@@ -36,7 +36,11 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         &mut rng,
     );
 
-    let kernel = DefaultProposalKernel::new(config.proposal.clone(), config.random_seed + 1);
+    let kernel = DefaultProposalKernel::new(
+        config.proposal.clone(),
+        config.random_seed + 1,
+        Some(search_module.clone()),
+    );
     let hardware_backend = create_hardware_backend(config.hardware_backend.clone());
     let energy_trace = anneal(
         &mut population,
