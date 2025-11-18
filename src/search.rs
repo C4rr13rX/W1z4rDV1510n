@@ -7,11 +7,16 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
     pub cell_size: f64,
+    #[serde(default)]
+    pub teleport_on_no_path: bool,
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
-        Self { cell_size: 1.0 }
+        Self {
+            cell_size: 1.0,
+            teleport_on_no_path: false,
+        }
     }
 }
 
@@ -111,8 +116,10 @@ impl SearchModule {
         }
         let depth_cap = snapshot_0.bounds.get("depth").copied().unwrap_or(f64::INFINITY);
         let mut lookup = HashMap::new();
+        let mut radii = HashMap::new();
         for symbol in &snapshot_0.symbols {
             lookup.insert(symbol.id.clone(), symbol.position);
+            radii.insert(symbol.id.clone(), symbol_radius(symbol));
         }
         let grid = OccupancyGrid::from_snapshot(snapshot_0, self.config.cell_size);
         for (symbol_id, symbol_state) in state.symbol_states.iter_mut() {
@@ -131,8 +138,61 @@ impl SearchModule {
             let outcome = self.plan_between(&grid, target_start, &desired);
             if let Some(last) = outcome.waypoints.last() {
                 symbol_state.position = clamp_with_depth(last, depth_cap);
+            } else if self.config.teleport_on_no_path {
+                if let Some(cell) = grid
+                    .position_to_cell(&desired)
+                    .or_else(|| grid.position_to_cell(target_start))
+                    .and_then(|cell| grid.nearest_free_cell(cell))
+                {
+                    let teleported = grid.cell_center(cell, desired.z);
+                    symbol_state.position = clamp_with_depth(&teleported, depth_cap);
+                } else {
+                    symbol_state.position = clamp_with_depth(&desired, depth_cap);
+                }
             } else {
                 symbol_state.position = clamp_with_depth(&desired, depth_cap);
+            }
+        }
+        let ids: Vec<String> = state.symbol_states.keys().cloned().collect();
+        for idx in 0..ids.len() {
+            for jdx in (idx + 1)..ids.len() {
+                let first_id = &ids[idx];
+                let second_id = &ids[jdx];
+                let Some(first_state) = state.symbol_states.get(first_id) else {
+                    continue;
+                };
+                let Some(second_state) = state.symbol_states.get(second_id) else {
+                    continue;
+                };
+                let r_first = *radii.get(first_id).unwrap_or(&0.5);
+                let r_second = *radii.get(second_id).unwrap_or(&0.5);
+                let min_dist = r_first + r_second;
+                let dx = second_state.position.x - first_state.position.x;
+                let dy = second_state.position.y - first_state.position.y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist >= min_dist || dist == 0.0 {
+                    continue;
+                }
+                let overlap = min_dist - dist;
+                let nx = if dist > 0.0 { dx / dist } else { 1.0 };
+                let ny = if dist > 0.0 { dy / dist } else { 0.0 };
+                let adjust = overlap / 2.0;
+                if let Some(first_mut) = state.symbol_states.get_mut(first_id) {
+                    first_mut.position.x -= nx * adjust;
+                    first_mut.position.y -= ny * adjust;
+                    first_mut.position = clamp_with_depth(
+                        &grid.clamp_position(&first_mut.position),
+                        depth_cap,
+                    );
+                }
+                if let Some(second_mut) = state.symbol_states.get_mut(second_id) {
+                    second_mut.position.x += nx * adjust;
+                    second_mut.position.y += ny * adjust;
+                    second_mut.position = clamp_with_depth(
+                        &grid.clamp_position(&second_mut.position),
+                        depth_cap,
+                    );
+                }
             }
         }
     }
@@ -636,6 +696,14 @@ fn extent_from_props(symbol: &Symbol, keys: &[&str]) -> Option<f64> {
         .find_map(|key| symbol.properties.get(*key))
         .and_then(Value::as_f64)
         .map(|value| value.max(0.1))
+}
+
+fn symbol_radius(symbol: &Symbol) -> f64 {
+    extent_from_props(symbol, &["radius", "collision_radius"])
+        .or_else(|| {
+            extent_from_props(symbol, &["width", "length", "size_x"]).map(|extent| extent / 2.0)
+        })
+        .unwrap_or(0.5)
 }
 
 fn is_blocker(symbol: &Symbol) -> bool {
