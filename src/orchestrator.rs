@@ -26,7 +26,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         Some(search_module.clone()),
         config.t_end,
     );
-    let mut population = init_population(
+    let population = init_population(
         snapshot.as_ref(),
         config.t_end,
         Some(&ml_hooks),
@@ -42,8 +42,8 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         Some(search_module.clone()),
     );
     let hardware_backend = create_hardware_backend(config.hardware_backend.clone());
-    let energy_trace = anneal(
-        &mut population,
+    let (population, energy_trace) = anneal(
+        population,
         snapshot.as_ref(),
         &energy_model,
         &kernel,

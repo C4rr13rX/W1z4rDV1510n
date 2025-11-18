@@ -9,7 +9,7 @@ use rand::Rng;
 use rand::rngs::StdRng;
 
 pub fn anneal(
-    population: &mut Population,
+    mut population: Population,
     snapshot_0: &EnvironmentSnapshot,
     energy_model: &EnergyModel,
     kernel: &dyn ProposalKernel,
@@ -18,7 +18,7 @@ pub fn anneal(
     resample_config: &ResampleConfig,
     hardware_backend: &HardwareBackendHandle,
     rng: &mut StdRng,
-) -> Vec<f64> {
+) -> (Population, Vec<f64>) {
     let mut energy_trace = Vec::with_capacity(schedule.n_iterations);
     for iteration in 0..schedule.n_iterations {
         let temperature = temperature(iteration, schedule);
@@ -37,13 +37,13 @@ pub fn anneal(
             }
             particle.weight = (-particle.energy / temperature.max(1e-3)).exp();
         };
-        hardware_backend.map_particles(population, &mut update_particle);
-        normalize_weights(population);
+        hardware_backend.map_particles(&mut population, &mut update_particle);
+        normalize_weights(&mut population);
 
-        let ess_ratio = effective_sample_size(population);
+        let ess_ratio = effective_sample_size(&population);
         if resample_config.enabled && ess_ratio < resample_config.effective_sample_size_threshold {
-            resample_population(population, rng);
-            clone_and_mutate(population, rng, resample_config.mutation_rate);
+            resample_population(&mut population, rng);
+            clone_and_mutate(&mut population, rng, resample_config.mutation_rate);
         }
 
         let min_energy = population
@@ -53,7 +53,7 @@ pub fn anneal(
             .fold(f64::INFINITY, f64::min);
         energy_trace.push(min_energy);
     }
-    energy_trace
+    (population, energy_trace)
 }
 
 fn temperature(iteration: usize, schedule: &AnnealingScheduleConfig) -> f64 {
