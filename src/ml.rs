@@ -1,4 +1,4 @@
-use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Timestamp};
+use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Timestamp, Trajectory};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ pub trait MLHooks: Send + Sync {
 
     fn score_configuration(&self, state: &DynamicState) -> f64;
 
-    fn update_from_data(&self, _trajectories: &[DynamicState]) {}
+    fn update_from_data(&self, _trajectories: &[Trajectory]) {}
 }
 
 pub type MlHooksHandle = Arc<dyn MLHooks>;
@@ -23,6 +23,10 @@ pub type MlHooksHandle = Arc<dyn MLHooks>;
 pub enum MLBackendType {
     None,
     SimpleRules,
+    Rnn,
+    Transformer,
+    Gnn,
+    Custom,
 }
 
 impl Default for MLBackendType {
@@ -111,5 +115,9 @@ pub fn create_ml_hooks(backend: MLBackendType, seed: u64) -> MlHooksHandle {
     match backend {
         MLBackendType::None => Arc::new(NullMLHooks),
         MLBackendType::SimpleRules => Arc::new(SimpleRulesMLHooks::new(seed)),
+        MLBackendType::Rnn
+        | MLBackendType::Transformer
+        | MLBackendType::Gnn
+        | MLBackendType::Custom => Arc::new(NullMLHooks),
     }
 }

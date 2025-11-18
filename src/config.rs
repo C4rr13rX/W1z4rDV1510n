@@ -5,6 +5,7 @@ use crate::schema::Timestamp;
 use crate::search::SearchConfig;
 use crate::state_population::InitStrategyConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +88,8 @@ pub struct EnergyConfig {
     pub w_ml_prior: f64,
     pub w_path_feasibility: f64,
     pub w_env_constraints: f64,
+    #[serde(default)]
+    pub other_terms: HashMap<String, f64>,
 }
 
 impl Default for EnergyConfig {
@@ -99,6 +102,7 @@ impl Default for EnergyConfig {
             w_ml_prior: 0.0,
             w_path_feasibility: 1.0,
             w_env_constraints: 3.0,
+            other_terms: HashMap::new(),
         }
     }
 }

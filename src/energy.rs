@@ -301,6 +301,15 @@ impl EnergyModel {
         EnergyBreakdown::new(per_symbol, per_term, total)
     }
 
+    pub fn local_energy(&self, dynamic_state: &DynamicState, symbol_id: &str) -> f64 {
+        let breakdown = self.energy_breakdown(dynamic_state);
+        breakdown
+            .per_symbol
+            .get(symbol_id)
+            .map(SymbolEnergyBreakdown::total)
+            .unwrap_or(0.0)
+    }
+
     fn accumulate_term(
         &self,
         per_symbol: &mut HashMap<String, SymbolEnergyBreakdown>,

@@ -85,3 +85,10 @@ pub struct Population {
     pub temperature: f64,
     pub iteration: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trajectory {
+    pub sequence: Vec<DynamicState>,
+    #[serde(default)]
+    pub metadata: Properties,
+}
