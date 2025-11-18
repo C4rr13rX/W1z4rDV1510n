@@ -1,0 +1,7 @@
+{
+  "command_line": "cargo run -- --config C:\\Users\\Adam\\Projects\\W1z4rDV1510n\\data\\synthetic_run_config.json",
+  "config_path": "C:\\Users\\Adam\\Projects\\W1z4rDV1510n\\data\\synthetic_run_config.json",
+  "pid": 38352,
+  "started_at": "2025-11-18T10:09:24.1442069-05:00",
+  "log_path": "C:\\Users\\Adam\\Projects\\W1z4rDV1510n\\logs\\predict_state_20251118_100924.log"
+}

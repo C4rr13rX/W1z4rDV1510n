@@ -1,0 +1,4788 @@
+{
+  "timestamp": {
+    "unix": 1763467200
+  },
+  "bounds": {
+    "width": 120.0,
+    "height": 90.0,
+    "depth": 15.0
+  },
+  "symbols": [
+    {
+      "id": "person_0000",
+      "type": "Person",
+      "position": {
+        "x": 76.73121581494605,
+        "y": 2.2509679700400245,
+        "z": 0.4125439775536789
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_2",
+        "thought_labels": [
+          "calm",
+          "fearful",
+          "calling_out",
+          "curious"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0001",
+      "type": "Person",
+      "position": {
+        "x": 3.5756663325684412,
+        "y": 19.6774177323243,
+        "z": 0.7580329321550436
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_8",
+        "thought_labels": [
+          "guarding_area",
+          "distracted"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0002",
+      "type": "Person",
+      "position": {
+        "x": 70.71188206510905,
+        "y": 72.84874110100439,
+        "z": 0.009748139517091525
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_6",
+        "thought_labels": [
+          "focused_task",
+          "seeking_friend",
+          "calm"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0003",
+      "type": "Person",
+      "position": {
+        "x": 12.265233182381845,
+        "y": 34.19345705736036,
+        "z": 0.5384690707269426
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_4",
+        "thought_labels": [
+          "waiting_for_signal",
+          "calm"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0004",
+      "type": "Person",
+      "position": {
+        "x": 9.45602376941498,
+        "y": 26.38604532663836,
+        "z": 0.9429596992416651
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_3",
+        "thought_labels": [
+          "fearful",
+          "plan_exit",
+          "alert_security",
+          "calm"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0005",
+      "type": "Person",
+      "position": {
+        "x": 118.22658247929093,
+        "y": 76.97859489136322,
+        "z": 1.2997255001329044
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_4",
+        "thought_labels": [
+          "navigate_corridor",
+          "monitor_obstacle",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0006",
+      "type": "Person",
+      "position": {
+        "x": 25.14084369257852,
+        "y": 24.028003984420202,
+        "z": 1.404981881568741
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_1",
+        "thought_labels": [
+          "monitor_obstacle",
+          "distracted",
+          "fearful",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0007",
+      "type": "Person",
+      "position": {
+        "x": 32.39373921411336,
+        "y": 83.2852061659096,
+        "z": 1.0322429376499698
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_5",
+        "thought_labels": [
+          "distracted",
+          "plan_exit"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0008",
+      "type": "Person",
+      "position": {
+        "x": 48.139774442679474,
+        "y": 5.956974469039251,
+        "z": 1.3697041862783175
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_5",
+        "thought_labels": [
+          "evaluate_risk",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0009",
+      "type": "Person",
+      "position": {
+        "x": 55.062222310487854,
+        "y": 23.83921498482472,
+        "z": 0.3699412615409752
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_8",
+        "thought_labels": [
+          "guarding_area",
+          "avoid_vehicle",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0010",
+      "type": "Person",
+      "position": {
+        "x": 119.67909335869932,
+        "y": 12.449857040177028,
+        "z": 0.7402737523344465
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_1",
+        "thought_labels": [
+          "monitor_obstacle",
+          "guarding_area"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0011",
+      "type": "Person",
+      "position": {
+        "x": 7.623324738234856,
+        "y": 34.34573578558831,
+        "z": 1.4941820703601452
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_4",
+        "thought_labels": [
+          "observe_crowd",
+          "calm",
+          "alert_security",
+          "focused_task"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0012",
+      "type": "Person",
+      "position": {
+        "x": 92.23184791889351,
+        "y": 30.61579257279407,
+        "z": 0.4402501929711392
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_7",
+        "thought_labels": [
+          "focused_task",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0013",
+      "type": "Person",
+      "position": {
+        "x": 109.51534072137846,
+        "y": 78.34667128530901,
+        "z": 0.44766718717294934
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_8",
+        "thought_labels": [
+          "curious",
+          "seeking_friend",
+          "monitor_obstacle",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0014",
+      "type": "Person",
+      "position": {
+        "x": 64.72548361435508,
+        "y": 70.07638307675025,
+        "z": 0.7955305082927662
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_5",
+        "thought_labels": [
+          "observe_crowd",
+          "calm",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0015",
+      "type": "Person",
+      "position": {
+        "x": 105.44662533878211,
+        "y": 74.84989764250615,
+        "z": 0.46127118810399215
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_3",
+        "thought_labels": [
+          "fearful",
+          "multi_tasking",
+          "navigate_corridor",
+          "distracted"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0016",
+      "type": "Person",
+      "position": {
+        "x": 117.3581392412801,
+        "y": 47.943555257656406,
+        "z": 0.18864076728066198
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "monitor_obstacle",
+          "focused_task",
+          "evaluate_risk",
+          "guarding_area"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0017",
+      "type": "Person",
+      "position": {
+        "x": 50.77655282410643,
+        "y": 19.061838489787384,
+        "z": 0.8089441331691876
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_3",
+        "thought_labels": [
+          "calling_out",
+          "avoid_vehicle",
+          "alert_security",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0018",
+      "type": "Person",
+      "position": {
+        "x": 52.572010069740486,
+        "y": 46.58182569320316,
+        "z": 0.18150629380239858
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_1",
+        "thought_labels": [
+          "observe_crowd",
+          "distracted",
+          "calling_out"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0019",
+      "type": "Person",
+      "position": {
+        "x": 0.8629006782112247,
+        "y": 63.70568518936087,
+        "z": 0.0883106503144851
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_0",
+        "thought_labels": [
+          "fearful",
+          "distracted",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0020",
+      "type": "Person",
+      "position": {
+        "x": 58.24973989805889,
+        "y": 48.53105382552791,
+        "z": 1.0850288488214563
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_7",
+        "thought_labels": [
+          "evaluate_risk",
+          "guarding_area"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0021",
+      "type": "Person",
+      "position": {
+        "x": 11.319095579025866,
+        "y": 59.308447456319676,
+        "z": 0.5314463498843307
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_7",
+        "thought_labels": [
+          "plan_exit",
+          "calm",
+          "observe_crowd",
+          "curious"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0022",
+      "type": "Person",
+      "position": {
+        "x": 40.716312647395576,
+        "y": 77.55052827175119,
+        "z": 0.37298450088042845
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_8",
+        "thought_labels": [
+          "seeking_friend",
+          "guarding_area",
+          "fearful"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0023",
+      "type": "Person",
+      "position": {
+        "x": 55.51536820811609,
+        "y": 78.70373586635219,
+        "z": 0.11307733256143404
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_1",
+        "thought_labels": [
+          "observe_crowd",
+          "fearful"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0024",
+      "type": "Person",
+      "position": {
+        "x": 19.957333272469683,
+        "y": 43.707701290564664,
+        "z": 0.3206209487987725
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_0",
+        "thought_labels": [
+          "avoid_vehicle",
+          "observe_crowd"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0025",
+      "type": "Person",
+      "position": {
+        "x": 31.824366980658233,
+        "y": 70.56635417537125,
+        "z": 0.6825125510087149
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_8",
+        "thought_labels": [
+          "evaluate_risk",
+          "seeking_friend",
+          "calm",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0026",
+      "type": "Person",
+      "position": {
+        "x": 116.24512379629905,
+        "y": 52.12622617346306,
+        "z": 0.8132928020614114
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_5",
+        "thought_labels": [
+          "plan_exit",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0027",
+      "type": "Person",
+      "position": {
+        "x": 110.32645569984903,
+        "y": 47.801352174348715,
+        "z": 0.08531936959302677
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_1",
+        "thought_labels": [
+          "fearful",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0028",
+      "type": "Person",
+      "position": {
+        "x": 103.41830423641552,
+        "y": 36.339799618644975,
+        "z": 1.4123941908436342
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_3",
+        "thought_labels": [
+          "plan_exit",
+          "fearful",
+          "curious",
+          "alert_security"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0029",
+      "type": "Person",
+      "position": {
+        "x": 67.82723086129073,
+        "y": 28.47328613790544,
+        "z": 0.39114854340544924
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_5",
+        "thought_labels": [
+          "focused_task",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0030",
+      "type": "Person",
+      "position": {
+        "x": 80.60282675519656,
+        "y": 26.9997371818886,
+        "z": 0.47426579440778105
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_0",
+        "thought_labels": [
+          "calm",
+          "fearful",
+          "focused_task"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0031",
+      "type": "Person",
+      "position": {
+        "x": 60.706163285851844,
+        "y": 11.921091332982057,
+        "z": 0.5235132524467726
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_3",
+        "thought_labels": [
+          "calling_out",
+          "monitor_obstacle",
+          "distracted"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0032",
+      "type": "Person",
+      "position": {
+        "x": 84.42479101048451,
+        "y": 55.05099891533551,
+        "z": 1.4808495954472565
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_8",
+        "thought_labels": [
+          "calling_out",
+          "calm"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0033",
+      "type": "Person",
+      "position": {
+        "x": 31.735910578455318,
+        "y": 80.07414363051382,
+        "z": 1.1136250259714982
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_4",
+        "thought_labels": [
+          "curious",
+          "alert_security",
+          "calm"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0034",
+      "type": "Person",
+      "position": {
+        "x": 76.10855506620956,
+        "y": 23.758551146736846,
+        "z": 0.7327977782240649
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_1",
+        "thought_labels": [
+          "guarding_area",
+          "focused_task",
+          "observe_crowd",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0035",
+      "type": "Person",
+      "position": {
+        "x": 92.53430676235526,
+        "y": 57.34020395712417,
+        "z": 0.3929328936515223
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "guarding_area",
+          "observe_crowd",
+          "plan_exit",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0036",
+      "type": "Person",
+      "position": {
+        "x": 108.47142858718718,
+        "y": 49.10312602849701,
+        "z": 1.251892529829025
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_8",
+        "thought_labels": [
+          "guarding_area",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0037",
+      "type": "Person",
+      "position": {
+        "x": 36.991001991616045,
+        "y": 80.9083339868331,
+        "z": 1.1941834573320627
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_5",
+        "thought_labels": [
+          "distracted",
+          "calm"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0038",
+      "type": "Person",
+      "position": {
+        "x": 93.61394902457312,
+        "y": 79.5721231305908,
+        "z": 0.6095660847481752
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_2",
+        "thought_labels": [
+          "monitor_obstacle",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0039",
+      "type": "Person",
+      "position": {
+        "x": 2.974363427782647,
+        "y": 66.29080245795738,
+        "z": 0.498278201919643
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_3",
+        "thought_labels": [
+          "monitor_obstacle",
+          "calm",
+          "curious"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0040",
+      "type": "Person",
+      "position": {
+        "x": 103.0311901605338,
+        "y": 20.0190345791098,
+        "z": 1.2248799083953934
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_5",
+        "thought_labels": [
+          "distracted",
+          "multi_tasking",
+          "observe_crowd"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0041",
+      "type": "Person",
+      "position": {
+        "x": 23.17557459932504,
+        "y": 29.543575607793585,
+        "z": 1.2965294130454295
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_5",
+        "thought_labels": [
+          "multi_tasking",
+          "avoid_vehicle",
+          "alert_security",
+          "guarding_area"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0042",
+      "type": "Person",
+      "position": {
+        "x": 39.73798418572885,
+        "y": 2.4840481607672302,
+        "z": 1.3155576173633405
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_2",
+        "thought_labels": [
+          "focused_task",
+          "plan_exit",
+          "evaluate_risk",
+          "calling_out"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0043",
+      "type": "Person",
+      "position": {
+        "x": 41.48245340157603,
+        "y": 70.77853603833137,
+        "z": 0.6545908258059119
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_1",
+        "thought_labels": [
+          "curious",
+          "focused_task",
+          "observe_crowd"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0044",
+      "type": "Person",
+      "position": {
+        "x": 52.32690185459668,
+        "y": 46.79283137099269,
+        "z": 1.2097663045501559
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_3",
+        "thought_labels": [
+          "guarding_area",
+          "fearful",
+          "alert_security"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0045",
+      "type": "Person",
+      "position": {
+        "x": 74.7786491935691,
+        "y": 59.704872863898984,
+        "z": 0.1869379734965516
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_8",
+        "thought_labels": [
+          "guarding_area",
+          "alert_security",
+          "curious"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0046",
+      "type": "Person",
+      "position": {
+        "x": 35.47862430311364,
+        "y": 11.455901915323789,
+        "z": 0.6306695006593624
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_2",
+        "thought_labels": [
+          "calling_out",
+          "avoid_vehicle",
+          "focused_task",
+          "guarding_area"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0047",
+      "type": "Person",
+      "position": {
+        "x": 36.46499391220245,
+        "y": 18.91644163943777,
+        "z": 1.17863824121637
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_5",
+        "thought_labels": [
+          "waiting_for_signal",
+          "multi_tasking",
+          "alert_security"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0048",
+      "type": "Person",
+      "position": {
+        "x": 61.34087962495045,
+        "y": 71.43618591954018,
+        "z": 1.4397480055245544
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_2",
+        "thought_labels": [
+          "fearful",
+          "calling_out",
+          "focused_task",
+          "alert_security"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0049",
+      "type": "Person",
+      "position": {
+        "x": 74.31129664348506,
+        "y": 8.404848006800641,
+        "z": 1.4279994936787128
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_4",
+        "thought_labels": [
+          "curious",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0050",
+      "type": "Person",
+      "position": {
+        "x": 5.545646171131011,
+        "y": 88.55424205036662,
+        "z": 0.9169109595910201
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_7",
+        "thought_labels": [
+          "curious",
+          "avoid_vehicle",
+          "distracted"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0051",
+      "type": "Person",
+      "position": {
+        "x": 29.278132749412663,
+        "y": 59.045221000060565,
+        "z": 0.00831722720704764
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_6",
+        "thought_labels": [
+          "monitor_obstacle",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0052",
+      "type": "Person",
+      "position": {
+        "x": 66.88869528400744,
+        "y": 82.57230130098962,
+        "z": 0.1820378987840766
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_7",
+        "thought_labels": [
+          "multi_tasking",
+          "alert_security",
+          "avoid_vehicle",
+          "distracted"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0053",
+      "type": "Person",
+      "position": {
+        "x": 97.80078087980206,
+        "y": 80.28182667069163,
+        "z": 0.6401111352879834
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_7",
+        "thought_labels": [
+          "evaluate_risk",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0054",
+      "type": "Person",
+      "position": {
+        "x": 90.21321438006137,
+        "y": 75.58765990577287,
+        "z": 0.41596702969611077
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_7",
+        "thought_labels": [
+          "distracted",
+          "focused_task",
+          "multi_tasking",
+          "plan_exit"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0055",
+      "type": "Person",
+      "position": {
+        "x": 34.2873781035783,
+        "y": 24.454359637396614,
+        "z": 0.47956435262814345
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_1",
+        "thought_labels": [
+          "seeking_friend",
+          "distracted"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0056",
+      "type": "Person",
+      "position": {
+        "x": 83.27397747588627,
+        "y": 63.5777227525097,
+        "z": 0.09634327607081711
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_5",
+        "thought_labels": [
+          "waiting_for_signal",
+          "guarding_area",
+          "observe_crowd",
+          "calm"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0057",
+      "type": "Person",
+      "position": {
+        "x": 46.73721752003295,
+        "y": 69.2816195083197,
+        "z": 1.4190930503851509
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_6",
+        "thought_labels": [
+          "observe_crowd",
+          "navigate_corridor",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0058",
+      "type": "Person",
+      "position": {
+        "x": 102.41375406829255,
+        "y": 85.80873046230957,
+        "z": 0.6285319239447328
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_8",
+        "thought_labels": [
+          "distracted",
+          "evaluate_risk",
+          "calm",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0059",
+      "type": "Person",
+      "position": {
+        "x": 58.27703925582004,
+        "y": 34.99714829215152,
+        "z": 1.0033104309343757
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_2",
+        "thought_labels": [
+          "seeking_friend",
+          "observe_crowd",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0060",
+      "type": "Person",
+      "position": {
+        "x": 71.0271330753493,
+        "y": 59.669978115254516,
+        "z": 0.12592119324300033
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_2",
+        "thought_labels": [
+          "monitor_obstacle",
+          "plan_exit",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0061",
+      "type": "Person",
+      "position": {
+        "x": 39.28232003300811,
+        "y": 40.92293925148339,
+        "z": 0.506250822110806
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_4",
+        "thought_labels": [
+          "focused_task",
+          "fearful",
+          "distracted"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0062",
+      "type": "Person",
+      "position": {
+        "x": 89.88291132994209,
+        "y": 4.687704741892993,
+        "z": 1.4278795385728815
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_1",
+        "thought_labels": [
+          "plan_exit",
+          "observe_crowd",
+          "calm",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0063",
+      "type": "Person",
+      "position": {
+        "x": 74.56027879033894,
+        "y": 21.469044770001528,
+        "z": 0.7103415914191921
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_3",
+        "thought_labels": [
+          "focused_task",
+          "navigate_corridor",
+          "fearful"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0064",
+      "type": "Person",
+      "position": {
+        "x": 72.86969926691181,
+        "y": 67.31330867597572,
+        "z": 0.1717993070683465
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_4",
+        "thought_labels": [
+          "observe_crowd",
+          "calling_out"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0065",
+      "type": "Person",
+      "position": {
+        "x": 81.28167442204905,
+        "y": 86.23555543853064,
+        "z": 0.594981662274941
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_3",
+        "thought_labels": [
+          "distracted",
+          "calm"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0066",
+      "type": "Person",
+      "position": {
+        "x": 92.69770619414689,
+        "y": 76.52639151799167,
+        "z": 0.9006174222252662
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_0",
+        "thought_labels": [
+          "guarding_area",
+          "navigate_corridor",
+          "plan_exit"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0067",
+      "type": "Person",
+      "position": {
+        "x": 77.70519048681662,
+        "y": 1.1386935149267774,
+        "z": 0.6300881112627414
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_1",
+        "thought_labels": [
+          "navigate_corridor",
+          "waiting_for_signal",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0068",
+      "type": "Person",
+      "position": {
+        "x": 52.258457400921245,
+        "y": 66.04157736120527,
+        "z": 1.4482105968571166
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_8",
+        "thought_labels": [
+          "waiting_for_signal",
+          "guarding_area",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0069",
+      "type": "Person",
+      "position": {
+        "x": 71.09695428764421,
+        "y": 29.007412468300636,
+        "z": 0.36824275364053627
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_4",
+        "thought_labels": [
+          "distracted",
+          "waiting_for_signal",
+          "calling_out"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0070",
+      "type": "Person",
+      "position": {
+        "x": 80.18261645345923,
+        "y": 30.27569579022377,
+        "z": 0.741459755423883
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_2",
+        "thought_labels": [
+          "curious",
+          "navigate_corridor",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0071",
+      "type": "Person",
+      "position": {
+        "x": 40.84066117971404,
+        "y": 79.22879817824028,
+        "z": 1.0517756254983024
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_8",
+        "thought_labels": [
+          "multi_tasking",
+          "curious"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0072",
+      "type": "Person",
+      "position": {
+        "x": 28.96272604472159,
+        "y": 36.57853122034673,
+        "z": 0.8327643173727912
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_7",
+        "thought_labels": [
+          "evaluate_risk",
+          "waiting_for_signal",
+          "avoid_vehicle",
+          "observe_crowd"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0073",
+      "type": "Person",
+      "position": {
+        "x": 35.30826975845968,
+        "y": 36.39610158101353,
+        "z": 0.36495774581513574
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_5",
+        "thought_labels": [
+          "multi_tasking",
+          "navigate_corridor",
+          "curious"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0074",
+      "type": "Person",
+      "position": {
+        "x": 66.04661673080143,
+        "y": 31.662947485275147,
+        "z": 0.6806178942797678
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_4",
+        "thought_labels": [
+          "calm",
+          "curious"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0075",
+      "type": "Person",
+      "position": {
+        "x": 14.34656895060634,
+        "y": 48.227756884537484,
+        "z": 1.1432844142261545
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_3",
+        "thought_labels": [
+          "evaluate_risk",
+          "focused_task"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0076",
+      "type": "Person",
+      "position": {
+        "x": 70.7504287152949,
+        "y": 68.41871058357744,
+        "z": 0.8951861107684527
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_3",
+        "thought_labels": [
+          "distracted",
+          "navigate_corridor",
+          "fearful"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0077",
+      "type": "Person",
+      "position": {
+        "x": 1.6978040707276598,
+        "y": 48.072158034089696,
+        "z": 0.41146699017490096
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_8",
+        "thought_labels": [
+          "seeking_friend",
+          "evaluate_risk",
+          "plan_exit"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0078",
+      "type": "Person",
+      "position": {
+        "x": 68.88770635515986,
+        "y": 42.24572504374592,
+        "z": 0.6607031972040154
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_0",
+        "thought_labels": [
+          "evaluate_risk",
+          "calm",
+          "guarding_area"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0079",
+      "type": "Person",
+      "position": {
+        "x": 48.08489307023277,
+        "y": 6.667395323007581,
+        "z": 0.9441685604279975
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_2",
+        "thought_labels": [
+          "calling_out",
+          "fearful"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0080",
+      "type": "Person",
+      "position": {
+        "x": 14.214187465375389,
+        "y": 68.79991007935749,
+        "z": 0.9094764768644441
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_3",
+        "thought_labels": [
+          "avoid_vehicle",
+          "waiting_for_signal",
+          "evaluate_risk",
+          "distracted"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0081",
+      "type": "Person",
+      "position": {
+        "x": 103.21999989914161,
+        "y": 89.10281344201181,
+        "z": 0.4580703664790406
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_0",
+        "thought_labels": [
+          "calm",
+          "curious",
+          "alert_security",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0082",
+      "type": "Person",
+      "position": {
+        "x": 79.2513764630444,
+        "y": 14.135138404278942,
+        "z": 0.2607203224896517
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_2",
+        "thought_labels": [
+          "guarding_area",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0083",
+      "type": "Person",
+      "position": {
+        "x": 71.25734341434759,
+        "y": 26.213336012792485,
+        "z": 0.34721435183403876
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_4",
+        "thought_labels": [
+          "waiting_for_signal",
+          "fearful",
+          "alert_security",
+          "calm"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0084",
+      "type": "Person",
+      "position": {
+        "x": 94.53936319760776,
+        "y": 56.25522064477997,
+        "z": 0.9917745642800517
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_6",
+        "thought_labels": [
+          "distracted",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0085",
+      "type": "Person",
+      "position": {
+        "x": 99.19573915800716,
+        "y": 6.426885317023273,
+        "z": 0.248884183831087
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_4",
+        "thought_labels": [
+          "calm",
+          "waiting_for_signal",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0086",
+      "type": "Person",
+      "position": {
+        "x": 83.96804219708608,
+        "y": 84.84086166696368,
+        "z": 0.7507082656768884
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_7",
+        "thought_labels": [
+          "plan_exit",
+          "guarding_area"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0087",
+      "type": "Person",
+      "position": {
+        "x": 38.678590002995996,
+        "y": 22.53311121708035,
+        "z": 0.1369903299464778
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_0",
+        "thought_labels": [
+          "focused_task",
+          "plan_exit",
+          "avoid_vehicle",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0088",
+      "type": "Person",
+      "position": {
+        "x": 56.46009879019603,
+        "y": 58.63585404903177,
+        "z": 1.3741091818901512
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_6",
+        "thought_labels": [
+          "evaluate_risk",
+          "fearful",
+          "distracted",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0089",
+      "type": "Person",
+      "position": {
+        "x": 39.99700723981104,
+        "y": 60.31201585690669,
+        "z": 1.286599641600529
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_6",
+        "thought_labels": [
+          "evaluate_risk",
+          "calling_out",
+          "alert_security",
+          "curious"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0090",
+      "type": "Person",
+      "position": {
+        "x": 4.403655637645043,
+        "y": 7.925381349820971,
+        "z": 0.37859827641331156
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_6",
+        "thought_labels": [
+          "observe_crowd",
+          "waiting_for_signal",
+          "curious",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0091",
+      "type": "Person",
+      "position": {
+        "x": 62.212727095287455,
+        "y": 56.03704853415402,
+        "z": 0.7477396535732829
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_0",
+        "thought_labels": [
+          "focused_task",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0092",
+      "type": "Person",
+      "position": {
+        "x": 52.57393140868539,
+        "y": 62.8425026209955,
+        "z": 0.18213912504392976
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_3",
+        "thought_labels": [
+          "monitor_obstacle",
+          "calling_out",
+          "focused_task",
+          "observe_crowd"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0093",
+      "type": "Person",
+      "position": {
+        "x": 48.958882474788304,
+        "y": 20.22305935102062,
+        "z": 1.2621085224255533
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_7",
+        "thought_labels": [
+          "seeking_friend",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0094",
+      "type": "Person",
+      "position": {
+        "x": 35.02338723141432,
+        "y": 63.48704669332683,
+        "z": 0.6232355144030295
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_7",
+        "thought_labels": [
+          "waiting_for_signal",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0095",
+      "type": "Person",
+      "position": {
+        "x": 22.8732445137514,
+        "y": 53.943983880740994,
+        "z": 1.1194388182385966
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_1",
+        "thought_labels": [
+          "guarding_area",
+          "alert_security",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0096",
+      "type": "Person",
+      "position": {
+        "x": 32.060719568028574,
+        "y": 0.2308733422719489,
+        "z": 1.0890764739202987
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_7",
+        "thought_labels": [
+          "waiting_for_signal",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0097",
+      "type": "Person",
+      "position": {
+        "x": 39.89279468528992,
+        "y": 68.65854098579813,
+        "z": 0.5658150813208289
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_3",
+        "thought_labels": [
+          "distracted",
+          "avoid_vehicle",
+          "calm",
+          "guarding_area"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0098",
+      "type": "Person",
+      "position": {
+        "x": 5.23767589167623,
+        "y": 67.02346364086763,
+        "z": 1.0578418215375038
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_6",
+        "thought_labels": [
+          "seeking_friend",
+          "evaluate_risk",
+          "observe_crowd",
+          "fearful"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0099",
+      "type": "Person",
+      "position": {
+        "x": 115.84243082122245,
+        "y": 29.87952335382274,
+        "z": 0.15054690324727849
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_1",
+        "thought_labels": [
+          "waiting_for_signal",
+          "observe_crowd",
+          "navigate_corridor",
+          "fearful"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0100",
+      "type": "Person",
+      "position": {
+        "x": 104.51195656190632,
+        "y": 87.29611146369956,
+        "z": 0.11224237236556323
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_5",
+        "thought_labels": [
+          "avoid_vehicle",
+          "fearful",
+          "guarding_area",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0101",
+      "type": "Person",
+      "position": {
+        "x": 103.12106210019199,
+        "y": 34.20084577703896,
+        "z": 0.4749917309000995
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "plan_exit",
+          "fearful",
+          "calm",
+          "alert_security"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0102",
+      "type": "Person",
+      "position": {
+        "x": 110.5114918536356,
+        "y": 89.76833306605938,
+        "z": 1.1201495501068903
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_1",
+        "thought_labels": [
+          "calm",
+          "waiting_for_signal",
+          "fearful",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0103",
+      "type": "Person",
+      "position": {
+        "x": 108.41088744605831,
+        "y": 4.139187180949148,
+        "z": 1.1942151977433177
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_5",
+        "thought_labels": [
+          "guarding_area",
+          "seeking_friend",
+          "calm"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0104",
+      "type": "Person",
+      "position": {
+        "x": 49.446209877069045,
+        "y": 61.36203342174554,
+        "z": 0.27008532922696665
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_1",
+        "thought_labels": [
+          "avoid_vehicle",
+          "distracted",
+          "evaluate_risk",
+          "calling_out"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0105",
+      "type": "Person",
+      "position": {
+        "x": 27.862613315418272,
+        "y": 57.41141679032117,
+        "z": 0.6893557487650965
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_0",
+        "thought_labels": [
+          "calling_out",
+          "monitor_obstacle",
+          "plan_exit"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0106",
+      "type": "Person",
+      "position": {
+        "x": 113.42827619215753,
+        "y": 88.88865256966243,
+        "z": 0.4487313736856583
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_4",
+        "thought_labels": [
+          "calling_out",
+          "curious",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0107",
+      "type": "Person",
+      "position": {
+        "x": 12.798392090683311,
+        "y": 34.322786789186615,
+        "z": 0.5384387363658687
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_4",
+        "thought_labels": [
+          "avoid_vehicle",
+          "focused_task"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0108",
+      "type": "Person",
+      "position": {
+        "x": 67.91148203468387,
+        "y": 61.72195434606109,
+        "z": 1.1170032617479877
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_7",
+        "thought_labels": [
+          "distracted",
+          "navigate_corridor",
+          "calm"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0109",
+      "type": "Person",
+      "position": {
+        "x": 22.815838713250596,
+        "y": 22.556412003925445,
+        "z": 1.1333659856125158
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_2",
+        "thought_labels": [
+          "calm",
+          "plan_exit",
+          "seeking_friend",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0110",
+      "type": "Person",
+      "position": {
+        "x": 4.003743749475892,
+        "y": 32.83751097256228,
+        "z": 0.19711770963072817
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_5",
+        "thought_labels": [
+          "guarding_area",
+          "monitor_obstacle",
+          "calm",
+          "fearful"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0111",
+      "type": "Person",
+      "position": {
+        "x": 105.17527160479686,
+        "y": 32.92717775536114,
+        "z": 0.7526921433972602
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_2",
+        "thought_labels": [
+          "evaluate_risk",
+          "calling_out",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0112",
+      "type": "Person",
+      "position": {
+        "x": 96.50790463254127,
+        "y": 42.14982499674258,
+        "z": 0.11294904136013623
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_6",
+        "thought_labels": [
+          "navigate_corridor",
+          "fearful",
+          "avoid_vehicle",
+          "curious"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0113",
+      "type": "Person",
+      "position": {
+        "x": 31.735029402290856,
+        "y": 11.122986308714312,
+        "z": 0.5528784879240585
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_4",
+        "thought_labels": [
+          "avoid_vehicle",
+          "navigate_corridor",
+          "plan_exit",
+          "alert_security"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0114",
+      "type": "Person",
+      "position": {
+        "x": 56.57722415777263,
+        "y": 55.75921803400766,
+        "z": 1.4147537040867735
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_3",
+        "thought_labels": [
+          "fearful",
+          "waiting_for_signal",
+          "evaluate_risk",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0115",
+      "type": "Person",
+      "position": {
+        "x": 77.90873355415093,
+        "y": 10.5008343054349,
+        "z": 0.06802021652007317
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_4",
+        "thought_labels": [
+          "calm",
+          "multi_tasking",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0116",
+      "type": "Person",
+      "position": {
+        "x": 16.279685844760383,
+        "y": 40.82793812000033,
+        "z": 1.0057293282752569
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_8",
+        "thought_labels": [
+          "seeking_friend",
+          "guarding_area",
+          "alert_security"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0117",
+      "type": "Person",
+      "position": {
+        "x": 100.04316999555859,
+        "y": 55.40869926460407,
+        "z": 1.408579598570483
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_0",
+        "thought_labels": [
+          "navigate_corridor",
+          "curious",
+          "distracted",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0118",
+      "type": "Person",
+      "position": {
+        "x": 102.65402319671455,
+        "y": 8.941916214551728,
+        "z": 1.028520398221928
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_5",
+        "thought_labels": [
+          "avoid_vehicle",
+          "focused_task"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0119",
+      "type": "Person",
+      "position": {
+        "x": 116.18482511236641,
+        "y": 85.41097094359239,
+        "z": 1.236286622897357
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_3",
+        "thought_labels": [
+          "observe_crowd",
+          "plan_exit",
+          "avoid_vehicle",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0120",
+      "type": "Person",
+      "position": {
+        "x": 118.65850847297061,
+        "y": 70.82802899786843,
+        "z": 0.3078083627143146
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_3",
+        "thought_labels": [
+          "curious",
+          "distracted",
+          "monitor_obstacle",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0121",
+      "type": "Person",
+      "position": {
+        "x": 94.63725051331313,
+        "y": 53.6383471656978,
+        "z": 0.41591226896352446
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_2",
+        "thought_labels": [
+          "focused_task",
+          "monitor_obstacle",
+          "plan_exit",
+          "alert_security"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0122",
+      "type": "Person",
+      "position": {
+        "x": 15.816387547427698,
+        "y": 32.24180512948796,
+        "z": 1.1826473016805752
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_5",
+        "thought_labels": [
+          "monitor_obstacle",
+          "focused_task"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0123",
+      "type": "Person",
+      "position": {
+        "x": 15.211025245533634,
+        "y": 37.886450121907124,
+        "z": 0.17047396017981992
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_7",
+        "thought_labels": [
+          "navigate_corridor",
+          "calm",
+          "distracted"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0124",
+      "type": "Person",
+      "position": {
+        "x": 26.5859707701942,
+        "y": 55.35961526559929,
+        "z": 1.0908644957456028
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_8",
+        "thought_labels": [
+          "waiting_for_signal",
+          "observe_crowd",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0125",
+      "type": "Person",
+      "position": {
+        "x": 101.67582518006913,
+        "y": 38.364625735199255,
+        "z": 0.16194274451884078
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "fearful",
+          "alert_security"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0126",
+      "type": "Person",
+      "position": {
+        "x": 17.80005907924375,
+        "y": 11.357242947455045,
+        "z": 0.9364762414218117
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_8",
+        "thought_labels": [
+          "alert_security",
+          "avoid_vehicle",
+          "calling_out",
+          "focused_task"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0127",
+      "type": "Person",
+      "position": {
+        "x": 54.44585010905659,
+        "y": 54.48841123817816,
+        "z": 0.14876769251856298
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_1",
+        "thought_labels": [
+          "curious",
+          "guarding_area",
+          "distracted",
+          "calm"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0128",
+      "type": "Person",
+      "position": {
+        "x": 40.67179426022102,
+        "y": 40.81490126167026,
+        "z": 0.6239844753922429
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_5",
+        "thought_labels": [
+          "alert_security",
+          "focused_task",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0129",
+      "type": "Person",
+      "position": {
+        "x": 82.4185242560372,
+        "y": 42.684109703019246,
+        "z": 0.13683718254907296
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_1",
+        "thought_labels": [
+          "calm",
+          "navigate_corridor",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0130",
+      "type": "Person",
+      "position": {
+        "x": 66.76448827384202,
+        "y": 52.78185744655293,
+        "z": 0.8423796209881087
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_1",
+        "thought_labels": [
+          "navigate_corridor",
+          "guarding_area",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0131",
+      "type": "Person",
+      "position": {
+        "x": 6.173529596685126,
+        "y": 25.886646688259454,
+        "z": 0.4686733486314809
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_8",
+        "thought_labels": [
+          "seeking_friend",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0132",
+      "type": "Person",
+      "position": {
+        "x": 101.6729817761943,
+        "y": 31.510259479907205,
+        "z": 0.8343982141564903
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_4",
+        "thought_labels": [
+          "distracted",
+          "guarding_area",
+          "evaluate_risk",
+          "focused_task"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0133",
+      "type": "Person",
+      "position": {
+        "x": 73.62879366425577,
+        "y": 57.84292474468482,
+        "z": 0.0393807471803751
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_4",
+        "thought_labels": [
+          "monitor_obstacle",
+          "focused_task"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0134",
+      "type": "Person",
+      "position": {
+        "x": 91.48914215771974,
+        "y": 82.93837689298554,
+        "z": 0.5265351311054727
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_2",
+        "thought_labels": [
+          "avoid_vehicle",
+          "fearful",
+          "evaluate_risk",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0135",
+      "type": "Person",
+      "position": {
+        "x": 116.61723825096229,
+        "y": 8.258191474900078,
+        "z": 0.7957240329883941
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_6",
+        "thought_labels": [
+          "alert_security",
+          "monitor_obstacle",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0136",
+      "type": "Person",
+      "position": {
+        "x": 86.59151612912079,
+        "y": 69.91520579700669,
+        "z": 0.8513903349215959
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_0",
+        "thought_labels": [
+          "monitor_obstacle",
+          "plan_exit"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0137",
+      "type": "Person",
+      "position": {
+        "x": 9.78978330382958,
+        "y": 39.88016768972934,
+        "z": 0.6360221596694928
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_7",
+        "thought_labels": [
+          "focused_task",
+          "curious",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0138",
+      "type": "Person",
+      "position": {
+        "x": 13.65810097322421,
+        "y": 38.69222700581013,
+        "z": 0.424869705120674
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "calling_out",
+          "plan_exit",
+          "calm",
+          "curious"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0139",
+      "type": "Person",
+      "position": {
+        "x": 6.573835022169718,
+        "y": 18.39808119183586,
+        "z": 1.417986130839966
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_4",
+        "thought_labels": [
+          "alert_security",
+          "calm",
+          "observe_crowd"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0140",
+      "type": "Person",
+      "position": {
+        "x": 89.64169481157214,
+        "y": 15.812532168825808,
+        "z": 0.5703111685728544
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_3",
+        "thought_labels": [
+          "navigate_corridor",
+          "fearful",
+          "curious",
+          "guarding_area"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0141",
+      "type": "Person",
+      "position": {
+        "x": 5.076271387534965,
+        "y": 1.6867382927081132,
+        "z": 1.3817436517536186
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_6",
+        "thought_labels": [
+          "avoid_vehicle",
+          "guarding_area",
+          "seeking_friend",
+          "plan_exit"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0142",
+      "type": "Person",
+      "position": {
+        "x": 2.5027870829698573,
+        "y": 29.229136150096245,
+        "z": 1.2019832314656782
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_7",
+        "thought_labels": [
+          "navigate_corridor",
+          "fearful",
+          "curious",
+          "guarding_area"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0143",
+      "type": "Person",
+      "position": {
+        "x": 29.19797697872804,
+        "y": 52.998415947262075,
+        "z": 0.7859438145009474
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_4",
+        "thought_labels": [
+          "alert_security",
+          "distracted",
+          "monitor_obstacle",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0144",
+      "type": "Person",
+      "position": {
+        "x": 9.165525296762539,
+        "y": 56.99022002713678,
+        "z": 0.7959072311589723
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_5",
+        "thought_labels": [
+          "seeking_friend",
+          "distracted",
+          "plan_exit"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0145",
+      "type": "Person",
+      "position": {
+        "x": 30.71618664020758,
+        "y": 15.614912019788532,
+        "z": 0.22930468350889477
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_1",
+        "thought_labels": [
+          "evaluate_risk",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0146",
+      "type": "Person",
+      "position": {
+        "x": 91.18525795292982,
+        "y": 40.40147312955567,
+        "z": 1.386231387578489
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_5",
+        "thought_labels": [
+          "alert_security",
+          "seeking_friend",
+          "distracted",
+          "plan_exit"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0147",
+      "type": "Person",
+      "position": {
+        "x": 53.064967660354185,
+        "y": 27.253839162511163,
+        "z": 0.41201050122923877
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_5",
+        "thought_labels": [
+          "fearful",
+          "calling_out",
+          "distracted",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0148",
+      "type": "Person",
+      "position": {
+        "x": 6.826806100074285,
+        "y": 74.85269684968094,
+        "z": 0.11509650176018249
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_8",
+        "thought_labels": [
+          "waiting_for_signal",
+          "plan_exit",
+          "distracted"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0149",
+      "type": "Person",
+      "position": {
+        "x": 78.22049455783318,
+        "y": 28.937408659238553,
+        "z": 0.7134435419146042
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_0",
+        "thought_labels": [
+          "calm",
+          "alert_security",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0150",
+      "type": "Person",
+      "position": {
+        "x": 60.545880180114885,
+        "y": 15.530302029272843,
+        "z": 0.37161558539742634
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_7",
+        "thought_labels": [
+          "multi_tasking",
+          "monitor_obstacle",
+          "evaluate_risk",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0151",
+      "type": "Person",
+      "position": {
+        "x": 46.48998714277391,
+        "y": 69.7018309716362,
+        "z": 1.0183465808393717
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_5",
+        "thought_labels": [
+          "alert_security",
+          "calm"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0152",
+      "type": "Person",
+      "position": {
+        "x": 81.40552138080972,
+        "y": 25.573227649030233,
+        "z": 1.0856004825036927
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_2",
+        "thought_labels": [
+          "fearful",
+          "seeking_friend",
+          "waiting_for_signal"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0153",
+      "type": "Person",
+      "position": {
+        "x": 37.22780850621745,
+        "y": 59.04492462324497,
+        "z": 0.9932027353937698
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_1",
+        "thought_labels": [
+          "avoid_vehicle",
+          "alert_security",
+          "guarding_area"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0154",
+      "type": "Person",
+      "position": {
+        "x": 80.4139679993667,
+        "y": 74.6063075605018,
+        "z": 1.108162008194224
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_8",
+        "thought_labels": [
+          "guarding_area",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0155",
+      "type": "Person",
+      "position": {
+        "x": 43.51172027784533,
+        "y": 16.223663058916017,
+        "z": 0.3212889918133505
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_3",
+        "thought_labels": [
+          "seeking_friend",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0156",
+      "type": "Person",
+      "position": {
+        "x": 35.49505219855461,
+        "y": 70.93081563042601,
+        "z": 0.7615345690869694
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_8",
+        "thought_labels": [
+          "alert_security",
+          "seeking_friend"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0157",
+      "type": "Person",
+      "position": {
+        "x": 45.20638449870296,
+        "y": 14.602249087960544,
+        "z": 1.2470175850336882
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_2",
+        "thought_labels": [
+          "waiting_for_signal",
+          "plan_exit",
+          "curious",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0158",
+      "type": "Person",
+      "position": {
+        "x": 86.350280854878,
+        "y": 87.26297430677624,
+        "z": 0.9158931331887237
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "distracted",
+          "calling_out"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0159",
+      "type": "Person",
+      "position": {
+        "x": 108.47692057649499,
+        "y": 17.461455860031286,
+        "z": 1.0174602375976387
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_7",
+        "thought_labels": [
+          "calling_out",
+          "avoid_vehicle",
+          "focused_task"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0160",
+      "type": "Person",
+      "position": {
+        "x": 50.239299207569495,
+        "y": 14.585235592128422,
+        "z": 0.29954659716702126
+      },
+      "properties": {
+        "role": "staff",
+        "group_id": "group_2",
+        "thought_labels": [
+          "plan_exit",
+          "evaluate_risk",
+          "guarding_area"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0161",
+      "type": "Person",
+      "position": {
+        "x": 66.54488945093175,
+        "y": 9.233075857356841,
+        "z": 1.2688384151001577
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_4",
+        "thought_labels": [
+          "monitor_obstacle",
+          "focused_task"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0162",
+      "type": "Person",
+      "position": {
+        "x": 108.63674507738895,
+        "y": 13.261379039244387,
+        "z": 0.6562088402924713
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_7",
+        "thought_labels": [
+          "observe_crowd",
+          "guarding_area",
+          "multi_tasking"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0163",
+      "type": "Person",
+      "position": {
+        "x": 60.240853763188255,
+        "y": 21.220026647708938,
+        "z": 1.4917880268574368
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_3",
+        "thought_labels": [
+          "alert_security",
+          "calm"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0164",
+      "type": "Person",
+      "position": {
+        "x": 77.99528211530179,
+        "y": 71.22425737339584,
+        "z": 0.2063993815888075
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_7",
+        "thought_labels": [
+          "seeking_friend",
+          "evaluate_risk",
+          "distracted",
+          "calling_out"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0165",
+      "type": "Person",
+      "position": {
+        "x": 108.7028986923925,
+        "y": 1.7103496419873343,
+        "z": 0.32348211670253163
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_8",
+        "thought_labels": [
+          "multi_tasking",
+          "guarding_area",
+          "plan_exit",
+          "avoid_vehicle"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0166",
+      "type": "Person",
+      "position": {
+        "x": 28.51682719691204,
+        "y": 10.966351064275578,
+        "z": 0.357659255189734
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "calm",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0167",
+      "type": "Person",
+      "position": {
+        "x": 64.32645411768735,
+        "y": 56.87594478118282,
+        "z": 0.8625711862959504
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_2",
+        "thought_labels": [
+          "guarding_area",
+          "observe_crowd",
+          "calling_out"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0168",
+      "type": "Person",
+      "position": {
+        "x": 28.867708656785226,
+        "y": 37.49108356876858,
+        "z": 0.9965569526130136
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_8",
+        "thought_labels": [
+          "fearful",
+          "observe_crowd",
+          "curious"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0169",
+      "type": "Person",
+      "position": {
+        "x": 5.224131020013196,
+        "y": 34.81931893746218,
+        "z": 0.5599535806512488
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_0",
+        "thought_labels": [
+          "fearful",
+          "navigate_corridor",
+          "calm"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0170",
+      "type": "Person",
+      "position": {
+        "x": 78.85252800129976,
+        "y": 9.329748074972052,
+        "z": 0.87285498233721
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_2",
+        "thought_labels": [
+          "navigate_corridor",
+          "alert_security"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0171",
+      "type": "Person",
+      "position": {
+        "x": 21.01069524620501,
+        "y": 70.12283341304534,
+        "z": 0.6969343496205567
+      },
+      "properties": {
+        "role": "resident",
+        "group_id": "group_7",
+        "thought_labels": [
+          "monitor_obstacle",
+          "seeking_friend",
+          "plan_exit",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0172",
+      "type": "Person",
+      "position": {
+        "x": 4.4380548239730855,
+        "y": 18.143189355303083,
+        "z": 1.186663819843566
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_5",
+        "thought_labels": [
+          "multi_tasking",
+          "avoid_vehicle",
+          "guarding_area"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0173",
+      "type": "Person",
+      "position": {
+        "x": 56.80797212122121,
+        "y": 3.295869438321751,
+        "z": 0.9703507482011254
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_5",
+        "thought_labels": [
+          "alert_security",
+          "focused_task"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0174",
+      "type": "Person",
+      "position": {
+        "x": 95.92108938218877,
+        "y": 39.325624481244276,
+        "z": 0.6000326619666929
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_6",
+        "thought_labels": [
+          "monitor_obstacle",
+          "evaluate_risk",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0175",
+      "type": "Person",
+      "position": {
+        "x": 44.08163123516184,
+        "y": 71.7561792338999,
+        "z": 0.4000810437032739
+      },
+      "properties": {
+        "role": "bystander",
+        "group_id": "group_6",
+        "thought_labels": [
+          "guarding_area",
+          "monitor_obstacle"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0176",
+      "type": "Person",
+      "position": {
+        "x": 35.251970280299865,
+        "y": 9.233811700390287,
+        "z": 0.4918798580123397
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_4",
+        "thought_labels": [
+          "guarding_area",
+          "monitor_obstacle",
+          "navigate_corridor"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "person_0177",
+      "type": "Person",
+      "position": {
+        "x": 42.18563805263906,
+        "y": 3.811964656511657,
+        "z": 1.3050557625845882
+      },
+      "properties": {
+        "role": "maintenance",
+        "group_id": "group_6",
+        "thought_labels": [
+          "plan_exit",
+          "fearful",
+          "alert_security"
+        ],
+        "goal_id": "exit_roof"
+      }
+    },
+    {
+      "id": "person_0178",
+      "type": "Person",
+      "position": {
+        "x": 48.74522778091829,
+        "y": 46.17774175180969,
+        "z": 1.1248469763928348
+      },
+      "properties": {
+        "role": "security",
+        "group_id": "group_0",
+        "thought_labels": [
+          "waiting_for_signal",
+          "plan_exit"
+        ],
+        "goal_id": "exit_west"
+      }
+    },
+    {
+      "id": "person_0179",
+      "type": "Person",
+      "position": {
+        "x": 8.068003567453058,
+        "y": 70.06638361561788,
+        "z": 0.5494927096607228
+      },
+      "properties": {
+        "role": "vip",
+        "group_id": "group_0",
+        "thought_labels": [
+          "seeking_friend",
+          "waiting_for_signal",
+          "monitor_obstacle",
+          "evaluate_risk"
+        ],
+        "goal_id": "exit_east"
+      }
+    },
+    {
+      "id": "vehicle_000",
+      "type": "Object",
+      "position": {
+        "x": 91.57013661582954,
+        "y": 51.65296005005061,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 3.4147344859169673,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_001",
+      "type": "Object",
+      "position": {
+        "x": 33.44277195597736,
+        "y": 86.44680470384937,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "car",
+        "velocity_hint": 4.245697821154101,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_002",
+      "type": "Object",
+      "position": {
+        "x": 46.438485604711616,
+        "y": 50.55054396836824,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 5.168170150430717,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_003",
+      "type": "Object",
+      "position": {
+        "x": 25.74845105084637,
+        "y": 55.06894644872783,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 2.9008025344600408,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_004",
+      "type": "Object",
+      "position": {
+        "x": 16.287410127663268,
+        "y": 6.664683525888932,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 4.0030003673410475,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_005",
+      "type": "Object",
+      "position": {
+        "x": 10.534888932567728,
+        "y": 61.37363342255735,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 5.005279057200355,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_006",
+      "type": "Object",
+      "position": {
+        "x": 85.14485841835058,
+        "y": 49.49974327382015,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 5.8311292283890666,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_007",
+      "type": "Object",
+      "position": {
+        "x": 85.41709248086552,
+        "y": 83.459201105086,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 4.289400853284354,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_008",
+      "type": "Object",
+      "position": {
+        "x": 14.563494609414827,
+        "y": 18.088233405991716,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 2.1182781206371954,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_009",
+      "type": "Object",
+      "position": {
+        "x": 66.48257247115141,
+        "y": 33.202004895109866,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 2.583970533711967,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_010",
+      "type": "Object",
+      "position": {
+        "x": 106.10957362015439,
+        "y": 5.917329474062947,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 5.234913469508237,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_011",
+      "type": "Object",
+      "position": {
+        "x": 63.083478579636015,
+        "y": 69.22480953372282,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "car",
+        "velocity_hint": 2.5639705201663734,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_012",
+      "type": "Object",
+      "position": {
+        "x": 38.04332045525782,
+        "y": 6.674851778877558,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 3.550316513162149,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_013",
+      "type": "Object",
+      "position": {
+        "x": 105.35521819804941,
+        "y": 70.22366359544776,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "car",
+        "velocity_hint": 5.455017368109456,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_014",
+      "type": "Object",
+      "position": {
+        "x": 15.483954935626635,
+        "y": 45.25774078044372,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "car",
+        "velocity_hint": 4.331459598158073,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_015",
+      "type": "Object",
+      "position": {
+        "x": 36.494945136896135,
+        "y": 14.57702636003097,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "car",
+        "velocity_hint": 3.5571038705384286,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_016",
+      "type": "Object",
+      "position": {
+        "x": 112.90848659178417,
+        "y": 80.5433325139012,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 2.8833586376738314,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_017",
+      "type": "Object",
+      "position": {
+        "x": 114.76219524518378,
+        "y": 24.700592989216194,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 4.400651133957712,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_018",
+      "type": "Object",
+      "position": {
+        "x": 60.308777368951525,
+        "y": 15.177231157293614,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "car",
+        "velocity_hint": 2.7704028037510655,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_019",
+      "type": "Object",
+      "position": {
+        "x": 74.93750249203988,
+        "y": 81.18008043216543,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 2.1853743658480287,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_020",
+      "type": "Object",
+      "position": {
+        "x": 103.65374299440397,
+        "y": 7.31005694040329,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 3.190951585248745,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_021",
+      "type": "Object",
+      "position": {
+        "x": 25.297005564235743,
+        "y": 51.49234822014577,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "car",
+        "velocity_hint": 4.241171270612522,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_022",
+      "type": "Object",
+      "position": {
+        "x": 75.25968123577012,
+        "y": 26.07044911214452,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "truck",
+        "velocity_hint": 3.1019505979202435,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_023",
+      "type": "Object",
+      "position": {
+        "x": 96.88191773145572,
+        "y": 36.548327407010255,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 2.2696086482060105,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "vehicle_024",
+      "type": "Object",
+      "position": {
+        "x": 52.75265999044932,
+        "y": 43.58260170966233,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "drone",
+        "velocity_hint": 2.6465091102318556,
+        "walkable": false,
+        "blocking": true
+      }
+    },
+    {
+      "id": "object_000",
+      "type": "Object",
+      "position": {
+        "x": 103.37820921989938,
+        "y": 28.738475338205525,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": false,
+        "importance": 0.13076615155238647
+      }
+    },
+    {
+      "id": "object_001",
+      "type": "Object",
+      "position": {
+        "x": 44.464823766034954,
+        "y": 50.54860941735323,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": true,
+        "importance": 0.2674716744541824
+      }
+    },
+    {
+      "id": "object_002",
+      "type": "Object",
+      "position": {
+        "x": 29.750265903065475,
+        "y": 8.71304873045143,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": false,
+        "importance": 0.2482702803811866
+      }
+    },
+    {
+      "id": "object_003",
+      "type": "Object",
+      "position": {
+        "x": 103.83690020648612,
+        "y": 14.372969591714487,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "fountain",
+        "walkable": false,
+        "importance": 0.18983410122335975
+      }
+    },
+    {
+      "id": "object_004",
+      "type": "Object",
+      "position": {
+        "x": 19.121089427112523,
+        "y": 89.63724699858751,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": false,
+        "importance": 0.023176298216351032
+      }
+    },
+    {
+      "id": "object_005",
+      "type": "Object",
+      "position": {
+        "x": 113.42793648830848,
+        "y": 45.49000167213944,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "sofa",
+        "walkable": false,
+        "importance": 0.04865813292965593
+      }
+    },
+    {
+      "id": "object_006",
+      "type": "Object",
+      "position": {
+        "x": 33.762760604823406,
+        "y": 53.776689390916765,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "statue",
+        "walkable": false,
+        "importance": 0.28574838144101755
+      }
+    },
+    {
+      "id": "object_007",
+      "type": "Object",
+      "position": {
+        "x": 0.9812887136689108,
+        "y": 9.674737593408668,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": false,
+        "importance": 0.7638567641619896
+      }
+    },
+    {
+      "id": "object_008",
+      "type": "Object",
+      "position": {
+        "x": 43.912482302107556,
+        "y": 36.052345891328095,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "sofa",
+        "walkable": false,
+        "importance": 0.5532229266211517
+      }
+    },
+    {
+      "id": "object_009",
+      "type": "Object",
+      "position": {
+        "x": 8.823809969141019,
+        "y": 45.38299762108842,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": true,
+        "importance": 0.12866339068921517
+      }
+    },
+    {
+      "id": "object_010",
+      "type": "Object",
+      "position": {
+        "x": 11.601778322968217,
+        "y": 33.587850269233805,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "fountain",
+        "walkable": false,
+        "importance": 0.7549651722927939
+      }
+    },
+    {
+      "id": "object_011",
+      "type": "Object",
+      "position": {
+        "x": 23.886945786293996,
+        "y": 45.82102646026639,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "desk",
+        "walkable": true,
+        "importance": 0.1370363735675204
+      }
+    },
+    {
+      "id": "object_012",
+      "type": "Object",
+      "position": {
+        "x": 39.964884642332066,
+        "y": 42.6369735355671,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "fountain",
+        "walkable": true,
+        "importance": 0.32796584763652625
+      }
+    },
+    {
+      "id": "object_013",
+      "type": "Object",
+      "position": {
+        "x": 73.56817452776136,
+        "y": 14.625184128924545,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "statue",
+        "walkable": false,
+        "importance": 0.5937246556309868
+      }
+    },
+    {
+      "id": "object_014",
+      "type": "Object",
+      "position": {
+        "x": 60.877798344155586,
+        "y": 45.87426906757492,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "fountain",
+        "walkable": false,
+        "importance": 0.47489259999803324
+      }
+    },
+    {
+      "id": "object_015",
+      "type": "Object",
+      "position": {
+        "x": 1.9964346602777905,
+        "y": 29.81156342210304,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": false,
+        "importance": 0.7967548139301471
+      }
+    },
+    {
+      "id": "object_016",
+      "type": "Object",
+      "position": {
+        "x": 87.03890550622263,
+        "y": 61.92392860824945,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": false,
+        "importance": 0.9670706961720509
+      }
+    },
+    {
+      "id": "object_017",
+      "type": "Object",
+      "position": {
+        "x": 93.94847897177057,
+        "y": 69.85458226548648,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "statue",
+        "walkable": true,
+        "importance": 0.58352327704764
+      }
+    },
+    {
+      "id": "object_018",
+      "type": "Object",
+      "position": {
+        "x": 20.46144740959912,
+        "y": 56.612271703082726,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "vehicle",
+        "walkable": false,
+        "importance": 0.14777570830033182
+      }
+    },
+    {
+      "id": "object_019",
+      "type": "Object",
+      "position": {
+        "x": 81.68722740608146,
+        "y": 2.8413462007889434,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "desk",
+        "walkable": true,
+        "importance": 0.018937367506612568
+      }
+    },
+    {
+      "id": "object_020",
+      "type": "Object",
+      "position": {
+        "x": 37.64309801350262,
+        "y": 13.62881323074109,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": false,
+        "importance": 0.8728177089123204
+      }
+    },
+    {
+      "id": "object_021",
+      "type": "Object",
+      "position": {
+        "x": 88.30047255224176,
+        "y": 5.605315741298876,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "sofa",
+        "walkable": false,
+        "importance": 0.9981228684054821
+      }
+    },
+    {
+      "id": "object_022",
+      "type": "Object",
+      "position": {
+        "x": 57.40451800120813,
+        "y": 33.914229856712616,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": false,
+        "importance": 0.5462732192448302
+      }
+    },
+    {
+      "id": "object_023",
+      "type": "Object",
+      "position": {
+        "x": 81.10422918676416,
+        "y": 78.0888963109494,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "vehicle",
+        "walkable": false,
+        "importance": 0.6100765800787515
+      }
+    },
+    {
+      "id": "object_024",
+      "type": "Object",
+      "position": {
+        "x": 23.07170029640561,
+        "y": 22.186722197462434,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "sofa",
+        "walkable": false,
+        "importance": 0.7711742690876434
+      }
+    },
+    {
+      "id": "object_025",
+      "type": "Object",
+      "position": {
+        "x": 84.58811242039006,
+        "y": 62.12159204072463,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": false,
+        "importance": 0.5604875902362195
+      }
+    },
+    {
+      "id": "object_026",
+      "type": "Object",
+      "position": {
+        "x": 112.13824671096087,
+        "y": 64.94979407348616,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "fountain",
+        "walkable": false,
+        "importance": 0.8957604615402261
+      }
+    },
+    {
+      "id": "object_027",
+      "type": "Object",
+      "position": {
+        "x": 47.34389467690359,
+        "y": 31.062120764812807,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "sofa",
+        "walkable": false,
+        "importance": 0.042066486832725514
+      }
+    },
+    {
+      "id": "object_028",
+      "type": "Object",
+      "position": {
+        "x": 114.63764612150902,
+        "y": 7.112649240886531,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "statue",
+        "walkable": false,
+        "importance": 0.7473384997180049
+      }
+    },
+    {
+      "id": "object_029",
+      "type": "Object",
+      "position": {
+        "x": 25.678416969240907,
+        "y": 74.51565331572303,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "fountain",
+        "walkable": false,
+        "importance": 0.13727295480092294
+      }
+    },
+    {
+      "id": "object_030",
+      "type": "Object",
+      "position": {
+        "x": 73.88124412973907,
+        "y": 52.814744871373364,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "statue",
+        "walkable": true,
+        "importance": 0.6379445734086376
+      }
+    },
+    {
+      "id": "object_031",
+      "type": "Object",
+      "position": {
+        "x": 6.298932820735534,
+        "y": 37.19712294434328,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "desk",
+        "walkable": true,
+        "importance": 0.00518144640713003
+      }
+    },
+    {
+      "id": "object_032",
+      "type": "Object",
+      "position": {
+        "x": 66.042307893554,
+        "y": 83.618971215298,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "tree",
+        "walkable": false,
+        "importance": 0.6505386918742654
+      }
+    },
+    {
+      "id": "object_033",
+      "type": "Object",
+      "position": {
+        "x": 90.70932712904875,
+        "y": 25.85205338079551,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "desk",
+        "walkable": true,
+        "importance": 0.6522987304190796
+      }
+    },
+    {
+      "id": "object_034",
+      "type": "Object",
+      "position": {
+        "x": 27.86642390652204,
+        "y": 66.48178700417719,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "desk",
+        "walkable": true,
+        "importance": 0.41788498224500537
+      }
+    },
+    {
+      "id": "object_035",
+      "type": "Object",
+      "position": {
+        "x": 100.51258669119063,
+        "y": 84.05303495203802,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "vehicle",
+        "walkable": false,
+        "importance": 0.7879606298758379
+      }
+    },
+    {
+      "id": "object_036",
+      "type": "Object",
+      "position": {
+        "x": 22.357395830698668,
+        "y": 67.410288129686,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": true,
+        "importance": 0.009267168480099786
+      }
+    },
+    {
+      "id": "object_037",
+      "type": "Object",
+      "position": {
+        "x": 68.15542423973945,
+        "y": 9.657062169618419,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": false,
+        "importance": 0.9890994700887233
+      }
+    },
+    {
+      "id": "object_038",
+      "type": "Object",
+      "position": {
+        "x": 65.196058026837,
+        "y": 44.452117830763726,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "vehicle",
+        "walkable": false,
+        "importance": 0.27283708149799246
+      }
+    },
+    {
+      "id": "object_039",
+      "type": "Object",
+      "position": {
+        "x": 97.05766538916238,
+        "y": 29.7615687148607,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "statue",
+        "walkable": false,
+        "importance": 0.7185981734558871
+      }
+    },
+    {
+      "id": "object_040",
+      "type": "Object",
+      "position": {
+        "x": 1.6901034742157695,
+        "y": 30.34009613967753,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "statue",
+        "walkable": true,
+        "importance": 0.17549491383846472
+      }
+    },
+    {
+      "id": "object_041",
+      "type": "Object",
+      "position": {
+        "x": 102.73758051281493,
+        "y": 80.73384856055776,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "fountain",
+        "walkable": false,
+        "importance": 0.0867377698483559
+      }
+    },
+    {
+      "id": "object_042",
+      "type": "Object",
+      "position": {
+        "x": 80.3107024091945,
+        "y": 16.6303080942606,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": true,
+        "importance": 0.006830120539555451
+      }
+    },
+    {
+      "id": "object_043",
+      "type": "Object",
+      "position": {
+        "x": 46.0289268811237,
+        "y": 40.20619696258081,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "kiosk",
+        "walkable": false,
+        "importance": 0.5824607515549848
+      }
+    },
+    {
+      "id": "object_044",
+      "type": "Object",
+      "position": {
+        "x": 68.74528170654392,
+        "y": 23.53978357338535,
+        "z": 0.0
+      },
+      "properties": {
+        "category": "sofa",
+        "walkable": true,
+        "importance": 0.6677861147986713
+      }
+    },
+    {
+      "id": "wall_00",
+      "type": "Wall",
+      "position": {
+        "x": 55.847398913031526,
+        "y": 14.374514270480683,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 9.17,
+        "height": 3.88,
+        "thickness": 0.73,
+        "blocking": true,
+        "rotation_degrees": 90
+      }
+    },
+    {
+      "id": "wall_01",
+      "type": "Wall",
+      "position": {
+        "x": 82.8348452902577,
+        "y": 57.484019267944504,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 11.47,
+        "height": 3.05,
+        "thickness": 0.33,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_02",
+      "type": "Wall",
+      "position": {
+        "x": 57.38182796822687,
+        "y": 40.94808054936033,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 11.9,
+        "height": 3.06,
+        "thickness": 0.62,
+        "blocking": true,
+        "rotation_degrees": 90
+      }
+    },
+    {
+      "id": "wall_03",
+      "type": "Wall",
+      "position": {
+        "x": 90.88206279651911,
+        "y": 72.17954926020279,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 10.43,
+        "height": 3.64,
+        "thickness": 0.61,
+        "blocking": true,
+        "rotation_degrees": 45
+      }
+    },
+    {
+      "id": "wall_04",
+      "type": "Wall",
+      "position": {
+        "x": 104.776207018528,
+        "y": 7.368327582594738,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 7.02,
+        "height": 3.56,
+        "thickness": 0.25,
+        "blocking": true,
+        "rotation_degrees": 45
+      }
+    },
+    {
+      "id": "wall_05",
+      "type": "Wall",
+      "position": {
+        "x": 13.465054984472431,
+        "y": 74.58966485625827,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 11.13,
+        "height": 2.8,
+        "thickness": 0.52,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_06",
+      "type": "Wall",
+      "position": {
+        "x": 39.37411652906478,
+        "y": 46.83073870663083,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 4.05,
+        "height": 2.81,
+        "thickness": 0.55,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_07",
+      "type": "Wall",
+      "position": {
+        "x": 107.86672220561685,
+        "y": 40.093442296849844,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 3.5,
+        "height": 2.7,
+        "thickness": 0.45,
+        "blocking": true,
+        "rotation_degrees": 45
+      }
+    },
+    {
+      "id": "wall_08",
+      "type": "Wall",
+      "position": {
+        "x": 6.928413711902972,
+        "y": 41.614047516503135,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 10.26,
+        "height": 3.58,
+        "thickness": 0.44,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_09",
+      "type": "Wall",
+      "position": {
+        "x": 89.49653793981788,
+        "y": 52.04801385531319,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 3.41,
+        "height": 3.02,
+        "thickness": 0.24,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_10",
+      "type": "Wall",
+      "position": {
+        "x": 112.14993586619357,
+        "y": 6.211723154428242,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 11.4,
+        "height": 2.55,
+        "thickness": 0.45,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_11",
+      "type": "Wall",
+      "position": {
+        "x": 91.8993219508454,
+        "y": 88.04999564316908,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 8.81,
+        "height": 3.13,
+        "thickness": 0.8,
+        "blocking": true,
+        "rotation_degrees": 90
+      }
+    },
+    {
+      "id": "wall_12",
+      "type": "Wall",
+      "position": {
+        "x": 53.82445591952229,
+        "y": 82.54035690135552,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 6.4,
+        "height": 2.62,
+        "thickness": 0.78,
+        "blocking": true,
+        "rotation_degrees": 45
+      }
+    },
+    {
+      "id": "wall_13",
+      "type": "Wall",
+      "position": {
+        "x": 15.958776760280804,
+        "y": 77.42579230144091,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 4.07,
+        "height": 3.99,
+        "thickness": 0.44,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_14",
+      "type": "Wall",
+      "position": {
+        "x": 87.34297690873537,
+        "y": 20.042119436963983,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 3.03,
+        "height": 2.53,
+        "thickness": 0.38,
+        "blocking": true,
+        "rotation_degrees": 45
+      }
+    },
+    {
+      "id": "wall_15",
+      "type": "Wall",
+      "position": {
+        "x": 86.29127700130225,
+        "y": 38.17152267600614,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 6.41,
+        "height": 2.84,
+        "thickness": 0.48,
+        "blocking": true,
+        "rotation_degrees": 0
+      }
+    },
+    {
+      "id": "wall_16",
+      "type": "Wall",
+      "position": {
+        "x": 33.07796733541528,
+        "y": 84.36693250215602,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 9.53,
+        "height": 2.67,
+        "thickness": 0.69,
+        "blocking": true,
+        "rotation_degrees": 90
+      }
+    },
+    {
+      "id": "wall_17",
+      "type": "Wall",
+      "position": {
+        "x": 73.7907848650695,
+        "y": 84.26141373469007,
+        "z": 0.0
+      },
+      "properties": {
+        "width": 11.0,
+        "height": 2.86,
+        "thickness": 0.24,
+        "blocking": true,
+        "rotation_degrees": 45
+      }
+    },
+    {
+      "id": "exit_west",
+      "type": "Exit",
+      "position": {
+        "x": 6.0,
+        "y": 45.0,
+        "z": 0.0
+      },
+      "properties": {
+        "priority": "primary",
+        "walkable": true
+      }
+    },
+    {
+      "id": "exit_east",
+      "type": "Exit",
+      "position": {
+        "x": 114.0,
+        "y": 45.0,
+        "z": 0.0
+      },
+      "properties": {
+        "priority": "secondary",
+        "walkable": true
+      }
+    },
+    {
+      "id": "exit_roof",
+      "type": "Exit",
+      "position": {
+        "x": 60.0,
+        "y": 45.0,
+        "z": 13.5
+      },
+      "properties": {
+        "priority": "primary",
+        "walkable": true
+      }
+    }
+  ],
+  "metadata": {
+    "description": "synthetic multi-entity snapshot generated locally",
+    "generator": "scripts/generate_synthetic_dataset.py",
+    "generated_at": "2025-11-18T15:06:17.287610+00:00",
+    "symbol_counts": {
+      "people": 180,
+      "vehicles": 25,
+      "objects": 45,
+      "walls": 18,
+      "exits": 3
+    },
+    "spatial_resolution": 1.0
+  }
+}

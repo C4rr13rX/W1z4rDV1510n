@@ -1,0 +1,47 @@
+{
+  "snapshot_file": "data/synthetic_snapshot.json",
+  "t_end": {
+    "unix": 1763478977
+  },
+  "n_particles": 384,
+  "schedule": {
+    "t_start": 5.0,
+    "t_end": 0.2,
+    "n_iterations": 120
+  },
+  "energy": {
+    "w_motion": 1.0,
+    "w_collision": 6.5,
+    "w_goal": 1.2,
+    "w_group_cohesion": 0.9,
+    "w_ml_prior": 0.5,
+    "w_path_feasibility": 2.5,
+    "w_env_constraints": 3.2
+  },
+  "proposal": {
+    "local_move_prob": 0.85,
+    "max_step_size": 1.5
+  },
+  "init_strategy": {
+    "use_ml_priors": true,
+    "noise_level": 0.65,
+    "random_fraction": 0.25,
+    "copy_snapshot_fraction": 0.1
+  },
+  "resample": {
+    "enabled": true,
+    "effective_sample_size_threshold": 0.35,
+    "mutation_rate": 0.08
+  },
+  "search": {
+    "cell_size": 1.0
+  },
+  "ml_backend": "SIMPLE_RULES",
+  "hardware_backend": "Cpu",
+  "random_seed": 42,
+  "output": {
+    "save_best_state": true,
+    "save_population_summary": true,
+    "output_path": "logs/latest_results.json"
+  }
+}

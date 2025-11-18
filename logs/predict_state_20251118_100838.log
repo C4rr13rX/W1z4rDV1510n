@@ -1,0 +1,19 @@
+   Compiling simfutures v0.1.0 (C:\Users\Adam\Projects\W1z4rDV1510n)
+error[E0277]: `GridCell` doesn't implement `Debug`
+   --> src\search.rs:600:5
+    |
+598 | #[derive(Debug, Clone, Copy)]
+    |          ----- in this derive macro expansion
+599 | struct OpenNode {
+600 |     cell: GridCell,
+    |     ^^^^^^^^^^^^^^ the trait `Debug` is not implemented for `GridCell`
+    |
+    = note: add `#[derive(Debug)]` to `GridCell` or manually `impl Debug for GridCell`
+help: consider annotating `GridCell` with `#[derive(Debug)]`
+    |
+464 + #[derive(Debug)]
+465 | struct GridCell {
+    |
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `simfutures` (lib) due to 1 previous error

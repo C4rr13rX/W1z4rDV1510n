@@ -1,0 +1,206 @@
+use crate::hardware::HardwareBackendType;
+use crate::ml::MLBackendType;
+use crate::proposal::ProposalConfig;
+use crate::schema::Timestamp;
+use crate::search::SearchConfig;
+use crate::state_population::InitStrategyConfig;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunConfig {
+    pub snapshot_file: PathBuf,
+    pub t_end: Timestamp,
+    #[serde(default = "default_particles")]
+    pub n_particles: usize,
+    #[serde(default)]
+    pub schedule: AnnealingScheduleConfig,
+    #[serde(default)]
+    pub energy: EnergyConfig,
+    #[serde(default)]
+    pub proposal: ProposalConfig,
+    #[serde(default)]
+    pub init_strategy: InitStrategyConfig,
+    #[serde(default)]
+    pub resample: ResampleConfig,
+    #[serde(default)]
+    pub search: SearchConfig,
+    #[serde(default)]
+    pub ml_backend: MLBackendType,
+    #[serde(default)]
+    pub hardware_backend: HardwareBackendType,
+    #[serde(default = "default_seed")]
+    pub random_seed: u64,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+    #[serde(default)]
+    pub output: OutputConfig,
+}
+
+fn default_particles() -> usize {
+    512
+}
+
+fn default_seed() -> u64 {
+    7
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnealingScheduleConfig {
+    pub t_start: f64,
+    pub t_end: f64,
+    pub n_iterations: usize,
+    #[serde(default)]
+    pub schedule_type: ScheduleType,
+}
+
+impl Default for AnnealingScheduleConfig {
+    fn default() -> Self {
+        Self {
+            t_start: 5.0,
+            t_end: 0.2,
+            n_iterations: 200,
+            schedule_type: ScheduleType::Linear,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ScheduleType {
+    Linear,
+    Exponential,
+    Custom,
+}
+
+impl Default for ScheduleType {
+    fn default() -> Self {
+        ScheduleType::Linear
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnergyConfig {
+    pub w_motion: f64,
+    pub w_collision: f64,
+    pub w_goal: f64,
+    pub w_group_cohesion: f64,
+    pub w_ml_prior: f64,
+    pub w_path_feasibility: f64,
+    pub w_env_constraints: f64,
+}
+
+impl Default for EnergyConfig {
+    fn default() -> Self {
+        Self {
+            w_motion: 1.0,
+            w_collision: 5.0,
+            w_goal: 1.0,
+            w_group_cohesion: 0.5,
+            w_ml_prior: 0.0,
+            w_path_feasibility: 1.0,
+            w_env_constraints: 3.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResampleConfig {
+    #[serde(default = "ResampleConfig::default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "ResampleConfig::default_threshold")]
+    pub effective_sample_size_threshold: f64,
+    #[serde(default = "ResampleConfig::default_mutation_rate")]
+    pub mutation_rate: f64,
+}
+
+impl ResampleConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_threshold() -> f64 {
+        0.3
+    }
+
+    fn default_mutation_rate() -> f64 {
+        0.05
+    }
+}
+
+impl Default for ResampleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            effective_sample_size_threshold: Self::default_threshold(),
+            mutation_rate: Self::default_mutation_rate(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "LoggingConfig::default_level")]
+    pub log_level: String,
+    #[serde(default)]
+    pub log_path: Option<PathBuf>,
+}
+
+impl LoggingConfig {
+    fn default_level() -> String {
+        "INFO".to_string()
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            log_level: Self::default_level(),
+            log_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputConfig {
+    #[serde(default)]
+    pub save_best_state: bool,
+    #[serde(default)]
+    pub save_population_summary: bool,
+    #[serde(default)]
+    pub save_trajectories: bool,
+    #[serde(default = "OutputConfig::default_format")]
+    pub format: OutputFormat,
+    #[serde(default)]
+    pub output_path: Option<PathBuf>,
+}
+
+impl OutputConfig {
+    fn default_format() -> OutputFormat {
+        OutputFormat::Json
+    }
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            save_best_state: true,
+            save_population_summary: true,
+            save_trajectories: false,
+            format: Self::default_format(),
+            output_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OutputFormat {
+    Json,
+    Msgpack,
+    Custom,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        OutputFormat::Json
+    }
+}

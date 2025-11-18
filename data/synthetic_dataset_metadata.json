@@ -1,0 +1,14 @@
+{
+  "snapshot_path": "data\\synthetic_snapshot.json",
+  "run_config_path": "data\\synthetic_run_config.json",
+  "timeline": {
+    "mean_speed": 0.6631829350169025,
+    "max_speed": 3.841113119917194,
+    "min_speed": 0.001414213562373095,
+    "train_path": "data\\timeline_train.jsonl",
+    "test_path": "data\\timeline_test.jsonl",
+    "train_rows": 34560,
+    "test_rows": 8640
+  },
+  "generated_at": "2025-11-18T15:06:18.128743+00:00"
+}

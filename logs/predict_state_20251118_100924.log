@@ -1,0 +1,18 @@
+   Compiling simfutures v0.1.0 (C:\Users\Adam\Projects\W1z4rDV1510n)
+warning: field `depth` is never read
+   --> src\search.rs:473:5
+    |
+470 | struct Bounds {
+    |        ------ field in this struct
+...
+473 |     depth: f64,
+    |     ^^^^^
+    |
+    = note: `Bounds` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `simfutures` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.85s
+     Running `target\debug\predict_state.exe --config C:\Users\Adam\Projects\W1z4rDV1510n\data\synthetic_run_config.json`
+Error: unknown variant `SIMPLE_RULES`, expected `None` or `SimpleRules` at line 39 column 30
+error: process didn't exit successfully: `target\debug\predict_state.exe --config C:\Users\Adam\Projects\W1z4rDV1510n\data\synthetic_run_config.json` (exit code: 1)
