@@ -1,6 +1,8 @@
 use crate::energy::{EnergyBreakdown, EnergyModel};
-use crate::schema::{DynamicState, Population};
+use crate::schema::{DynamicState, EnvironmentSnapshot, Population};
+use crate::search::{PathResult, SearchModule};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Results {
@@ -24,12 +26,32 @@ pub struct Diagnostics {
     pub diversity_metric: f64,
     #[serde(default)]
     pub best_state_breakdown: Option<EnergyBreakdown>,
+    #[serde(default)]
+    pub path_report: Option<PathDiagnosticsReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathDiagnosticsReport {
+    pub per_symbol: HashMap<String, SymbolPathDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolPathDiagnostics {
+    pub feasible: bool,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+    pub path_length: f64,
+    pub cost: f64,
+    pub visited_nodes: usize,
+    pub constraint_violations: usize,
 }
 
 pub fn analyze_results(
     population: &Population,
     energy_trace: Vec<f64>,
     energy_model: &EnergyModel,
+    search_module: Option<&SearchModule>,
+    snapshot_0: &EnvironmentSnapshot,
 ) -> Results {
     let mut sorted = population.particles.clone();
     sorted.sort_by(|a, b| a.energy.partial_cmp(&b.energy).unwrap());
@@ -46,6 +68,9 @@ pub fn analyze_results(
         .collect();
     let diversity_metric = compute_diversity(population);
     let breakdown = energy_model.energy_breakdown(&best_particle.current_state);
+    let path_report = search_module.map(|module| {
+        compute_path_report(module, snapshot_0, &best_particle.current_state)
+    });
     Results {
         best_state: best_particle.current_state.clone(),
         best_energy: best_particle.energy,
@@ -54,6 +79,7 @@ pub fn analyze_results(
             energy_trace,
             diversity_metric,
             best_state_breakdown: Some(breakdown),
+            path_report,
         },
     }
 }
@@ -89,4 +115,35 @@ fn spatial_distance(a: &crate::schema::Position, b: &crate::schema::Position) ->
     let dy = a.y - b.y;
     let dz = a.z - b.z;
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn compute_path_report(
+    search: &SearchModule,
+    snapshot_0: &EnvironmentSnapshot,
+    state: &DynamicState,
+) -> PathDiagnosticsReport {
+    let mut per_symbol = HashMap::new();
+    let paths = search.compute_paths(snapshot_0, state);
+    for (symbol_id, path) in paths {
+        let entry = match path {
+            PathResult::Feasible { diagnostics, .. } => SymbolPathDiagnostics {
+                feasible: true,
+                failure_reason: None,
+                path_length: diagnostics.length,
+                cost: diagnostics.cost,
+                visited_nodes: diagnostics.visited_nodes,
+                constraint_violations: diagnostics.constraint_violations,
+            },
+            PathResult::Infeasible { reason, diagnostics } => SymbolPathDiagnostics {
+                feasible: false,
+                failure_reason: Some(format!("{reason:?}")),
+                path_length: diagnostics.length,
+                cost: diagnostics.cost,
+                visited_nodes: diagnostics.visited_nodes,
+                constraint_violations: diagnostics.constraint_violations,
+            },
+        };
+        per_symbol.insert(symbol_id, entry);
+    }
+    PathDiagnosticsReport { per_symbol }
 }

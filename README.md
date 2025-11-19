@@ -63,6 +63,7 @@ This prints the best energy and writes `results.json` when configured.
 - ? Occupancy-aware search module with configurable A* grid planner, wall/object masking, constraint projection, and path diagnostics that feed energy scoring.
 - ? Synthetic timeline dataset generator + automation scripts for spawning background runs and tailing their logs.
 - ? Hardware backend abstraction with CPU, multi-threaded CPU, and external stubs, plus an exposed noise-source hook for experimental entropy providers.
+- ? Results now capture per-symbol path diagnostics (feasibility, path length, constraint violations) for the best state, giving downstream consumers a richer view into path feasibility.
 
 ## Synthetic timeline dataset
 

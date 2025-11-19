@@ -53,7 +53,13 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         &hardware_backend,
         &mut rng,
     );
-    let results = analyze_results(&population, energy_trace, &energy_model);
+    let results = analyze_results(
+        &population,
+        energy_trace,
+        &energy_model,
+        Some(&search_module),
+        snapshot.as_ref(),
+    );
     maybe_persist_results(&results, &config)?;
     Ok(results)
 }
