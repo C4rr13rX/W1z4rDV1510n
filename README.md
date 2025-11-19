@@ -61,6 +61,7 @@ This prints the best energy and writes `results.json` when configured.
 - ? Working CLI with JSON config I/O.
 - ? Richer energy model with volumetric collisions, wall penalties, ML priors, and per-symbol diagnostics (surfaced via `Results.diagnostics.best_state_breakdown`).
 - ? Occupancy-aware search module with configurable A* grid planner, wall/object masking, constraint projection, and path diagnostics that feed energy scoring.
+- ? Search grid caching + overlap repair keeps proposals feasible even in dense environments, with optional teleportation when no path exists.
 - ? Synthetic timeline dataset generator + automation scripts for spawning background runs and tailing their logs.
 - ? Hardware backend abstraction with CPU, multi-threaded CPU, and external stubs, plus an exposed noise-source hook for experimental entropy providers.
 - ? Results now capture per-symbol path diagnostics (feasibility, path length, constraint violations) for the best state, giving downstream consumers a richer view into path feasibility.

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
+use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
@@ -62,14 +63,17 @@ pub enum PathResult {
     },
 }
 
-#[derive(Clone)]
 pub struct SearchModule {
     pub config: SearchConfig,
+    cached: Mutex<Option<CachedGrid>>,
 }
 
 impl SearchModule {
     pub fn new(config: SearchConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            cached: Mutex::new(None),
+        }
     }
 
     pub fn compute_paths(
@@ -78,7 +82,7 @@ impl SearchModule {
         target_state: &DynamicState,
     ) -> HashMap<String, PathResult> {
         let mut results = HashMap::new();
-        let grid = OccupancyGrid::from_snapshot(snapshot_0, self.config.cell_size);
+        let grid = self.grid_for_snapshot(snapshot_0);
         for symbol in &snapshot_0.symbols {
             let result = if let Some(target) = target_state.symbol_states.get(&symbol.id) {
                 let outcome = self.plan_between(&grid, &symbol.position, &target.position);
@@ -121,7 +125,7 @@ impl SearchModule {
             lookup.insert(symbol.id.clone(), symbol.position);
             radii.insert(symbol.id.clone(), symbol_radius(symbol));
         }
-        let grid = OccupancyGrid::from_snapshot(snapshot_0, self.config.cell_size);
+        let grid = self.grid_for_snapshot(snapshot_0);
         for (symbol_id, symbol_state) in state.symbol_states.iter_mut() {
             let target_start = match lookup.get(symbol_id) {
                 Some(pos) => pos,
@@ -277,6 +281,31 @@ impl SearchModule {
                 failure_reason: Some(PathFailureReason::NoPath),
             }
         }
+    }
+
+    fn grid_for_snapshot(&self, snapshot: &EnvironmentSnapshot) -> OccupancyGrid {
+        let signature = snapshot_signature(snapshot, self.config.cell_size);
+        {
+            let cache_guard = self.cached.lock();
+            if let Some(entry) = cache_guard.as_ref() {
+                if entry.signature == signature {
+                    return entry.grid.clone();
+                }
+            }
+        }
+        let grid = OccupancyGrid::from_snapshot(snapshot, self.config.cell_size);
+        let mut cache_guard = self.cached.lock();
+        *cache_guard = Some(CachedGrid {
+            signature,
+            grid: grid.clone(),
+        });
+        grid
+    }
+}
+
+impl Clone for SearchModule {
+    fn clone(&self) -> Self {
+        SearchModule::new(self.config.clone())
     }
 }
 
@@ -704,6 +733,33 @@ fn symbol_radius(symbol: &Symbol) -> f64 {
             extent_from_props(symbol, &["width", "length", "size_x"]).map(|extent| extent / 2.0)
         })
         .unwrap_or(0.5)
+}
+
+#[derive(Clone)]
+struct CachedGrid {
+    signature: SnapshotSignature,
+    grid: OccupancyGrid,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SnapshotSignature(u64);
+
+fn snapshot_signature(snapshot: &EnvironmentSnapshot, cell_size: f64) -> SnapshotSignature {
+    let mut acc = snapshot.timestamp.unix as u64;
+    acc = acc.wrapping_mul(1_146_959);
+    acc ^= (snapshot.symbols.len() as u64).wrapping_mul(31_415_927);
+    acc ^= cell_size.to_bits();
+    if let Some(width) = snapshot.bounds.get("width") {
+        acc ^= width.to_bits();
+    }
+    if let Some(height) = snapshot.bounds.get("height") {
+        acc ^= height.to_bits().rotate_left(13);
+    }
+    for symbol in snapshot.symbols.iter().take(16) {
+        acc = acc.wrapping_add(symbol.position.x.to_bits());
+        acc = acc.wrapping_add(symbol.position.y.to_bits().rotate_left(7));
+    }
+    SnapshotSignature(acc)
 }
 
 fn is_blocker(symbol: &Symbol) -> bool {
