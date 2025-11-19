@@ -1,4 +1,5 @@
 use crate::schema::{ParticleState, Population};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -16,14 +17,22 @@ impl Default for HardwareBackendType {
 }
 
 pub trait HardwareBackend: Send + Sync {
-    fn map_particles(&self, population: &mut Population, func: &mut dyn FnMut(&mut ParticleState));
+    fn map_particles(
+        &self,
+        population: &mut Population,
+        func: &(dyn Fn(&mut ParticleState) + Send + Sync),
+    );
 }
 
 #[derive(Default)]
 pub struct CpuBackend;
 
 impl HardwareBackend for CpuBackend {
-    fn map_particles(&self, population: &mut Population, func: &mut dyn FnMut(&mut ParticleState)) {
+    fn map_particles(
+        &self,
+        population: &mut Population,
+        func: &(dyn Fn(&mut ParticleState) + Send + Sync),
+    ) {
         for particle in &mut population.particles {
             func(particle);
         }
@@ -33,17 +42,26 @@ impl HardwareBackend for CpuBackend {
 pub struct MultiThreadedCpuBackend;
 
 impl HardwareBackend for MultiThreadedCpuBackend {
-    fn map_particles(&self, population: &mut Population, func: &mut dyn FnMut(&mut ParticleState)) {
-        for particle in &mut population.particles {
-            func(particle);
-        }
+    fn map_particles(
+        &self,
+        population: &mut Population,
+        func: &(dyn Fn(&mut ParticleState) + Send + Sync),
+    ) {
+        population
+            .particles
+            .par_iter_mut()
+            .for_each(|particle| func(particle));
     }
 }
 
 pub struct ExternalBackend;
 
 impl HardwareBackend for ExternalBackend {
-    fn map_particles(&self, population: &mut Population, func: &mut dyn FnMut(&mut ParticleState)) {
+    fn map_particles(
+        &self,
+        population: &mut Population,
+        func: &(dyn Fn(&mut ParticleState) + Send + Sync),
+    ) {
         for particle in &mut population.particles {
             func(particle);
         }

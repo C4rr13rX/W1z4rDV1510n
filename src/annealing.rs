@@ -5,7 +5,7 @@ use crate::proposal::ProposalKernel;
 use crate::schema::{EnvironmentSnapshot, Population};
 use crate::search::SearchModule;
 use crate::state_population::{clone_and_mutate, normalize_weights, resample_population};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
 pub fn anneal(
@@ -24,20 +24,24 @@ pub fn anneal(
         let temperature = temperature(iteration, schedule);
         population.temperature = temperature;
         population.iteration = iteration;
-        let mut update_particle = |particle: &mut crate::schema::ParticleState| {
+        let particle_seeds: Vec<u64> = (0..population.particles.len())
+            .map(|_| rng.r#gen())
+            .collect();
+        let update_particle = |particle: &mut crate::schema::ParticleState| {
+            let mut local_rng = StdRng::seed_from_u64(particle_seeds[particle.id]);
             let mut proposal = kernel.propose(snapshot_0, &particle.current_state, temperature);
             if let Some(search) = search_module {
                 search.enforce_hard_constraints(snapshot_0, &mut proposal);
             }
             let new_energy = energy_model.energy(&proposal);
             let accept_prob = acceptance_probability(particle.energy, new_energy, temperature);
-            if rng.r#gen::<f64>() < accept_prob {
+            if local_rng.r#gen::<f64>() < accept_prob {
                 particle.current_state = proposal;
                 particle.energy = new_energy;
             }
             particle.weight = (-particle.energy / temperature.max(1e-3)).exp();
         };
-        hardware_backend.map_particles(&mut population, &mut update_particle);
+        hardware_backend.map_particles(&mut population, &update_particle);
         normalize_weights(&mut population);
 
         let ess_ratio = effective_sample_size(&population);
