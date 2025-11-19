@@ -41,7 +41,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         config.random_seed + 1,
         Some(search_module.clone()),
     );
-    let hardware_backend = create_hardware_backend(config.hardware_backend.clone());
+    let hardware_backend = create_hardware_backend(config.hardware_backend.clone(), config.random_seed);
     let (population, energy_trace) = anneal(
         population,
         snapshot.as_ref(),

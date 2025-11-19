@@ -62,6 +62,7 @@ This prints the best energy and writes `results.json` when configured.
 - ? Richer energy model with volumetric collisions, wall penalties, ML priors, and per-symbol diagnostics (surfaced via `Results.diagnostics.best_state_breakdown`).
 - ? Occupancy-aware search module with configurable A* grid planner, wall/object masking, constraint projection, and path diagnostics that feed energy scoring.
 - ? Synthetic timeline dataset generator + automation scripts for spawning background runs and tailing their logs.
+- ? Hardware backend abstraction with CPU, multi-threaded CPU, and external stubs, plus an exposed noise-source hook for experimental entropy providers.
 
 ## Synthetic timeline dataset
 
