@@ -1,4 +1,5 @@
 pub mod annealing;
+pub mod calibration;
 pub mod config;
 pub mod energy;
 pub mod hardware;

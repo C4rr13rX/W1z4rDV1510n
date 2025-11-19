@@ -101,6 +101,16 @@ pwsh -File scripts/tail_simulation_logs.ps1             # accepts -LogPath and -
 
 The tailer watches the log specified in `latest_run.json` by default, prints the last 40 lines, and keeps streaming until you Ctrl+C (or until `-StopAfterSeconds` elapses).
 
+## Training data & calibration
+
+If you have recorded trajectories (see `src/schema::Trajectory` for the JSON shape) you can automatically derive reasonable energy weights via the calibration utility:
+
+```powershell
+cargo run --bin calibrate_energy -- --trajectories data/training_trajectories.json --output calibrated_energy.json
+```
+
+The input should be a JSON array of trajectories (each trajectory is a sequence of `DynamicState` snapshots). The tool inspects displacement, collision frequency, goal adherence, and group spread to produce a set of recommended energy weights. The resulting JSON can be merged into your `RunConfig.energy` block or used as a starting point for manual tuning.
+
 ## Next steps / roadmap
 
 1. **Search module**: extend the new occupancy grid/A* planner with cached builds, nav-mesh or multi-resolution search, and richer multi-agent coordination (reservation tables, crowd-flow penalties).
