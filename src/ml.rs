@@ -1,6 +1,8 @@
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Timestamp, Trajectory};
-use rand::SeedableRng;
+use parking_lot::{Mutex, RwLock};
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,13 +58,13 @@ impl MLHooks for NullMLHooks {
 }
 
 pub struct SimpleRulesMLHooks {
-    rng: parking_lot::Mutex<rand::rngs::StdRng>,
+    rng: Mutex<StdRng>,
 }
 
 impl SimpleRulesMLHooks {
     pub fn new(seed: u64) -> Self {
         Self {
-            rng: parking_lot::Mutex::new(rand::rngs::StdRng::seed_from_u64(seed)),
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
         }
     }
 }
@@ -117,7 +119,105 @@ pub fn create_ml_hooks(backend: MLBackendType, seed: u64) -> MlHooksHandle {
         MLBackendType::SimpleRules => Arc::new(SimpleRulesMLHooks::new(seed)),
         MLBackendType::Rnn
         | MLBackendType::Transformer
-        | MLBackendType::Gnn
-        | MLBackendType::Custom => Arc::new(NullMLHooks),
+        | MLBackendType::Gnn => Arc::new(HistoryAwareMLHooks::new(seed)),
+        MLBackendType::Custom => Arc::new(NullMLHooks),
     }
 }
+
+pub struct HistoryAwareMLHooks {
+    anchors: RwLock<HashMap<String, GoalStats>>,
+    fallback: SimpleRulesMLHooks,
+    horizon_seconds: f64,
+}
+
+impl HistoryAwareMLHooks {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            anchors: RwLock::new(HashMap::new()),
+            fallback: SimpleRulesMLHooks::new(seed + 17),
+            horizon_seconds: 5.0,
+        }
+    }
+
+    fn anchor_for(&self, symbol_id: &str) -> Option<GoalStats> {
+        self.anchors.read().get(symbol_id).copied()
+    }
+}
+
+impl MLHooks for HistoryAwareMLHooks {
+    fn predict_next_positions(
+        &self,
+        snapshot_0: &EnvironmentSnapshot,
+        t_end: &Timestamp,
+    ) -> HashMap<String, Position> {
+        let dt = ((t_end.unix - snapshot_0.timestamp.unix) as f64).max(0.0);
+        let lerp = (dt / self.horizon_seconds).clamp(0.0, 1.0);
+        let fallback = self.fallback.predict_next_positions(snapshot_0, t_end);
+        snapshot_0
+            .symbols
+            .iter()
+            .map(|symbol| {
+                let predicted = if let Some(anchor) = self.anchor_for(&symbol.id) {
+                    Position {
+                        x: symbol.position.x + (anchor.x - symbol.position.x) * lerp,
+                        y: symbol.position.y + (anchor.y - symbol.position.y) * lerp,
+                        z: symbol.position.z + (anchor.z - symbol.position.z) * lerp,
+                    }
+                } else {
+                    fallback
+                        .get(&symbol.id)
+                        .copied()
+                        .unwrap_or(symbol.position)
+                };
+                (symbol.id.clone(), predicted)
+            })
+            .collect()
+    }
+
+    fn score_configuration(&self, state: &DynamicState) -> f64 {
+        let anchors = self.anchors.read();
+        let mut score = 0.0;
+        for (symbol_id, symbol_state) in state.symbol_states.iter() {
+            if let Some(anchor) = anchors.get(symbol_id) {
+                let dx = symbol_state.position.x - anchor.x;
+                let dy = symbol_state.position.y - anchor.y;
+                let dz = symbol_state.position.z - anchor.z;
+                score += dx * dx + dy * dy + dz * dz;
+            }
+        }
+        score
+    }
+
+    fn update_from_data(&self, trajectories: &[Trajectory]) {
+        let mut anchors = self.anchors.write();
+        for trajectory in trajectories {
+            let Some(last) = trajectory.sequence.last() else {
+                continue;
+            };
+            for (symbol_id, symbol_state) in last.symbol_states.iter() {
+                let entry = anchors.entry(symbol_id.clone()).or_insert(GoalStats {
+                    x: symbol_state.position.x,
+                    y: symbol_state.position.y,
+                    z: symbol_state.position.z,
+                    count: 1.0,
+                });
+                let count = entry.count + 1.0;
+                entry.x = (entry.x * entry.count + symbol_state.position.x) / count;
+                entry.y = (entry.y * entry.count + symbol_state.position.y) / count;
+                entry.z = (entry.z * entry.count + symbol_state.position.z) / count;
+                entry.count = count;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GoalStats {
+    x: f64,
+    y: f64,
+    z: f64,
+    count: f64,
+}
+
+
+
