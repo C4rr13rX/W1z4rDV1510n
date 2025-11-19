@@ -17,9 +17,13 @@ pub struct ProposalConfig {
     pub swap_move_prob: f64,
     #[serde(default)]
     pub path_based_move_prob: f64,
+    #[serde(default)]
+    pub global_move_prob: f64,
     pub max_step_size: f64,
     #[serde(default)]
     pub use_parallel_updates: bool,
+    #[serde(default)]
+    pub adaptive_move_mixing: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +32,7 @@ enum MoveType {
     Group,
     Swap,
     Path,
+    Global,
 }
 
 impl Default for ProposalConfig {
@@ -37,8 +42,10 @@ impl Default for ProposalConfig {
             group_move_prob: 0.05,
             swap_move_prob: 0.05,
             path_based_move_prob: 0.0,
+            global_move_prob: 0.0,
             max_step_size: 0.75,
             use_parallel_updates: false,
+            adaptive_move_mixing: true,
         }
     }
 }
@@ -76,7 +83,7 @@ impl ProposalKernel for DefaultProposalKernel {
         temperature: f64,
     ) -> DynamicState {
         let mut rng = self.rng.lock();
-        let move_type = self.choose_move_type(&mut rng);
+        let move_type = self.choose_move_type(&mut rng, temperature);
         if self.config.use_parallel_updates {
             return self.apply_parallel_move(
                 move_type,
@@ -92,31 +99,33 @@ impl ProposalKernel for DefaultProposalKernel {
             MoveType::Group => self.group_move(snapshot_0, proposal, temperature, &mut rng),
             MoveType::Swap => self.swap_move(proposal, &mut rng),
             MoveType::Path => self.path_move(snapshot_0, proposal, temperature, &mut rng),
+            MoveType::Global => self.global_move(proposal, temperature, &mut rng),
         }
     }
 }
 
 impl DefaultProposalKernel {
-    fn choose_move_type(&self, rng: &mut StdRng) -> MoveType {
-        let total_prob = self.config.local_move_prob
-            + self.config.group_move_prob
-            + self.config.swap_move_prob
-            + self.config.path_based_move_prob;
+    fn choose_move_type(&self, rng: &mut StdRng, temperature: f64) -> MoveType {
+        let (local, group, swap, path, global) = self.adapted_weights(temperature);
+        let total_prob = local + group + swap + path + global;
         if total_prob <= f64::EPSILON {
             return MoveType::Local;
         }
         let roll = rng.gen_range(0.0..1.0) * total_prob;
-        let local_threshold = self.config.local_move_prob;
-        let group_threshold = local_threshold + self.config.group_move_prob;
-        let swap_threshold = group_threshold + self.config.swap_move_prob;
+        let local_threshold = local;
+        let group_threshold = local_threshold + group;
+        let swap_threshold = group_threshold + swap;
+        let path_threshold = swap_threshold + path;
         if roll < local_threshold {
             MoveType::Local
         } else if roll < group_threshold {
             MoveType::Group
         } else if roll < swap_threshold {
             MoveType::Swap
-        } else {
+        } else if roll < path_threshold {
             MoveType::Path
+        } else {
+            MoveType::Global
         }
     }
 
@@ -137,6 +146,7 @@ impl DefaultProposalKernel {
             MoveType::Path => {
                 self.path_move_parallel(snapshot_0, current_state, temperature, rng)
             }
+            MoveType::Global => self.global_move_parallel(current_state, temperature, rng),
         }
     }
 
@@ -203,6 +213,28 @@ impl DefaultProposalKernel {
                 state.position.y += dy;
                 state.position.z += dz;
             }
+        }
+        proposal
+    }
+
+    fn global_move(
+        &self,
+        mut proposal: DynamicState,
+        temperature: f64,
+        rng: &mut StdRng,
+    ) -> DynamicState {
+        if proposal.symbol_states.is_empty() {
+            return proposal;
+        }
+        let step_scale = self.step_scale(temperature) * 1.5;
+        let jitter = step_scale * 0.25;
+        let dx = rng.gen_range(-step_scale..step_scale);
+        let dy = rng.gen_range(-step_scale..step_scale);
+        let dz = rng.gen_range(-step_scale..step_scale);
+        for symbol_state in proposal.symbol_states.values_mut() {
+            symbol_state.position.x += dx + rng.gen_range(-jitter..jitter);
+            symbol_state.position.y += dy + rng.gen_range(-jitter..jitter);
+            symbol_state.position.z += dz + rng.gen_range(-jitter..jitter);
         }
         proposal
     }
@@ -420,6 +452,31 @@ impl DefaultProposalKernel {
         proposal
     }
 
+    fn global_move_parallel(
+        &self,
+        state: &DynamicState,
+        temperature: f64,
+        rng: &mut StdRng,
+    ) -> DynamicState {
+        if state.symbol_states.is_empty() {
+            return state.clone();
+        }
+        let step_scale = self.step_scale(temperature) * 1.5;
+        let jitter = step_scale * 0.25;
+        let dx = rng.gen_range(-step_scale..step_scale);
+        let dy = rng.gen_range(-step_scale..step_scale);
+        let dz = rng.gen_range(-step_scale..step_scale);
+        let mut proposal = state.clone();
+        for (symbol_id, original) in state.symbol_states.iter() {
+            if let Some(dest) = proposal.symbol_states.get_mut(symbol_id) {
+                dest.position.x = original.position.x + dx + rng.gen_range(-jitter..jitter);
+                dest.position.y = original.position.y + dy + rng.gen_range(-jitter..jitter);
+                dest.position.z = original.position.z + dz + rng.gen_range(-jitter..jitter);
+            }
+        }
+        proposal
+    }
+
     fn advance_symbol(
         &self,
         symbol_state: &mut SymbolState,
@@ -437,6 +494,34 @@ impl DefaultProposalKernel {
         symbol_state.position.x += dx / dist * step;
         symbol_state.position.y += dy / dist * step;
         symbol_state.position.z += dz / dist * step;
+    }
+
+    fn adapted_weights(&self, temperature: f64) -> (f64, f64, f64, f64, f64) {
+        if !self.config.adaptive_move_mixing {
+            return (
+                self.config.local_move_prob,
+                self.config.group_move_prob,
+                self.config.swap_move_prob,
+                self.config.path_based_move_prob,
+                self.config.global_move_prob,
+            );
+        }
+        let mut local = self.config.local_move_prob;
+        let group = self.config.group_move_prob;
+        let mut swap = self.config.swap_move_prob;
+        let mut path = self.config.path_based_move_prob;
+        let mut global = self.config.global_move_prob;
+        if temperature > 0.8 {
+            global += 0.2 * temperature;
+            local += 0.05 * temperature;
+        }
+        if temperature < 0.6 {
+            path += 0.4 * (0.6 - temperature);
+        }
+        if temperature < 0.5 {
+            swap *= 0.5;
+        }
+        (local, group, swap, path, global)
     }
 
     fn target_position(
