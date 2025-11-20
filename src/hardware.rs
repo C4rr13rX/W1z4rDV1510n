@@ -304,10 +304,22 @@ fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) 
         "[hardware] backend={:?} cpu_cores={} memory_gb={:.1} has_gpu={} cluster_hint={}",
         kind, profile.cpu_cores, profile.total_memory_gb, profile.has_gpu, profile.cluster_hint
     );
-    if matches!(kind, HardwareBackendType::Gpu | HardwareBackendType::Distributed) {
-        println!(
-            "[hardware] advanced backend selected – ensure GPU/cluster resources are accessible."
-        );
+    match kind {
+        HardwareBackendType::Gpu => {
+            if !profile.has_gpu {
+                println!(
+                    "[hardware][warn] GPU backend selected but no GPU detected; falling back to chunked CPU execution."
+                );
+            }
+        }
+        HardwareBackendType::Distributed => {
+            if !profile.cluster_hint {
+                println!(
+                    "[hardware][warn] Distributed backend selected without cluster hints; ensure SIMFUTURES_DISTRIBUTED=1 or SLURM/cluster env vars are set."
+                );
+            }
+        }
+        _ => {}
     }
 }
 
