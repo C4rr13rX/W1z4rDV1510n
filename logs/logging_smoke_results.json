@@ -1,0 +1,386 @@
+{
+  "best_state": {
+    "timestamp": {
+      "unix": 1732000010
+    },
+    "symbol_states": {
+      "person_1": {
+        "position": {
+          "x": 2.283535276555221,
+          "y": 2.45520532821509,
+          "z": 0.46361296244710126
+        },
+        "velocity": null,
+        "internal_state": {}
+      },
+      "wall_1": {
+        "position": {
+          "x": 8.811610841150978,
+          "y": 1.6104405862601774,
+          "z": 0.0
+        },
+        "velocity": null,
+        "internal_state": {}
+      },
+      "person_2": {
+        "position": {
+          "x": 10.094442352251148,
+          "y": 8.0,
+          "z": 0.0
+        },
+        "velocity": null,
+        "internal_state": {}
+      },
+      "exit": {
+        "position": {
+          "x": 12.0,
+          "y": 7.245101815915139,
+          "z": 0.0
+        },
+        "velocity": null,
+        "internal_state": {}
+      },
+      "sofa": {
+        "position": {
+          "x": 2.6531375175287697,
+          "y": 4.938083343864068,
+          "z": 0.0
+        },
+        "velocity": null,
+        "internal_state": {}
+      }
+    }
+  },
+  "best_energy": 92.63065208935805,
+  "clusters": [
+    {
+      "representative_state": {
+        "timestamp": {
+          "unix": 1732000010
+        },
+        "symbol_states": {
+          "person_1": {
+            "position": {
+              "x": 2.283535276555221,
+              "y": 2.45520532821509,
+              "z": 0.46361296244710126
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "wall_1": {
+            "position": {
+              "x": 8.811610841150978,
+              "y": 1.6104405862601774,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "person_2": {
+            "position": {
+              "x": 10.094442352251148,
+              "y": 8.0,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "exit": {
+            "position": {
+              "x": 12.0,
+              "y": 7.245101815915139,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "sofa": {
+            "position": {
+              "x": 2.6531375175287697,
+              "y": 4.938083343864068,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          }
+        }
+      },
+      "cluster_weight": 0.0078125,
+      "mean_energy": 92.63065208935805,
+      "size": 1
+    },
+    {
+      "representative_state": {
+        "timestamp": {
+          "unix": 1732000010
+        },
+        "symbol_states": {
+          "wall_1": {
+            "position": {
+              "x": 9.640455189438761,
+              "y": 1.6335081262251305,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "exit": {
+            "position": {
+              "x": 11.930240181719128,
+              "y": 7.764133710783992,
+              "z": 0.38047624374318245
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "sofa": {
+            "position": {
+              "x": 3.3092732852952413,
+              "y": 2.7640880133658667,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "person_1": {
+            "position": {
+              "x": 1.8116251685982343,
+              "y": 2.848052997459878,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "person_2": {
+            "position": {
+              "x": 9.28977413546801,
+              "y": 8.0,
+              "z": 0.18680254864542478
+            },
+            "velocity": null,
+            "internal_state": {}
+          }
+        }
+      },
+      "cluster_weight": 0.0078125,
+      "mean_energy": 92.87246157688062,
+      "size": 1
+    },
+    {
+      "representative_state": {
+        "timestamp": {
+          "unix": 1732000010
+        },
+        "symbol_states": {
+          "exit": {
+            "position": {
+              "x": 11.435533936776078,
+              "y": 7.619156925367314,
+              "z": 0.1834386589761715
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "person_2": {
+            "position": {
+              "x": 9.74342499607822,
+              "y": 8.0,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "wall_1": {
+            "position": {
+              "x": 9.028488897975585,
+              "y": 1.5345182260569894,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "sofa": {
+            "position": {
+              "x": 2.5260693441734277,
+              "y": 4.929024183490578,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          },
+          "person_1": {
+            "position": {
+              "x": 2.635411171070004,
+              "y": 2.7086379719704055,
+              "z": 0.0
+            },
+            "velocity": null,
+            "internal_state": {}
+          }
+        }
+      },
+      "cluster_weight": 0.0078125,
+      "mean_energy": 93.22196451187473,
+      "size": 1
+    }
+  ],
+  "diagnostics": {
+    "energy_trace": [
+      97.5194300723176,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      97.4369613497834,
+      95.42379171337942,
+      95.42379171337942,
+      95.42379171337942,
+      95.42379171337942,
+      95.42379171337942,
+      95.42379171337942,
+      95.42379171337942,
+      95.42379171337942,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      93.46010557077149,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.87246157688062,
+      92.63065208935805
+    ],
+    "diversity_metric": 4.20610491217402,
+    "best_state_breakdown": {
+      "total": 92.63065208935805,
+      "per_symbol": {
+        "wall_1": {
+          "motion": 9.138233817691557,
+          "collision": 0.0,
+          "goal": 6.474129003764778,
+          "group": 0.0,
+          "environment": 0.0,
+          "path": 12.473258214021286,
+          "ml_prior": 0.5713790087539936
+        },
+        "person_1": {
+          "motion": 0.5025411228356309,
+          "collision": 0.0,
+          "goal": 10.517039139316752,
+          "group": 0.0,
+          "environment": 0.0,
+          "path": 1.0,
+          "ml_prior": 2.5430326690378036
+        },
+        "exit": {
+          "motion": 0.31497308424975967,
+          "collision": 0.0,
+          "goal": 0.5612246290477279,
+          "group": 0.0,
+          "environment": 0.0,
+          "path": 1.0,
+          "ml_prior": 0.031497308424975966
+        },
+        "person_2": {
+          "motion": 10.197804062401026,
+          "collision": 0.0,
+          "goal": 1.4918419156014102,
+          "group": 0.0,
+          "environment": 0.0,
+          "path": 3.361663009709184,
+          "ml_prior": 0.3086698181773156
+        },
+        "sofa": {
+          "motion": 5.478984733059054,
+          "collision": 0.0,
+          "goal": 9.210341618894695,
+          "group": 0.0,
+          "environment": 0.0,
+          "path": 14.563570060880963,
+          "ml_prior": 2.89046887349014
+        }
+      },
+      "per_term": {
+        "motion": 25.63253682023703,
+        "collision": 0.0,
+        "goal": 28.254576306625363,
+        "group": 0.0,
+        "environment": 0.0,
+        "path": 32.39849128461143,
+        "ml_prior": 6.345047677884229
+      }
+    },
+    "path_report": {
+      "per_symbol": {
+        "wall_1": {
+          "feasible": true,
+          "failure_reason": null,
+          "path_length": 2.473258214021285,
+          "cost": 2.473258214021285,
+          "visited_nodes": 3,
+          "constraint_violations": 1
+        },
+        "exit": {
+          "feasible": true,
+          "failure_reason": null,
+          "path_length": 0.5612246290477279,
+          "cost": 0.5612246290477279,
+          "visited_nodes": 1,
+          "constraint_violations": 0
+        },
+        "sofa": {
+          "feasible": true,
+          "failure_reason": null,
+          "path_length": 4.563570060880964,
+          "cost": 4.563570060880964,
+          "visited_nodes": 9,
+          "constraint_violations": 1
+        },
+        "person_2": {
+          "feasible": true,
+          "failure_reason": null,
+          "path_length": 3.361663009709184,
+          "cost": 3.361663009709184,
+          "visited_nodes": 7,
+          "constraint_violations": 0
+        },
+        "person_1": {
+          "feasible": true,
+          "failure_reason": null,
+          "path_length": 0.708901349156306,
+          "cost": 0.708901349156306,
+          "visited_nodes": 1,
+          "constraint_violations": 0
+        }
+      }
+    }
+  }
+}

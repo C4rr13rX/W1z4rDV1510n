@@ -10,5 +10,6 @@ pub mod results;
 pub mod schema;
 pub mod search;
 pub mod state_population;
+pub mod logging;
 
 pub use orchestrator::run_with_config;

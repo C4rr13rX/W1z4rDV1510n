@@ -185,6 +185,8 @@ pub struct LoggingConfig {
     pub log_level: String,
     #[serde(default)]
     pub log_path: Option<PathBuf>,
+    #[serde(default)]
+    pub json: bool,
 }
 
 impl LoggingConfig {
@@ -198,6 +200,7 @@ impl Default for LoggingConfig {
         Self {
             log_level: Self::default_level(),
             log_path: None,
+            json: false,
         }
     }
 }

@@ -1,13 +1,14 @@
 use crate::schema::{ParticleState, Population};
 use num_cpus;
 use parking_lot::Mutex;
-use rand::{rngs::StdRng, SeedableRng};
 use rand::Rng;
+use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HardwareBackendType {
@@ -191,14 +192,16 @@ pub fn create_hardware_backend(kind: HardwareBackendType, seed: u64) -> Hardware
         kind
     };
     if matches!(resolved, HardwareBackendType::Gpu) && !profile.has_gpu {
-        println!(
-            "[hardware][warn] GPU backend requested but no GPU detected; falling back to MultiThreadedCpu."
+        warn!(
+            target: "simfutures::hardware",
+            "GPU backend requested but no GPU detected; falling back to MultiThreadedCpu"
         );
         resolved = HardwareBackendType::MultiThreadedCpu;
     }
     if matches!(resolved, HardwareBackendType::Distributed) && !profile.cluster_hint {
-        println!(
-            "[hardware][warn] Distributed backend requested without cluster hints; falling back to MultiThreadedCpu."
+        warn!(
+            target: "simfutures::hardware",
+            "Distributed backend requested without cluster hints; falling back to MultiThreadedCpu"
         );
         resolved = HardwareBackendType::MultiThreadedCpu;
     }
@@ -272,11 +275,12 @@ impl HardwareProfile {
     pub fn detect() -> Self {
         let mut system = System::new();
         system.refresh_specifics(
-            RefreshKind::new().with_cpu(CpuRefreshKind::everything()).with_memory(MemoryRefreshKind::everything()),
+            RefreshKind::new()
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
         );
         let cpu_cores = num_cpus::get().max(1);
-        let total_memory_gb =
-            (system.total_memory() as f64 / 1_048_576.0).max(0.5);
+        let total_memory_gb = (system.total_memory() as f64 / 1_048_576.0).max(0.5);
         let has_gpu_env = read_env_bool("SIMFUTURES_HAS_GPU");
         let cuda_visible = std::env::var("CUDA_VISIBLE_DEVICES")
             .map(|v| !v.trim().is_empty() && v.trim() != "-1")
@@ -284,12 +288,21 @@ impl HardwareProfile {
         let has_gpu = has_gpu_env || cuda_visible;
         let cluster_hint =
             read_env_bool("SIMFUTURES_DISTRIBUTED") || std::env::var("SLURM_JOB_ID").is_ok();
-        Self {
+        let profile = Self {
             cpu_cores,
             total_memory_gb,
             has_gpu,
             cluster_hint,
-        }
+        };
+        debug!(
+            target: "simfutures::hardware",
+            cpu_cores = profile.cpu_cores,
+            memory_gb = profile.total_memory_gb,
+            has_gpu = profile.has_gpu,
+            cluster_hint = profile.cluster_hint,
+            "detected hardware profile"
+        );
+        profile
     }
 }
 
@@ -312,22 +325,29 @@ fn read_env_bool(key: &str) -> bool {
 }
 
 fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) {
-    println!(
-        "[hardware] backend={:?} cpu_cores={} memory_gb={:.1} has_gpu={} cluster_hint={}",
-        kind, profile.cpu_cores, profile.total_memory_gb, profile.has_gpu, profile.cluster_hint
+    info!(
+        target: "simfutures::hardware",
+        backend = ?kind,
+        cpu_cores = profile.cpu_cores,
+        memory_gb = profile.total_memory_gb,
+        has_gpu = profile.has_gpu,
+        cluster_hint = profile.cluster_hint,
+        "hardware backend resolved"
     );
     match kind {
         HardwareBackendType::Gpu => {
             if !profile.has_gpu {
-                println!(
-                    "[hardware][warn] GPU backend selected but no GPU detected; falling back to chunked CPU execution."
+                warn!(
+                    target: "simfutures::hardware",
+                    "GPU backend selected but no GPU detected; ensure SIMFUTURES_HAS_GPU=1 if this is intentional"
                 );
             }
         }
         HardwareBackendType::Distributed => {
             if !profile.cluster_hint {
-                println!(
-                    "[hardware][warn] Distributed backend selected without cluster hints; ensure SIMFUTURES_DISTRIBUTED=1 or SLURM/cluster env vars are set."
+                warn!(
+                    target: "simfutures::hardware",
+                    "Distributed backend selected without cluster hints; set SIMFUTURES_DISTRIBUTED=1 or run under a scheduler"
                 );
             }
         }
@@ -345,4 +365,51 @@ fn distributed_chunk_size(cpu_cores: usize, memory_gb: f64) -> usize {
     let base = 1024;
     let mem_factor = (memory_gb / 4.0).clamp(0.25, 8.0);
     (base as f64 * mem_factor * (cpu_cores as f64).sqrt()).round() as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(cpu: usize, mem: f64, has_gpu: bool, cluster_hint: bool) -> HardwareProfile {
+        HardwareProfile {
+            cpu_cores: cpu,
+            total_memory_gb: mem,
+            has_gpu,
+            cluster_hint,
+        }
+    }
+
+    #[test]
+    fn auto_prefers_gpu_when_available() {
+        let p = profile(8, 16.0, true, false);
+        assert!(matches!(
+            recommend_backend(&p),
+            HardwareBackendType::Gpu
+        ));
+    }
+
+    #[test]
+    fn auto_prefers_distributed_on_cluster() {
+        let p = profile(2, 1.0, false, true);
+        assert!(matches!(
+            recommend_backend(&p),
+            HardwareBackendType::Distributed
+        ));
+    }
+
+    #[test]
+    fn auto_selects_multithreaded_for_midrange_cpu() {
+        let p = profile(6, 8.0, false, false);
+        assert!(matches!(
+            recommend_backend(&p),
+            HardwareBackendType::MultiThreadedCpu
+        ));
+    }
+
+    #[test]
+    fn auto_falls_back_to_single_cpu_on_low_specs() {
+        let p = profile(2, 0.5, false, false);
+        assert!(matches!(recommend_backend(&p), HardwareBackendType::Cpu));
+    }
 }

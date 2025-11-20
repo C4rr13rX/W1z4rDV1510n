@@ -1,8 +1,8 @@
-use clap::Parser;
-use std::path::PathBuf;
-
 use simfutures::config::RunConfig;
 use simfutures::run_with_config;
+use std::path::PathBuf;
+use tracing::info;
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Parallel future simulation CLI")]
@@ -21,6 +21,12 @@ fn main() -> anyhow::Result<()> {
         "Best energy: {:.3} | symbols: {}",
         results.best_energy,
         results.best_state.symbol_states.len()
+    );
+    info!(
+        target: "simfutures::cli",
+        best_energy = results.best_energy,
+        best_symbols = results.best_state.symbol_states.len(),
+        "run completed"
     );
     Ok(())
 }

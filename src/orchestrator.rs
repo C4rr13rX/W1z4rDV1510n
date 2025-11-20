@@ -2,6 +2,7 @@ use crate::annealing::anneal;
 use crate::config::{OutputFormat, RunConfig};
 use crate::energy::EnergyModel;
 use crate::hardware::create_hardware_backend;
+use crate::logging::init_logging;
 use crate::ml::create_ml_hooks;
 use crate::proposal::DefaultProposalKernel;
 use crate::results::{Results, analyze_results};
@@ -9,14 +10,30 @@ use crate::schema::EnvironmentSnapshot;
 use crate::search::SearchModule;
 use crate::state_population::init_population;
 use anyhow::Context;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 use std::fs;
 use std::sync::Arc;
+use tracing::{debug, info};
 
 pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
+    init_logging(&config.logging)?;
     config.validate()?;
+    info!(
+        target: "simfutures::orchestrator",
+        n_particles = config.n_particles,
+        iterations = config.schedule.n_iterations,
+        hardware = ?config.hardware_backend,
+        ml_backend = ?config.ml_backend,
+        "starting simulation run"
+    );
     let snapshot = Arc::new(load_snapshot(&config)?);
+    info!(
+        target: "simfutures::orchestrator",
+        symbols = snapshot.symbols.len(),
+        timestamp = snapshot.timestamp.unix,
+        "snapshot loaded"
+    );
     let mut rng = StdRng::seed_from_u64(config.random_seed);
     let ml_hooks = create_ml_hooks(config.ml_backend.clone(), config.random_seed);
     let search_module = SearchModule::new(config.search.clone());
@@ -36,13 +53,25 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         &config.init_strategy,
         &mut rng,
     );
+    let initial_min_energy = population
+        .particles
+        .iter()
+        .map(|p| p.energy)
+        .fold(f64::INFINITY, f64::min);
+    debug!(
+        target: "simfutures::orchestrator",
+        n_particles = population.particles.len(),
+        min_energy = initial_min_energy,
+        "population initialized"
+    );
 
     let kernel = DefaultProposalKernel::new(
         config.proposal.clone(),
         config.random_seed + 1,
         Some(search_module.clone()),
     );
-    let hardware_backend = create_hardware_backend(config.hardware_backend.clone(), config.random_seed);
+    let hardware_backend =
+        create_hardware_backend(config.hardware_backend.clone(), config.random_seed);
     let (population, energy_trace) = anneal(
         population,
         snapshot.as_ref(),
@@ -60,6 +89,12 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         &energy_model,
         Some(&search_module),
         snapshot.as_ref(),
+    );
+    info!(
+        target: "simfutures::orchestrator",
+        best_energy = results.best_energy,
+        best_symbols = results.best_state.symbol_states.len(),
+        "annealing run complete"
     );
     maybe_persist_results(&results, &config)?;
     Ok(results)
@@ -79,6 +114,12 @@ fn maybe_persist_results(results: &Results, config: &RunConfig) -> anyhow::Resul
             OutputFormat::Json => serde_json::to_string_pretty(results)?,
             OutputFormat::Msgpack | OutputFormat::Custom => serde_json::to_string(results)?,
         };
+        info!(
+            target: "simfutures::results",
+            path = ?path,
+            format = ?config.output.format,
+            "writing results"
+        );
         fs::write(path, serialized)
             .with_context(|| format!("Failed to write results to {:?}", path))?;
     }

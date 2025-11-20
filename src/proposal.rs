@@ -1,12 +1,12 @@
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, SymbolState, SymbolType};
 use crate::search::{PathResult, SearchModule};
-use serde_json::Value;
-use std::collections::HashMap;
 use parking_lot::Mutex;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalConfig {
@@ -143,9 +143,7 @@ impl DefaultProposalKernel {
                 self.group_move_parallel(snapshot_0, current_state, temperature, rng)
             }
             MoveType::Swap => self.swap_move_parallel(current_state, rng),
-            MoveType::Path => {
-                self.path_move_parallel(snapshot_0, current_state, temperature, rng)
-            }
+            MoveType::Path => self.path_move_parallel(snapshot_0, current_state, temperature, rng),
             MoveType::Global => self.global_move_parallel(current_state, temperature, rng),
         }
     }
@@ -477,12 +475,7 @@ impl DefaultProposalKernel {
         proposal
     }
 
-    fn advance_symbol(
-        &self,
-        symbol_state: &mut SymbolState,
-        target: &Position,
-        temperature: f64,
-    ) {
+    fn advance_symbol(&self, symbol_state: &mut SymbolState, target: &Position, temperature: f64) {
         let dx = target.x - symbol_state.position.x;
         let dy = target.y - symbol_state.position.y;
         let dz = target.z - symbol_state.position.z;
@@ -584,6 +577,49 @@ fn value_to_position(value: &Value) -> Option<Position> {
             Some(Position { x, y, z })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kernel_with_config(mut config: ProposalConfig) -> DefaultProposalKernel {
+        config.adaptive_move_mixing = true;
+        DefaultProposalKernel::new(config, 7, None)
+    }
+
+    #[test]
+    fn adaptive_weights_boost_global_at_high_temperature() {
+        let kernel = kernel_with_config(ProposalConfig::default());
+        let (local, _, _, _, global) = kernel.adapted_weights(0.95);
+        assert!(global > kernel.config.global_move_prob);
+        assert!(local > kernel.config.local_move_prob);
+    }
+
+    #[test]
+    fn adaptive_weights_shift_to_path_and_reduce_swap_when_cool() {
+        let kernel = kernel_with_config(ProposalConfig::default());
+        let (_, _, swap, path, _) = kernel.adapted_weights(0.3);
+        assert!(path > kernel.config.path_based_move_prob);
+        assert!(swap < kernel.config.swap_move_prob);
+    }
+
+    #[test]
+    fn choose_move_type_defaults_to_local_when_weights_zero() {
+        let mut config = ProposalConfig::default();
+        config.local_move_prob = 0.0;
+        config.group_move_prob = 0.0;
+        config.swap_move_prob = 0.0;
+        config.path_based_move_prob = 0.0;
+        config.global_move_prob = 0.0;
+        config.adaptive_move_mixing = false;
+        let kernel = DefaultProposalKernel::new(config, 11, None);
+        let mut rng = StdRng::seed_from_u64(123);
+        assert!(matches!(
+            kernel.choose_move_type(&mut rng, 0.5),
+            MoveType::Local
+        ));
     }
 }
 

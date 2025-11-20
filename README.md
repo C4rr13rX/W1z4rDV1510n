@@ -40,6 +40,7 @@ Key crates: `serde` (I/O), `clap` (CLI), `rand` (sampling), `anyhow` (error flow
   "ml_backend": "SIMPLE_RULES",
   "hardware_backend": "Cpu",
   "random_seed": 42,
+  "logging": { "log_level": "INFO", "json": false, "log_path": null },
   "output": { "save_best_state": true, "output_path": "results.json", "format": "Json" }
 }
 ```
@@ -67,8 +68,27 @@ This prints the best energy and writes `results.json` when configured.
 - ? Hardware backends now auto-select (via `HardwareBackendType::Auto`) based on detected CPU cores, memory, GPU/env hints (`SIMFUTURES_HAS_GPU`, `SIMFUTURES_DISTRIBUTED`), scaling from Pi-class devices up to multi-GPU clusters.
 - ? Results now capture per-symbol path diagnostics (feasibility, path length, constraint violations) for the best state, giving downstream consumers a richer view into path feasibility.
 - ? Proposal kernel now mixes local/group/swap/path/global moves adaptively based on temperature, improving diversity at high temperatures and focusing on path-following as the search cools.
+- ? Structured logging via `tracing`: configure level/format/file target via the `logging` block (or override level with `SIMFUTURES_LOG`). JSON logs are emitted automatically when writing to disk for easier ingestion into observability stacks.
 - ? ML backend can ingest historical trajectories (via the RNN backend option) to learn per-symbol goal anchors, yielding better position predictions and plausibility scoring than the simple heuristic fallback.
     - Set `ml_backend` to `GOAL_ANCHOR` (or leave `RNN/TRANSFORMER/GNN` with `SIMFUTURES_ML_ONNX` unset) to use the trajectory-driven goal-anchoring prior.
+
+### Logging & telemetry
+
+The CLI and orchestrator use [`tracing`](https://docs.rs/tracing) for structured logs. Configure via `RunConfig.logging`:
+
+```json
+"logging": {
+  "log_level": "INFO",
+  "json": false,
+  "log_path": "logs/run.jsonl"
+}
+```
+
+- `log_level`: default minimum level (override at runtime with `SIMFUTURES_LOG="debug"`).
+- `log_path`: optional file target; directories are created automatically. File outputs use JSON format for ingestion in ELK/Grafana/etc.
+- `json`: force JSON on stdout when you want structured logs in the console.
+
+Annealing iterations, resampling events, hardware auto-selection, cache hits/misses, and result persistence are all instrumented, making it easier to tail progress locally or forward to a collector.
 
 ## Synthetic timeline dataset
 

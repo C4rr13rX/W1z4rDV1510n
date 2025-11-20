@@ -1,9 +1,11 @@
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolType};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
-use parking_lot::Mutex;
+use std::collections::{hash_map::DefaultHasher, BinaryHeap, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
@@ -76,6 +78,15 @@ impl SearchModule {
         }
     }
 
+    /// Explicitly clears any cached occupancy grid. Use when external callers know
+    /// the environment bounds or symbol metadata changed in ways the signature
+    /// might not capture, or before reusing the search module across scenarios.
+    pub fn invalidate_cache(&self) {
+        let mut guard = self.cached.lock();
+        *guard = None;
+        debug!(target: "simfutures::search", "invalidated occupancy-grid cache");
+    }
+
     pub fn compute_paths(
         &self,
         snapshot_0: &EnvironmentSnapshot,
@@ -93,9 +104,7 @@ impl SearchModule {
                     }
                 } else {
                     PathResult::Infeasible {
-                        reason: outcome
-                            .failure_reason
-                            .unwrap_or(PathFailureReason::NoPath),
+                        reason: outcome.failure_reason.unwrap_or(PathFailureReason::NoPath),
                         diagnostics: outcome.diagnostics,
                     }
                 }
@@ -118,7 +127,11 @@ impl SearchModule {
         if state.symbol_states.is_empty() {
             return;
         }
-        let depth_cap = snapshot_0.bounds.get("depth").copied().unwrap_or(f64::INFINITY);
+        let depth_cap = snapshot_0
+            .bounds
+            .get("depth")
+            .copied()
+            .unwrap_or(f64::INFINITY);
         let mut lookup = HashMap::new();
         let mut radii = HashMap::new();
         for symbol in &snapshot_0.symbols {
@@ -130,10 +143,8 @@ impl SearchModule {
             let target_start = match lookup.get(symbol_id) {
                 Some(pos) => pos,
                 None => {
-                    symbol_state.position = clamp_with_depth(
-                        &grid.clamp_position(&symbol_state.position),
-                        depth_cap,
-                    );
+                    symbol_state.position =
+                        clamp_with_depth(&grid.clamp_position(&symbol_state.position), depth_cap);
                     continue;
                 }
             };
@@ -184,18 +195,14 @@ impl SearchModule {
                 if let Some(first_mut) = state.symbol_states.get_mut(first_id) {
                     first_mut.position.x -= nx * adjust;
                     first_mut.position.y -= ny * adjust;
-                    first_mut.position = clamp_with_depth(
-                        &grid.clamp_position(&first_mut.position),
-                        depth_cap,
-                    );
+                    first_mut.position =
+                        clamp_with_depth(&grid.clamp_position(&first_mut.position), depth_cap);
                 }
                 if let Some(second_mut) = state.symbol_states.get_mut(second_id) {
                     second_mut.position.x += nx * adjust;
                     second_mut.position.y += ny * adjust;
-                    second_mut.position = clamp_with_depth(
-                        &grid.clamp_position(&second_mut.position),
-                        depth_cap,
-                    );
+                    second_mut.position =
+                        clamp_with_depth(&grid.clamp_position(&second_mut.position), depth_cap);
                 }
             }
         }
@@ -241,7 +248,11 @@ impl SearchModule {
                 start_cell = free;
                 start_point = grid.cell_center(start_cell, start_point.z);
             } else {
-                return PathSearchOutcome::blocked(PathFailureReason::StartBlocked, start_point, diagnostics);
+                return PathSearchOutcome::blocked(
+                    PathFailureReason::StartBlocked,
+                    start_point,
+                    diagnostics,
+                );
             }
         }
 
@@ -251,13 +262,21 @@ impl SearchModule {
                 goal_cell = free;
                 goal_point = grid.cell_center(goal_cell, goal_point.z);
             } else {
-                return PathSearchOutcome::blocked(PathFailureReason::GoalBlocked, start_point, diagnostics);
+                return PathSearchOutcome::blocked(
+                    PathFailureReason::GoalBlocked,
+                    start_point,
+                    diagnostics,
+                );
             }
         }
 
         let search = run_a_star(grid, start_cell, goal_cell);
-        let mut waypoints =
-            grid.cells_to_waypoints(&search.path_cells, &start_point, &goal_point, search.reached_goal);
+        let mut waypoints = grid.cells_to_waypoints(
+            &search.path_cells,
+            &start_point,
+            &goal_point,
+            search.reached_goal,
+        );
         if waypoints.is_empty() {
             waypoints.push(start_point);
         }
@@ -288,17 +307,31 @@ impl SearchModule {
         {
             let cache_guard = self.cached.lock();
             if let Some(entry) = cache_guard.as_ref() {
-                if entry.signature == signature {
+                if entry.signature == signature && entry.grid.signature == signature {
+                    debug!(
+                        target: "simfutures::search",
+                        width_cells = entry.grid.width_cells,
+                        height_cells = entry.grid.height_cells,
+                        "reusing cached occupancy grid"
+                    );
                     return entry.grid.clone();
                 }
             }
         }
-        let grid = OccupancyGrid::from_snapshot(snapshot, self.config.cell_size);
+        let grid = OccupancyGrid::from_snapshot(snapshot, self.config.cell_size, signature);
         let mut cache_guard = self.cached.lock();
         *cache_guard = Some(CachedGrid {
             signature,
             grid: grid.clone(),
         });
+        let blocked_cells = grid.blocked.iter().filter(|cell| **cell).count();
+        debug!(
+            target: "simfutures::search",
+            width_cells = grid.width_cells,
+            height_cells = grid.height_cells,
+            blocked_cells,
+            "rebuilt occupancy grid"
+        );
         grid
     }
 }
@@ -338,6 +371,7 @@ impl PathSearchOutcome {
 
 #[derive(Clone)]
 struct OccupancyGrid {
+    signature: SnapshotSignature,
     bounds: Bounds,
     cell_size: f64,
     width_cells: usize,
@@ -346,12 +380,17 @@ struct OccupancyGrid {
 }
 
 impl OccupancyGrid {
-    fn from_snapshot(snapshot: &EnvironmentSnapshot, cell_size: f64) -> Self {
+    fn from_snapshot(
+        snapshot: &EnvironmentSnapshot,
+        cell_size: f64,
+        signature: SnapshotSignature,
+    ) -> Self {
         let bounds = Bounds::from_snapshot(snapshot);
         let cell_size = cell_size.max(0.25);
         let width_cells = ((bounds.width / cell_size).ceil() as usize).max(1);
         let height_cells = ((bounds.height / cell_size).ceil() as usize).max(1);
         let mut grid = Self {
+            signature,
             bounds,
             cell_size,
             width_cells,
@@ -378,11 +417,7 @@ impl OccupancyGrid {
         if pos.x.is_nan() || pos.y.is_nan() {
             return None;
         }
-        if pos.x < 0.0
-            || pos.y < 0.0
-            || pos.x > self.bounds.width
-            || pos.y > self.bounds.height
-        {
+        if pos.x < 0.0 || pos.y < 0.0 || pos.x > self.bounds.width || pos.y > self.bounds.height {
             return None;
         }
         let x = (pos.x / self.cell_size)
@@ -536,12 +571,21 @@ impl OccupancyGrid {
                 points.push(self.cell_center(*cell, goal.z));
             }
         }
-        if reached_goal && (points.last().map(|p| !approx_equal(p, goal)).unwrap_or(true)) {
+        if reached_goal
+            && (points
+                .last()
+                .map(|p| !approx_equal(p, goal))
+                .unwrap_or(true))
+        {
             points.push(*goal);
         } else if !reached_goal {
             let last_cell = cells.last().copied().unwrap_or(cells[0]);
             let projected = self.cell_center(last_cell, goal.z);
-            if points.last().map(|p| !approx_equal(p, &projected)).unwrap_or(true) {
+            if points
+                .last()
+                .map(|p| !approx_equal(p, &projected))
+                .unwrap_or(true)
+            {
                 points.push(projected);
             }
         }
@@ -568,13 +612,27 @@ impl Bounds {
             .bounds
             .get("width")
             .copied()
-            .unwrap_or_else(|| snapshot.symbols.iter().map(|s| s.position.x).fold(1.0, f64::max) + 1.0)
+            .unwrap_or_else(|| {
+                snapshot
+                    .symbols
+                    .iter()
+                    .map(|s| s.position.x)
+                    .fold(1.0, f64::max)
+                    + 1.0
+            })
             .max(1.0);
         let height = snapshot
             .bounds
             .get("height")
             .copied()
-            .unwrap_or_else(|| snapshot.symbols.iter().map(|s| s.position.y).fold(1.0, f64::max) + 1.0)
+            .unwrap_or_else(|| {
+                snapshot
+                    .symbols
+                    .iter()
+                    .map(|s| s.position.y)
+                    .fold(1.0, f64::max)
+                    + 1.0
+            })
             .max(1.0);
         let depth = snapshot
             .bounds
@@ -735,31 +793,147 @@ fn symbol_radius(symbol: &Symbol) -> f64 {
         .unwrap_or(0.5)
 }
 
+fn hash_bounds(hasher: &mut DefaultHasher, bounds: &HashMap<String, f64>) {
+    if bounds.is_empty() {
+        return;
+    }
+    let mut entries: Vec<_> = bounds.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, value) in entries {
+        key.hash(hasher);
+        hasher.write_u64(value.to_bits());
+    }
+}
+
+fn hash_metadata(hasher: &mut DefaultHasher, metadata: &HashMap<String, Value>) {
+    if metadata.is_empty() {
+        return;
+    }
+    let mut entries: Vec<_> = metadata.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, value) in entries {
+        key.hash(hasher);
+        hash_json_value(hasher, value);
+    }
+}
+
+fn hash_json_value(hasher: &mut DefaultHasher, value: &Value) {
+    match value {
+        Value::Null => {
+            0u8.hash(hasher);
+        }
+        Value::Bool(flag) => {
+            1u8.hash(hasher);
+            flag.hash(hasher);
+        }
+        Value::Number(num) => {
+            2u8.hash(hasher);
+            if let Some(float) = num.as_f64() {
+                hasher.write_u64(float.to_bits());
+            } else if let Some(int_val) = num.as_i64() {
+                int_val.hash(hasher);
+            } else if let Some(u_val) = num.as_u64() {
+                u_val.hash(hasher);
+            }
+        }
+        Value::String(text) => {
+            3u8.hash(hasher);
+            text.hash(hasher);
+        }
+        Value::Array(items) => {
+            4u8.hash(hasher);
+            for item in items {
+                hash_json_value(hasher, item);
+            }
+        }
+        Value::Object(map) => {
+            5u8.hash(hasher);
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            for (key, value) in entries {
+                key.hash(hasher);
+                hash_json_value(hasher, value);
+            }
+        }
+    }
+}
+
+fn hash_symbol_type(hasher: &mut DefaultHasher, symbol_type: &SymbolType) {
+    let tag = match symbol_type {
+        SymbolType::Person => 1u8,
+        SymbolType::Object => 2u8,
+        SymbolType::Wall => 3u8,
+        SymbolType::Exit => 4u8,
+        SymbolType::Custom => 5u8,
+    };
+    hasher.write_u8(tag);
+}
+
+fn hash_position(hasher: &mut DefaultHasher, position: &Position) {
+    hasher.write_u64(position.x.to_bits());
+    hasher.write_u64(position.y.to_bits());
+    hasher.write_u64(position.z.to_bits());
+}
+
+fn hash_blocker_extents(hasher: &mut DefaultHasher, symbol: &Symbol) {
+    let width = extent_from_props(symbol, &["width", "length", "size_x"]).unwrap_or(1.0);
+    let height = extent_from_props(symbol, &["height", "size_y"]).unwrap_or(1.0);
+    let depth = extent_from_props(symbol, &["depth", "size_z"]).unwrap_or(0.0);
+    let radius = symbol_radius(symbol);
+    hasher.write_u64(width.to_bits());
+    hasher.write_u64(height.to_bits());
+    hasher.write_u64(depth.to_bits());
+    hasher.write_u64(radius.to_bits());
+}
+
+fn hash_blocker_flags(hasher: &mut DefaultHasher, props: &HashMap<String, Value>) {
+    for key in ["walkable", "blocking", "solid", "layer", "material"] {
+        if let Some(value) = props.get(key) {
+            key.hash(hasher);
+            hash_json_value(hasher, value);
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CachedGrid {
     signature: SnapshotSignature,
     grid: OccupancyGrid,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SnapshotSignature(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SnapshotSignature {
+    hash: u64,
+    blocker_digest: u64,
+}
 
 fn snapshot_signature(snapshot: &EnvironmentSnapshot, cell_size: f64) -> SnapshotSignature {
-    let mut acc = snapshot.timestamp.unix as u64;
-    acc = acc.wrapping_mul(1_146_959);
-    acc ^= (snapshot.symbols.len() as u64).wrapping_mul(31_415_927);
-    acc ^= cell_size.to_bits();
-    if let Some(width) = snapshot.bounds.get("width") {
-        acc ^= width.to_bits();
+    let mut base_hasher = DefaultHasher::new();
+    snapshot.timestamp.unix.hash(&mut base_hasher);
+    (snapshot.symbols.len() as u64).hash(&mut base_hasher);
+    cell_size.to_bits().hash(&mut base_hasher);
+    hash_bounds(&mut base_hasher, &snapshot.bounds);
+    hash_metadata(&mut base_hasher, &snapshot.metadata);
+
+    let mut blocker_hasher = DefaultHasher::new();
+    let mut blockers: Vec<_> = snapshot
+        .symbols
+        .iter()
+        .filter(|sym| is_blocker(sym))
+        .collect();
+    blockers.sort_by(|a, b| a.id.cmp(&b.id));
+    for symbol in blockers {
+        symbol.id.hash(&mut blocker_hasher);
+        hash_symbol_type(&mut blocker_hasher, &symbol.symbol_type);
+        hash_position(&mut blocker_hasher, &symbol.position);
+        hash_blocker_extents(&mut blocker_hasher, symbol);
+        hash_blocker_flags(&mut blocker_hasher, &symbol.properties);
     }
-    if let Some(height) = snapshot.bounds.get("height") {
-        acc ^= height.to_bits().rotate_left(13);
+
+    SnapshotSignature {
+        hash: base_hasher.finish(),
+        blocker_digest: blocker_hasher.finish(),
     }
-    for symbol in snapshot.symbols.iter().take(16) {
-        acc = acc.wrapping_add(symbol.position.x.to_bits());
-        acc = acc.wrapping_add(symbol.position.y.to_bits().rotate_left(7));
-    }
-    SnapshotSignature(acc)
 }
 
 fn is_blocker(symbol: &Symbol) -> bool {
@@ -792,4 +966,127 @@ fn path_length(points: &[Position]) -> f64 {
             (dx * dx + dy * dy + dz * dz).sqrt()
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{Properties, SymbolState, SymbolType};
+
+    fn bounds(width: f64, height: f64) -> HashMap<String, f64> {
+        let mut map = HashMap::new();
+        map.insert("width".into(), width);
+        map.insert("height".into(), height);
+        map
+    }
+
+    fn person(id: &str, position: Position) -> Symbol {
+        Symbol {
+            id: id.into(),
+            symbol_type: SymbolType::Person,
+            position,
+            properties: Properties::new(),
+        }
+    }
+
+    fn wall(id: &str, position: Position, width: f64, height: f64) -> Symbol {
+        let mut props = Properties::new();
+        props.insert("width".into(), Value::from(width));
+        props.insert("height".into(), Value::from(height));
+        Symbol {
+            id: id.into(),
+            symbol_type: SymbolType::Wall,
+            position,
+            properties: props,
+        }
+    }
+
+    #[test]
+    fn enforce_constraints_moves_agent_out_of_blocked_cell() {
+        let snapshot = EnvironmentSnapshot {
+            timestamp: crate::schema::Timestamp { unix: 0 },
+            bounds: bounds(4.0, 4.0),
+            symbols: vec![
+                person("agent", Position { x: 0.5, y: 0.5, z: 0.0 }),
+                wall(
+                    "wall",
+                    Position { x: 2.0, y: 2.0, z: 0.0 },
+                    2.0,
+                    2.0,
+                ),
+            ],
+            metadata: Properties::new(),
+        };
+        let mut state = DynamicState {
+            timestamp: snapshot.timestamp,
+            symbol_states: HashMap::from([(
+                "agent".into(),
+                SymbolState {
+                    position: Position {
+                        x: 2.0,
+                        y: 2.0,
+                        z: 0.0,
+                    },
+                    ..Default::default()
+                },
+            )]),
+        };
+        let module = SearchModule::new(SearchConfig {
+            cell_size: 0.5,
+            teleport_on_no_path: true,
+        });
+        module.enforce_hard_constraints(&snapshot, &mut state);
+        let repaired = state.symbol_states.get("agent").unwrap().position;
+        let grid = module.grid_for_snapshot(&snapshot);
+        let cell = grid.position_to_cell(&repaired).expect("valid cell");
+        assert!(!grid.is_blocked(cell), "agent should no longer be inside wall");
+    }
+
+    #[test]
+    fn enforce_constraints_separates_overlapping_agents() {
+        let snapshot = EnvironmentSnapshot {
+            timestamp: crate::schema::Timestamp { unix: 0 },
+            bounds: bounds(3.0, 3.0),
+            symbols: vec![
+                person("a", Position { x: 0.5, y: 0.5, z: 0.0 }),
+                person("b", Position { x: 1.5, y: 0.5, z: 0.0 }),
+            ],
+            metadata: Properties::new(),
+        };
+        let overlapping = Position {
+            x: 1.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let mut state = DynamicState {
+            timestamp: snapshot.timestamp,
+            symbol_states: HashMap::from([
+                (
+                    "a".into(),
+                    SymbolState {
+                        position: overlapping,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "b".into(),
+                    SymbolState {
+                        position: overlapping,
+                        ..Default::default()
+                    },
+                ),
+            ]),
+        };
+        let module = SearchModule::new(SearchConfig::default());
+        module.enforce_hard_constraints(&snapshot, &mut state);
+        let a_pos = state.symbol_states.get("a").unwrap().position;
+        let b_pos = state.symbol_states.get("b").unwrap().position;
+        let dx = a_pos.x - b_pos.x;
+        let dy = a_pos.y - b_pos.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        assert!(
+            dist >= 0.9,
+            "agents should be separated beyond combined radii, got {dist}"
+        );
+    }
 }

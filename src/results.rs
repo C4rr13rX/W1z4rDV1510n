@@ -68,9 +68,8 @@ pub fn analyze_results(
         .collect();
     let diversity_metric = compute_diversity(population);
     let breakdown = energy_model.energy_breakdown(&best_particle.current_state);
-    let path_report = search_module.map(|module| {
-        compute_path_report(module, snapshot_0, &best_particle.current_state)
-    });
+    let path_report = search_module
+        .map(|module| compute_path_report(module, snapshot_0, &best_particle.current_state));
     Results {
         best_state: best_particle.current_state.clone(),
         best_energy: best_particle.energy,
@@ -134,7 +133,10 @@ fn compute_path_report(
                 visited_nodes: diagnostics.visited_nodes,
                 constraint_violations: diagnostics.constraint_violations,
             },
-            PathResult::Infeasible { reason, diagnostics } => SymbolPathDiagnostics {
+            PathResult::Infeasible {
+                reason,
+                diagnostics,
+            } => SymbolPathDiagnostics {
                 feasible: false,
                 failure_reason: Some(format!("{reason:?}")),
                 path_length: diagnostics.length,

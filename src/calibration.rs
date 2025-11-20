@@ -155,7 +155,11 @@ fn groups_for_state<'a>(
 
 fn centroid(states: &[&crate::schema::SymbolState]) -> Position {
     let n = states.len() as f64;
-    let mut sum = Position { x: 0.0, y: 0.0, z: 0.0 };
+    let mut sum = Position {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
     for state in states {
         sum.x += state.position.x;
         sum.y += state.position.y;
@@ -209,13 +213,25 @@ mod tests {
         let mut final_state = DynamicState::default();
         initial.timestamp = Timestamp { unix: 0 };
         final_state.timestamp = Timestamp { unix: 5 };
-        initial
-            .symbol_states
-            .insert("a".into(), SymbolState { position: Position { x: 0.0, y: 0.0, z: 0.0 }, ..Default::default() });
+        initial.symbol_states.insert(
+            "a".into(),
+            SymbolState {
+                position: Position {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                ..Default::default()
+            },
+        );
         final_state.symbol_states.insert(
             "a".into(),
             SymbolState {
-                position: Position { x: 5.0, y: 0.0, z: 0.0 },
+                position: Position {
+                    x: 5.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
                 internal_state: {
                     let mut map = HashMap::new();
                     map.insert("goal_position".into(), json!({"x": 6.0, "y": 0.0 }));

@@ -1,0 +1,57 @@
+{
+  "snapshot_file": "data/logging_snapshot.json",
+  "t_end": { "unix": 1732000010 },
+  "n_particles": 128,
+  "schedule": {
+    "t_start": 4.0,
+    "t_end": 0.5,
+    "n_iterations": 50,
+    "schedule_type": "Linear"
+  },
+  "energy": {
+    "w_motion": 1.0,
+    "w_collision": 5.0,
+    "w_goal": 1.0,
+    "w_group_cohesion": 0.5,
+    "w_ml_prior": 0.1,
+    "w_path_feasibility": 1.0,
+    "w_env_constraints": 3.0,
+    "other_terms": {}
+  },
+  "proposal": {
+    "local_move_prob": 0.5,
+    "group_move_prob": 0.2,
+    "swap_move_prob": 0.1,
+    "path_based_move_prob": 0.15,
+    "global_move_prob": 0.05,
+    "max_step_size": 1.5,
+    "use_parallel_updates": true
+  },
+  "init_strategy": {
+    "use_ml_priors": true,
+    "noise_level": 0.4,
+    "random_fraction": 0.15,
+    "copy_snapshot_fraction": 0.1
+  },
+  "resample": {
+    "enabled": true,
+    "effective_sample_size_threshold": 0.35,
+    "mutation_rate": 0.05
+  },
+  "search": { "cell_size": 0.75, "teleport_on_no_path": true },
+  "ml_backend": "GoalAnchor",
+  "hardware_backend": "Auto",
+  "random_seed": 1337,
+  "logging": {
+    "log_level": "INFO",
+    "json": false,
+    "log_path": "logs/logging_smoke.jsonl"
+  },
+  "output": {
+    "save_best_state": true,
+    "save_population_summary": true,
+    "save_trajectories": false,
+    "format": "Json",
+    "output_path": "logs/logging_smoke_results.json"
+  }
+}

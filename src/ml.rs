@@ -1,8 +1,8 @@
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Timestamp, Trajectory};
 use parking_lot::{Mutex, RwLock};
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -160,10 +160,7 @@ impl MLHooks for GoalAnchorMLHooks {
                         z: symbol.position.z + (anchor.z - symbol.position.z) * lerp,
                     }
                 } else {
-                    fallback
-                        .get(&symbol.id)
-                        .copied()
-                        .unwrap_or(symbol.position)
+                    fallback.get(&symbol.id).copied().unwrap_or(symbol.position)
                 };
                 (symbol.id.clone(), predicted)
             })
@@ -215,5 +212,86 @@ struct GoalStats {
     count: f64,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{EnvironmentSnapshot, Properties, Symbol, SymbolState, SymbolType};
 
+    fn snapshot_at(position: Position) -> EnvironmentSnapshot {
+        EnvironmentSnapshot {
+            timestamp: Timestamp { unix: 0 },
+            bounds: HashMap::from([("width".into(), 10.0), ("height".into(), 10.0)]),
+            symbols: vec![Symbol {
+                id: "p1".into(),
+                symbol_type: SymbolType::Person,
+                position,
+                properties: Properties::new(),
+            }],
+            metadata: Properties::new(),
+        }
+    }
 
+    #[test]
+    fn goal_anchor_learns_and_scores_zero_at_anchor() {
+        let hooks = GoalAnchorMLHooks::new(9);
+        let mut last_state = DynamicState::default();
+        last_state.symbol_states.insert(
+            "p1".into(),
+            SymbolState {
+                position: Position {
+                    x: 4.0,
+                    y: 6.0,
+                    z: 0.0,
+                },
+                ..Default::default()
+            },
+        );
+        let trajectory = Trajectory {
+            sequence: vec![last_state.clone()],
+            metadata: Properties::new(),
+        };
+        hooks.update_from_data(&[trajectory]);
+        let anchor = hooks.anchor_for("p1").expect("anchor exists");
+        assert!((anchor.x - 4.0).abs() < 1e-6 && (anchor.y - 6.0).abs() < 1e-6);
+
+        assert!(
+            hooks.score_configuration(&last_state) < 1e-6,
+            "state at anchor should score ~0"
+        );
+    }
+
+    #[test]
+    fn goal_anchor_predictions_follow_learned_target() {
+        let hooks = GoalAnchorMLHooks::new(1);
+        let mut last_state = DynamicState::default();
+        last_state.symbol_states.insert(
+            "p1".into(),
+            SymbolState {
+                position: Position {
+                    x: 8.0,
+                    y: 2.0,
+                    z: 0.0,
+                },
+                ..Default::default()
+            },
+        );
+        hooks.update_from_data(&[Trajectory {
+            sequence: vec![last_state],
+            metadata: Properties::new(),
+        }]);
+        let snapshot = snapshot_at(Position {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        let t_end = Timestamp {
+            unix: snapshot.timestamp.unix + 5,
+        };
+        let predictions = hooks.predict_next_positions(&snapshot, &t_end);
+        let predicted = predictions.get("p1").unwrap();
+        assert!(
+            (predicted.x - 8.0).abs() < 1e-6 && (predicted.y - 2.0).abs() < 1e-6,
+            "prediction should hit anchor when horizon elapsed"
+        );
+    }
+}
