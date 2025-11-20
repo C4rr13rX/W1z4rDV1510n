@@ -1,3 +1,4 @@
+use crate::config::ExperimentalHardwareConfig;
 use crate::schema::{ParticleState, Population};
 use num_cpus;
 use parking_lot::Mutex;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tracing::{debug, info, warn};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HardwareBackendType {
     Auto,
     Cpu,
@@ -18,6 +19,7 @@ pub enum HardwareBackendType {
     Gpu,
     Distributed,
     External,
+    Experimental,
 }
 
 impl Default for HardwareBackendType {
@@ -182,12 +184,78 @@ impl HardwareBackend for DistributedBackend {
     }
 }
 
+#[cfg(feature = "experimental-hw")]
+pub struct ExperimentalHardwareBackend {
+    noise: NoiseSourceHandle,
+    options: ExperimentalHardwareConfig,
+    system: Mutex<System>,
+    last_sample: Mutex<std::time::Instant>,
+}
+
+#[cfg(feature = "experimental-hw")]
+impl ExperimentalHardwareBackend {
+    fn new(seed: u64, options: ExperimentalHardwareConfig) -> Self {
+        Self {
+            noise: Arc::new(SoftwareNoiseSource::new(seed)),
+            options,
+            system: Mutex::new(System::new()),
+            last_sample: Mutex::new(std::time::Instant::now()),
+        }
+    }
+
+    fn maybe_sample(&self) {
+        let interval = std::time::Duration::from_secs_f64(
+            self.options.max_sample_interval_secs.max(0.1).min(10.0),
+        );
+        let mut last = self.last_sample.lock();
+        if last.elapsed() < interval {
+            return;
+        }
+        *last = std::time::Instant::now();
+        let mut system = self.system.lock();
+        system.refresh_specifics(
+            RefreshKind::new()
+                .with_cpu(CpuRefreshKind::new())
+                .with_memory(MemoryRefreshKind::everything()),
+        );
+        let loads = system.load_average();
+        let used_memory_gb = (system.used_memory() as f64 / 1_048_576.0).max(0.0);
+        tracing::info!(
+            target: "w1z4rdv1510n::hardware::experimental",
+            used_memory_gb,
+            load_avg_one = loads.one,
+            load_avg_five = loads.five,
+            perf_counters = self.options.use_performance_counters,
+            "sampled hardware metrics"
+        );
+    }
+}
+
+#[cfg(feature = "experimental-hw")]
+impl HardwareBackend for ExperimentalHardwareBackend {
+    fn map_particles(
+        &self,
+        population: &mut Population,
+        func: &(dyn Fn(&mut ParticleState) + Send + Sync),
+    ) {
+        self.maybe_sample();
+        for particle in &mut population.particles {
+            func(particle);
+        }
+    }
+
+    fn noise_source(&self) -> NoiseSourceHandle {
+        Arc::clone(&self.noise)
+    }
+}
+
 pub type HardwareBackendHandle = Arc<dyn HardwareBackend>;
 
 pub fn create_hardware_backend(
     kind: HardwareBackendType,
     seed: u64,
-) -> (HardwareBackendHandle, HardwareBackendType) {
+    experimental: &ExperimentalHardwareConfig,
+) -> anyhow::Result<(HardwareBackendHandle, HardwareBackendType)> {
     let profile = HardwareProfile::detect();
     let mut resolved = if let HardwareBackendType::Auto = kind {
         recommend_backend(&profile)
@@ -209,8 +277,10 @@ pub fn create_hardware_backend(
         resolved = HardwareBackendType::MultiThreadedCpu;
     }
     log_backend_selection(&resolved, &profile);
-    match resolved {
-        HardwareBackendType::Auto => unreachable!("resolved backend should not be Auto"),
+    let handle = match resolved {
+        HardwareBackendType::Auto => {
+            anyhow::bail!("resolved backend should not be Auto");
+        }
         HardwareBackendType::Cpu => (
             Arc::new(CpuBackend::new(seed)) as HardwareBackendHandle,
             HardwareBackendType::Cpu,
@@ -237,6 +307,34 @@ pub fn create_hardware_backend(
             Arc::new(ExternalBackend::new(seed)) as HardwareBackendHandle,
             HardwareBackendType::External,
         ),
+        HardwareBackendType::Experimental => create_experimental_backend(seed, experimental)?,
+    };
+    Ok(handle)
+}
+
+fn create_experimental_backend(
+    seed: u64,
+    config: &ExperimentalHardwareConfig,
+) -> anyhow::Result<(HardwareBackendHandle, HardwareBackendType)> {
+    anyhow::ensure!(
+        config.enabled,
+        "experimental hardware backend selected but experimental_hardware.enabled is false"
+    );
+    #[cfg(feature = "experimental-hw")]
+    {
+        Ok((
+            Arc::new(ExperimentalHardwareBackend::new(seed, config.clone()))
+                as HardwareBackendHandle,
+            HardwareBackendType::Experimental,
+        ))
+    }
+    #[cfg(not(feature = "experimental-hw"))]
+    {
+        let _ = seed;
+        let _ = config;
+        anyhow::bail!(
+            "experimental hardware backend requires building with the `experimental-hw` feature"
+        );
     }
 }
 

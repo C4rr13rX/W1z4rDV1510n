@@ -71,6 +71,7 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
 ```json
 {
   "snapshot_file": "data/snapshot.json",
+  "mode": "PRODUCTION",
   "t_end": { "unix": 1732003600 },
   "n_particles": 512,
   "schedule": { "t_start": 5.0, "t_end": 0.2, "n_iterations": 200, "schedule_type": "Linear" },
@@ -101,7 +102,8 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
   "hardware_backend": "Auto",
   "logging": { "log_level": "INFO", "json": true, "log_path": "logs/run.jsonl" },
   "output": { "save_best_state": true, "save_population_summary": true, "output_path": "logs/results.json", "format": "Json" },
-  "random": { "provider": "DETERMINISTIC", "seed": 1337 }
+  "random": { "provider": "DETERMINISTIC", "seed": 1337 },
+  "experimental_hardware": { "enabled": false }
 }
 ```
 
@@ -124,6 +126,9 @@ Output:
 - `logging.log_path` - optional JSONL file target; directories auto-created.
 - `HardwareBackendType::Auto` writes detection + fallback info at INFO/WARN.
 - `random.provider` - choose `DETERMINISTIC` (reproducible with `seed`), `OS_ENTROPY` (draws from OS RNG), or `JITTER_EXPERIMENTAL` (feature-gated physical jitter). Major module seeds are logged at DEBUG level.
+- `mode` - defaults to `PRODUCTION`. Switch to `LAB_EXPERIMENTAL` when using jitter RNG or the experimental hardware backend. Production mode automatically rejects unsafe combinations.
+- `hardware_backend` - add `"Experimental"` (requires `--features experimental-hw` and `experimental_hardware.enabled: true`) to blend physical telemetry into the annealer. Sensors are read passively; no destructive behavior occurs.
+- `experimental_hardware` - tuning knobs for the experimental backend (`use_thermal`, `use_performance_counters`, `max_sample_interval_secs`). Leave `enabled: false` unless running in lab mode.
 
 ## REST Service API
 

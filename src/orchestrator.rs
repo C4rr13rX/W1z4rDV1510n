@@ -113,8 +113,11 @@ pub fn run_with_snapshot(
         seed = kernel_seed
     );
     let hardware_seed = random_provider.next_seed("hardware_backend");
-    let (hardware_backend, resolved_backend) =
-        create_hardware_backend(config.hardware_backend.clone(), hardware_seed);
+    let (hardware_backend, resolved_backend) = create_hardware_backend(
+        config.hardware_backend.clone(),
+        hardware_seed,
+        &config.experimental_hardware,
+    )?;
     debug!(
         target: "w1z4rdv1510n::random",
         module = "hardware_backend",

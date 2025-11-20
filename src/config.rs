@@ -17,6 +17,8 @@ fn default_snapshot_path() -> PathBuf {
 pub struct RunConfig {
     #[serde(default = "default_snapshot_path")]
     pub snapshot_file: PathBuf,
+    #[serde(default)]
+    pub mode: RunMode,
     pub t_end: Timestamp,
     #[serde(default = "default_particles")]
     pub n_particles: usize,
@@ -40,6 +42,8 @@ pub struct RunConfig {
     pub random_seed: u64,
     #[serde(default)]
     pub random: RandomConfig,
+    #[serde(default)]
+    pub experimental_hardware: ExperimentalHardwareConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
@@ -80,6 +84,29 @@ impl RunConfig {
             self.resample.mutation_rate >= 0.0 && self.resample.mutation_rate <= 1.0,
             "mutation_rate must be between 0 and 1"
         );
+        if matches!(self.mode, RunMode::Production) {
+            anyhow::ensure!(
+                !self.experimental_hardware.enabled,
+                "experimental hardware options must be disabled in production mode"
+            );
+            anyhow::ensure!(
+                self.hardware_backend != HardwareBackendType::Experimental,
+                "experimental hardware backend is not allowed in production mode"
+            );
+            anyhow::ensure!(
+                !matches!(
+                    self.random.provider,
+                    crate::random::RandomProviderType::JitterExperimental
+                ),
+                "experimental jitter RNG is not allowed in production mode"
+            );
+        }
+        if self.experimental_hardware.enabled {
+            anyhow::ensure!(
+                self.hardware_backend == HardwareBackendType::Experimental,
+                "set hardware_backend to EXPERIMENTAL when experimental hardware options are enabled"
+            );
+        }
         Ok(())
     }
 }
@@ -255,5 +282,46 @@ pub enum OutputFormat {
 impl Default for OutputFormat {
     fn default() -> Self {
         OutputFormat::Json
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RunMode {
+    Production,
+    LabExperimental,
+}
+
+impl Default for RunMode {
+    fn default() -> Self {
+        RunMode::Production
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentalHardwareConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub use_thermal: bool,
+    #[serde(default)]
+    pub use_performance_counters: bool,
+    #[serde(default = "ExperimentalHardwareConfig::default_interval")]
+    pub max_sample_interval_secs: f64,
+}
+
+impl ExperimentalHardwareConfig {
+    fn default_interval() -> f64 {
+        1.0
+    }
+}
+
+impl Default for ExperimentalHardwareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            use_thermal: true,
+            use_performance_counters: false,
+            max_sample_interval_secs: Self::default_interval(),
+        }
     }
 }
