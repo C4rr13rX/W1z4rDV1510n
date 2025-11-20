@@ -196,3 +196,42 @@ fn value_to_position(value: &Value) -> Option<Position> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{DynamicState, SymbolState, Timestamp};
+    use serde_json::json;
+
+    #[test]
+    fn calibration_outputs_positive_weights() {
+        let mut initial = DynamicState::default();
+        let mut final_state = DynamicState::default();
+        initial.timestamp = Timestamp { unix: 0 };
+        final_state.timestamp = Timestamp { unix: 5 };
+        initial
+            .symbol_states
+            .insert("a".into(), SymbolState { position: Position { x: 0.0, y: 0.0, z: 0.0 }, ..Default::default() });
+        final_state.symbol_states.insert(
+            "a".into(),
+            SymbolState {
+                position: Position { x: 5.0, y: 0.0, z: 0.0 },
+                internal_state: {
+                    let mut map = HashMap::new();
+                    map.insert("goal_position".into(), json!({"x": 6.0, "y": 0.0 }));
+                    map
+                },
+                ..Default::default()
+            },
+        );
+        let traj = Trajectory {
+            sequence: vec![initial, final_state],
+            metadata: HashMap::new(),
+        };
+        let calib = calibrate_from_trajectories(&[traj]);
+        assert!(calib.recommended_motion > 0.0);
+        assert!(calib.recommended_goal > 0.0);
+        assert!(calib.recommended_collision > 0.0);
+        assert!(calib.recommended_group > 0.0);
+    }
+}

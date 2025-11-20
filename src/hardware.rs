@@ -186,6 +186,7 @@ pub fn create_hardware_backend(kind: HardwareBackendType, seed: u64) -> Hardware
     } else {
         kind
     };
+    log_backend_selection(&resolved, &profile);
     match resolved {
         HardwareBackendType::Auto => unreachable!("resolved backend should not be Auto"),
         HardwareBackendType::Cpu => Arc::new(CpuBackend::new(seed)),
@@ -286,4 +287,16 @@ fn read_env_bool(key: &str) -> bool {
     std::env::var(key)
         .map(|value| matches!(value.trim(), "1" | "true" | "TRUE"))
         .unwrap_or(false)
+}
+
+fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) {
+    println!(
+        "[hardware] backend={:?} cpu_cores={} memory_gb={:.1} has_gpu={} cluster_hint={}",
+        kind, profile.cpu_cores, profile.total_memory_gb, profile.has_gpu, profile.cluster_hint
+    );
+    if matches!(kind, HardwareBackendType::Gpu | HardwareBackendType::Distributed) {
+        println!(
+            "[hardware] advanced backend selected – ensure GPU/cluster resources are accessible."
+        );
+    }
 }

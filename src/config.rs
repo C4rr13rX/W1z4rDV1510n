@@ -38,6 +38,44 @@ pub struct RunConfig {
     pub output: OutputConfig,
 }
 
+impl RunConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.n_particles > 0, "n_particles must be > 0");
+        anyhow::ensure!(
+            self.schedule.n_iterations > 0,
+            "schedule.n_iterations must be > 0"
+        );
+        anyhow::ensure!(
+            self.energy.w_motion >= 0.0
+                && self.energy.w_collision >= 0.0
+                && self.energy.w_goal >= 0.0
+                && self.energy.w_group_cohesion >= 0.0
+                && self.energy.w_ml_prior >= 0.0
+                && self.energy.w_path_feasibility >= 0.0
+                && self.energy.w_env_constraints >= 0.0,
+            "energy weights must be non-negative"
+        );
+        anyhow::ensure!(
+            self.proposal.local_move_prob
+                + self.proposal.group_move_prob
+                + self.proposal.swap_move_prob
+                + self.proposal.path_based_move_prob
+                + self.proposal.global_move_prob
+                > 0.0,
+            "proposal move probabilities must sum to > 0"
+        );
+        anyhow::ensure!(
+            self.search.cell_size > 0.01,
+            "search.cell_size must be > 0.01"
+        );
+        anyhow::ensure!(
+            self.resample.mutation_rate >= 0.0 && self.resample.mutation_rate <= 1.0,
+            "mutation_rate must be between 0 and 1"
+        );
+        Ok(())
+    }
+}
+
 fn default_particles() -> usize {
     512
 }

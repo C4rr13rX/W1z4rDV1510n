@@ -15,6 +15,7 @@ use std::fs;
 use std::sync::Arc;
 
 pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
+    config.validate()?;
     let snapshot = Arc::new(load_snapshot(&config)?);
     let mut rng = StdRng::seed_from_u64(config.random_seed);
     let ml_hooks = create_ml_hooks(config.ml_backend.clone(), config.random_seed);
