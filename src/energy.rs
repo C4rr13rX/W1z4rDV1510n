@@ -1,5 +1,5 @@
 use crate::config::EnergyConfig;
-use crate::ml::MlHooksHandle;
+use crate::ml::MlModelHandle;
 use crate::schema::{
     DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType, Timestamp,
 };
@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+pub trait EnergyEvaluator {
+    fn energy(&self, state: &DynamicState) -> f64;
+    fn batch_energy(&self, states: &[DynamicState]) -> Vec<f64>;
+    fn breakdown(&self, state: &DynamicState) -> EnergyBreakdown;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnergyBreakdown {
@@ -182,7 +188,7 @@ pub struct EnergyModel {
     config: EnergyConfig,
     symbol_lookup: HashMap<String, Symbol>,
     exit_symbols: Vec<Symbol>,
-    ml_hooks: Option<MlHooksHandle>,
+    ml_model: Option<MlModelHandle>,
     ml_predictions: Option<HashMap<String, Position>>,
     search_module: Option<SearchModule>,
     walls: Vec<WallPrimitive>,
@@ -192,7 +198,7 @@ impl EnergyModel {
     pub fn new(
         snapshot_0: Arc<EnvironmentSnapshot>,
         config: EnergyConfig,
-        ml_hooks: Option<MlHooksHandle>,
+        ml_model: Option<MlModelHandle>,
         search_module: Option<SearchModule>,
         target_time: Timestamp,
     ) -> Self {
@@ -214,7 +220,7 @@ impl EnergyModel {
             .filter(|symbol| matches!(symbol.symbol_type, SymbolType::Wall))
             .map(WallPrimitive::from_symbol)
             .collect();
-        let ml_predictions = ml_hooks
+        let ml_predictions = ml_model
             .as_ref()
             .map(|hooks| hooks.predict_next_positions(snapshot_0.as_ref(), &target_time));
         Self {
@@ -222,7 +228,7 @@ impl EnergyModel {
             config,
             symbol_lookup,
             exit_symbols,
-            ml_hooks,
+            ml_model,
             ml_predictions,
             search_module,
             walls,
@@ -231,6 +237,10 @@ impl EnergyModel {
 
     pub fn energy(&self, dynamic_state: &DynamicState) -> f64 {
         self.energy_breakdown(dynamic_state).total
+    }
+
+    pub fn batch_energy(&self, states: &[DynamicState]) -> Vec<f64> {
+        states.iter().map(|state| self.energy(state)).collect()
     }
 
     pub fn energy_breakdown(&self, dynamic_state: &DynamicState) -> EnergyBreakdown {
@@ -496,8 +506,8 @@ impl EnergyModel {
             }
             return contribution;
         }
-        if let Some(hooks) = &self.ml_hooks {
-            contribution.add_direct(hooks.score_configuration(state));
+        if let Some(model) = &self.ml_model {
+            contribution.add_direct(model.score_state(state));
         }
         contribution
     }
@@ -611,5 +621,19 @@ fn value_to_position(value: &Value) -> Option<Position> {
             Some(Position { x, y, z })
         }
         _ => None,
+    }
+}
+
+impl EnergyEvaluator for EnergyModel {
+    fn energy(&self, state: &DynamicState) -> f64 {
+        EnergyModel::energy(self, state)
+    }
+
+    fn batch_energy(&self, states: &[DynamicState]) -> Vec<f64> {
+        self.batch_energy(states)
+    }
+
+    fn breakdown(&self, state: &DynamicState) -> EnergyBreakdown {
+        self.energy_breakdown(state)
     }
 }

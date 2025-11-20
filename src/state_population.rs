@@ -1,5 +1,5 @@
 use crate::energy::EnergyModel;
-use crate::ml::MlHooksHandle;
+use crate::ml::MlModelHandle;
 use crate::schema::{
     DynamicState, EnvironmentSnapshot, ParticleState, Population, Position, SymbolState, Timestamp,
 };
@@ -30,13 +30,13 @@ impl Default for InitStrategyConfig {
 pub fn init_population(
     snapshot_0: &EnvironmentSnapshot,
     t_end: Timestamp,
-    ml_hooks: Option<&MlHooksHandle>,
+    ml_model: Option<&MlModelHandle>,
     energy_model: &EnergyModel,
     n_particles: usize,
     init_strategy: &InitStrategyConfig,
     rng: &mut StdRng,
 ) -> Population {
-    let predictions = ml_hooks.map(|hooks| hooks.predict_next_positions(snapshot_0, &t_end));
+    let predictions = ml_model.map(|model| model.predict_next_positions(snapshot_0, &t_end));
     let mut particles = Vec::with_capacity(n_particles);
     for idx in 0..n_particles {
         let mut symbol_states = HashMap::new();

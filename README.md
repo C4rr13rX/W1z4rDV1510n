@@ -10,6 +10,7 @@ W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futur
 - **Search-integrated proposals** – Occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible. Cached grids eliminate redundant rebuilds.
 - **Goal-aware ML priors** – ML hooks (`None`, `SimpleRules`, `GoalAnchor`) provide initialization hints and contribute to energy scoring. GoalAnchor learns anchor destinations from trajectories.
 - **Configurable randomness** – Deterministic, OS entropy, and (feature-gated) jitter-based RNG providers with per-module seed logging and reproducible runs when deterministic mode is selected.
+- **ML-guided proposals** – Enable `proposal.ml_guided_move_prob` (>0) to let ML backends suggest coordinated moves in the sampler.
 - **Structured logging** – Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, and path diagnostics.
 - **Calibration tooling** – `calibrate_energy` inspects recorded trajectories to recommend energy weights, plus schema validation and summary stats.
 - **Validation scripts** – Python helpers convert chess PGNs and run perpetual accuracy loops to benchmark ML + logging pipelines.
@@ -88,6 +89,7 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
     "swap_move_prob": 0.1,
     "path_based_move_prob": 0.15,
     "global_move_prob": 0.05,
+    "ml_guided_move_prob": 0.05,
     "max_step_size": 1.0,
     "use_parallel_updates": true,
     "adaptive_move_mixing": true

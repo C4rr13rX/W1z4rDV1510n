@@ -1,3 +1,4 @@
+use crate::ml::MlModelHandle;
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, SymbolState, SymbolType};
 use crate::search::{PathResult, SearchModule};
 use parking_lot::Mutex;
@@ -19,6 +20,8 @@ pub struct ProposalConfig {
     pub path_based_move_prob: f64,
     #[serde(default)]
     pub global_move_prob: f64,
+    #[serde(default)]
+    pub ml_guided_move_prob: f64,
     pub max_step_size: f64,
     #[serde(default)]
     pub use_parallel_updates: bool,
@@ -33,6 +36,7 @@ enum MoveType {
     Swap,
     Path,
     Global,
+    MlGuided,
 }
 
 impl Default for ProposalConfig {
@@ -43,6 +47,7 @@ impl Default for ProposalConfig {
             swap_move_prob: 0.05,
             path_based_move_prob: 0.0,
             global_move_prob: 0.0,
+            ml_guided_move_prob: 0.0,
             max_step_size: 0.75,
             use_parallel_updates: false,
             adaptive_move_mixing: true,
@@ -63,14 +68,21 @@ pub struct DefaultProposalKernel {
     config: ProposalConfig,
     rng: Mutex<StdRng>,
     search: Option<SearchModule>,
+    ml_model: Option<MlModelHandle>,
 }
 
 impl DefaultProposalKernel {
-    pub fn new(config: ProposalConfig, seed: u64, search: Option<SearchModule>) -> Self {
+    pub fn new(
+        config: ProposalConfig,
+        seed: u64,
+        search: Option<SearchModule>,
+        ml_model: Option<MlModelHandle>,
+    ) -> Self {
         Self {
             config,
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             search,
+            ml_model,
         }
     }
 }
@@ -100,14 +112,15 @@ impl ProposalKernel for DefaultProposalKernel {
             MoveType::Swap => self.swap_move(proposal, &mut rng),
             MoveType::Path => self.path_move(snapshot_0, proposal, temperature, &mut rng),
             MoveType::Global => self.global_move(proposal, temperature, &mut rng),
+            MoveType::MlGuided => self.ml_guided_move(snapshot_0, &proposal, temperature, &mut rng),
         }
     }
 }
 
 impl DefaultProposalKernel {
     fn choose_move_type(&self, rng: &mut StdRng, temperature: f64) -> MoveType {
-        let (local, group, swap, path, global) = self.adapted_weights(temperature);
-        let total_prob = local + group + swap + path + global;
+        let (local, group, swap, path, global, ml_guided) = self.adapted_weights(temperature);
+        let total_prob = local + group + swap + path + global + ml_guided;
         if total_prob <= f64::EPSILON {
             return MoveType::Local;
         }
@@ -116,6 +129,7 @@ impl DefaultProposalKernel {
         let group_threshold = local_threshold + group;
         let swap_threshold = group_threshold + swap;
         let path_threshold = swap_threshold + path;
+        let ml_threshold = path_threshold + ml_guided;
         if roll < local_threshold {
             MoveType::Local
         } else if roll < group_threshold {
@@ -124,6 +138,8 @@ impl DefaultProposalKernel {
             MoveType::Swap
         } else if roll < path_threshold {
             MoveType::Path
+        } else if roll < ml_threshold {
+            MoveType::MlGuided
         } else {
             MoveType::Global
         }
@@ -145,6 +161,7 @@ impl DefaultProposalKernel {
             MoveType::Swap => self.swap_move_parallel(current_state, rng),
             MoveType::Path => self.path_move_parallel(snapshot_0, current_state, temperature, rng),
             MoveType::Global => self.global_move_parallel(current_state, temperature, rng),
+            MoveType::MlGuided => self.ml_guided_move(snapshot_0, current_state, temperature, rng),
         }
     }
 
@@ -489,7 +506,28 @@ impl DefaultProposalKernel {
         symbol_state.position.z += dz / dist * step;
     }
 
-    fn adapted_weights(&self, temperature: f64) -> (f64, f64, f64, f64, f64) {
+    fn ml_guided_move(
+        &self,
+        snapshot_0: &EnvironmentSnapshot,
+        current_state: &DynamicState,
+        temperature: f64,
+        rng: &mut StdRng,
+    ) -> DynamicState {
+        if let Some(model) = &self.ml_model {
+            if let Some(targets) = model.propose_moves(snapshot_0, current_state, temperature) {
+                let mut proposal = current_state.clone();
+                for (symbol_id, target) in targets {
+                    if let Some(state) = proposal.symbol_states.get_mut(&symbol_id) {
+                        self.advance_symbol(state, &target, temperature);
+                    }
+                }
+                return proposal;
+            }
+        }
+        self.global_move(current_state.clone(), temperature, rng)
+    }
+
+    fn adapted_weights(&self, temperature: f64) -> (f64, f64, f64, f64, f64, f64) {
         if !self.config.adaptive_move_mixing {
             return (
                 self.config.local_move_prob,
@@ -497,6 +535,11 @@ impl DefaultProposalKernel {
                 self.config.swap_move_prob,
                 self.config.path_based_move_prob,
                 self.config.global_move_prob,
+                if self.ml_model.is_some() {
+                    self.config.ml_guided_move_prob
+                } else {
+                    0.0
+                },
             );
         }
         let mut local = self.config.local_move_prob;
@@ -504,9 +547,15 @@ impl DefaultProposalKernel {
         let mut swap = self.config.swap_move_prob;
         let mut path = self.config.path_based_move_prob;
         let mut global = self.config.global_move_prob;
+        let mut ml_guided = if self.ml_model.is_some() {
+            self.config.ml_guided_move_prob
+        } else {
+            0.0
+        };
         if temperature > 0.8 {
             global += 0.2 * temperature;
             local += 0.05 * temperature;
+            ml_guided += 0.1 * temperature;
         }
         if temperature < 0.6 {
             path += 0.4 * (0.6 - temperature);
@@ -514,7 +563,10 @@ impl DefaultProposalKernel {
         if temperature < 0.5 {
             swap *= 0.5;
         }
-        (local, group, swap, path, global)
+        if self.ml_model.is_none() {
+            ml_guided = 0.0;
+        }
+        (local, group, swap, path, global, ml_guided)
     }
 
     fn target_position(
@@ -586,13 +638,13 @@ mod tests {
 
     fn kernel_with_config(mut config: ProposalConfig) -> DefaultProposalKernel {
         config.adaptive_move_mixing = true;
-        DefaultProposalKernel::new(config, 7, None)
+        DefaultProposalKernel::new(config, 7, None, None)
     }
 
     #[test]
     fn adaptive_weights_boost_global_at_high_temperature() {
         let kernel = kernel_with_config(ProposalConfig::default());
-        let (local, _, _, _, global) = kernel.adapted_weights(0.95);
+        let (local, _, _, _, global, _) = kernel.adapted_weights(0.95);
         assert!(global > kernel.config.global_move_prob);
         assert!(local > kernel.config.local_move_prob);
     }
@@ -600,7 +652,8 @@ mod tests {
     #[test]
     fn adaptive_weights_shift_to_path_and_reduce_swap_when_cool() {
         let kernel = kernel_with_config(ProposalConfig::default());
-        let (_, _, swap, path, _) = kernel.adapted_weights(0.3);
+        let (_, _, swap, path, _, ml) = kernel.adapted_weights(0.3);
+        assert!(ml >= 0.0);
         assert!(path > kernel.config.path_based_move_prob);
         assert!(swap < kernel.config.swap_move_prob);
     }
@@ -614,7 +667,7 @@ mod tests {
         config.path_based_move_prob = 0.0;
         config.global_move_prob = 0.0;
         config.adaptive_move_mixing = false;
-        let kernel = DefaultProposalKernel::new(config, 11, None);
+        let kernel = DefaultProposalKernel::new(config, 11, None, None);
         let mut rng = StdRng::seed_from_u64(123);
         assert!(matches!(
             kernel.choose_move_type(&mut rng, 0.5),

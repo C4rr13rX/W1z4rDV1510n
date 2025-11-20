@@ -7,19 +7,28 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub trait MLHooks: Send + Sync {
+pub trait MLModel: Send + Sync {
     fn predict_next_positions(
         &self,
         snapshot_0: &EnvironmentSnapshot,
         t_end: &Timestamp,
     ) -> HashMap<String, Position>;
 
-    fn score_configuration(&self, state: &DynamicState) -> f64;
+    fn score_state(&self, state: &DynamicState) -> f64;
+
+    fn propose_moves(
+        &self,
+        _snapshot_0: &EnvironmentSnapshot,
+        _state: &DynamicState,
+        _temperature: f64,
+    ) -> Option<HashMap<String, Position>> {
+        None
+    }
 
     fn update_from_data(&self, _trajectories: &[Trajectory]) {}
 }
 
-pub type MlHooksHandle = Arc<dyn MLHooks>;
+pub type MlModelHandle = Arc<dyn MLModel>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MLBackendType {
@@ -35,9 +44,9 @@ impl Default for MLBackendType {
     }
 }
 
-pub struct NullMLHooks;
+pub struct NullMLModel;
 
-impl MLHooks for NullMLHooks {
+impl MLModel for NullMLModel {
     fn predict_next_positions(
         &self,
         snapshot_0: &EnvironmentSnapshot,
@@ -50,16 +59,16 @@ impl MLHooks for NullMLHooks {
             .collect()
     }
 
-    fn score_configuration(&self, _state: &DynamicState) -> f64 {
+    fn score_state(&self, _state: &DynamicState) -> f64 {
         0.0
     }
 }
 
-pub struct SimpleRulesMLHooks {
+pub struct SimpleRulesMLModel {
     rng: Mutex<StdRng>,
 }
 
-impl SimpleRulesMLHooks {
+impl SimpleRulesMLModel {
     pub fn new(seed: u64) -> Self {
         Self {
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
@@ -67,7 +76,7 @@ impl SimpleRulesMLHooks {
     }
 }
 
-impl MLHooks for SimpleRulesMLHooks {
+impl MLModel for SimpleRulesMLModel {
     fn predict_next_positions(
         &self,
         snapshot_0: &EnvironmentSnapshot,
@@ -96,7 +105,7 @@ impl MLHooks for SimpleRulesMLHooks {
             .collect()
     }
 
-    fn score_configuration(&self, state: &DynamicState) -> f64 {
+    fn score_state(&self, state: &DynamicState) -> f64 {
         let mut score = 0.0;
         let mut prev_pos: Option<Position> = None;
         for symbol_state in state.symbol_states.values() {
@@ -109,28 +118,37 @@ impl MLHooks for SimpleRulesMLHooks {
         }
         score
     }
-}
 
-pub fn create_ml_hooks(backend: MLBackendType, seed: u64) -> MlHooksHandle {
-    match backend {
-        MLBackendType::None => Arc::new(NullMLHooks),
-        MLBackendType::SimpleRules => Arc::new(SimpleRulesMLHooks::new(seed)),
-        MLBackendType::GoalAnchor => Arc::new(GoalAnchorMLHooks::new(seed)),
-        MLBackendType::Custom => Arc::new(NullMLHooks),
+    fn propose_moves(
+        &self,
+        snapshot_0: &EnvironmentSnapshot,
+        state: &DynamicState,
+        _temperature: f64,
+    ) -> Option<HashMap<String, Position>> {
+        Some(self.predict_next_positions(snapshot_0, &state.timestamp))
     }
 }
 
-pub struct GoalAnchorMLHooks {
+pub fn create_ml_model(backend: MLBackendType, seed: u64) -> MlModelHandle {
+    match backend {
+        MLBackendType::None => Arc::new(NullMLModel),
+        MLBackendType::SimpleRules => Arc::new(SimpleRulesMLModel::new(seed)),
+        MLBackendType::GoalAnchor => Arc::new(GoalAnchorMLModel::new(seed)),
+        MLBackendType::Custom => Arc::new(NullMLModel),
+    }
+}
+
+pub struct GoalAnchorMLModel {
     anchors: RwLock<HashMap<String, GoalStats>>,
-    fallback: SimpleRulesMLHooks,
+    fallback: SimpleRulesMLModel,
     horizon_seconds: f64,
 }
 
-impl GoalAnchorMLHooks {
+impl GoalAnchorMLModel {
     pub fn new(seed: u64) -> Self {
         Self {
             anchors: RwLock::new(HashMap::new()),
-            fallback: SimpleRulesMLHooks::new(seed + 17),
+            fallback: SimpleRulesMLModel::new(seed + 17),
             horizon_seconds: 5.0,
         }
     }
@@ -140,7 +158,7 @@ impl GoalAnchorMLHooks {
     }
 }
 
-impl MLHooks for GoalAnchorMLHooks {
+impl MLModel for GoalAnchorMLModel {
     fn predict_next_positions(
         &self,
         snapshot_0: &EnvironmentSnapshot,
@@ -167,7 +185,7 @@ impl MLHooks for GoalAnchorMLHooks {
             .collect()
     }
 
-    fn score_configuration(&self, state: &DynamicState) -> f64 {
+    fn score_state(&self, state: &DynamicState) -> f64 {
         let anchors = self.anchors.read();
         let mut score = 0.0;
         for (symbol_id, symbol_state) in state.symbol_states.iter() {
@@ -179,6 +197,15 @@ impl MLHooks for GoalAnchorMLHooks {
             }
         }
         score
+    }
+
+    fn propose_moves(
+        &self,
+        snapshot_0: &EnvironmentSnapshot,
+        state: &DynamicState,
+        _temperature: f64,
+    ) -> Option<HashMap<String, Position>> {
+        Some(self.predict_next_positions(snapshot_0, &state.timestamp))
     }
 
     fn update_from_data(&self, trajectories: &[Trajectory]) {
@@ -233,7 +260,7 @@ mod tests {
 
     #[test]
     fn goal_anchor_learns_and_scores_zero_at_anchor() {
-        let hooks = GoalAnchorMLHooks::new(9);
+        let hooks = GoalAnchorMLModel::new(9);
         let mut last_state = DynamicState::default();
         last_state.symbol_states.insert(
             "p1".into(),
@@ -255,14 +282,14 @@ mod tests {
         assert!((anchor.x - 4.0).abs() < 1e-6 && (anchor.y - 6.0).abs() < 1e-6);
 
         assert!(
-            hooks.score_configuration(&last_state) < 1e-6,
+            hooks.score_state(&last_state) < 1e-6,
             "state at anchor should score ~0"
         );
     }
 
     #[test]
     fn goal_anchor_predictions_follow_learned_target() {
-        let hooks = GoalAnchorMLHooks::new(1);
+        let hooks = GoalAnchorMLModel::new(1);
         let mut last_state = DynamicState::default();
         last_state.symbol_states.insert(
             "p1".into(),

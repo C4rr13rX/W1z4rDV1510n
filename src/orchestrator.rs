@@ -3,7 +3,7 @@ use crate::config::{OutputFormat, RunConfig};
 use crate::energy::EnergyModel;
 use crate::hardware::create_hardware_backend;
 use crate::logging::init_logging;
-use crate::ml::create_ml_hooks;
+use crate::ml::create_ml_model;
 use crate::proposal::DefaultProposalKernel;
 use crate::random::create_random_provider;
 use crate::results::{Results, analyze_results};
@@ -48,25 +48,25 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         module = "orchestrator_rng",
         seed = orchestrator_seed
     );
-    let ml_seed = random_provider.next_seed("ml_hooks");
+    let ml_seed = random_provider.next_seed("ml_model");
     debug!(
         target: "w1z4rdv1510n::random",
-        module = "ml_hooks",
+        module = "ml_model",
         seed = ml_seed
     );
-    let ml_hooks = create_ml_hooks(config.ml_backend.clone(), ml_seed);
+    let ml_model = create_ml_model(config.ml_backend.clone(), ml_seed);
     let search_module = SearchModule::new(config.search.clone());
     let energy_model = EnergyModel::new(
         Arc::clone(&snapshot),
         config.energy.clone(),
-        Some(ml_hooks.clone()),
+        Some(ml_model.clone()),
         Some(search_module.clone()),
         config.t_end,
     );
     let population = init_population(
         snapshot.as_ref(),
         config.t_end,
-        Some(&ml_hooks),
+        Some(&ml_model),
         &energy_model,
         config.n_particles,
         &config.init_strategy,
@@ -89,6 +89,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         config.proposal.clone(),
         kernel_seed,
         Some(search_module.clone()),
+        Some(ml_model.clone()),
     );
     debug!(
         target: "w1z4rdv1510n::random",
