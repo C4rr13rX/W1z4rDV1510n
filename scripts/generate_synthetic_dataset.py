@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Synthetic dataset generator for SimFutures.
+Synthetic dataset generator for W1z4rDV1510n.
 
 Creates:
   - Environment snapshot with hundreds of symbols (people, objects, walls, exits)

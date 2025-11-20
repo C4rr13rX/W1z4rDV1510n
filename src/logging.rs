@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use tracing::info;
 use tracing_appender::{non_blocking, non_blocking::WorkerGuard};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 static LOGGING_INIT: OnceLock<()> = OnceLock::new();
 static LOG_GUARD: OnceLock<Option<WorkerGuard>> = OnceLock::new();
@@ -65,7 +65,7 @@ pub fn init_logging(config: &LoggingConfig) -> Result<()> {
     LOG_GUARD.set(guard).ok();
 
     info!(
-        target: "simfutures::logging",
+        target: "w1z4rdv1510n::logging",
         level = level.as_str(),
         json = emit_json,
         log_path = ?config.log_path,

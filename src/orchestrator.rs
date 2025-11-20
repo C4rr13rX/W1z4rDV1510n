@@ -10,8 +10,8 @@ use crate::schema::EnvironmentSnapshot;
 use crate::search::SearchModule;
 use crate::state_population::init_population;
 use anyhow::Context;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::fs;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -20,7 +20,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
     init_logging(&config.logging)?;
     config.validate()?;
     info!(
-        target: "simfutures::orchestrator",
+        target: "w1z4rdv1510n::orchestrator",
         n_particles = config.n_particles,
         iterations = config.schedule.n_iterations,
         hardware = ?config.hardware_backend,
@@ -29,7 +29,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
     );
     let snapshot = Arc::new(load_snapshot(&config)?);
     info!(
-        target: "simfutures::orchestrator",
+        target: "w1z4rdv1510n::orchestrator",
         symbols = snapshot.symbols.len(),
         timestamp = snapshot.timestamp.unix,
         "snapshot loaded"
@@ -59,7 +59,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         .map(|p| p.energy)
         .fold(f64::INFINITY, f64::min);
     debug!(
-        target: "simfutures::orchestrator",
+        target: "w1z4rdv1510n::orchestrator",
         n_particles = population.particles.len(),
         min_energy = initial_min_energy,
         "population initialized"
@@ -91,7 +91,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         snapshot.as_ref(),
     );
     info!(
-        target: "simfutures::orchestrator",
+        target: "w1z4rdv1510n::orchestrator",
         best_energy = results.best_energy,
         best_symbols = results.best_state.symbol_states.len(),
         "annealing run complete"
@@ -115,7 +115,7 @@ fn maybe_persist_results(results: &Results, config: &RunConfig) -> anyhow::Resul
             OutputFormat::Msgpack | OutputFormat::Custom => serde_json::to_string(results)?,
         };
         info!(
-            target: "simfutures::results",
+            target: "w1z4rdv1510n::results",
             path = ?path,
             format = ?config.output.format,
             "writing results"

@@ -1,11 +1,11 @@
 use clap::Parser;
-use simfutures::calibration::{calibrate_from_trajectories, EnergyCalibration};
-use simfutures::config::{EnergyConfig, LoggingConfig};
-use simfutures::logging::init_logging;
-use simfutures::schema::Trajectory;
 use std::fs;
 use std::path::PathBuf;
 use tracing::info;
+use w1z4rdv1510n::calibration::{EnergyCalibration, calibrate_from_trajectories};
+use w1z4rdv1510n::config::{EnergyConfig, LoggingConfig};
+use w1z4rdv1510n::logging::init_logging;
+use w1z4rdv1510n::schema::Trajectory;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(output_path) = &args.output {
         fs::write(output_path, &json)?;
         info!(
-            target: "simfutures::calibration",
+            target: "w1z4rdv1510n::calibration",
             path = ?output_path,
             trajectories = trajectories.len(),
             "wrote calibrated energy config"
@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         println!("{json}");
         info!(
-            target: "simfutures::calibration",
+            target: "w1z4rdv1510n::calibration",
             trajectories = trajectories.len(),
             "printed calibrated energy config to stdout"
         );

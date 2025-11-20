@@ -193,14 +193,14 @@ pub fn create_hardware_backend(kind: HardwareBackendType, seed: u64) -> Hardware
     };
     if matches!(resolved, HardwareBackendType::Gpu) && !profile.has_gpu {
         warn!(
-            target: "simfutures::hardware",
+            target: "w1z4rdv1510n::hardware",
             "GPU backend requested but no GPU detected; falling back to MultiThreadedCpu"
         );
         resolved = HardwareBackendType::MultiThreadedCpu;
     }
     if matches!(resolved, HardwareBackendType::Distributed) && !profile.cluster_hint {
         warn!(
-            target: "simfutures::hardware",
+            target: "w1z4rdv1510n::hardware",
             "Distributed backend requested without cluster hints; falling back to MultiThreadedCpu"
         );
         resolved = HardwareBackendType::MultiThreadedCpu;
@@ -295,7 +295,7 @@ impl HardwareProfile {
             cluster_hint,
         };
         debug!(
-            target: "simfutures::hardware",
+            target: "w1z4rdv1510n::hardware",
             cpu_cores = profile.cpu_cores,
             memory_gb = profile.total_memory_gb,
             has_gpu = profile.has_gpu,
@@ -326,7 +326,7 @@ fn read_env_bool(key: &str) -> bool {
 
 fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) {
     info!(
-        target: "simfutures::hardware",
+        target: "w1z4rdv1510n::hardware",
         backend = ?kind,
         cpu_cores = profile.cpu_cores,
         memory_gb = profile.total_memory_gb,
@@ -338,7 +338,7 @@ fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) 
         HardwareBackendType::Gpu => {
             if !profile.has_gpu {
                 warn!(
-                    target: "simfutures::hardware",
+                    target: "w1z4rdv1510n::hardware",
                     "GPU backend selected but no GPU detected; ensure SIMFUTURES_HAS_GPU=1 if this is intentional"
                 );
             }
@@ -346,7 +346,7 @@ fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) 
         HardwareBackendType::Distributed => {
             if !profile.cluster_hint {
                 warn!(
-                    target: "simfutures::hardware",
+                    target: "w1z4rdv1510n::hardware",
                     "Distributed backend selected without cluster hints; set SIMFUTURES_DISTRIBUTED=1 or run under a scheduler"
                 );
             }
@@ -383,10 +383,7 @@ mod tests {
     #[test]
     fn auto_prefers_gpu_when_available() {
         let p = profile(8, 16.0, true, false);
-        assert!(matches!(
-            recommend_backend(&p),
-            HardwareBackendType::Gpu
-        ));
+        assert!(matches!(recommend_backend(&p), HardwareBackendType::Gpu));
     }
 
     #[test]

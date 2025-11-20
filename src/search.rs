@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::{hash_map::DefaultHasher, BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use tracing::debug;
 
@@ -84,7 +84,7 @@ impl SearchModule {
     pub fn invalidate_cache(&self) {
         let mut guard = self.cached.lock();
         *guard = None;
-        debug!(target: "simfutures::search", "invalidated occupancy-grid cache");
+        debug!(target: "w1z4rdv1510n::search", "invalidated occupancy-grid cache");
     }
 
     pub fn compute_paths(
@@ -309,7 +309,7 @@ impl SearchModule {
             if let Some(entry) = cache_guard.as_ref() {
                 if entry.signature == signature && entry.grid.signature == signature {
                     debug!(
-                        target: "simfutures::search",
+                        target: "w1z4rdv1510n::search",
                         width_cells = entry.grid.width_cells,
                         height_cells = entry.grid.height_cells,
                         "reusing cached occupancy grid"
@@ -326,7 +326,7 @@ impl SearchModule {
         });
         let blocked_cells = grid.blocked.iter().filter(|cell| **cell).count();
         debug!(
-            target: "simfutures::search",
+            target: "w1z4rdv1510n::search",
             width_cells = grid.width_cells,
             height_cells = grid.height_cells,
             blocked_cells,
@@ -1007,10 +1007,21 @@ mod tests {
             timestamp: crate::schema::Timestamp { unix: 0 },
             bounds: bounds(4.0, 4.0),
             symbols: vec![
-                person("agent", Position { x: 0.5, y: 0.5, z: 0.0 }),
+                person(
+                    "agent",
+                    Position {
+                        x: 0.5,
+                        y: 0.5,
+                        z: 0.0,
+                    },
+                ),
                 wall(
                     "wall",
-                    Position { x: 2.0, y: 2.0, z: 0.0 },
+                    Position {
+                        x: 2.0,
+                        y: 2.0,
+                        z: 0.0,
+                    },
                     2.0,
                     2.0,
                 ),
@@ -1039,7 +1050,10 @@ mod tests {
         let repaired = state.symbol_states.get("agent").unwrap().position;
         let grid = module.grid_for_snapshot(&snapshot);
         let cell = grid.position_to_cell(&repaired).expect("valid cell");
-        assert!(!grid.is_blocked(cell), "agent should no longer be inside wall");
+        assert!(
+            !grid.is_blocked(cell),
+            "agent should no longer be inside wall"
+        );
     }
 
     #[test]
@@ -1048,8 +1062,22 @@ mod tests {
             timestamp: crate::schema::Timestamp { unix: 0 },
             bounds: bounds(3.0, 3.0),
             symbols: vec![
-                person("a", Position { x: 0.5, y: 0.5, z: 0.0 }),
-                person("b", Position { x: 1.5, y: 0.5, z: 0.0 }),
+                person(
+                    "a",
+                    Position {
+                        x: 0.5,
+                        y: 0.5,
+                        z: 0.0,
+                    },
+                ),
+                person(
+                    "b",
+                    Position {
+                        x: 1.5,
+                        y: 0.5,
+                        z: 0.0,
+                    },
+                ),
             ],
             metadata: Properties::new(),
         };

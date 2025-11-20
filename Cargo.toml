@@ -1,10 +1,10 @@
 [package]
-name = "simfutures"
+name = "w1z4rdv1510n"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "simfutures"
+name = "w1z4rdv1510n"
 path = "src/lib.rs"
 
 [[bin]]

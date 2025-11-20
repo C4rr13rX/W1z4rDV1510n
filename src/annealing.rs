@@ -55,7 +55,7 @@ pub fn anneal(
             resample_population(&mut population, rng);
             clone_and_mutate(&mut population, rng, resample_config.mutation_rate);
             debug!(
-                target: "simfutures::annealing",
+                target: "w1z4rdv1510n::annealing",
                 iteration,
                 ess_ratio,
                 "resampled population due to ESS drop"
@@ -70,7 +70,7 @@ pub fn anneal(
         energy_trace.push(min_energy);
         if iteration % log_interval == 0 || iteration + 1 == schedule.n_iterations {
             info!(
-                target: "simfutures::annealing",
+                target: "w1z4rdv1510n::annealing",
                 iteration,
                 temperature,
                 min_energy,

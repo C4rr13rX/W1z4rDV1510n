@@ -1,8 +1,8 @@
-use simfutures::config::RunConfig;
-use simfutures::run_with_config;
+use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
-use clap::Parser;
+use w1z4rdv1510n::config::RunConfig;
+use w1z4rdv1510n::run_with_config;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Parallel future simulation CLI")]
@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
         results.best_state.symbol_states.len()
     );
     info!(
-        target: "simfutures::cli",
+        target: "w1z4rdv1510n::cli",
         best_energy = results.best_energy,
         best_symbols = results.best_state.symbol_states.len(),
         "run completed"

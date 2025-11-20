@@ -1,12 +1,12 @@
-# SimFutures
+# W1z4rDV1510n
 
-SimFutures is a Rust-first annealing engine for simulating many parallel futures from a symbolic snapshot. It runs adaptive proposal kernels, search-aware constraints, and configurable energy functions to estimate the most likely end-state at `t_end`, while logging rich diagnostics for downstream analysis.
+W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futures from a symbolic snapshot. It runs adaptive proposal kernels, search-aware constraints, and configurable energy functions to estimate the most likely end-state at `t_end`, while logging rich diagnostics for downstream analysis.
 
 ---
 
 ## Key Features
 
-- **Automatic hardware scaling** – `HardwareBackendType::Auto` inspects CPU cores, memory, GPU hints, and cluster schedulers to pick CPU, multi-threaded CPU, or distributed backends. Overrides are available via config or env vars (`SIMFUTURES_HAS_GPU`, `SIMFUTURES_DISTRIBUTED`).
+- **Automatic hardware scaling** – `HardwareBackendType::Auto` inspects CPU cores, memory, GPU hints, and cluster schedulers to pick CPU, multi-threaded CPU, or distributed backends. Overrides are available via config or env vars (`W1z4rDV1510n_HAS_GPU`, `W1z4rDV1510n_DISTRIBUTED`).
 - **Search-integrated proposals** – Occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible. Cached grids eliminate redundant rebuilds.
 - **Goal-aware ML priors** – ML hooks (`None`, `SimpleRules`, `GoalAnchor`) provide initialization hints and contribute to energy scoring. GoalAnchor learns anchor destinations from trajectories.
 - **Structured logging** – Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, and path diagnostics.
@@ -116,7 +116,7 @@ Output:
 
 ### Logging Options
 
-- `RunConfig.logging.log_level` – default level (override with `SIMFUTURES_LOG=debug`).
+- `RunConfig.logging.log_level` – default level (override with `W1z4rDV1510n_LOG=debug`).
 - `logging.json` – `true` for JSON logs to stdout/file; `false` for compact text.
 - `logging.log_path` – optional JSONL file target; directories auto-created.
 - `HardwareBackendType::Auto` writes detection + fallback info at INFO/WARN.
@@ -140,8 +140,8 @@ Use these to flag actors teleported out of walls or lacking a viable path.
 ### Hardware Overrides
 
 - Set `hardware_backend` in config to `Cpu`, `MultiThreadedCpu`, `Gpu`, etc.
-- `SIMFUTURES_HAS_GPU=1` → Auto backend may choose GPU even without CUDA env vars.
-- `SIMFUTURES_DISTRIBUTED=1` or `SLURM_JOB_ID` present → Auto prefers distributed backend.
+- `W1z4rDV1510n_HAS_GPU=1` → Auto backend may choose GPU even without CUDA env vars.
+- `W1z4rDV1510n_DISTRIBUTED=1` or `SLURM_JOB_ID` present → Auto prefers distributed backend.
 
 ---
 
