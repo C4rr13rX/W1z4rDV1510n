@@ -38,7 +38,10 @@
   },
   "ml_backend": "SIMPLE_RULES",
   "hardware_backend": "Cpu",
-  "random_seed": 42,
+  "random": {
+    "provider": "DETERMINISTIC",
+    "seed": 42
+  },
   "output": {
     "save_best_state": true,
     "save_population_summary": true,

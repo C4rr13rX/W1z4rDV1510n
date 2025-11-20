@@ -7,6 +7,7 @@ pub mod logging;
 pub mod ml;
 pub mod orchestrator;
 pub mod proposal;
+pub mod random;
 pub mod results;
 pub mod schema;
 pub mod search;

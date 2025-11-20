@@ -333,7 +333,7 @@ def write_run_config(snapshot_path: Path, args: argparse.Namespace) -> Path:
         "search": {"cell_size": args.cell_size},
         "ml_backend": "SIMPLE_RULES",
         "hardware_backend": "Cpu",
-        "random_seed": args.seed,
+        "random": {"provider": "DETERMINISTIC", "seed": args.seed},
         "output": {"save_best_state": True, "save_population_summary": True, "output_path": "logs/latest_results.json"},
     }
     path = snapshot_path.parent / "synthetic_run_config.json"

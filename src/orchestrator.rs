@@ -5,6 +5,7 @@ use crate::hardware::create_hardware_backend;
 use crate::logging::init_logging;
 use crate::ml::create_ml_hooks;
 use crate::proposal::DefaultProposalKernel;
+use crate::random::create_random_provider;
 use crate::results::{Results, analyze_results};
 use crate::schema::EnvironmentSnapshot;
 use crate::search::SearchModule;
@@ -19,6 +20,12 @@ use tracing::{debug, info};
 pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
     init_logging(&config.logging)?;
     config.validate()?;
+    let random_provider = create_random_provider(&config.random, config.random_seed)?;
+    info!(
+        target: "w1z4rdv1510n::random",
+        provider = ?random_provider.descriptor(),
+        "random provider initialized"
+    );
     info!(
         target: "w1z4rdv1510n::orchestrator",
         n_particles = config.n_particles,
@@ -34,8 +41,20 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         timestamp = snapshot.timestamp.unix,
         "snapshot loaded"
     );
-    let mut rng = StdRng::seed_from_u64(config.random_seed);
-    let ml_hooks = create_ml_hooks(config.ml_backend.clone(), config.random_seed);
+    let orchestrator_seed = random_provider.next_seed("orchestrator_rng");
+    let mut rng = StdRng::seed_from_u64(orchestrator_seed);
+    debug!(
+        target: "w1z4rdv1510n::random",
+        module = "orchestrator_rng",
+        seed = orchestrator_seed
+    );
+    let ml_seed = random_provider.next_seed("ml_hooks");
+    debug!(
+        target: "w1z4rdv1510n::random",
+        module = "ml_hooks",
+        seed = ml_seed
+    );
+    let ml_hooks = create_ml_hooks(config.ml_backend.clone(), ml_seed);
     let search_module = SearchModule::new(config.search.clone());
     let energy_model = EnergyModel::new(
         Arc::clone(&snapshot),
@@ -65,13 +84,24 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         "population initialized"
     );
 
+    let kernel_seed = random_provider.next_seed("proposal_kernel");
     let kernel = DefaultProposalKernel::new(
         config.proposal.clone(),
-        config.random_seed + 1,
+        kernel_seed,
         Some(search_module.clone()),
     );
-    let hardware_backend =
-        create_hardware_backend(config.hardware_backend.clone(), config.random_seed);
+    debug!(
+        target: "w1z4rdv1510n::random",
+        module = "proposal_kernel",
+        seed = kernel_seed
+    );
+    let hardware_seed = random_provider.next_seed("hardware_backend");
+    let hardware_backend = create_hardware_backend(config.hardware_backend.clone(), hardware_seed);
+    debug!(
+        target: "w1z4rdv1510n::random",
+        module = "hardware_backend",
+        seed = hardware_seed
+    );
     let (population, energy_trace) = anneal(
         population,
         snapshot.as_ref(),

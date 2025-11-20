@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "calibrate_energy"
 path = "src/bin/calibrate_energy.rs"
 
+[features]
+default = []
+experimental-hw = []
+
 [dependencies]
 num_cpus = "1.16"
 sysinfo = "0.30"
@@ -29,4 +33,5 @@ rayon = "1.10"
 tracing = { version = "0.1", features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
+blake2 = "0.10"
 

@@ -9,6 +9,7 @@ W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futur
 - **Automatic hardware scaling** – `HardwareBackendType::Auto` inspects CPU cores, memory, GPU hints, and cluster schedulers to pick CPU, multi-threaded CPU, or distributed backends. Overrides are available via config or env vars (`W1z4rDV1510n_HAS_GPU`, `W1z4rDV1510n_DISTRIBUTED`).
 - **Search-integrated proposals** – Occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible. Cached grids eliminate redundant rebuilds.
 - **Goal-aware ML priors** – ML hooks (`None`, `SimpleRules`, `GoalAnchor`) provide initialization hints and contribute to energy scoring. GoalAnchor learns anchor destinations from trajectories.
+- **Configurable randomness** – Deterministic, OS entropy, and (feature-gated) jitter-based RNG providers with per-module seed logging and reproducible runs when deterministic mode is selected.
 - **Structured logging** – Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, and path diagnostics.
 - **Calibration tooling** – `calibrate_energy` inspects recorded trajectories to recommend energy weights, plus schema validation and summary stats.
 - **Validation scripts** – Python helpers convert chess PGNs and run perpetual accuracy loops to benchmark ML + logging pipelines.
@@ -98,7 +99,7 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
   "hardware_backend": "Auto",
   "logging": { "log_level": "INFO", "json": true, "log_path": "logs/run.jsonl" },
   "output": { "save_best_state": true, "save_population_summary": true, "output_path": "logs/results.json", "format": "Json" },
-  "random_seed": 1337
+  "random": { "provider": "DETERMINISTIC", "seed": 1337 }
 }
 ```
 
@@ -116,10 +117,11 @@ Output:
 
 ### Logging Options
 
-- `RunConfig.logging.log_level` – default level (override with `W1z4rDV1510n_LOG=debug`).
-- `logging.json` – `true` for JSON logs to stdout/file; `false` for compact text.
-- `logging.log_path` – optional JSONL file target; directories auto-created.
+- `RunConfig.logging.log_level` - default level (override with `W1z4rDV1510n_LOG=debug` or `SIMFUTURES_LOG=debug` for backward compatibility).
+- `logging.json` - `true` for JSON logs to stdout/file; `false` for compact text.
+- `logging.log_path` - optional JSONL file target; directories auto-created.
 - `HardwareBackendType::Auto` writes detection + fallback info at INFO/WARN.
+- `random.provider` - choose `DETERMINISTIC` (reproducible with `seed`), `OS_ENTROPY` (draws from OS RNG), or `JITTER_EXPERIMENTAL` (feature-gated physical jitter). Major module seeds are logged at DEBUG level.
 
 ### Path Diagnostics
 

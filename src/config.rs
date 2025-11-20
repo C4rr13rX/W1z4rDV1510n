@@ -1,6 +1,7 @@
 use crate::hardware::HardwareBackendType;
 use crate::ml::MLBackendType;
 use crate::proposal::ProposalConfig;
+use crate::random::RandomConfig;
 use crate::schema::Timestamp;
 use crate::search::SearchConfig;
 use crate::state_population::InitStrategyConfig;
@@ -32,6 +33,8 @@ pub struct RunConfig {
     pub hardware_backend: HardwareBackendType,
     #[serde(default = "default_seed")]
     pub random_seed: u64,
+    #[serde(default)]
+    pub random: RandomConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
