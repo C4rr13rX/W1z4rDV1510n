@@ -68,6 +68,7 @@ This prints the best energy and writes `results.json` when configured.
 - ? Results now capture per-symbol path diagnostics (feasibility, path length, constraint violations) for the best state, giving downstream consumers a richer view into path feasibility.
 - ? Proposal kernel now mixes local/group/swap/path/global moves adaptively based on temperature, improving diversity at high temperatures and focusing on path-following as the search cools.
 - ? ML backend can ingest historical trajectories (via the RNN backend option) to learn per-symbol goal anchors, yielding better position predictions and plausibility scoring than the simple heuristic fallback.
+    - Set `ml_backend` to `GOAL_ANCHOR` (or leave `RNN/TRANSFORMER/GNN` with `SIMFUTURES_ML_ONNX` unset) to use the trajectory-driven goal-anchoring prior.
 
 ## Synthetic timeline dataset
 

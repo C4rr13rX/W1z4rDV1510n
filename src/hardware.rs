@@ -185,11 +185,23 @@ pub type HardwareBackendHandle = Arc<dyn HardwareBackend>;
 
 pub fn create_hardware_backend(kind: HardwareBackendType, seed: u64) -> HardwareBackendHandle {
     let profile = HardwareProfile::detect();
-    let resolved = if let HardwareBackendType::Auto = kind {
+    let mut resolved = if let HardwareBackendType::Auto = kind {
         recommend_backend(&profile)
     } else {
         kind
     };
+    if matches!(resolved, HardwareBackendType::Gpu) && !profile.has_gpu {
+        println!(
+            "[hardware][warn] GPU backend requested but no GPU detected; falling back to MultiThreadedCpu."
+        );
+        resolved = HardwareBackendType::MultiThreadedCpu;
+    }
+    if matches!(resolved, HardwareBackendType::Distributed) && !profile.cluster_hint {
+        println!(
+            "[hardware][warn] Distributed backend requested without cluster hints; falling back to MultiThreadedCpu."
+        );
+        resolved = HardwareBackendType::MultiThreadedCpu;
+    }
     log_backend_selection(&resolved, &profile);
     match resolved {
         HardwareBackendType::Auto => unreachable!("resolved backend should not be Auto"),

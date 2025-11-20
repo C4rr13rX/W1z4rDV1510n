@@ -25,6 +25,7 @@ pub type MlHooksHandle = Arc<dyn MLHooks>;
 pub enum MLBackendType {
     None,
     SimpleRules,
+    GoalAnchor,
     Rnn,
     Transformer,
     Gnn,
@@ -117,20 +118,32 @@ pub fn create_ml_hooks(backend: MLBackendType, seed: u64) -> MlHooksHandle {
     match backend {
         MLBackendType::None => Arc::new(NullMLHooks),
         MLBackendType::SimpleRules => Arc::new(SimpleRulesMLHooks::new(seed)),
-        MLBackendType::Rnn
-        | MLBackendType::Transformer
-        | MLBackendType::Gnn => Arc::new(HistoryAwareMLHooks::new(seed)),
+        MLBackendType::GoalAnchor => Arc::new(GoalAnchorMLHooks::new(seed)),
+        MLBackendType::Rnn | MLBackendType::Transformer | MLBackendType::Gnn => {
+            if let Ok(path) = std::env::var("SIMFUTURES_ML_ONNX") {
+                println!(
+                    "[ml][warn] ONNX model loading not yet implemented (requested {:?} @ {}). Falling back to GoalAnchor backend.",
+                    backend, path
+                );
+            } else {
+                println!(
+                    "[ml][warn] {:?} backend requested without SIMFUTURES_ML_ONNX; falling back to GoalAnchor.",
+                    backend
+                );
+            }
+            Arc::new(GoalAnchorMLHooks::new(seed))
+        }
         MLBackendType::Custom => Arc::new(NullMLHooks),
     }
 }
 
-pub struct HistoryAwareMLHooks {
+pub struct GoalAnchorMLHooks {
     anchors: RwLock<HashMap<String, GoalStats>>,
     fallback: SimpleRulesMLHooks,
     horizon_seconds: f64,
 }
 
-impl HistoryAwareMLHooks {
+impl GoalAnchorMLHooks {
     pub fn new(seed: u64) -> Self {
         Self {
             anchors: RwLock::new(HashMap::new()),
@@ -144,7 +157,7 @@ impl HistoryAwareMLHooks {
     }
 }
 
-impl MLHooks for HistoryAwareMLHooks {
+impl MLHooks for GoalAnchorMLHooks {
     fn predict_next_positions(
         &self,
         snapshot_0: &EnvironmentSnapshot,
