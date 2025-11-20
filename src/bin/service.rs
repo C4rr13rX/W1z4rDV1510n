@@ -19,6 +19,9 @@ struct PredictRequest {
 struct Telemetry {
     random_provider: RandomProviderDescriptor,
     hardware_backend: HardwareBackendType,
+    energy_trace: Vec<f64>,
+    acceptance_ratio: Option<f64>,
+    best_energy: f64,
 }
 
 #[derive(Serialize)]
@@ -68,10 +71,14 @@ async fn predict_handler(
             results,
             random_provider,
             hardware_backend,
+            acceptance_ratio,
         }) => {
             let telemetry = Telemetry {
                 random_provider,
                 hardware_backend,
+                energy_trace: results.diagnostics.energy_trace.clone(),
+                acceptance_ratio,
+                best_energy: results.best_energy,
             };
             Ok(Json(PredictResponse { results, telemetry }))
         }

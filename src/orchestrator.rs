@@ -21,6 +21,7 @@ pub struct RunOutcome {
     pub results: Results,
     pub random_provider: RandomProviderDescriptor,
     pub hardware_backend: HardwareBackendType,
+    pub acceptance_ratio: Option<f64>,
 }
 
 pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
@@ -123,7 +124,7 @@ pub fn run_with_snapshot(
         module = "hardware_backend",
         seed = hardware_seed
     );
-    let (population, energy_trace) = anneal(
+    let (population, energy_trace, acceptance_trace) = anneal(
         population,
         snapshot.as_ref(),
         &energy_model,
@@ -152,6 +153,7 @@ pub fn run_with_snapshot(
         results,
         random_provider: random_descriptor,
         hardware_backend: resolved_backend,
+        acceptance_ratio: acceptance_trace.last().copied(),
     })
 }
 
@@ -177,6 +179,21 @@ fn maybe_persist_results(results: &Results, config: &RunConfig) -> anyhow::Resul
         );
         fs::write(path, serialized)
             .with_context(|| format!("Failed to write results to {:?}", path))?;
+    }
+    if let Some(path) = &config.output.summary_path {
+        let summary = serde_json::json!({
+            "best_energy": results.best_energy,
+            "best_symbol_count": results.best_state.symbol_states.len(),
+            "energy_trace": results.diagnostics.energy_trace,
+            "diversity_metric": results.diagnostics.diversity_metric,
+        });
+        info!(
+            target: "w1z4rdv1510n::results",
+            path = ?path,
+            "writing summary"
+        );
+        fs::write(path, serde_json::to_string_pretty(&summary)?)
+            .with_context(|| format!("Failed to write summary to {:?}", path))?;
     }
     Ok(())
 }

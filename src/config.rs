@@ -222,6 +222,8 @@ pub struct LoggingConfig {
     pub log_path: Option<PathBuf>,
     #[serde(default)]
     pub json: bool,
+    #[serde(default)]
+    pub capture_metrics: bool,
 }
 
 impl LoggingConfig {
@@ -236,6 +238,7 @@ impl Default for LoggingConfig {
             log_level: Self::default_level(),
             log_path: None,
             json: false,
+            capture_metrics: false,
         }
     }
 }
@@ -252,6 +255,8 @@ pub struct OutputConfig {
     pub format: OutputFormat,
     #[serde(default)]
     pub output_path: Option<PathBuf>,
+    #[serde(default)]
+    pub summary_path: Option<PathBuf>,
 }
 
 impl OutputConfig {
@@ -268,6 +273,7 @@ impl Default for OutputConfig {
             save_trajectories: false,
             format: Self::default_format(),
             output_path: None,
+            summary_path: None,
         }
     }
 }
