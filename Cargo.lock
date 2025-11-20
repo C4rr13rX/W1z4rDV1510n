@@ -1152,6 +1152,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "w1z4rdv1510n-experimental"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "sysinfo",
+ "tracing",
+ "w1z4rdv1510n",
+]
+
+[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,11 @@
+[package]
+name = "w1z4rdv1510n-experimental"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+parking_lot = "0.12"
+sysinfo = "0.30"
+w1z4rdv1510n = { path = "../core" }
+tracing = { version = "0.1", features = ["std"] }

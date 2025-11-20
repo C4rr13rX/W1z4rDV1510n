@@ -20,30 +20,12 @@ W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futur
 
 ## Repository Layout
 
-```
-├── Cargo.toml / Cargo.lock
-├── README.md
-├── src/
-│   ├── annealing.rs          ← MH loop, resampling, schedules
-│   ├── calibration.rs        ← trajectory statistics → energy weights
-│   ├── config.rs             ← RunConfig + nested serde structs
-│   ├── hardware.rs           ← backend abstraction + auto detection
-│   ├── logging.rs            ← tracing setup (env filters, file writers)
-│   ├── ml.rs                 ← ML hooks (Null, SimpleRules, GoalAnchor)
-│   ├── orchestrator.rs       ← wiring layer (snapshot + config → results)
-│   ├── proposal.rs           ← adaptive move selection + kernels
-│   ├── results.rs            ← best-state selection, path diagnostics
-│   ├── schema.rs             ← timestamps, symbols, particles, trajectories
-│   ├── search.rs             ← occupancy grids, A*, constraint repair
-│   └── state_population.rs   ← init/resample/mutation utilities
-├── src/main.rs               ← `predict_state` CLI
-├── src/bin/calibrate_energy.rs
-└── scripts/
-    ├── preprocess_chess_games.py
-    └── chess_training_loop.py
-```
-
----
+- Cargo.toml (workspace)
+- README.md
+- crates/core (engine + binaries)
+- crates/experimental-hw (experimental hardware backends)
+- scripts/
+- data/, logs/, etc.
 
 ## Requirements
 
@@ -256,3 +238,4 @@ python scripts/chess_training_loop.py `
 - Test: `cargo test` (unit tests for hardware, proposals, search, ML, calibration).
 - Python helpers expect `python-chess` + `tqdm`; install via `pip install python-chess tqdm`.
 - Heavy artifacts (`data/chess`, `logs/`, generated configs) are ignored via `.gitignore`.
+
