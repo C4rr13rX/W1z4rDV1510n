@@ -93,12 +93,14 @@ impl HardwareBackend for MultiThreadedCpuBackend {
 
 pub struct GpuBackend {
     noise: NoiseSourceHandle,
+    chunk_size: usize,
 }
 
 impl GpuBackend {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, chunk_size: usize) -> Self {
         Self {
             noise: Arc::new(SoftwareNoiseSource::new(seed)),
+            chunk_size,
         }
     }
 }
@@ -111,7 +113,7 @@ impl HardwareBackend for GpuBackend {
     ) {
         population
             .particles
-            .par_chunks_mut(2048)
+            .par_chunks_mut(self.chunk_size)
             .for_each(|chunk| chunk.iter_mut().for_each(func));
     }
 
@@ -150,12 +152,14 @@ impl HardwareBackend for ExternalBackend {
 
 pub struct DistributedBackend {
     noise: NoiseSourceHandle,
+    chunk_size: usize,
 }
 
 impl DistributedBackend {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, chunk_size: usize) -> Self {
         Self {
             noise: Arc::new(SoftwareNoiseSource::new(seed)),
+            chunk_size,
         }
     }
 }
@@ -168,7 +172,7 @@ impl HardwareBackend for DistributedBackend {
     ) {
         population
             .particles
-            .par_chunks_mut(1024)
+            .par_chunks_mut(self.chunk_size)
             .for_each(|chunk| chunk.iter_mut().for_each(func));
     }
 
@@ -191,8 +195,14 @@ pub fn create_hardware_backend(kind: HardwareBackendType, seed: u64) -> Hardware
         HardwareBackendType::Auto => unreachable!("resolved backend should not be Auto"),
         HardwareBackendType::Cpu => Arc::new(CpuBackend::new(seed)),
         HardwareBackendType::MultiThreadedCpu => Arc::new(MultiThreadedCpuBackend::new(seed)),
-        HardwareBackendType::Gpu => Arc::new(GpuBackend::new(seed)),
-        HardwareBackendType::Distributed => Arc::new(DistributedBackend::new(seed)),
+        HardwareBackendType::Gpu => {
+            let chunk = gpu_chunk_size(profile.cpu_cores, profile.total_memory_gb);
+            Arc::new(GpuBackend::new(seed, chunk))
+        }
+        HardwareBackendType::Distributed => {
+            let chunk = distributed_chunk_size(profile.cpu_cores, profile.total_memory_gb);
+            Arc::new(DistributedBackend::new(seed, chunk))
+        }
         HardwareBackendType::External => Arc::new(ExternalBackend::new(seed)),
     }
 }
@@ -299,4 +309,16 @@ fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) 
             "[hardware] advanced backend selected – ensure GPU/cluster resources are accessible."
         );
     }
+}
+
+fn gpu_chunk_size(cpu_cores: usize, memory_gb: f64) -> usize {
+    let base = 4096;
+    let mem_factor = (memory_gb / 8.0).clamp(0.5, 4.0);
+    (base as f64 * mem_factor * (cpu_cores as f64).sqrt()).round() as usize
+}
+
+fn distributed_chunk_size(cpu_cores: usize, memory_gb: f64) -> usize {
+    let base = 1024;
+    let mem_factor = (memory_gb / 4.0).clamp(0.25, 8.0);
+    (base as f64 * mem_factor * (cpu_cores as f64).sqrt()).round() as usize
 }
