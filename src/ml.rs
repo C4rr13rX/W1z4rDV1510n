@@ -26,9 +26,6 @@ pub enum MLBackendType {
     None,
     SimpleRules,
     GoalAnchor,
-    Rnn,
-    Transformer,
-    Gnn,
     Custom,
 }
 
@@ -119,20 +116,6 @@ pub fn create_ml_hooks(backend: MLBackendType, seed: u64) -> MlHooksHandle {
         MLBackendType::None => Arc::new(NullMLHooks),
         MLBackendType::SimpleRules => Arc::new(SimpleRulesMLHooks::new(seed)),
         MLBackendType::GoalAnchor => Arc::new(GoalAnchorMLHooks::new(seed)),
-        MLBackendType::Rnn | MLBackendType::Transformer | MLBackendType::Gnn => {
-            if let Ok(path) = std::env::var("SIMFUTURES_ML_ONNX") {
-                println!(
-                    "[ml][warn] ONNX model loading not yet implemented (requested {:?} @ {}). Falling back to GoalAnchor backend.",
-                    backend, path
-                );
-            } else {
-                println!(
-                    "[ml][warn] {:?} backend requested without SIMFUTURES_ML_ONNX; falling back to GoalAnchor.",
-                    backend
-                );
-            }
-            Arc::new(GoalAnchorMLHooks::new(seed))
-        }
         MLBackendType::Custom => Arc::new(NullMLHooks),
     }
 }
