@@ -125,6 +125,52 @@ Output:
 - `HardwareBackendType::Auto` writes detection + fallback info at INFO/WARN.
 - `random.provider` - choose `DETERMINISTIC` (reproducible with `seed`), `OS_ENTROPY` (draws from OS RNG), or `JITTER_EXPERIMENTAL` (feature-gated physical jitter). Major module seeds are logged at DEBUG level.
 
+## REST Service API
+
+Launch the built-in REST service (defaults to `0.0.0.0:8080` or override with `W1Z4RDV1510N_SERVICE_ADDR`):
+
+```powershell
+W1Z4RDV1510N_SERVICE_ADDR=0.0.0.0:8080 cargo run --bin service
+```
+
+POST `/predict` with a JSON body containing a `config` (same `RunConfig` schema; `snapshot_file` can be omitted) and an inline `snapshot`. Example request:
+
+```json
+{
+  "config": {
+    "t_end": { "unix": 1732003600 },
+    "n_particles": 256,
+    "snapshot_file": "inline",
+    "energy": { "w_motion": 1.0, "w_collision": 5.0, "w_goal": 1.0, "w_group_cohesion": 0.5, "w_ml_prior": 0.2, "w_path_feasibility": 1.0, "w_env_constraints": 3.0 },
+    "proposal": { "local_move_prob": 0.5, "group_move_prob": 0.2, "swap_move_prob": 0.1, "path_based_move_prob": 0.15, "global_move_prob": 0.05, "ml_guided_move_prob": 0.05, "max_step_size": 1.0 },
+    "search": { "cell_size": 0.75 },
+    "random": { "provider": "OS_ENTROPY" }
+  },
+  "snapshot": {
+    "timestamp": { "unix": 1732000000 },
+    "bounds": { "width": 12.0, "height": 8.0 },
+    "symbols": [
+      { "id": "agent_a", "type": "PERSON", "position": { "x": 2, "y": 2 }, "properties": {} },
+      { "id": "exit_1", "type": "EXIT", "position": { "x": 11, "y": 7 }, "properties": {} }
+    ]
+  }
+}
+```
+
+The response returns the usual `Results` plus telemetry metadata:
+
+```json
+{
+  "results": { "...": "..." },
+  "telemetry": {
+    "random_provider": { "provider": "OS_ENTROPY", "deterministic": false, "seed": null },
+    "hardware_backend": "MultiThreadedCpu"
+  }
+}
+```
+
+Errors yield HTTP 400 with `{ "error": "<message>" }`.
+
 ### Path Diagnostics
 
 `Results.path_report` includes, per symbol:

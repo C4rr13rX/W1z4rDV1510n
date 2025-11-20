@@ -13,4 +13,4 @@ pub mod schema;
 pub mod search;
 pub mod state_population;
 
-pub use orchestrator::run_with_config;
+pub use orchestrator::{RunOutcome, run_with_config, run_with_snapshot};

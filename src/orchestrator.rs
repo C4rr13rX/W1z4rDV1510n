@@ -1,11 +1,11 @@
 use crate::annealing::anneal;
 use crate::config::{OutputFormat, RunConfig};
 use crate::energy::EnergyModel;
-use crate::hardware::create_hardware_backend;
+use crate::hardware::{HardwareBackendType, create_hardware_backend};
 use crate::logging::init_logging;
 use crate::ml::create_ml_model;
 use crate::proposal::DefaultProposalKernel;
-use crate::random::create_random_provider;
+use crate::random::{RandomProviderDescriptor, create_random_provider};
 use crate::results::{Results, analyze_results};
 use crate::schema::EnvironmentSnapshot;
 use crate::search::SearchModule;
@@ -17,13 +17,29 @@ use std::fs;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+pub struct RunOutcome {
+    pub results: Results,
+    pub random_provider: RandomProviderDescriptor,
+    pub hardware_backend: HardwareBackendType,
+}
+
 pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
+    let snapshot = load_snapshot(&config)?;
+    let outcome = run_with_snapshot(snapshot, config)?;
+    Ok(outcome.results)
+}
+
+pub fn run_with_snapshot(
+    snapshot: EnvironmentSnapshot,
+    config: RunConfig,
+) -> anyhow::Result<RunOutcome> {
     init_logging(&config.logging)?;
     config.validate()?;
     let random_provider = create_random_provider(&config.random, config.random_seed)?;
+    let random_descriptor = random_provider.descriptor();
     info!(
         target: "w1z4rdv1510n::random",
-        provider = ?random_provider.descriptor(),
+        provider = ?random_descriptor,
         "random provider initialized"
     );
     info!(
@@ -34,7 +50,7 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         ml_backend = ?config.ml_backend,
         "starting simulation run"
     );
-    let snapshot = Arc::new(load_snapshot(&config)?);
+    let snapshot = Arc::new(snapshot);
     info!(
         target: "w1z4rdv1510n::orchestrator",
         symbols = snapshot.symbols.len(),
@@ -97,7 +113,8 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         seed = kernel_seed
     );
     let hardware_seed = random_provider.next_seed("hardware_backend");
-    let hardware_backend = create_hardware_backend(config.hardware_backend.clone(), hardware_seed);
+    let (hardware_backend, resolved_backend) =
+        create_hardware_backend(config.hardware_backend.clone(), hardware_seed);
     debug!(
         target: "w1z4rdv1510n::random",
         module = "hardware_backend",
@@ -128,7 +145,11 @@ pub fn run_with_config(config: RunConfig) -> anyhow::Result<Results> {
         "annealing run complete"
     );
     maybe_persist_results(&results, &config)?;
-    Ok(results)
+    Ok(RunOutcome {
+        results,
+        random_provider: random_descriptor,
+        hardware_backend: resolved_backend,
+    })
 }
 
 fn load_snapshot(config: &RunConfig) -> anyhow::Result<EnvironmentSnapshot> {

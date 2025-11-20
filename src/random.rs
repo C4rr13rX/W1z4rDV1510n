@@ -37,7 +37,7 @@ impl Default for RandomConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RandomProviderDescriptor {
     pub provider: RandomProviderType,
     pub deterministic: bool,

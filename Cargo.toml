@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "calibrate_energy"
 path = "src/bin/calibrate_energy.rs"
 
+[[bin]]
+name = "service"
+path = "src/bin/service.rs"
+
 [features]
 default = []
 experimental-hw = []
@@ -34,4 +38,6 @@ tracing = { version = "0.1", features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
 blake2 = "0.10"
+axum = { version = "0.7", features = ["macros", "json"] }
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
 

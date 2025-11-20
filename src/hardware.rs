@@ -184,7 +184,10 @@ impl HardwareBackend for DistributedBackend {
 
 pub type HardwareBackendHandle = Arc<dyn HardwareBackend>;
 
-pub fn create_hardware_backend(kind: HardwareBackendType, seed: u64) -> HardwareBackendHandle {
+pub fn create_hardware_backend(
+    kind: HardwareBackendType,
+    seed: u64,
+) -> (HardwareBackendHandle, HardwareBackendType) {
     let profile = HardwareProfile::detect();
     let mut resolved = if let HardwareBackendType::Auto = kind {
         recommend_backend(&profile)
@@ -208,17 +211,32 @@ pub fn create_hardware_backend(kind: HardwareBackendType, seed: u64) -> Hardware
     log_backend_selection(&resolved, &profile);
     match resolved {
         HardwareBackendType::Auto => unreachable!("resolved backend should not be Auto"),
-        HardwareBackendType::Cpu => Arc::new(CpuBackend::new(seed)),
-        HardwareBackendType::MultiThreadedCpu => Arc::new(MultiThreadedCpuBackend::new(seed)),
+        HardwareBackendType::Cpu => (
+            Arc::new(CpuBackend::new(seed)) as HardwareBackendHandle,
+            HardwareBackendType::Cpu,
+        ),
+        HardwareBackendType::MultiThreadedCpu => (
+            Arc::new(MultiThreadedCpuBackend::new(seed)) as HardwareBackendHandle,
+            HardwareBackendType::MultiThreadedCpu,
+        ),
         HardwareBackendType::Gpu => {
             let chunk = gpu_chunk_size(profile.cpu_cores, profile.total_memory_gb);
-            Arc::new(GpuBackend::new(seed, chunk))
+            (
+                Arc::new(GpuBackend::new(seed, chunk)) as HardwareBackendHandle,
+                HardwareBackendType::Gpu,
+            )
         }
         HardwareBackendType::Distributed => {
             let chunk = distributed_chunk_size(profile.cpu_cores, profile.total_memory_gb);
-            Arc::new(DistributedBackend::new(seed, chunk))
+            (
+                Arc::new(DistributedBackend::new(seed, chunk)) as HardwareBackendHandle,
+                HardwareBackendType::Distributed,
+            )
         }
-        HardwareBackendType::External => Arc::new(ExternalBackend::new(seed)),
+        HardwareBackendType::External => (
+            Arc::new(ExternalBackend::new(seed)) as HardwareBackendHandle,
+            HardwareBackendType::External,
+        ),
     }
 }
 

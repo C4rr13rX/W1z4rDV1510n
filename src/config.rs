@@ -9,8 +9,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+fn default_snapshot_path() -> PathBuf {
+    PathBuf::from("snapshot.json")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
+    #[serde(default = "default_snapshot_path")]
     pub snapshot_file: PathBuf,
     pub t_end: Timestamp,
     #[serde(default = "default_particles")]
