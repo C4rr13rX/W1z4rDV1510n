@@ -1,154 +1,203 @@
-# SimFutures – Parallel Future Annealing (Rust)
+# SimFutures
 
-This repository hosts a Rust-first scaffold for the multi-hypothesis simulation engine you described. The current implementation establishes configuration schemas, module boundaries, and a working binary (`predict_state`) that loads a snapshot/config pair, spins up a particle population, runs a lightweight annealing loop, and emits best-state/diagnostic data.
-
-## Project layout
-
-```text
-src/
-  annealing.rs        # Temperature schedule + MH loop + resampling hooks
-  config.rs           # RunConfig + nested config structs (serde-friendly)
-  energy.rs           # Weighted energy components (motion/collision/etc.) + diagnostics
-  hardware.rs         # Backend abstraction (CPU baseline today)
-  ml.rs               # ML hook trait + null & simple heuristic backends
-  orchestrator.rs     # load config/snapshot, wire modules, persist results
-  proposal.rs         # Configurable proposal kernel with local moves
-  results.rs          # Ground-state selection + diagnostics helpers
-  schema.rs           # Core data types (timestamps, symbols, population)
-  search.rs           # Occupancy-aware grid planner + constraint repair
-  state_population.rs # Population init/resample/mutation utilities
-  main.rs             # CLI entrypoint (predict_state --config run.json)
-```
-
-Key crates: `serde` (I/O), `clap` (CLI), `rand` (sampling), `anyhow` (error flow), `parking_lot` (cheap locking for RNG-bound components).
-
-## Usage
-
-1. Prepare a JSON snapshot (matches `EnvironmentSnapshot`) and a `RunConfig` JSON. Minimal example:
-
-```jsonc
-{
-  "snapshot_file": "snapshot.json",
-  "t_end": { "unix": 1731900000 },
-  "n_particles": 256,
-  "schedule": { "t_start": 5.0, "t_end": 0.1, "n_iterations": 100 },
-  "energy": { "w_motion": 1, "w_collision": 5, "w_goal": 1, "w_group_cohesion": 0.5, "w_ml_prior": 0, "w_path_feasibility": 1, "w_env_constraints": 3 },
-  "proposal": { "local_move_prob": 1.0, "max_step_size": 1.0 },
-  "init_strategy": { "use_ml_priors": true, "noise_level": 0.5, "random_fraction": 0.2, "copy_snapshot_fraction": 0.1 },
-  "resample": { "enabled": true, "effective_sample_size_threshold": 0.3, "mutation_rate": 0.05 },
-  "search": { "cell_size": 1.0 },
-  "ml_backend": "SIMPLE_RULES",
-  "hardware_backend": "Cpu",
-  "random_seed": 42,
-  "logging": { "log_level": "INFO", "json": false, "log_path": null },
-  "output": { "save_best_state": true, "output_path": "results.json", "format": "Json" }
-}
-```
-
-2. Build & run:
-
-```powershell
-cargo run -- --config run_config.json
-```
-
-This prints the best energy and writes `results.json` when configured.
-
-## Current capabilities
-
-- ? Rust crate wiring with dedicated modules per architectural block.
-- ? Data schemas and serde-powered config ingestion.
-- ? Basic ML hooks (null + heuristic), proposal kernel, and annealing loop.
-- ? CPU backend abstraction for particle updates and result persistence.
-- ? Working CLI with JSON config I/O.
-- ? Richer energy model with volumetric collisions, wall penalties, ML priors, and per-symbol diagnostics (surfaced via `Results.diagnostics.best_state_breakdown`).
-- ? Occupancy-aware search module with configurable A* grid planner, wall/object masking, constraint projection, and path diagnostics that feed energy scoring.
-- ? Search grid caching + overlap repair keeps proposals feasible even in dense environments, with optional teleportation when no path exists.
-- ? Synthetic timeline dataset generator + automation scripts for spawning background runs and tailing their logs.
-- ? Hardware backend abstraction with CPU, multi-threaded CPU, and external stubs, plus an exposed noise-source hook for experimental entropy providers.
-- ? Hardware backends now auto-select (via `HardwareBackendType::Auto`) based on detected CPU cores, memory, GPU/env hints (`SIMFUTURES_HAS_GPU`, `SIMFUTURES_DISTRIBUTED`), scaling from Pi-class devices up to multi-GPU clusters.
-- ? Results now capture per-symbol path diagnostics (feasibility, path length, constraint violations) for the best state, giving downstream consumers a richer view into path feasibility.
-- ? Proposal kernel now mixes local/group/swap/path/global moves adaptively based on temperature, improving diversity at high temperatures and focusing on path-following as the search cools.
-- ? Structured logging via `tracing`: configure level/format/file target via the `logging` block (or override level with `SIMFUTURES_LOG`). JSON logs are emitted automatically when writing to disk for easier ingestion into observability stacks.
-- ? ML backend can ingest historical trajectories (via the RNN backend option) to learn per-symbol goal anchors, yielding better position predictions and plausibility scoring than the simple heuristic fallback.
-    - Set `ml_backend` to `GOAL_ANCHOR` (or leave `RNN/TRANSFORMER/GNN` with `SIMFUTURES_ML_ONNX` unset) to use the trajectory-driven goal-anchoring prior.
-
-### Logging & telemetry
-
-The CLI and orchestrator use [`tracing`](https://docs.rs/tracing) for structured logs. Configure via `RunConfig.logging`:
-
-```json
-"logging": {
-  "log_level": "INFO",
-  "json": false,
-  "log_path": "logs/run.jsonl"
-}
-```
-
-- `log_level`: default minimum level (override at runtime with `SIMFUTURES_LOG="debug"`).
-- `log_path`: optional file target; directories are created automatically. File outputs use JSON format for ingestion in ELK/Grafana/etc.
-- `json`: force JSON on stdout when you want structured logs in the console.
-
-Annealing iterations, resampling events, hardware auto-selection, cache hits/misses, and result persistence are all instrumented, making it easier to tail progress locally or forward to a collector.
-
-## Synthetic timeline dataset
-
-Use the helper script to fabricate a dense, multi-entity scenario with chaotic thought labels and timelines:
-
-```powershell
-python scripts/generate_synthetic_dataset.py --output-dir data
-```
-
-This emits:
-
-- `data/synthetic_snapshot.json` — >250 symbols (people, furniture, vehicles, walls, exits) with metadata hooks.
-- `data/timeline_train.jsonl` / `data/timeline_test.jsonl` — ~43k timeline rows containing per-symbol positions, velocities, and multi-label "thought"/attention annotations.
-- `data/synthetic_run_config.json` — ready-to-run config pointing at the snapshot.
-- `data/synthetic_dataset_metadata.json` — summary counts, split sizes, and timeline statistics.
-
-Tweaks (number of entities, steps, search cell size, etc.) can be passed via CLI flags; see `--help` for the full list.
-
-## Background runner + log tail
-
-Kick off `predict_state` in the background with stdout/stderr streamed into `logs/`:
-
-```powershell
-pwsh -File scripts/run_background_simulation.ps1        # add -DryRun to only preview the command
-```
-
-The script reports the PID, log file path, and writes `logs/latest_run.json` for downstream tooling. Tail progress (from another terminal) using:
-
-```powershell
-pwsh -File scripts/tail_simulation_logs.ps1             # accepts -LogPath and -StopAfterSeconds overrides
-```
-
-The tailer watches the log specified in `latest_run.json` by default, prints the last 40 lines, and keeps streaming until you Ctrl+C (or until `-StopAfterSeconds` elapses).
-
-## Training data & calibration
-
-If you have recorded trajectories (see `src/schema::Trajectory` for the JSON shape) you can automatically derive reasonable energy weights via the calibration utility:
-
-```powershell
-cargo run --bin calibrate_energy -- --trajectories data/training_trajectories.json --output calibrated_energy.json
-```
-
-The input should be a JSON array of trajectories (each trajectory is a sequence of `DynamicState` snapshots). The tool inspects displacement, collision frequency, goal adherence, and group spread to produce a set of recommended energy weights. The resulting JSON can be merged into your `RunConfig.energy` block or used as a starting point for manual tuning.
-
-## Next steps / roadmap
-
-1. **Search module**: extend the new occupancy grid/A* planner with cached builds, nav-mesh or multi-resolution search, and richer multi-agent coordination (reservation tables, crowd-flow penalties).
-2. **Population ops**: add stratified/systematic resampling modes, diversified mutation kernels, and history tracking per particle.
-3. **Annealing upgrades**: support parallel temperature ladders, configurable acceptance criteria, and pluggable schedules (import from config via `ScheduleType::Custom` hook).
-4. **Hardware backends**: add multi-threaded CPU backend and stubs for GPU/external solver hooks; expose `NoiseSource` API for experimental entropy sources.
-5. **ML integration**: implement real ML backends (bindings to ONNX, local Torch, etc.), plus streaming updates via `update_from_data`.
-6. **I/O & API**: add REST/gRPC surface, config validation, richer snapshot serialization (Msgpack) once `OutputFormat::Msgpack` is wired.
-7. **Testing**: create unit tests per module (energy terms, proposal invariants, config parsing) and deterministic synthetic scenarios for regression coverage.
-
-Each module was documented and structured so another AI (or developer) can independently extend it—continue following that contract when fleshing out future stages. Feel free to tag TODOs inline as deeper behaviors are implemented.
+SimFutures is a Rust-first annealing engine for simulating many parallel futures from a symbolic snapshot. It runs adaptive proposal kernels, search-aware constraints, and configurable energy functions to estimate the most likely end-state at `t_end`, while logging rich diagnostics for downstream analysis.
 
 ---
 
-## Next update hand-off
+## Key Features
 
-- Cache the occupancy grid per snapshot (or diff it incrementally) so annealing proposals no longer rebuild the environment mask each call; expose metrics so configs can tune cell size adaptively.
-- Surface the new path diagnostics (length, constraint violations, visited nodes) in the CLI/log output and persist them in `Results` for downstream analysis/visualization.
-- Layer in cooperative routing: allow the planner/resampler to treat fellow agents as soft obstacles (time-expanded or reservation-based) so multi-agent coordination benefits from the grid model.
+- **Automatic hardware scaling** – `HardwareBackendType::Auto` inspects CPU cores, memory, GPU hints, and cluster schedulers to pick CPU, multi-threaded CPU, or distributed backends. Overrides are available via config or env vars (`SIMFUTURES_HAS_GPU`, `SIMFUTURES_DISTRIBUTED`).
+- **Search-integrated proposals** – Occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible. Cached grids eliminate redundant rebuilds.
+- **Goal-aware ML priors** – ML hooks (`None`, `SimpleRules`, `GoalAnchor`) provide initialization hints and contribute to energy scoring. GoalAnchor learns anchor destinations from trajectories.
+- **Structured logging** – Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, and path diagnostics.
+- **Calibration tooling** – `calibrate_energy` inspects recorded trajectories to recommend energy weights, plus schema validation and summary stats.
+- **Validation scripts** – Python helpers convert chess PGNs and run perpetual accuracy loops to benchmark ML + logging pipelines.
+- **Unit-test coverage** – Hardware selection, proposal mixing, search constraint repairs, and ML calibration each have dedicated tests (`cargo test`).
+
+---
+
+## Repository Layout
+
+```
+├── Cargo.toml / Cargo.lock
+├── README.md
+├── src/
+│   ├── annealing.rs          ← MH loop, resampling, schedules
+│   ├── calibration.rs        ← trajectory statistics → energy weights
+│   ├── config.rs             ← RunConfig + nested serde structs
+│   ├── hardware.rs           ← backend abstraction + auto detection
+│   ├── logging.rs            ← tracing setup (env filters, file writers)
+│   ├── ml.rs                 ← ML hooks (Null, SimpleRules, GoalAnchor)
+│   ├── orchestrator.rs       ← wiring layer (snapshot + config → results)
+│   ├── proposal.rs           ← adaptive move selection + kernels
+│   ├── results.rs            ← best-state selection, path diagnostics
+│   ├── schema.rs             ← timestamps, symbols, particles, trajectories
+│   ├── search.rs             ← occupancy grids, A*, constraint repair
+│   └── state_population.rs   ← init/resample/mutation utilities
+├── src/main.rs               ← `predict_state` CLI
+├── src/bin/calibrate_energy.rs
+└── scripts/
+    ├── preprocess_chess_games.py
+    └── chess_training_loop.py
+```
+
+---
+
+## Requirements
+
+- Rust 1.74+ (install via [rustup](https://rustup.rs)).
+- Python 3.10+ (optional, for data scripts + chess validation).
+- Optional: `python-chess`, `tqdm` (`pip install python-chess tqdm`).
+
+---
+
+## Build & Test
+
+```powershell
+cargo fmt
+cargo test
+```
+
+Tests cover calibration heuristics, hardware auto-selection, search constraint repairs, proposal mixing, and GoalAnchor ML updates.
+
+---
+
+## Running the Simulator
+
+1. **Author a snapshot + config.** A `RunConfig` example (`run_config.json`):
+
+```json
+{
+  "snapshot_file": "data/snapshot.json",
+  "t_end": { "unix": 1732003600 },
+  "n_particles": 512,
+  "schedule": { "t_start": 5.0, "t_end": 0.2, "n_iterations": 200, "schedule_type": "Linear" },
+  "energy": {
+    "w_motion": 1.0,
+    "w_collision": 5.0,
+    "w_goal": 1.0,
+    "w_group_cohesion": 0.5,
+    "w_ml_prior": 0.2,
+    "w_path_feasibility": 1.0,
+    "w_env_constraints": 3.0
+  },
+  "proposal": {
+    "local_move_prob": 0.5,
+    "group_move_prob": 0.2,
+    "swap_move_prob": 0.1,
+    "path_based_move_prob": 0.15,
+    "global_move_prob": 0.05,
+    "max_step_size": 1.0,
+    "use_parallel_updates": true,
+    "adaptive_move_mixing": true
+  },
+  "init_strategy": { "use_ml_priors": true, "noise_level": 0.4, "random_fraction": 0.2, "copy_snapshot_fraction": 0.1 },
+  "resample": { "enabled": true, "effective_sample_size_threshold": 0.3, "mutation_rate": 0.05 },
+  "search": { "cell_size": 0.75, "teleport_on_no_path": true },
+  "ml_backend": "GoalAnchor",
+  "hardware_backend": "Auto",
+  "logging": { "log_level": "INFO", "json": true, "log_path": "logs/run.jsonl" },
+  "output": { "save_best_state": true, "save_population_summary": true, "output_path": "logs/results.json", "format": "Json" },
+  "random_seed": 1337
+}
+```
+
+2. **Run the CLI:**
+
+```powershell
+cargo run --bin predict_state -- --config run_config.json
+```
+
+Output:
+
+- Console summary (`Best energy: … | symbols: …`).
+- `logs/results.json` (best state, energy breakdown, path diagnostics).
+- `logs/run.jsonl` (if `log_path` set): structured logs with iteration metrics.
+
+### Logging Options
+
+- `RunConfig.logging.log_level` – default level (override with `SIMFUTURES_LOG=debug`).
+- `logging.json` – `true` for JSON logs to stdout/file; `false` for compact text.
+- `logging.log_path` – optional JSONL file target; directories auto-created.
+- `HardwareBackendType::Auto` writes detection + fallback info at INFO/WARN.
+
+### Path Diagnostics
+
+`Results.path_report` includes, per symbol:
+
+```json
+{
+  "feasible": true,
+  "path_length": 12.4,
+  "visited_nodes": 187,
+  "constraint_violations": 0,
+  "failure_reason": null
+}
+```
+
+Use these to flag actors teleported out of walls or lacking a viable path.
+
+### Hardware Overrides
+
+- Set `hardware_backend` in config to `Cpu`, `MultiThreadedCpu`, `Gpu`, etc.
+- `SIMFUTURES_HAS_GPU=1` → Auto backend may choose GPU even without CUDA env vars.
+- `SIMFUTURES_DISTRIBUTED=1` or `SLURM_JOB_ID` present → Auto prefers distributed backend.
+
+---
+
+## Energy Calibration Workflow
+
+Use `calibrate_energy` to extract motion/collision/goal/group statistics from recorded trajectories:
+
+```powershell
+cargo run --bin calibrate_energy -- `
+  --trajectories data/training_trajectories.json `
+  --base-config config/energy_base.json `
+  --output config/energy_calibrated.json
+```
+
+- Input: JSON array of `Trajectory` objects (`sequence: [DynamicState, …]`).
+- Output: `EnergyConfig` with recommended weights (merging in other base fields).
+- The tool validates sequence length, counts the samples contributing to each statistic, and prints summary stats so misformatted data is caught early.
+- Integrate with a deployment pipeline by generating the calibrated file, then pointing `RunConfig.energy` at it before invoking `predict_state`.
+
+---
+
+## Chess Validation Loop (Optional)
+
+1. Download PGNs to `data/chess/` (already ignored by git). Example sources: [PGNMentor](https://www.pgnmentor.com/).
+2. Convert PGNs to JSONL:
+
+```powershell
+python scripts/preprocess_chess_games.py --max-games 25000
+```
+
+3. Run the perpetual accuracy loop:
+
+```powershell
+python scripts/chess_training_loop.py `
+  --max-games 20000 `
+  --epochs-per-iteration 5 `
+  --log-file logs/chess_training_metrics.log
+```
+
+- Hashed SAN features + player/opening metadata feed a softmax outcome model at multiple observation scopes (6→40 plies) and frequency-based move predictors (+1→+20 moves ahead).
+- Each iteration prints integer accuracies and appends a JSON record to `logs/chess_training_metrics.log`, enabling long-term analysis while the process runs unattended.
+
+---
+
+## Suggested Workflows
+
+1. **Local simulation** – craft snapshot/config, run `predict_state`, examine `logs/results.json` + path diagnostics.
+2. **Trajectory calibration** – collect ground-truth trajectories, run `calibrate_energy`, inject weights into production configs.
+3. **Hardware smoke test** – set `hardware_backend = "Auto"` and verify logs (CPU-only, GPU-enabled, cluster hints).
+4. **Continuous regression** – keep the chess script running overnight to observe accuracy trends; inspect the JSON log in the morning.
+
+---
+
+## Contributing
+
+- Format + lint: `cargo fmt && cargo clippy`.
+- Test: `cargo test` (unit tests for hardware, proposals, search, ML, calibration).
+- Python helpers expect `python-chess` + `tqdm`; install via `pip install python-chess tqdm`.
+- Heavy artifacts (`data/chess`, `logs/`, generated configs) are ignored via `.gitignore`.

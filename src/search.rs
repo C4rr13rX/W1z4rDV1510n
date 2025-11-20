@@ -185,7 +185,7 @@ impl SearchModule {
                 let dx = second_state.position.x - first_state.position.x;
                 let dy = second_state.position.y - first_state.position.y;
                 let dist = (dx * dx + dy * dy).sqrt();
-                if dist >= min_dist || dist == 0.0 {
+                if dist >= min_dist {
                     continue;
                 }
                 let overlap = min_dist - dist;

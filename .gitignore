@@ -1,1 +1,8 @@
 /target
+/data/chess/
+/data/logging_snapshot.json
+/logs/
+/run_config.json
+/scripts/__pycache__/
+*.zip
+*.jsonl
