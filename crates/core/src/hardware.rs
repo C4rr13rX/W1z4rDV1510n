@@ -22,6 +22,27 @@ pub enum HardwareBackendType {
     Experimental,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum BitOp {
+    And,
+    Or,
+    Xor,
+}
+
+pub trait StorageExecutor: Send + Sync {
+    fn offload_scan(&self, _query: &str) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("storage offload not implemented")
+    }
+
+    fn offload_energy_eval(&self, _batch: &[Vec<u8>]) -> anyhow::Result<Vec<f32>> {
+        anyhow::bail!("storage offload not implemented")
+    }
+}
+
+pub trait AnalogArray: Send + Sync {
+    fn accumulate(&self, weights: &[f32], inputs: &[f32]) -> Vec<f32>;
+}
+
 impl Default for HardwareBackendType {
     fn default() -> Self {
         HardwareBackendType::Auto
@@ -35,6 +56,20 @@ pub trait HardwareBackend: Send + Sync {
         func: &(dyn Fn(&mut ParticleState) + Send + Sync),
     );
     fn noise_source(&self) -> NoiseSourceHandle;
+
+    fn bulk_bitop(&self, _op: BitOp, _buffers: &mut [&mut [u8]]) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "bulk bit operations not supported by this backend"
+        ))
+    }
+
+    fn storage_executor(&self) -> Option<&dyn StorageExecutor> {
+        None
+    }
+
+    fn analog_array(&self) -> Option<&dyn AnalogArray> {
+        None
+    }
 }
 
 pub struct CpuBackend {

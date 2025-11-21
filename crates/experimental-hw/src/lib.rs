@@ -4,7 +4,9 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use w1z4rdv1510n::config::ExperimentalHardwareConfig;
-use w1z4rdv1510n::hardware::{HardwareBackend, HardwareBackendHandle, HardwareBackendType, NoiseSourceHandle};
+use w1z4rdv1510n::hardware::{
+    HardwareBackend, HardwareBackendHandle, HardwareBackendType, NoiseSourceHandle,
+};
 use w1z4rdv1510n::schema::{ParticleState, Population};
 
 pub struct ExperimentalHardwareBackend {
