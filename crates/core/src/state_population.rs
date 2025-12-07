@@ -3,6 +3,7 @@ use crate::ml::MlModelHandle;
 use crate::schema::{
     DynamicState, EnvironmentSnapshot, ParticleState, Population, Position, SymbolState, Timestamp,
 };
+use crate::tensor::TensorExecutor;
 use rand::Rng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
@@ -92,17 +93,30 @@ pub fn init_population(
     }
 }
 
-pub fn normalize_weights(population: &mut Population) {
+pub fn normalize_weights(population: &mut Population, tensor: Option<&dyn TensorExecutor>) {
+    if let Some(exec) = tensor {
+        let mut buffer: Vec<f32> = population
+            .particles
+            .iter()
+            .map(|p| p.weight as f32)
+            .collect();
+        if buffer.is_empty() {
+            return;
+        }
+        exec.softmax(&mut buffer);
+        for (particle, normalized) in population.particles.iter_mut().zip(buffer.into_iter()) {
+            particle.weight = normalized as f64;
+        }
+        return;
+    }
     let sum: f64 = population.particles.iter().map(|p| p.weight).sum();
-    if sum <= f64::EPSILON {
-        let uniform = 1.0 / population.particles.len().max(1) as f64;
-        for particle in &mut population.particles {
-            particle.weight = uniform;
-        }
+    let denom = if sum <= f64::EPSILON {
+        population.particles.len().max(1) as f64
     } else {
-        for particle in &mut population.particles {
-            particle.weight /= sum;
-        }
+        sum
+    };
+    for particle in &mut population.particles {
+        particle.weight = (particle.weight / denom).max(0.0);
     }
 }
 
@@ -126,7 +140,6 @@ pub fn resample_population(population: &mut Population, rng: &mut StdRng) {
         new_particles.push(cloned);
     }
     population.particles = new_particles;
-    normalize_weights(population);
 }
 
 pub fn clone_and_mutate(population: &mut Population, rng: &mut StdRng, mutation_rate: f64) {

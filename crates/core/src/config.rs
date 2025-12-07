@@ -33,11 +33,15 @@ pub struct RunConfig {
     #[serde(default)]
     pub resample: ResampleConfig,
     #[serde(default)]
+    pub quantum: QuantumConfig,
+    #[serde(default)]
     pub search: SearchConfig,
     #[serde(default)]
     pub ml_backend: MLBackendType,
     #[serde(default)]
     pub hardware_backend: HardwareBackendType,
+    #[serde(default)]
+    pub hardware_overrides: HardwareOverrides,
     #[serde(default = "default_seed")]
     pub random_seed: u64,
     #[serde(default)]
@@ -64,9 +68,38 @@ impl RunConfig {
                 && self.energy.w_group_cohesion >= 0.0
                 && self.energy.w_ml_prior >= 0.0
                 && self.energy.w_path_feasibility >= 0.0
-                && self.energy.w_env_constraints >= 0.0,
+                && self.energy.w_env_constraints >= 0.0
+                && self.energy.w_stack_hash >= 0.0
+                && self.energy.stack_alignment_weight >= 0.0
+                && self.energy.stack_future_weight >= 0.0,
             "energy weights must be non-negative"
         );
+        anyhow::ensure!(
+            self.energy.stack_alignment_topk > 0,
+            "energy.stack_alignment_topk must be > 0"
+        );
+        if self.quantum.enabled {
+            anyhow::ensure!(
+                self.quantum.trotter_slices > 0,
+                "quantum.trotter_slices must be > 0 when quantum mode is enabled"
+            );
+            anyhow::ensure!(
+                self.quantum.driver_strength >= 0.0,
+                "quantum.driver_strength must be >= 0"
+            );
+            anyhow::ensure!(
+                self.quantum.driver_final_strength >= 0.0,
+                "quantum.driver_final_strength must be >= 0"
+            );
+            anyhow::ensure!(
+                self.quantum.slice_temperature_scale > 0.0,
+                "quantum.slice_temperature_scale must be > 0"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.quantum.worldline_mix_prob),
+                "quantum.worldline_mix_prob must be in [0,1]"
+            );
+        }
         anyhow::ensure!(
             self.proposal.local_move_prob
                 + self.proposal.group_move_prob
@@ -105,6 +138,18 @@ impl RunConfig {
             anyhow::ensure!(
                 self.hardware_backend == HardwareBackendType::Experimental,
                 "set hardware_backend to EXPERIMENTAL when experimental hardware options are enabled"
+            );
+        }
+        if !self.hardware_overrides.allow_gpu {
+            anyhow::ensure!(
+                self.hardware_backend != HardwareBackendType::Gpu,
+                "hardware_backend=GPU is not allowed when hardware_overrides.allow_gpu is false"
+            );
+        }
+        if !self.hardware_overrides.allow_distributed {
+            anyhow::ensure!(
+                self.hardware_backend != HardwareBackendType::Distributed,
+                "hardware_backend=DISTRIBUTED is not allowed when hardware_overrides.allow_distributed is false"
             );
         }
         Ok(())
@@ -153,6 +198,7 @@ impl Default for ScheduleType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EnergyConfig {
     pub w_motion: f64,
     pub w_collision: f64,
@@ -161,6 +207,20 @@ pub struct EnergyConfig {
     pub w_ml_prior: f64,
     pub w_path_feasibility: f64,
     pub w_env_constraints: f64,
+    /// Weight for the sequence stack/hash consistency term (set >0 to fuse prior trajectories).
+    pub w_stack_hash: f64,
+    /// How many history frames to align against when scoring stack similarity (top-k by overlap distance).
+    #[serde(default = "EnergyConfig::default_stack_alignment_topk")]
+    pub stack_alignment_topk: usize,
+    /// How far ahead (in frames) to look when encouraging future consistency from the matched history frame.
+    #[serde(default = "EnergyConfig::default_stack_future_horizon")]
+    pub stack_future_horizon: usize,
+    /// Internal scale for matching the current state to the closest history frame (before the external w_stack_hash weight).
+    #[serde(default = "EnergyConfig::default_stack_alignment_weight")]
+    pub stack_alignment_weight: f64,
+    /// Internal scale for pulling the state toward the future frame of the matched history (gap-filling / forecasting).
+    #[serde(default = "EnergyConfig::default_stack_future_weight")]
+    pub stack_future_weight: f64,
     #[serde(default)]
     pub other_terms: HashMap<String, f64>,
 }
@@ -175,8 +235,35 @@ impl Default for EnergyConfig {
             w_ml_prior: 0.0,
             w_path_feasibility: 1.0,
             w_env_constraints: 3.0,
+            w_stack_hash: 0.0,
+            stack_alignment_topk: EnergyConfig::default_stack_alignment_topk(),
+            stack_future_horizon: EnergyConfig::default_stack_future_horizon(),
+            stack_alignment_weight: EnergyConfig::default_stack_alignment_weight(),
+            stack_future_weight: EnergyConfig::default_stack_future_weight(),
             other_terms: HashMap::new(),
         }
+    }
+}
+
+impl EnergyConfig {
+    fn default_stack_alignment_topk() -> usize {
+        3
+    }
+
+    fn default_stack_future_horizon() -> usize {
+        1
+    }
+
+    fn default_stack_alignment_weight() -> f64 {
+        1.0
+    }
+
+    fn default_stack_future_weight() -> f64 {
+        0.75
+    }
+
+    pub fn get_other_term(&self, key: &str) -> Option<f64> {
+        self.other_terms.get(key).copied()
     }
 }
 
@@ -210,6 +297,57 @@ impl Default for ResampleConfig {
             enabled: Self::default_enabled(),
             effective_sample_size_threshold: Self::default_threshold(),
             mutation_rate: Self::default_mutation_rate(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "QuantumConfig::default_trotter")]
+    pub trotter_slices: usize,
+    #[serde(default = "QuantumConfig::default_driver")]
+    pub driver_strength: f64,
+    #[serde(default = "QuantumConfig::default_driver_final")]
+    pub driver_final_strength: f64,
+    #[serde(default = "QuantumConfig::default_worldline")]
+    pub worldline_mix_prob: f64,
+    #[serde(default = "QuantumConfig::default_temp_scale")]
+    pub slice_temperature_scale: f64,
+}
+
+impl QuantumConfig {
+    fn default_trotter() -> usize {
+        4
+    }
+
+    fn default_driver() -> f64 {
+        0.35
+    }
+
+    fn default_driver_final() -> f64 {
+        0.35
+    }
+
+    fn default_worldline() -> f64 {
+        0.05
+    }
+
+    fn default_temp_scale() -> f64 {
+        1.0
+    }
+}
+
+impl Default for QuantumConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trotter_slices: Self::default_trotter(),
+            driver_strength: Self::default_driver(),
+            driver_final_strength: Self::default_driver_final(),
+            worldline_mix_prob: Self::default_worldline(),
+            slice_temperature_scale: Self::default_temp_scale(),
         }
     }
 }
@@ -290,6 +428,46 @@ impl Default for OutputFormat {
         OutputFormat::Json
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardwareOverrides {
+    #[serde(default = "HardwareOverrides::default_allow_gpu")]
+    pub allow_gpu: bool,
+    #[serde(default = "HardwareOverrides::default_allow_distributed")]
+    pub allow_distributed: bool,
+    #[serde(default = "HardwareOverrides::default_max_threads")]
+    pub max_threads: Option<usize>,
+}
+
+impl HardwareOverrides {
+    fn default_allow_gpu() -> bool {
+        env_bool("W1Z4RDV1510N_ALLOW_GPU")
+            .or_else(|| env_bool("SIMFUTURES_ALLOW_GPU"))
+            .unwrap_or(true)
+    }
+
+    fn default_allow_distributed() -> bool {
+        env_bool("W1Z4RDV1510N_ALLOW_DISTRIBUTED")
+            .or_else(|| env_bool("SIMFUTURES_ALLOW_DISTRIBUTED"))
+            .unwrap_or(true)
+    }
+
+    fn default_max_threads() -> Option<usize> {
+        env_usize("W1Z4RDV1510N_MAX_THREADS")
+            .or_else(|| env_usize("SIMFUTURES_MAX_THREADS"))
+            .and_then(|value| if value == 0 { None } else { Some(value) })
+    }
+}
+
+impl Default for HardwareOverrides {
+    fn default() -> Self {
+        Self {
+            allow_gpu: Self::default_allow_gpu(),
+            allow_distributed: Self::default_allow_distributed(),
+            max_threads: Self::default_max_threads(),
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RunMode {
@@ -330,4 +508,20 @@ impl Default for ExperimentalHardwareConfig {
             max_sample_interval_secs: Self::default_interval(),
         }
     }
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
 }

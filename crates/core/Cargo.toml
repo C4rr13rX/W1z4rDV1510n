@@ -22,6 +22,8 @@ path = "src/bin/service.rs"
 [features]
 default = []
 experimental-hw = []
+gpu = ["wgpu", "pollster", "bytemuck"]
+distributed = []
 
 [dependencies]
 num_cpus = "1.16"
@@ -40,4 +42,20 @@ tracing-appender = "0.2"
 blake2 = "0.10"
 axum = { version = "0.7", features = ["macros", "json"] }
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
+cfg-if = "1.0"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_Security"
+] }
+futures = "0.3"
+bytemuck = { version = "1.15", optional = true, features = ["derive"] }
+wgpu = { version = "0.20", optional = true, features = ["wgsl"] }
+pollster = { version = "0.3", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.10"
 

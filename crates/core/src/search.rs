@@ -1,3 +1,4 @@
+use crate::hardware::BitOp;
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolType};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,7 @@ impl SearchModule {
         &self,
         snapshot_0: &EnvironmentSnapshot,
         state: &mut DynamicState,
+        hardware: Option<&dyn crate::hardware::HardwareBackend>,
     ) {
         if state.symbol_states.is_empty() {
             return;
@@ -139,6 +141,8 @@ impl SearchModule {
             radii.insert(symbol.id.clone(), symbol_radius(symbol));
         }
         let grid = self.grid_for_snapshot(snapshot_0);
+        let mut occupancy_mask = vec![0u8; grid.blocked.len()];
+        let mut cell_assignments: HashMap<usize, Vec<String>> = HashMap::new();
         for (symbol_id, symbol_state) in state.symbol_states.iter_mut() {
             let target_start = match lookup.get(symbol_id) {
                 Some(pos) => pos,
@@ -166,6 +170,57 @@ impl SearchModule {
                 }
             } else {
                 symbol_state.position = clamp_with_depth(&desired, depth_cap);
+            }
+            if let Some(cell) = grid.position_to_cell(&symbol_state.position) {
+                if let Some(idx) = grid.index(cell) {
+                    occupancy_mask[idx] = 1;
+                    cell_assignments
+                        .entry(idx)
+                        .or_default()
+                        .push(symbol_id.clone());
+                }
+            }
+        }
+        if let Some(hw) = hardware {
+            if !grid.blocked.is_empty() {
+                let mut static_mask = grid.blocked.clone();
+                let mut dynamic_mask = occupancy_mask.clone();
+                let mut collision_mask = vec![0u8; static_mask.len()];
+                if hw
+                    .bulk_bitop(
+                        BitOp::And,
+                        &mut [
+                            static_mask.as_mut_slice(),
+                            dynamic_mask.as_mut_slice(),
+                            collision_mask.as_mut_slice(),
+                        ],
+                    )
+                    .is_ok()
+                {
+                    for (idx, value) in collision_mask.iter().enumerate() {
+                        if *value == 0 {
+                            continue;
+                        }
+                        let Some(symbols) = cell_assignments.get(&idx) else {
+                            continue;
+                        };
+                        if let Some(cell) = grid.cell_from_index(idx) {
+                            if let Some(nearest) = grid.nearest_free_cell(cell) {
+                                let repair = grid.cell_center(nearest, 0.0);
+                                for symbol_id in symbols {
+                                    if let Some(symbol_state) =
+                                        state.symbol_states.get_mut(symbol_id)
+                                    {
+                                        let mut adjusted = repair;
+                                        adjusted.z = symbol_state.position.z;
+                                        symbol_state.position =
+                                            clamp_with_depth(&adjusted, depth_cap);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         let ids: Vec<String> = state.symbol_states.keys().cloned().collect();
@@ -324,7 +379,7 @@ impl SearchModule {
             signature,
             grid: grid.clone(),
         });
-        let blocked_cells = grid.blocked.iter().filter(|cell| **cell).count();
+        let blocked_cells = grid.blocked.iter().filter(|cell| **cell > 0).count();
         debug!(
             target: "w1z4rdv1510n::search",
             width_cells = grid.width_cells,
@@ -376,7 +431,7 @@ struct OccupancyGrid {
     cell_size: f64,
     width_cells: usize,
     height_cells: usize,
-    blocked: Vec<bool>,
+    blocked: Vec<u8>,
 }
 
 impl OccupancyGrid {
@@ -395,7 +450,7 @@ impl OccupancyGrid {
             cell_size,
             width_cells,
             height_cells,
-            blocked: vec![false; width_cells * height_cells],
+            blocked: vec![0u8; width_cells * height_cells],
         };
         for symbol in &snapshot.symbols {
             if is_blocker(symbol) {
@@ -440,10 +495,22 @@ impl OccupancyGrid {
         Some(cell.y as usize * self.width_cells + cell.x as usize)
     }
 
+    fn cell_from_index(&self, idx: usize) -> Option<GridCell> {
+        if idx >= self.blocked.len() {
+            return None;
+        }
+        let y = idx / self.width_cells;
+        let x = idx % self.width_cells;
+        Some(GridCell {
+            x: x as i32,
+            y: y as i32,
+        })
+    }
+
     fn is_blocked(&self, cell: GridCell) -> bool {
         self.index(cell)
             .and_then(|idx| self.blocked.get(idx))
-            .copied()
+            .map(|value| *value != 0)
             .unwrap_or(true)
     }
 
@@ -462,7 +529,7 @@ impl OccupancyGrid {
             for x in start_x..=end_x {
                 let cell = GridCell { x, y };
                 if let Some(idx) = self.index(cell) {
-                    self.blocked[idx] = true;
+                    self.blocked[idx] = 1;
                 }
             }
         }
@@ -472,7 +539,7 @@ impl OccupancyGrid {
         let mut visited = vec![false; self.blocked.len()];
         let mut queue = VecDeque::new();
         if let Some(idx) = self.index(start) {
-            if !self.blocked[idx] {
+            if self.blocked[idx] == 0 {
                 return Some(start);
             }
             visited[idx] = true;
@@ -494,7 +561,7 @@ impl OccupancyGrid {
                     continue;
                 }
                 visited[idx] = true;
-                if !self.blocked[idx] {
+                if self.blocked[idx] == 0 {
                     return Some(neighbor);
                 }
                 queue.push_back(neighbor);
@@ -1027,6 +1094,7 @@ mod tests {
                 ),
             ],
             metadata: Properties::new(),
+            stack_history: Vec::new(),
         };
         let mut state = DynamicState {
             timestamp: snapshot.timestamp,
@@ -1046,7 +1114,7 @@ mod tests {
             cell_size: 0.5,
             teleport_on_no_path: true,
         });
-        module.enforce_hard_constraints(&snapshot, &mut state);
+        module.enforce_hard_constraints(&snapshot, &mut state, None);
         let repaired = state.symbol_states.get("agent").unwrap().position;
         let grid = module.grid_for_snapshot(&snapshot);
         let cell = grid.position_to_cell(&repaired).expect("valid cell");
@@ -1080,6 +1148,7 @@ mod tests {
                 ),
             ],
             metadata: Properties::new(),
+            stack_history: Vec::new(),
         };
         let overlapping = Position {
             x: 1.0,
@@ -1106,7 +1175,7 @@ mod tests {
             ]),
         };
         let module = SearchModule::new(SearchConfig::default());
-        module.enforce_hard_constraints(&snapshot, &mut state);
+        module.enforce_hard_constraints(&snapshot, &mut state, None);
         let a_pos = state.symbol_states.get("a").unwrap().position;
         let b_pos = state.symbol_states.get("b").unwrap().position;
         let dx = a_pos.x - b_pos.x;

@@ -29,6 +29,14 @@ pub fn anneal(
     let mut energy_trace = Vec::with_capacity(schedule.n_iterations);
     let mut acceptance_trace = Vec::with_capacity(schedule.n_iterations);
     let log_interval = (schedule.n_iterations / 10).max(1);
+    let tensor_executor = hardware_backend.tensor_executor();
+    if let Some(planner) = hardware_backend.planner() {
+        debug!(
+            target: "w1z4rdv1510n::annealing",
+            threads = planner.threads_for(population.particles.len()),
+            "backend planner engaged for annealing"
+        );
+    }
     for iteration in 0..schedule.n_iterations {
         let temperature = temperature(iteration, schedule);
         population.temperature = temperature;
@@ -43,7 +51,11 @@ pub fn anneal(
                 let mut local_rng = StdRng::seed_from_u64(particle_seeds[particle.id]);
                 let mut proposal = kernel.propose(snapshot_0, &particle.current_state, temperature);
                 if let Some(search) = search_module {
-                    search.enforce_hard_constraints(snapshot_0, &mut proposal);
+                    search.enforce_hard_constraints(
+                        snapshot_0,
+                        &mut proposal,
+                        Some(hardware_backend.as_ref()),
+                    );
                 }
                 let new_energy = energy_model.energy(&proposal);
                 let accept_prob = acceptance_probability(particle.energy, new_energy, temperature);
@@ -57,12 +69,13 @@ pub fn anneal(
             }
         };
         hardware_backend.map_particles(&mut population, &update_particle);
-        normalize_weights(&mut population);
+        normalize_weights(&mut population, tensor_executor.as_deref());
 
         let ess_ratio = effective_sample_size(&population);
         if resample_config.enabled && ess_ratio < resample_config.effective_sample_size_threshold {
             resample_population(&mut population, rng);
             clone_and_mutate(&mut population, rng, resample_config.mutation_rate);
+            normalize_weights(&mut population, tensor_executor.as_deref());
             debug!(
                 target: "w1z4rdv1510n::annealing",
                 iteration,

@@ -6,15 +6,29 @@ W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futur
 
 ## Key Features
 
-- **Automatic hardware scaling** – `HardwareBackendType::Auto` inspects CPU cores, memory, GPU hints, and cluster schedulers to pick CPU, multi-threaded CPU, or distributed backends. Overrides are available via config or env vars (`W1z4rDV1510n_HAS_GPU`, `W1z4rDV1510n_DISTRIBUTED`).
-- **Search-integrated proposals** – Occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible. Cached grids eliminate redundant rebuilds.
-- **Goal-aware ML priors** – ML hooks (`None`, `SimpleRules`, `GoalAnchor`) provide initialization hints and contribute to energy scoring. GoalAnchor learns anchor destinations from trajectories.
-- **Configurable randomness** – Deterministic, OS entropy, and (feature-gated) jitter-based RNG providers with per-module seed logging and reproducible runs when deterministic mode is selected.
-- **ML-guided proposals** – Enable `proposal.ml_guided_move_prob` (>0) to let ML backends suggest coordinated moves in the sampler.
-- **Structured logging** – Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, and path diagnostics.
-- **Calibration tooling** – `calibrate_energy` inspects recorded trajectories to recommend energy weights, plus schema validation and summary stats.
-- **Validation scripts** – Python helpers convert chess PGNs and run perpetual accuracy loops to benchmark ML + logging pipelines.
-- **Unit-test coverage** – Hardware selection, proposal mixing, search constraint repairs, and ML calibration each have dedicated tests (`cargo test`).
+- **Automatic hardware scaling** - `HardwareBackendType::Auto` inspects CPU cores, memory, GPU hints, and cluster schedulers to pick CPU, multi-threaded CPU, GPU, or distributed backends. Fine-grained overrides (`RunConfig.hardware_overrides` or env vars such as `W1Z4RDV1510N_ALLOW_GPU`, `..._MAX_THREADS`) let you disable accelerators or cap thread counts per deployment.
+- **Search-integrated proposals** - Occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible. Cached grids eliminate redundant rebuilds.
+- **Goal-aware ML priors** - ML hooks (`None`, `SimpleRules`, `GoalAnchor`) provide initialization hints and contribute to energy scoring. GoalAnchor learns anchor destinations from trajectories.
+- **Configurable randomness** - Deterministic, OS entropy, and (feature-gated) jitter-based RNG providers with per-module seed logging and reproducible runs when deterministic mode is selected.
+- **ML-guided proposals** - Enable `proposal.ml_guided_move_prob` (>0) to let ML backends suggest coordinated moves in the sampler.
+- **Quantum-inspired stacks** - Optional `quantum` mode runs coupled Trotter slices (simulated quantum annealing) while the `energy.w_stack_hash` family fuses prior trajectories (`stack_history`) via hashed consistency, top-k frame alignment, and future-lookahead pulls for gap-filling chess/sequence experiments.
+- **Structured logging** - Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, path diagnostics, and service telemetry.
+- **Calibration tooling** - `cargo run --bin calibrate_energy` inspects recorded trajectories to recommend energy weights, plus schema validation and summary stats.
+- **REST + persistence layer** - `/predict`, `/healthz`, `/readyz`, `/runs`, `/runs/{id}` form a full control plane with durable JSON artifacts for every job.
+- **Validation scripts** - Python helpers convert chess PGNs and run perpetual accuracy loops to benchmark ML + logging pipelines.
+- **Relational priors** - `scripts/build_relational_priors.py` builds generic motif/transition priors from any sequence of symbol states (chess, people, vehicles). It hashes relational graphs, learns transition likelihoods, and exports top-k destination bins for lightweight inference/energy terms.
+- **Unit-test coverage** - Hardware selection, proposal mixing, search constraint repairs, telemetry readiness, service storage, and ML calibration each have dedicated tests (`cargo test`).
+
+### Architecture Overview
+
+- **config** – validated `RunConfig`/`RunMode`, hardware overrides, logging/output knobs, and production guardrails.
+- **state_population** – particle initialization, weight normalization (tensor-accelerated), resampling, and mutation utilities.
+- **proposal** – adaptive mixing of local/group/swap/path/global moves plus ML-guided proposals and temperature-aware weights.
+- **search** – occupancy grid caching, teleport-on-no-path, overlap repair, and A* diagnostics feeding the path energy term.
+- **energy** – decomposed cost terms (motion, collision, goals, env constraints, ML priors) with tensor/vector fast paths when available.
+- **hardware** – CPU, multi-threaded CPU, RAM-optimized, GPU (`wgpu`), distributed, and experimental backends + auto-detection/fallback logic.
+- **service_api / service_storage / telemetry** – shared request/response structs, run persistence, health/readiness metrics, and run-id telemetry for the Axum service.
+- **bin/predict_state** – CLI driver for JSON configs; **bin/service** – REST API with health probes + persistent runs.
 
 ---
 
@@ -32,6 +46,12 @@ W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futur
 - Rust 1.74+ (install via [rustup](https://rustup.rs)).
 - Python 3.10+ (optional, for data scripts + chess validation).
 - Optional: `python-chess`, `tqdm` (`pip install python-chess tqdm`).
+
+### Optional Cargo features
+
+- `gpu` – enables the true GPU backend (requires a Vulkan/Metal/DirectX12-capable adapter).
+- `experimental-hw` – builds the experimental hardware backend; must be combined with `mode = "LAB_EXPERIMENTAL"`.
+- `distributed` – reserved for future remote/offload integrations (presently a no-op feature flag).
 
 ---
 
@@ -82,6 +102,11 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
   "search": { "cell_size": 0.75, "teleport_on_no_path": true },
   "ml_backend": "GoalAnchor",
   "hardware_backend": "Auto",
+  "hardware_overrides": {
+    "allow_gpu": false,
+    "allow_distributed": true,
+    "max_threads": 12
+  },
   "logging": { "log_level": "INFO", "json": true, "log_path": "logs/run.jsonl" },
   "output": { "save_best_state": true, "save_population_summary": true, "output_path": "logs/results.json", "format": "Json" },
   "random": { "provider": "DETERMINISTIC", "seed": 1337 },
@@ -100,6 +125,7 @@ Output:
 - Console summary (`Best energy: … | symbols: …`).
 - `logs/results.json` (best state, energy breakdown, path diagnostics).
 - `logs/run.jsonl` (if `log_path` set): structured logs with iteration metrics.
+- **Quantum + stack hashing:** add a `stack_history` array to the snapshot, set `energy.w_stack_hash` > 0, and toggle `"quantum": { "enabled": true, ... }` to run the coupled Trotter-slice annealer. `energy.stack_alignment_topk`, `energy.stack_alignment_weight`, `energy.stack_future_horizon`, and `energy.stack_future_weight` let you bias toward the closest history frames (by overlap distance) and softly pull particles toward where those frames are headed, which is handy when the observed sequence is sparse/staggered. `quantum.driver_final_strength` lets you taper the transverse-field driver toward the end of the schedule.
 
 ### Logging Options
 
@@ -111,6 +137,61 @@ Output:
 - `mode` - defaults to `PRODUCTION`. Switch to `LAB_EXPERIMENTAL` when using jitter RNG or the experimental hardware backend. Production mode automatically rejects unsafe combinations.
 - `hardware_backend` - add `"Experimental"` (requires `--features experimental-hw` and `experimental_hardware.enabled: true`) to blend physical telemetry into the annealer. Sensors are read passively; no destructive behavior occurs.
 - `experimental_hardware` - tuning knobs for the experimental backend (`use_thermal`, `use_performance_counters`, `max_sample_interval_secs`). Leave `enabled: false` unless running in lab mode.
+
+### Hardware & Safety Configuration
+
+- `hardware_overrides.allow_gpu/allow_distributed` explicitly disable accelerators even when Auto detects them. Defaults honor env vars (`W1Z4RDV1510N_ALLOW_GPU`, `SIMFUTURES_ALLOW_GPU`, etc.).
+- `hardware_overrides.max_threads` caps the logical CPU core count the scheduler uses (also configurable via `W1Z4RDV1510N_MAX_THREADS`). Handy when sharing multi-socket machines.
+- Environment hints:
+  - `W1Z4RDV1510N_HAS_GPU` / `SIMFUTURES_HAS_GPU` – force-detect a GPU even if CUDA tooling is not present.
+  - `W1Z4RDV1510N_DISTRIBUTED` / `SIMFUTURES_DISTRIBUTED` – hint that we’re running under a cluster scheduler (Auto may pick the distributed backend).
+  - `CUDA_VISIBLE_DEVICES` – honored transparently by the GPU backend.
+- Production guardrails (`mode = "PRODUCTION"`) reject jitter RNGs, experimental hardware, or explicit `hardware_backend = "Experimental"`.
+
+### Service Endpoints & Telemetry
+
+- Launch via `W1Z4RDV1510N_SERVICE_ADDR=0.0.0.0:8080 cargo run --bin service`.
+- `POST /predict` – same payload as the CLI accepts; response now includes a monotonic `run_id`, backend, and acceptance ratio.
+- `GET /healthz` – always returns HTTP 200 with a `HealthReport { status, ready, uptime, total_requests, ... }`.
+- `GET /readyz` – returns HTTP 200 only after at least one successful run (otherwise HTTP 503 but with the same JSON payload). Perfect for load balancer readiness checks.
+- Structured telemetry records start/end timestamps, backend choice, and best energy per run; logs also include the `run_id` for correlation.
+- `GET /runs?limit=20` – lists the most recent persisted runs (best energy, backend, timestamp). `GET /runs/{run_id}` returns the original request + response payload for that run, exactly as they were processed.
+- Every POSTed job is persisted under `logs/service_runs/run_<id>.json` by default (override via `W1Z4RDV1510N_SERVICE_STORAGE`). This makes post-mortem analysis and dataset building straightforward.
+
+## Chess validation loop
+
+The chess pipeline under `scripts/` provides a deterministic, hardware-aware benchmark for proposal diversity and ML-guided reasoning:
+
+1. `preprocess_chess_games.py` ingests PGNs (`data/chess/raw`) into `processed_games.jsonl`.
+2. `chess_training_loop.py` hashes move histories + player metadata, builds prefix features for multiple time horizons, and trains:
+   - Softmax regressors for outcomes at different ply scopes.
+   - Frequency-based move predictors for +1…+20 moves ahead given sliding context windows.
+3. The loop runs indefinitely (or until `--max-iterations`), logging accuracy per scope/horizon to `logs/chess_training_metrics.log`.
+
+Recent upgrades:
+
+- Thread-aware initialization: sets `OMP_NUM_THREADS` / MKL / OpenBLAS defaults based on CPU count so NumPy kernels utilize all cores (and play nicely with lightweight devices).
+- Incremental histogramming: outcome features reuse cumulative hashed counts instead of repeated `np.bincount`, yielding a large speed-up per iteration.
+- Hashed move contexts: move models store compact integer contexts, drastically reducing dictionary pressure while keeping exact move labels for evaluation.
+- Motif + relational priors: `build_relational_priors.py` distills motifs/transitions from any sequence dataset; `chess_training_loop.py` can blend them (`--relational-priors`, `--prior-blend`, `--prior-topk`) to bias toward recurring relational structure.
+- Fully parameterized CLI: `--outcome-scopes`, `--move-horizons`, `--context-window`, `--context-stride`, `--epochs-per-iteration`, `--max-runtime-minutes`, `--summary-file`, etc., make it easy to sweep experiments or run a deterministic overnight job.
+- Continuous logging: every iteration appends JSON metrics (iteration, duration, per-scope accuracy) so you can tail progress in real time.
+- Multi-frame reinforcement: `--multi-frame-windows` samples multiple temporal windows per game, while `--anneal-*` + `--reinforcement-*` hook the annealing engine into the chess loop for positive/negative feedback on simultaneous futures.
+
+Example launch (runs indefinitely, retraining each iteration):
+
+```powershell
+python scripts/chess_training_loop.py `
+  --max-games 20000 `
+  --epochs-per-iteration 5 `
+  --outcome-scopes 6 10 14 18 22 26 30 40 `
+  --move-horizons 1 5 10 15 20 `
+  --context-window 8 `
+  --context-stride 2 `
+  --log-file logs/chess_training_metrics.log
+```
+
+The script automatically seeds NumPy/Python RNGs, prints detected CPU/thread settings, and reports integer accuracies for each horizon so you can gauge convergence quickly.
 
 ## REST Service API
 
@@ -150,8 +231,11 @@ The response returns the usual `Results` plus telemetry metadata:
 {
   "results": { "...": "..." },
   "telemetry": {
+    "run_id": 42,
     "random_provider": { "provider": "OS_ENTROPY", "deterministic": false, "seed": null },
-    "hardware_backend": "MultiThreadedCpu"
+    "hardware_backend": "MultiThreadedCpu",
+    "best_energy": -12.3,
+    "acceptance_ratio": 0.44
   }
 }
 ```
@@ -218,8 +302,25 @@ python scripts/chess_training_loop.py `
   --log-file logs/chess_training_metrics.log
 ```
 
+- For a deterministic overnight run with relational priors, automatic summary, and a wall-clock cap:
+
+```powershell
+python scripts/chess_training_loop.py `
+  --max-games 8000 `
+  --max-iterations 0 `
+  --max-runtime-minutes 600 `
+  --epochs-per-iteration 4 `
+  --relational-priors data/relational_priors.json `
+  --prior-blend 0.35 `
+  --prior-topk 50 `
+  --log-file logs/chess_eval_priors_long.log `
+  --summary-file logs/chess_run_summary.txt
+```
+
 - Hashed SAN features + player/opening metadata feed a softmax outcome model at multiple observation scopes (6→40 plies) and frequency-based move predictors (+1→+20 moves ahead).
 - Each iteration prints integer accuracies and appends a JSON record to `logs/chess_training_metrics.log`, enabling long-term analysis while the process runs unattended.
+- To drive the Rust annealer on real games, run `scripts/export_chess_stack_snapshot.py --game-index 3 --plies 14 --output data/chess/stack_snapshot.json` to emit an `EnvironmentSnapshot` with a `stack_history` of early plies. Pair it with `energy.w_stack_hash` and `quantum.enabled=true` in your config.
+- Use `--stride` / `--stride-offset` / `--skip-terminal` on `export_chess_stack_snapshot.py` to intentionally sparsify the history (e.g., keep every 3rd ply) when testing the gap-filling stack alignment / future-lookahead terms.
 
 ---
 

@@ -49,6 +49,9 @@ pub struct EnvironmentSnapshot {
     pub symbols: Vec<Symbol>,
     #[serde(default)]
     pub metadata: Properties,
+    /// Optional stack of previous dynamic states (e.g., sequential snapshots for sequence-aware energies).
+    #[serde(default)]
+    pub stack_history: Vec<DynamicState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

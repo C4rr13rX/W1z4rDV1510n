@@ -255,6 +255,7 @@ mod tests {
                 properties: Properties::new(),
             }],
             metadata: Properties::new(),
+            stack_history: Vec::new(),
         }
     }
 

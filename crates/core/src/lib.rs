@@ -6,11 +6,18 @@ pub mod hardware;
 pub mod logging;
 pub mod ml;
 pub mod orchestrator;
+pub mod planner;
 pub mod proposal;
+pub mod quantum;
 pub mod random;
 pub mod results;
 pub mod schema;
 pub mod search;
+pub mod service_api;
+pub mod service_storage;
 pub mod state_population;
+pub mod system;
+pub mod telemetry;
+pub mod tensor;
 
 pub use orchestrator::{RunOutcome, run_with_config, run_with_snapshot};

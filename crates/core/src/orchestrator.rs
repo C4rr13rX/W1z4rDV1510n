@@ -5,9 +5,10 @@ use crate::hardware::{HardwareBackendType, create_hardware_backend};
 use crate::logging::init_logging;
 use crate::ml::create_ml_model;
 use crate::proposal::DefaultProposalKernel;
+use crate::quantum::anneal_quantum;
 use crate::random::{RandomProviderDescriptor, create_random_provider};
 use crate::results::{Results, analyze_results};
-use crate::schema::EnvironmentSnapshot;
+use crate::schema::{EnvironmentSnapshot, Population};
 use crate::search::SearchModule;
 use crate::state_population::init_population;
 use anyhow::Context;
@@ -73,14 +74,27 @@ pub fn run_with_snapshot(
     );
     let ml_model = create_ml_model(config.ml_backend.clone(), ml_seed);
     let search_module = SearchModule::new(config.search.clone());
+    let hardware_seed = random_provider.next_seed("hardware_backend");
+    let (hardware_backend, resolved_backend) = create_hardware_backend(
+        config.hardware_backend.clone(),
+        hardware_seed,
+        &config.experimental_hardware,
+        &config.hardware_overrides,
+    )?;
+    debug!(
+        target: "w1z4rdv1510n::random",
+        module = "hardware_backend",
+        seed = hardware_seed
+    );
     let energy_model = EnergyModel::new(
         Arc::clone(&snapshot),
         config.energy.clone(),
         Some(ml_model.clone()),
         Some(search_module.clone()),
         config.t_end,
+        hardware_backend.tensor_executor(),
     );
-    let population = init_population(
+    let base_population = init_population(
         snapshot.as_ref(),
         config.t_end,
         Some(&ml_model),
@@ -89,14 +103,14 @@ pub fn run_with_snapshot(
         &config.init_strategy,
         &mut rng,
     );
-    let initial_min_energy = population
+    let initial_min_energy = base_population
         .particles
         .iter()
         .map(|p| p.energy)
         .fold(f64::INFINITY, f64::min);
     debug!(
         target: "w1z4rdv1510n::orchestrator",
-        n_particles = population.particles.len(),
+        n_particles = base_population.particles.len(),
         min_energy = initial_min_energy,
         "population initialized"
     );
@@ -113,28 +127,47 @@ pub fn run_with_snapshot(
         module = "proposal_kernel",
         seed = kernel_seed
     );
-    let hardware_seed = random_provider.next_seed("hardware_backend");
-    let (hardware_backend, resolved_backend) = create_hardware_backend(
-        config.hardware_backend.clone(),
-        hardware_seed,
-        &config.experimental_hardware,
-    )?;
-    debug!(
-        target: "w1z4rdv1510n::random",
-        module = "hardware_backend",
-        seed = hardware_seed
-    );
-    let (population, energy_trace, acceptance_trace) = anneal(
-        population,
-        snapshot.as_ref(),
-        &energy_model,
-        &kernel,
-        Some(&search_module),
-        &config.schedule,
-        &config.resample,
-        &hardware_backend,
-        &mut rng,
-    );
+    let (population, energy_trace, acceptance_trace) = if config.quantum.enabled {
+        let mut slices = Vec::with_capacity(config.quantum.trotter_slices.max(1));
+        slices.push(base_population);
+        for _ in 1..config.quantum.trotter_slices.max(1) {
+            slices.push(init_population(
+                snapshot.as_ref(),
+                config.t_end,
+                Some(&ml_model),
+                &energy_model,
+                config.n_particles,
+                &config.init_strategy,
+                &mut rng,
+            ));
+        }
+        let outcome = anneal_quantum(
+            slices,
+            snapshot.as_ref(),
+            &energy_model,
+            &kernel,
+            Some(&search_module),
+            &config.schedule,
+            &config.resample,
+            &hardware_backend,
+            &mut rng,
+            &config.quantum,
+        );
+        let best_slice = select_best_population(&outcome.slices);
+        (best_slice, outcome.energy_trace, outcome.acceptance_trace)
+    } else {
+        anneal(
+            base_population,
+            snapshot.as_ref(),
+            &energy_model,
+            &kernel,
+            Some(&search_module),
+            &config.schedule,
+            &config.resample,
+            &hardware_backend,
+            &mut rng,
+        )
+    };
     let results = analyze_results(
         &population,
         energy_trace,
@@ -155,6 +188,32 @@ pub fn run_with_snapshot(
         hardware_backend: resolved_backend,
         acceptance_ratio: acceptance_trace.last().copied(),
     })
+}
+
+fn select_best_population(slices: &[Population]) -> Population {
+    slices
+        .iter()
+        .cloned()
+        .min_by(|a, b| {
+            min_population_energy(a)
+                .partial_cmp(&min_population_energy(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or_else(|| {
+            slices.first().cloned().unwrap_or(Population {
+                particles: Vec::new(),
+                temperature: 0.0,
+                iteration: 0,
+            })
+        })
+}
+
+fn min_population_energy(population: &Population) -> f64 {
+    population
+        .particles
+        .iter()
+        .map(|p| p.energy)
+        .fold(f64::INFINITY, f64::min)
 }
 
 fn load_snapshot(config: &RunConfig) -> anyhow::Result<EnvironmentSnapshot> {

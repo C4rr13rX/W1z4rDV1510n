@@ -1,0 +1,76 @@
+{
+  "snapshot_file": "data/chess/stack_snapshot.json",
+  "mode": "PRODUCTION",
+  "t_end": { "unix": 1732003600 },
+  "n_particles": 256,
+  "schedule": { "t_start": 4.0, "t_end": 0.25, "n_iterations": 120, "schedule_type": "Linear" },
+  "energy": {
+    "w_motion": 0.5,
+    "w_collision": 4.0,
+    "w_goal": 0.5,
+    "w_group_cohesion": 0.5,
+    "w_ml_prior": 0.0,
+    "w_path_feasibility": 0.5,
+    "w_env_constraints": 1.0,
+    "w_stack_hash": 0.35,
+    "stack_alignment_topk": 3,
+    "stack_future_horizon": 2,
+    "stack_alignment_weight": 1.0,
+    "stack_future_weight": 0.75,
+    "other_terms": {}
+  },
+  "proposal": {
+    "local_move_prob": 0.45,
+    "group_move_prob": 0.05,
+    "swap_move_prob": 0.15,
+    "path_based_move_prob": 0.0,
+    "global_move_prob": 0.35,
+    "ml_guided_move_prob": 0.0,
+    "max_step_size": 0.65,
+    "use_parallel_updates": true,
+    "adaptive_move_mixing": true
+  },
+  "init_strategy": {
+    "use_ml_priors": true,
+    "noise_level": 0.35,
+    "random_fraction": 0.1,
+    "copy_snapshot_fraction": 0.1
+  },
+  "resample": {
+    "enabled": true,
+    "effective_sample_size_threshold": 0.35,
+    "mutation_rate": 0.05
+  },
+  "search": { "cell_size": 0.9, "teleport_on_no_path": true },
+  "ml_backend": "GoalAnchor",
+  "hardware_backend": "Auto",
+  "hardware_overrides": {
+    "allow_gpu": true,
+    "allow_distributed": true,
+    "max_threads": 12
+  },
+  "quantum": {
+    "enabled": true,
+    "trotter_slices": 4,
+    "driver_strength": 0.35,
+    "driver_final_strength": 0.08,
+    "worldline_mix_prob": 0.05,
+    "slice_temperature_scale": 1.0
+  },
+  "random_seed": 2025,
+  "random": { "provider": "DETERMINISTIC", "seed": 2025 },
+  "logging": {
+    "log_level": "INFO",
+    "json": true,
+    "log_path": "logs/chess_quantum_run.jsonl"
+  },
+  "output": {
+    "save_best_state": true,
+    "save_population_summary": true,
+    "save_trajectories": false,
+    "format": "Json",
+    "output_path": "logs/chess_quantum_results.json",
+    "summary_path": "logs/chess_quantum_summary.json"
+  },
+  "experimental_hardware": { "enabled": false }
+}

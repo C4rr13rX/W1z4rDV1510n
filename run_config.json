@@ -41,6 +41,11 @@
   "search": { "cell_size": 0.75, "teleport_on_no_path": true },
   "ml_backend": "GoalAnchor",
   "hardware_backend": "Auto",
+  "hardware_overrides": {
+    "allow_gpu": true,
+    "allow_distributed": true,
+    "max_threads": 12
+  },
   "random_seed": 1337,
   "logging": {
     "log_level": "INFO",
