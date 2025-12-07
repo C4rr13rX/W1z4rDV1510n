@@ -174,7 +174,9 @@ Recent upgrades:
 - Incremental histogramming: outcome features reuse cumulative hashed counts instead of repeated `np.bincount`, yielding a large speed-up per iteration.
 - Hashed move contexts: move models store compact integer contexts, drastically reducing dictionary pressure while keeping exact move labels for evaluation.
 - Motif + relational priors: `build_relational_priors.py` distills motifs/transitions from any sequence dataset; `chess_training_loop.py` can blend them (`--relational-priors`, `--prior-blend`, `--prior-topk`) to bias toward recurring relational structure.
-- Fully parameterized CLI: `--outcome-scopes`, `--move-horizons`, `--context-window`, `--context-stride`, `--epochs-per-iteration`, `--max-runtime-minutes`, `--summary-file`, etc., make it easy to sweep experiments or run a deterministic overnight job.
+- Role-aware motifs + factorized move priors: motif hashes and move labels now include role/side/zone bins; factorized priors (`--factor-blend`) reduce sparsity without heavy models.
+- Clustered/anchor priors + beam re-rank: hashed style clusters and anchor motifs add structure; a shallow beam (`--beam-width`, `--beam-steps`) re-ranks longer horizons cheaply.
+- Fully parameterized CLI: `--outcome-scopes`, `--move-horizons`, `--context-window`, `--context-stride`, `--epochs-per-iteration`, `--max-runtime-minutes`, `--summary-file`, `--factor-blend`, `--beam-*`, etc., make it easy to sweep experiments or run a deterministic overnight job.
 - Continuous logging: every iteration appends JSON metrics (iteration, duration, per-scope accuracy) so you can tail progress in real time.
 - Multi-frame reinforcement: `--multi-frame-windows` samples multiple temporal windows per game, while `--anneal-*` + `--reinforcement-*` hook the annealing engine into the chess loop for positive/negative feedback on simultaneous futures.
 
@@ -302,7 +304,7 @@ python scripts/chess_training_loop.py `
   --log-file logs/chess_training_metrics.log
 ```
 
-- For a deterministic overnight run with relational priors, automatic summary, and a wall-clock cap:
+- For a deterministic overnight run with relational + role-aware/factorized priors, beam re-rank, automatic summary, and a wall-clock cap:
 
 ```powershell
 python scripts/chess_training_loop.py `
@@ -311,8 +313,11 @@ python scripts/chess_training_loop.py `
   --max-runtime-minutes 600 `
   --epochs-per-iteration 4 `
   --relational-priors data/relational_priors.json `
-  --prior-blend 0.35 `
-  --prior-topk 50 `
+  --prior-blend 0.6 `
+  --prior-topk 100 `
+  --factor-blend 0.6 `
+  --beam-width 12 `
+  --beam-steps 3 `
   --log-file logs/chess_eval_priors_long.log `
   --summary-file logs/chess_run_summary.txt
 ```
