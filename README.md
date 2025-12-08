@@ -324,6 +324,17 @@ python scripts/chess_training_loop.py `
 
 - Hashed SAN features + player/opening metadata feed a softmax outcome model at multiple observation scopes (6→40 plies) and frequency-based move predictors (+1→+20 moves ahead).
 - Each iteration prints integer accuracies and appends a JSON record to `logs/chess_training_metrics.log`, enabling long-term analysis while the process runs unattended.
+
+Fetching chemistry (USPTO) datasets for symbol-sequence tests:
+
+- Use `scripts/fetch_uspto_reactions.py` to download both the full Lowe USPTO set and the curated USPTO-50K subset into `data/uspto/`:
+
+```powershell
+python scripts/fetch_uspto_reactions.py             # full + 50k
+python scripts/fetch_uspto_reactions.py --only 50k  # just the 50k subset
+```
+
+These archives come from the public deepchemdata S3 bucket. Convert the extracted reaction data into your symbol schema (roles/groups/steps) before running priors/training on them.
 - To drive the Rust annealer on real games, run `scripts/export_chess_stack_snapshot.py --game-index 3 --plies 14 --output data/chess/stack_snapshot.json` to emit an `EnvironmentSnapshot` with a `stack_history` of early plies. Pair it with `energy.w_stack_hash` and `quantum.enabled=true` in your config.
 - Use `--stride` / `--stride-offset` / `--skip-terminal` on `export_chess_stack_snapshot.py` to intentionally sparsify the history (e.g., keep every 3rd ply) when testing the gap-filling stack alignment / future-lookahead terms.
 

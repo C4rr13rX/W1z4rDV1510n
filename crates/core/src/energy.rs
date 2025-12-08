@@ -1,5 +1,6 @@
 use crate::config::EnergyConfig;
 use crate::ml::MlModelHandle;
+use crate::neuro::{NeuroRuntimeHandle, NeuroSnapshot, zone_label};
 use crate::schema::{
     DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType, Timestamp,
 };
@@ -9,9 +10,15 @@ use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 
 const STACK_HASH_SCALE: f64 = 100.0;
+const RELATION_BINS: i32 = 4;
+const RELATION_NEAR: f64 = 0.5;
+const RELATION_MID: f64 = 2.0;
+const RELATIONAL_EPS: f64 = 1e-9;
+const FACTOR_EPS: f64 = 1e-9;
 
 pub trait EnergyEvaluator {
     fn energy(&self, state: &DynamicState) -> f64;
@@ -55,7 +62,9 @@ pub struct SymbolEnergyBreakdown {
     pub environment: f64,
     pub path: f64,
     pub ml_prior: f64,
+    pub neuro: f64,
     pub stack: f64,
+    pub relational_prior: f64,
 }
 
 impl SymbolEnergyBreakdown {
@@ -67,7 +76,9 @@ impl SymbolEnergyBreakdown {
             + self.environment
             + self.path
             + self.ml_prior
+            + self.neuro
             + self.stack
+            + self.relational_prior
     }
 
     fn add(&mut self, term: EnergyTerm, value: f64) {
@@ -79,7 +90,9 @@ impl SymbolEnergyBreakdown {
             EnergyTerm::Environment => self.environment += value,
             EnergyTerm::Path => self.path += value,
             EnergyTerm::MlPrior => self.ml_prior += value,
+            EnergyTerm::Neuro => self.neuro += value,
             EnergyTerm::Stack => self.stack += value,
+            EnergyTerm::RelationalPrior => self.relational_prior += value,
         }
     }
 }
@@ -93,7 +106,9 @@ pub struct TermEnergyTotals {
     pub environment: f64,
     pub path: f64,
     pub ml_prior: f64,
+    pub neuro: f64,
     pub stack: f64,
+    pub relational_prior: f64,
 }
 
 impl TermEnergyTotals {
@@ -106,7 +121,9 @@ impl TermEnergyTotals {
             EnergyTerm::Environment => self.environment += value,
             EnergyTerm::Path => self.path += value,
             EnergyTerm::MlPrior => self.ml_prior += value,
+            EnergyTerm::Neuro => self.neuro += value,
             EnergyTerm::Stack => self.stack += value,
+            EnergyTerm::RelationalPrior => self.relational_prior += value,
         }
     }
 }
@@ -120,7 +137,9 @@ enum EnergyTerm {
     Environment,
     Path,
     MlPrior,
+    Neuro,
     Stack,
+    RelationalPrior,
 }
 
 #[derive(Default)]
@@ -199,6 +218,146 @@ impl WallPrimitive {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct RelationalPriors {
+    motif_probs: HashMap<String, f64>,
+    transition_probs: HashMap<String, f64>,
+    /// Factor priors keyed by factor name then value (e.g., role->KING, start_bin->3).
+    factor_probs: HashMap<String, HashMap<String, f64>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RelationalPriorFile {
+    #[serde(default)]
+    motif_probs: HashMap<String, f64>,
+    #[serde(default)]
+    transition_probs: HashMap<String, f64>,
+    #[serde(default)]
+    factor_probs: HashMap<String, HashMap<String, f64>>,
+}
+
+fn load_relational_priors(path: &str) -> Option<RelationalPriors> {
+    let content = fs::read_to_string(path).ok()?;
+    let parsed: RelationalPriorFile = serde_json::from_str(&content).ok()?;
+    Some(RelationalPriors {
+        motif_probs: parsed.motif_probs,
+        transition_probs: parsed.transition_probs,
+        factor_probs: parsed.factor_probs,
+    })
+}
+
+fn zone_bin(position: &Position) -> (i32, i32) {
+    let step = (RELATION_BINS.max(1)) as f64;
+    let bx = ((position.x / step).floor() as i32).clamp(0, RELATION_BINS - 1);
+    let by = ((position.y / step).floor() as i32).clamp(0, RELATION_BINS - 1);
+    (bx, by)
+}
+
+fn direction_bucket(a: &Position, b: &Position) -> &'static str {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    if dx.abs() > dy.abs() {
+        if dx > 0.0 {
+            "east"
+        } else {
+            "west"
+        }
+    } else if dy.abs() > 0.0 {
+        if dy > 0.0 {
+            "north"
+        } else {
+            "south"
+        }
+    } else {
+        "same"
+    }
+}
+
+fn distance_bucket(a: &Position, b: &Position) -> &'static str {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if dist < RELATION_NEAR {
+        "near"
+    } else if dist < RELATION_MID {
+        "mid"
+    } else {
+        "far"
+    }
+}
+
+fn symbol_role(symbol: &Symbol) -> String {
+    if let Some(Value::String(role)) = symbol.properties.get("role") {
+        return role.to_uppercase();
+    }
+    match symbol.symbol_type {
+        SymbolType::Person => "PERSON".to_string(),
+        SymbolType::Wall => "WALL".to_string(),
+        SymbolType::Exit => "EXIT".to_string(),
+        SymbolType::Object => "OBJECT".to_string(),
+        SymbolType::Custom => "CUSTOM".to_string(),
+    }
+}
+
+fn symbol_group(symbol: &Symbol) -> String {
+    if let Some(Value::String(side)) = symbol.properties.get("side") {
+        return side.to_lowercase();
+    }
+    if let Some(Value::String(group)) = symbol.properties.get("group_id") {
+        return group.to_lowercase();
+    }
+    "neutral".to_string()
+}
+
+fn relational_signature(
+    state: &DynamicState,
+    lookup: &HashMap<String, Symbol>,
+) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    // unary
+    for (symbol_id, symbol_state) in state.symbol_states.iter() {
+        if let Some(symbol) = lookup.get(symbol_id) {
+            let role = symbol_role(symbol);
+            let group = symbol_group(symbol);
+            let (bx, by) = zone_bin(&symbol_state.position);
+            tokens.push(format!("u:{role}:{group}:{bx}{by}"));
+        } else {
+            let (bx, by) = zone_bin(&symbol_state.position);
+            tokens.push(format!("u:UNK:neutral:{bx}{by}"));
+        }
+    }
+    // pairwise
+    let ids: Vec<&String> = state.symbol_states.keys().collect();
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            let a_id = ids[i];
+            let b_id = ids[j];
+            if let (Some(a), Some(b)) = (
+                state.symbol_states.get(a_id),
+                state.symbol_states.get(b_id),
+            ) {
+                let dir = direction_bucket(&a.position, &b.position);
+                let dist = distance_bucket(&a.position, &b.position);
+                tokens.push(format!("r:{a_id}->{b_id}:{dir}:{dist}"));
+            }
+        }
+    }
+    tokens.sort_unstable();
+    tokens
+}
+
+fn motif_hash_from_state(state: &DynamicState, lookup: &HashMap<String, Symbol>) -> Option<String> {
+    if state.symbol_states.is_empty() {
+        return None;
+    }
+    let parts = relational_signature(state, lookup);
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("|"))
+    }
+}
+
 pub struct EnergyModel {
     snapshot_0: Arc<EnvironmentSnapshot>,
     config: EnergyConfig,
@@ -212,6 +371,8 @@ pub struct EnergyModel {
     search_module: Option<SearchModule>,
     walls: Vec<WallPrimitive>,
     tensor_executor: Option<TensorExecutorHandle>,
+    relational_priors: Option<RelationalPriors>,
+    neuro_runtime: Option<NeuroRuntimeHandle>,
 }
 
 impl EnergyModel {
@@ -222,6 +383,7 @@ impl EnergyModel {
         search_module: Option<SearchModule>,
         target_time: Timestamp,
         tensor_executor: Option<TensorExecutorHandle>,
+        neuro_runtime: Option<NeuroRuntimeHandle>,
     ) -> Self {
         let symbol_lookup = snapshot_0
             .symbols
@@ -251,6 +413,11 @@ impl EnergyModel {
         let ml_predictions = ml_model
             .as_ref()
             .map(|hooks| hooks.predict_next_positions(snapshot_0.as_ref(), &target_time));
+        let relational_priors = if let Some(path) = config.relational_priors_path.as_ref() {
+            load_relational_priors(path)
+        } else {
+            None
+        };
         Self {
             snapshot_0,
             config,
@@ -264,6 +431,8 @@ impl EnergyModel {
             search_module,
             walls,
             tensor_executor,
+            relational_priors,
+            neuro_runtime,
         }
     }
 
@@ -348,6 +517,28 @@ impl EnergyModel {
                 cfg.w_ml_prior,
                 self.ml_term_breakdown(dynamic_state),
             );
+        }
+        if cfg.w_neuro_alignment > 0.0 {
+            self.accumulate_term(
+                &mut per_symbol,
+                &mut per_term,
+                &mut total,
+                EnergyTerm::Neuro,
+                cfg.w_neuro_alignment,
+                self.neuro_term_breakdown(dynamic_state),
+            );
+        }
+        if cfg.w_relational_prior > 0.0 {
+            if let Some(priors) = self.relational_priors.as_ref() {
+                self.accumulate_term(
+                    &mut per_symbol,
+                    &mut per_term,
+                    &mut total,
+                    EnergyTerm::RelationalPrior,
+                    cfg.w_relational_prior,
+                    self.relational_prior_term(dynamic_state, priors),
+                );
+            }
         }
 
         EnergyBreakdown::new(per_symbol, per_term, total)
@@ -672,6 +863,85 @@ impl EnergyModel {
         }
         if let Some(model) = &self.ml_model {
             contribution.add_direct(model.score_state(state));
+        }
+        contribution
+    }
+
+    fn relational_prior_term(
+        &self,
+        state: &DynamicState,
+        priors: &RelationalPriors,
+    ) -> TermContribution {
+        let mut contribution = TermContribution::default();
+        if state.symbol_states.is_empty() {
+            return contribution;
+        }
+        let motif_penalty = if let Some(hash) = motif_hash_from_state(state, &self.symbol_lookup) {
+            let prob = priors.motif_probs.get(&hash).copied().unwrap_or(RELATIONAL_EPS);
+            -prob.max(RELATIONAL_EPS).ln()
+        } else {
+            -RELATIONAL_EPS.ln()
+        };
+        let mut total_penalty = motif_penalty;
+
+        // transition-ish prior: compare current motif to previous frame if present
+        if let Some(prev_frame) = self.stack_history.last() {
+            if let (Some(prev_hash), Some(curr_hash)) = (
+                motif_hash_from_state(prev_frame, &self.symbol_lookup),
+                motif_hash_from_state(state, &self.symbol_lookup),
+            ) {
+                let key = format!("{prev_hash}→{curr_hash}");
+                if let Some(p) = priors.transition_probs.get(&key) {
+                    total_penalty += -p.max(RELATIONAL_EPS).ln();
+                } else {
+                    total_penalty += -RELATIONAL_EPS.ln();
+                }
+            }
+        }
+
+        // factor priors (role/zone bins)
+        if !priors.factor_probs.is_empty() {
+            for (symbol_id, symbol_state) in state.symbol_states.iter() {
+                let mut factor_penalty = 0.0;
+                let (bx, by) = zone_bin(&symbol_state.position);
+                let zone_key = format!("{bx}{by}");
+                if let Some(symbol) = self.symbol_lookup.get(symbol_id) {
+                    let role = symbol_role(symbol);
+                    let group = symbol_group(symbol);
+                    factor_penalty += -priors
+                        .factor_probs
+                        .get("role")
+                        .and_then(|m| m.get(&role))
+                        .copied()
+                        .unwrap_or(FACTOR_EPS)
+                        .max(FACTOR_EPS)
+                        .ln();
+                    factor_penalty += -priors
+                        .factor_probs
+                        .get("group")
+                        .and_then(|m| m.get(&group))
+                        .copied()
+                        .unwrap_or(FACTOR_EPS)
+                        .max(FACTOR_EPS)
+                        .ln();
+                    factor_penalty += -priors
+                        .factor_probs
+                        .get("zone")
+                        .and_then(|m| m.get(&zone_key))
+                        .copied()
+                        .unwrap_or(FACTOR_EPS)
+                        .max(FACTOR_EPS)
+                        .ln();
+                } else {
+                    factor_penalty += -FACTOR_EPS.ln();
+                }
+                contribution.add_symbol(symbol_id, factor_penalty);
+            }
+        }
+
+        let share = total_penalty / state.symbol_states.len() as f64;
+        for symbol_id in state.symbol_states.keys() {
+            contribution.add_symbol(symbol_id, share);
         }
         contribution
     }

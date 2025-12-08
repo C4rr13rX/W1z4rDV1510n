@@ -8,6 +8,10 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
+
+const RELATION_BINS: i32 = 4;
+const FACTOR_EPS: f64 = 1e-9;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalConfig {
@@ -27,6 +31,12 @@ pub struct ProposalConfig {
     pub use_parallel_updates: bool,
     #[serde(default)]
     pub adaptive_move_mixing: bool,
+    /// Optional path to relational priors JSON to bias proposals (same format as build_relational_priors.py).
+    #[serde(default)]
+    pub relational_priors_path: Option<String>,
+    /// Weight for factor priors when biasing proposals (role/zone/group).
+    #[serde(default = "ProposalConfig::default_factor_weight")]
+    pub factor_prior_weight: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,8 +61,42 @@ impl Default for ProposalConfig {
             max_step_size: 0.75,
             use_parallel_updates: false,
             adaptive_move_mixing: true,
+            relational_priors_path: None,
+            factor_prior_weight: ProposalConfig::default_factor_weight(),
         }
     }
+}
+
+impl ProposalConfig {
+    fn default_factor_weight() -> f64 {
+        1.0
+    }
+}
+
+fn zone_bin(position: &Position) -> (i32, i32) {
+    let step = (RELATION_BINS.max(1)) as f64;
+    let bx = ((position.x / step).floor() as i32).clamp(0, RELATION_BINS - 1);
+    let by = ((position.y / step).floor() as i32).clamp(0, RELATION_BINS - 1);
+    (bx, by)
+}
+
+#[derive(Debug, Clone, Default)]
+struct RelationalPriors {
+    factor_probs: HashMap<String, HashMap<String, f64>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RelationalPriorFile {
+    #[serde(default)]
+    factor_probs: HashMap<String, HashMap<String, f64>>,
+}
+
+fn load_relational_priors(path: &str) -> Option<RelationalPriors> {
+    let content = fs::read_to_string(path).ok()?;
+    let parsed: RelationalPriorFile = serde_json::from_str(&content).ok()?;
+    Some(RelationalPriors {
+        factor_probs: parsed.factor_probs,
+    })
 }
 
 pub trait ProposalKernel: Send + Sync {
@@ -69,6 +113,7 @@ pub struct DefaultProposalKernel {
     rng: Mutex<StdRng>,
     search: Option<SearchModule>,
     ml_model: Option<MlModelHandle>,
+    relational_priors: Option<RelationalPriors>,
 }
 
 impl DefaultProposalKernel {
@@ -78,11 +123,17 @@ impl DefaultProposalKernel {
         search: Option<SearchModule>,
         ml_model: Option<MlModelHandle>,
     ) -> Self {
+        let relational_priors = if let Some(path) = config.relational_priors_path.as_ref() {
+            load_relational_priors(path)
+        } else {
+            None
+        };
         Self {
             config,
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             search,
             ml_model,
+            relational_priors,
         }
     }
 }
@@ -107,7 +158,7 @@ impl ProposalKernel for DefaultProposalKernel {
         }
         let proposal = current_state.clone();
         match move_type {
-            MoveType::Local => self.local_move(proposal, temperature, &mut rng),
+            MoveType::Local => self.local_move(snapshot_0, proposal, temperature, &mut rng),
             MoveType::Group => self.group_move(snapshot_0, proposal, temperature, &mut rng),
             MoveType::Swap => self.swap_move(proposal, &mut rng),
             MoveType::Path => self.path_move(snapshot_0, proposal, temperature, &mut rng),
@@ -154,7 +205,7 @@ impl DefaultProposalKernel {
         rng: &mut StdRng,
     ) -> DynamicState {
         match move_type {
-            MoveType::Local => self.local_move_parallel(current_state, temperature, rng),
+            MoveType::Local => self.local_move_parallel(snapshot_0, current_state, temperature, rng),
             MoveType::Group => {
                 self.group_move_parallel(snapshot_0, current_state, temperature, rng)
             }
@@ -171,6 +222,7 @@ impl DefaultProposalKernel {
 
     fn local_move(
         &self,
+        snapshot_0: &EnvironmentSnapshot,
         mut proposal: DynamicState,
         temperature: f64,
         rng: &mut StdRng,
@@ -183,6 +235,9 @@ impl DefaultProposalKernel {
         symbol_state.position.x += delta();
         symbol_state.position.y += delta();
         symbol_state.position.z += delta();
+        if let Some(priors) = &self.relational_priors {
+            self.apply_factor_bias(symbol_state, None, snapshot_0, priors, rng);
+        }
         proposal
     }
 
@@ -206,7 +261,7 @@ impl DefaultProposalKernel {
             }
         }
         if groups.is_empty() {
-            return self.local_move(proposal, temperature, rng);
+            return self.local_move(snapshot_0, proposal, temperature, rng);
         }
         let group_ids: Vec<String> = groups.keys().cloned().collect();
         let Some(group_id) = group_ids.choose(rng).cloned() else {
@@ -227,6 +282,9 @@ impl DefaultProposalKernel {
                 state.position.x += dx;
                 state.position.y += dy;
                 state.position.z += dz;
+                if let Some(priors) = &self.relational_priors {
+                    self.apply_factor_bias(state, Some(member_id), snapshot_0, priors, rng);
+                }
             }
         }
         proposal
@@ -252,6 +310,102 @@ impl DefaultProposalKernel {
             symbol_state.position.z += dz + rng.gen_range(-jitter..jitter);
         }
         proposal
+    }
+
+    fn symbol_role(&self, snapshot_0: &EnvironmentSnapshot, symbol_id: &str) -> String {
+        snapshot_0
+            .symbols
+            .iter()
+            .find(|s| s.id == symbol_id)
+            .map(|s| {
+                if let Some(Value::String(role)) = s.properties.get("role") {
+                    role.to_uppercase()
+                } else {
+                    match s.symbol_type {
+                        SymbolType::Person => "PERSON".to_string(),
+                        SymbolType::Wall => "WALL".to_string(),
+                        SymbolType::Exit => "EXIT".to_string(),
+                        SymbolType::Custom => "CUSTOM".to_string(),
+                        SymbolType::Object => "OBJECT".to_string(),
+                    }
+                }
+            })
+            .unwrap_or_else(|| "UNK".to_string())
+    }
+
+    fn symbol_group(&self, snapshot_0: &EnvironmentSnapshot, symbol_id: &str) -> String {
+        snapshot_0
+            .symbols
+            .iter()
+            .find(|s| s.id == symbol_id)
+            .and_then(|s| s.properties.get("group_id").and_then(|v| v.as_str()))
+            .map(|g| g.to_lowercase())
+            .or_else(|| {
+                snapshot_0
+                    .symbols
+                    .iter()
+                    .find(|s| s.id == symbol_id)
+                    .and_then(|s| s.properties.get("side").and_then(|v| v.as_str()))
+                    .map(|s| s.to_lowercase())
+            })
+            .unwrap_or_else(|| "neutral".to_string())
+    }
+
+    fn apply_factor_bias(
+        &self,
+        symbol_state: &mut SymbolState,
+        symbol_id: Option<&str>,
+        snapshot_0: &EnvironmentSnapshot,
+        priors: &RelationalPriors,
+        rng: &mut StdRng,
+    ) {
+        let weight = self.config.factor_prior_weight.max(0.0);
+        if weight == 0.0 || priors.factor_probs.is_empty() {
+            return;
+        }
+        let (bx, by) = zone_bin(&symbol_state.position);
+        if let Some(zone_probs) = priors.factor_probs.get("zone") {
+            if let Some((best_key, _)) = zone_probs
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                if best_key.len() >= 2 {
+                    let tx = best_key[0..1].parse::<i32>().unwrap_or(bx);
+                    let ty = best_key[1..2].parse::<i32>().unwrap_or(by);
+                    if tx != bx || ty != by {
+                        let step = RELATION_BINS.max(1) as f64;
+                        let target_x = (tx as f64 + 0.5) * step;
+                        let target_y = (ty as f64 + 0.5) * step;
+                        let dx = target_x - symbol_state.position.x;
+                        let dy = target_y - symbol_state.position.y;
+                        symbol_state.position.x += dx * 0.1 * weight * rng.gen_range(0.5..1.0);
+                        symbol_state.position.y += dy * 0.1 * weight * rng.gen_range(0.5..1.0);
+                    }
+                }
+            }
+        }
+        if let Some(id) = symbol_id {
+            if let Some(role_probs) = priors.factor_probs.get("role") {
+                let role = self.symbol_role(snapshot_0, id);
+                if let Some(prob) = role_probs.get(&role) {
+                    if *prob < FACTOR_EPS {
+                        let jitter = 0.05 * weight;
+                        symbol_state.position.x += rng.gen_range(-jitter..jitter);
+                        symbol_state.position.y += rng.gen_range(-jitter..jitter);
+                    }
+                }
+            }
+            if let Some(group_probs) = priors.factor_probs.get("group") {
+                let group = self.symbol_group(snapshot_0, id);
+                if let Some(prob) = group_probs.get(&group) {
+                    if *prob < FACTOR_EPS {
+                        let jitter = 0.05 * weight;
+                        symbol_state.position.x += rng.gen_range(-jitter..jitter);
+                        symbol_state.position.y += rng.gen_range(-jitter..jitter);
+                    }
+                }
+            }
+        }
     }
 
     fn swap_move(&self, mut proposal: DynamicState, rng: &mut StdRng) -> DynamicState {
@@ -295,7 +449,7 @@ impl DefaultProposalKernel {
         rng: &mut StdRng,
     ) -> DynamicState {
         let Some(search_module) = &self.search else {
-            return self.local_move(proposal, temperature, rng);
+            return self.local_move(snapshot_0, proposal, temperature, rng);
         };
         let Some((symbol_id, symbol_state)) = proposal
             .symbol_states
@@ -306,7 +460,7 @@ impl DefaultProposalKernel {
             return proposal;
         };
         let Some(target) = self.target_position(snapshot_0, &symbol_id) else {
-            return self.local_move(proposal, temperature, rng);
+            return self.local_move(snapshot_0, proposal, temperature, rng);
         };
         let mut target_state = DynamicState {
             timestamp: proposal.timestamp,
@@ -322,7 +476,7 @@ impl DefaultProposalKernel {
         );
         let paths = search_module.compute_paths(snapshot_0, &target_state);
         let Some(path_result) = paths.get(&symbol_id) else {
-            return self.local_move(proposal, temperature, rng);
+            return self.local_move(snapshot_0, proposal, temperature, rng);
         };
         let Some(target_point) = next_path_point(path_result, &symbol_state.position) else {
             return proposal;
@@ -333,6 +487,7 @@ impl DefaultProposalKernel {
 
     fn local_move_parallel(
         &self,
+        snapshot_0: &EnvironmentSnapshot,
         state: &DynamicState,
         temperature: f64,
         rng: &mut StdRng,
@@ -347,6 +502,9 @@ impl DefaultProposalKernel {
                 dest.position.x = symbol_state.position.x + dx;
                 dest.position.y = symbol_state.position.y + dy;
                 dest.position.z = symbol_state.position.z + dz;
+                if let Some(priors) = &self.relational_priors {
+                    self.apply_factor_bias(dest, Some(symbol_id), snapshot_0, priors, rng);
+                }
             }
         }
         proposal
@@ -372,7 +530,7 @@ impl DefaultProposalKernel {
             }
         }
         if groups.is_empty() {
-            return self.local_move_parallel(state, temperature, rng);
+            return self.local_move_parallel(snapshot_0, state, temperature, rng);
         }
         let mut proposal = state.clone();
         let step_scale = self.step_scale(temperature);
@@ -388,6 +546,9 @@ impl DefaultProposalKernel {
                     dest.position.x = original.position.x + dx;
                     dest.position.y = original.position.y + dy;
                     dest.position.z = original.position.z + dz;
+                    if let Some(priors) = &self.relational_priors {
+                        self.apply_factor_bias(dest, Some(member_id), snapshot_0, priors, rng);
+                    }
                 }
             }
         }
@@ -430,7 +591,7 @@ impl DefaultProposalKernel {
         rng: &mut StdRng,
     ) -> DynamicState {
         let Some(search_module) = &self.search else {
-            return self.local_move_parallel(state, temperature, rng);
+            return self.local_move_parallel(snapshot_0, state, temperature, rng);
         };
         let mut target_state = DynamicState {
             timestamp: state.timestamp,

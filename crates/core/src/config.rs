@@ -1,5 +1,6 @@
 use crate::hardware::HardwareBackendType;
 use crate::ml::MLBackendType;
+use crate::neuro::NeuroRuntimeConfig;
 use crate::proposal::ProposalConfig;
 use crate::random::RandomConfig;
 use crate::schema::Timestamp;
@@ -52,6 +53,8 @@ pub struct RunConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub output: OutputConfig,
+    #[serde(default)]
+    pub neuro: NeuroRuntimeConfig,
 }
 
 impl RunConfig {
@@ -67,6 +70,8 @@ impl RunConfig {
                 && self.energy.w_goal >= 0.0
                 && self.energy.w_group_cohesion >= 0.0
                 && self.energy.w_ml_prior >= 0.0
+                && self.energy.w_relational_prior >= 0.0
+                && self.energy.w_neuro_alignment >= 0.0
                 && self.energy.w_path_feasibility >= 0.0
                 && self.energy.w_env_constraints >= 0.0
                 && self.energy.w_stack_hash >= 0.0
@@ -112,6 +117,14 @@ impl RunConfig {
         anyhow::ensure!(
             self.search.cell_size > 0.01,
             "search.cell_size must be > 0.01"
+        );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.neuro.min_activation),
+            "neuro.min_activation must be in [0,1]"
+        );
+        anyhow::ensure!(
+            self.neuro.module_threshold > 0,
+            "neuro.module_threshold must be > 0"
         );
         anyhow::ensure!(
             self.resample.mutation_rate >= 0.0 && self.resample.mutation_rate <= 1.0,
@@ -205,10 +218,20 @@ pub struct EnergyConfig {
     pub w_goal: f64,
     pub w_group_cohesion: f64,
     pub w_ml_prior: f64,
+    /// Weight for domain-aware relational/factor priors (motifs, roles, transitions).
+    pub w_relational_prior: f64,
+    /// Weight for alignment with emergent neurogenesis motifs/centroids.
+    pub w_neuro_alignment: f64,
+    /// Additional multiplier for factor priors (role/zone/group) when available.
+    #[serde(default = "EnergyConfig::default_factor_weight")]
+    pub factor_prior_weight: f64,
     pub w_path_feasibility: f64,
     pub w_env_constraints: f64,
     /// Weight for the sequence stack/hash consistency term (set >0 to fuse prior trajectories).
     pub w_stack_hash: f64,
+    /// Optional path to a relational priors JSON (from build_relational_priors.py). If absent, the
+    /// relational prior term is disabled even if w_relational_prior > 0.
+    pub relational_priors_path: Option<String>,
     /// How many history frames to align against when scoring stack similarity (top-k by overlap distance).
     #[serde(default = "EnergyConfig::default_stack_alignment_topk")]
     pub stack_alignment_topk: usize,
@@ -233,9 +256,13 @@ impl Default for EnergyConfig {
             w_goal: 1.0,
             w_group_cohesion: 0.5,
             w_ml_prior: 0.0,
+            w_relational_prior: 0.0,
+            w_neuro_alignment: 0.0,
+            factor_prior_weight: EnergyConfig::default_factor_weight(),
             w_path_feasibility: 1.0,
             w_env_constraints: 3.0,
             w_stack_hash: 0.0,
+            relational_priors_path: None,
             stack_alignment_topk: EnergyConfig::default_stack_alignment_topk(),
             stack_future_horizon: EnergyConfig::default_stack_future_horizon(),
             stack_alignment_weight: EnergyConfig::default_stack_alignment_weight(),
@@ -260,6 +287,10 @@ impl EnergyConfig {
 
     fn default_stack_future_weight() -> f64 {
         0.75
+    }
+
+    fn default_factor_weight() -> f64 {
+        1.0
     }
 
     pub fn get_other_term(&self, key: &str) -> Option<f64> {

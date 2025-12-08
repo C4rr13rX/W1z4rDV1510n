@@ -19,5 +19,6 @@ pub mod state_population;
 pub mod system;
 pub mod telemetry;
 pub mod tensor;
+pub mod neuro;
 
 pub use orchestrator::{RunOutcome, run_with_config, run_with_snapshot};

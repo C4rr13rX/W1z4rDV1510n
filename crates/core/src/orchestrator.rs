@@ -4,6 +4,7 @@ use crate::energy::EnergyModel;
 use crate::hardware::{HardwareBackendType, create_hardware_backend};
 use crate::logging::init_logging;
 use crate::ml::create_ml_model;
+use crate::neuro::NeuroRuntime;
 use crate::proposal::DefaultProposalKernel;
 use crate::quantum::anneal_quantum;
 use crate::random::{RandomProviderDescriptor, create_random_provider};
@@ -59,6 +60,11 @@ pub fn run_with_snapshot(
         timestamp = snapshot.timestamp.unix,
         "snapshot loaded"
     );
+    let neuro_runtime = if config.neuro.enabled {
+        Some(Arc::new(NeuroRuntime::new(snapshot.as_ref(), config.neuro.clone())))
+    } else {
+        None
+    };
     let orchestrator_seed = random_provider.next_seed("orchestrator_rng");
     let mut rng = StdRng::seed_from_u64(orchestrator_seed);
     debug!(
@@ -93,6 +99,7 @@ pub fn run_with_snapshot(
         Some(search_module.clone()),
         config.t_end,
         hardware_backend.tensor_executor(),
+        neuro_runtime.clone(),
     );
     let base_population = init_population(
         snapshot.as_ref(),
@@ -121,6 +128,7 @@ pub fn run_with_snapshot(
         kernel_seed,
         Some(search_module.clone()),
         Some(ml_model.clone()),
+        neuro_runtime.clone(),
     );
     debug!(
         target: "w1z4rdv1510n::random",
