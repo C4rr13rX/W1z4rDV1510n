@@ -182,13 +182,48 @@ impl HardwareBackend for CpuBackend {
 
 pub struct MultiThreadedCpuBackend {
     noise: NoiseSourceHandle,
+    pool: Arc<rayon::ThreadPool>,
+    thread_budget: usize,
 }
 
 impl MultiThreadedCpuBackend {
+    #[allow(dead_code)]
     fn new(seed: u64) -> Self {
+        let profile = HardwareProfile::detect();
+        Self::new_with_profile(seed, &profile)
+    }
+
+    fn new_with_profile(seed: u64, profile: &HardwareProfile) -> Self {
+        let thread_budget = compute_thread_budget(profile);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(thread_budget)
+            .build()
+            .map(Arc::new)
+            .unwrap_or_else(|_| {
+                Arc::new(
+                    rayon::ThreadPoolBuilder::new()
+                        .build()
+                        .expect("failed to build rayon pool"),
+                )
+            });
+        info!(
+            target: "w1z4rdv1510n::hardware",
+            cpu_cores = profile.cpu_cores,
+            memory_gb = profile.total_memory_gb,
+            thread_budget,
+            "multi-threaded CPU backend constrained by resource budget"
+        );
         Self {
             noise: Arc::new(SoftwareNoiseSource::new(seed)),
+            pool,
+            thread_budget,
         }
+    }
+
+    fn chunk_size(&self, workload: usize) -> usize {
+        let threads = self.thread_budget.max(1);
+        let base = (workload / (threads * 2).max(1)).max(8);
+        base.min(1024)
     }
 }
 
@@ -220,7 +255,7 @@ impl CpuRamOptimizedBackend {
             "cpu+ram optimized backend initialized"
         );
         Self {
-            multi: MultiThreadedCpuBackend::new(seed),
+            multi: MultiThreadedCpuBackend::new_with_profile(seed, profile),
             tensor,
             planner,
             _numa_guard: numa_guard,
@@ -266,10 +301,17 @@ impl HardwareBackend for MultiThreadedCpuBackend {
         population: &mut Population,
         func: &(dyn Fn(&mut ParticleState) + Send + Sync),
     ) {
-        population
-            .particles
-            .par_iter_mut()
-            .for_each(|particle| func(particle));
+        let chunk = self.chunk_size(population.particles.len());
+        self.pool.install(|| {
+            population
+                .particles
+                .par_chunks_mut(chunk.max(1))
+                .for_each(|chunk| {
+                    for particle in chunk {
+                        func(particle);
+                    }
+                });
+        });
     }
 
     fn noise_source(&self) -> NoiseSourceHandle {
@@ -287,19 +329,21 @@ impl HardwareBackend for MultiThreadedCpuBackend {
             "buffers must match"
         );
         let (lhs, rhs, out) = split_buffers(buffers);
-        let chunk = 1024;
-        lhs.par_chunks(chunk)
-            .zip(rhs.par_chunks(chunk))
-            .zip(out.par_chunks_mut(chunk))
-            .for_each(|((lhs, rhs), out)| {
-                for i in 0..out.len() {
-                    out[i] = match op {
-                        BitOp::And => lhs[i] & rhs[i],
-                        BitOp::Or => lhs[i] | rhs[i],
-                        BitOp::Xor => lhs[i] ^ rhs[i],
-                    };
-                }
-            });
+        let chunk = self.chunk_size(len.max(1));
+        self.pool.install(|| {
+            lhs.par_chunks(chunk)
+                .zip(rhs.par_chunks(chunk))
+                .zip(out.par_chunks_mut(chunk))
+                .for_each(|((lhs, rhs), out)| {
+                    for i in 0..out.len() {
+                        out[i] = match op {
+                            BitOp::And => lhs[i] & rhs[i],
+                            BitOp::Or => lhs[i] | rhs[i],
+                            BitOp::Xor => lhs[i] ^ rhs[i],
+                        };
+                    }
+                });
+        });
         Ok(())
     }
 }
@@ -857,7 +901,8 @@ pub fn create_hardware_backend(
             HardwareBackendType::Cpu,
         ),
         HardwareBackendType::MultiThreadedCpu => (
-            Arc::new(MultiThreadedCpuBackend::new(seed)) as HardwareBackendHandle,
+            Arc::new(MultiThreadedCpuBackend::new_with_profile(seed, &profile))
+                as HardwareBackendHandle,
             HardwareBackendType::MultiThreadedCpu,
         ),
         HardwareBackendType::CpuRamOptimized => (
@@ -1023,6 +1068,19 @@ fn recommend_backend(profile: &HardwareProfile) -> HardwareBackendType {
     }
 }
 
+fn compute_thread_budget(profile: &HardwareProfile) -> usize {
+    let mem_cap = ((profile.total_memory_gb / 1.5).floor() as usize).max(1);
+    let env_cap = std::env::var("W1Z4RDV1510N_THREAD_BUDGET")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let mut budget = profile.cpu_cores.max(1);
+    budget = budget.min(mem_cap.max(1));
+    if let Some(env) = env_cap {
+        budget = budget.min(env.max(1));
+    }
+    budget.max(1)
+}
+
 fn read_env_bool(key: &str) -> bool {
     std::env::var(key)
         .map(|value| matches!(value.trim(), "1" | "true" | "TRUE"))
@@ -1060,6 +1118,7 @@ fn log_backend_selection(kind: &HardwareBackendType, profile: &HardwareProfile) 
     }
 }
 
+#[allow(dead_code)]
 fn gpu_chunk_size(cpu_cores: usize, memory_gb: f64) -> usize {
     let base = 4096;
     let mem_factor = (memory_gb / 8.0).clamp(0.5, 4.0);

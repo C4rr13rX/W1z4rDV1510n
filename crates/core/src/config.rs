@@ -55,6 +55,8 @@ pub struct RunConfig {
     pub output: OutputConfig,
     #[serde(default)]
     pub neuro: NeuroRuntimeConfig,
+    #[serde(default)]
+    pub homeostasis: HomeostasisConfig,
 }
 
 impl RunConfig {
@@ -72,6 +74,8 @@ impl RunConfig {
                 && self.energy.w_ml_prior >= 0.0
                 && self.energy.w_relational_prior >= 0.0
                 && self.energy.w_neuro_alignment >= 0.0
+                && self.energy.w_motif_transition >= 0.0
+                && self.energy.w_super_network_prior >= 0.0
                 && self.energy.w_path_feasibility >= 0.0
                 && self.energy.w_env_constraints >= 0.0
                 && self.energy.w_stack_hash >= 0.0
@@ -126,6 +130,24 @@ impl RunConfig {
             self.neuro.module_threshold > 0,
             "neuro.module_threshold must be > 0"
         );
+        if self.homeostasis.enabled {
+            anyhow::ensure!(
+                self.homeostasis.patience > 0,
+                "homeostasis.patience must be > 0 when enabled"
+            );
+            anyhow::ensure!(
+                self.homeostasis.energy_plateau_tolerance >= 0.0,
+                "homeostasis.energy_plateau_tolerance must be >= 0"
+            );
+            anyhow::ensure!(
+                self.homeostasis.mutation_boost >= 0.0,
+                "homeostasis.mutation_boost must be >= 0"
+            );
+            anyhow::ensure!(
+                self.homeostasis.reheat_scale >= 0.0,
+                "homeostasis.reheat_scale must be >= 0"
+            );
+        }
         anyhow::ensure!(
             self.resample.mutation_rate >= 0.0 && self.resample.mutation_rate <= 1.0,
             "mutation_rate must be between 0 and 1"
@@ -212,6 +234,33 @@ impl Default for ScheduleType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct HomeostasisConfig {
+    /// Enable the self-adjustment loop that reheats/boosts mutation on plateaus.
+    pub enabled: bool,
+    /// Minimum relative improvement in best energy to be considered progress.
+    pub energy_plateau_tolerance: f64,
+    /// Number of consecutive plateau iterations before triggering adjustments.
+    pub patience: usize,
+    /// Multiplier applied to mutation rate when plateauing (e.g., 0.5 -> +50%).
+    pub mutation_boost: f64,
+    /// Scale factor applied to temperature when plateauing (e.g., 0.2 -> +20% temp).
+    pub reheat_scale: f64,
+}
+
+impl Default for HomeostasisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            energy_plateau_tolerance: 1e-4,
+            patience: 8,
+            mutation_boost: 0.5,
+            reheat_scale: 0.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EnergyConfig {
     pub w_motion: f64,
     pub w_collision: f64,
@@ -222,6 +271,10 @@ pub struct EnergyConfig {
     pub w_relational_prior: f64,
     /// Weight for alignment with emergent neurogenesis motifs/centroids.
     pub w_neuro_alignment: f64,
+    /// Weight for motif transition priors (previous frame motif -> current motif).
+    pub w_motif_transition: f64,
+    /// Weight for boosting relational transitions using active super-networks.
+    pub w_super_network_prior: f64,
     /// Additional multiplier for factor priors (role/zone/group) when available.
     #[serde(default = "EnergyConfig::default_factor_weight")]
     pub factor_prior_weight: f64,
@@ -258,6 +311,8 @@ impl Default for EnergyConfig {
             w_ml_prior: 0.0,
             w_relational_prior: 0.0,
             w_neuro_alignment: 0.0,
+            w_motif_transition: 0.0,
+            w_super_network_prior: 0.0,
             factor_prior_weight: EnergyConfig::default_factor_weight(),
             w_path_feasibility: 1.0,
             w_env_constraints: 3.0,

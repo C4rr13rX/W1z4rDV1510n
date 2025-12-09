@@ -5,6 +5,7 @@ pub mod energy;
 pub mod hardware;
 pub mod logging;
 pub mod ml;
+pub mod neuro;
 pub mod orchestrator;
 pub mod planner;
 pub mod proposal;
@@ -19,6 +20,5 @@ pub mod state_population;
 pub mod system;
 pub mod telemetry;
 pub mod tensor;
-pub mod neuro;
 
 pub use orchestrator::{RunOutcome, run_with_config, run_with_snapshot};

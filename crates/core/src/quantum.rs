@@ -1,6 +1,7 @@
-use crate::config::{AnnealingScheduleConfig, QuantumConfig, ResampleConfig};
+use crate::config::{AnnealingScheduleConfig, HomeostasisConfig, QuantumConfig, ResampleConfig};
 use crate::energy::EnergyModel;
 use crate::hardware::HardwareBackendHandle;
+use crate::neuro::NeuroRuntimeHandle;
 use crate::proposal::ProposalKernel;
 use crate::schema::{DynamicState, EnvironmentSnapshot, Population, Position};
 use crate::search::SearchModule;
@@ -28,19 +29,24 @@ pub fn anneal_quantum(
     schedule: &AnnealingScheduleConfig,
     resample_config: &ResampleConfig,
     hardware_backend: &HardwareBackendHandle,
+    neuro: Option<NeuroRuntimeHandle>,
+    homeostasis: &HomeostasisConfig,
     rng: &mut StdRng,
     quantum: &QuantumConfig,
 ) -> QuantumAnnealOutcome {
     let trotter = slices.len().max(1);
     let tensor_executor = hardware_backend.tensor_executor();
     let log_interval = (schedule.n_iterations / 10).max(1);
+    let mut homeo_state = HomeostasisState::new(homeostasis.clone());
 
     let mut energy_trace = Vec::with_capacity(schedule.n_iterations);
     let mut acceptance_trace = Vec::with_capacity(schedule.n_iterations);
 
     for iteration in 0..schedule.n_iterations {
         let base_temp = temperature(iteration, schedule);
-        let slice_temp = base_temp * quantum.slice_temperature_scale / (trotter as f64).max(1.0);
+        let slice_temp_base =
+            base_temp * quantum.slice_temperature_scale / (trotter as f64).max(1.0);
+        let (slice_temp, boosted) = homeo_state.effective_temperature(slice_temp_base);
         let progress = iteration as f64 / schedule.n_iterations.max(1) as f64;
         let driver_scale = quantum.driver_strength
             + (quantum.driver_final_strength - quantum.driver_strength) * progress;
@@ -105,8 +111,12 @@ pub fn anneal_quantum(
             if resample_config.enabled
                 && ess_ratio < resample_config.effective_sample_size_threshold
             {
+                let mut mutation_rate = resample_config.mutation_rate;
+                if boosted {
+                    mutation_rate *= 1.0 + homeostasis.mutation_boost;
+                }
                 resample_population(&mut slices[slice_idx], rng);
-                clone_and_mutate(&mut slices[slice_idx], rng, resample_config.mutation_rate);
+                clone_and_mutate(&mut slices[slice_idx], rng, mutation_rate);
                 normalize_weights(&mut slices[slice_idx], tensor_executor.as_deref());
                 debug!(
                     target: "w1z4rdv1510n::annealing::quantum",
@@ -115,6 +125,10 @@ pub fn anneal_quantum(
                     ess_ratio,
                     "resampled slice due to ESS drop"
                 );
+            }
+            if let Some(neuro_runtime) = neuro.as_ref() {
+                neuro_runtime
+                    .observe_states(slices[slice_idx].particles.iter().map(|p| &p.current_state));
             }
             accepted_total += *accepted_counter.lock();
             total_particles += slices[slice_idx].particles.len();
@@ -163,6 +177,7 @@ pub fn anneal_quantum(
         };
         energy_trace.push(min_energy);
         acceptance_trace.push(acceptance_ratio);
+        homeo_state.observe(min_energy, acceptance_ratio, iteration);
         if iteration % log_interval == 0 || iteration + 1 == schedule.n_iterations {
             info!(
                 target: "w1z4rdv1510n::annealing::quantum",
@@ -172,6 +187,8 @@ pub fn anneal_quantum(
                 driver_scale,
                 min_energy,
                 acceptance_ratio,
+                plateau_iters = homeo_state.stagnant_iters,
+                homeostasis_boost = boosted,
                 "quantum annealing iteration summary"
             );
         }
@@ -212,6 +229,54 @@ fn effective_sample_size(population: &Population) -> f64 {
         1.0
     } else {
         1.0 / sum_sq / population.particles.len().max(1) as f64
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HomeostasisState {
+    best_energy: f64,
+    stagnant_iters: usize,
+    config: HomeostasisConfig,
+}
+
+impl HomeostasisState {
+    fn new(config: HomeostasisConfig) -> Self {
+        Self {
+            best_energy: f64::INFINITY,
+            stagnant_iters: 0,
+            config,
+        }
+    }
+
+    fn effective_temperature(&self, base: f64) -> (f64, bool) {
+        if !self.config.enabled || self.stagnant_iters < self.config.patience {
+            (base, false)
+        } else {
+            (
+                base * (1.0 + self.config.reheat_scale),
+                self.config.reheat_scale > 0.0,
+            )
+        }
+    }
+
+    fn observe(&mut self, min_energy: f64, _acceptance: f64, iteration: usize) {
+        if !self.config.enabled {
+            return;
+        }
+        if min_energy + self.config.energy_plateau_tolerance < self.best_energy {
+            self.best_energy = min_energy;
+            self.stagnant_iters = 0;
+        } else {
+            self.stagnant_iters += 1;
+        }
+        if self.stagnant_iters == self.config.patience {
+            tracing::info!(
+                target: "w1z4rdv1510n::homeostasis",
+                iteration,
+                best_energy = self.best_energy,
+                "homeostasis plateau detected; applying mutation/temperature boost (quantum)"
+            );
+        }
     }
 }
 
@@ -424,6 +489,7 @@ mod tests {
             Some(Arc::new(NullMLModel)),
             None,
             Timestamp { unix: 0 },
+            None,
             None,
         );
         let mut slices = vec![

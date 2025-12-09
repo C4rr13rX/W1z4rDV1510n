@@ -65,6 +65,7 @@ pub struct SymbolEnergyBreakdown {
     pub neuro: f64,
     pub stack: f64,
     pub relational_prior: f64,
+    pub motif_transition: f64,
 }
 
 impl SymbolEnergyBreakdown {
@@ -79,6 +80,7 @@ impl SymbolEnergyBreakdown {
             + self.neuro
             + self.stack
             + self.relational_prior
+            + self.motif_transition
     }
 
     fn add(&mut self, term: EnergyTerm, value: f64) {
@@ -93,6 +95,7 @@ impl SymbolEnergyBreakdown {
             EnergyTerm::Neuro => self.neuro += value,
             EnergyTerm::Stack => self.stack += value,
             EnergyTerm::RelationalPrior => self.relational_prior += value,
+            EnergyTerm::MotifTransition => self.motif_transition += value,
         }
     }
 }
@@ -109,6 +112,7 @@ pub struct TermEnergyTotals {
     pub neuro: f64,
     pub stack: f64,
     pub relational_prior: f64,
+    pub motif_transition: f64,
 }
 
 impl TermEnergyTotals {
@@ -124,6 +128,7 @@ impl TermEnergyTotals {
             EnergyTerm::Neuro => self.neuro += value,
             EnergyTerm::Stack => self.stack += value,
             EnergyTerm::RelationalPrior => self.relational_prior += value,
+            EnergyTerm::MotifTransition => self.motif_transition += value,
         }
     }
 }
@@ -140,6 +145,7 @@ enum EnergyTerm {
     Neuro,
     Stack,
     RelationalPrior,
+    MotifTransition,
 }
 
 #[derive(Default)]
@@ -257,17 +263,9 @@ fn direction_bucket(a: &Position, b: &Position) -> &'static str {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     if dx.abs() > dy.abs() {
-        if dx > 0.0 {
-            "east"
-        } else {
-            "west"
-        }
+        if dx > 0.0 { "east" } else { "west" }
     } else if dy.abs() > 0.0 {
-        if dy > 0.0 {
-            "north"
-        } else {
-            "south"
-        }
+        if dy > 0.0 { "north" } else { "south" }
     } else {
         "same"
     }
@@ -309,10 +307,14 @@ fn symbol_group(symbol: &Symbol) -> String {
     "neutral".to_string()
 }
 
-fn relational_signature(
-    state: &DynamicState,
-    lookup: &HashMap<String, Symbol>,
-) -> Vec<String> {
+fn symbol_domain(symbol: &Symbol) -> String {
+    if let Some(Value::String(domain)) = symbol.properties.get("domain") {
+        return domain.to_lowercase();
+    }
+    "global".to_string()
+}
+
+fn relational_signature(state: &DynamicState, lookup: &HashMap<String, Symbol>) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     // unary
     for (symbol_id, symbol_state) in state.symbol_states.iter() {
@@ -332,10 +334,9 @@ fn relational_signature(
         for j in (i + 1)..ids.len() {
             let a_id = ids[i];
             let b_id = ids[j];
-            if let (Some(a), Some(b)) = (
-                state.symbol_states.get(a_id),
-                state.symbol_states.get(b_id),
-            ) {
+            if let (Some(a), Some(b)) =
+                (state.symbol_states.get(a_id), state.symbol_states.get(b_id))
+            {
                 let dir = direction_bucket(&a.position, &b.position);
                 let dist = distance_bucket(&a.position, &b.position);
                 tokens.push(format!("r:{a_id}->{b_id}:{dir}:{dist}"));
@@ -358,12 +359,36 @@ fn motif_hash_from_state(state: &DynamicState, lookup: &HashMap<String, Symbol>)
     }
 }
 
+fn hierarchical_motif_hash(
+    state: &DynamicState,
+    lookup: &HashMap<String, Symbol>,
+    neuro: Option<&NeuroSnapshot>,
+) -> Option<String> {
+    let mut tokens = Vec::new();
+    if let Some(base) = motif_hash_from_state(state, lookup) {
+        tokens.push(base);
+    }
+    if let Some(ns) = neuro {
+        for net in &ns.active_networks {
+            tokens.push(format!("net:{}:lvl{}", net.label, net.level));
+        }
+    }
+    tokens.sort();
+    tokens.dedup();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join("|"))
+    }
+}
+
 pub struct EnergyModel {
     snapshot_0: Arc<EnvironmentSnapshot>,
     config: EnergyConfig,
     symbol_lookup: HashMap<String, Symbol>,
     exit_symbols: Vec<Symbol>,
     stack_history: Vec<DynamicState>,
+    stack_motif_hashes: Vec<String>,
     stack_hash: Option<[u8; 32]>,
     stack_means: HashMap<String, Position>,
     ml_model: Option<MlModelHandle>,
@@ -398,6 +423,10 @@ impl EnergyModel {
             .cloned()
             .collect();
         let stack_history = snapshot_0.stack_history.clone();
+        let stack_motif_hashes = stack_history
+            .iter()
+            .filter_map(|s| motif_hash_from_state(s, &symbol_lookup))
+            .collect::<Vec<_>>();
         let stack_hash = if stack_history.is_empty() {
             None
         } else {
@@ -424,6 +453,7 @@ impl EnergyModel {
             symbol_lookup,
             exit_symbols,
             stack_history,
+            stack_motif_hashes,
             stack_hash,
             stack_means,
             ml_model,
@@ -539,6 +569,16 @@ impl EnergyModel {
                     self.relational_prior_term(dynamic_state, priors),
                 );
             }
+        }
+        if cfg.w_motif_transition > 0.0 {
+            self.accumulate_term(
+                &mut per_symbol,
+                &mut per_term,
+                &mut total,
+                EnergyTerm::MotifTransition,
+                cfg.w_motif_transition,
+                self.motif_transition_term(dynamic_state),
+            );
         }
 
         EnergyBreakdown::new(per_symbol, per_term, total)
@@ -867,6 +907,133 @@ impl EnergyModel {
         contribution
     }
 
+    fn neuro_term_breakdown(&self, state: &DynamicState) -> TermContribution {
+        let mut contribution = TermContribution::default();
+        let Some(runtime) = self.neuro_runtime.as_ref() else {
+            return contribution;
+        };
+        let snapshot: NeuroSnapshot = runtime.snapshot();
+        if snapshot.is_empty() {
+            return contribution;
+        }
+        for (symbol_id, symbol_state) in state.symbol_states.iter() {
+            let mut labels = vec![
+                format!("id::{symbol_id}"),
+                zone_label(&symbol_state.position),
+            ];
+            if let Some(symbol) = self.symbol_lookup.get(symbol_id) {
+                labels.push(format!("role::{}", symbol_role(symbol)));
+                labels.push(format!("group::{}", symbol_group(symbol)));
+                labels.push(format!("domain::{}", symbol_domain(symbol)));
+                labels.push(format!(
+                    "col::{}::{}",
+                    symbol_role(symbol),
+                    zone_label(&symbol_state.position)
+                ));
+            }
+            let mut penalty = 0.0;
+            for label in &labels {
+                if let Some(center) = snapshot.centroids.get(label) {
+                    penalty += distance(&symbol_state.position, center) * 0.05;
+                }
+                if !snapshot.active_labels.contains(label) {
+                    penalty += 0.01;
+                }
+            }
+            if penalty > 0.0 {
+                contribution.add_symbol(symbol_id, penalty);
+            }
+        }
+        for net in &snapshot.active_networks {
+            let normalized = (net.strength as f64).min(10.0) / 10.0;
+            let shortfall = (1.0 - normalized).max(0.0);
+            if shortfall <= 0.0 {
+                continue;
+            }
+            let per_member = shortfall * 0.05 * (net.level as f64 + 1.0);
+            for member in &net.members {
+                if let Some(symbol_id) = member.strip_prefix("id::") {
+                    contribution.add_symbol(symbol_id, per_member);
+                }
+            }
+        }
+        for (source, links) in &snapshot.network_links {
+            let source_strength = snapshot
+                .active_networks
+                .iter()
+                .find(|n| n.label == *source)
+                .map(|n| n.strength as f64)
+                .unwrap_or(0.0);
+            for (target, weight) in links {
+                let link_penalty = (1.0 - (*weight as f64).min(1.0)) * 0.01 * source_strength;
+                if link_penalty <= 0.0 {
+                    continue;
+                }
+                for net in &snapshot.active_networks {
+                    if net.label == *target {
+                        for member in &net.members {
+                            if let Some(symbol_id) = member.strip_prefix("id::") {
+                                contribution.add_symbol(symbol_id, link_penalty);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        contribution
+    }
+
+    fn motif_transition_term(&self, state: &DynamicState) -> TermContribution {
+        let mut contribution = TermContribution::default();
+        let Some(runtime) = self.neuro_runtime.as_ref() else {
+            return contribution;
+        };
+        let snapshot: NeuroSnapshot = runtime.snapshot();
+        if snapshot.active_networks.is_empty() || self.stack_history.is_empty() {
+            return contribution;
+        }
+        let curr_hash = motif_hash_from_state(state, &self.symbol_lookup);
+        let history_window = self
+            .stack_motif_hashes
+            .iter()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>();
+        if let Some(curr) = curr_hash.as_ref() {
+            if !history_window.iter().any(|h| *h == curr) {
+                for symbol_id in state.symbol_states.keys() {
+                    contribution.add_symbol(symbol_id, 0.02);
+                }
+            }
+            if let Some(prev) = history_window.get(0) {
+                if *prev != curr {
+                    for symbol_id in state.symbol_states.keys() {
+                        contribution.add_symbol(symbol_id, 0.01);
+                    }
+                }
+            }
+        }
+        let prev_frame = self.stack_history.last().unwrap();
+        let prev_labels: std::collections::HashSet<String> =
+            prev_frame.symbol_states.keys().cloned().collect();
+        for net in &snapshot.active_networks {
+            let normalized = (net.strength as f64).min(10.0) / 10.0;
+            if normalized < 0.2 {
+                continue;
+            }
+            // Reward carryover of members that persist; penalize if a member vanished.
+            for member in &net.members {
+                if let Some(symbol_id) = member.strip_prefix("id::") {
+                    if !prev_labels.contains(symbol_id) {
+                        let penalty = (1.0 - normalized) * 0.02 * (net.level as f64 + 1.0);
+                        contribution.add_symbol(symbol_id, penalty);
+                    }
+                }
+            }
+        }
+        contribution
+    }
+
     fn relational_prior_term(
         &self,
         state: &DynamicState,
@@ -876,8 +1043,15 @@ impl EnergyModel {
         if state.symbol_states.is_empty() {
             return contribution;
         }
-        let motif_penalty = if let Some(hash) = motif_hash_from_state(state, &self.symbol_lookup) {
-            let prob = priors.motif_probs.get(&hash).copied().unwrap_or(RELATIONAL_EPS);
+        let neuro_snapshot = self.neuro_runtime.as_ref().map(|n| n.snapshot());
+        let motif_penalty = if let Some(hash) =
+            hierarchical_motif_hash(state, &self.symbol_lookup, neuro_snapshot.as_ref())
+        {
+            let prob = priors
+                .motif_probs
+                .get(&hash)
+                .copied()
+                .unwrap_or(RELATIONAL_EPS);
             -prob.max(RELATIONAL_EPS).ln()
         } else {
             -RELATIONAL_EPS.ln()
@@ -905,6 +1079,14 @@ impl EnergyModel {
                 let mut factor_penalty = 0.0;
                 let (bx, by) = zone_bin(&symbol_state.position);
                 let zone_key = format!("{bx}{by}");
+                let mut neuro_boost = 1.0;
+                if let Some(neuro) = neuro_snapshot.as_ref() {
+                    for net in &neuro.active_networks {
+                        if net.members.iter().any(|m| m == symbol_id) {
+                            neuro_boost *= (0.9_f64).powf(net.level as f64 + 1.0);
+                        }
+                    }
+                }
                 if let Some(symbol) = self.symbol_lookup.get(symbol_id) {
                     let role = symbol_role(symbol);
                     let group = symbol_group(symbol);
@@ -932,10 +1114,23 @@ impl EnergyModel {
                         .unwrap_or(FACTOR_EPS)
                         .max(FACTOR_EPS)
                         .ln();
+                    factor_penalty *= neuro_boost;
                 } else {
                     factor_penalty += -FACTOR_EPS.ln();
                 }
                 contribution.add_symbol(symbol_id, factor_penalty);
+            }
+        }
+        if self.config.w_super_network_prior > 0.0 {
+            if let Some(hier_hash) =
+                hierarchical_motif_hash(state, &self.symbol_lookup, neuro_snapshot.as_ref())
+            {
+                if priors.transition_probs.contains_key(&hier_hash) {
+                    for symbol_id in state.symbol_states.keys() {
+                        contribution
+                            .add_symbol(symbol_id, -self.config.w_super_network_prior * 0.01);
+                    }
+                }
             }
         }
 
@@ -1229,6 +1424,7 @@ mod tests {
             None,
             Timestamp { unix: 5 },
             None,
+            None,
         );
         let near_state = dynamic_with_pos(Position {
             x: 1.0,
@@ -1312,6 +1508,7 @@ mod tests {
             None,
             None,
             Timestamp { unix: 0 },
+            None,
             None,
         );
 

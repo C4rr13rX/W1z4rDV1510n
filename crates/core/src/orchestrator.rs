@@ -61,7 +61,10 @@ pub fn run_with_snapshot(
         "snapshot loaded"
     );
     let neuro_runtime = if config.neuro.enabled {
-        Some(Arc::new(NeuroRuntime::new(snapshot.as_ref(), config.neuro.clone())))
+        Some(Arc::new(NeuroRuntime::new(
+            snapshot.as_ref(),
+            config.neuro.clone(),
+        )))
     } else {
         None
     };
@@ -158,6 +161,8 @@ pub fn run_with_snapshot(
             &config.schedule,
             &config.resample,
             &hardware_backend,
+            neuro_runtime.clone(),
+            &config.homeostasis,
             &mut rng,
             &config.quantum,
         );
@@ -173,6 +178,8 @@ pub fn run_with_snapshot(
             &config.schedule,
             &config.resample,
             &hardware_backend,
+            neuro_runtime.clone(),
+            &config.homeostasis,
             &mut rng,
         )
     };

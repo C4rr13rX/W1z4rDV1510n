@@ -1,4 +1,5 @@
 use crate::ml::MlModelHandle;
+use crate::neuro::{NeuroRuntimeHandle, NeuroSnapshot, zone_label};
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, SymbolState, SymbolType};
 use crate::search::{PathResult, SearchModule};
 use parking_lot::Mutex;
@@ -8,6 +9,7 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fs;
 
 const RELATION_BINS: i32 = 4;
@@ -80,6 +82,35 @@ fn zone_bin(position: &Position) -> (i32, i32) {
     (bx, by)
 }
 
+fn motif_signature(snapshot: &EnvironmentSnapshot, state: &DynamicState) -> Option<String> {
+    if state.symbol_states.is_empty() {
+        return None;
+    }
+    let mut tokens = Vec::with_capacity(state.symbol_states.len());
+    for (symbol_id, symbol_state) in state.symbol_states.iter() {
+        let (bx, by) = zone_bin(&symbol_state.position);
+        let role = snapshot
+            .symbols
+            .iter()
+            .find(|s| s.id == *symbol_id)
+            .and_then(|s| {
+                s.properties
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .map(|r| r.to_uppercase())
+            })
+            .unwrap_or_else(|| "UNK".to_string());
+        tokens.push(format!("u:{role}:{bx}{by}"));
+    }
+    tokens.sort();
+    tokens.dedup();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join("|"))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct RelationalPriors {
     factor_probs: HashMap<String, HashMap<String, f64>>,
@@ -114,14 +145,49 @@ pub struct DefaultProposalKernel {
     search: Option<SearchModule>,
     ml_model: Option<MlModelHandle>,
     relational_priors: Option<RelationalPriors>,
+    neuro: Option<NeuroRuntimeHandle>,
+    context_cache: Mutex<HashMap<String, VecDeque<String>>>,
 }
 
 impl DefaultProposalKernel {
+    fn apply_relational_hint(&self, proposal: &mut DynamicState, motif: &str, rng: &mut StdRng) {
+        if motif.is_empty() || self.relational_priors.is_none() {
+            return;
+        }
+        let priors = self.relational_priors.as_ref().unwrap();
+        // Small random walk guided by motif hash to diversify within the same motif class.
+        for state in proposal.symbol_states.values_mut() {
+            let jitter = 0.01 + (motif.len() as f64 % 7.0) * 0.001;
+            state.position.x += rng.gen_range(-jitter..jitter);
+            state.position.y += rng.gen_range(-jitter..jitter);
+        }
+        if let Some(zone_probs) = priors.factor_probs.get("zone") {
+            if let Some((best_key, _)) = zone_probs
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                if best_key.len() >= 2 {
+                    let tx = best_key[0..1].parse::<i32>().unwrap_or(0);
+                    let ty = best_key[1..2].parse::<i32>().unwrap_or(0);
+                    let step = RELATION_BINS.max(1) as f64;
+                    let target_x = (tx as f64 + 0.5) * step;
+                    let target_y = (ty as f64 + 0.5) * step;
+                    for state in proposal.symbol_states.values_mut() {
+                        let dx = target_x - state.position.x;
+                        let dy = target_y - state.position.y;
+                        state.position.x += dx * 0.05 * rng.gen_range(0.5..1.0);
+                        state.position.y += dy * 0.05 * rng.gen_range(0.5..1.0);
+                    }
+                }
+            }
+        }
+    }
     pub fn new(
         config: ProposalConfig,
         seed: u64,
         search: Option<SearchModule>,
         ml_model: Option<MlModelHandle>,
+        neuro: Option<NeuroRuntimeHandle>,
     ) -> Self {
         let relational_priors = if let Some(path) = config.relational_priors_path.as_ref() {
             load_relational_priors(path)
@@ -134,6 +200,8 @@ impl DefaultProposalKernel {
             search,
             ml_model,
             relational_priors,
+            neuro,
+            context_cache: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -147,6 +215,32 @@ impl ProposalKernel for DefaultProposalKernel {
     ) -> DynamicState {
         let mut rng = self.rng.lock();
         let move_type = self.choose_move_type(&mut rng, temperature);
+        let neuro_snapshot = self.neuro.as_ref().map(|n| n.snapshot());
+        let relational_motif = motif_signature(snapshot_0, current_state);
+        let zone_key = current_state
+            .symbol_states
+            .values()
+            .next()
+            .map(|s| zone_label(&s.position));
+        let cached_motif = zone_key.as_ref().and_then(|k| {
+            self.context_cache
+                .lock()
+                .get(k)
+                .and_then(|q| q.front().cloned())
+        });
+        let mut motif_hints = Vec::new();
+        if let Some(m) = relational_motif.clone() {
+            motif_hints.push(m);
+        } else if let Some(k) = zone_key.as_ref() {
+            if let Some(queue) = self.context_cache.lock().get(k) {
+                motif_hints.extend(queue.iter().cloned());
+            }
+        }
+        if motif_hints.is_empty() {
+            if let Some(m) = cached_motif {
+                motif_hints.push(m);
+            }
+        }
         if self.config.use_parallel_updates {
             return self.apply_parallel_move(
                 move_type,
@@ -154,17 +248,42 @@ impl ProposalKernel for DefaultProposalKernel {
                 current_state,
                 temperature,
                 &mut rng,
+                neuro_snapshot.as_ref(),
+                motif_hints
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<&str>>()
+                    .as_slice(),
+                zone_key.clone(),
             );
         }
         let proposal = current_state.clone();
-        match move_type {
+        let mut proposal = match move_type {
             MoveType::Local => self.local_move(snapshot_0, proposal, temperature, &mut rng),
             MoveType::Group => self.group_move(snapshot_0, proposal, temperature, &mut rng),
             MoveType::Swap => self.swap_move(proposal, &mut rng),
             MoveType::Path => self.path_move(snapshot_0, proposal, temperature, &mut rng),
             MoveType::Global => self.global_move(proposal, temperature, &mut rng),
             MoveType::MlGuided => self.ml_guided_move(snapshot_0, &proposal, temperature, &mut rng),
+        };
+        if let Some(neuro) = neuro_snapshot.as_ref() {
+            self.apply_neuro_to_state(&mut proposal, snapshot_0, neuro, &mut rng);
         }
+        for motif in &motif_hints {
+            self.apply_relational_hint(&mut proposal, motif, &mut rng);
+        }
+        self.reverse_anchor_pull(snapshot_0, &mut proposal, &mut rng);
+        if let Some(zone) = zone_key {
+            if let Some(m) = motif_signature(snapshot_0, &proposal) {
+                let mut cache = self.context_cache.lock();
+                let entry = cache.entry(zone).or_insert_with(VecDeque::new);
+                entry.push_front(m);
+                while entry.len() > 3 {
+                    entry.pop_back();
+                }
+            }
+        }
+        proposal
     }
 }
 
@@ -203,9 +322,14 @@ impl DefaultProposalKernel {
         current_state: &DynamicState,
         temperature: f64,
         rng: &mut StdRng,
+        neuro_snapshot: Option<&NeuroSnapshot>,
+        motifs: &[&str],
+        zone_key: Option<String>,
     ) -> DynamicState {
-        match move_type {
-            MoveType::Local => self.local_move_parallel(snapshot_0, current_state, temperature, rng),
+        let mut proposals = match move_type {
+            MoveType::Local => {
+                self.local_move_parallel(snapshot_0, current_state, temperature, rng)
+            }
             MoveType::Group => {
                 self.group_move_parallel(snapshot_0, current_state, temperature, rng)
             }
@@ -213,7 +337,25 @@ impl DefaultProposalKernel {
             MoveType::Path => self.path_move_parallel(snapshot_0, current_state, temperature, rng),
             MoveType::Global => self.global_move_parallel(current_state, temperature, rng),
             MoveType::MlGuided => self.ml_guided_move(snapshot_0, current_state, temperature, rng),
+        };
+        if let Some(neuro) = neuro_snapshot {
+            self.apply_neuro_to_state(&mut proposals, snapshot_0, neuro, rng);
         }
+        for motif in motifs {
+            self.apply_relational_hint(&mut proposals, motif, rng);
+        }
+        self.reverse_anchor_pull(snapshot_0, &mut proposals, rng);
+        if let Some(zone) = zone_key {
+            if let Some(m) = motif_signature(snapshot_0, &proposals) {
+                let mut cache = self.context_cache.lock();
+                let entry = cache.entry(zone).or_insert_with(VecDeque::new);
+                entry.push_front(m);
+                while entry.len() > 3 {
+                    entry.pop_back();
+                }
+            }
+        }
+        proposals
     }
 
     fn step_scale(&self, temperature: f64) -> f64 {
@@ -239,6 +381,29 @@ impl DefaultProposalKernel {
             self.apply_factor_bias(symbol_state, None, snapshot_0, priors, rng);
         }
         proposal
+    }
+
+    fn reverse_anchor_pull(
+        &self,
+        snapshot_0: &EnvironmentSnapshot,
+        proposal: &mut DynamicState,
+        rng: &mut StdRng,
+    ) {
+        if snapshot_0.stack_history.is_empty() {
+            return;
+        }
+        let future_frame = snapshot_0.stack_history.last().unwrap();
+        for (symbol_id, symbol_state) in proposal.symbol_states.iter_mut() {
+            if let Some(target) = future_frame.symbol_states.get(symbol_id) {
+                let dx = target.position.x - symbol_state.position.x;
+                let dy = target.position.y - symbol_state.position.y;
+                let dz = target.position.z - symbol_state.position.z;
+                let scale = 0.08 * rng.gen_range(0.5..1.0);
+                symbol_state.position.x += dx * scale;
+                symbol_state.position.y += dy * scale;
+                symbol_state.position.z += dz * scale * 0.5;
+            }
+        }
     }
 
     fn group_move(
@@ -402,6 +567,76 @@ impl DefaultProposalKernel {
                         let jitter = 0.05 * weight;
                         symbol_state.position.x += rng.gen_range(-jitter..jitter);
                         symbol_state.position.y += rng.gen_range(-jitter..jitter);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_neuro_to_state(
+        &self,
+        proposal: &mut DynamicState,
+        snapshot_0: &EnvironmentSnapshot,
+        neuro: &NeuroSnapshot,
+        rng: &mut StdRng,
+    ) {
+        if neuro.is_empty() {
+            return;
+        }
+        for (symbol_id, symbol_state) in proposal.symbol_states.iter_mut() {
+            let mut labels = vec![
+                format!("id::{symbol_id}"),
+                zone_label(&symbol_state.position),
+            ];
+            let role = self.symbol_role(snapshot_0, symbol_id);
+            let group = self.symbol_group(snapshot_0, symbol_id);
+            labels.push(format!("role::{role}"));
+            labels.push(format!("group::{group}"));
+            labels.push(format!(
+                "col::{role}::{}",
+                zone_label(&symbol_state.position)
+            ));
+            if let Some(symbol) = snapshot_0.symbols.iter().find(|s| s.id == *symbol_id) {
+                let domain = symbol
+                    .properties
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("global");
+                labels.push(format!(
+                    "region::{domain}::{}",
+                    zone_label(&symbol_state.position)
+                ));
+            }
+            for label in &labels {
+                if let Some(center) = neuro.centroids.get(label) {
+                    let dx = center.x - symbol_state.position.x;
+                    let dy = center.y - symbol_state.position.y;
+                    let dz = center.z - symbol_state.position.z;
+                    symbol_state.position.x += dx * 0.12 * rng.gen_range(0.5..1.0);
+                    symbol_state.position.y += dy * 0.12 * rng.gen_range(0.5..1.0);
+                    symbol_state.position.z += dz * 0.05 * rng.gen_range(0.5..1.0);
+                } else if !neuro.active_labels.contains(label) {
+                    let jitter = 0.02;
+                    symbol_state.position.x += rng.gen_range(-jitter..jitter);
+                    symbol_state.position.y += rng.gen_range(-jitter..jitter);
+                }
+            }
+            for net in &neuro.active_networks {
+                if net.members.iter().any(|m| m == &format!("id::{symbol_id}")) {
+                    let boost = (net.strength as f64).min(8.0) / 8.0 * (net.level as f64 + 1.0);
+                    symbol_state.position.x += rng.gen_range(-0.01..0.01) * boost;
+                    symbol_state.position.y += rng.gen_range(-0.01..0.01) * boost;
+                }
+            }
+            for net in &neuro.active_networks {
+                if !net.members.iter().any(|m| m == &format!("id::{symbol_id}")) {
+                    continue;
+                }
+                if let Some(links) = neuro.network_links.get(&net.label) {
+                    for (_target, weight) in links {
+                        let w = (*weight as f64).min(2.0);
+                        symbol_state.position.x += rng.gen_range(-0.005..0.005) * w;
+                        symbol_state.position.y += rng.gen_range(-0.005..0.005) * w;
                     }
                 }
             }
@@ -799,7 +1034,7 @@ mod tests {
 
     fn kernel_with_config(mut config: ProposalConfig) -> DefaultProposalKernel {
         config.adaptive_move_mixing = true;
-        DefaultProposalKernel::new(config, 7, None, None)
+        DefaultProposalKernel::new(config, 7, None, None, None)
     }
 
     #[test]
@@ -828,7 +1063,7 @@ mod tests {
         config.path_based_move_prob = 0.0;
         config.global_move_prob = 0.0;
         config.adaptive_move_mixing = false;
-        let kernel = DefaultProposalKernel::new(config, 11, None, None);
+        let kernel = DefaultProposalKernel::new(config, 11, None, None, None);
         let mut rng = StdRng::seed_from_u64(123);
         assert!(matches!(
             kernel.choose_move_type(&mut rng, 0.5),

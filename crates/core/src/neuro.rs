@@ -16,6 +16,14 @@ pub struct NeuroConfig {
     pub max_neurons: usize,
     pub inhibitory_scale: f32,
     pub excitatory_scale: f32,
+    /// Increment applied to fatigue when a neuron fires.
+    pub fatigue_increment: f32,
+    /// Decay applied to fatigue each step.
+    pub fatigue_decay: f32,
+    /// Top-k winner-take-all per zone to keep activity sparse.
+    pub wta_k_per_zone: usize,
+    /// Scale for STDP-lite weight nudges.
+    pub stdp_scale: f32,
 }
 
 impl Default for NeuroConfig {
@@ -27,6 +35,10 @@ impl Default for NeuroConfig {
             max_neurons: 100_000,
             inhibitory_scale: 0.5,
             excitatory_scale: 1.0,
+            fatigue_increment: 0.02,
+            fatigue_decay: 0.98,
+            wta_k_per_zone: 4,
+            stdp_scale: 0.02,
         }
     }
 }
@@ -65,15 +77,31 @@ pub struct Synapse {
 }
 
 #[derive(Debug, Clone)]
+pub struct Dendrite {
+    pub source: u32,
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone)]
 pub struct Neuron {
     pub id: u32,
     pub label: Option<String>,
+    /// Optional symbol this neuron stands for (id::<symbol>).
+    pub symbol_id: Option<String>,
     pub activation: f32,
     pub bias: f32,
+    /// Incoming connections.
+    pub dendrites: Vec<Dendrite>,
+    /// Outgoing excitatory synapses.
     pub excitatory: Vec<Synapse>,
+    /// Outgoing inhibitory synapses.
     pub inhibitory: Vec<Synapse>,
     pub born_at: u64,
     pub use_count: u64,
+    /// Short-term fatigue (higher = more suppressed).
+    pub fatigue: f32,
+    /// Eligibility trace for STDP-lite updates.
+    pub trace: f32,
 }
 
 impl Neuron {
@@ -81,12 +109,16 @@ impl Neuron {
         Self {
             id,
             label,
+            symbol_id: None,
             activation: 0.0,
             bias: 0.0,
+            dendrites: Vec::new(),
             excitatory: Vec::new(),
             inhibitory: Vec::new(),
             born_at,
             use_count: 0,
+            fatigue: 0.0,
+            trace: 0.0,
         }
     }
 }
@@ -118,6 +150,8 @@ impl NeuronPool {
         self.step += 1;
         for neuron in self.neurons.iter_mut() {
             neuron.activation *= self.config.decay;
+            neuron.fatigue *= self.config.fatigue_decay;
+            neuron.trace *= self.config.decay;
         }
     }
 
@@ -128,6 +162,7 @@ impl NeuronPool {
         let id = if let Some(id) = self.free.pop() {
             let neuron = &mut self.neurons[id as usize];
             neuron.label = Some(label.to_string());
+            neuron.symbol_id = label.strip_prefix("id::").map(|s| s.to_string());
             neuron.activation = 0.0;
             neuron.use_count = 0;
             neuron.born_at = self.step;
@@ -137,7 +172,9 @@ impl NeuronPool {
             if self.neurons.len() >= self.config.max_neurons {
                 return id.saturating_sub(1);
             }
-            self.neurons.push(Neuron::new(id, Some(label.to_string()), self.step));
+            let mut neuron = Neuron::new(id, Some(label.to_string()), self.step);
+            neuron.symbol_id = label.strip_prefix("id::").map(|s| s.to_string());
+            self.neurons.push(neuron);
             id
         };
         self.label_to_id.insert(label.to_string(), id);
@@ -150,8 +187,10 @@ impl NeuronPool {
         for label in symbols {
             let id = self.get_or_create(label);
             if let Some(neuron) = self.neurons.get_mut(id as usize) {
-                neuron.activation = 1.0;
+                neuron.activation = (1.0 - neuron.fatigue).max(0.0);
                 neuron.use_count += 1;
+                neuron.trace += 0.1;
+                neuron.fatigue = (neuron.fatigue + self.config.fatigue_increment).min(0.6);
             }
             ids.push(id);
         }
@@ -185,9 +224,7 @@ impl NeuronPool {
     }
 
     pub fn label_for(&self, id: u32) -> Option<String> {
-        self.neurons
-            .get(id as usize)
-            .and_then(|n| n.label.clone())
+        self.neurons.get(id as usize).and_then(|n| n.label.clone())
     }
 
     pub fn cooccurrences_above(&self, threshold: u64) -> Vec<((String, String), u64)> {
@@ -204,13 +241,14 @@ impl NeuronPool {
     }
 
     fn hebbian_pair(&mut self, a: u32, b: u32, scale: f32, inhibitory: bool) {
-        let (Some(n_a), Some(n_b)) = (
-            self.neurons.get(a as usize),
-            self.neurons.get(b as usize),
-        ) else {
+        let (Some(n_a), Some(n_b)) = (self.neurons.get(a as usize), self.neurons.get(b as usize))
+        else {
             return;
         };
-        let delta = self.config.hebbian_lr * n_a.activation * n_b.activation * scale;
+        let delta = self.config.hebbian_lr
+            * (n_a.activation + n_a.trace)
+            * (n_b.activation + n_b.trace)
+            * scale;
         self.add_synapse(a, b, delta, inhibitory);
         self.add_synapse(b, a, delta, inhibitory);
     }
@@ -229,6 +267,17 @@ impl NeuronPool {
                     target: to,
                     weight: delta,
                     inhibitory,
+                });
+            }
+        }
+        // add dendrite on target side
+        if let Some(target) = self.neurons.get_mut(to as usize) {
+            if let Some(existing) = target.dendrites.iter_mut().find(|d| d.source == from) {
+                existing.weight += delta;
+            } else {
+                target.dendrites.push(Dendrite {
+                    source: from,
+                    weight: delta,
                 });
             }
         }
@@ -284,6 +333,9 @@ pub struct NeuralNetwork {
     pub born_at: u64,
     pub strength: f32,
     pub use_count: u64,
+    pub level: u8,
+    pub excites: HashMap<u32, f32>,
+    pub inhibits: HashMap<u32, f32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -291,6 +343,7 @@ pub struct NeuralNetworkSnapshot {
     pub label: String,
     pub members: Vec<String>,
     pub strength: f32,
+    pub level: u8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -299,6 +352,7 @@ pub struct NeuroSnapshot {
     pub active_composites: HashSet<String>,
     pub active_networks: Vec<NeuralNetworkSnapshot>,
     pub centroids: HashMap<String, Position>,
+    pub network_links: HashMap<String, HashMap<String, f32>>,
 }
 
 impl NeuroSnapshot {
@@ -346,6 +400,7 @@ struct NeuroState {
     networks: Vec<NeuralNetwork>,
     label_to_network: HashMap<String, u32>,
     positions: HashMap<String, PositionAccumulator>,
+    network_cooccur: HashMap<(u32, u32), u64>,
 }
 
 impl NeuroState {
@@ -355,6 +410,7 @@ impl NeuroState {
             networks: Vec::new(),
             label_to_network: HashMap::new(),
             positions: HashMap::new(),
+            network_cooccur: HashMap::new(),
         }
     }
 
@@ -368,6 +424,7 @@ impl NeuroState {
         decay: f32,
     ) {
         let mut labels: Vec<String> = Vec::with_capacity(state.symbol_states.len() * 5 + 2);
+        let mut zone_map: HashMap<String, Vec<u32>> = HashMap::new();
         for (symbol_id, symbol_state) in &state.symbol_states {
             labels.push(format!("id::{symbol_id}"));
             labels.push(zone_label(&symbol_state.position));
@@ -380,10 +437,32 @@ impl NeuroState {
                 labels.push(format!("role::{role}"));
                 labels.push(format!("group::{group}"));
                 labels.push(format!("domain::{domain}"));
+                labels.push(format!(
+                    "col::{role}::{}",
+                    zone_label(&symbol_state.position)
+                ));
+                labels.push(format!(
+                    "region::{domain}::{}",
+                    zone_label(&symbol_state.position)
+                ));
                 self.bump_position(&format!("role::{role}"), &symbol_state.position);
                 self.bump_position(&format!("group::{group}"), &symbol_state.position);
                 self.bump_position(&format!("domain::{domain}"), &symbol_state.position);
+                self.bump_position(
+                    &format!("col::{role}::{}", zone_label(&symbol_state.position)),
+                    &symbol_state.position,
+                );
+                self.bump_position(
+                    &format!("region::{domain}::{}", zone_label(&symbol_state.position)),
+                    &symbol_state.position,
+                );
             }
+            let id_label = format!("id::{symbol_id}");
+            let id_idx = self.pool.get_or_create(&id_label);
+            zone_map
+                .entry(zone_label(&symbol_state.position))
+                .or_default()
+                .push(id_idx);
         }
         if !labels.is_empty() {
             let mut motif = labels
@@ -400,8 +479,12 @@ impl NeuroState {
         labels.sort();
         labels.dedup();
         self.pool.record_symbols(&labels);
+        self.apply_zone_wta(&zone_map);
+        self.apply_stdp();
         self.promote_networks(module_threshold, max_networks);
         self.refresh_network_strengths(min_activation, decay);
+        self.promote_super_networks(module_threshold, max_networks, min_activation);
+        self.refresh_cross_links(min_activation);
     }
 
     fn bump_position(&mut self, label: &str, pos: &Position) {
@@ -434,20 +517,63 @@ impl NeuroState {
                 born_at: self.pool.step_counter(),
                 strength: (count as f32).sqrt().max(1.0),
                 use_count: 0,
+                level: 0,
+                excites: HashMap::new(),
+                inhibits: HashMap::new(),
             });
             self.label_to_network.insert(label, net_id);
         }
     }
 
+    fn apply_zone_wta(&mut self, zones: &HashMap<String, Vec<u32>>) {
+        let k = self.pool.config.wta_k_per_zone.max(1);
+        for ids in zones.values() {
+            if ids.len() <= k {
+                continue;
+            }
+            let mut sorted = ids
+                .iter()
+                .filter_map(|id| {
+                    self.pool
+                        .neurons
+                        .get(*id as usize)
+                        .map(|n| (n.activation, *id))
+                })
+                .collect::<Vec<_>>();
+            sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let keep: HashSet<u32> = sorted.iter().take(k).map(|(_, id)| *id).collect();
+            for (_, id) in sorted.iter().skip(k) {
+                if let Some(neuron) = self.pool.neurons.get_mut(*id as usize) {
+                    neuron.activation *= self.pool.config.inhibitory_scale;
+                }
+            }
+            // lateral inhibition between kept neurons
+            for id in &keep {
+                if let Some(neuron) = self.pool.neurons.get_mut(*id as usize) {
+                    neuron.activation *= 1.0;
+                }
+            }
+        }
+    }
+
     fn refresh_network_strengths(&mut self, min_activation: f32, decay: f32) {
         let active = self.pool.active_ids(min_activation);
+        let mut active_nets = Vec::new();
         for net in &mut self.networks {
             net.strength *= decay;
             if net.members.iter().all(|m| active.contains(m)) {
                 net.use_count += 1;
                 net.strength += 0.5;
+                active_nets.push(net.id);
             }
             net.strength = net.strength.clamp(0.0, 16.0);
+        }
+        active_nets.sort();
+        for i in 0..active_nets.len() {
+            for j in (i + 1)..active_nets.len() {
+                let key = (active_nets[i], active_nets[j]);
+                *self.network_cooccur.entry(key).or_insert(0) += 1;
+            }
         }
     }
 
@@ -464,6 +590,7 @@ impl NeuroState {
             .filter_map(|(label, acc)| acc.mean().map(|m| (label.clone(), m)))
             .collect::<HashMap<_, _>>();
         let mut active_networks = Vec::new();
+        let mut network_links: HashMap<String, HashMap<String, f32>> = HashMap::new();
         for net in &self.networks {
             if net.strength <= 0.01 {
                 continue;
@@ -477,13 +604,150 @@ impl NeuroState {
                 label: net.label.clone(),
                 members,
                 strength: net.strength,
+                level: net.level,
             });
+            let mut links = HashMap::new();
+            for (tgt, w) in net.excites.iter() {
+                if let Some(label) = self
+                    .networks
+                    .iter()
+                    .find(|n| n.id == *tgt)
+                    .map(|n| n.label.clone())
+                {
+                    links.insert(label, *w);
+                }
+            }
+            if !links.is_empty() {
+                network_links.insert(net.label.clone(), links);
+            }
         }
         NeuroSnapshot {
             active_labels,
             active_composites,
             active_networks,
             centroids,
+            network_links,
+        }
+    }
+
+    fn promote_super_networks(&mut self, threshold: u64, max_networks: usize, min_activation: f32) {
+        if self.networks.len() >= max_networks {
+            return;
+        }
+        let active = self
+            .networks
+            .iter()
+            .filter(|n| n.strength >= min_activation)
+            .map(|n| n.id)
+            .collect::<Vec<_>>();
+        for i in 0..active.len() {
+            for j in (i + 1)..active.len() {
+                let key = (active[i], active[j]);
+                let count = *self.network_cooccur.get(&key).unwrap_or(&0);
+                if count >= threshold && self.networks.len() < max_networks {
+                    let a = active[i];
+                    let b = active[j];
+                    let label = format!("super::{}&{}", a, b);
+                    if self.label_to_network.contains_key(&label) {
+                        continue;
+                    }
+                    let members = self
+                        .networks
+                        .iter()
+                        .filter(|n| n.id == a || n.id == b)
+                        .flat_map(|n| n.members.iter().cloned())
+                        .collect::<Vec<_>>();
+                    let net_id = self.networks.len() as u32;
+                    self.networks.push(NeuralNetwork {
+                        id: net_id,
+                        label: label.clone(),
+                        members,
+                        born_at: self.pool.step_counter(),
+                        strength: (count as f32).sqrt().max(1.0),
+                        use_count: 0,
+                        level: 1,
+                        excites: HashMap::new(),
+                        inhibits: HashMap::new(),
+                    });
+                    self.label_to_network.insert(label, net_id);
+                }
+            }
+        }
+    }
+
+    fn refresh_cross_links(&mut self, min_activation: f32) {
+        let active = self
+            .networks
+            .iter()
+            .filter(|n| n.strength >= min_activation)
+            .map(|n| n.id)
+            .collect::<Vec<_>>();
+        let mut updates: Vec<(u32, u32, f32)> = Vec::new();
+        for i in 0..active.len() {
+            for j in (i + 1)..active.len() {
+                let (a, b) = (active[i], active[j]);
+                updates.push((a, b, 0.05));
+                updates.push((b, a, 0.05));
+            }
+        }
+        for (src, dst, delta) in updates {
+            if let Some(net) = self.networks.iter_mut().find(|n| n.id == src) {
+                *net.excites.entry(dst).or_insert(0.0) += delta;
+            }
+        }
+    }
+
+    fn apply_stdp(&mut self) {
+        let scale = self.pool.config.stdp_scale;
+        let len = self.pool.neurons.len();
+        for idx in 0..len {
+            let (pre_trace, pre_fatigue) = {
+                let pre = &self.pool.neurons[idx];
+                (pre.trace as f32, pre.fatigue)
+            };
+            // borrow target activations first to avoid aliasing
+            let excit_updates = {
+                let neuron = &self.pool.neurons[idx];
+                neuron
+                    .excitatory
+                    .iter()
+                    .map(|syn| {
+                        let post_act = self
+                            .pool
+                            .neurons
+                            .get(syn.target as usize)
+                            .map(|p| p.activation as f32)
+                            .unwrap_or(0.0);
+                        let delta = scale * (pre_trace * post_act - pre_fatigue * syn.weight * 0.1);
+                        (syn.target, delta, syn.inhibitory)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let inhib_updates = {
+                let neuron = &self.pool.neurons[idx];
+                neuron
+                    .inhibitory
+                    .iter()
+                    .map(|syn| {
+                        let post_act = self
+                            .pool
+                            .neurons
+                            .get(syn.target as usize)
+                            .map(|p| p.activation as f32)
+                            .unwrap_or(0.0);
+                        let delta = scale * (pre_trace * post_act - pre_fatigue * syn.weight * 0.1);
+                        (syn.target, delta, syn.inhibitory)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if let Some(neuron) = self.pool.neurons.get_mut(idx) {
+                for (syn, (_, delta, _)) in neuron.excitatory.iter_mut().zip(excit_updates.iter()) {
+                    syn.weight = (syn.weight + delta).clamp(-2.0, 2.0);
+                }
+                for (syn, (_, delta, _)) in neuron.inhibitory.iter_mut().zip(inhib_updates.iter()) {
+                    syn.weight = (syn.weight + delta).clamp(-2.0, 2.0);
+                }
+            }
         }
     }
 }

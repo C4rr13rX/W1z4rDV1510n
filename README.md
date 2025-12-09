@@ -13,6 +13,9 @@ W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futur
 - **ML-guided proposals** - Enable `proposal.ml_guided_move_prob` (>0) to let ML backends suggest coordinated moves in the sampler.
 - **Quantum-inspired stacks** - Optional `quantum` mode runs coupled Trotter slices (simulated quantum annealing) while the `energy.w_stack_hash` family fuses prior trajectories (`stack_history`) via hashed consistency, top-k frame alignment, and future-lookahead pulls for gap-filling chess/sequence experiments.
 - **Structured logging** - Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, path diagnostics, and service telemetry.
+- **Neurogenesis + emergent motifs** - A lightweight neuron pool learns co-occurring roles/zones, spawns composite neurons and mini-networks, maintains centroids, and feeds both proposal biasing and a new `energy.w_neuro_alignment` term to reward consistent trajectories across domains.
+- **Resource-aware scheduling** - CPU backends build capped rayon pools using memory-aware budgets (`W1Z4RDV1510N_THREAD_BUDGET` or `hardware_overrides.max_threads`), chunk particle updates, and log the effective thread plan so midrange i5/32GB machines stay responsive.
+- **Homeostasis controller** - Optional feedback loop watches for energy plateaus and temporarily reheats the sampler and mutation rate to escape local minima while chasing 90–100% accuracy.
 - **Calibration tooling** - `cargo run --bin calibrate_energy` inspects recorded trajectories to recommend energy weights, plus schema validation and summary stats.
 - **REST + persistence layer** - `/predict`, `/healthz`, `/readyz`, `/runs`, `/runs/{id}` form a full control plane with durable JSON artifacts for every job.
 - **Validation scripts** - Python helpers convert chess PGNs and run perpetual accuracy loops to benchmark ML + logging pipelines.
@@ -83,6 +86,9 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
     "w_goal": 1.0,
     "w_group_cohesion": 0.5,
     "w_ml_prior": 0.2,
+    "w_relational_prior": 0.4,
+    "w_neuro_alignment": 0.2,
+    "relational_priors_path": "data/relational_priors.json",
     "w_path_feasibility": 1.0,
     "w_env_constraints": 3.0
   },
@@ -107,6 +113,8 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
     "allow_distributed": true,
     "max_threads": 12
   },
+  "neuro": { "enabled": true, "min_activation": 0.6, "module_threshold": 40, "max_networks": 256 },
+  "homeostasis": { "enabled": true, "energy_plateau_tolerance": 0.0001, "patience": 8, "mutation_boost": 0.5, "reheat_scale": 0.2 },
   "logging": { "log_level": "INFO", "json": true, "log_path": "logs/run.jsonl" },
   "output": { "save_best_state": true, "save_population_summary": true, "output_path": "logs/results.json", "format": "Json" },
   "random": { "provider": "DETERMINISTIC", "seed": 1337 },
@@ -138,13 +146,21 @@ Output:
 - `hardware_backend` - add `"Experimental"` (requires `--features experimental-hw` and `experimental_hardware.enabled: true`) to blend physical telemetry into the annealer. Sensors are read passively; no destructive behavior occurs.
 - `experimental_hardware` - tuning knobs for the experimental backend (`use_thermal`, `use_performance_counters`, `max_sample_interval_secs`). Leave `enabled: false` unless running in lab mode.
 
+### Neurogenesis & Alignment
+
+- Enable the lightweight neural fabric via `neuro.enabled: true`; tune decay/thresholds with `neuro.min_activation`, `neuro.module_threshold`, and `neuro.max_networks`.
+- Reward consistency with emergent centroids/networks by setting `energy.w_neuro_alignment > 0` (combine with relational/stack terms for domain-agnostic structure).
+- Proposal kernels automatically consume neuro snapshots to nudge symbols toward active centroids and downweight unlikely roles/zones.
+- Keep the sampler “alive” with the homeostasis loop: when best energy plateaus for `homeostasis.patience` iterations, mutation and temperature are briefly boosted (`mutation_boost`, `reheat_scale`) to escape local minima and continue chasing higher accuracy.
+
 ### Hardware & Safety Configuration
 
 - `hardware_overrides.allow_gpu/allow_distributed` explicitly disable accelerators even when Auto detects them. Defaults honor env vars (`W1Z4RDV1510N_ALLOW_GPU`, `SIMFUTURES_ALLOW_GPU`, etc.).
 - `hardware_overrides.max_threads` caps the logical CPU core count the scheduler uses (also configurable via `W1Z4RDV1510N_MAX_THREADS`). Handy when sharing multi-socket machines.
+- `W1Z4RDV1510N_THREAD_BUDGET` provides an extra cap for CPU worker pools; the multi-threaded backend chunks particle updates to honor this budget and keep midrange machines responsive.
 - Environment hints:
-  - `W1Z4RDV1510N_HAS_GPU` / `SIMFUTURES_HAS_GPU` – force-detect a GPU even if CUDA tooling is not present.
-  - `W1Z4RDV1510N_DISTRIBUTED` / `SIMFUTURES_DISTRIBUTED` – hint that we’re running under a cluster scheduler (Auto may pick the distributed backend).
+  - `W1Z4RDV1510N_HAS_GPU` / `SIMFUTURES_HAS_GPU` - force-detect a GPU even if CUDA tooling is not present.
+  - `W1Z4RDV1510N_DISTRIBUTED` / `SIMFUTURES_DISTRIBUTED` - hint that we're running under a cluster scheduler (Auto may pick the distributed backend).
   - `CUDA_VISIBLE_DEVICES` – honored transparently by the GPU backend.
 - Production guardrails (`mode = "PRODUCTION"`) reject jitter RNGs, experimental hardware, or explicit `hardware_backend = "Experimental"`.
 
@@ -334,7 +350,7 @@ python scripts/fetch_uspto_reactions.py             # full + 50k
 python scripts/fetch_uspto_reactions.py --only 50k  # just the 50k subset
 ```
 
-These archives come from the public deepchemdata S3 bucket. Convert the extracted reaction data into your symbol schema (roles/groups/steps) before running priors/training on them.
+The script first tries the Figshare mirrors (50k: `25325623`, full: `25242010`) and falls back through a list of public mirrors; downloads can be slow, so you can also drop `uspto_50k.zip` into `data/uspto/` manually. Convert the extracted reaction data into your symbol schema (roles/groups/steps) before running priors/training on them.
 - To drive the Rust annealer on real games, run `scripts/export_chess_stack_snapshot.py --game-index 3 --plies 14 --output data/chess/stack_snapshot.json` to emit an `EnvironmentSnapshot` with a `stack_history` of early plies. Pair it with `energy.w_stack_hash` and `quantum.enabled=true` in your config.
 - Use `--stride` / `--stride-offset` / `--skip-terminal` on `export_chess_stack_snapshot.py` to intentionally sparsify the history (e.g., keep every 3rd ply) when testing the gap-filling stack alignment / future-lookahead terms.
 
