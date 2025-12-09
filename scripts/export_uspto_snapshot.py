@@ -40,17 +40,41 @@ def sequence_to_snapshot(rec: Dict[str, Any]) -> Dict[str, Any]:
             properties.setdefault("role", "unknown")
             sym = {
                 "id": sid,
-                "symbol_type": "Object",
+                "type": "OBJECT",
                 "position": {"x": float(pos.get("x", 0.0)), "y": float(frame_idx), "z": 0.0},
                 "properties": properties,
             }
             symbols.append(sym)
 
+    stack_history = []
+    for frame_idx, frame in enumerate(rec["sequence"]):
+        symbol_states = {}
+        for sid, state in frame["symbol_states"].items():
+            pos = state.get("position", {})
+            properties = state.get("properties", {}).copy()
+            properties.setdefault("domain", "chemistry")
+            properties.setdefault("role", "unknown")
+            symbol_states[sid] = {
+                "position": {"x": float(pos.get("x", 0.0)), "y": float(frame_idx), "z": 0.0},
+                "velocity": None,
+                "internal_state": properties,
+            }
+        stack_history.append(
+            {
+                "timestamp": {"unix": int(frame_idx)},
+                "symbol_states": symbol_states,
+            }
+        )
+
     snapshot = {
         "timestamp": {"unix": 0},
-        "bounds": {"width": max([s["position"]["x"] for s in symbols] + [1.0]) + 1.0, "height": 2.0},
+        "bounds": {
+            "width": max([s["position"]["x"] for s in symbols] + [1.0]) + 1.0,
+            "height": 2.0,
+            "depth": 1.0,
+        },
         "symbols": symbols,
-        "stack_history": rec["sequence"],  # allow stack hashing/gap-fill
+        "stack_history": stack_history,  # allow stack hashing/gap-fill
     }
     return snapshot
 

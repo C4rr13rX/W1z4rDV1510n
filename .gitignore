@@ -1,5 +1,6 @@
 /target
-/data/chess/
+/data/**
+/.genomic_benchmarks/
 /data/logging_snapshot.json
 /logs/
 /run_config.json
