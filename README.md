@@ -1,26 +1,41 @@
 # W1z4rDV1510n
 
-W1z4rDV1510n is a Rust-first annealing engine for simulating many parallel futures from a symbolic snapshot. It runs adaptive proposal kernels, search-aware constraints, and configurable energy functions to estimate the most likely end-state at `t_end`, while logging rich diagnostics for downstream analysis.
+W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like neural fabric for predicting and completing symbol sequences. It simulates many parallel futures from any symbolic snapshot (chess plies, reaction steps, traffic frames, code edits) and uses relational priors, neurogenesis, and simulated quantum annealing to fill gaps and forecast where symbols will be next—comfortably on an i5/32GB CPU.
 
 ---
 
-## Key Features
+## Why this matters (engineers, scientists, data folks)
 
-- **Automatic hardware scaling** - `HardwareBackendType::Auto` inspects CPU cores, memory, GPU hints, and cluster schedulers to pick CPU, multi-threaded CPU, GPU, or distributed backends. Fine-grained overrides (`RunConfig.hardware_overrides` or env vars such as `W1Z4RDV1510N_ALLOW_GPU`, `..._MAX_THREADS`) let you disable accelerators or cap thread counts per deployment.
-- **Search-integrated proposals** - Occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible. Cached grids eliminate redundant rebuilds.
-- **Goal-aware ML priors** - ML hooks (`None`, `SimpleRules`, `GoalAnchor`) provide initialization hints and contribute to energy scoring. GoalAnchor learns anchor destinations from trajectories.
-- **Configurable randomness** - Deterministic, OS entropy, and (feature-gated) jitter-based RNG providers with per-module seed logging and reproducible runs when deterministic mode is selected.
-- **ML-guided proposals** - Enable `proposal.ml_guided_move_prob` (>0) to let ML backends suggest coordinated moves in the sampler.
-- **Quantum-inspired stacks** - Optional `quantum` mode runs coupled Trotter slices (simulated quantum annealing) while the `energy.w_stack_hash` family fuses prior trajectories (`stack_history`) via hashed consistency, top-k frame alignment, and future-lookahead pulls for gap-filling chess/sequence experiments.
-- **Structured logging** - Deterministic `tracing` configuration (JSON/compact) with per-iteration metrics, ESS resampling notices, hardware detection logs, path diagnostics, and service telemetry.
-- **Neurogenesis + emergent motifs** - A lightweight neuron pool learns co-occurring roles/zones, spawns composite neurons and mini-networks, maintains centroids, and feeds both proposal biasing and a new `energy.w_neuro_alignment` term to reward consistent trajectories across domains.
-- **Resource-aware scheduling** - CPU backends build capped rayon pools using memory-aware budgets (`W1Z4RDV1510N_THREAD_BUDGET` or `hardware_overrides.max_threads`), chunk particle updates, and log the effective thread plan so midrange i5/32GB machines stay responsive.
-- **Homeostasis controller** - Optional feedback loop watches for energy plateaus and temporarily reheats the sampler and mutation rate to escape local minima while chasing 90–100% accuracy.
-- **Calibration tooling** - `cargo run --bin calibrate_energy` inspects recorded trajectories to recommend energy weights, plus schema validation and summary stats.
-- **REST + persistence layer** - `/predict`, `/healthz`, `/readyz`, `/runs`, `/runs/{id}` form a full control plane with durable JSON artifacts for every job.
-- **Validation scripts** - Python helpers convert chess PGNs and run perpetual accuracy loops to benchmark ML + logging pipelines.
-- **Relational priors** - `scripts/build_relational_priors.py` builds generic motif/transition priors from any sequence of symbol states (chess, people, vehicles). It hashes relational graphs, learns transition likelihoods, and exports top-k destination bins for lightweight inference/energy terms.
-- **Unit-test coverage** - Hardware selection, proposal mixing, search constraint repairs, telemetry readiness, service storage, and ML calibration each have dedicated tests (`cargo test`).
+- **Domain-agnostic sequence reasoning** – chess games, USPTO reaction steps, crowd/traffic frames, clickstreams, market ticks, log lines, code edits: if you can encode symbols/roles/positions, the sampler can predict/complete the sequence.
+- **Gap-filling + forecasting** – handles sparse or staggered histories, predicts missing frames, and projects plausible futures with stack hashing + relational priors.
+- **Low-overhead ML** – no GPU required; thread-capped, CPU-friendly kernels with deterministic seeds keep experiments reproducible on modest hardware.
+- **Inspectable & tunable** – every energy term, prior, neuro plasticity knob, and homeostasis control is JSON-configurable and logged.
+- **Cross-discipline fusion** – quantum-inspired annealing, graph/relational hashing, and cortical-style neurogenesis cooperate in one engine.
+
+## Core capabilities
+
+- **Hardware-smart execution** – `HardwareBackendType::Auto` chooses CPU, multi-threaded CPU, GPU, or distributed; env/overrides cap threads and disable accelerators when needed.
+- **Search-integrated proposals** – occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible; caches avoid rebuild churn.
+- **Goal/role/relational priors** – ML hooks (`None`, `SimpleRules`, `GoalAnchor`), relational graphs, and hashed motifs bias initialization and energy scoring without heavy models.
+- **Quantum-inspired stacks** – optional `quantum` mode couples Trotter slices; `energy.w_stack_hash` aligns with past trajectories (`stack_history`) and pulls toward likely futures for gap-filling.
+- **Brain-like neuro layer** – neurons carry dendrites/axon splits, excitatory & inhibitory synapses, light synaptic fatigue, winner-take-all sparsity, and STDP-lite nudges. The pool learns co-occurring roles/zones, spawns composite neurons + cross-linked mini-networks, and feeds proposal biasing plus `energy.w_neuro_alignment`.
+- **Resource-aware scheduling** – capped rayon pools, memory-aware budgets (`W1Z4RDV1510N_THREAD_BUDGET`, `hardware_overrides.max_threads`), and chunked updates keep an i5/32GB responsive.
+- **Homeostasis controller** – detects plateaus and reheats/mutates briefly to escape local minima while chasing 90–100% accuracy.
+- **Structured telemetry** – deterministic tracing (JSON/compact), ESS/resampling notices, occupancy/path diagnostics, hardware detection logs, and persisted run artifacts.
+- **Tooling** – `calibrate_energy` for weight tuning, REST API with persistence, relational prior builder, chess/chemistry scripts, and comprehensive tests (`cargo test`).
+
+## How it works (stack)
+
+- **Annealer**: multi-proposal MCMC + simulated/quantum annealing with adaptive move mixing.
+- **Relational priors**: graph-hash motifs and transition tables steer moves toward historically consistent structures.
+- **Neural fabric**: emergent motifs, centroids, mini-networks, cross-network links; bias proposals and energy toward coherent “cortical” patterns.
+- **Homeostasis**: detects stagnation and temporarily raises temperature/mutation to keep searching.
+
+## Example workflows
+
+- **Chess (gap-fill + forecast)**: train lightweight outcome/move models (`scripts/chess_training_loop.py`), export sparse stacks, and run the annealer with `energy.w_stack_hash` to complete missing plies and predict futures.
+- **Chemistry (USPTO reactions)**: fetch USPTO-50K or full Lowe dataset (`scripts/fetch_uspto_reactions.py`), hash reaction steps into symbols/roles, build relational priors, and anneal to propose likely next steps or full routes.
+- **People/traffic/time-series**: encode agents/roles/zones per frame; use relational priors + neuro alignment to forecast trajectories and fill missing observations.
 
 ### Architecture Overview
 
@@ -148,7 +163,7 @@ Output:
 
 ### Neurogenesis & Alignment
 
-- Enable the lightweight neural fabric via `neuro.enabled: true`; tune decay/thresholds with `neuro.min_activation`, `neuro.module_threshold`, and `neuro.max_networks`.
+- Enable the lightweight neural fabric via `neuro.enabled: true`; tune decay/thresholds with `neuro.min_activation`, `neuro.module_threshold`, and `neuro.max_networks`. Inside the inner `neuro` block, adjust `fatigue_increment` / `fatigue_decay`, `wta_k_per_zone` (lateral inhibition), and `stdp_scale` (STDP-lite) for brain-like dynamics.
 - Reward consistency with emergent centroids/networks by setting `energy.w_neuro_alignment > 0` (combine with relational/stack terms for domain-agnostic structure).
 - Proposal kernels automatically consume neuro snapshots to nudge symbols toward active centroids and downweight unlikely roles/zones.
 - Keep the sampler “alive” with the homeostasis loop: when best energy plateaus for `homeostasis.patience` iterations, mutation and temperature are briefly boosted (`mutation_boost`, `reheat_scale`) to escape local minima and continue chasing higher accuracy.
@@ -371,4 +386,3 @@ The script first tries the Figshare mirrors (50k: `25325623`, full: `25242010`) 
 - Test: `cargo test` (unit tests for hardware, proposals, search, ML, calibration).
 - Python helpers expect `python-chess` + `tqdm`; install via `pip install python-chess tqdm`.
 - Heavy artifacts (`data/chess`, `logs/`, generated configs) are ignored via `.gitignore`.
-
