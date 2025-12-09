@@ -1,7 +1,0 @@
-{
-  "bins": 8,
-  "motif_probs": {},
-  "transition_probs": {},
-  "role_topk_bins": {},
-  "role_pair_topk_bins": {}
-}
