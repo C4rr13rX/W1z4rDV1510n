@@ -83,16 +83,70 @@ def fetch_dataset(name: str, url: str, root: Path) -> Tuple[Path, Path]:
     return archive, extract_dir
 
 
+def fetch_uspto50k_hf(root: Path) -> Tuple[Path, Path]:
+    """
+    Fetch USPTO-50K directly from the Hugging Face dataset pingzhili/uspto-50k
+    without relying on the archived zip mirrors (many now 401/403).
+    """
+    dataset_id = "pingzhili/uspto-50k"
+    files = {
+        "data/train-00000-of-00001.parquet": "train.parquet",
+        "data/validation-00000-of-00001.parquet": "validation.parquet",
+    }
+    dest_dir = root / "50k"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    def download_with_progress(url: str, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with requests.get(url, stream=True, allow_redirects=True, timeout=60) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("Content-Length", 0))
+            desc = f"Downloading {target.name}"
+            with open(target, "wb") as fout, tqdm(
+                total=total, unit="B", unit_scale=True, desc=desc, leave=False
+            ) as pbar:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        fout.write(chunk)
+                        pbar.update(len(chunk))
+
+    for remote, local in files.items():
+        target = dest_dir / local
+        if target.exists() and target.stat().st_size > 0:
+            print(f"[skip] {target} already exists")
+            continue
+        url = f"https://huggingface.co/datasets/{dataset_id}/resolve/main/{remote}"
+        print(f"[fetch-hf] {remote} from {dataset_id}")
+        download_with_progress(url, target)
+
+    # Return a placeholder archive path (the HF fetch is not zipped)
+    return dest_dir, dest_dir
+
+
 def fetch_with_fallback(name: str, root: Path) -> Tuple[Path, Path]:
+    # Try Hugging Face first for the 50k split to avoid broken S3 links.
+    if name == "50k":
+        try:
+            return fetch_uspto50k_hf(root)
+        except Exception as exc:
+            print(f"[warn] HF fetch failed for 50k: {exc}")
+
     urls = MIRRORS.get(name, [])
     if not urls:
         raise SystemExit(f"No mirrors configured for dataset: {name}")
+
     for url in urls:
         try:
             return fetch_dataset(name, url, root)
         except Exception as exc:
             print(f"[warn] fetch failed for {url}: {exc}")
             continue
+
+    if name == "50k":
+        raise SystemExit(
+            "Failed to fetch 50k from all mirrors (S3/HF). "
+            "If you have a local copy, place it at data/uspto/50k/train.parquet and validation.parquet."
+        )
     raise SystemExit(f"Failed to fetch dataset {name} from all known mirrors")
 
 

@@ -1,0 +1,111 @@
+{
+  "timestamp": {
+    "unix": 0
+  },
+  "bounds": {
+    "width": 2.0,
+    "height": 2.0
+  },
+  "symbols": [
+    {
+      "id": "reactant_US08188092B2_0",
+      "symbol_type": "Object",
+      "position": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "properties": {
+        "domain": "chemistry",
+        "role": "reactant",
+        "class": 3,
+        "smiles": "CC1(C)OB([c:1]2[cH:2][cH:3][c:4]([CH:5]([C:6]([O:7][CH3:8])=[O:9])[CH3:10])[cH:11][c:12]2[Cl:13])OC1(C)C"
+      }
+    },
+    {
+      "id": "reactant_US08188092B2_1",
+      "symbol_type": "Object",
+      "position": {
+        "x": 1.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "properties": {
+        "domain": "chemistry",
+        "role": "reactant",
+        "class": 3,
+        "smiles": "O=S(=O)(O[c:14]1[cH:15][cH:16][c:17](-[c:18]2[c:19]([CH3:20])[n:21][c:22]([CH3:23])[c:24]([C:25]([NH2:26])=[O:27])[n:28]2)[cH:29][cH:30]1)C(F)(F)F"
+      }
+    },
+    {
+      "id": "product_US08188092B2_0",
+      "symbol_type": "Object",
+      "position": {
+        "x": 0.0,
+        "y": 1.0,
+        "z": 0.0
+      },
+      "properties": {
+        "domain": "chemistry",
+        "role": "product",
+        "class": 3,
+        "smiles": "[c:1]1(-[c:14]2[cH:15][cH:16][c:17](-[c:18]3[c:19]([CH3:20])[n:21][c:22]([CH3:23])[c:24]([C:25]([NH2:26])=[O:27])[n:28]3)[cH:29][cH:30]2)[cH:2][cH:3][c:4]([CH:5]([C:6]([O:7][CH3:8])=[O:9])[CH3:10])[cH:11][c:12]1[Cl:13]"
+      }
+    }
+  ],
+  "stack_history": [
+    {
+      "timestamp": {
+        "unix": 0
+      },
+      "symbol_states": {
+        "reactant_US08188092B2_0": {
+          "position": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "properties": {
+            "domain": "chemistry",
+            "role": "reactant",
+            "class": 3,
+            "smiles": "CC1(C)OB([c:1]2[cH:2][cH:3][c:4]([CH:5]([C:6]([O:7][CH3:8])=[O:9])[CH3:10])[cH:11][c:12]2[Cl:13])OC1(C)C"
+          }
+        },
+        "reactant_US08188092B2_1": {
+          "position": {
+            "x": 1.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "properties": {
+            "domain": "chemistry",
+            "role": "reactant",
+            "class": 3,
+            "smiles": "O=S(=O)(O[c:14]1[cH:15][cH:16][c:17](-[c:18]2[c:19]([CH3:20])[n:21][c:22]([CH3:23])[c:24]([C:25]([NH2:26])=[O:27])[n:28]2)[cH:29][cH:30]1)C(F)(F)F"
+          }
+        }
+      }
+    },
+    {
+      "timestamp": {
+        "unix": 1
+      },
+      "symbol_states": {
+        "product_US08188092B2_0": {
+          "position": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "properties": {
+            "domain": "chemistry",
+            "role": "product",
+            "class": 3,
+            "smiles": "[c:1]1(-[c:14]2[cH:15][cH:16][c:17](-[c:18]3[c:19]([CH3:20])[n:21][c:22]([CH3:23])[c:24]([C:25]([NH2:26])=[O:27])[n:28]3)[cH:29][cH:30]2)[cH:2][cH:3][c:4]([CH:5]([C:6]([O:7][CH3:8])=[O:9])[CH3:10])[cH:11][c:12]1[Cl:13]"
+          }
+        }
+      }
+    }
+  ]
+}
