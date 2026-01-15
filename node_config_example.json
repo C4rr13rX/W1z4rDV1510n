@@ -75,6 +75,53 @@
       "target_txs_per_window": 100,
       "window_secs": 60,
       "adjustment_rate": 0.125
+    },
+    "bridge": {
+      "enabled": false,
+      "challenge_window_secs": 3600,
+      "max_proof_bytes": 262144,
+      "chains": [
+        {
+          "chain_id": "ethereum",
+          "chain_kind": "EVM",
+          "verification": "RELAYER_QUORUM",
+          "min_confirmations": 12,
+          "relayer_quorum": 2,
+          "relayer_public_keys": [],
+          "allowed_assets": ["USDC", "USDT"],
+          "max_deposit_amount": 100000.0
+        },
+        {
+          "chain_id": "bnb",
+          "chain_kind": "EVM",
+          "verification": "RELAYER_QUORUM",
+          "min_confirmations": 15,
+          "relayer_quorum": 2,
+          "relayer_public_keys": [],
+          "allowed_assets": ["USDC", "USDT"],
+          "max_deposit_amount": 100000.0
+        },
+        {
+          "chain_id": "solana",
+          "chain_kind": "SOLANA",
+          "verification": "RELAYER_QUORUM",
+          "min_confirmations": 32,
+          "relayer_quorum": 2,
+          "relayer_public_keys": [],
+          "allowed_assets": ["USDC", "USDT"],
+          "max_deposit_amount": 100000.0
+        },
+        {
+          "chain_id": "bitcoin",
+          "chain_kind": "BITCOIN",
+          "verification": "RELAYER_QUORUM",
+          "min_confirmations": 6,
+          "relayer_quorum": 2,
+          "relayer_public_keys": [],
+          "allowed_assets": ["USDC", "USDT"],
+          "max_deposit_amount": 100000.0
+        }
+      ]
     }
   },
   "compute": {

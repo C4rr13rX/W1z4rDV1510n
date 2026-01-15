@@ -123,6 +123,48 @@ impl NodeConfig {
                 self.blockchain.validator_policy.downtime_penalty_score >= 0.0,
                 "blockchain.validator_policy.downtime_penalty_score must be >= 0"
             );
+            if self.blockchain.bridge.enabled {
+                let bridge = &self.blockchain.bridge;
+                anyhow::ensure!(
+                    bridge.max_proof_bytes > 0,
+                    "blockchain.bridge.max_proof_bytes must be > 0"
+                );
+                anyhow::ensure!(
+                    !bridge.chains.is_empty(),
+                    "blockchain.bridge.chains must be non-empty when enabled"
+                );
+                for chain in &bridge.chains {
+                    anyhow::ensure!(
+                        !chain.chain_id.trim().is_empty(),
+                        "blockchain.bridge.chain_id must be non-empty"
+                    );
+                    anyhow::ensure!(
+                        chain.min_confirmations > 0,
+                        "blockchain.bridge.min_confirmations must be > 0"
+                    );
+                    anyhow::ensure!(
+                        chain.relayer_quorum > 0,
+                        "blockchain.bridge.relayer_quorum must be > 0"
+                    );
+                    anyhow::ensure!(
+                        chain.max_deposit_amount.is_finite() && chain.max_deposit_amount > 0.0,
+                        "blockchain.bridge.max_deposit_amount must be > 0 and finite"
+                    );
+                    anyhow::ensure!(
+                        !chain.allowed_assets.is_empty(),
+                        "blockchain.bridge.allowed_assets must be non-empty"
+                    );
+                    if matches!(
+                        chain.verification,
+                        w1z4rdv1510n::bridge::BridgeVerificationMode::RelayerQuorum
+                    ) {
+                        anyhow::ensure!(
+                            chain.relayer_public_keys.len() as u32 >= chain.relayer_quorum,
+                            "blockchain.bridge.relayer_public_keys must satisfy relayer_quorum"
+                        );
+                    }
+                }
+            }
             if self.blockchain.fee_market.enabled {
                 let fee = &self.blockchain.fee_market;
                 anyhow::ensure!(

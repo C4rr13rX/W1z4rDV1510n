@@ -5,6 +5,7 @@ pub mod branching;
 pub mod causal;
 pub mod consistency;
 pub mod blockchain;
+pub mod bridge;
 pub mod config;
 pub mod energy;
 pub mod hardware;

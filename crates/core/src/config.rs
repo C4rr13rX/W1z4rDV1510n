@@ -1,4 +1,5 @@
 use crate::hardware::HardwareBackendType;
+use crate::bridge::{BridgeVerificationMode, ChainKind};
 use crate::ml::MLBackendType;
 use crate::neuro::NeuroRuntimeConfig;
 use crate::objective::GameObjectiveConfig;
@@ -294,6 +295,45 @@ impl RunConfig {
                     (0.0..=1.0).contains(&fee.adjustment_rate),
                     "fee_market.adjustment_rate must be in [0,1]"
                 );
+            }
+            if self.blockchain.bridge.enabled {
+                let bridge = &self.blockchain.bridge;
+                anyhow::ensure!(
+                    bridge.max_proof_bytes > 0,
+                    "bridge.max_proof_bytes must be > 0"
+                );
+                anyhow::ensure!(
+                    !bridge.chains.is_empty(),
+                    "bridge.chains must be non-empty when bridge is enabled"
+                );
+                for chain in &bridge.chains {
+                    anyhow::ensure!(
+                        !chain.chain_id.trim().is_empty(),
+                        "bridge chain_id must be non-empty"
+                    );
+                    anyhow::ensure!(
+                        chain.min_confirmations > 0,
+                        "bridge.min_confirmations must be > 0"
+                    );
+                    anyhow::ensure!(
+                        chain.relayer_quorum > 0,
+                        "bridge.relayer_quorum must be > 0"
+                    );
+                    anyhow::ensure!(
+                        chain.max_deposit_amount.is_finite() && chain.max_deposit_amount > 0.0,
+                        "bridge.max_deposit_amount must be > 0 and finite"
+                    );
+                    anyhow::ensure!(
+                        !chain.allowed_assets.is_empty(),
+                        "bridge.allowed_assets must be non-empty"
+                    );
+                    if matches!(chain.verification, BridgeVerificationMode::RelayerQuorum) {
+                        anyhow::ensure!(
+                            chain.relayer_public_keys.len() as u32 >= chain.relayer_quorum,
+                            "bridge.relayer_public_keys must satisfy relayer_quorum"
+                        );
+                    }
+                }
             }
         }
         if self.governance.enforce_public_only {
@@ -1009,6 +1049,58 @@ impl Default for NodeRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct BridgeConfig {
+    pub enabled: bool,
+    pub challenge_window_secs: u64,
+    pub max_proof_bytes: usize,
+    pub chains: Vec<BridgeChainPolicy>,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            challenge_window_secs: 3600,
+            max_proof_bytes: 262_144,
+            chains: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BridgeChainPolicy {
+    pub chain_id: String,
+    #[serde(default)]
+    pub chain_kind: ChainKind,
+    #[serde(default)]
+    pub verification: BridgeVerificationMode,
+    pub min_confirmations: u32,
+    pub relayer_quorum: u32,
+    #[serde(default)]
+    pub relayer_public_keys: Vec<String>,
+    #[serde(default)]
+    pub allowed_assets: Vec<String>,
+    pub max_deposit_amount: f64,
+}
+
+impl Default for BridgeChainPolicy {
+    fn default() -> Self {
+        Self {
+            chain_id: String::new(),
+            chain_kind: ChainKind::default(),
+            verification: BridgeVerificationMode::default(),
+            min_confirmations: 1,
+            relayer_quorum: 2,
+            relayer_public_keys: Vec::new(),
+            allowed_assets: Vec::new(),
+            max_deposit_amount: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BlockchainConfig {
     pub enabled: bool,
     pub chain_id: String,
@@ -1028,6 +1120,8 @@ pub struct BlockchainConfig {
     pub validator_policy: ValidatorPolicyConfig,
     #[serde(default)]
     pub fee_market: FeeMarketConfig,
+    #[serde(default)]
+    pub bridge: BridgeConfig,
 }
 
 impl Default for BlockchainConfig {
@@ -1044,6 +1138,7 @@ impl Default for BlockchainConfig {
             require_sensor_attestation: false,
             validator_policy: ValidatorPolicyConfig::default(),
             fee_market: FeeMarketConfig::default(),
+            bridge: BridgeConfig::default(),
         }
     }
 }

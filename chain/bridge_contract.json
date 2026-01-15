@@ -3,12 +3,23 @@
   "version": "1.0.0",
   "supported_chains": [
     "ethereum",
+    "bnb",
+    "solana",
+    "bitcoin",
     "cosmos",
     "polkadot"
   ],
   "token_mapping": {
     "W1Z": {
       "decimals": 9,
+      "bridged_assets": []
+    },
+    "USDC": {
+      "decimals": 6,
+      "bridged_assets": []
+    },
+    "USDT": {
+      "decimals": 6,
       "bridged_assets": []
     }
   }
