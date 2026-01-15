@@ -55,6 +55,7 @@ struct FeeMarketState {
     window_start_unix: i64,
     window_tx_count: u32,
     total_fees_collected: f64,
+    pool_balance: f64,
     fees_by_node: HashMap<String, f64>,
 }
 
@@ -202,6 +203,7 @@ impl BlockchainLedger for LocalLedger {
             commitment.timestamp,
             commitment.fee_paid,
             "SENSOR_COMMITMENT",
+            0.0,
         )?;
         let state = &mut *state;
         push_event_with_id(
@@ -307,6 +309,7 @@ impl BlockchainLedger for LocalLedger {
         let public_key = node_public_key_locked(&proof.node_id, &state)?;
         let payload = work_proof_payload(&proof);
         verify_signature(&public_key, payload.as_bytes(), &proof.signature)?;
+        // Allow fees to be covered by the reward earned for this proof.
         charge_fee(
             &mut *state,
             &self.fee_market,
@@ -314,6 +317,7 @@ impl BlockchainLedger for LocalLedger {
             proof.completed_at,
             proof.fee_paid,
             "WORK_PROOF",
+            proof.score,
         )?;
         let reward_kind = match proof.kind {
             WorkKind::SensorIngest => RewardEventKind::SensorContribution,
@@ -391,6 +395,7 @@ impl BlockchainLedger for LocalLedger {
             transfer.timestamp,
             transfer.fee_paid,
             "CROSS_CHAIN_TRANSFER",
+            0.0,
         )?;
         let state = &mut *state;
         push_event_with_id(
@@ -487,6 +492,7 @@ impl BlockchainLedger for LocalLedger {
             heartbeat_timestamp,
             heartbeat.fee_paid,
             "VALIDATOR_HEARTBEAT",
+            0.0,
         )?;
         let state = &mut *state;
         push_event_with_id(
@@ -687,6 +693,9 @@ fn normalize_fee_market_state(state: &mut LocalLedgerState, config: &FeeMarketCo
         state.fee_market.base_fee = config.base_fee;
     }
     state.fee_market.base_fee = clamp_base_fee(state.fee_market.base_fee, config);
+    if !state.fee_market.pool_balance.is_finite() || state.fee_market.pool_balance < 0.0 {
+        state.fee_market.pool_balance = 0.0;
+    }
 }
 
 fn roll_fee_window_if_needed(
@@ -729,12 +738,16 @@ fn charge_fee(
     timestamp: Timestamp,
     fee_paid: f64,
     kind: &str,
+    pending_credit: f64,
 ) -> Result<()> {
     if !config.enabled {
         return Ok(());
     }
     if !fee_paid.is_finite() || fee_paid.is_sign_negative() {
         anyhow::bail!("fee_paid must be non-negative and finite");
+    }
+    if !pending_credit.is_finite() || pending_credit.is_sign_negative() {
+        anyhow::bail!("pending credit must be non-negative and finite");
     }
     if state.fee_market.window_start_unix == 0 {
         state.fee_market.window_start_unix = timestamp.unix;
@@ -748,8 +761,21 @@ fn charge_fee(
     if fee_paid + 1e-9 < base_fee {
         anyhow::bail!("fee_paid below base fee");
     }
+    let wallet_address = state
+        .nodes
+        .get(node_id)
+        .map(|reg| reg.wallet_address.clone())
+        .unwrap_or_default();
+    let entry = LocalLedger::balance_entry(state, node_id, &wallet_address);
+    let available = entry.balance + pending_credit;
+    if fee_paid + 1e-9 > available {
+        anyhow::bail!("insufficient balance to cover fee");
+    }
+    entry.balance -= fee_paid;
+    entry.updated_at = timestamp;
     state.fee_market.window_tx_count = state.fee_market.window_tx_count.saturating_add(1);
     state.fee_market.total_fees_collected += fee_paid;
+    state.fee_market.pool_balance += fee_paid;
     *state
         .fee_market
         .fees_by_node
@@ -1154,5 +1180,70 @@ mod tests {
         signed.signature = hex_encode(&signature);
         let result = ledger.submit_work_proof(signed);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn fee_charge_debits_balance() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let policy = ValidatorPolicyConfig::default();
+        let fee_market = FeeMarketConfig {
+            enabled: true,
+            base_fee: 1.0,
+            min_base_fee: 1.0,
+            max_base_fee: 5.0,
+            target_txs_per_window: 10,
+            window_secs: 60,
+            adjustment_rate: 0.1,
+        };
+        let ledger = LocalLedger::load_or_create(path, policy, fee_market).expect("ledger");
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        let public_key = hex_encode(public_bytes.as_slice());
+        let wallet_address = address_from_public_key(&public_bytes);
+        let mut registration = NodeRegistration {
+            node_id: "n1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Worker,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address,
+            wallet_public_key: public_key.clone(),
+            signature: String::new(),
+        };
+        let registration_payload = node_registration_payload(&registration);
+        let registration_signature = signing_key.sign(registration_payload.as_bytes()).to_bytes();
+        registration.signature = hex_encode(&registration_signature);
+        ledger.register_node(registration).expect("register");
+
+        let reward = RewardEvent {
+            node_id: "n1".to_string(),
+            kind: RewardEventKind::ComputeContribution,
+            timestamp: Timestamp { unix: 1 },
+            score: 2.0,
+        };
+        ledger.submit_reward_event(reward).expect("reward");
+
+        let commitment = SensorCommitment {
+            node_id: "n1".to_string(),
+            sensor_id: "sensor-1".to_string(),
+            timestamp: Timestamp { unix: 2 },
+            payload_hash: "payload".to_string(),
+            fee_paid: 1.0,
+            signature: String::new(),
+        };
+        let payload = sensor_commitment_payload(&commitment);
+        let signature = signing_key.sign(payload.as_bytes()).to_bytes();
+        let mut signed = commitment.clone();
+        signed.signature = hex_encode(&signature);
+        ledger
+            .submit_sensor_commitment(signed)
+            .expect("commitment");
+
+        let balance = ledger.reward_balance("n1").expect("balance");
+        assert!((balance.balance - 1.0).abs() < 1e-6);
     }
 }
