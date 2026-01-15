@@ -10,10 +10,11 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, CrossChainTransfer, EnergyEfficiencySample, NodeRegistration, RewardBalance,
-    RewardEvent, RewardEventKind, SensorCommitment, WorkKind, WorkProof, ValidatorHeartbeat,
-    ValidatorRecord, ValidatorSlashEvent, ValidatorSlashReason, ValidatorStatus,
+    RewardEvent, RewardEventKind, SensorCommitment, StakeDeposit, WorkKind, WorkProof,
+    ValidatorHeartbeat, ValidatorRecord, ValidatorSlashEvent, ValidatorSlashReason,
+    ValidatorStatus,
     cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
-    validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
+    stake_deposit_payload, validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
 };
 use w1z4rdv1510n::config::{FeeMarketConfig, ValidatorPolicyConfig};
 use w1z4rdv1510n::schema::Timestamp;
@@ -36,6 +37,9 @@ struct LocalLedgerState {
     cross_chain_transfers: Vec<CrossChainTransfer>,
     cross_chain_transfer_ids: VecDeque<String>,
     cross_chain_transfer_id_set: HashSet<String>,
+    stake_deposits: Vec<StakeDeposit>,
+    stake_deposit_ids: VecDeque<String>,
+    stake_deposit_id_set: HashSet<String>,
     validators: HashMap<String, ValidatorRecord>,
     validator_heartbeats: Vec<ValidatorHeartbeat>,
     validator_heartbeat_ids: VecDeque<String>,
@@ -286,6 +290,47 @@ impl BlockchainLedger for LocalLedger {
             updated_at: now(),
             wallet_address,
         })
+    }
+
+    fn submit_stake_deposit(&self, deposit: StakeDeposit) -> Result<()> {
+        if deposit.deposit_id.trim().is_empty() {
+            anyhow::bail!("stake deposit id must be non-empty");
+        }
+        if deposit.node_id.trim().is_empty() {
+            anyhow::bail!("stake deposit node id must be non-empty");
+        }
+        if !deposit.amount.is_finite() || deposit.amount <= 0.0 {
+            anyhow::bail!("stake deposit amount must be > 0 and finite");
+        }
+        let public_key = node_public_key(&deposit.node_id, &self.state)?;
+        let payload = stake_deposit_payload(&deposit);
+        verify_signature(&public_key, payload.as_bytes(), &deposit.signature)?;
+        let mut state = self.state.lock().expect("local ledger mutex poisoned");
+        if state.stake_deposit_id_set.contains(&deposit.deposit_id) {
+            anyhow::bail!("duplicate stake deposit id");
+        }
+        let wallet_address = state
+            .nodes
+            .get(&deposit.node_id)
+            .map(|reg| reg.wallet_address.clone())
+            .unwrap_or_default();
+        let entry = Self::balance_entry(&mut state, &deposit.node_id, &wallet_address);
+        entry.balance += deposit.amount;
+        entry.updated_at = deposit.timestamp;
+        let deposit_id = deposit.deposit_id.clone();
+        let timestamp = deposit.timestamp;
+        let state = &mut *state;
+        push_event_with_id(
+            &mut state.stake_deposits,
+            &mut state.stake_deposit_ids,
+            &mut state.stake_deposit_id_set,
+            deposit,
+            deposit_id,
+        );
+        let audit_id = payload_id(payload.as_bytes());
+        record_audit(state, "STAKE_DEPOSIT", audit_id, timestamp);
+        self.persist(state)?;
+        Ok(())
     }
 
     fn submit_work_proof(&self, proof: WorkProof) -> Result<()> {
@@ -571,6 +616,7 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
     trim_events(&mut state.cross_chain_transfers);
     trim_events(&mut state.reward_events);
     trim_events(&mut state.energy_samples);
+    trim_events(&mut state.stake_deposits);
     trim_events(&mut state.validator_heartbeats);
     trim_events(&mut state.validator_slashes);
     trim_events(&mut state.audit_log);
@@ -600,6 +646,18 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
         let id = payload_id(payload.as_bytes());
         if state.cross_chain_transfer_id_set.insert(id.clone()) {
             state.cross_chain_transfer_ids.push_back(id);
+        }
+    }
+
+    state.stake_deposit_ids.clear();
+    state.stake_deposit_id_set.clear();
+    for deposit in &state.stake_deposits {
+        let id = deposit.deposit_id.clone();
+        if id.trim().is_empty() {
+            continue;
+        }
+        if state.stake_deposit_id_set.insert(id.clone()) {
+            state.stake_deposit_ids.push_back(id);
         }
     }
 
@@ -1460,5 +1518,58 @@ mod tests {
 
         let balance_worker = ledger.reward_balance("worker1").expect("balance worker");
         assert!((balance_worker.balance - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stake_deposit_increases_balance_and_rejects_duplicate() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let ledger = LocalLedger::load_or_create(
+            path,
+            ValidatorPolicyConfig::default(),
+            FeeMarketConfig::default(),
+        )
+        .expect("ledger");
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        let public_key = hex_encode(public_bytes.as_slice());
+        let wallet_address = address_from_public_key(&public_bytes);
+        let mut registration = NodeRegistration {
+            node_id: "n1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Worker,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address,
+            wallet_public_key: public_key.clone(),
+            signature: String::new(),
+        };
+        let registration_payload = node_registration_payload(&registration);
+        let registration_signature = signing_key.sign(registration_payload.as_bytes()).to_bytes();
+        registration.signature = hex_encode(&registration_signature);
+        ledger.register_node(registration).expect("register");
+
+        let deposit = StakeDeposit {
+            deposit_id: "dep1".to_string(),
+            node_id: "n1".to_string(),
+            amount: 3.0,
+            timestamp: Timestamp { unix: 5 },
+            source: "faucet".to_string(),
+            signature: String::new(),
+        };
+        let payload = stake_deposit_payload(&deposit);
+        let signature = signing_key.sign(payload.as_bytes()).to_bytes();
+        let mut signed = deposit.clone();
+        signed.signature = hex_encode(&signature);
+        ledger.submit_stake_deposit(signed.clone()).expect("deposit");
+
+        let balance = ledger.reward_balance("n1").expect("balance");
+        assert!((balance.balance - 3.0).abs() < 1e-6);
+
+        let duplicate = ledger.submit_stake_deposit(signed);
+        assert!(duplicate.is_err());
     }
 }

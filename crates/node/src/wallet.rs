@@ -11,9 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use w1z4rdv1510n::blockchain::{
-    CrossChainTransfer, NodeRegistration, SensorCommitment, ValidatorHeartbeat, WorkProof,
-    cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
-    validator_heartbeat_payload, work_proof_payload,
+    CrossChainTransfer, NodeRegistration, SensorCommitment, StakeDeposit, ValidatorHeartbeat,
+    WorkProof, cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
+    stake_deposit_payload, validator_heartbeat_payload, work_proof_payload,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +116,12 @@ impl WalletSigner {
         let payload = cross_chain_transfer_payload(&transfer);
         transfer.signature = self.sign_payload(payload.as_bytes());
         transfer
+    }
+
+    pub fn sign_stake_deposit(&self, mut deposit: StakeDeposit) -> StakeDeposit {
+        let payload = stake_deposit_payload(&deposit);
+        deposit.signature = self.sign_payload(payload.as_bytes());
+        deposit
     }
 }
 
@@ -524,6 +530,21 @@ mod tests {
             &signer,
             cross_chain_transfer_payload(&signed_transfer),
             &signed_transfer.signature,
+        );
+
+        let deposit = StakeDeposit {
+            deposit_id: "dep1".to_string(),
+            node_id: "n1".to_string(),
+            amount: 5.0,
+            timestamp: Timestamp { unix: 5 },
+            source: "faucet".to_string(),
+            signature: String::new(),
+        };
+        let signed_deposit = signer.sign_stake_deposit(deposit);
+        assert_signature(
+            &signer,
+            stake_deposit_payload(&signed_deposit),
+            &signed_deposit.signature,
         );
     }
 

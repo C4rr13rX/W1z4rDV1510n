@@ -80,6 +80,18 @@ pub struct RewardBalance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakeDeposit {
+    pub deposit_id: String,
+    pub node_id: String,
+    pub amount: f64,
+    pub timestamp: Timestamp,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkKind {
     SensorIngest,
@@ -222,6 +234,17 @@ pub fn validator_heartbeat_payload(heartbeat: &ValidatorHeartbeat) -> String {
     )
 }
 
+pub fn stake_deposit_payload(deposit: &StakeDeposit) -> String {
+    format!(
+        "stake|{}|{}|{:.6}|{}|{}",
+        deposit.node_id,
+        deposit.deposit_id,
+        deposit.amount,
+        deposit.timestamp.unix,
+        deposit.source
+    )
+}
+
 pub fn validator_slash_payload(slash: &ValidatorSlashEvent) -> String {
     format!(
         "slash|{}|{:?}|{}|{:.6}",
@@ -253,6 +276,9 @@ pub trait BlockchainLedger: Send + Sync {
     fn submit_energy_sample(&self, sample: EnergyEfficiencySample) -> Result<()>;
     fn submit_reward_event(&self, event: RewardEvent) -> Result<()>;
     fn reward_balance(&self, node_id: &str) -> Result<RewardBalance>;
+    fn submit_stake_deposit(&self, _deposit: StakeDeposit) -> Result<()> {
+        anyhow::bail!("stake deposit submission not implemented")
+    }
 
     fn submit_work_proof(&self, _proof: WorkProof) -> Result<()> {
         anyhow::bail!("work proof submission not implemented")
@@ -292,6 +318,10 @@ impl BlockchainLedger for NoopLedger {
     }
 
     fn reward_balance(&self, _node_id: &str) -> Result<RewardBalance> {
+        anyhow::bail!("ledger not configured")
+    }
+
+    fn submit_stake_deposit(&self, _deposit: StakeDeposit) -> Result<()> {
         anyhow::bail!("ledger not configured")
     }
 
