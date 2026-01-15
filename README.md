@@ -39,14 +39,22 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 
 ### Architecture Overview
 
-- **config** – validated `RunConfig`/`RunMode`, hardware overrides, logging/output knobs, and production guardrails.
-- **state_population** – particle initialization, weight normalization (tensor-accelerated), resampling, and mutation utilities.
-- **proposal** – adaptive mixing of local/group/swap/path/global moves plus ML-guided proposals and temperature-aware weights.
-- **search** – occupancy grid caching, teleport-on-no-path, overlap repair, and A* diagnostics feeding the path energy term.
-- **energy** – decomposed cost terms (motion, collision, goals, env constraints, ML priors) with tensor/vector fast paths when available.
-- **hardware** – CPU, multi-threaded CPU, RAM-optimized, GPU (`wgpu`), distributed, and experimental backends + auto-detection/fallback logic.
-- **service_api / service_storage / telemetry** – shared request/response structs, run persistence, health/readiness metrics, and run-id telemetry for the Axum service.
-- **bin/predict_state** – CLI driver for JSON configs; **bin/service** – REST API with health probes + persistent runs.
+- **config** - validated `RunConfig`/`RunMode`, hardware overrides, logging/output knobs, and production guardrails.
+- **state_population** - particle initialization, weight normalization (tensor-accelerated), resampling, and mutation utilities.
+- **proposal** - adaptive mixing of local/group/swap/path/global moves plus ML-guided proposals and temperature-aware weights.
+- **search** - occupancy grid caching, teleport-on-no-path, overlap repair, and A* diagnostics feeding the path energy term.
+- **energy** - decomposed cost terms (motion, collision, goals, env constraints, ML priors) with tensor/vector fast paths when available.
+- **hardware** - CPU, multi-threaded CPU, RAM-optimized, GPU (`wgpu`), distributed, and experimental backends + auto-detection/fallback logic.
+- **service_api / service_storage / telemetry** - shared request/response structs, run persistence, health/readiness metrics, and run-id telemetry for the Axum service.
+- **bin/predict_state** - CLI driver for JSON configs; **bin/service** - REST API with health probes + persistent runs.
+
+## Multi-Chain Bridge (stablecoin deposits)
+
+- **Goal** - fund nodes with stablecoin deposits (USDC/USDT) from existing chains, no bank account required.
+- **Flow** - deposit on source chain -> relayer quorum signs canonical `BridgeDeposit` payload -> submit `BridgeProof` -> ledger mints `StakeDeposit`.
+- **Security tiers** - `RELAYER_QUORUM` (implemented), `OPTIMISTIC` (challenge window), `LIGHT_CLIENT`/`ZK` (highest security, planned).
+- **Config** - `blockchain.bridge` in `node_config_example.json` controls chain policies, relayer keys/quorum, allowed assets, and max deposit sizes.
+- **Extensibility** - add new chains by appending policies; `chain/bridge_contract.json` lists supported chains/assets.
 
 ---
 
