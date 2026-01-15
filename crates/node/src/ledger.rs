@@ -10,10 +10,12 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, CrossChainTransfer, EnergyEfficiencySample, NodeRegistration, RewardBalance,
-    RewardEvent, RewardEventKind, SensorCommitment, WorkKind, WorkProof,
+    RewardEvent, RewardEventKind, SensorCommitment, WorkKind, WorkProof, ValidatorHeartbeat,
+    ValidatorRecord, ValidatorSlashEvent, ValidatorSlashReason, ValidatorStatus,
     cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
-    work_proof_payload,
+    validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
 };
+use w1z4rdv1510n::config::ValidatorPolicyConfig;
 use w1z4rdv1510n::schema::Timestamp;
 
 const MAX_LOG_ITEMS: usize = 10_000;
@@ -34,6 +36,11 @@ struct LocalLedgerState {
     cross_chain_transfers: Vec<CrossChainTransfer>,
     cross_chain_transfer_ids: VecDeque<String>,
     cross_chain_transfer_id_set: HashSet<String>,
+    validators: HashMap<String, ValidatorRecord>,
+    validator_heartbeats: Vec<ValidatorHeartbeat>,
+    validator_heartbeat_ids: VecDeque<String>,
+    validator_heartbeat_id_set: HashSet<String>,
+    validator_slashes: Vec<ValidatorSlashEvent>,
     audit_log: Vec<AuditEvent>,
     audit_head: String,
     audit_sequence: u64,
@@ -52,16 +59,18 @@ struct AuditEvent {
 pub struct LocalLedger {
     state: Mutex<LocalLedgerState>,
     path: PathBuf,
+    validator_policy: ValidatorPolicyConfig,
 }
 
 impl LocalLedger {
-    pub fn load_or_create(path: PathBuf) -> Result<Self> {
+    pub fn load_or_create(path: PathBuf, validator_policy: ValidatorPolicyConfig) -> Result<Self> {
         if path.exists() {
             let mut state = read_state(&path)?;
             rebuild_indices(&mut state);
             return Ok(Self {
                 state: Mutex::new(state),
                 path,
+                validator_policy,
             });
         }
         let state = LocalLedgerState::default();
@@ -69,6 +78,7 @@ impl LocalLedger {
         Ok(Self {
             state: Mutex::new(state),
             path,
+            validator_policy,
         })
     }
 
@@ -346,6 +356,119 @@ impl BlockchainLedger for LocalLedger {
         self.persist(state)?;
         Ok(())
     }
+
+    fn submit_validator_heartbeat(&self, heartbeat: ValidatorHeartbeat) -> Result<()> {
+        if heartbeat.node_id.trim().is_empty() {
+            anyhow::bail!("validator heartbeat node id must be non-empty");
+        }
+        let public_key = node_public_key(&heartbeat.node_id, &self.state)?;
+        let payload = validator_heartbeat_payload(&heartbeat);
+        verify_signature(&public_key, payload.as_bytes(), &heartbeat.signature)?;
+        let heartbeat_id = payload_id(payload.as_bytes());
+        let audit_id = heartbeat_id.clone();
+        let mut state = self.state.lock().expect("local ledger mutex poisoned");
+        ensure_validator_node(&state, &heartbeat.node_id)?;
+        if state.validator_heartbeat_id_set.contains(&heartbeat_id) {
+            anyhow::bail!("duplicate validator heartbeat");
+        }
+        let heartbeat_timestamp = heartbeat.timestamp;
+        let mut slashed = None;
+        {
+            let record = state
+                .validators
+                .entry(heartbeat.node_id.clone())
+                .or_insert_with(|| ValidatorRecord {
+                    node_id: heartbeat.node_id.clone(),
+                    status: ValidatorStatus::Active,
+                    last_heartbeat: heartbeat_timestamp,
+                    missed_heartbeats: 0,
+                    jailed_until: None,
+                });
+            if record.status == ValidatorStatus::Jailed {
+                if let Some(until) = record.jailed_until {
+                    if heartbeat_timestamp.unix < until.unix {
+                        anyhow::bail!("validator is jailed");
+                    }
+                }
+                record.status = ValidatorStatus::Active;
+                record.missed_heartbeats = 0;
+                record.jailed_until = None;
+            }
+            let interval = self.validator_policy.heartbeat_interval_secs as i64;
+            if interval <= 0 {
+                anyhow::bail!("validator heartbeat interval must be > 0");
+            }
+            if heartbeat_timestamp.unix < record.last_heartbeat.unix {
+                anyhow::bail!("validator heartbeat timestamp regression");
+            }
+            let delta = heartbeat_timestamp.unix - record.last_heartbeat.unix;
+            let missed = (delta.saturating_sub(1) / interval) as u32;
+            if missed == 0 {
+                record.status = ValidatorStatus::Active;
+                record.missed_heartbeats = 0;
+            } else {
+                record.status = ValidatorStatus::Inactive;
+                record.missed_heartbeats = record.missed_heartbeats.saturating_add(missed);
+            }
+            record.last_heartbeat = heartbeat_timestamp;
+            if record.missed_heartbeats >= self.validator_policy.max_missed_heartbeats {
+                record.status = ValidatorStatus::Jailed;
+                record.missed_heartbeats = 0;
+                if self.validator_policy.jail_duration_secs > 0 {
+                    record.jailed_until = Some(Timestamp {
+                        unix: heartbeat_timestamp.unix
+                            + self.validator_policy.jail_duration_secs as i64,
+                    });
+                } else {
+                    record.jailed_until = None;
+                }
+                slashed = Some(ValidatorSlashEvent {
+                    node_id: heartbeat.node_id.clone(),
+                    timestamp: heartbeat_timestamp,
+                    reason: ValidatorSlashReason::Downtime,
+                    penalty_score: self.validator_policy.downtime_penalty_score,
+                    signature: String::new(),
+                });
+            }
+        }
+        let state = &mut *state;
+        push_event_with_id(
+            &mut state.validator_heartbeats,
+            &mut state.validator_heartbeat_ids,
+            &mut state.validator_heartbeat_id_set,
+            heartbeat,
+            heartbeat_id,
+        );
+        record_audit(state, "VALIDATOR_HEARTBEAT", audit_id, heartbeat_timestamp);
+        if let Some(slash) = slashed {
+            let slash_payload = validator_slash_payload(&slash);
+            let slash_id = payload_id(slash_payload.as_bytes());
+            state.validator_slashes.push(slash);
+            trim_events(&mut state.validator_slashes);
+            record_audit(state, "VALIDATOR_SLASH", slash_id, heartbeat_timestamp);
+        }
+        self.persist(state)?;
+        Ok(())
+    }
+
+    fn validator_record(&self, node_id: &str) -> Result<ValidatorRecord> {
+        let state = self.state.lock().expect("local ledger mutex poisoned");
+        if let Some(record) = state.validators.get(node_id) {
+            return Ok(record.clone());
+        }
+        if let Some(registration) = state.nodes.get(node_id) {
+            if matches!(registration.role, w1z4rdv1510n::config::NodeRole::Validator) {
+                return Ok(ValidatorRecord {
+                    node_id: node_id.to_string(),
+                    status: ValidatorStatus::Inactive,
+                    last_heartbeat: Timestamp::default(),
+                    missed_heartbeats: 0,
+                    jailed_until: None,
+                });
+            }
+        }
+        anyhow::bail!("validator record not found");
+    }
 }
 
 fn read_state(path: &Path) -> Result<LocalLedgerState> {
@@ -385,6 +508,8 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
     trim_events(&mut state.cross_chain_transfers);
     trim_events(&mut state.reward_events);
     trim_events(&mut state.energy_samples);
+    trim_events(&mut state.validator_heartbeats);
+    trim_events(&mut state.validator_slashes);
     trim_events(&mut state.audit_log);
 
     state.work_id_queue.clear();
@@ -412,6 +537,16 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
         let id = payload_id(payload.as_bytes());
         if state.cross_chain_transfer_id_set.insert(id.clone()) {
             state.cross_chain_transfer_ids.push_back(id);
+        }
+    }
+
+    state.validator_heartbeat_ids.clear();
+    state.validator_heartbeat_id_set.clear();
+    for heartbeat in &state.validator_heartbeats {
+        let payload = validator_heartbeat_payload(heartbeat);
+        let id = payload_id(payload.as_bytes());
+        if state.validator_heartbeat_id_set.insert(id.clone()) {
+            state.validator_heartbeat_ids.push_back(id);
         }
     }
 
@@ -505,6 +640,18 @@ fn node_public_key_locked(node_id: &str, state: &LocalLedgerState) -> Result<Str
         anyhow::bail!("node public key missing");
     }
     Ok(public_key)
+}
+
+fn ensure_validator_node(state: &LocalLedgerState, node_id: &str) -> Result<()> {
+    let role = state
+        .nodes
+        .get(node_id)
+        .map(|reg| reg.role.clone())
+        .ok_or_else(|| anyhow!("validator node not registered"))?;
+    if !matches!(role, w1z4rdv1510n::config::NodeRole::Validator) {
+        anyhow::bail!("node is not a validator");
+    }
+    Ok(())
 }
 
 fn address_from_public_key_hex(public_key_hex: &str) -> Result<String> {
@@ -601,7 +748,8 @@ mod tests {
     fn rejects_duplicate_work_ids() {
         let temp = tempdir().expect("temp dir");
         let path = temp.path().join("ledger.json");
-        let ledger = LocalLedger::load_or_create(path).expect("ledger");
+        let ledger = LocalLedger::load_or_create(path, ValidatorPolicyConfig::default())
+            .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -645,7 +793,8 @@ mod tests {
     fn accepts_signed_cross_chain_transfer() {
         let temp = tempdir().expect("temp dir");
         let path = temp.path().join("ledger.json");
-        let ledger = LocalLedger::load_or_create(path).expect("ledger");
+        let ledger = LocalLedger::load_or_create(path, ValidatorPolicyConfig::default())
+            .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -684,5 +833,67 @@ mod tests {
         ledger
             .submit_cross_chain_transfer(signed)
             .expect("transfer");
+    }
+
+    #[test]
+    fn validator_heartbeat_jails_after_missed_intervals() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let policy = ValidatorPolicyConfig {
+            heartbeat_interval_secs: 10,
+            max_missed_heartbeats: 2,
+            jail_duration_secs: 60,
+            downtime_penalty_score: 1.0,
+        };
+        let ledger = LocalLedger::load_or_create(path, policy).expect("ledger");
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        let public_key = hex_encode(public_bytes.as_slice());
+        let wallet_address = address_from_public_key(&public_bytes);
+        let mut registration = NodeRegistration {
+            node_id: "val1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Validator,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address,
+            wallet_public_key: public_key.clone(),
+            signature: String::new(),
+        };
+        let registration_payload = node_registration_payload(&registration);
+        let registration_signature = signing_key.sign(registration_payload.as_bytes()).to_bytes();
+        registration.signature = hex_encode(&registration_signature);
+        ledger.register_node(registration).expect("register");
+
+        let mut heartbeat = ValidatorHeartbeat {
+            node_id: "val1".to_string(),
+            timestamp: Timestamp { unix: 0 },
+            signature: String::new(),
+        };
+        let payload = validator_heartbeat_payload(&heartbeat);
+        let signature = signing_key.sign(payload.as_bytes()).to_bytes();
+        heartbeat.signature = hex_encode(&signature);
+        ledger
+            .submit_validator_heartbeat(heartbeat)
+            .expect("heartbeat");
+
+        let mut late = ValidatorHeartbeat {
+            node_id: "val1".to_string(),
+            timestamp: Timestamp { unix: 25 },
+            signature: String::new(),
+        };
+        let payload = validator_heartbeat_payload(&late);
+        let signature = signing_key.sign(payload.as_bytes()).to_bytes();
+        late.signature = hex_encode(&signature);
+        ledger
+            .submit_validator_heartbeat(late)
+            .expect("late heartbeat");
+
+        let record = ledger.validator_record("val1").expect("record");
+        assert!(matches!(record.status, ValidatorStatus::Jailed));
+        assert!(record.jailed_until.is_some());
     }
 }

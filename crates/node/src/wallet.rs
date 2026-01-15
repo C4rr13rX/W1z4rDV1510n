@@ -11,9 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use w1z4rdv1510n::blockchain::{
-    CrossChainTransfer, NodeRegistration, SensorCommitment, WorkProof,
+    CrossChainTransfer, NodeRegistration, SensorCommitment, ValidatorHeartbeat, WorkProof,
     cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
-    work_proof_payload,
+    validator_heartbeat_payload, work_proof_payload,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +98,12 @@ impl WalletSigner {
         let payload = node_registration_payload(&registration);
         registration.signature = self.sign_payload(payload.as_bytes());
         registration
+    }
+
+    pub fn sign_validator_heartbeat(&self, mut heartbeat: ValidatorHeartbeat) -> ValidatorHeartbeat {
+        let payload = validator_heartbeat_payload(&heartbeat);
+        heartbeat.signature = self.sign_payload(payload.as_bytes());
+        heartbeat
     }
 
     pub fn sign_sensor_commitment(&self, mut commitment: SensorCommitment) -> SensorCommitment {
@@ -426,7 +432,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::Verifier;
     use std::collections::HashMap;
-    use w1z4rdv1510n::blockchain::WorkKind;
+    use w1z4rdv1510n::blockchain::{ValidatorHeartbeat, WorkKind};
     use w1z4rdv1510n::config::NodeRole;
     use w1z4rdv1510n::schema::Timestamp;
 
@@ -471,6 +477,18 @@ mod tests {
             &signer,
             node_registration_payload(&signed_registration),
             &signed_registration.signature,
+        );
+
+        let heartbeat = ValidatorHeartbeat {
+            node_id: "n1".to_string(),
+            timestamp: Timestamp { unix: 4 },
+            signature: String::new(),
+        };
+        let signed_heartbeat = signer.sign_validator_heartbeat(heartbeat);
+        assert_signature(
+            &signer,
+            validator_heartbeat_payload(&signed_heartbeat),
+            &signed_heartbeat.signature,
         );
 
         let commitment = SensorCommitment {

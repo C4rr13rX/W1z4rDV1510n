@@ -54,7 +54,13 @@
       "endpoint": "",
       "required": false
     },
-    "require_sensor_attestation": false
+    "require_sensor_attestation": false,
+    "validator_policy": {
+      "heartbeat_interval_secs": 30,
+      "max_missed_heartbeats": 5,
+      "jail_duration_secs": 600,
+      "downtime_penalty_score": 1.0
+    }
   },
   "compute": {
     "allow_gpu": true,

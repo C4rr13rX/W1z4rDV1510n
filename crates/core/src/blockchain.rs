@@ -124,6 +124,52 @@ pub struct CrossChainTransfer {
     pub signature: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ValidatorStatus {
+    Active,
+    Inactive,
+    Jailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorRecord {
+    pub node_id: String,
+    pub status: ValidatorStatus,
+    pub last_heartbeat: Timestamp,
+    pub missed_heartbeats: u32,
+    #[serde(default)]
+    pub jailed_until: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorHeartbeat {
+    pub node_id: String,
+    pub timestamp: Timestamp,
+    #[serde(default)]
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ValidatorSlashReason {
+    Downtime,
+    DoubleSign,
+    Equivocation,
+    Governance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorSlashEvent {
+    pub node_id: String,
+    pub timestamp: Timestamp,
+    pub reason: ValidatorSlashReason,
+    #[serde(default)]
+    pub penalty_score: f64,
+    #[serde(default)]
+    pub signature: String,
+}
+
 pub fn work_proof_payload(proof: &WorkProof) -> String {
     format!(
         "work|{}|{}|{:?}|{}|{:.6}",
@@ -152,6 +198,20 @@ pub fn cross_chain_transfer_payload(transfer: &CrossChainTransfer) -> String {
         transfer.amount,
         transfer.payload_hash,
         transfer.timestamp.unix
+    )
+}
+
+pub fn validator_heartbeat_payload(heartbeat: &ValidatorHeartbeat) -> String {
+    format!(
+        "heartbeat|{}|{}",
+        heartbeat.node_id, heartbeat.timestamp.unix
+    )
+}
+
+pub fn validator_slash_payload(slash: &ValidatorSlashEvent) -> String {
+    format!(
+        "slash|{}|{:?}|{}|{:.6}",
+        slash.node_id, slash.reason, slash.timestamp.unix, slash.penalty_score
     )
 }
 
@@ -186,6 +246,14 @@ pub trait BlockchainLedger: Send + Sync {
 
     fn submit_cross_chain_transfer(&self, _transfer: CrossChainTransfer) -> Result<()> {
         anyhow::bail!("cross-chain transfer not implemented")
+    }
+
+    fn submit_validator_heartbeat(&self, _heartbeat: ValidatorHeartbeat) -> Result<()> {
+        anyhow::bail!("validator heartbeat not implemented")
+    }
+
+    fn validator_record(&self, _node_id: &str) -> Result<ValidatorRecord> {
+        anyhow::bail!("validator record not implemented")
     }
 }
 

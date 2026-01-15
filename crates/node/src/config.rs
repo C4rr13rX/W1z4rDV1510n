@@ -87,6 +87,18 @@ impl NodeConfig {
                 spec.consensus == self.blockchain.consensus,
                 "blockchain.consensus must match chain spec"
             );
+            anyhow::ensure!(
+                self.blockchain.validator_policy.heartbeat_interval_secs > 0,
+                "blockchain.validator_policy.heartbeat_interval_secs must be > 0"
+            );
+            anyhow::ensure!(
+                self.blockchain.validator_policy.max_missed_heartbeats > 0,
+                "blockchain.validator_policy.max_missed_heartbeats must be > 0"
+            );
+            anyhow::ensure!(
+                self.blockchain.validator_policy.downtime_penalty_score >= 0.0,
+                "blockchain.validator_policy.downtime_penalty_score must be >= 0"
+            );
         }
         Ok(())
     }

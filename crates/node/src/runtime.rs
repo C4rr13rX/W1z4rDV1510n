@@ -7,9 +7,13 @@ use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
 use crate::p2p::NodeNetwork;
 use anyhow::Result;
 use tracing::{info, warn};
-use w1z4rdv1510n::blockchain::{BlockchainLedger, NoopLedger, NodeCapabilities, NodeRegistration};
+use w1z4rdv1510n::blockchain::{
+    BlockchainLedger, NoopLedger, NodeCapabilities, NodeRegistration, ValidatorHeartbeat,
+};
 use w1z4rdv1510n::compute::{ComputeJobKind, ComputeRouter};
+use w1z4rdv1510n::config::NodeRole;
 use w1z4rdv1510n::hardware::HardwareProfile;
+use w1z4rdv1510n::schema::Timestamp;
 
 pub struct NodeRuntime {
     config: NodeConfig,
@@ -58,6 +62,7 @@ impl NodeRuntime {
         self.network.start(&self.config.node_id)?;
         self.network.connect_bootstrap()?;
         self.register_node()?;
+        self.maybe_send_validator_heartbeat()?;
         let target = self.compute_router.route(ComputeJobKind::TensorHeavy);
         info!(
             target: "w1z4rdv1510n::node",
@@ -104,6 +109,29 @@ impl NodeRuntime {
         Ok(())
     }
 
+    fn maybe_send_validator_heartbeat(&self) -> Result<()> {
+        if !self.config.blockchain.enabled {
+            return Ok(());
+        }
+        if !matches!(self.config.node_role, NodeRole::Validator) {
+            return Ok(());
+        }
+        let heartbeat = ValidatorHeartbeat {
+            node_id: self.config.node_id.clone(),
+            timestamp: now_timestamp(),
+            signature: String::new(),
+        };
+        let heartbeat = self.wallet.sign_validator_heartbeat(heartbeat);
+        if let Err(err) = self.ledger.submit_validator_heartbeat(heartbeat) {
+            warn!(
+                target: "w1z4rdv1510n::node",
+                error = %err,
+                "validator heartbeat rejected"
+            );
+        }
+        Ok(())
+    }
+
     pub fn openstack_control_plane(&self) -> Option<&OpenStackControlPlane> {
         self.openstack.as_ref()
     }
@@ -121,7 +149,10 @@ fn build_ledger(config: &NodeConfig) -> Result<Box<dyn BlockchainLedger>> {
             } else {
                 config.ledger.endpoint.clone().into()
             };
-            Ok(Box::new(LocalLedger::load_or_create(path)?))
+            Ok(Box::new(LocalLedger::load_or_create(
+                path,
+                config.blockchain.validator_policy.clone(),
+            )?))
         }
         "none" | "" => Ok(Box::new(NoopLedger::default())),
         other => {
@@ -133,4 +164,13 @@ fn build_ledger(config: &NodeConfig) -> Result<Box<dyn BlockchainLedger>> {
             Ok(Box::new(NoopLedger::default()))
         }
     }
+}
+
+fn now_timestamp() -> Timestamp {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    Timestamp { unix }
 }

@@ -250,6 +250,18 @@ impl RunConfig {
                     "blockchain.attestation.endpoint must be set when sensor attestation is required"
                 );
             }
+            anyhow::ensure!(
+                self.blockchain.validator_policy.heartbeat_interval_secs > 0,
+                "validator_policy.heartbeat_interval_secs must be > 0"
+            );
+            anyhow::ensure!(
+                self.blockchain.validator_policy.max_missed_heartbeats > 0,
+                "validator_policy.max_missed_heartbeats must be > 0"
+            );
+            anyhow::ensure!(
+                self.blockchain.validator_policy.downtime_penalty_score >= 0.0,
+                "validator_policy.downtime_penalty_score must be >= 0"
+            );
         }
         if self.governance.enforce_public_only {
             anyhow::ensure!(
@@ -979,6 +991,8 @@ pub struct BlockchainConfig {
     pub attestation: SensorAttestationConfig,
     #[serde(default)]
     pub require_sensor_attestation: bool,
+    #[serde(default)]
+    pub validator_policy: ValidatorPolicyConfig,
 }
 
 impl Default for BlockchainConfig {
@@ -993,6 +1007,7 @@ impl Default for BlockchainConfig {
             energy_efficiency: EnergyEfficiencyConfig::default(),
             attestation: SensorAttestationConfig::default(),
             require_sensor_attestation: false,
+            validator_policy: ValidatorPolicyConfig::default(),
         }
     }
 }
@@ -1045,6 +1060,26 @@ impl Default for SensorAttestationConfig {
         Self {
             endpoint: String::new(),
             required: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidatorPolicyConfig {
+    pub heartbeat_interval_secs: u64,
+    pub max_missed_heartbeats: u32,
+    pub jail_duration_secs: u64,
+    pub downtime_penalty_score: f64,
+}
+
+impl Default for ValidatorPolicyConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_secs: 30,
+            max_missed_heartbeats: 5,
+            jail_duration_secs: 600,
+            downtime_penalty_score: 1.0,
         }
     }
 }
