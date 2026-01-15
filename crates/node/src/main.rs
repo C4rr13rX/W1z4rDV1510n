@@ -6,6 +6,7 @@ use tracing_subscriber::EnvFilter;
 
 mod chain;
 mod bridge;
+mod api;
 mod config;
 mod ledger;
 mod openstack;
@@ -17,6 +18,7 @@ mod wallet;
 
 use config::NodeConfig;
 use runtime::NodeRuntime;
+use api::run_api;
 use wallet::{WalletStore, node_id_from_wallet};
 use w1z4rdv1510n::hardware::HardwareProfile;
 
@@ -60,6 +62,10 @@ enum Command {
         max_queue_depth: usize,
         #[arg(long)]
         out: Option<String>,
+    },
+    Api {
+        #[arg(long, default_value = "127.0.0.1:8090")]
+        addr: String,
     },
 }
 
@@ -109,6 +115,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some(Command::Api { addr }) => run_api_mode(&config_path, &addr),
         None => run_node(&config_path),
     }
 }
@@ -151,6 +158,18 @@ fn init_node(config_path: &Path, force: bool, report_path: Option<&Path>) -> any
         fs::write(path, serde_json::to_string_pretty(&report)?)?;
     }
     Ok(())
+}
+
+fn run_api_mode(config_path: &Path, addr: &str) -> anyhow::Result<()> {
+    let config = load_or_create_config(config_path)?;
+    config.validate()?;
+    let addr: std::net::SocketAddr = addr.parse()?;
+    info!(
+        target: "w1z4rdv1510n::node",
+        api_addr = %addr,
+        "starting node api"
+    );
+    run_api(config, addr)
 }
 
 fn load_or_create_config(config_path: &Path) -> anyhow::Result<NodeConfig> {
