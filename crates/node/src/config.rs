@@ -60,6 +60,14 @@ impl NodeConfig {
             "network.security.max_established_total must be > 0"
         );
         anyhow::ensure!(
+            self.network.security.max_message_age_secs >= 0,
+            "network.security.max_message_age_secs must be >= 0"
+        );
+        anyhow::ensure!(
+            self.network.security.max_clock_skew_secs >= 0,
+            "network.security.max_clock_skew_secs must be >= 0"
+        );
+        anyhow::ensure!(
             self.wallet.enabled,
             "wallet must be enabled for production nodes"
         );
@@ -118,6 +126,9 @@ pub struct NetworkSecurityConfig {
     pub max_established_outgoing: u32,
     pub max_established_total: u32,
     pub max_established_per_peer: u32,
+    pub require_signed_payloads: bool,
+    pub max_message_age_secs: i64,
+    pub max_clock_skew_secs: i64,
 }
 
 impl Default for NetworkSecurityConfig {
@@ -131,6 +142,9 @@ impl Default for NetworkSecurityConfig {
             max_established_outgoing: 256,
             max_established_total: 512,
             max_established_per_peer: 8,
+            require_signed_payloads: true,
+            max_message_age_secs: 300,
+            max_clock_skew_secs: 10,
         }
     }
 }

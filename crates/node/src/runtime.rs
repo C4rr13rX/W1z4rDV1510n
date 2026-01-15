@@ -93,9 +93,7 @@ impl NodeRuntime {
             wallet_public_key: self.wallet.wallet().public_key.clone(),
             signature: String::new(),
         };
-        let payload = w1z4rdv1510n::blockchain::node_registration_payload(&registration);
-        let mut registration = registration;
-        registration.signature = self.wallet.sign_payload(payload.as_bytes());
+        let registration = self.wallet.sign_node_registration(registration);
         if let Err(err) = self.ledger.register_node(registration) {
             warn!(
                 target: "w1z4rdv1510n::node",

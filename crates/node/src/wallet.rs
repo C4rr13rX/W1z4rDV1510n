@@ -11,8 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use w1z4rdv1510n::blockchain::{
-    CrossChainTransfer, SensorCommitment, WorkProof,
-    cross_chain_transfer_payload, sensor_commitment_payload, work_proof_payload,
+    CrossChainTransfer, NodeRegistration, SensorCommitment, WorkProof,
+    cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
+    work_proof_payload,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +92,12 @@ impl WalletSigner {
         let payload = work_proof_payload(&proof);
         proof.signature = self.sign_payload(payload.as_bytes());
         proof
+    }
+
+    pub fn sign_node_registration(&self, mut registration: NodeRegistration) -> NodeRegistration {
+        let payload = node_registration_payload(&registration);
+        registration.signature = self.sign_payload(payload.as_bytes());
+        registration
     }
 
     pub fn sign_sensor_commitment(&self, mut commitment: SensorCommitment) -> SensorCommitment {
@@ -420,6 +427,7 @@ mod tests {
     use ed25519_dalek::Verifier;
     use std::collections::HashMap;
     use w1z4rdv1510n::blockchain::WorkKind;
+    use w1z4rdv1510n::config::NodeRole;
     use w1z4rdv1510n::schema::Timestamp;
 
     #[test]
@@ -444,6 +452,26 @@ mod tests {
         };
         let signed_proof = signer.sign_work_proof(proof);
         assert_signature(&signer, work_proof_payload(&signed_proof), &signed_proof.signature);
+
+        let registration = NodeRegistration {
+            node_id: "n1".to_string(),
+            role: NodeRole::Worker,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address: signer.wallet().address.clone(),
+            wallet_public_key: signer.wallet().public_key.clone(),
+            signature: String::new(),
+        };
+        let signed_registration = signer.sign_node_registration(registration);
+        assert_signature(
+            &signer,
+            node_registration_payload(&signed_registration),
+            &signed_registration.signature,
+        );
 
         let commitment = SensorCommitment {
             node_id: "n1".to_string(),

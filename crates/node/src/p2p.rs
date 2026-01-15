@@ -1,6 +1,7 @@
 use crate::config::NodeNetworkConfig;
 use crate::paths::node_data_dir;
 use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageAuthenticity};
 use libp2p::identify;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use w1z4rdv1510n::network::{NetworkEnvelope, NETWORK_ENVELOPE_VERSION};
 
 const IDENTITY_KEY_FILE: &str = "p2p.key";
 
@@ -301,6 +303,27 @@ fn validate_message(message: &gossipsub::Message, config: &NodeNetworkConfig) ->
     if message.topic.as_str() != config.gossip_protocol {
         return MessageAcceptance::Reject;
     }
+    let envelope: NetworkEnvelope = match serde_json::from_slice(&message.data) {
+        Ok(envelope) => envelope,
+        Err(_) => return MessageAcceptance::Reject,
+    };
+    if envelope.version != NETWORK_ENVELOPE_VERSION {
+        return MessageAcceptance::Reject;
+    }
+    if envelope.validate_basic().is_err() {
+        return MessageAcceptance::Reject;
+    }
+    if validate_envelope_clock(&envelope, config).is_err() {
+        return MessageAcceptance::Reject;
+    }
+    if config.security.require_signed_payloads {
+        if envelope.public_key.trim().is_empty() || envelope.signature.trim().is_empty() {
+            return MessageAcceptance::Reject;
+        }
+        if verify_envelope_signature(&envelope).is_err() {
+            return MessageAcceptance::Reject;
+        }
+    }
     MessageAcceptance::Accept
 }
 
@@ -327,6 +350,30 @@ fn message_id_for(message: &gossipsub::Message) -> gossipsub::MessageId {
     gossipsub::MessageId::from(hex_encode(&digest))
 }
 
+fn validate_envelope_clock(envelope: &NetworkEnvelope, config: &NodeNetworkConfig) -> Result<()> {
+    let now = now_unix();
+    let max_age = config.security.max_message_age_secs;
+    let max_skew = config.security.max_clock_skew_secs;
+    if envelope.timestamp_unix > now + max_skew {
+        anyhow::bail!("message timestamp too far in future");
+    }
+    let age = now - envelope.timestamp_unix;
+    if age > max_age {
+        anyhow::bail!("message timestamp too old");
+    }
+    Ok(())
+}
+
+fn verify_envelope_signature(envelope: &NetworkEnvelope) -> Result<()> {
+    let public_key = decode_public_key(&envelope.public_key)?;
+    let signature = decode_signature(&envelope.signature)?;
+    let payload = envelope.signing_payload();
+    public_key
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|err| anyhow!("signature verify failed: {err}"))?;
+    Ok(())
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const LUT: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -335,6 +382,52 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(LUT[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+fn hex_decode(hex: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let mut iter = hex.as_bytes().iter().copied();
+    while let Some(high) = iter.next() {
+        let low = iter
+            .next()
+            .ok_or_else(|| anyhow!("hex string has odd length"))?;
+        let high_val = hex_value(high)?;
+        let low_val = hex_value(low)?;
+        out.push((high_val << 4) | low_val);
+    }
+    Ok(out)
+}
+
+fn hex_value(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => anyhow::bail!("invalid hex character"),
+    }
+}
+
+fn decode_public_key(hex: &str) -> Result<VerifyingKey> {
+    let bytes = hex_decode(hex)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("public key must be 32 bytes");
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    VerifyingKey::from_bytes(&arr).map_err(|err| anyhow!("invalid public key: {err}"))
+}
+
+fn decode_signature(hex: &str) -> Result<Signature> {
+    let bytes = hex_decode(hex)?;
+    Signature::from_slice(&bytes).map_err(|err| anyhow!("invalid signature: {err}"))
+}
+
+fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn parse_listen_addr(value: &str) -> Result<Multiaddr> {
