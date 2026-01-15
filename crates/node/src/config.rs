@@ -123,6 +123,39 @@ impl NodeConfig {
                 self.blockchain.validator_policy.downtime_penalty_score >= 0.0,
                 "blockchain.validator_policy.downtime_penalty_score must be >= 0"
             );
+            if self.blockchain.fee_market.enabled {
+                let fee = &self.blockchain.fee_market;
+                anyhow::ensure!(
+                    fee.base_fee.is_finite()
+                        && fee.min_base_fee.is_finite()
+                        && fee.max_base_fee.is_finite(),
+                    "blockchain.fee_market base_fee/min_base_fee/max_base_fee must be finite"
+                );
+                anyhow::ensure!(
+                    fee.min_base_fee >= 0.0,
+                    "blockchain.fee_market.min_base_fee must be >= 0"
+                );
+                anyhow::ensure!(
+                    fee.min_base_fee <= fee.max_base_fee,
+                    "blockchain.fee_market.min_base_fee must be <= max_base_fee"
+                );
+                anyhow::ensure!(
+                    fee.base_fee >= fee.min_base_fee && fee.base_fee <= fee.max_base_fee,
+                    "blockchain.fee_market.base_fee must be within [min_base_fee, max_base_fee]"
+                );
+                anyhow::ensure!(
+                    fee.target_txs_per_window > 0,
+                    "blockchain.fee_market.target_txs_per_window must be > 0"
+                );
+                anyhow::ensure!(
+                    fee.window_secs > 0,
+                    "blockchain.fee_market.window_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&fee.adjustment_rate),
+                    "blockchain.fee_market.adjustment_rate must be in [0,1]"
+                );
+            }
         }
         Ok(())
     }

@@ -262,6 +262,39 @@ impl RunConfig {
                 self.blockchain.validator_policy.downtime_penalty_score >= 0.0,
                 "validator_policy.downtime_penalty_score must be >= 0"
             );
+            if self.blockchain.fee_market.enabled {
+                let fee = &self.blockchain.fee_market;
+                anyhow::ensure!(
+                    fee.base_fee.is_finite()
+                        && fee.min_base_fee.is_finite()
+                        && fee.max_base_fee.is_finite(),
+                    "fee_market base_fee/min_base_fee/max_base_fee must be finite"
+                );
+                anyhow::ensure!(
+                    fee.min_base_fee >= 0.0,
+                    "fee_market.min_base_fee must be >= 0"
+                );
+                anyhow::ensure!(
+                    fee.min_base_fee <= fee.max_base_fee,
+                    "fee_market.min_base_fee must be <= fee_market.max_base_fee"
+                );
+                anyhow::ensure!(
+                    fee.base_fee >= fee.min_base_fee && fee.base_fee <= fee.max_base_fee,
+                    "fee_market.base_fee must be within [min_base_fee, max_base_fee]"
+                );
+                anyhow::ensure!(
+                    fee.target_txs_per_window > 0,
+                    "fee_market.target_txs_per_window must be > 0"
+                );
+                anyhow::ensure!(
+                    fee.window_secs > 0,
+                    "fee_market.window_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&fee.adjustment_rate),
+                    "fee_market.adjustment_rate must be in [0,1]"
+                );
+            }
         }
         if self.governance.enforce_public_only {
             anyhow::ensure!(
@@ -993,6 +1026,8 @@ pub struct BlockchainConfig {
     pub require_sensor_attestation: bool,
     #[serde(default)]
     pub validator_policy: ValidatorPolicyConfig,
+    #[serde(default)]
+    pub fee_market: FeeMarketConfig,
 }
 
 impl Default for BlockchainConfig {
@@ -1008,6 +1043,7 @@ impl Default for BlockchainConfig {
             attestation: SensorAttestationConfig::default(),
             require_sensor_attestation: false,
             validator_policy: ValidatorPolicyConfig::default(),
+            fee_market: FeeMarketConfig::default(),
         }
     }
 }
@@ -1080,6 +1116,32 @@ impl Default for ValidatorPolicyConfig {
             max_missed_heartbeats: 5,
             jail_duration_secs: 600,
             downtime_penalty_score: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeeMarketConfig {
+    pub enabled: bool,
+    pub base_fee: f64,
+    pub min_base_fee: f64,
+    pub max_base_fee: f64,
+    pub target_txs_per_window: u32,
+    pub window_secs: u64,
+    pub adjustment_rate: f64,
+}
+
+impl Default for FeeMarketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_fee: 0.0,
+            min_base_fee: 0.0,
+            max_base_fee: 10.0,
+            target_txs_per_window: 100,
+            window_secs: 60,
+            adjustment_rate: 0.125,
         }
     }
 }

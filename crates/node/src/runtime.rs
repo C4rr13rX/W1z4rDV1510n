@@ -119,6 +119,7 @@ impl NodeRuntime {
         let heartbeat = ValidatorHeartbeat {
             node_id: self.config.node_id.clone(),
             timestamp: now_timestamp(),
+            fee_paid: 0.0,
             signature: String::new(),
         };
         let heartbeat = self.wallet.sign_validator_heartbeat(heartbeat);
@@ -152,6 +153,7 @@ fn build_ledger(config: &NodeConfig) -> Result<Box<dyn BlockchainLedger>> {
             Ok(Box::new(LocalLedger::load_or_create(
                 path,
                 config.blockchain.validator_policy.clone(),
+                config.blockchain.fee_market.clone(),
             )?))
         }
         "none" | "" => Ok(Box::new(NoopLedger::default())),

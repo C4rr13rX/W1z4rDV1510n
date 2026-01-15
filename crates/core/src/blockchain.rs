@@ -49,6 +49,8 @@ pub struct SensorCommitment {
     pub timestamp: Timestamp,
     pub payload_hash: String,
     #[serde(default)]
+    pub fee_paid: f64,
+    #[serde(default)]
     pub signature: String,
 }
 
@@ -105,6 +107,8 @@ pub struct WorkProof {
     pub completed_at: Timestamp,
     pub score: f64,
     #[serde(default)]
+    pub fee_paid: f64,
+    #[serde(default)]
     pub metrics: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub signature: String,
@@ -118,6 +122,8 @@ pub struct CrossChainTransfer {
     pub target_chain: String,
     pub token_symbol: String,
     pub amount: u64,
+    #[serde(default)]
+    pub fee_paid: f64,
     pub payload_hash: String,
     pub timestamp: Timestamp,
     #[serde(default)]
@@ -147,6 +153,8 @@ pub struct ValidatorHeartbeat {
     pub node_id: String,
     pub timestamp: Timestamp,
     #[serde(default)]
+    pub fee_paid: f64,
+    #[serde(default)]
     pub signature: String,
 }
 
@@ -172,30 +180,36 @@ pub struct ValidatorSlashEvent {
 
 pub fn work_proof_payload(proof: &WorkProof) -> String {
     format!(
-        "work|{}|{}|{:?}|{}|{:.6}",
+        "work|{}|{}|{:?}|{}|{:.6}|{:.6}",
         proof.work_id,
         proof.node_id,
         proof.kind,
         proof.completed_at.unix,
-        proof.score
+        proof.score,
+        proof.fee_paid
     )
 }
 
 pub fn sensor_commitment_payload(commitment: &SensorCommitment) -> String {
     format!(
-        "sensor|{}|{}|{}|{}",
-        commitment.node_id, commitment.sensor_id, commitment.timestamp.unix, commitment.payload_hash
+        "sensor|{}|{}|{}|{}|{:.6}",
+        commitment.node_id,
+        commitment.sensor_id,
+        commitment.timestamp.unix,
+        commitment.payload_hash,
+        commitment.fee_paid
     )
 }
 
 pub fn cross_chain_transfer_payload(transfer: &CrossChainTransfer) -> String {
     format!(
-        "xfer|{}|{}|{}|{}|{}|{}|{}",
+        "xfer|{}|{}|{}|{}|{}|{:.6}|{}|{}",
         transfer.node_id,
         transfer.source_chain,
         transfer.target_chain,
         transfer.token_symbol,
         transfer.amount,
+        transfer.fee_paid,
         transfer.payload_hash,
         transfer.timestamp.unix
     )
@@ -203,8 +217,8 @@ pub fn cross_chain_transfer_payload(transfer: &CrossChainTransfer) -> String {
 
 pub fn validator_heartbeat_payload(heartbeat: &ValidatorHeartbeat) -> String {
     format!(
-        "heartbeat|{}|{}",
-        heartbeat.node_id, heartbeat.timestamp.unix
+        "heartbeat|{}|{}|{:.6}",
+        heartbeat.node_id, heartbeat.timestamp.unix, heartbeat.fee_paid
     )
 }
 

@@ -66,6 +66,15 @@
       "max_missed_heartbeats": 5,
       "jail_duration_secs": 600,
       "downtime_penalty_score": 1.0
+    },
+    "fee_market": {
+      "enabled": false,
+      "base_fee": 0.0,
+      "min_base_fee": 0.0,
+      "max_base_fee": 10.0,
+      "target_txs_per_window": 100,
+      "window_secs": 60,
+      "adjustment_rate": 0.125
     }
   },
   "compute": {

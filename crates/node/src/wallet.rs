@@ -453,6 +453,7 @@ mod tests {
             kind: WorkKind::ComputeTask,
             completed_at: Timestamp { unix: 1 },
             score: 1.0,
+            fee_paid: 0.0,
             metrics: HashMap::new(),
             signature: String::new(),
         };
@@ -482,6 +483,7 @@ mod tests {
         let heartbeat = ValidatorHeartbeat {
             node_id: "n1".to_string(),
             timestamp: Timestamp { unix: 4 },
+            fee_paid: 0.0,
             signature: String::new(),
         };
         let signed_heartbeat = signer.sign_validator_heartbeat(heartbeat);
@@ -496,6 +498,7 @@ mod tests {
             sensor_id: "sensor-1".to_string(),
             timestamp: Timestamp { unix: 2 },
             payload_hash: "payload".to_string(),
+            fee_paid: 0.0,
             signature: String::new(),
         };
         let signed_commitment = signer.sign_sensor_commitment(commitment);
@@ -511,6 +514,7 @@ mod tests {
             target_chain: "eth".to_string(),
             token_symbol: "W1Z".to_string(),
             amount: 100,
+            fee_paid: 0.0,
             payload_hash: "payload".to_string(),
             timestamp: Timestamp { unix: 3 },
             signature: String::new(),

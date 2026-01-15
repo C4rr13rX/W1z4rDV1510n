@@ -15,7 +15,7 @@ use w1z4rdv1510n::blockchain::{
     cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
     validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
 };
-use w1z4rdv1510n::config::ValidatorPolicyConfig;
+use w1z4rdv1510n::config::{FeeMarketConfig, ValidatorPolicyConfig};
 use w1z4rdv1510n::schema::Timestamp;
 
 const MAX_LOG_ITEMS: usize = 10_000;
@@ -41,9 +41,21 @@ struct LocalLedgerState {
     validator_heartbeat_ids: VecDeque<String>,
     validator_heartbeat_id_set: HashSet<String>,
     validator_slashes: Vec<ValidatorSlashEvent>,
+    #[serde(default)]
+    fee_market: FeeMarketState,
     audit_log: Vec<AuditEvent>,
     audit_head: String,
     audit_sequence: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct FeeMarketState {
+    base_fee: f64,
+    window_start_unix: i64,
+    window_tx_count: u32,
+    total_fees_collected: f64,
+    fees_by_node: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,25 +72,34 @@ pub struct LocalLedger {
     state: Mutex<LocalLedgerState>,
     path: PathBuf,
     validator_policy: ValidatorPolicyConfig,
+    fee_market: FeeMarketConfig,
 }
 
 impl LocalLedger {
-    pub fn load_or_create(path: PathBuf, validator_policy: ValidatorPolicyConfig) -> Result<Self> {
+    pub fn load_or_create(
+        path: PathBuf,
+        validator_policy: ValidatorPolicyConfig,
+        fee_market: FeeMarketConfig,
+    ) -> Result<Self> {
         if path.exists() {
             let mut state = read_state(&path)?;
             rebuild_indices(&mut state);
+            normalize_fee_market_state(&mut state, &fee_market);
             return Ok(Self {
                 state: Mutex::new(state),
                 path,
                 validator_policy,
+                fee_market,
             });
         }
-        let state = LocalLedgerState::default();
+        let mut state = LocalLedgerState::default();
+        initialize_fee_market_state(&mut state, &fee_market, now());
         write_state(&path, &state)?;
         Ok(Self {
             state: Mutex::new(state),
             path,
             validator_policy,
+            fee_market,
         })
     }
 
@@ -164,6 +185,7 @@ impl BlockchainLedger for LocalLedger {
         if commitment.payload_hash.trim().is_empty() {
             anyhow::bail!("sensor commitment payload hash must be non-empty");
         }
+        validate_fee_paid(commitment.fee_paid, "sensor commitment")?;
         let public_key = node_public_key(&commitment.node_id, &self.state)?;
         let payload = sensor_commitment_payload(&commitment);
         verify_signature(&public_key, payload.as_bytes(), &commitment.signature)?;
@@ -173,6 +195,14 @@ impl BlockchainLedger for LocalLedger {
         if state.sensor_commitment_id_set.contains(&commitment_id) {
             anyhow::bail!("duplicate sensor commitment");
         }
+        charge_fee(
+            &mut *state,
+            &self.fee_market,
+            &commitment.node_id,
+            commitment.timestamp,
+            commitment.fee_paid,
+            "SENSOR_COMMITMENT",
+        )?;
         let state = &mut *state;
         push_event_with_id(
             &mut state.sensor_commitments,
@@ -269,6 +299,7 @@ impl BlockchainLedger for LocalLedger {
         if proof.score.is_sign_negative() {
             anyhow::bail!("work proof score must be non-negative");
         }
+        validate_fee_paid(proof.fee_paid, "work proof")?;
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         if state.work_id_set.contains(&proof.work_id) {
             anyhow::bail!("duplicate work proof id");
@@ -276,6 +307,14 @@ impl BlockchainLedger for LocalLedger {
         let public_key = node_public_key_locked(&proof.node_id, &state)?;
         let payload = work_proof_payload(&proof);
         verify_signature(&public_key, payload.as_bytes(), &proof.signature)?;
+        charge_fee(
+            &mut *state,
+            &self.fee_market,
+            &proof.node_id,
+            proof.completed_at,
+            proof.fee_paid,
+            "WORK_PROOF",
+        )?;
         let reward_kind = match proof.kind {
             WorkKind::SensorIngest => RewardEventKind::SensorContribution,
             WorkKind::ComputeTask
@@ -334,6 +373,7 @@ impl BlockchainLedger for LocalLedger {
         if transfer.payload_hash.trim().is_empty() {
             anyhow::bail!("cross-chain transfer payload hash must be non-empty");
         }
+        validate_fee_paid(transfer.fee_paid, "cross-chain transfer")?;
         let public_key = node_public_key(&transfer.node_id, &self.state)?;
         let payload = cross_chain_transfer_payload(&transfer);
         verify_signature(&public_key, payload.as_bytes(), &transfer.signature)?;
@@ -344,6 +384,14 @@ impl BlockchainLedger for LocalLedger {
         if state.cross_chain_transfer_id_set.contains(&transfer_id) {
             anyhow::bail!("duplicate cross-chain transfer");
         }
+        charge_fee(
+            &mut *state,
+            &self.fee_market,
+            &transfer.node_id,
+            transfer.timestamp,
+            transfer.fee_paid,
+            "CROSS_CHAIN_TRANSFER",
+        )?;
         let state = &mut *state;
         push_event_with_id(
             &mut state.cross_chain_transfers,
@@ -361,6 +409,7 @@ impl BlockchainLedger for LocalLedger {
         if heartbeat.node_id.trim().is_empty() {
             anyhow::bail!("validator heartbeat node id must be non-empty");
         }
+        validate_fee_paid(heartbeat.fee_paid, "validator heartbeat")?;
         let public_key = node_public_key(&heartbeat.node_id, &self.state)?;
         let payload = validator_heartbeat_payload(&heartbeat);
         verify_signature(&public_key, payload.as_bytes(), &heartbeat.signature)?;
@@ -431,6 +480,14 @@ impl BlockchainLedger for LocalLedger {
                 });
             }
         }
+        charge_fee(
+            &mut *state,
+            &self.fee_market,
+            &heartbeat.node_id,
+            heartbeat_timestamp,
+            heartbeat.fee_paid,
+            "VALIDATOR_HEARTBEAT",
+        )?;
         let state = &mut *state;
         push_event_with_id(
             &mut state.validator_heartbeats,
@@ -604,6 +661,130 @@ fn record_audit(
     trim_events(&mut state.audit_log);
 }
 
+fn initialize_fee_market_state(
+    state: &mut LocalLedgerState,
+    config: &FeeMarketConfig,
+    timestamp: Timestamp,
+) {
+    if !config.enabled {
+        return;
+    }
+    state.fee_market.base_fee = clamp_base_fee(config.base_fee, config);
+    state.fee_market.window_start_unix = timestamp.unix;
+}
+
+fn normalize_fee_market_state(state: &mut LocalLedgerState, config: &FeeMarketConfig) {
+    if !config.enabled {
+        return;
+    }
+    if state.fee_market.window_start_unix == 0 {
+        state.fee_market.window_start_unix = now().unix;
+    }
+    if !state.fee_market.base_fee.is_finite() || state.fee_market.base_fee < 0.0 {
+        state.fee_market.base_fee = config.base_fee;
+    }
+    if state.fee_market.base_fee == 0.0 && config.base_fee > 0.0 {
+        state.fee_market.base_fee = config.base_fee;
+    }
+    state.fee_market.base_fee = clamp_base_fee(state.fee_market.base_fee, config);
+}
+
+fn roll_fee_window_if_needed(
+    state: &mut LocalLedgerState,
+    config: &FeeMarketConfig,
+    timestamp: Timestamp,
+) {
+    if !config.enabled {
+        return;
+    }
+    let window_secs = config.window_secs as i64;
+    if window_secs <= 0 {
+        return;
+    }
+    if state.fee_market.window_start_unix == 0 {
+        state.fee_market.window_start_unix = timestamp.unix;
+        return;
+    }
+    let elapsed = timestamp.unix - state.fee_market.window_start_unix;
+    if elapsed < window_secs {
+        return;
+    }
+    let target = config.target_txs_per_window.max(1) as f64;
+    let usage = state.fee_market.window_tx_count as f64 / target;
+    let mut base_fee = state.fee_market.base_fee;
+    if !base_fee.is_finite() {
+        base_fee = config.base_fee;
+    }
+    let delta = (usage - 1.0) * config.adjustment_rate;
+    base_fee *= 1.0 + delta;
+    state.fee_market.base_fee = clamp_base_fee(base_fee, config);
+    state.fee_market.window_tx_count = 0;
+    state.fee_market.window_start_unix = timestamp.unix;
+}
+
+fn charge_fee(
+    state: &mut LocalLedgerState,
+    config: &FeeMarketConfig,
+    node_id: &str,
+    timestamp: Timestamp,
+    fee_paid: f64,
+    kind: &str,
+) -> Result<()> {
+    if !config.enabled {
+        return Ok(());
+    }
+    if !fee_paid.is_finite() || fee_paid.is_sign_negative() {
+        anyhow::bail!("fee_paid must be non-negative and finite");
+    }
+    if state.fee_market.window_start_unix == 0 {
+        state.fee_market.window_start_unix = timestamp.unix;
+    }
+    if state.fee_market.base_fee == 0.0 && config.base_fee > 0.0 {
+        state.fee_market.base_fee = config.base_fee;
+    }
+    state.fee_market.base_fee = clamp_base_fee(state.fee_market.base_fee, config);
+    roll_fee_window_if_needed(state, config, timestamp);
+    let base_fee = state.fee_market.base_fee;
+    if fee_paid + 1e-9 < base_fee {
+        anyhow::bail!("fee_paid below base fee");
+    }
+    state.fee_market.window_tx_count = state.fee_market.window_tx_count.saturating_add(1);
+    state.fee_market.total_fees_collected += fee_paid;
+    *state
+        .fee_market
+        .fees_by_node
+        .entry(node_id.to_string())
+        .or_insert(0.0) += fee_paid;
+    let fee_payload = fee_event_payload(node_id, timestamp, fee_paid, base_fee, kind);
+    let fee_id = payload_id(fee_payload.as_bytes());
+    record_audit(state, "FEE_CHARGE", fee_id, timestamp);
+    Ok(())
+}
+
+fn clamp_base_fee(value: f64, config: &FeeMarketConfig) -> f64 {
+    let mut fee = if value.is_finite() { value } else { config.base_fee };
+    if fee.is_sign_negative() {
+        fee = 0.0;
+    }
+    if config.min_base_fee <= config.max_base_fee {
+        fee = fee.clamp(config.min_base_fee, config.max_base_fee);
+    }
+    fee
+}
+
+fn fee_event_payload(
+    node_id: &str,
+    timestamp: Timestamp,
+    fee_paid: f64,
+    base_fee: f64,
+    kind: &str,
+) -> String {
+    format!(
+        "fee|{}|{}|{:.6}|{:.6}|{}",
+        node_id, timestamp.unix, fee_paid, base_fee, kind
+    )
+}
+
 fn payload_id(payload: &[u8]) -> String {
     let mut hasher = Blake2s256::new();
     hasher.update(payload);
@@ -671,6 +852,16 @@ fn energy_sample_payload(sample: &EnergyEfficiencySample) -> String {
         "energy|{}|{}|{:.6}|{:.6}",
         sample.node_id, sample.timestamp.unix, sample.watts, sample.throughput
     )
+}
+
+fn validate_fee_paid(fee_paid: f64, label: &str) -> Result<()> {
+    if !fee_paid.is_finite() {
+        anyhow::bail!("{label} fee_paid must be finite");
+    }
+    if fee_paid.is_sign_negative() {
+        anyhow::bail!("{label} fee_paid must be non-negative");
+    }
+    Ok(())
 }
 
 fn verify_signature(public_key_hex: &str, payload: &[u8], signature_hex: &str) -> Result<()> {
@@ -748,7 +939,11 @@ mod tests {
     fn rejects_duplicate_work_ids() {
         let temp = tempdir().expect("temp dir");
         let path = temp.path().join("ledger.json");
-        let ledger = LocalLedger::load_or_create(path, ValidatorPolicyConfig::default())
+        let ledger = LocalLedger::load_or_create(
+            path,
+            ValidatorPolicyConfig::default(),
+            FeeMarketConfig::default(),
+        )
             .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
@@ -777,6 +972,7 @@ mod tests {
             kind: WorkKind::ComputeTask,
             completed_at: Timestamp { unix: 1 },
             score: 1.0,
+            fee_paid: 0.0,
             metrics: HashMap::new(),
             signature: String::new(),
         };
@@ -793,7 +989,11 @@ mod tests {
     fn accepts_signed_cross_chain_transfer() {
         let temp = tempdir().expect("temp dir");
         let path = temp.path().join("ledger.json");
-        let ledger = LocalLedger::load_or_create(path, ValidatorPolicyConfig::default())
+        let ledger = LocalLedger::load_or_create(
+            path,
+            ValidatorPolicyConfig::default(),
+            FeeMarketConfig::default(),
+        )
             .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
@@ -822,6 +1022,7 @@ mod tests {
             target_chain: "eth".to_string(),
             token_symbol: "W1Z".to_string(),
             amount: 100,
+            fee_paid: 0.0,
             payload_hash: "payload".to_string(),
             timestamp: Timestamp { unix: 10 },
             signature: String::new(),
@@ -845,7 +1046,8 @@ mod tests {
             jail_duration_secs: 60,
             downtime_penalty_score: 1.0,
         };
-        let ledger = LocalLedger::load_or_create(path, policy).expect("ledger");
+        let ledger =
+            LocalLedger::load_or_create(path, policy, FeeMarketConfig::default()).expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -871,6 +1073,7 @@ mod tests {
         let mut heartbeat = ValidatorHeartbeat {
             node_id: "val1".to_string(),
             timestamp: Timestamp { unix: 0 },
+            fee_paid: 0.0,
             signature: String::new(),
         };
         let payload = validator_heartbeat_payload(&heartbeat);
@@ -883,6 +1086,7 @@ mod tests {
         let mut late = ValidatorHeartbeat {
             node_id: "val1".to_string(),
             timestamp: Timestamp { unix: 25 },
+            fee_paid: 0.0,
             signature: String::new(),
         };
         let payload = validator_heartbeat_payload(&late);
@@ -895,5 +1099,60 @@ mod tests {
         let record = ledger.validator_record("val1").expect("record");
         assert!(matches!(record.status, ValidatorStatus::Jailed));
         assert!(record.jailed_until.is_some());
+    }
+
+    #[test]
+    fn fee_market_rejects_underpaying_work_proof() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let policy = ValidatorPolicyConfig::default();
+        let fee_market = FeeMarketConfig {
+            enabled: true,
+            base_fee: 1.0,
+            min_base_fee: 1.0,
+            max_base_fee: 5.0,
+            target_txs_per_window: 10,
+            window_secs: 60,
+            adjustment_rate: 0.1,
+        };
+        let ledger = LocalLedger::load_or_create(path, policy, fee_market).expect("ledger");
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        let public_key = hex_encode(public_bytes.as_slice());
+        let wallet_address = address_from_public_key(&public_bytes);
+        let mut registration = NodeRegistration {
+            node_id: "n1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Worker,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address,
+            wallet_public_key: public_key.clone(),
+            signature: String::new(),
+        };
+        let registration_payload = node_registration_payload(&registration);
+        let registration_signature = signing_key.sign(registration_payload.as_bytes()).to_bytes();
+        registration.signature = hex_encode(&registration_signature);
+        ledger.register_node(registration).expect("register");
+
+        let proof = WorkProof {
+            work_id: "w1".to_string(),
+            node_id: "n1".to_string(),
+            kind: WorkKind::ComputeTask,
+            completed_at: Timestamp { unix: 1 },
+            score: 1.0,
+            fee_paid: 0.5,
+            metrics: HashMap::new(),
+            signature: String::new(),
+        };
+        let payload = work_proof_payload(&proof);
+        let signature = signing_key.sign(payload.as_bytes()).to_bytes();
+        let mut signed = proof.clone();
+        signed.signature = hex_encode(&signature);
+        let result = ledger.submit_work_proof(signed);
+        assert!(result.is_err());
     }
 }
