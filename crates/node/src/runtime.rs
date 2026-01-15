@@ -154,6 +154,7 @@ fn build_ledger(config: &NodeConfig) -> Result<Box<dyn BlockchainLedger>> {
                 path,
                 config.blockchain.validator_policy.clone(),
                 config.blockchain.fee_market.clone(),
+                config.blockchain.bridge.clone(),
             )?))
         }
         "none" | "" => Ok(Box::new(NoopLedger::default())),

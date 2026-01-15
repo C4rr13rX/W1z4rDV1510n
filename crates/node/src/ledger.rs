@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use blake2::{Blake2s256, Digest};
+use crate::bridge::{BridgeVerifier, VerifiedBridgeDeposit};
 use crate::wallet::address_from_public_key;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,8 @@ use w1z4rdv1510n::blockchain::{
     cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
     stake_deposit_payload, validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
 };
-use w1z4rdv1510n::config::{FeeMarketConfig, ValidatorPolicyConfig};
+use w1z4rdv1510n::bridge::BridgeProof;
+use w1z4rdv1510n::config::{BridgeConfig, FeeMarketConfig, ValidatorPolicyConfig};
 use w1z4rdv1510n::schema::Timestamp;
 
 const MAX_LOG_ITEMS: usize = 10_000;
@@ -78,6 +80,7 @@ pub struct LocalLedger {
     path: PathBuf,
     validator_policy: ValidatorPolicyConfig,
     fee_market: FeeMarketConfig,
+    bridge: BridgeConfig,
 }
 
 impl LocalLedger {
@@ -85,6 +88,7 @@ impl LocalLedger {
         path: PathBuf,
         validator_policy: ValidatorPolicyConfig,
         fee_market: FeeMarketConfig,
+        bridge: BridgeConfig,
     ) -> Result<Self> {
         if path.exists() {
             let mut state = read_state(&path)?;
@@ -95,6 +99,7 @@ impl LocalLedger {
                 path,
                 validator_policy,
                 fee_market,
+                bridge,
             });
         }
         let mut state = LocalLedgerState::default();
@@ -105,6 +110,7 @@ impl LocalLedger {
             path,
             validator_policy,
             fee_market,
+            bridge,
         })
     }
 
@@ -306,30 +312,26 @@ impl BlockchainLedger for LocalLedger {
         let payload = stake_deposit_payload(&deposit);
         verify_signature(&public_key, payload.as_bytes(), &deposit.signature)?;
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
-        if state.stake_deposit_id_set.contains(&deposit.deposit_id) {
-            anyhow::bail!("duplicate stake deposit id");
-        }
-        let wallet_address = state
-            .nodes
-            .get(&deposit.node_id)
-            .map(|reg| reg.wallet_address.clone())
-            .unwrap_or_default();
-        let entry = Self::balance_entry(&mut state, &deposit.node_id, &wallet_address);
-        entry.balance += deposit.amount;
-        entry.updated_at = deposit.timestamp;
-        let deposit_id = deposit.deposit_id.clone();
-        let timestamp = deposit.timestamp;
-        let state = &mut *state;
-        push_event_with_id(
-            &mut state.stake_deposits,
-            &mut state.stake_deposit_ids,
-            &mut state.stake_deposit_id_set,
-            deposit,
-            deposit_id,
-        );
-        let audit_id = payload_id(payload.as_bytes());
-        record_audit(state, "STAKE_DEPOSIT", audit_id, timestamp);
-        self.persist(state)?;
+        record_stake_deposit(&mut state, deposit, payload)?;
+        self.persist(&state)?;
+        Ok(())
+    }
+
+    fn submit_bridge_proof(&self, proof: BridgeProof) -> Result<()> {
+        let verifier = BridgeVerifier::new(self.bridge.clone());
+        let verified: VerifiedBridgeDeposit = verifier.verify(&proof)?;
+        let deposit = StakeDeposit {
+            deposit_id: verified.deposit_id,
+            node_id: verified.node_id,
+            amount: verified.amount,
+            timestamp: verified.timestamp,
+            source: verified.source,
+            signature: String::new(),
+        };
+        let payload = stake_deposit_payload(&deposit);
+        let mut state = self.state.lock().expect("local ledger mutex poisoned");
+        record_stake_deposit(&mut state, deposit, payload)?;
+        self.persist(&state)?;
         Ok(())
     }
 
@@ -725,6 +727,45 @@ fn record_audit(
     trim_events(&mut state.audit_log);
 }
 
+fn record_stake_deposit(
+    state: &mut LocalLedgerState,
+    deposit: StakeDeposit,
+    payload: String,
+) -> Result<()> {
+    if deposit.deposit_id.trim().is_empty() {
+        anyhow::bail!("stake deposit id must be non-empty");
+    }
+    if deposit.node_id.trim().is_empty() {
+        anyhow::bail!("stake deposit node id must be non-empty");
+    }
+    if !deposit.amount.is_finite() || deposit.amount <= 0.0 {
+        anyhow::bail!("stake deposit amount must be > 0 and finite");
+    }
+    if state.stake_deposit_id_set.contains(&deposit.deposit_id) {
+        anyhow::bail!("duplicate stake deposit id");
+    }
+    let wallet_address = state
+        .nodes
+        .get(&deposit.node_id)
+        .map(|reg| reg.wallet_address.clone())
+        .unwrap_or_default();
+    let entry = LocalLedger::balance_entry(state, &deposit.node_id, &wallet_address);
+    entry.balance += deposit.amount;
+    entry.updated_at = deposit.timestamp;
+    let deposit_id = deposit.deposit_id.clone();
+    let timestamp = deposit.timestamp;
+    push_event_with_id(
+        &mut state.stake_deposits,
+        &mut state.stake_deposit_ids,
+        &mut state.stake_deposit_id_set,
+        deposit,
+        deposit_id,
+    );
+    let audit_id = payload_id(payload.as_bytes());
+    record_audit(state, "STAKE_DEPOSIT", audit_id, timestamp);
+    Ok(())
+}
+
 fn initialize_fee_market_state(
     state: &mut LocalLedgerState,
     config: &FeeMarketConfig,
@@ -1083,8 +1124,9 @@ mod tests {
             path,
             ValidatorPolicyConfig::default(),
             FeeMarketConfig::default(),
+            BridgeConfig::default(),
         )
-            .expect("ledger");
+        .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -1133,8 +1175,9 @@ mod tests {
             path,
             ValidatorPolicyConfig::default(),
             FeeMarketConfig::default(),
+            BridgeConfig::default(),
         )
-            .expect("ledger");
+        .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -1186,8 +1229,13 @@ mod tests {
             jail_duration_secs: 60,
             downtime_penalty_score: 1.0,
         };
-        let ledger =
-            LocalLedger::load_or_create(path, policy, FeeMarketConfig::default()).expect("ledger");
+        let ledger = LocalLedger::load_or_create(
+            path,
+            policy,
+            FeeMarketConfig::default(),
+            BridgeConfig::default(),
+        )
+        .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -1255,7 +1303,9 @@ mod tests {
             window_secs: 60,
             adjustment_rate: 0.1,
         };
-        let ledger = LocalLedger::load_or_create(path, policy, fee_market).expect("ledger");
+        let ledger =
+            LocalLedger::load_or_create(path, policy, fee_market, BridgeConfig::default())
+                .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -1310,7 +1360,9 @@ mod tests {
             window_secs: 60,
             adjustment_rate: 0.1,
         };
-        let ledger = LocalLedger::load_or_create(path, policy, fee_market).expect("ledger");
+        let ledger =
+            LocalLedger::load_or_create(path, policy, fee_market, BridgeConfig::default())
+                .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes = signing_key.verifying_key().to_bytes();
         let public_key = hex_encode(public_bytes.as_slice());
@@ -1375,7 +1427,9 @@ mod tests {
             window_secs: 10,
             adjustment_rate: 0.0,
         };
-        let ledger = LocalLedger::load_or_create(path, policy, fee_market).expect("ledger");
+        let ledger =
+            LocalLedger::load_or_create(path, policy, fee_market, BridgeConfig::default())
+                .expect("ledger");
 
         let signing_key_val1 = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let public_bytes_val1 = signing_key_val1.verifying_key().to_bytes();
@@ -1528,6 +1582,7 @@ mod tests {
             path,
             ValidatorPolicyConfig::default(),
             FeeMarketConfig::default(),
+            BridgeConfig::default(),
         )
         .expect("ledger");
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -1571,5 +1626,91 @@ mod tests {
 
         let duplicate = ledger.submit_stake_deposit(signed);
         assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn bridge_proof_credits_deposit() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let relayer_key1 = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let relayer_key2 = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let relayer_pub1 = hex_encode(relayer_key1.verifying_key().to_bytes().as_slice());
+        let relayer_pub2 = hex_encode(relayer_key2.verifying_key().to_bytes().as_slice());
+        let bridge = BridgeConfig {
+            enabled: true,
+            challenge_window_secs: 3600,
+            max_proof_bytes: 262_144,
+            chains: vec![w1z4rdv1510n::config::BridgeChainPolicy {
+                chain_id: "ethereum".to_string(),
+                chain_kind: w1z4rdv1510n::bridge::ChainKind::Evm,
+                verification: w1z4rdv1510n::bridge::BridgeVerificationMode::RelayerQuorum,
+                min_confirmations: 12,
+                relayer_quorum: 2,
+                relayer_public_keys: vec![relayer_pub1.clone(), relayer_pub2.clone()],
+                allowed_assets: vec!["USDC".to_string()],
+                max_deposit_amount: 10000.0,
+            }],
+        };
+        let ledger = LocalLedger::load_or_create(
+            path,
+            ValidatorPolicyConfig::default(),
+            FeeMarketConfig::default(),
+            bridge,
+        )
+        .expect("ledger");
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        let public_key = hex_encode(public_bytes.as_slice());
+        let wallet_address = address_from_public_key(&public_bytes);
+        let mut registration = NodeRegistration {
+            node_id: "n1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Worker,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address,
+            wallet_public_key: public_key.clone(),
+            signature: String::new(),
+        };
+        let registration_payload = node_registration_payload(&registration);
+        let registration_signature = signing_key.sign(registration_payload.as_bytes()).to_bytes();
+        registration.signature = hex_encode(&registration_signature);
+        ledger.register_node(registration).expect("register");
+
+        let deposit = w1z4rdv1510n::bridge::BridgeDeposit {
+            chain_id: "ethereum".to_string(),
+            chain_kind: w1z4rdv1510n::bridge::ChainKind::Evm,
+            tx_hash: "0xabc123".to_string(),
+            log_index: 1,
+            asset: "USDC".to_string(),
+            amount: 25.0,
+            recipient_node_id: "n1".to_string(),
+            observed_at: Timestamp { unix: 10 },
+        };
+        let payload = w1z4rdv1510n::bridge::bridge_deposit_payload(&deposit);
+        let sig1 = relayer_key1.sign(payload.as_bytes()).to_bytes();
+        let sig2 = relayer_key2.sign(payload.as_bytes()).to_bytes();
+        let proof = w1z4rdv1510n::bridge::BridgeProof {
+            deposit,
+            verification: w1z4rdv1510n::bridge::BridgeVerification::RelayerQuorum {
+                signatures: vec![
+                    w1z4rdv1510n::bridge::BridgeSignature {
+                        public_key: relayer_pub1,
+                        signature: hex_encode(&sig1),
+                    },
+                    w1z4rdv1510n::bridge::BridgeSignature {
+                        public_key: relayer_pub2,
+                        signature: hex_encode(&sig2),
+                    },
+                ],
+            },
+        };
+        ledger.submit_bridge_proof(proof).expect("bridge proof");
+
+        let balance = ledger.reward_balance("n1").expect("balance");
+        assert!((balance.balance - 25.0).abs() < 1e-6);
     }
 }

@@ -1,3 +1,4 @@
+use crate::bridge::BridgeProof;
 use crate::config::{BlockchainConfig, NodeRole, RewardPolicyConfig};
 use crate::schema::Timestamp;
 use anyhow::Result;
@@ -279,6 +280,9 @@ pub trait BlockchainLedger: Send + Sync {
     fn submit_stake_deposit(&self, _deposit: StakeDeposit) -> Result<()> {
         anyhow::bail!("stake deposit submission not implemented")
     }
+    fn submit_bridge_proof(&self, _proof: BridgeProof) -> Result<()> {
+        anyhow::bail!("bridge proof submission not implemented")
+    }
 
     fn submit_work_proof(&self, _proof: WorkProof) -> Result<()> {
         anyhow::bail!("work proof submission not implemented")
@@ -322,6 +326,10 @@ impl BlockchainLedger for NoopLedger {
     }
 
     fn submit_stake_deposit(&self, _deposit: StakeDeposit) -> Result<()> {
+        anyhow::bail!("ledger not configured")
+    }
+
+    fn submit_bridge_proof(&self, _proof: BridgeProof) -> Result<()> {
         anyhow::bail!("ledger not configured")
     }
 

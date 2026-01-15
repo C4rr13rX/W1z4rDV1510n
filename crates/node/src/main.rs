@@ -5,6 +5,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod chain;
+mod bridge;
 mod config;
 mod ledger;
 mod openstack;
