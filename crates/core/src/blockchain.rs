@@ -28,6 +28,8 @@ pub struct NodeRegistration {
     pub sensors: Vec<SensorDescriptor>,
     #[serde(default)]
     pub wallet_address: String,
+    #[serde(default)]
+    pub wallet_public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,8 @@ pub struct SensorCommitment {
     pub sensor_id: String,
     pub timestamp: Timestamp,
     pub payload_hash: String,
+    #[serde(default)]
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +104,8 @@ pub struct WorkProof {
     pub score: f64,
     #[serde(default)]
     pub metrics: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +116,8 @@ pub struct CrossChainTransfer {
     pub amount: u64,
     pub payload_hash: String,
     pub timestamp: Timestamp,
+    #[serde(default)]
+    pub signature: String,
 }
 
 pub trait BlockchainLedger: Send + Sync {

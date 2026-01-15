@@ -1,4 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -87,6 +88,9 @@ impl BlockchainLedger for LocalLedger {
         if commitment.payload_hash.trim().is_empty() {
             anyhow::bail!("sensor commitment payload hash must be non-empty");
         }
+        let public_key = node_public_key(&commitment.node_id, &self.state)?;
+        let payload = sensor_commitment_payload(&commitment);
+        verify_signature(&public_key, &payload, &commitment.signature)?;
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         state.sensor_commitments.push(commitment);
         trim_events(&mut state.sensor_commitments);
@@ -153,6 +157,9 @@ impl BlockchainLedger for LocalLedger {
         if state.work_ids.contains(&proof.work_id) {
             anyhow::bail!("duplicate work proof id");
         }
+        let public_key = node_public_key_locked(&proof.node_id, &state)?;
+        let payload = work_proof_payload(&proof);
+        verify_signature(&public_key, &payload, &proof.signature)?;
         state.work_ids.insert(proof.work_id.clone());
         let reward_kind = match proof.kind {
             WorkKind::SensorIngest => RewardEventKind::SensorContribution,
@@ -232,9 +239,107 @@ fn trim_events<T>(items: &mut Vec<T>) {
     }
 }
 
+fn node_public_key(node_id: &str, state: &Mutex<LocalLedgerState>) -> Result<String> {
+    let state = state.lock().expect("local ledger mutex poisoned");
+    node_public_key_locked(node_id, &state)
+}
+
+fn node_public_key_locked(node_id: &str, state: &LocalLedgerState) -> Result<String> {
+    let public_key = state
+        .nodes
+        .get(node_id)
+        .map(|reg| reg.wallet_public_key.clone())
+        .unwrap_or_default();
+    if public_key.trim().is_empty() {
+        anyhow::bail!("node public key missing");
+    }
+    Ok(public_key)
+}
+
+fn work_proof_payload(proof: &WorkProof) -> Vec<u8> {
+    format!(
+        "work|{}|{}|{:?}|{}|{:.6}",
+        proof.work_id,
+        proof.node_id,
+        proof.kind,
+        proof.completed_at.unix,
+        proof.score
+    )
+    .into_bytes()
+}
+
+fn sensor_commitment_payload(commitment: &SensorCommitment) -> Vec<u8> {
+    format!(
+        "sensor|{}|{}|{}|{}",
+        commitment.node_id, commitment.sensor_id, commitment.timestamp.unix, commitment.payload_hash
+    )
+    .into_bytes()
+}
+
+fn verify_signature(public_key_hex: &str, payload: &[u8], signature_hex: &str) -> Result<()> {
+    if signature_hex.trim().is_empty() {
+        anyhow::bail!("signature is required");
+    }
+    let public_key = decode_public_key(public_key_hex)?;
+    let signature = decode_signature(signature_hex)?;
+    public_key
+        .verify(payload, &signature)
+        .map_err(|err| anyhow!("signature verify failed: {err}"))?;
+    Ok(())
+}
+
+fn decode_public_key(hex: &str) -> Result<VerifyingKey> {
+    let bytes = hex_decode(hex)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("public key must be 32 bytes");
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    VerifyingKey::from_bytes(&arr).map_err(|err| anyhow!("invalid public key: {err}"))
+}
+
+fn decode_signature(hex: &str) -> Result<Signature> {
+    let bytes = hex_decode(hex)?;
+    Signature::from_slice(&bytes).map_err(|err| anyhow!("invalid signature: {err}"))
+}
+
+fn hex_decode(hex: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let mut iter = hex.as_bytes().iter().copied();
+    while let Some(high) = iter.next() {
+        let low = iter
+            .next()
+            .ok_or_else(|| anyhow!("hex string has odd length"))?;
+        let high_val = hex_value(high)?;
+        let low_val = hex_value(low)?;
+        out.push((high_val << 4) | low_val);
+    }
+    Ok(out)
+}
+
+fn hex_value(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => anyhow::bail!("invalid hex character"),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const LUT: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(LUT[(b >> 4) as usize] as char);
+        out.push(LUT[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer;
     use tempfile::tempdir;
 
     #[test]
@@ -242,6 +347,21 @@ mod tests {
         let temp = tempdir().expect("temp dir");
         let path = temp.path().join("ledger.json");
         let ledger = LocalLedger::load_or_create(path).expect("ledger");
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_key = hex_encode(signing_key.verifying_key().to_bytes().as_slice());
+        let registration = NodeRegistration {
+            node_id: "n1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Worker,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address: "w1ztest".to_string(),
+            wallet_public_key: public_key.clone(),
+        };
+        ledger.register_node(registration).expect("register");
         let proof = WorkProof {
             work_id: "w1".to_string(),
             node_id: "n1".to_string(),
@@ -249,9 +369,14 @@ mod tests {
             completed_at: Timestamp { unix: 1 },
             score: 1.0,
             metrics: HashMap::new(),
+            signature: String::new(),
         };
-        ledger.submit_work_proof(proof.clone()).expect("first");
-        let second = ledger.submit_work_proof(proof);
+        let payload = work_proof_payload(&proof);
+        let signature = signing_key.sign(&payload).to_bytes();
+        let mut signed = proof.clone();
+        signed.signature = hex_encode(&signature);
+        ledger.submit_work_proof(signed.clone()).expect("first");
+        let second = ledger.submit_work_proof(signed);
         assert!(second.is_err());
     }
 }

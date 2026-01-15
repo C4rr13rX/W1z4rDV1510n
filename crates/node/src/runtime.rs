@@ -90,6 +90,7 @@ impl NodeRuntime {
             capabilities,
             sensors: self.config.sensors.clone(),
             wallet_address: self.wallet.address.clone(),
+            wallet_public_key: self.wallet.public_key.clone(),
         };
         if let Err(err) = self.ledger.register_node(registration) {
             warn!(

@@ -114,6 +114,7 @@ fn main() -> anyhow::Result<()> {
 
 fn run_node(config_path: &Path) -> anyhow::Result<()> {
     let config = load_or_create_config(config_path)?;
+    config.validate()?;
     info!(
         target: "w1z4rdv1510n::node",
         node_id = config.node_id,

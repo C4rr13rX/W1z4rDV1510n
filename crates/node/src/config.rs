@@ -41,6 +41,37 @@ impl Default for NodeConfig {
     }
 }
 
+impl NodeConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.node_id.trim().is_empty(), "node_id must be non-empty");
+        anyhow::ensure!(!self.network.listen_addr.trim().is_empty(), "listen_addr must be set");
+        anyhow::ensure!(self.network.max_peers > 0, "network.max_peers must be > 0");
+        anyhow::ensure!(
+            self.network.security.max_message_bytes >= 100,
+            "network.security.max_message_bytes must be >= 100"
+        );
+        anyhow::ensure!(
+            self.network.security.max_messages_per_rpc > 0,
+            "network.security.max_messages_per_rpc must be > 0"
+        );
+        anyhow::ensure!(
+            self.network.security.max_established_total > 0,
+            "network.security.max_established_total must be > 0"
+        );
+        anyhow::ensure!(
+            self.wallet.enabled,
+            "wallet must be enabled for production nodes"
+        );
+        if self.ledger.enabled {
+            anyhow::ensure!(
+                !self.ledger.backend.trim().is_empty(),
+                "ledger.backend must be set when ledger is enabled"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NodeNetworkConfig {

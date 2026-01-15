@@ -4,6 +4,7 @@ use argon2::{Argon2, Params, Version};
 use blake2::{Blake2s256, Digest};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::ChaCha20Poly1305;
+use ed25519_dalek::{Signature, SigningKey, Signer};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -16,6 +17,25 @@ pub struct WalletFile {
     pub public_key: String,
     pub secret_key: String,
     pub created_at_unix: u64,
+    #[serde(default)]
+    pub key_type: WalletKeyType,
+    #[serde(default)]
+    pub legacy_address: Option<String>,
+    #[serde(default)]
+    pub legacy_public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WalletKeyType {
+    Ed25519,
+    LegacySeed,
+}
+
+impl Default for WalletKeyType {
+    fn default() -> Self {
+        WalletKeyType::Ed25519
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +67,23 @@ pub struct WalletInfo {
     pub path: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct WalletSigner {
+    info: WalletInfo,
+    signing_key: SigningKey,
+}
+
+impl WalletSigner {
+    pub fn wallet(&self) -> &WalletInfo {
+        &self.info
+    }
+
+    pub fn sign_payload(&self, payload: &[u8]) -> String {
+        let signature: Signature = self.signing_key.sign(payload);
+        hex_encode(&signature.to_bytes())
+    }
+}
+
 pub struct WalletStore;
 
 impl WalletStore {
@@ -59,11 +96,11 @@ impl WalletStore {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("read wallet file {}", path.display()))?;
             let wallet = read_wallet(&raw, config, &path)?;
-            return Ok(WalletInfo {
-                address: wallet.address,
-                public_key: wallet.public_key,
-                path,
-            });
+            let (wallet, info, changed) = normalize_wallet(wallet, &path)?;
+            if changed {
+                write_wallet(&path, &wallet, config, false)?;
+            }
+            return Ok(info);
         }
         if !config.auto_create {
             anyhow::bail!("wallet file missing and auto_create is false");
@@ -76,6 +113,19 @@ impl WalletStore {
             path,
         })
     }
+
+    pub fn load_or_create_signer(config: &WalletConfig) -> Result<WalletSigner> {
+        let info = Self::load_or_create(config)?;
+        let raw = fs::read_to_string(&info.path)
+            .with_context(|| format!("read wallet file {}", info.path.display()))?;
+        let wallet = read_wallet(&raw, config, &info.path)?;
+        let (wallet, info, changed) = normalize_wallet(wallet, &info.path)?;
+        if changed {
+            write_wallet(&info.path, &wallet, config, false)?;
+        }
+        let signing_key = signing_key_from_secret(&wallet.secret_key)?;
+        Ok(WalletSigner { info, signing_key })
+    }
 }
 
 pub fn node_id_from_wallet(address: &str) -> String {
@@ -85,15 +135,18 @@ pub fn node_id_from_wallet(address: &str) -> String {
 }
 
 fn generate_wallet() -> WalletFile {
-    let mut secret = [0u8; 32];
-    OsRng.fill_bytes(&mut secret);
-    let public = hash_bytes(&secret);
-    let address = format!("w1z{}", hex_encode(&hash_bytes(&public)[0..20]));
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let secret = signing_key.to_bytes();
+    let public = signing_key.verifying_key().to_bytes();
+    let address = address_from_public_key(&public);
     WalletFile {
         address,
         public_key: hex_encode(&public),
         secret_key: hex_encode(&secret),
         created_at_unix: unix_time(),
+        key_type: WalletKeyType::Ed25519,
+        legacy_address: None,
+        legacy_public_key: None,
     }
 }
 
@@ -142,6 +195,43 @@ fn write_wallet(path: &Path, wallet: &WalletFile, config: &WalletConfig, creatin
     };
     write_wallet_disk(path, disk)?;
     Ok(())
+}
+
+fn normalize_wallet(mut wallet: WalletFile, path: &Path) -> Result<(WalletFile, WalletInfo, bool)> {
+    let signing_key = signing_key_from_secret(&wallet.secret_key)?;
+    let public = signing_key.verifying_key().to_bytes();
+    let public_hex = hex_encode(&public);
+    let address = address_from_public_key(&public);
+    let mut changed = false;
+    if wallet.public_key != public_hex {
+        if wallet.legacy_public_key.is_none() {
+            wallet.legacy_public_key = Some(wallet.public_key.clone());
+        }
+        wallet.public_key = public_hex;
+        changed = true;
+    }
+    if wallet.address != address {
+        if wallet.legacy_address.is_none() {
+            wallet.legacy_address = Some(wallet.address.clone());
+        }
+        wallet.address = address;
+        changed = true;
+    }
+    if !matches!(wallet.key_type, WalletKeyType::Ed25519) {
+        wallet.key_type = WalletKeyType::Ed25519;
+        changed = true;
+    }
+    let info = WalletInfo {
+        address: wallet.address.clone(),
+        public_key: wallet.public_key.clone(),
+        path: path.to_path_buf(),
+    };
+    Ok((wallet, info, changed))
+}
+
+fn signing_key_from_secret(secret_hex: &str) -> Result<SigningKey> {
+    let bytes = decode_secret_key(secret_hex)?;
+    Ok(SigningKey::from_bytes(&bytes))
 }
 
 fn write_wallet_disk(path: &Path, disk: WalletDisk) -> Result<()> {
@@ -278,6 +368,21 @@ fn hex_value(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => anyhow::bail!("invalid hex character"),
     }
+}
+
+fn decode_secret_key(hex: &str) -> Result<[u8; 32]> {
+    let bytes = hex_decode(hex)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("secret key must be 32 bytes");
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn address_from_public_key(public_key: &[u8]) -> String {
+    let hash = hash_bytes(public_key);
+    format!("w1z{}", hex_encode(&hash[0..20]))
 }
 
 fn unix_time() -> u64 {
