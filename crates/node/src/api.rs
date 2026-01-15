@@ -120,8 +120,18 @@ async fn submit_bridge_proof(
 
 async fn get_balance(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Path(node_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = authorize(&state, &headers) {
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
     match state.ledger.reward_balance(&node_id) {
         Ok(balance) => (
             StatusCode::OK,
