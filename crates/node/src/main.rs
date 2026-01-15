@@ -67,6 +67,10 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:8090")]
         addr: String,
     },
+    HashApiKey {
+        #[arg(long)]
+        key: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -116,6 +120,10 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Api { addr }) => run_api_mode(&config_path, &addr),
+        Some(Command::HashApiKey { key }) => {
+            println!("{}", api::hash_api_key_hex(&key));
+            Ok(())
+        }
         None => run_node(&config_path),
     }
 }

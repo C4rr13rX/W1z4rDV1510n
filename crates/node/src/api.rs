@@ -207,6 +207,11 @@ fn hash_api_key(key: &str) -> [u8; 32] {
     out
 }
 
+pub fn hash_api_key_hex(key: &str) -> String {
+    let digest = hash_api_key(key);
+    hex_encode(&digest)
+}
+
 fn decode_hash_hex(hex: &str) -> Result<[u8; 32]> {
     let bytes = hex_decode(hex)?;
     if bytes.len() != 32 {
@@ -238,6 +243,16 @@ fn hex_value(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => anyhow::bail!("invalid hex character"),
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const LUT: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(LUT[(b >> 4) as usize] as char);
+        out.push(LUT[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {
