@@ -1,6 +1,7 @@
 use crate::config::{AnnealingScheduleConfig, HomeostasisConfig, QuantumConfig, ResampleConfig};
 use crate::energy::EnergyModel;
 use crate::hardware::HardwareBackendHandle;
+use crate::logging::{LiveFrameSink, LiveNeuroSink};
 use crate::neuro::NeuroRuntimeHandle;
 use crate::proposal::ProposalKernel;
 use crate::schema::{DynamicState, EnvironmentSnapshot, Population, Position};
@@ -33,6 +34,8 @@ pub fn anneal_quantum(
     homeostasis: &HomeostasisConfig,
     rng: &mut StdRng,
     quantum: &QuantumConfig,
+    live_frame: Option<&LiveFrameSink>,
+    live_neuro: Option<&LiveNeuroSink>,
 ) -> QuantumAnnealOutcome {
     let trotter = slices.len().max(1);
     let tensor_executor = hardware_backend.tensor_executor();
@@ -47,12 +50,16 @@ pub fn anneal_quantum(
         let slice_temp_base =
             base_temp * quantum.slice_temperature_scale / (trotter as f64).max(1.0);
         let (slice_temp, boosted) = homeo_state.effective_temperature(slice_temp_base);
+        let enforce_constraints = search_module
+            .map(|module| iteration % module.config.constraint_check_every.max(1) == 0)
+            .unwrap_or(false);
         let progress = iteration as f64 / schedule.n_iterations.max(1) as f64;
         let driver_scale = quantum.driver_strength
             + (quantum.driver_final_strength - quantum.driver_strength) * progress;
 
         let mut accepted_total = 0usize;
         let mut total_particles = 0usize;
+        let mut best_state: Option<DynamicState> = None;
         for slice_idx in 0..trotter {
             let prev_idx = if slice_idx == 0 {
                 trotter - 1
@@ -78,12 +85,14 @@ pub fn anneal_quantum(
                         driver_penalty(&particle.current_state, prev_state, next_state);
                     let mut proposal =
                         kernel.propose(snapshot_0, &particle.current_state, slice_temp);
-                    if let Some(search) = search_module {
-                        search.enforce_hard_constraints(
-                            snapshot_0,
-                            &mut proposal,
-                            Some(hardware_backend.as_ref()),
-                        );
+                    if enforce_constraints {
+                        if let Some(search) = search_module {
+                            search.enforce_hard_constraints(
+                                snapshot_0,
+                                &mut proposal,
+                                Some(hardware_backend.as_ref()),
+                            );
+                        }
                     }
                     let proposal_driver = driver_penalty(&proposal, prev_state, next_state);
                     let classical_energy = energy_model.energy(&proposal);
@@ -144,6 +153,7 @@ pub fn anneal_quantum(
                 driver_scale,
                 energy_model,
                 tensor_executor.as_deref(),
+                enforce_constraints,
                 rng,
             );
         }
@@ -166,6 +176,7 @@ pub fn anneal_quantum(
                 let total = composite_energy(particle.energy, driver, driver_scale);
                 if total < min_energy {
                     min_energy = total;
+                    best_state = Some(particle.current_state.clone());
                 }
             }
         }
@@ -175,6 +186,13 @@ pub fn anneal_quantum(
         } else {
             accepted_total as f64 / total_particles as f64
         };
+        if let (Some(sink), Some(state)) = (live_frame, best_state.as_ref()) {
+            sink.write_frame(iteration, min_energy, state);
+        }
+        if let (Some(neuro_runtime), Some(neuro_sink)) = (neuro.as_ref(), live_neuro) {
+            let snapshot = neuro_runtime.snapshot();
+            neuro_sink.write_snapshot(iteration, &snapshot);
+        }
         energy_trace.push(min_energy);
         acceptance_trace.push(acceptance_ratio);
         homeo_state.observe(min_energy, acceptance_ratio, iteration);
@@ -335,6 +353,7 @@ fn apply_worldline_mix(
     driver_scale: f64,
     energy_model: &EnergyModel,
     tensor: Option<&dyn crate::tensor::TensorExecutor>,
+    enforce_constraints: bool,
     rng: &mut StdRng,
 ) {
     if mix_prob <= 0.0 || slices.is_empty() {
@@ -386,10 +405,12 @@ fn apply_worldline_mix(
                         state.position = *target;
                     }
                 }
-                if let Some(search) = search_module {
-                    let mut state = particle.current_state.clone();
-                    search.enforce_hard_constraints(snapshot_0, &mut state, None);
-                    particle.current_state = state;
+                if enforce_constraints {
+                    if let Some(search) = search_module {
+                        let mut state = particle.current_state.clone();
+                        search.enforce_hard_constraints(snapshot_0, &mut state, None);
+                        particle.current_state = state;
+                    }
                 }
             }
         }
@@ -491,6 +512,7 @@ mod tests {
             Timestamp { unix: 0 },
             None,
             None,
+            None,
         );
         let mut slices = vec![
             Population {
@@ -528,6 +550,7 @@ mod tests {
             0.5,
             &energy_model,
             None,
+            true,
             &mut rng,
         );
         let pos0 = slices[0].particles[0].current_state.symbol_states["p1"]

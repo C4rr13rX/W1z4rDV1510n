@@ -13,6 +13,8 @@ pub struct SearchConfig {
     pub cell_size: f64,
     #[serde(default)]
     pub teleport_on_no_path: bool,
+    #[serde(default = "SearchConfig::default_constraint_every")]
+    pub constraint_check_every: usize,
 }
 
 impl Default for SearchConfig {
@@ -20,7 +22,14 @@ impl Default for SearchConfig {
         Self {
             cell_size: 1.0,
             teleport_on_no_path: false,
+            constraint_check_every: SearchConfig::default_constraint_every(),
         }
+    }
+}
+
+impl SearchConfig {
+    fn default_constraint_every() -> usize {
+        1
     }
 }
 
@@ -1113,6 +1122,7 @@ mod tests {
         let module = SearchModule::new(SearchConfig {
             cell_size: 0.5,
             teleport_on_no_path: true,
+            constraint_check_every: 1,
         });
         module.enforce_hard_constraints(&snapshot, &mut state, None);
         let repaired = state.symbol_states.get("agent").unwrap().position;

@@ -39,7 +39,8 @@ impl ExperimentalHardwareBackend {
                 .with_cpu(CpuRefreshKind::new())
                 .with_memory(MemoryRefreshKind::everything()),
         );
-        let loads = system.load_average();
+        // sysinfo exposes load average as an associated fn, not an instance method.
+        let loads = System::load_average();
         let used_memory_gb = (system.used_memory() as f64 / 1_048_576.0).max(0.0);
         tracing::info!(
             target: "w1z4rdv1510n::hardware::experimental",

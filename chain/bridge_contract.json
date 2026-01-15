@@ -1,0 +1,15 @@
+{
+  "contract_id": "bridge-v1",
+  "version": "1.0.0",
+  "supported_chains": [
+    "ethereum",
+    "cosmos",
+    "polkadot"
+  ],
+  "token_mapping": {
+    "W1Z": {
+      "decimals": 9,
+      "bridged_assets": []
+    }
+  }
+}

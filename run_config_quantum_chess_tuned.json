@@ -49,6 +49,12 @@
     "allow_distributed": true,
     "max_threads": 12
   },
+  "neuro": {
+    "enabled": true,
+    "min_activation": 0.6,
+    "module_threshold": 40,
+    "max_networks": 256
+  },
   "quantum": {
     "enabled": true,
     "trotter_slices": 4,
@@ -62,7 +68,11 @@
   "logging": {
     "log_level": "INFO",
     "json": true,
-    "log_path": "logs/chess_quantum_tuned_run.jsonl"
+    "log_path": "logs/chess_quantum_tuned_run.jsonl",
+    "live_frame_path": "logs/chess_quantum_live_frame.json",
+    "live_frame_every": 1,
+    "live_neuro_path": "logs/chess_quantum_live_neuro.json",
+    "live_neuro_every": 1
   },
   "output": {
     "save_best_state": true,

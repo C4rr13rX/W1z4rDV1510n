@@ -1,7 +1,10 @@
 use crate::ml::MlModelHandle;
 use crate::neuro::{NeuroRuntimeHandle, NeuroSnapshot, zone_label};
-use crate::schema::{DynamicState, EnvironmentSnapshot, Position, SymbolState, SymbolType};
+use crate::schema::{
+    DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType,
+};
 use crate::search::{PathResult, SearchModule};
+use blake2::Digest;
 use parking_lot::Mutex;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
@@ -11,6 +14,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs;
+use std::sync::Arc;
 
 const RELATION_BINS: i32 = 4;
 const FACTOR_EPS: f64 = 1e-9;
@@ -82,24 +86,18 @@ fn zone_bin(position: &Position) -> (i32, i32) {
     (bx, by)
 }
 
-fn motif_signature(snapshot: &EnvironmentSnapshot, state: &DynamicState) -> Option<String> {
+fn motif_signature(cache: &SnapshotCache, state: &DynamicState) -> Option<String> {
     if state.symbol_states.is_empty() {
         return None;
     }
     let mut tokens = Vec::with_capacity(state.symbol_states.len());
     for (symbol_id, symbol_state) in state.symbol_states.iter() {
         let (bx, by) = zone_bin(&symbol_state.position);
-        let role = snapshot
+        let role = cache
             .symbols
-            .iter()
-            .find(|s| s.id == *symbol_id)
-            .and_then(|s| {
-                s.properties
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .map(|r| r.to_uppercase())
-            })
-            .unwrap_or_else(|| "UNK".to_string());
+            .get(symbol_id)
+            .map(|sym| sym.role.as_str())
+            .unwrap_or("UNK");
         tokens.push(format!("u:{role}:{bx}{by}"));
     }
     tokens.sort();
@@ -130,6 +128,118 @@ fn load_relational_priors(path: &str) -> Option<RelationalPriors> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SnapshotSignature {
+    timestamp: i64,
+    symbols_len: usize,
+}
+
+impl SnapshotSignature {
+    fn from_snapshot(snapshot_0: &EnvironmentSnapshot) -> Self {
+        Self {
+            timestamp: snapshot_0.timestamp.unix,
+            symbols_len: snapshot_0.symbols.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedSymbol {
+    role: String,
+    group: String,
+    domain: String,
+    target_position: Option<Position>,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotCache {
+    signature: SnapshotSignature,
+    symbols: HashMap<String, CachedSymbol>,
+}
+
+impl SnapshotCache {
+    fn new(snapshot_0: &EnvironmentSnapshot, signature: SnapshotSignature) -> Self {
+        let mut positions = HashMap::new();
+        let mut exits = Vec::new();
+        for symbol in &snapshot_0.symbols {
+            positions.insert(symbol.id.clone(), symbol.position);
+            if matches!(symbol.symbol_type, SymbolType::Exit) {
+                exits.push(symbol.position);
+            }
+        }
+        let mut symbols = HashMap::new();
+        for symbol in &snapshot_0.symbols {
+            let role = role_from_symbol(symbol);
+            let group = group_from_symbol(symbol);
+            let domain = domain_from_symbol(symbol);
+            let target_position = symbol
+                .properties
+                .get("goal_position")
+                .and_then(value_to_position)
+                .or_else(|| symbol.properties.get("goal").and_then(value_to_position))
+                .or_else(|| {
+                    symbol
+                        .properties
+                        .get("goal_id")
+                        .or_else(|| symbol.properties.get("target_id"))
+                        .and_then(|value| value.as_str())
+                        .and_then(|goal_id| positions.get(goal_id))
+                        .copied()
+                })
+                .or_else(|| nearest_exit_position_from_list(&symbol.position, &exits));
+            symbols.insert(
+                symbol.id.clone(),
+                CachedSymbol {
+                    role,
+                    group,
+                    domain,
+                    target_position,
+                },
+            );
+        }
+        Self { signature, symbols }
+    }
+}
+
+fn role_from_symbol(symbol: &Symbol) -> String {
+    if let Some(Value::String(role)) = symbol.properties.get("role") {
+        role.to_uppercase()
+    } else {
+        match symbol.symbol_type {
+            SymbolType::Person => "PERSON".to_string(),
+            SymbolType::Wall => "WALL".to_string(),
+            SymbolType::Exit => "EXIT".to_string(),
+            SymbolType::Custom => "CUSTOM".to_string(),
+            SymbolType::Object => "OBJECT".to_string(),
+        }
+    }
+}
+
+fn group_from_symbol(symbol: &Symbol) -> String {
+    symbol
+        .properties
+        .get("group_id")
+        .and_then(|v| v.as_str())
+        .map(|g| g.to_lowercase())
+        .or_else(|| {
+            symbol
+                .properties
+                .get("side")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase())
+        })
+        .unwrap_or_else(|| "neutral".to_string())
+}
+
+fn domain_from_symbol(symbol: &Symbol) -> String {
+    symbol
+        .properties
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .map(|d| d.to_lowercase())
+        .unwrap_or_else(|| "global".to_string())
+}
+
 pub trait ProposalKernel: Send + Sync {
     fn propose(
         &self,
@@ -147,6 +257,7 @@ pub struct DefaultProposalKernel {
     relational_priors: Option<RelationalPriors>,
     neuro: Option<NeuroRuntimeHandle>,
     context_cache: Mutex<HashMap<String, VecDeque<String>>>,
+    snapshot_cache: Mutex<Option<Arc<SnapshotCache>>>,
 }
 
 impl DefaultProposalKernel {
@@ -202,7 +313,24 @@ impl DefaultProposalKernel {
             relational_priors,
             neuro,
             context_cache: Mutex::new(HashMap::new()),
+            snapshot_cache: Mutex::new(None),
         }
+    }
+
+    fn snapshot_cache(&self, snapshot_0: &EnvironmentSnapshot) -> Arc<SnapshotCache> {
+        let signature = SnapshotSignature::from_snapshot(snapshot_0);
+        let mut guard = self.snapshot_cache.lock();
+        let rebuild = guard
+            .as_ref()
+            .map(|cache| cache.signature != signature)
+            .unwrap_or(true);
+        if rebuild {
+            *guard = Some(Arc::new(SnapshotCache::new(snapshot_0, signature)));
+        }
+        guard
+            .as_ref()
+            .expect("snapshot cache missing")
+            .clone()
     }
 }
 
@@ -213,10 +341,11 @@ impl ProposalKernel for DefaultProposalKernel {
         current_state: &DynamicState,
         temperature: f64,
     ) -> DynamicState {
+        let cache = self.snapshot_cache(snapshot_0);
         let mut rng = self.rng.lock();
         let move_type = self.choose_move_type(&mut rng, temperature);
         let neuro_snapshot = self.neuro.as_ref().map(|n| n.snapshot());
-        let relational_motif = motif_signature(snapshot_0, current_state);
+        let relational_motif = motif_signature(cache.as_ref(), current_state);
         let zone_key = current_state
             .symbol_states
             .values()
@@ -255,26 +384,33 @@ impl ProposalKernel for DefaultProposalKernel {
                     .collect::<Vec<&str>>()
                     .as_slice(),
                 zone_key.clone(),
+                cache.as_ref(),
             );
         }
         let proposal = current_state.clone();
         let mut proposal = match move_type {
-            MoveType::Local => self.local_move(snapshot_0, proposal, temperature, &mut rng),
-            MoveType::Group => self.group_move(snapshot_0, proposal, temperature, &mut rng),
+            MoveType::Local => {
+                self.local_move(snapshot_0, proposal, temperature, &mut rng, cache.as_ref())
+            }
+            MoveType::Group => {
+                self.group_move(snapshot_0, proposal, temperature, &mut rng, cache.as_ref())
+            }
             MoveType::Swap => self.swap_move(proposal, &mut rng),
-            MoveType::Path => self.path_move(snapshot_0, proposal, temperature, &mut rng),
+            MoveType::Path => {
+                self.path_move(snapshot_0, proposal, temperature, &mut rng, cache.as_ref())
+            }
             MoveType::Global => self.global_move(proposal, temperature, &mut rng),
             MoveType::MlGuided => self.ml_guided_move(snapshot_0, &proposal, temperature, &mut rng),
         };
         if let Some(neuro) = neuro_snapshot.as_ref() {
-            self.apply_neuro_to_state(&mut proposal, snapshot_0, neuro, &mut rng);
+            self.apply_neuro_to_state(&mut proposal, cache.as_ref(), neuro, &mut rng);
         }
         for motif in &motif_hints {
             self.apply_relational_hint(&mut proposal, motif, &mut rng);
         }
         self.reverse_anchor_pull(snapshot_0, &mut proposal, &mut rng);
         if let Some(zone) = zone_key {
-            if let Some(m) = motif_signature(snapshot_0, &proposal) {
+            if let Some(m) = motif_signature(cache.as_ref(), &proposal) {
                 let mut cache = self.context_cache.lock();
                 let entry = cache.entry(zone).or_insert_with(VecDeque::new);
                 entry.push_front(m);
@@ -325,28 +461,31 @@ impl DefaultProposalKernel {
         neuro_snapshot: Option<&NeuroSnapshot>,
         motifs: &[&str],
         zone_key: Option<String>,
+        cache: &SnapshotCache,
     ) -> DynamicState {
         let mut proposals = match move_type {
             MoveType::Local => {
-                self.local_move_parallel(snapshot_0, current_state, temperature, rng)
+                self.local_move_parallel(snapshot_0, current_state, temperature, rng, cache)
             }
             MoveType::Group => {
-                self.group_move_parallel(snapshot_0, current_state, temperature, rng)
+                self.group_move_parallel(snapshot_0, current_state, temperature, rng, cache)
             }
             MoveType::Swap => self.swap_move_parallel(current_state, rng),
-            MoveType::Path => self.path_move_parallel(snapshot_0, current_state, temperature, rng),
+            MoveType::Path => {
+                self.path_move_parallel(snapshot_0, current_state, temperature, rng, cache)
+            }
             MoveType::Global => self.global_move_parallel(current_state, temperature, rng),
             MoveType::MlGuided => self.ml_guided_move(snapshot_0, current_state, temperature, rng),
         };
         if let Some(neuro) = neuro_snapshot {
-            self.apply_neuro_to_state(&mut proposals, snapshot_0, neuro, rng);
+            self.apply_neuro_to_state(&mut proposals, cache, neuro, rng);
         }
         for motif in motifs {
             self.apply_relational_hint(&mut proposals, motif, rng);
         }
         self.reverse_anchor_pull(snapshot_0, &mut proposals, rng);
         if let Some(zone) = zone_key {
-            if let Some(m) = motif_signature(snapshot_0, &proposals) {
+            if let Some(m) = motif_signature(cache, &proposals) {
                 let mut cache = self.context_cache.lock();
                 let entry = cache.entry(zone).or_insert_with(VecDeque::new);
                 entry.push_front(m);
@@ -368,6 +507,7 @@ impl DefaultProposalKernel {
         mut proposal: DynamicState,
         temperature: f64,
         rng: &mut StdRng,
+        cache: &SnapshotCache,
     ) -> DynamicState {
         let Some(symbol_state) = proposal.symbol_states.values_mut().choose(rng) else {
             return proposal;
@@ -378,7 +518,7 @@ impl DefaultProposalKernel {
         symbol_state.position.y += delta();
         symbol_state.position.z += delta();
         if let Some(priors) = &self.relational_priors {
-            self.apply_factor_bias(symbol_state, None, snapshot_0, priors, rng);
+            self.apply_factor_bias(symbol_state, None, snapshot_0, priors, rng, cache);
         }
         proposal
     }
@@ -412,6 +552,7 @@ impl DefaultProposalKernel {
         mut proposal: DynamicState,
         temperature: f64,
         rng: &mut StdRng,
+        cache: &SnapshotCache,
     ) -> DynamicState {
         if proposal.symbol_states.is_empty() {
             return proposal;
@@ -426,7 +567,7 @@ impl DefaultProposalKernel {
             }
         }
         if groups.is_empty() {
-            return self.local_move(snapshot_0, proposal, temperature, rng);
+            return self.local_move(snapshot_0, proposal, temperature, rng, cache);
         }
         let group_ids: Vec<String> = groups.keys().cloned().collect();
         let Some(group_id) = group_ids.choose(rng).cloned() else {
@@ -448,7 +589,7 @@ impl DefaultProposalKernel {
                 state.position.y += dy;
                 state.position.z += dz;
                 if let Some(priors) = &self.relational_priors {
-                    self.apply_factor_bias(state, Some(member_id), snapshot_0, priors, rng);
+                    self.apply_factor_bias(state, Some(member_id), snapshot_0, priors, rng, cache);
                 }
             }
         }
@@ -477,52 +618,30 @@ impl DefaultProposalKernel {
         proposal
     }
 
-    fn symbol_role(&self, snapshot_0: &EnvironmentSnapshot, symbol_id: &str) -> String {
-        snapshot_0
+    fn symbol_role<'a>(&self, cache: &'a SnapshotCache, symbol_id: &str) -> &'a str {
+        cache
             .symbols
-            .iter()
-            .find(|s| s.id == symbol_id)
-            .map(|s| {
-                if let Some(Value::String(role)) = s.properties.get("role") {
-                    role.to_uppercase()
-                } else {
-                    match s.symbol_type {
-                        SymbolType::Person => "PERSON".to_string(),
-                        SymbolType::Wall => "WALL".to_string(),
-                        SymbolType::Exit => "EXIT".to_string(),
-                        SymbolType::Custom => "CUSTOM".to_string(),
-                        SymbolType::Object => "OBJECT".to_string(),
-                    }
-                }
-            })
-            .unwrap_or_else(|| "UNK".to_string())
+            .get(symbol_id)
+            .map(|sym| sym.role.as_str())
+            .unwrap_or("UNK")
     }
 
-    fn symbol_group(&self, snapshot_0: &EnvironmentSnapshot, symbol_id: &str) -> String {
-        snapshot_0
+    fn symbol_group<'a>(&self, cache: &'a SnapshotCache, symbol_id: &str) -> &'a str {
+        cache
             .symbols
-            .iter()
-            .find(|s| s.id == symbol_id)
-            .and_then(|s| s.properties.get("group_id").and_then(|v| v.as_str()))
-            .map(|g| g.to_lowercase())
-            .or_else(|| {
-                snapshot_0
-                    .symbols
-                    .iter()
-                    .find(|s| s.id == symbol_id)
-                    .and_then(|s| s.properties.get("side").and_then(|v| v.as_str()))
-                    .map(|s| s.to_lowercase())
-            })
-            .unwrap_or_else(|| "neutral".to_string())
+            .get(symbol_id)
+            .map(|sym| sym.group.as_str())
+            .unwrap_or("neutral")
     }
 
     fn apply_factor_bias(
         &self,
         symbol_state: &mut SymbolState,
         symbol_id: Option<&str>,
-        snapshot_0: &EnvironmentSnapshot,
+        _snapshot_0: &EnvironmentSnapshot,
         priors: &RelationalPriors,
         rng: &mut StdRng,
+        cache: &SnapshotCache,
     ) {
         let weight = self.config.factor_prior_weight.max(0.0);
         if weight == 0.0 || priors.factor_probs.is_empty() {
@@ -551,8 +670,8 @@ impl DefaultProposalKernel {
         }
         if let Some(id) = symbol_id {
             if let Some(role_probs) = priors.factor_probs.get("role") {
-                let role = self.symbol_role(snapshot_0, id);
-                if let Some(prob) = role_probs.get(&role) {
+                let role = self.symbol_role(cache, id);
+                if let Some(prob) = role_probs.get(role) {
                     if *prob < FACTOR_EPS {
                         let jitter = 0.05 * weight;
                         symbol_state.position.x += rng.gen_range(-jitter..jitter);
@@ -561,8 +680,8 @@ impl DefaultProposalKernel {
                 }
             }
             if let Some(group_probs) = priors.factor_probs.get("group") {
-                let group = self.symbol_group(snapshot_0, id);
-                if let Some(prob) = group_probs.get(&group) {
+                let group = self.symbol_group(cache, id);
+                if let Some(prob) = group_probs.get(group) {
                     if *prob < FACTOR_EPS {
                         let jitter = 0.05 * weight;
                         symbol_state.position.x += rng.gen_range(-jitter..jitter);
@@ -576,7 +695,7 @@ impl DefaultProposalKernel {
     fn apply_neuro_to_state(
         &self,
         proposal: &mut DynamicState,
-        snapshot_0: &EnvironmentSnapshot,
+        cache: &SnapshotCache,
         neuro: &NeuroSnapshot,
         rng: &mut StdRng,
     ) {
@@ -588,25 +707,23 @@ impl DefaultProposalKernel {
                 format!("id::{symbol_id}"),
                 zone_label(&symbol_state.position),
             ];
-            let role = self.symbol_role(snapshot_0, symbol_id);
-            let group = self.symbol_group(snapshot_0, symbol_id);
+            let role = self.symbol_role(cache, symbol_id);
+            let group = self.symbol_group(cache, symbol_id);
             labels.push(format!("role::{role}"));
             labels.push(format!("group::{group}"));
             labels.push(format!(
                 "col::{role}::{}",
                 zone_label(&symbol_state.position)
             ));
-            if let Some(symbol) = snapshot_0.symbols.iter().find(|s| s.id == *symbol_id) {
-                let domain = symbol
-                    .properties
-                    .get("domain")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("global");
-                labels.push(format!(
-                    "region::{domain}::{}",
-                    zone_label(&symbol_state.position)
-                ));
-            }
+            let domain = cache
+                .symbols
+                .get(symbol_id)
+                .map(|sym| sym.domain.as_str())
+                .unwrap_or("global");
+            labels.push(format!(
+                "region::{domain}::{}",
+                zone_label(&symbol_state.position)
+            ));
             for label in &labels {
                 if let Some(center) = neuro.centroids.get(label) {
                     let dx = center.x - symbol_state.position.x;
@@ -639,6 +756,38 @@ impl DefaultProposalKernel {
                         symbol_state.position.y += rng.gen_range(-0.005..0.005) * w;
                     }
                 }
+            }
+            if let Some(pred) = neuro.temporal_predictions.get(symbol_id) {
+                let err = neuro
+                    .prediction_error
+                    .get(symbol_id)
+                    .copied()
+                    .unwrap_or(0.5)
+                    .clamp(0.1, 5.0);
+                let confidence = neuro
+                    .prediction_confidence
+                    .get(symbol_id)
+                    .copied()
+                    .unwrap_or(0.5)
+                    .clamp(0.0, 1.0);
+                let surprise = neuro.surprise.get(symbol_id).copied().unwrap_or(0.0);
+                let weight = (1.0 / (1.0 + err)) * confidence as f64 * 0.4;
+                symbol_state.position.x += (pred.x - symbol_state.position.x) * weight;
+                symbol_state.position.y += (pred.y - symbol_state.position.y) * weight;
+                symbol_state.position.z += (pred.z - symbol_state.position.z) * weight * 0.5;
+                if surprise > 0.5 {
+                    let jitter = 0.01 * surprise.min(2.0);
+                    symbol_state.position.x += rng.gen_range(-jitter..jitter);
+                    symbol_state.position.y += rng.gen_range(-jitter..jitter);
+                }
+            }
+            if let Some(motif) = neuro.working_memory.last() {
+                // Treat working-memory motif as a soft relational hint.
+                let jitter = self.config.max_step_size.min(0.1);
+                let hash = blake2::Blake2s256::digest(motif.as_bytes());
+                let scale = (hash[0] as f64 / 255.0) * self.config.max_step_size * 0.2;
+                symbol_state.position.x += rng.gen_range(-jitter..jitter) * scale;
+                symbol_state.position.y += rng.gen_range(-jitter..jitter) * scale;
             }
         }
     }
@@ -682,9 +831,10 @@ impl DefaultProposalKernel {
         mut proposal: DynamicState,
         temperature: f64,
         rng: &mut StdRng,
+        cache: &SnapshotCache,
     ) -> DynamicState {
         let Some(search_module) = &self.search else {
-            return self.local_move(snapshot_0, proposal, temperature, rng);
+            return self.local_move(snapshot_0, proposal, temperature, rng, cache);
         };
         let Some((symbol_id, symbol_state)) = proposal
             .symbol_states
@@ -694,8 +844,8 @@ impl DefaultProposalKernel {
         else {
             return proposal;
         };
-        let Some(target) = self.target_position(snapshot_0, &symbol_id) else {
-            return self.local_move(snapshot_0, proposal, temperature, rng);
+        let Some(target) = self.target_position(cache, &symbol_id) else {
+            return self.local_move(snapshot_0, proposal, temperature, rng, cache);
         };
         let mut target_state = DynamicState {
             timestamp: proposal.timestamp,
@@ -711,7 +861,7 @@ impl DefaultProposalKernel {
         );
         let paths = search_module.compute_paths(snapshot_0, &target_state);
         let Some(path_result) = paths.get(&symbol_id) else {
-            return self.local_move(snapshot_0, proposal, temperature, rng);
+            return self.local_move(snapshot_0, proposal, temperature, rng, cache);
         };
         let Some(target_point) = next_path_point(path_result, &symbol_state.position) else {
             return proposal;
@@ -726,6 +876,7 @@ impl DefaultProposalKernel {
         state: &DynamicState,
         temperature: f64,
         rng: &mut StdRng,
+        cache: &SnapshotCache,
     ) -> DynamicState {
         let step_scale = self.step_scale(temperature);
         let mut proposal = state.clone();
@@ -738,7 +889,7 @@ impl DefaultProposalKernel {
                 dest.position.y = symbol_state.position.y + dy;
                 dest.position.z = symbol_state.position.z + dz;
                 if let Some(priors) = &self.relational_priors {
-                    self.apply_factor_bias(dest, Some(symbol_id), snapshot_0, priors, rng);
+                    self.apply_factor_bias(dest, Some(symbol_id), snapshot_0, priors, rng, cache);
                 }
             }
         }
@@ -751,6 +902,7 @@ impl DefaultProposalKernel {
         state: &DynamicState,
         temperature: f64,
         rng: &mut StdRng,
+        cache: &SnapshotCache,
     ) -> DynamicState {
         if state.symbol_states.is_empty() {
             return state.clone();
@@ -765,7 +917,7 @@ impl DefaultProposalKernel {
             }
         }
         if groups.is_empty() {
-            return self.local_move_parallel(snapshot_0, state, temperature, rng);
+            return self.local_move_parallel(snapshot_0, state, temperature, rng, cache);
         }
         let mut proposal = state.clone();
         let step_scale = self.step_scale(temperature);
@@ -782,7 +934,7 @@ impl DefaultProposalKernel {
                     dest.position.y = original.position.y + dy;
                     dest.position.z = original.position.z + dz;
                     if let Some(priors) = &self.relational_priors {
-                        self.apply_factor_bias(dest, Some(member_id), snapshot_0, priors, rng);
+                        self.apply_factor_bias(dest, Some(member_id), snapshot_0, priors, rng, cache);
                     }
                 }
             }
@@ -824,16 +976,17 @@ impl DefaultProposalKernel {
         state: &DynamicState,
         temperature: f64,
         rng: &mut StdRng,
+        cache: &SnapshotCache,
     ) -> DynamicState {
         let Some(search_module) = &self.search else {
-            return self.local_move_parallel(snapshot_0, state, temperature, rng);
+            return self.local_move_parallel(snapshot_0, state, temperature, rng, cache);
         };
         let mut target_state = DynamicState {
             timestamp: state.timestamp,
             symbol_states: HashMap::new(),
         };
         for symbol_id in state.symbol_states.keys() {
-            if let Some(target) = self.target_position(snapshot_0, symbol_id) {
+            if let Some(target) = self.target_position(cache, symbol_id) {
                 target_state.symbol_states.insert(
                     symbol_id.clone(),
                     SymbolState {
@@ -965,48 +1118,11 @@ impl DefaultProposalKernel {
         (local, group, swap, path, global, ml_guided)
     }
 
-    fn target_position(
-        &self,
-        snapshot_0: &EnvironmentSnapshot,
-        symbol_id: &str,
-    ) -> Option<Position> {
-        let symbol = snapshot_0.symbols.iter().find(|s| s.id == symbol_id)?;
-        symbol
-            .properties
-            .get("goal_position")
-            .and_then(value_to_position)
-            .or_else(|| symbol.properties.get("goal").and_then(value_to_position))
-            .or_else(|| {
-                symbol
-                    .properties
-                    .get("goal_id")
-                    .and_then(|value| value.as_str())
-                    .and_then(|goal_id| {
-                        snapshot_0
-                            .symbols
-                            .iter()
-                            .find(|candidate| candidate.id == goal_id)
-                    })
-                    .map(|goal_symbol| goal_symbol.position)
-            })
-            .or_else(|| self.nearest_exit_position(snapshot_0, &symbol.position))
-    }
-
-    fn nearest_exit_position(
-        &self,
-        snapshot_0: &EnvironmentSnapshot,
-        origin: &Position,
-    ) -> Option<Position> {
-        snapshot_0
+    fn target_position(&self, cache: &SnapshotCache, symbol_id: &str) -> Option<Position> {
+        cache
             .symbols
-            .iter()
-            .filter(|symbol| matches!(symbol.symbol_type, SymbolType::Exit))
-            .min_by(|a, b| {
-                distance(&a.position, origin)
-                    .partial_cmp(&distance(&b.position, origin))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|exit| exit.position)
+            .get(symbol_id)
+            .and_then(|symbol| symbol.target_position)
     }
 }
 
@@ -1077,6 +1193,17 @@ fn distance(a: &Position, b: &Position) -> f64 {
     let dy = a.y - b.y;
     let dz = a.z - b.z;
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn nearest_exit_position_from_list(origin: &Position, exits: &[Position]) -> Option<Position> {
+    exits
+        .iter()
+        .min_by(|a, b| {
+            distance(a, origin)
+                .partial_cmp(&distance(b, origin))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
 }
 
 fn next_path_point(path_result: &PathResult, current: &Position) -> Option<Position> {

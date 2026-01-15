@@ -55,6 +55,18 @@ pub struct NeuroRuntimeConfig {
     pub module_threshold: u64,
     /// Soft cap on the number of emergent networks to avoid unbounded growth.
     pub max_networks: usize,
+    /// Exponential smoothing factor for temporal velocity estimates.
+    pub prediction_smoothing: f32,
+    /// How many steps ahead to extrapolate temporal predictions.
+    pub prediction_horizon: usize,
+    /// Pull strength toward temporal predictions in the proposal kernel.
+    pub prediction_pull: f64,
+    /// Scale for curiosity-driven plasticity (uses surprise to adapt connections).
+    pub curiosity_strength: f32,
+    /// Working-memory capacity (recent motifs/contexts).
+    pub working_memory: usize,
+    /// Pull strength from working-memory motifs.
+    pub working_memory_pull: f64,
 }
 
 impl Default for NeuroRuntimeConfig {
@@ -65,6 +77,12 @@ impl Default for NeuroRuntimeConfig {
             neuro: NeuroConfig::default(),
             module_threshold: 40,
             max_networks: 256,
+            prediction_smoothing: 0.3,
+            prediction_horizon: 2,
+            prediction_pull: 0.18,
+            curiosity_strength: 0.05,
+            working_memory: 6,
+            working_memory_pull: 0.08,
         }
     }
 }
@@ -338,7 +356,7 @@ pub struct NeuralNetwork {
     pub inhibits: HashMap<u32, f32>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct NeuralNetworkSnapshot {
     pub label: String,
     pub members: Vec<String>,
@@ -346,13 +364,19 @@ pub struct NeuralNetworkSnapshot {
     pub level: u8,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct NeuroSnapshot {
     pub active_labels: HashSet<String>,
     pub active_composites: HashSet<String>,
     pub active_networks: Vec<NeuralNetworkSnapshot>,
     pub centroids: HashMap<String, Position>,
     pub network_links: HashMap<String, HashMap<String, f32>>,
+    pub temporal_predictions: HashMap<String, Position>,
+    pub prediction_error: HashMap<String, f64>,
+    pub prediction_confidence: HashMap<String, f64>,
+    pub surprise: HashMap<String, f64>,
+    pub working_memory: Vec<String>,
+    pub temporal_motif_priors: HashMap<String, f64>,
 }
 
 impl NeuroSnapshot {
@@ -361,6 +385,12 @@ impl NeuroSnapshot {
             && self.active_composites.is_empty()
             && self.active_networks.is_empty()
             && self.centroids.is_empty()
+            && self.temporal_predictions.is_empty()
+            && self.prediction_error.is_empty()
+            && self.prediction_confidence.is_empty()
+            && self.surprise.is_empty()
+            && self.working_memory.is_empty()
+            && self.temporal_motif_priors.is_empty()
     }
 }
 
@@ -401,6 +431,11 @@ struct NeuroState {
     label_to_network: HashMap<String, u32>,
     positions: HashMap<String, PositionAccumulator>,
     network_cooccur: HashMap<(u32, u32), u64>,
+    last_positions: HashMap<String, Position>,
+    velocities: HashMap<String, Position>,
+    prediction_error: HashMap<String, f64>,
+    working_memory: Vec<String>,
+    temporal_motif_counts: HashMap<String, u64>,
 }
 
 impl NeuroState {
@@ -411,6 +446,11 @@ impl NeuroState {
             label_to_network: HashMap::new(),
             positions: HashMap::new(),
             network_cooccur: HashMap::new(),
+            last_positions: HashMap::new(),
+            velocities: HashMap::new(),
+            prediction_error: HashMap::new(),
+            working_memory: Vec::new(),
+            temporal_motif_counts: HashMap::new(),
         }
     }
 
@@ -422,10 +462,16 @@ impl NeuroState {
         module_threshold: u64,
         max_networks: usize,
         decay: f32,
+        prediction_smoothing: f32,
+        prediction_horizon: usize,
+        curiosity_strength: f32,
+        working_capacity: usize,
     ) {
+        let mut observed: HashSet<String> = HashSet::with_capacity(state.symbol_states.len());
         let mut labels: Vec<String> = Vec::with_capacity(state.symbol_states.len() * 5 + 2);
         let mut zone_map: HashMap<String, Vec<u32>> = HashMap::new();
         for (symbol_id, symbol_state) in &state.symbol_states {
+            observed.insert(symbol_id.clone());
             labels.push(format!("id::{symbol_id}"));
             labels.push(zone_label(&symbol_state.position));
             self.bump_position(&format!("id::{symbol_id}"), &symbol_state.position);
@@ -463,6 +509,7 @@ impl NeuroState {
                 .entry(zone_label(&symbol_state.position))
                 .or_default()
                 .push(id_idx);
+            self.update_temporal(symbol_id, &symbol_state.position, prediction_smoothing);
         }
         if !labels.is_empty() {
             let mut motif = labels
@@ -485,6 +532,9 @@ impl NeuroState {
         self.refresh_network_strengths(min_activation, decay);
         self.promote_super_networks(module_threshold, max_networks, min_activation);
         self.refresh_cross_links(min_activation);
+        self.apply_curiosity(curiosity_strength, &observed);
+        self.update_working_memory(&labels, working_capacity);
+        self.prune_temporal(prediction_horizon, &observed);
     }
 
     fn bump_position(&mut self, label: &str, pos: &Position) {
@@ -577,7 +627,7 @@ impl NeuroState {
         }
     }
 
-    fn snapshot(&self, min_activation: f32) -> NeuroSnapshot {
+    fn snapshot(&self, min_activation: f32, prediction_horizon: usize) -> NeuroSnapshot {
         let active_labels = self.pool.active_labels(min_activation);
         let active_composites = active_labels
             .iter()
@@ -621,12 +671,137 @@ impl NeuroState {
                 network_links.insert(net.label.clone(), links);
             }
         }
+        let mut temporal_predictions = HashMap::new();
+        for (symbol_id, last_pos) in &self.last_positions {
+            if let Some(vel) = self.velocities.get(symbol_id) {
+                let horizon = prediction_horizon.max(1) as f64;
+                let predicted = Position {
+                    x: last_pos.x + vel.x * horizon,
+                    y: last_pos.y + vel.y * horizon,
+                    z: last_pos.z + vel.z * horizon,
+                };
+                temporal_predictions.insert(symbol_id.clone(), predicted);
+            }
+        }
+        let prediction_error = self.prediction_error.clone();
+        let prediction_confidence = self
+            .prediction_error
+            .iter()
+            .map(|(k, err)| (k.clone(), 1.0 / (1.0 + *err)))
+            .collect::<HashMap<_, _>>();
+        let surprise = self
+            .prediction_error
+            .iter()
+            .map(|(k, err)| (k.clone(), (*err).min(5.0)))
+            .collect::<HashMap<_, _>>();
+        let total_motifs: u64 = self.temporal_motif_counts.values().sum();
+        let temporal_motif_priors = if total_motifs > 0 {
+            self.temporal_motif_counts
+                .iter()
+                .map(|(k, v)| (k.clone(), *v as f64 / total_motifs as f64))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         NeuroSnapshot {
             active_labels,
             active_composites,
             active_networks,
             centroids,
             network_links,
+            temporal_predictions,
+            prediction_error,
+            prediction_confidence,
+            surprise,
+            working_memory: self.working_memory.clone(),
+            temporal_motif_priors,
+        }
+    }
+
+    fn update_temporal(&mut self, symbol_id: &str, pos: &Position, smoothing: f32) {
+        let last = self.last_positions.get(symbol_id).cloned();
+        let vel = self
+            .velocities
+            .entry(symbol_id.to_string())
+            .or_insert_with(Position::default);
+        let alpha = smoothing.clamp(0.0, 1.0) as f64;
+        if let Some(last_pos) = last {
+            let dx = pos.x - last_pos.x;
+            let dy = pos.y - last_pos.y;
+            let dz = pos.z - last_pos.z;
+            vel.x = vel.x * (1.0 - alpha) + dx * alpha;
+            vel.y = vel.y * (1.0 - alpha) + dy * alpha;
+            vel.z = vel.z * (1.0 - alpha) + dz * alpha;
+            let err = (dx * dx + dy * dy + dz * dz).sqrt();
+            let entry = self
+                .prediction_error
+                .entry(symbol_id.to_string())
+                .or_insert(0.0);
+            *entry = *entry * (1.0 - alpha) + err * alpha;
+        } else {
+            vel.x = 0.0;
+            vel.y = 0.0;
+            vel.z = 0.0;
+            self.prediction_error
+                .entry(symbol_id.to_string())
+                .or_insert(0.0);
+        }
+        self.last_positions.insert(symbol_id.to_string(), *pos);
+    }
+
+    fn prune_temporal(&mut self, _horizon: usize, observed: &HashSet<String>) {
+        // Drop stale entries not seen in this step.
+        self.last_positions.retain(|k, _| observed.contains(k));
+        self.velocities.retain(|k, _| observed.contains(k));
+        self.prediction_error.retain(|k, _| observed.contains(k));
+    }
+
+    fn update_working_memory(&mut self, labels: &[String], capacity: usize) {
+        if capacity == 0 {
+            self.working_memory.clear();
+            return;
+        }
+        let mut motif = labels
+            .iter()
+            .filter(|l| {
+                l.starts_with("role::") || l.starts_with("group::") || l.starts_with("zone::")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        motif.sort();
+        motif.dedup();
+        if motif.is_empty() {
+            return;
+        }
+        let motif_label = format!("wm::{}", motif.join("|"));
+        self.working_memory.push(motif_label.clone());
+        if self.working_memory.len() > capacity {
+            let overflow = self.working_memory.len() - capacity;
+            self.working_memory.drain(0..overflow);
+        }
+        *self.temporal_motif_counts.entry(motif_label).or_insert(0) += 1;
+    }
+
+    fn apply_curiosity(&mut self, strength: f32, observed: &HashSet<String>) {
+        if strength <= 0.0 {
+            return;
+        }
+        for symbol_id in observed {
+            let surprise = *self.prediction_error.get(symbol_id).unwrap_or(&0.0);
+            if surprise <= 0.1 {
+                continue;
+            }
+            let label = format!("id::{symbol_id}");
+            let zone = self
+                .last_positions
+                .get(symbol_id)
+                .map(zone_label)
+                .unwrap_or_else(|| "zone::0,0".to_string());
+            let a = self.pool.get_or_create(&label);
+            let b = self.pool.get_or_create(&zone);
+            let scaled = strength * surprise.min(3.0) as f32;
+            self.pool
+                .hebbian_pair(a, b, self.pool.config.excitatory_scale * scaled, false);
         }
     }
 
@@ -793,6 +968,10 @@ impl NeuroRuntime {
                 self.config.module_threshold,
                 self.config.max_networks,
                 self.config.neuro.decay,
+                self.config.prediction_smoothing,
+                self.config.prediction_horizon,
+                self.config.curiosity_strength,
+                self.config.working_memory,
             );
         }
     }
@@ -802,7 +981,7 @@ impl NeuroRuntime {
             return NeuroSnapshot::default();
         }
         let guard = self.inner.lock();
-        guard.snapshot(self.config.min_activation)
+        guard.snapshot(self.config.min_activation, self.config.prediction_horizon)
     }
 }
 

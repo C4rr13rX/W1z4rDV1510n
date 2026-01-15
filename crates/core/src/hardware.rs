@@ -924,6 +924,12 @@ pub fn create_hardware_backend(
         }
         HardwareBackendType::Distributed => {
             let chunk = distributed_chunk_size(profile.cpu_cores, profile.total_memory_gb);
+            info!(
+                target: "w1z4rdv1510n::hardware",
+                nodes = profile.cpu_cores.max(2),
+                chunk,
+                "distributed backend runs locally (threaded segmentation only; no remote workers)"
+            );
             (
                 Arc::new(DistributedBackend::new(
                     seed,

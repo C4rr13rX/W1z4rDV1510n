@@ -1,5 +1,6 @@
 use crate::hardware::HardwareBackendType;
 use parking_lot::Mutex;
+use rand::random;
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,6 +56,7 @@ struct ServiceStats {
 pub struct ServiceMetrics {
     inner: Arc<Mutex<ServiceStats>>,
     next_run_id: Arc<AtomicU64>,
+    run_id_salt: u32,
 }
 
 impl ServiceMetrics {
@@ -69,11 +71,13 @@ impl ServiceMetrics {
                 last_error: None,
             })),
             next_run_id: Arc::new(AtomicU64::new(1)),
+            run_id_salt: random::<u32>(),
         }
     }
 
     pub fn start_request(&self) -> RequestHandle {
-        let run_id = self.next_run_id.fetch_add(1, Ordering::Relaxed);
+        let seq = self.next_run_id.fetch_add(1, Ordering::Relaxed);
+        let run_id = generate_run_id(self.run_id_salt, seq);
         {
             let mut stats = self.inner.lock();
             stats.total_requests += 1;
@@ -205,6 +209,11 @@ impl Default for ServiceMetrics {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn generate_run_id(salt: u32, seq: u64) -> u64 {
+    let now = now_unix_secs();
+    (now << 32) ^ ((salt as u64) << 16) ^ (seq & 0xFFFF_FFFF)
 }
 
 #[cfg(test)]

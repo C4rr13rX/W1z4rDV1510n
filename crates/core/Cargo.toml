@@ -51,6 +51,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security"
 ] }
 futures = "0.3"
+chess = "3.2"
 bytemuck = { version = "1.15", optional = true, features = ["derive"] }
 wgpu = { version = "0.20", optional = true, features = ["wgsl"] }
 pollster = { version = "0.3", optional = true }

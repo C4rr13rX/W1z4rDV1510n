@@ -1,6 +1,7 @@
 use crate::config::{AnnealingScheduleConfig, HomeostasisConfig, ResampleConfig, ScheduleType};
 use crate::energy::EnergyModel;
 use crate::hardware::HardwareBackendHandle;
+use crate::logging::{LiveFrameSink, LiveNeuroSink};
 use crate::neuro::NeuroRuntimeHandle;
 use crate::proposal::ProposalKernel;
 use crate::schema::{EnvironmentSnapshot, Population};
@@ -9,6 +10,7 @@ use crate::state_population::{clone_and_mutate, normalize_weights, resample_popu
 use parking_lot::Mutex;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::cmp::Ordering;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -27,6 +29,8 @@ pub fn anneal(
     hardware_backend: &HardwareBackendHandle,
     neuro: Option<NeuroRuntimeHandle>,
     homeostasis: &HomeostasisConfig,
+    live_frame: Option<&LiveFrameSink>,
+    live_neuro: Option<&LiveNeuroSink>,
     rng: &mut StdRng,
 ) -> (Population, Vec<f64>, Vec<f64>) {
     let mut energy_trace = Vec::with_capacity(schedule.n_iterations);
@@ -49,6 +53,9 @@ pub fn anneal(
         let (temperature, boosted) = homeo_state.effective_temperature(base_temperature);
         population.temperature = temperature;
         population.iteration = iteration;
+        let enforce_constraints = search_module
+            .map(|module| iteration % module.config.constraint_check_every.max(1) == 0)
+            .unwrap_or(false);
         let particle_seeds: Vec<u64> = (0..population.particles.len())
             .map(|_| rng.r#gen())
             .collect();
@@ -58,12 +65,14 @@ pub fn anneal(
             move |particle: &mut crate::schema::ParticleState| {
                 let mut local_rng = StdRng::seed_from_u64(particle_seeds[particle.id]);
                 let mut proposal = kernel.propose(snapshot_0, &particle.current_state, temperature);
-                if let Some(search) = search_module {
-                    search.enforce_hard_constraints(
-                        snapshot_0,
-                        &mut proposal,
-                        Some(hardware_backend.as_ref()),
-                    );
+                if enforce_constraints {
+                    if let Some(search) = search_module {
+                        search.enforce_hard_constraints(
+                            snapshot_0,
+                            &mut proposal,
+                            Some(hardware_backend.as_ref()),
+                        );
+                    }
                 }
                 let new_energy = energy_model.energy(&proposal);
                 let accept_prob = acceptance_probability(particle.energy, new_energy, temperature);
@@ -105,6 +114,19 @@ pub fn anneal(
             .iter()
             .map(|p| p.energy)
             .fold(f64::INFINITY, f64::min);
+        if let Some(sink) = live_frame {
+            if let Some(best) = population
+                .particles
+                .iter()
+                .min_by(|a, b| a.energy.partial_cmp(&b.energy).unwrap_or(Ordering::Equal))
+            {
+                sink.write_frame(iteration, best.energy, &best.current_state);
+            }
+        }
+        if let (Some(neuro_runtime), Some(neuro_sink)) = (neuro.as_ref(), live_neuro) {
+            let snapshot = neuro_runtime.snapshot();
+            neuro_sink.write_snapshot(iteration, &snapshot);
+        }
         energy_trace.push(min_energy);
         let accepted_count = *accepted_counter.lock();
         let acceptance_ratio = if population.particles.is_empty() {

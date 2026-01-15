@@ -1,6 +1,7 @@
 use crate::config::EnergyConfig;
 use crate::ml::MlModelHandle;
 use crate::neuro::{NeuroRuntimeHandle, NeuroSnapshot, zone_label};
+use crate::objective::{GameObjective, ObjectiveOutcome};
 use crate::schema::{
     DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType, Timestamp,
 };
@@ -66,6 +67,7 @@ pub struct SymbolEnergyBreakdown {
     pub stack: f64,
     pub relational_prior: f64,
     pub motif_transition: f64,
+    pub objective: f64,
 }
 
 impl SymbolEnergyBreakdown {
@@ -81,6 +83,7 @@ impl SymbolEnergyBreakdown {
             + self.stack
             + self.relational_prior
             + self.motif_transition
+            + self.objective
     }
 
     fn add(&mut self, term: EnergyTerm, value: f64) {
@@ -96,6 +99,7 @@ impl SymbolEnergyBreakdown {
             EnergyTerm::Stack => self.stack += value,
             EnergyTerm::RelationalPrior => self.relational_prior += value,
             EnergyTerm::MotifTransition => self.motif_transition += value,
+            EnergyTerm::Objective => self.objective += value,
         }
     }
 }
@@ -113,6 +117,7 @@ pub struct TermEnergyTotals {
     pub stack: f64,
     pub relational_prior: f64,
     pub motif_transition: f64,
+    pub objective: f64,
 }
 
 impl TermEnergyTotals {
@@ -129,6 +134,7 @@ impl TermEnergyTotals {
             EnergyTerm::Stack => self.stack += value,
             EnergyTerm::RelationalPrior => self.relational_prior += value,
             EnergyTerm::MotifTransition => self.motif_transition += value,
+            EnergyTerm::Objective => self.objective += value,
         }
     }
 }
@@ -146,6 +152,7 @@ enum EnergyTerm {
     Stack,
     RelationalPrior,
     MotifTransition,
+    Objective,
 }
 
 #[derive(Default)]
@@ -224,6 +231,14 @@ impl WallPrimitive {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SymbolMeta {
+    role: String,
+    group: String,
+    domain: String,
+    radius: f64,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RelationalPriors {
     motif_probs: HashMap<String, f64>,
@@ -297,6 +312,10 @@ fn symbol_role(symbol: &Symbol) -> String {
     }
 }
 
+fn symbol_radius_from_symbol(symbol: &Symbol) -> f64 {
+    property_as_f64(symbol, &["radius", "collision_radius", "size"]).unwrap_or(0.5)
+}
+
 fn symbol_group(symbol: &Symbol) -> String {
     if let Some(Value::String(side)) = symbol.properties.get("side") {
         return side.to_lowercase();
@@ -314,15 +333,20 @@ fn symbol_domain(symbol: &Symbol) -> String {
     "global".to_string()
 }
 
-fn relational_signature(state: &DynamicState, lookup: &HashMap<String, Symbol>) -> Vec<String> {
+fn relational_signature(
+    state: &DynamicState,
+    meta: &HashMap<String, SymbolMeta>,
+) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     // unary
     for (symbol_id, symbol_state) in state.symbol_states.iter() {
-        if let Some(symbol) = lookup.get(symbol_id) {
-            let role = symbol_role(symbol);
-            let group = symbol_group(symbol);
+        if let Some(symbol_meta) = meta.get(symbol_id) {
             let (bx, by) = zone_bin(&symbol_state.position);
-            tokens.push(format!("u:{role}:{group}:{bx}{by}"));
+            tokens.push(format!(
+                "u:{}:{}:{bx}{by}",
+                symbol_meta.role.as_str(),
+                symbol_meta.group.as_str()
+            ));
         } else {
             let (bx, by) = zone_bin(&symbol_state.position);
             tokens.push(format!("u:UNK:neutral:{bx}{by}"));
@@ -347,11 +371,14 @@ fn relational_signature(state: &DynamicState, lookup: &HashMap<String, Symbol>) 
     tokens
 }
 
-fn motif_hash_from_state(state: &DynamicState, lookup: &HashMap<String, Symbol>) -> Option<String> {
+fn motif_hash_from_state(
+    state: &DynamicState,
+    meta: &HashMap<String, SymbolMeta>,
+) -> Option<String> {
     if state.symbol_states.is_empty() {
         return None;
     }
-    let parts = relational_signature(state, lookup);
+    let parts = relational_signature(state, meta);
     if parts.is_empty() {
         None
     } else {
@@ -361,11 +388,11 @@ fn motif_hash_from_state(state: &DynamicState, lookup: &HashMap<String, Symbol>)
 
 fn hierarchical_motif_hash(
     state: &DynamicState,
-    lookup: &HashMap<String, Symbol>,
+    meta: &HashMap<String, SymbolMeta>,
     neuro: Option<&NeuroSnapshot>,
 ) -> Option<String> {
     let mut tokens = Vec::new();
-    if let Some(base) = motif_hash_from_state(state, lookup) {
+    if let Some(base) = motif_hash_from_state(state, meta) {
         tokens.push(base);
     }
     if let Some(ns) = neuro {
@@ -386,6 +413,7 @@ pub struct EnergyModel {
     snapshot_0: Arc<EnvironmentSnapshot>,
     config: EnergyConfig,
     symbol_lookup: HashMap<String, Symbol>,
+    symbol_meta: HashMap<String, SymbolMeta>,
     exit_symbols: Vec<Symbol>,
     stack_history: Vec<DynamicState>,
     stack_motif_hashes: Vec<String>,
@@ -398,6 +426,7 @@ pub struct EnergyModel {
     tensor_executor: Option<TensorExecutorHandle>,
     relational_priors: Option<RelationalPriors>,
     neuro_runtime: Option<NeuroRuntimeHandle>,
+    objective: Option<GameObjective>,
 }
 
 impl EnergyModel {
@@ -409,12 +438,28 @@ impl EnergyModel {
         target_time: Timestamp,
         tensor_executor: Option<TensorExecutorHandle>,
         neuro_runtime: Option<NeuroRuntimeHandle>,
+        objective: Option<GameObjective>,
     ) -> Self {
         let symbol_lookup = snapshot_0
             .symbols
             .iter()
             .cloned()
             .map(|symbol| (symbol.id.clone(), symbol))
+            .collect::<HashMap<_, _>>();
+        let symbol_meta = snapshot_0
+            .symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.id.clone(),
+                    SymbolMeta {
+                        role: symbol_role(symbol),
+                        group: symbol_group(symbol),
+                        domain: symbol_domain(symbol),
+                        radius: symbol_radius_from_symbol(symbol),
+                    },
+                )
+            })
             .collect::<HashMap<_, _>>();
         let exit_symbols = snapshot_0
             .symbols
@@ -425,7 +470,7 @@ impl EnergyModel {
         let stack_history = snapshot_0.stack_history.clone();
         let stack_motif_hashes = stack_history
             .iter()
-            .filter_map(|s| motif_hash_from_state(s, &symbol_lookup))
+            .filter_map(|s| motif_hash_from_state(s, &symbol_meta))
             .collect::<Vec<_>>();
         let stack_hash = if stack_history.is_empty() {
             None
@@ -451,6 +496,7 @@ impl EnergyModel {
             snapshot_0,
             config,
             symbol_lookup,
+            symbol_meta,
             exit_symbols,
             stack_history,
             stack_motif_hashes,
@@ -463,6 +509,7 @@ impl EnergyModel {
             tensor_executor,
             relational_priors,
             neuro_runtime,
+            objective,
         }
     }
 
@@ -578,6 +625,16 @@ impl EnergyModel {
                 EnergyTerm::MotifTransition,
                 cfg.w_motif_transition,
                 self.motif_transition_term(dynamic_state),
+            );
+        }
+        if cfg.w_objective > 0.0 {
+            self.accumulate_term(
+                &mut per_symbol,
+                &mut per_term,
+                &mut total,
+                EnergyTerm::Objective,
+                cfg.w_objective,
+                self.objective_term(dynamic_state),
             );
         }
 
@@ -921,13 +978,13 @@ impl EnergyModel {
                 format!("id::{symbol_id}"),
                 zone_label(&symbol_state.position),
             ];
-            if let Some(symbol) = self.symbol_lookup.get(symbol_id) {
-                labels.push(format!("role::{}", symbol_role(symbol)));
-                labels.push(format!("group::{}", symbol_group(symbol)));
-                labels.push(format!("domain::{}", symbol_domain(symbol)));
+            if let Some(symbol_meta) = self.symbol_meta.get(symbol_id) {
+                labels.push(format!("role::{}", symbol_meta.role.as_str()));
+                labels.push(format!("group::{}", symbol_meta.group.as_str()));
+                labels.push(format!("domain::{}", symbol_meta.domain.as_str()));
                 labels.push(format!(
                     "col::{}::{}",
-                    symbol_role(symbol),
+                    symbol_meta.role.as_str(),
                     zone_label(&symbol_state.position)
                 ));
             }
@@ -942,6 +999,19 @@ impl EnergyModel {
             }
             if penalty > 0.0 {
                 contribution.add_symbol(symbol_id, penalty);
+            }
+            if let Some(pred) = snapshot.temporal_predictions.get(symbol_id) {
+                let err = distance(&symbol_state.position, pred);
+                let conf = snapshot
+                    .prediction_confidence
+                    .get(symbol_id)
+                    .copied()
+                    .unwrap_or(0.5)
+                    .clamp(0.0, 1.0);
+                contribution.add_symbol(symbol_id, err * 0.1 * conf.max(0.1));
+            }
+            if let Some(surprise) = snapshot.surprise.get(symbol_id) {
+                contribution.add_symbol(symbol_id, surprise * 0.02);
             }
         }
         for net in &snapshot.active_networks {
@@ -983,6 +1053,23 @@ impl EnergyModel {
         contribution
     }
 
+    fn objective_term(&self, state: &DynamicState) -> TermContribution {
+        let mut contribution = TermContribution::default();
+        let Some(objective) = self.objective.as_ref() else {
+            return contribution;
+        };
+        let outcome: ObjectiveOutcome = objective.evaluate(state);
+        if outcome.win {
+            contribution.add_direct(-objective.reward());
+        } else {
+            contribution.add_direct(outcome.miss_cost * 0.5);
+        }
+        if outcome.step_penalty > 0.0 {
+            contribution.add_direct(outcome.step_penalty);
+        }
+        contribution
+    }
+
     fn motif_transition_term(&self, state: &DynamicState) -> TermContribution {
         let mut contribution = TermContribution::default();
         let Some(runtime) = self.neuro_runtime.as_ref() else {
@@ -992,7 +1079,7 @@ impl EnergyModel {
         if snapshot.active_networks.is_empty() || self.stack_history.is_empty() {
             return contribution;
         }
-        let curr_hash = motif_hash_from_state(state, &self.symbol_lookup);
+        let curr_hash = motif_hash_from_state(state, &self.symbol_meta);
         let history_window = self
             .stack_motif_hashes
             .iter()
@@ -1045,7 +1132,7 @@ impl EnergyModel {
         }
         let neuro_snapshot = self.neuro_runtime.as_ref().map(|n| n.snapshot());
         let motif_penalty = if let Some(hash) =
-            hierarchical_motif_hash(state, &self.symbol_lookup, neuro_snapshot.as_ref())
+            hierarchical_motif_hash(state, &self.symbol_meta, neuro_snapshot.as_ref())
         {
             let prob = priors
                 .motif_probs
@@ -1061,8 +1148,8 @@ impl EnergyModel {
         // transition-ish prior: compare current motif to previous frame if present
         if let Some(prev_frame) = self.stack_history.last() {
             if let (Some(prev_hash), Some(curr_hash)) = (
-                motif_hash_from_state(prev_frame, &self.symbol_lookup),
-                motif_hash_from_state(state, &self.symbol_lookup),
+                motif_hash_from_state(prev_frame, &self.symbol_meta),
+                motif_hash_from_state(state, &self.symbol_meta),
             ) {
                 let key = format!("{prev_hash}→{curr_hash}");
                 if let Some(p) = priors.transition_probs.get(&key) {
@@ -1087,13 +1174,13 @@ impl EnergyModel {
                         }
                     }
                 }
-                if let Some(symbol) = self.symbol_lookup.get(symbol_id) {
-                    let role = symbol_role(symbol);
-                    let group = symbol_group(symbol);
+                if let Some(symbol_meta) = self.symbol_meta.get(symbol_id) {
+                    let role = symbol_meta.role.as_str();
+                    let group = symbol_meta.group.as_str();
                     factor_penalty += -priors
                         .factor_probs
                         .get("role")
-                        .and_then(|m| m.get(&role))
+                        .and_then(|m| m.get(role))
                         .copied()
                         .unwrap_or(FACTOR_EPS)
                         .max(FACTOR_EPS)
@@ -1101,7 +1188,7 @@ impl EnergyModel {
                     factor_penalty += -priors
                         .factor_probs
                         .get("group")
-                        .and_then(|m| m.get(&group))
+                        .and_then(|m| m.get(group))
                         .copied()
                         .unwrap_or(FACTOR_EPS)
                         .max(FACTOR_EPS)
@@ -1123,7 +1210,7 @@ impl EnergyModel {
         }
         if self.config.w_super_network_prior > 0.0 {
             if let Some(hier_hash) =
-                hierarchical_motif_hash(state, &self.symbol_lookup, neuro_snapshot.as_ref())
+                hierarchical_motif_hash(state, &self.symbol_meta, neuro_snapshot.as_ref())
             {
                 if priors.transition_probs.contains_key(&hier_hash) {
                     for symbol_id in state.symbol_states.keys() {
@@ -1142,9 +1229,9 @@ impl EnergyModel {
     }
 
     fn symbol_radius(&self, symbol_id: &str) -> f64 {
-        self.symbol_lookup
+        self.symbol_meta
             .get(symbol_id)
-            .and_then(|symbol| property_as_f64(symbol, &["radius", "collision_radius", "size"]))
+            .map(|meta| meta.radius)
             .unwrap_or(0.5)
     }
 
@@ -1425,6 +1512,7 @@ mod tests {
             Timestamp { unix: 5 },
             None,
             None,
+            None,
         );
         let near_state = dynamic_with_pos(Position {
             x: 1.0,
@@ -1508,6 +1596,7 @@ mod tests {
             None,
             None,
             Timestamp { unix: 0 },
+            None,
             None,
             None,
         );

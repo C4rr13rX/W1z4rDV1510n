@@ -1,6 +1,7 @@
 use crate::hardware::HardwareBackendType;
 use crate::ml::MLBackendType;
 use crate::neuro::NeuroRuntimeConfig;
+use crate::objective::GameObjectiveConfig;
 use crate::proposal::ProposalConfig;
 use crate::random::RandomConfig;
 use crate::schema::Timestamp;
@@ -57,6 +58,20 @@ pub struct RunConfig {
     pub neuro: NeuroRuntimeConfig,
     #[serde(default)]
     pub homeostasis: HomeostasisConfig,
+    #[serde(default)]
+    pub objective: GameObjectiveConfig,
+    #[serde(default)]
+    pub streaming: StreamingConfig,
+    #[serde(default)]
+    pub compute: ComputeRoutingConfig,
+    #[serde(default)]
+    pub governance: GovernanceConfig,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
+    #[serde(default)]
+    pub ledger: LedgerConfig,
+    #[serde(default)]
+    pub blockchain: BlockchainConfig,
 }
 
 impl RunConfig {
@@ -80,7 +95,8 @@ impl RunConfig {
                 && self.energy.w_env_constraints >= 0.0
                 && self.energy.w_stack_hash >= 0.0
                 && self.energy.stack_alignment_weight >= 0.0
-                && self.energy.stack_future_weight >= 0.0,
+                && self.energy.stack_future_weight >= 0.0
+                && self.energy.w_objective >= 0.0,
             "energy weights must be non-negative"
         );
         anyhow::ensure!(
@@ -121,6 +137,10 @@ impl RunConfig {
         anyhow::ensure!(
             self.search.cell_size > 0.01,
             "search.cell_size must be > 0.01"
+        );
+        anyhow::ensure!(
+            self.search.constraint_check_every > 0,
+            "search.constraint_check_every must be > 0"
         );
         anyhow::ensure!(
             (0.0..=1.0).contains(&self.neuro.min_activation),
@@ -185,6 +205,60 @@ impl RunConfig {
             anyhow::ensure!(
                 self.hardware_backend != HardwareBackendType::Distributed,
                 "hardware_backend=DISTRIBUTED is not allowed when hardware_overrides.allow_distributed is false"
+            );
+        }
+        if matches!(self.mode, RunMode::Streaming) {
+            anyhow::ensure!(
+                self.streaming.enabled,
+                "streaming.enabled must be true when mode is STREAMING"
+            );
+        }
+        if self.streaming.enabled {
+            anyhow::ensure!(
+                self.streaming.temporal_tolerance_secs >= 0.0,
+                "streaming.temporal_tolerance_secs must be >= 0"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.streaming.confidence_gate),
+                "streaming.confidence_gate must be in [0,1]"
+            );
+            anyhow::ensure!(
+                self.streaming.ingest.enabled_source_count() > 0,
+                "streaming ingest must enable at least one source"
+            );
+        }
+        if self.compute.allow_quantum {
+            for endpoint in &self.compute.quantum_endpoints {
+                anyhow::ensure!(
+                    !endpoint.url.trim().is_empty(),
+                    "compute.quantum_endpoints url must be non-empty"
+                );
+            }
+        }
+        if self.blockchain.enabled {
+            anyhow::ensure!(
+                !self.blockchain.chain_id.trim().is_empty(),
+                "blockchain.chain_id must be non-empty when enabled"
+            );
+            anyhow::ensure!(
+                !self.blockchain.consensus.trim().is_empty(),
+                "blockchain.consensus must be non-empty when enabled"
+            );
+            if self.blockchain.require_sensor_attestation {
+                anyhow::ensure!(
+                    !self.blockchain.attestation.endpoint.trim().is_empty(),
+                    "blockchain.attestation.endpoint must be set when sensor attestation is required"
+                );
+            }
+        }
+        if self.governance.enforce_public_only {
+            anyhow::ensure!(
+                self.governance.disable_face_id,
+                "governance.disable_face_id must be true when enforce_public_only is set"
+            );
+            anyhow::ensure!(
+                self.governance.disable_pii,
+                "governance.disable_pii must be true when enforce_public_only is set"
             );
         }
         Ok(())
@@ -297,6 +371,9 @@ pub struct EnergyConfig {
     /// Internal scale for pulling the state toward the future frame of the matched history (gap-filling / forecasting).
     #[serde(default = "EnergyConfig::default_stack_future_weight")]
     pub stack_future_weight: f64,
+    /// Weight for game-objective scoring (win/step penalties).
+    #[serde(default)]
+    pub w_objective: f64,
     #[serde(default)]
     pub other_terms: HashMap<String, f64>,
 }
@@ -322,6 +399,7 @@ impl Default for EnergyConfig {
             stack_future_horizon: EnergyConfig::default_stack_future_horizon(),
             stack_alignment_weight: EnergyConfig::default_stack_alignment_weight(),
             stack_future_weight: EnergyConfig::default_stack_future_weight(),
+            w_objective: 0.0,
             other_terms: HashMap::new(),
         }
     }
@@ -448,11 +526,27 @@ pub struct LoggingConfig {
     pub json: bool,
     #[serde(default)]
     pub capture_metrics: bool,
+    #[serde(default)]
+    pub live_frame_path: Option<PathBuf>,
+    #[serde(default = "LoggingConfig::default_live_frame_every")]
+    pub live_frame_every: usize,
+    #[serde(default)]
+    pub live_neuro_path: Option<PathBuf>,
+    #[serde(default = "LoggingConfig::default_live_neuro_every")]
+    pub live_neuro_every: usize,
 }
 
 impl LoggingConfig {
     fn default_level() -> String {
         "INFO".to_string()
+    }
+
+    fn default_live_frame_every() -> usize {
+        1
+    }
+
+    fn default_live_neuro_every() -> usize {
+        1
     }
 }
 
@@ -463,6 +557,10 @@ impl Default for LoggingConfig {
             log_path: None,
             json: false,
             capture_metrics: false,
+            live_frame_path: None,
+            live_frame_every: Self::default_live_frame_every(),
+            live_neuro_path: None,
+            live_neuro_every: Self::default_live_neuro_every(),
         }
     }
 }
@@ -559,11 +657,395 @@ impl Default for HardwareOverrides {
 pub enum RunMode {
     Production,
     LabExperimental,
+    Streaming,
 }
 
 impl Default for RunMode {
     fn default() -> Self {
         RunMode::Production
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingConfig {
+    pub enabled: bool,
+    pub ingest: StreamingIngestConfig,
+    /// Temporal alignment tolerance for token/layer fusion in seconds.
+    pub temporal_tolerance_secs: f64,
+    /// Confidence gate used for per-modality fusion in [0,1].
+    pub confidence_gate: f64,
+    #[serde(default)]
+    pub layer_flags: StreamingLayerFlags,
+    #[serde(default)]
+    pub branching: BranchingFuturesConfig,
+    #[serde(default)]
+    pub causal: CausalDiscoveryConfig,
+    #[serde(default)]
+    pub consistency: ConsistencyChunkingConfig,
+    #[serde(default)]
+    pub plasticity: OnlinePlasticityConfig,
+    #[serde(default)]
+    pub ontology: OntologyConfig,
+}
+
+impl Default for StreamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ingest: StreamingIngestConfig::default(),
+            temporal_tolerance_secs: 2.0,
+            confidence_gate: 0.5,
+            layer_flags: StreamingLayerFlags::default(),
+            branching: BranchingFuturesConfig::default(),
+            causal: CausalDiscoveryConfig::default(),
+            consistency: ConsistencyChunkingConfig::default(),
+            plasticity: OnlinePlasticityConfig::default(),
+            ontology: OntologyConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingIngestConfig {
+    pub people_video: bool,
+    pub crowd_traffic: bool,
+    pub public_topics: bool,
+}
+
+impl StreamingIngestConfig {
+    fn enabled_source_count(&self) -> usize {
+        self.people_video as usize + self.crowd_traffic as usize + self.public_topics as usize
+    }
+}
+
+impl Default for StreamingIngestConfig {
+    fn default() -> Self {
+        Self {
+            people_video: false,
+            crowd_traffic: false,
+            public_topics: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingLayerFlags {
+    pub ultradian_enabled: bool,
+    pub flow_enabled: bool,
+    pub topic_event_enabled: bool,
+    pub physiology_enabled: bool,
+}
+
+impl Default for StreamingLayerFlags {
+    fn default() -> Self {
+        Self {
+            ultradian_enabled: false,
+            flow_enabled: true,
+            topic_event_enabled: true,
+            physiology_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BranchingFuturesConfig {
+    pub enabled: bool,
+    pub max_branches: usize,
+    pub max_depth: usize,
+    pub retrodiction_enabled: bool,
+}
+
+impl Default for BranchingFuturesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_branches: 64,
+            max_depth: 6,
+            retrodiction_enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CausalDiscoveryConfig {
+    pub enabled: bool,
+    pub max_lag_secs: f64,
+    pub intervention_enabled: bool,
+}
+
+impl Default for CausalDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_lag_secs: 3600.0,
+            intervention_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConsistencyChunkingConfig {
+    pub enabled: bool,
+    pub novelty_threshold: f64,
+    pub uncertainty_threshold: f64,
+    pub min_support: usize,
+}
+
+impl Default for ConsistencyChunkingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            novelty_threshold: 0.6,
+            uncertainty_threshold: 0.5,
+            min_support: 32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OnlinePlasticityConfig {
+    pub enabled: bool,
+    pub surprise_threshold: f64,
+    pub trust_region: f64,
+    pub ema_teacher_alpha: f64,
+}
+
+impl Default for OnlinePlasticityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            surprise_threshold: 0.7,
+            trust_region: 0.1,
+            ema_teacher_alpha: 0.98,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OntologyConfig {
+    pub enabled: bool,
+    pub window_minutes: usize,
+    pub version_prefix: String,
+}
+
+impl Default for OntologyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_minutes: 60,
+            version_prefix: "v".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputeRoutingConfig {
+    pub allow_gpu: bool,
+    pub allow_quantum: bool,
+    pub quantum_endpoints: Vec<QuantumEndpointConfig>,
+}
+
+impl Default for ComputeRoutingConfig {
+    fn default() -> Self {
+        Self {
+            allow_gpu: true,
+            allow_quantum: false,
+            quantum_endpoints: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumEndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub timeout_secs: u64,
+}
+
+impl Default for QuantumEndpointConfig {
+    fn default() -> Self {
+        Self {
+            name: "default".to_string(),
+            url: String::new(),
+            timeout_secs: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GovernanceConfig {
+    pub disable_face_id: bool,
+    pub disable_pii: bool,
+    pub enforce_public_only: bool,
+    pub immutable_audit_logs: bool,
+    pub explainability_on: bool,
+    pub disable_high_risk_interventions: bool,
+    pub federated_learning_enabled: bool,
+    pub dp_enabled: bool,
+}
+
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        Self {
+            disable_face_id: true,
+            disable_pii: true,
+            enforce_public_only: true,
+            immutable_audit_logs: true,
+            explainability_on: true,
+            disable_high_risk_interventions: true,
+            federated_learning_enabled: false,
+            dp_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClusterConfig {
+    pub enabled: bool,
+    pub mode: String,
+    pub min_nodes: usize,
+    pub openstack_minimal: bool,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "local".to_string(),
+            min_nodes: 1,
+            openstack_minimal: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LedgerConfig {
+    pub enabled: bool,
+    pub backend: String,
+    pub endpoint: String,
+}
+
+impl Default for LedgerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: "none".to_string(),
+            endpoint: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NodeRole {
+    Validator,
+    Worker,
+    Sensor,
+}
+
+impl Default for NodeRole {
+    fn default() -> Self {
+        NodeRole::Worker
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlockchainConfig {
+    pub enabled: bool,
+    pub chain_id: String,
+    pub consensus: String,
+    pub bootstrap_peers: Vec<String>,
+    #[serde(default)]
+    pub node_role: NodeRole,
+    #[serde(default)]
+    pub reward_policy: RewardPolicyConfig,
+    #[serde(default)]
+    pub energy_efficiency: EnergyEfficiencyConfig,
+    #[serde(default)]
+    pub attestation: SensorAttestationConfig,
+    #[serde(default)]
+    pub require_sensor_attestation: bool,
+}
+
+impl Default for BlockchainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chain_id: "w1z4rdv1510n".to_string(),
+            consensus: "poa".to_string(),
+            bootstrap_peers: Vec::new(),
+            node_role: NodeRole::default(),
+            reward_policy: RewardPolicyConfig::default(),
+            energy_efficiency: EnergyEfficiencyConfig::default(),
+            attestation: SensorAttestationConfig::default(),
+            require_sensor_attestation: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RewardPolicyConfig {
+    pub sensor_reward_weight: f64,
+    pub compute_reward_weight: f64,
+    pub energy_efficiency_weight: f64,
+    pub uptime_reward_weight: f64,
+}
+
+impl Default for RewardPolicyConfig {
+    fn default() -> Self {
+        Self {
+            sensor_reward_weight: 1.0,
+            compute_reward_weight: 1.0,
+            energy_efficiency_weight: 1.0,
+            uptime_reward_weight: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnergyEfficiencyConfig {
+    pub target_watts: f64,
+    pub efficiency_baseline: f64,
+}
+
+impl Default for EnergyEfficiencyConfig {
+    fn default() -> Self {
+        Self {
+            target_watts: 150.0,
+            efficiency_baseline: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SensorAttestationConfig {
+    pub endpoint: String,
+    pub required: bool,
+}
+
+impl Default for SensorAttestationConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            required: false,
+        }
     }
 }
 

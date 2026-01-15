@@ -1,6 +1,10 @@
 use crate::config::LoggingConfig;
+use crate::neuro::NeuroSnapshot;
+use crate::schema::DynamicState;
 use anyhow::{Context, Result};
+use serde_json::json;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use tracing::info;
 use tracing_appender::{non_blocking, non_blocking::WorkerGuard};
@@ -72,4 +76,97 @@ pub fn init_logging(config: &LoggingConfig) -> Result<()> {
         "logging initialized"
     );
     Ok(())
+}
+
+/// Live frame sink: writes the best-state snapshot per iteration to a JSON file for visualization.
+#[derive(Debug, Clone)]
+pub struct LiveFrameSink {
+    path: PathBuf,
+    every: usize,
+}
+
+impl LiveFrameSink {
+    pub fn from_config(cfg: &LoggingConfig) -> Option<Self> {
+        cfg.live_frame_path.as_ref().map(|p| Self {
+            path: p.clone(),
+            every: cfg.live_frame_every.max(1),
+        })
+    }
+
+    pub fn write_frame(&self, iteration: usize, min_energy: f64, state: &DynamicState) {
+        if iteration % self.every != 0 {
+            return;
+        }
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            eprintln!("[live_frame] failed to create dir {:?}: {:?}", parent, err);
+            return;
+        }
+        let symbols: Vec<_> = state
+            .symbol_states
+            .iter()
+            .map(|(id, s)| {
+                let role = s
+                    .internal_state
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let domain = s
+                    .internal_state
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("global");
+                json!({
+                    "id": id,
+                    "x": s.position.x,
+                    "y": s.position.y,
+                    "z": s.position.z,
+                    "role": role,
+                    "domain": domain
+                })
+            })
+            .collect();
+        let payload = json!({
+            "iteration": iteration,
+            "min_energy": min_energy,
+            "symbols": symbols
+        });
+        if let Err(err) = std::fs::write(&self.path, payload.to_string()) {
+            eprintln!("[live_frame] failed to write {:?}: {:?}", self.path, err);
+        }
+    }
+}
+
+/// Live neuro sink: writes neuro snapshot per iteration for visualization/inspection.
+#[derive(Debug, Clone)]
+pub struct LiveNeuroSink {
+    path: PathBuf,
+    every: usize,
+}
+
+impl LiveNeuroSink {
+    pub fn from_config(cfg: &LoggingConfig) -> Option<Self> {
+        cfg.live_neuro_path.as_ref().map(|p| Self {
+            path: p.clone(),
+            every: cfg.live_neuro_every.max(1),
+        })
+    }
+
+    pub fn write_snapshot(&self, iteration: usize, snapshot: &NeuroSnapshot) {
+        if iteration % self.every != 0 {
+            return;
+        }
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            eprintln!("[live_neuro] failed to create dir {:?}: {:?}", parent, err);
+            return;
+        }
+        let payload = json!({
+            "iteration": iteration,
+            "neuro": snapshot
+        });
+        if let Err(err) = std::fs::write(&self.path, payload.to_string()) {
+            eprintln!("[live_neuro] failed to write {:?}: {:?}", self.path, err);
+        }
+    }
 }

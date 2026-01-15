@@ -1,0 +1,11 @@
+{
+  "contract_id": "reward-v1",
+  "version": "1.0.0",
+  "reward_policy": {
+    "sensor_reward_weight": 1.0,
+    "compute_reward_weight": 1.0,
+    "energy_efficiency_weight": 1.0,
+    "uptime_reward_weight": 1.0,
+    "energy_target_watts": 150.0
+  }
+}

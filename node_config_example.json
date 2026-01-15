@@ -1,0 +1,73 @@
+{
+  "node_id": "node-001",
+  "node_role": "WORKER",
+  "network": {
+    "listen_addr": "0.0.0.0:8088",
+    "bootstrap_peers": [],
+    "max_peers": 128,
+    "gossip_protocol": "w1z4rdv1510n-gossip"
+  },
+  "openstack": {
+    "enabled": false,
+    "mode": "LOCAL_CONTROL_PLANE",
+    "region": "RegionOne",
+    "interface": "public"
+  },
+  "wallet": {
+    "enabled": true,
+    "path": "wallet.json",
+    "auto_create": true,
+    "encrypted": true,
+    "passphrase_env": "W1Z4RDV1510N_WALLET_PASSPHRASE",
+    "prompt_on_load": true
+  },
+  "blockchain": {
+    "enabled": true,
+    "chain_id": "w1z4rdv1510n-l1",
+    "consensus": "poa",
+    "bootstrap_peers": [],
+    "node_role": "WORKER",
+    "reward_policy": {
+      "sensor_reward_weight": 1.0,
+      "compute_reward_weight": 1.0,
+      "energy_efficiency_weight": 1.0,
+      "uptime_reward_weight": 1.0
+    },
+    "energy_efficiency": {
+      "target_watts": 150.0,
+      "efficiency_baseline": 1.0
+    },
+    "attestation": {
+      "endpoint": "",
+      "required": false
+    },
+    "require_sensor_attestation": false
+  },
+  "compute": {
+    "allow_gpu": true,
+    "allow_quantum": false,
+    "quantum_endpoints": []
+  },
+  "cluster": {
+    "enabled": false,
+    "mode": "local",
+    "min_nodes": 1,
+    "openstack_minimal": false
+  },
+  "ledger": {
+    "enabled": true,
+    "backend": "local",
+    "endpoint": ""
+  },
+  "sensors": [],
+  "chain_spec": {
+    "genesis_path": "chain/genesis.json",
+    "reward_contract_path": "chain/reward_contract.json",
+    "bridge_contract_path": "chain/bridge_contract.json",
+    "token_standard_path": "chain/token_standard.json"
+  },
+  "energy_reporting": {
+    "enabled": true,
+    "sample_interval_secs": 30
+  }
+}

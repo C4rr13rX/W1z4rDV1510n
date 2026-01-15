@@ -2,19 +2,21 @@ use crate::annealing::anneal;
 use crate::config::{OutputFormat, RunConfig};
 use crate::energy::EnergyModel;
 use crate::hardware::{HardwareBackendType, create_hardware_backend};
-use crate::logging::init_logging;
+use crate::logging::{LiveFrameSink, LiveNeuroSink, init_logging};
 use crate::ml::create_ml_model;
 use crate::neuro::NeuroRuntime;
+use crate::objective::GameObjective;
 use crate::proposal::DefaultProposalKernel;
 use crate::quantum::anneal_quantum;
 use crate::random::{RandomProviderDescriptor, create_random_provider};
 use crate::results::{Results, analyze_results};
-use crate::schema::{EnvironmentSnapshot, Population};
+use crate::schema::{EnvironmentSnapshot, Population, Position};
 use crate::search::SearchModule;
 use crate::state_population::init_population;
 use anyhow::Context;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use std::collections::HashSet;
 use std::fs;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -38,6 +40,9 @@ pub fn run_with_snapshot(
 ) -> anyhow::Result<RunOutcome> {
     init_logging(&config.logging)?;
     config.validate()?;
+    validate_snapshot(&snapshot)?;
+    let live_frame = LiveFrameSink::from_config(&config.logging);
+    let live_neuro = LiveNeuroSink::from_config(&config.logging);
     let random_provider = create_random_provider(&config.random, config.random_seed)?;
     let random_descriptor = random_provider.descriptor();
     info!(
@@ -103,6 +108,7 @@ pub fn run_with_snapshot(
         config.t_end,
         hardware_backend.tensor_executor(),
         neuro_runtime.clone(),
+        GameObjective::new(config.objective.clone()),
     );
     let base_population = init_population(
         snapshot.as_ref(),
@@ -165,6 +171,8 @@ pub fn run_with_snapshot(
             &config.homeostasis,
             &mut rng,
             &config.quantum,
+            live_frame.as_ref(),
+            live_neuro.as_ref(),
         );
         let best_slice = select_best_population(&outcome.slices);
         (best_slice, outcome.energy_trace, outcome.acceptance_trace)
@@ -180,6 +188,8 @@ pub fn run_with_snapshot(
             &hardware_backend,
             neuro_runtime.clone(),
             &config.homeostasis,
+            live_frame.as_ref(),
+            live_neuro.as_ref(),
             &mut rng,
         )
     };
@@ -270,4 +280,188 @@ fn maybe_persist_results(results: &Results, config: &RunConfig) -> anyhow::Resul
             .with_context(|| format!("Failed to write summary to {:?}", path))?;
     }
     Ok(())
+}
+
+fn validate_snapshot(snapshot: &EnvironmentSnapshot) -> anyhow::Result<()> {
+    let width = *snapshot.bounds.get("width").unwrap_or(&f64::NAN);
+    let height = *snapshot.bounds.get("height").unwrap_or(&f64::NAN);
+    let depth = snapshot.bounds.get("depth").copied();
+    anyhow::ensure!(
+        width.is_finite() && width > 0.0 && height.is_finite() && height > 0.0,
+        "snapshot bounds must include positive width and height"
+    );
+    if let Some(d) = depth {
+        anyhow::ensure!(
+            d.is_finite() && d > 0.0,
+            "depth, if provided, must be positive"
+        );
+    }
+    let mut ids = HashSet::new();
+    for symbol in &snapshot.symbols {
+        anyhow::ensure!(
+            ids.insert(&symbol.id),
+            "duplicate symbol id '{}' in snapshot",
+            symbol.id
+        );
+        ensure_position("symbol", &symbol.id, &symbol.position, width, height, depth)?;
+    }
+    for (frame_idx, frame) in snapshot.stack_history.iter().enumerate() {
+        for (id, state) in &frame.symbol_states {
+            ensure_position("stack_history", id, &state.position, width, height, depth)
+                .with_context(|| format!("stack_history frame {}", frame_idx))?;
+            anyhow::ensure!(
+                ids.contains(id),
+                "stack_history references unknown symbol id '{}'",
+                id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_position(
+    scope: &str,
+    id: &str,
+    pos: &Position,
+    width: f64,
+    height: f64,
+    depth: Option<f64>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite(),
+        "{} '{}' position must be finite",
+        scope,
+        id
+    );
+    anyhow::ensure!(
+        pos.x >= 0.0 && pos.x <= width && pos.y >= 0.0 && pos.y <= height,
+        "{} '{}' position is out of bounds",
+        scope,
+        id
+    );
+    if let Some(d) = depth {
+        anyhow::ensure!(
+            pos.z >= 0.0 && pos.z <= d,
+            "{} '{}' z position is out of bounds",
+            scope,
+            id
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{
+        EnvironmentSnapshot, Properties, Symbol, SymbolState, SymbolType, Timestamp,
+    };
+
+    fn base_snapshot() -> EnvironmentSnapshot {
+        EnvironmentSnapshot {
+            timestamp: Timestamp { unix: 0 },
+            bounds: [("width".into(), 10.0), ("height".into(), 5.0)]
+                .into_iter()
+                .collect(),
+            symbols: vec![Symbol {
+                id: "a".into(),
+                symbol_type: SymbolType::Person,
+                position: Position {
+                    x: 1.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
+                properties: Properties::new(),
+            }],
+            metadata: Properties::new(),
+            stack_history: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_duplicate_ids() {
+        let mut snap = base_snapshot();
+        snap.symbols.push(Symbol {
+            id: "a".into(),
+            symbol_type: SymbolType::Person,
+            position: Position {
+                x: 2.0,
+                y: 2.0,
+                z: 0.0,
+            },
+            properties: Properties::new(),
+        });
+        assert!(validate_snapshot(&snap).is_err());
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_non_finite_positions() {
+        let mut snap = base_snapshot();
+        snap.symbols[0].position.x = f64::NAN;
+        assert!(validate_snapshot(&snap).is_err());
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_missing_bounds() {
+        let mut snap = base_snapshot();
+        snap.bounds.clear();
+        assert!(validate_snapshot(&snap).is_err());
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_out_of_bounds_symbol() {
+        let mut snap = base_snapshot();
+        snap.symbols[0].position.x = 50.0;
+        assert!(validate_snapshot(&snap).is_err());
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_out_of_bounds_stack_symbol() {
+        let mut snap = base_snapshot();
+        snap.stack_history.push(crate::schema::DynamicState {
+            timestamp: Timestamp { unix: 0 },
+            symbol_states: [(
+                "a".into(),
+                SymbolState {
+                    position: Position {
+                        x: -1.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        });
+        assert!(validate_snapshot(&snap).is_err());
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_unknown_stack_symbol() {
+        let mut snap = base_snapshot();
+        snap.stack_history.push(crate::schema::DynamicState {
+            timestamp: Timestamp { unix: 0 },
+            symbol_states: [(
+                "missing".into(),
+                SymbolState {
+                    position: Position {
+                        x: 1.0,
+                        y: 1.0,
+                        z: 0.0,
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        });
+        assert!(validate_snapshot(&snap).is_err());
+    }
+
+    #[test]
+    fn snapshot_validation_passes_for_valid_snapshot() {
+        let snap = base_snapshot();
+        assert!(validate_snapshot(&snap).is_ok());
+    }
 }
