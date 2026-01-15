@@ -1,4 +1,4 @@
-use crate::config::NodeNetworkConfig;
+use crate::config::{NetworkSecurityConfig, NodeNetworkConfig};
 use crate::paths::node_data_dir;
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -11,11 +11,12 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{
     connection_limits, identity, multiaddr::Protocol, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -191,6 +192,8 @@ async fn run_swarm(
         "p2p swarm started"
     );
 
+    let guard = Arc::new(Mutex::new(MessageGuard::new(&config.security)));
+
     loop {
         tokio::select! {
             Some(command) = command_rx.recv() => {
@@ -203,7 +206,7 @@ async fn run_swarm(
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &peer_count, &config)?;
+                handle_swarm_event(event, &mut swarm, &peer_count, &config, &guard)?;
             }
         }
     }
@@ -214,6 +217,7 @@ fn handle_swarm_event(
     swarm: &mut Swarm<NodeBehaviour>,
     peer_count: &Arc<AtomicUsize>,
     config: &NodeNetworkConfig,
+    guard: &Arc<Mutex<MessageGuard>>,
 ) -> Result<()> {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -233,7 +237,7 @@ fn handle_swarm_event(
             }).ok();
         }
         SwarmEvent::Behaviour(NodeBehaviourEvent::Gossipsub(event)) => {
-            handle_gossipsub_event(event, swarm, config);
+            handle_gossipsub_event(event, swarm, config, guard);
         }
         SwarmEvent::Behaviour(NodeBehaviourEvent::Mdns(event)) => match event {
             mdns::Event::Discovered(list) => {
@@ -280,6 +284,7 @@ fn handle_gossipsub_event(
     event: gossipsub::Event,
     swarm: &mut Swarm<NodeBehaviour>,
     config: &NodeNetworkConfig,
+    guard: &Arc<Mutex<MessageGuard>>,
 ) {
     if let gossipsub::Event::Message {
         propagation_source,
@@ -287,7 +292,7 @@ fn handle_gossipsub_event(
         message,
     } = event
     {
-        let acceptance = validate_message(&message, config);
+        let acceptance = validate_message(&message, config, guard);
         let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
             &message_id,
             &propagation_source,
@@ -296,7 +301,11 @@ fn handle_gossipsub_event(
     }
 }
 
-fn validate_message(message: &gossipsub::Message, config: &NodeNetworkConfig) -> MessageAcceptance {
+fn validate_message(
+    message: &gossipsub::Message,
+    config: &NodeNetworkConfig,
+    guard: &Arc<Mutex<MessageGuard>>,
+) -> MessageAcceptance {
     if message.data.len() > config.security.max_message_bytes {
         return MessageAcceptance::Reject;
     }
@@ -313,7 +322,8 @@ fn validate_message(message: &gossipsub::Message, config: &NodeNetworkConfig) ->
     if envelope.validate_basic().is_err() {
         return MessageAcceptance::Reject;
     }
-    if validate_envelope_clock(&envelope, config).is_err() {
+    let now = now_unix();
+    if validate_envelope_clock(&envelope, config, now).is_err() {
         return MessageAcceptance::Reject;
     }
     if config.security.require_signed_payloads {
@@ -323,6 +333,14 @@ fn validate_message(message: &gossipsub::Message, config: &NodeNetworkConfig) ->
         if verify_envelope_signature(&envelope).is_err() {
             return MessageAcceptance::Reject;
         }
+    }
+    match guard.lock() {
+        Ok(mut guard) => {
+            if guard.validate(&envelope, now).is_err() {
+                return MessageAcceptance::Reject;
+            }
+        }
+        Err(_) => return MessageAcceptance::Reject,
     }
     MessageAcceptance::Accept
 }
@@ -350,8 +368,145 @@ fn message_id_for(message: &gossipsub::Message) -> gossipsub::MessageId {
     gossipsub::MessageId::from(hex_encode(&digest))
 }
 
-fn validate_envelope_clock(envelope: &NetworkEnvelope, config: &NodeNetworkConfig) -> Result<()> {
-    let now = now_unix();
+struct MessageGuardConfig {
+    max_seen_message_ids: usize,
+    message_id_ttl_secs: i64,
+    max_messages_per_key: u32,
+    key_rate_window_secs: i64,
+    max_tracked_public_keys: usize,
+    public_key_ttl_secs: i64,
+}
+
+struct KeyWindow {
+    window_start: i64,
+    count: u32,
+    last_seen: i64,
+}
+
+struct MessageGuard {
+    config: MessageGuardConfig,
+    recent_ids: VecDeque<(String, i64)>,
+    recent_set: HashSet<String>,
+    key_windows: HashMap<String, KeyWindow>,
+    key_seen: VecDeque<(String, i64)>,
+}
+
+impl MessageGuard {
+    fn new(config: &NetworkSecurityConfig) -> Self {
+        Self {
+            config: MessageGuardConfig {
+                max_seen_message_ids: config.max_seen_message_ids.max(1),
+                message_id_ttl_secs: config.message_id_ttl_secs.max(0),
+                max_messages_per_key: config.max_messages_per_key_per_window.max(1),
+                key_rate_window_secs: config.key_rate_window_secs.max(1),
+                max_tracked_public_keys: config.max_tracked_public_keys.max(1),
+                public_key_ttl_secs: config.public_key_ttl_secs.max(0),
+            },
+            recent_ids: VecDeque::new(),
+            recent_set: HashSet::new(),
+            key_windows: HashMap::new(),
+            key_seen: VecDeque::new(),
+        }
+    }
+
+    fn validate(&mut self, envelope: &NetworkEnvelope, now: i64) -> Result<()> {
+        self.prune_ids(now);
+        if self.recent_set.contains(&envelope.message_id) {
+            anyhow::bail!("duplicate message id");
+        }
+        self.track_message_id(envelope.message_id.clone(), now);
+
+        let key = if envelope.public_key.trim().is_empty() {
+            "anonymous".to_string()
+        } else {
+            envelope.public_key.clone()
+        };
+        self.prune_keys(now);
+        self.enforce_key_rate(&key, now)?;
+        self.key_seen.push_back((key, now));
+        self.prune_keys(now);
+        Ok(())
+    }
+
+    fn enforce_key_rate(&mut self, key: &str, now: i64) -> Result<()> {
+        let window = self
+            .key_windows
+            .entry(key.to_string())
+            .or_insert_with(|| KeyWindow {
+                window_start: now,
+                count: 0,
+                last_seen: now,
+            });
+        if now - window.window_start >= self.config.key_rate_window_secs {
+            window.window_start = now;
+            window.count = 0;
+        }
+        window.count = window.count.saturating_add(1);
+        window.last_seen = now;
+        if window.count > self.config.max_messages_per_key {
+            anyhow::bail!("public key rate limit exceeded");
+        }
+        Ok(())
+    }
+
+    fn track_message_id(&mut self, message_id: String, now: i64) {
+        self.recent_ids.push_back((message_id.clone(), now));
+        self.recent_set.insert(message_id);
+        let max_ids = self.config.max_seen_message_ids;
+        while self.recent_ids.len() > max_ids {
+            if let Some((id, _)) = self.recent_ids.pop_front() {
+                self.recent_set.remove(&id);
+            }
+        }
+    }
+
+    fn prune_ids(&mut self, now: i64) {
+        let ttl = self.config.message_id_ttl_secs;
+        while let Some((id, ts)) = self.recent_ids.front() {
+            if now - *ts <= ttl {
+                break;
+            }
+            let id = id.clone();
+            self.recent_ids.pop_front();
+            self.recent_set.remove(&id);
+        }
+    }
+
+    fn prune_keys(&mut self, now: i64) {
+        let ttl = self.config.public_key_ttl_secs;
+        while let Some((key, ts)) = self.key_seen.front() {
+            if now - *ts <= ttl {
+                break;
+            }
+            let key = key.clone();
+            let ts = *ts;
+            self.key_seen.pop_front();
+            if let Some(entry) = self.key_windows.get(&key) {
+                if entry.last_seen <= ts {
+                    self.key_windows.remove(&key);
+                }
+            }
+        }
+        let max_keys = self.config.max_tracked_public_keys;
+        while self.key_windows.len() > max_keys {
+            if let Some((key, ts)) = self.key_seen.pop_front() {
+                if let Some(entry) = self.key_windows.get(&key) {
+                    if entry.last_seen <= ts {
+                        self.key_windows.remove(&key);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn validate_envelope_clock(
+    envelope: &NetworkEnvelope,
+    config: &NodeNetworkConfig,
+    now: i64,
+) -> Result<()> {
     let max_age = config.security.max_message_age_secs;
     let max_skew = config.security.max_clock_skew_secs;
     if envelope.timestamp_unix > now + max_skew {
@@ -428,6 +583,38 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_rejects_duplicate_message_ids() {
+        let config = NetworkSecurityConfig::default();
+        let mut guard = MessageGuard::new(&config);
+        let envelope = NetworkEnvelope::new("test", b"payload", 100);
+        guard.validate(&envelope, 100).expect("first ok");
+        assert!(guard.validate(&envelope, 100).is_err());
+    }
+
+    #[test]
+    fn guard_rate_limits_by_public_key() {
+        let mut config = NetworkSecurityConfig::default();
+        config.max_messages_per_key_per_window = 1;
+        config.key_rate_window_secs = 60;
+        let mut guard = MessageGuard::new(&config);
+
+        let mut first = NetworkEnvelope::new("test", b"payload-1", 200);
+        first.public_key = "key1".to_string();
+        first.message_id = first.expected_message_id();
+        guard.validate(&first, 200).expect("first ok");
+
+        let mut second = NetworkEnvelope::new("test", b"payload-2", 201);
+        second.public_key = "key1".to_string();
+        second.message_id = second.expected_message_id();
+        assert!(guard.validate(&second, 201).is_err());
+    }
 }
 
 fn parse_listen_addr(value: &str) -> Result<Multiaddr> {

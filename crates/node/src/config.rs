@@ -68,6 +68,30 @@ impl NodeConfig {
             "network.security.max_clock_skew_secs must be >= 0"
         );
         anyhow::ensure!(
+            self.network.security.max_seen_message_ids > 0,
+            "network.security.max_seen_message_ids must be > 0"
+        );
+        anyhow::ensure!(
+            self.network.security.message_id_ttl_secs >= 0,
+            "network.security.message_id_ttl_secs must be >= 0"
+        );
+        anyhow::ensure!(
+            self.network.security.max_messages_per_key_per_window > 0,
+            "network.security.max_messages_per_key_per_window must be > 0"
+        );
+        anyhow::ensure!(
+            self.network.security.key_rate_window_secs > 0,
+            "network.security.key_rate_window_secs must be > 0"
+        );
+        anyhow::ensure!(
+            self.network.security.max_tracked_public_keys > 0,
+            "network.security.max_tracked_public_keys must be > 0"
+        );
+        anyhow::ensure!(
+            self.network.security.public_key_ttl_secs >= 0,
+            "network.security.public_key_ttl_secs must be >= 0"
+        );
+        anyhow::ensure!(
             self.wallet.enabled,
             "wallet must be enabled for production nodes"
         );
@@ -141,6 +165,12 @@ pub struct NetworkSecurityConfig {
     pub require_signed_payloads: bool,
     pub max_message_age_secs: i64,
     pub max_clock_skew_secs: i64,
+    pub max_seen_message_ids: usize,
+    pub message_id_ttl_secs: i64,
+    pub max_messages_per_key_per_window: u32,
+    pub key_rate_window_secs: i64,
+    pub max_tracked_public_keys: usize,
+    pub public_key_ttl_secs: i64,
 }
 
 impl Default for NetworkSecurityConfig {
@@ -157,6 +187,12 @@ impl Default for NetworkSecurityConfig {
             require_signed_payloads: true,
             max_message_age_secs: 300,
             max_clock_skew_secs: 10,
+            max_seen_message_ids: 50_000,
+            message_id_ttl_secs: 600,
+            max_messages_per_key_per_window: 120,
+            key_rate_window_secs: 60,
+            max_tracked_public_keys: 10_000,
+            public_key_ttl_secs: 600,
         }
     }
 }
