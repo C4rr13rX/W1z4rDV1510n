@@ -203,13 +203,19 @@ impl NodeConfig {
         }
         if self.api.require_api_key {
             anyhow::ensure!(
-                !self.api.api_key_env.trim().is_empty(),
-                "api.api_key_env must be non-empty when api.require_api_key is true"
-            );
-            anyhow::ensure!(
                 !self.api.api_key_header.trim().is_empty(),
                 "api.api_key_header must be non-empty when api.require_api_key is true"
             );
+            anyhow::ensure!(
+                !self.api.api_key_hashes.is_empty() || !self.api.api_key_env.trim().is_empty(),
+                "api.api_key_hashes or api.api_key_env must be set when api.require_api_key is true"
+            );
+            for hash in &self.api.api_key_hashes {
+                anyhow::ensure!(
+                    is_hex_string(hash, 64),
+                    "api.api_key_hashes entries must be 64-char hex strings"
+                );
+            }
         }
         Ok(())
     }
@@ -232,6 +238,8 @@ pub struct NodeApiConfig {
     pub require_api_key: bool,
     pub api_key_env: String,
     pub api_key_header: String,
+    #[serde(default)]
+    pub api_key_hashes: Vec<String>,
 }
 
 impl Default for NodeApiConfig {
@@ -240,6 +248,7 @@ impl Default for NodeApiConfig {
             require_api_key: false,
             api_key_env: "W1Z4RDV1510N_API_KEY".to_string(),
             api_key_header: "x-api-key".to_string(),
+            api_key_hashes: Vec::new(),
         }
     }
 }
@@ -398,6 +407,16 @@ impl Default for EnergyReportingConfig {
             sample_interval_secs: 30,
         }
     }
+}
+
+fn is_hex_string(value: &str, length: usize) -> bool {
+    if value.len() != length {
+        return false;
+    }
+    value
+        .as_bytes()
+        .iter()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
 }
 
 #[cfg(test)]

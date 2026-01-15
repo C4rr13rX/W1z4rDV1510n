@@ -6,6 +6,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use blake2::{Blake2s256, Digest};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,7 +16,8 @@ use w1z4rdv1510n::bridge::{BridgeProof, bridge_deposit_id};
 #[derive(Clone)]
 struct ApiState {
     ledger: Arc<dyn BlockchainLedger>,
-    api_key: Option<String>,
+    require_api_key: bool,
+    api_key_hashes: Vec<[u8; 32]>,
     api_key_header: HeaderName,
 }
 
@@ -33,17 +35,26 @@ struct ErrorResponse {
 
 pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let ledger = build_ledger(&config)?;
-    let api_key = if config.api.require_api_key {
-        let key = std::env::var(&config.api.api_key_env)
-            .with_context(|| "api key env var not set")?;
-        let trimmed = key.trim().to_string();
-        if trimmed.is_empty() {
-            anyhow::bail!("api key env var is empty");
+    let mut api_key_hashes = Vec::new();
+    if config.api.require_api_key {
+        for hash in &config.api.api_key_hashes {
+            api_key_hashes.push(decode_hash_hex(hash)?);
         }
-        Some(trimmed)
-    } else {
-        None
-    };
+        if !config.api.api_key_env.trim().is_empty() {
+            if let Ok(raw) = std::env::var(&config.api.api_key_env) {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    let candidate = hash_api_key(trimmed);
+                    if !api_key_hashes.contains(&candidate) {
+                        api_key_hashes.push(candidate);
+                    }
+                }
+            }
+        }
+        if api_key_hashes.is_empty() {
+            anyhow::bail!("api key allowlist is empty");
+        }
+    }
     let api_key_header: HeaderName = config
         .api
         .api_key_header
@@ -51,7 +62,8 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .context("invalid api_key_header")?;
     let state = ApiState {
         ledger,
-        api_key,
+        require_api_key: config.api.require_api_key,
+        api_key_hashes,
         api_key_header,
     };
     let max_body = config
@@ -150,7 +162,7 @@ async fn get_balance(
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<()> {
-    let Some(expected) = &state.api_key else {
+    if !state.require_api_key {
         return Ok(());
     };
     let provided = headers
@@ -161,23 +173,71 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<()> {
     if provided.is_empty() {
         anyhow::bail!("missing api key");
     }
-    if !constant_time_eq(&provided, expected) {
+    let candidate = hash_api_key(&provided);
+    if !hash_allowed(&candidate, &state.api_key_hashes) {
         anyhow::bail!("invalid api key");
     }
     Ok(())
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let max = a_bytes.len().max(b_bytes.len());
-    let mut diff = 0u8;
-    for i in 0..max {
-        let av = *a_bytes.get(i).unwrap_or(&0);
-        let bv = *b_bytes.get(i).unwrap_or(&0);
-        diff |= av ^ bv;
+fn hash_allowed(candidate: &[u8; 32], allowlist: &[[u8; 32]]) -> bool {
+    let mut matched = false;
+    for allowed in allowlist {
+        if constant_time_eq_bytes(candidate, allowed) {
+            matched = true;
+        }
     }
-    diff == 0 && a_bytes.len() == b_bytes.len()
+    matched
+}
+
+fn constant_time_eq_bytes(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+fn hash_api_key(key: &str) -> [u8; 32] {
+    let mut hasher = Blake2s256::new();
+    hasher.update(key.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest[..32]);
+    out
+}
+
+fn decode_hash_hex(hex: &str) -> Result<[u8; 32]> {
+    let bytes = hex_decode(hex)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("api key hash must be 32 bytes");
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn hex_decode(hex: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let mut iter = hex.as_bytes().iter().copied();
+    while let Some(high) = iter.next() {
+        let low = iter
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("hex string has odd length"))?;
+        let high_val = hex_value(high)?;
+        let low_val = hex_value(low)?;
+        out.push((high_val << 4) | low_val);
+    }
+    Ok(out)
+}
+
+fn hex_value(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => anyhow::bail!("invalid hex character"),
+    }
 }
 
 fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {
