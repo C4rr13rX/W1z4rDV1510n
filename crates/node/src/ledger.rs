@@ -34,6 +34,19 @@ struct LocalLedgerState {
     cross_chain_transfers: Vec<CrossChainTransfer>,
     cross_chain_transfer_ids: VecDeque<String>,
     cross_chain_transfer_id_set: HashSet<String>,
+    audit_log: Vec<AuditEvent>,
+    audit_head: String,
+    audit_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditEvent {
+    sequence: u64,
+    timestamp: Timestamp,
+    kind: String,
+    event_id: String,
+    prev_hash: String,
+    hash: String,
 }
 
 pub struct LocalLedger {
@@ -125,6 +138,8 @@ impl BlockchainLedger for LocalLedger {
             entry.wallet_address = wallet_address;
         }
         entry.updated_at = now();
+        let audit_id = payload_id(payload.as_bytes());
+        record_audit(&mut state, "REGISTER_NODE", audit_id, now());
         self.persist(&state)?;
         Ok(())
     }
@@ -143,6 +158,7 @@ impl BlockchainLedger for LocalLedger {
         let payload = sensor_commitment_payload(&commitment);
         verify_signature(&public_key, payload.as_bytes(), &commitment.signature)?;
         let commitment_id = payload_id(payload.as_bytes());
+        let audit_id = commitment_id.clone();
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         if state.sensor_commitment_id_set.contains(&commitment_id) {
             anyhow::bail!("duplicate sensor commitment");
@@ -155,6 +171,9 @@ impl BlockchainLedger for LocalLedger {
             commitment,
             commitment_id,
         );
+        if let Some(last) = state.sensor_commitments.last() {
+            record_audit(state, "SENSOR_COMMITMENT", audit_id, last.timestamp.clone());
+        }
         self.persist(state)?;
         Ok(())
     }
@@ -169,9 +188,13 @@ impl BlockchainLedger for LocalLedger {
         if sample.watts.is_sign_negative() || sample.throughput.is_sign_negative() {
             anyhow::bail!("energy sample values must be non-negative");
         }
+        let payload = energy_sample_payload(&sample);
+        let timestamp = sample.timestamp;
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         state.energy_samples.push(sample);
         trim_events(&mut state.energy_samples);
+        let audit_id = payload_id(payload.as_bytes());
+        record_audit(&mut state, "ENERGY_SAMPLE", audit_id, timestamp);
         self.persist(&state)?;
         Ok(())
     }
@@ -186,6 +209,8 @@ impl BlockchainLedger for LocalLedger {
         if event.score.is_sign_negative() {
             anyhow::bail!("reward score must be non-negative");
         }
+        let payload = reward_event_payload(&event);
+        let timestamp = event.timestamp;
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         let wallet_address = state
             .nodes
@@ -197,6 +222,8 @@ impl BlockchainLedger for LocalLedger {
         entry.updated_at = event.timestamp.clone();
         state.reward_events.push(event);
         trim_events(&mut state.reward_events);
+        let audit_id = payload_id(payload.as_bytes());
+        record_audit(&mut state, "REWARD_EVENT", audit_id, timestamp);
         self.persist(&state)?;
         Ok(())
     }
@@ -252,6 +279,8 @@ impl BlockchainLedger for LocalLedger {
             timestamp: proof.completed_at,
             score: proof.score,
         };
+        let reward_payload = reward_event_payload(&reward_event);
+        let reward_timestamp = reward_event.timestamp;
         let wallet_address = state
             .nodes
             .get(&proof.node_id)
@@ -259,9 +288,11 @@ impl BlockchainLedger for LocalLedger {
             .unwrap_or_default();
         let entry = Self::balance_entry(&mut state, &proof.node_id, &wallet_address);
         entry.balance += proof.score;
-        entry.updated_at = reward_event.timestamp;
+        entry.updated_at = reward_timestamp;
         state.reward_events.push(reward_event);
         trim_events(&mut state.reward_events);
+        let reward_audit_id = payload_id(reward_payload.as_bytes());
+        record_audit(&mut state, "REWARD_EVENT", reward_audit_id, reward_timestamp);
         let proof_id = proof.work_id.clone();
         let state = &mut *state;
         push_event_with_id(
@@ -271,6 +302,8 @@ impl BlockchainLedger for LocalLedger {
             proof,
             proof_id,
         );
+        let proof_audit_id = payload_id(payload.as_bytes());
+        record_audit(state, "WORK_PROOF", proof_audit_id, reward_timestamp);
         self.persist(state)?;
         Ok(())
     }
@@ -295,6 +328,8 @@ impl BlockchainLedger for LocalLedger {
         let payload = cross_chain_transfer_payload(&transfer);
         verify_signature(&public_key, payload.as_bytes(), &transfer.signature)?;
         let transfer_id = payload_id(payload.as_bytes());
+        let audit_id = transfer_id.clone();
+        let timestamp = transfer.timestamp;
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         if state.cross_chain_transfer_id_set.contains(&transfer_id) {
             anyhow::bail!("duplicate cross-chain transfer");
@@ -307,6 +342,7 @@ impl BlockchainLedger for LocalLedger {
             transfer,
             transfer_id,
         );
+        record_audit(state, "CROSS_CHAIN_TRANSFER", audit_id, timestamp);
         self.persist(state)?;
         Ok(())
     }
@@ -349,6 +385,7 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
     trim_events(&mut state.cross_chain_transfers);
     trim_events(&mut state.reward_events);
     trim_events(&mut state.energy_samples);
+    trim_events(&mut state.audit_log);
 
     state.work_id_queue.clear();
     state.work_id_set.clear();
@@ -377,6 +414,15 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
             state.cross_chain_transfer_ids.push_back(id);
         }
     }
+
+    rebuild_audit(state);
+}
+
+fn rebuild_audit(state: &mut LocalLedgerState) {
+    if let Some(last) = state.audit_log.last() {
+        state.audit_head = last.hash.clone();
+        state.audit_sequence = last.sequence;
+    }
 }
 
 fn push_event_with_id<T>(
@@ -400,11 +446,48 @@ fn push_event_with_id<T>(
     }
 }
 
+fn record_audit(
+    state: &mut LocalLedgerState,
+    kind: &str,
+    event_id: String,
+    timestamp: Timestamp,
+) {
+    let sequence = state.audit_sequence.saturating_add(1);
+    let prev_hash = state.audit_head.clone();
+    let hash = audit_hash(sequence, &timestamp, kind, &event_id, &prev_hash);
+    let event = AuditEvent {
+        sequence,
+        timestamp,
+        kind: kind.to_string(),
+        event_id,
+        prev_hash,
+        hash: hash.clone(),
+    };
+    state.audit_sequence = sequence;
+    state.audit_head = hash;
+    state.audit_log.push(event);
+    trim_events(&mut state.audit_log);
+}
+
 fn payload_id(payload: &[u8]) -> String {
     let mut hasher = Blake2s256::new();
     hasher.update(payload);
     let digest = hasher.finalize();
     hex_encode(&digest)
+}
+
+fn audit_hash(
+    sequence: u64,
+    timestamp: &Timestamp,
+    kind: &str,
+    event_id: &str,
+    prev_hash: &str,
+) -> String {
+    let marker = format!(
+        "audit|{}|{}|{}|{}|{}",
+        sequence, timestamp.unix, kind, event_id, prev_hash
+    );
+    payload_id(marker.as_bytes())
 }
 
 fn node_public_key(node_id: &str, state: &Mutex<LocalLedgerState>) -> Result<String> {
@@ -427,6 +510,20 @@ fn node_public_key_locked(node_id: &str, state: &LocalLedgerState) -> Result<Str
 fn address_from_public_key_hex(public_key_hex: &str) -> Result<String> {
     let bytes = decode_public_key_bytes(public_key_hex)?;
     Ok(address_from_public_key(&bytes))
+}
+
+fn reward_event_payload(event: &RewardEvent) -> String {
+    format!(
+        "reward|{}|{:?}|{}|{:.6}",
+        event.node_id, event.kind, event.timestamp.unix, event.score
+    )
+}
+
+fn energy_sample_payload(sample: &EnergyEfficiencySample) -> String {
+    format!(
+        "energy|{}|{}|{:.6}|{:.6}",
+        sample.node_id, sample.timestamp.unix, sample.watts, sample.throughput
+    )
 }
 
 fn verify_signature(public_key_hex: &str, payload: &[u8], signature_hex: &str) -> Result<()> {
