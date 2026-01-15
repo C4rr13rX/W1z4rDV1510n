@@ -48,6 +48,8 @@ pub struct NodeNetworkConfig {
     pub bootstrap_peers: Vec<String>,
     pub max_peers: usize,
     pub gossip_protocol: String,
+    #[serde(default)]
+    pub security: NetworkSecurityConfig,
 }
 
 impl Default for NodeNetworkConfig {
@@ -57,6 +59,35 @@ impl Default for NodeNetworkConfig {
             bootstrap_peers: Vec::new(),
             max_peers: 128,
             gossip_protocol: "w1z4rdv1510n-gossip".to_string(),
+            security: NetworkSecurityConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkSecurityConfig {
+    pub max_message_bytes: usize,
+    pub max_messages_per_rpc: usize,
+    pub max_pending_incoming: u32,
+    pub max_pending_outgoing: u32,
+    pub max_established_incoming: u32,
+    pub max_established_outgoing: u32,
+    pub max_established_total: u32,
+    pub max_established_per_peer: u32,
+}
+
+impl Default for NetworkSecurityConfig {
+    fn default() -> Self {
+        Self {
+            max_message_bytes: 262_144,
+            max_messages_per_rpc: 128,
+            max_pending_incoming: 64,
+            max_pending_outgoing: 64,
+            max_established_incoming: 256,
+            max_established_outgoing: 256,
+            max_established_total: 512,
+            max_established_per_peer: 8,
         }
     }
 }
@@ -168,7 +199,7 @@ mod tests {
         let raw = r#"{
             "node_id": "node-01",
             "node_role": "WORKER",
-            "network": { "listen_addr": "0.0.0.0:1", "bootstrap_peers": [], "max_peers": 1, "gossip_protocol": "g" },
+            "network": { "listen_addr": "0.0.0.0:1", "bootstrap_peers": [], "max_peers": 1, "gossip_protocol": "g", "security": { "max_message_bytes": 1024, "max_messages_per_rpc": 4, "max_pending_incoming": 1, "max_pending_outgoing": 1, "max_established_incoming": 2, "max_established_outgoing": 2, "max_established_total": 4, "max_established_per_peer": 1 } },
             "openstack": { "enabled": false, "mode": "LOCAL_CONTROL_PLANE", "region": "RegionOne", "interface": "public" },
             "wallet": { "enabled": true, "path": "wallet.json", "auto_create": true, "encrypted": true, "passphrase_env": "W1Z4RDV1510N_WALLET_PASSPHRASE", "prompt_on_load": true },
             "blockchain": { "enabled": false, "chain_id": "w1", "consensus": "poa", "bootstrap_peers": [], "node_role": "WORKER", "reward_policy": { "sensor_reward_weight": 1.0, "compute_reward_weight": 1.0, "energy_efficiency_weight": 1.0, "uptime_reward_weight": 1.0 }, "energy_efficiency": { "target_watts": 150.0, "efficiency_baseline": 1.0 }, "attestation": { "endpoint": "", "required": false }, "require_sensor_attestation": false },

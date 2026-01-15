@@ -11,6 +11,7 @@ mod openstack;
 mod paths;
 mod p2p;
 mod runtime;
+mod sim;
 mod wallet;
 
 use config::NodeConfig;
@@ -35,6 +36,30 @@ enum Command {
         #[arg(long)]
         report: Option<String>,
     },
+    Sim {
+        #[arg(long, default_value_t = 10000)]
+        nodes: usize,
+        #[arg(long, default_value_t = 100)]
+        ticks: usize,
+        #[arg(long, default_value_t = 100000)]
+        max_messages_per_tick: usize,
+        #[arg(long, default_value_t = 0.05)]
+        work_rate: f64,
+        #[arg(long, default_value_t = 0.02)]
+        validation_fail_rate: f64,
+        #[arg(long, default_value_t = 2)]
+        fanout: usize,
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 0)]
+        throttle_ms: u64,
+        #[arg(long)]
+        max_nodes: Option<usize>,
+        #[arg(long, default_value_t = 200000)]
+        max_queue_depth: usize,
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -50,6 +75,38 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Init { force, report }) => {
             let report_path = report.map(PathBuf::from);
             init_node(&config_path, force, report_path.as_deref())
+        }
+        Some(Command::Sim {
+            nodes,
+            ticks,
+            max_messages_per_tick,
+            work_rate,
+            validation_fail_rate,
+            fanout,
+            seed,
+            throttle_ms,
+            max_nodes,
+            max_queue_depth,
+            out,
+        }) => {
+            let report = sim::run_simulation(sim::SimConfig {
+                nodes,
+                ticks,
+                max_messages_per_tick,
+                work_rate,
+                validation_fail_rate,
+                fanout,
+                seed,
+                throttle_ms,
+                max_nodes,
+                max_queue_depth,
+            });
+            let payload = serde_json::to_string_pretty(&report)?;
+            println!("{payload}");
+            if let Some(path) = out {
+                fs::write(path, payload)?;
+            }
+            Ok(())
         }
         None => run_node(&config_path),
     }

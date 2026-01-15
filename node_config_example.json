@@ -5,7 +5,17 @@
     "listen_addr": "0.0.0.0:8088",
     "bootstrap_peers": [],
     "max_peers": 128,
-    "gossip_protocol": "w1z4rdv1510n-gossip"
+    "gossip_protocol": "w1z4rdv1510n-gossip",
+    "security": {
+      "max_message_bytes": 262144,
+      "max_messages_per_rpc": 128,
+      "max_pending_incoming": 64,
+      "max_pending_outgoing": 64,
+      "max_established_incoming": 256,
+      "max_established_outgoing": 256,
+      "max_established_total": 512,
+      "max_established_per_peer": 8
+    }
   },
   "openstack": {
     "enabled": false,

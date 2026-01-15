@@ -2,12 +2,14 @@ use crate::config::NodeNetworkConfig;
 use crate::paths::node_data_dir;
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
-use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity};
+use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageAuthenticity};
 use libp2p::identify;
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::mdns;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{identity, multiaddr::Protocol, Multiaddr, PeerId, Swarm, SwarmBuilder};
+use libp2p::{
+    connection_limits, identity, multiaddr::Protocol, Multiaddr, PeerId, Swarm, SwarmBuilder,
+};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -98,6 +100,7 @@ struct NodeBehaviour {
     identify: identify::Behaviour,
     kademlia: kad::Behaviour<MemoryStore>,
     mdns: mdns::tokio::Behaviour,
+    limits: connection_limits::Behaviour,
 }
 
 #[derive(Debug)]
@@ -106,6 +109,7 @@ enum NodeBehaviourEvent {
     Identify(identify::Event),
     Kademlia(kad::Event),
     Mdns(mdns::Event),
+    Limits(void::Void),
 }
 
 impl From<gossipsub::Event> for NodeBehaviourEvent {
@@ -132,6 +136,12 @@ impl From<mdns::Event> for NodeBehaviourEvent {
     }
 }
 
+impl From<void::Void> for NodeBehaviourEvent {
+    fn from(event: void::Void) -> Self {
+        match event {}
+    }
+}
+
 async fn run_swarm(
     config: NodeNetworkConfig,
     node_id: String,
@@ -155,13 +165,16 @@ async fn run_swarm(
                 key.public(),
             ));
             let peer_id = PeerId::from(key.public());
-            let kademlia = kad::Behaviour::new(peer_id, MemoryStore::new(peer_id));
+            let mut kademlia = kad::Behaviour::new(peer_id, MemoryStore::new(peer_id));
+            kademlia.set_mode(Some(kad::Mode::Client));
             let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
+            let limits = connection_limits::Behaviour::new(build_connection_limits(&config));
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(NodeBehaviour {
                 gossipsub,
                 identify,
                 kademlia,
                 mdns,
+                limits,
             })
         })?
         .build();
@@ -188,7 +201,7 @@ async fn run_swarm(
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &peer_count)?;
+                handle_swarm_event(event, &mut swarm, &peer_count, &config)?;
             }
         }
     }
@@ -198,6 +211,7 @@ fn handle_swarm_event(
     event: SwarmEvent<NodeBehaviourEvent>,
     swarm: &mut Swarm<NodeBehaviour>,
     peer_count: &Arc<AtomicUsize>,
+    config: &NodeNetworkConfig,
 ) -> Result<()> {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -215,6 +229,9 @@ fn handle_swarm_event(
             peer_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_sub(1))
             }).ok();
+        }
+        SwarmEvent::Behaviour(NodeBehaviourEvent::Gossipsub(event)) => {
+            handle_gossipsub_event(event, swarm, config);
         }
         SwarmEvent::Behaviour(NodeBehaviourEvent::Mdns(event)) => match event {
             mdns::Event::Discovered(list) => {
@@ -240,7 +257,11 @@ fn build_gossipsub(
 ) -> Result<gossipsub::Behaviour> {
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .heartbeat_interval(Duration::from_secs(10))
-        .validation_mode(gossipsub::ValidationMode::Permissive)
+        .validation_mode(gossipsub::ValidationMode::Strict)
+        .validate_messages()
+        .max_transmit_size(config.security.max_message_bytes)
+        .max_messages_per_rpc(Some(config.security.max_messages_per_rpc))
+        .message_id_fn(|message| message_id_for(message))
         .build()
         .map_err(|err| anyhow!("gossipsub config: {err}"))?;
     let mut gossipsub = gossipsub::Behaviour::new(
@@ -251,6 +272,69 @@ fn build_gossipsub(
     let topic = IdentTopic::new(config.gossip_protocol.clone());
     gossipsub.subscribe(&topic)?;
     Ok(gossipsub)
+}
+
+fn handle_gossipsub_event(
+    event: gossipsub::Event,
+    swarm: &mut Swarm<NodeBehaviour>,
+    config: &NodeNetworkConfig,
+) {
+    if let gossipsub::Event::Message {
+        propagation_source,
+        message_id,
+        message,
+    } = event
+    {
+        let acceptance = validate_message(&message, config);
+        let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
+            &message_id,
+            &propagation_source,
+            acceptance,
+        );
+    }
+}
+
+fn validate_message(message: &gossipsub::Message, config: &NodeNetworkConfig) -> MessageAcceptance {
+    if message.data.len() > config.security.max_message_bytes {
+        return MessageAcceptance::Reject;
+    }
+    if message.topic.as_str() != config.gossip_protocol {
+        return MessageAcceptance::Reject;
+    }
+    MessageAcceptance::Accept
+}
+
+fn build_connection_limits(config: &NodeNetworkConfig) -> connection_limits::ConnectionLimits {
+    let total_limit = config
+        .max_peers
+        .min(config.security.max_established_total.max(1) as usize)
+        .max(1) as u32;
+    connection_limits::ConnectionLimits::default()
+        .with_max_pending_incoming(Some(config.security.max_pending_incoming))
+        .with_max_pending_outgoing(Some(config.security.max_pending_outgoing))
+        .with_max_established_incoming(Some(config.security.max_established_incoming))
+        .with_max_established_outgoing(Some(config.security.max_established_outgoing))
+        .with_max_established(Some(total_limit))
+        .with_max_established_per_peer(Some(config.security.max_established_per_peer))
+}
+
+fn message_id_for(message: &gossipsub::Message) -> gossipsub::MessageId {
+    use blake2::{Blake2s256, Digest};
+    let mut hasher = Blake2s256::new();
+    hasher.update(message.topic.as_str().as_bytes());
+    hasher.update(&message.data);
+    let digest = hasher.finalize();
+    gossipsub::MessageId::from(hex_encode(&digest))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const LUT: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(LUT[(b >> 4) as usize] as char);
+        out.push(LUT[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn parse_listen_addr(value: &str) -> Result<Multiaddr> {

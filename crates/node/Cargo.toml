@@ -19,3 +19,7 @@ tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "sync", "ti
 tracing = { version = "0.1", features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 w1z4rdv1510n = { path = "../core" }
+void = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

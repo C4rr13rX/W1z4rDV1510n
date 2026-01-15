@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -19,6 +19,7 @@ struct LocalLedgerState {
     balances: HashMap<String, RewardBalance>,
     reward_events: Vec<RewardEvent>,
     work_proofs: Vec<WorkProof>,
+    work_ids: HashSet<String>,
     sensor_commitments: Vec<SensorCommitment>,
     energy_samples: Vec<EnergyEfficiencySample>,
     cross_chain_transfers: Vec<CrossChainTransfer>,
@@ -83,6 +84,9 @@ impl BlockchainLedger for LocalLedger {
     }
 
     fn submit_sensor_commitment(&self, commitment: SensorCommitment) -> Result<()> {
+        if commitment.payload_hash.trim().is_empty() {
+            anyhow::bail!("sensor commitment payload hash must be non-empty");
+        }
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         state.sensor_commitments.push(commitment);
         trim_events(&mut state.sensor_commitments);
@@ -91,6 +95,9 @@ impl BlockchainLedger for LocalLedger {
     }
 
     fn submit_energy_sample(&self, sample: EnergyEfficiencySample) -> Result<()> {
+        if sample.watts.is_sign_negative() || sample.throughput.is_sign_negative() {
+            anyhow::bail!("energy sample values must be non-negative");
+        }
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         state.energy_samples.push(sample);
         trim_events(&mut state.energy_samples);
@@ -99,6 +106,9 @@ impl BlockchainLedger for LocalLedger {
     }
 
     fn submit_reward_event(&self, event: RewardEvent) -> Result<()> {
+        if event.score.is_sign_negative() {
+            anyhow::bail!("reward score must be non-negative");
+        }
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         let wallet_address = state
             .nodes
@@ -133,7 +143,17 @@ impl BlockchainLedger for LocalLedger {
     }
 
     fn submit_work_proof(&self, proof: WorkProof) -> Result<()> {
+        if proof.work_id.trim().is_empty() {
+            anyhow::bail!("work proof id must be non-empty");
+        }
+        if proof.score.is_sign_negative() {
+            anyhow::bail!("work proof score must be non-negative");
+        }
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
+        if state.work_ids.contains(&proof.work_id) {
+            anyhow::bail!("duplicate work proof id");
+        }
+        state.work_ids.insert(proof.work_id.clone());
         let reward_kind = match proof.kind {
             WorkKind::SensorIngest => RewardEventKind::SensorContribution,
             WorkKind::ComputeTask
@@ -164,6 +184,15 @@ impl BlockchainLedger for LocalLedger {
     }
 
     fn submit_cross_chain_transfer(&self, transfer: CrossChainTransfer) -> Result<()> {
+        if transfer.amount == 0 {
+            anyhow::bail!("cross-chain transfer amount must be > 0");
+        }
+        if transfer.source_chain.trim().is_empty() || transfer.target_chain.trim().is_empty() {
+            anyhow::bail!("cross-chain transfer requires chain identifiers");
+        }
+        if transfer.token_symbol.trim().is_empty() {
+            anyhow::bail!("cross-chain transfer requires token symbol");
+        }
         let mut state = self.state.lock().expect("local ledger mutex poisoned");
         state.cross_chain_transfers.push(transfer);
         trim_events(&mut state.cross_chain_transfers);
@@ -200,5 +229,29 @@ fn trim_events<T>(items: &mut Vec<T>) {
     if items.len() > MAX_LOG_ITEMS {
         let excess = items.len() - MAX_LOG_ITEMS;
         items.drain(0..excess);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn rejects_duplicate_work_ids() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let ledger = LocalLedger::load_or_create(path).expect("ledger");
+        let proof = WorkProof {
+            work_id: "w1".to_string(),
+            node_id: "n1".to_string(),
+            kind: WorkKind::ComputeTask,
+            completed_at: Timestamp { unix: 1 },
+            score: 1.0,
+            metrics: HashMap::new(),
+        };
+        ledger.submit_work_proof(proof.clone()).expect("first");
+        let second = ledger.submit_work_proof(proof);
+        assert!(second.is_err());
     }
 }
