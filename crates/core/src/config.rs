@@ -985,7 +985,7 @@ impl Default for BlockchainConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            chain_id: "w1z4rdv1510n".to_string(),
+            chain_id: "w1z4rdv1510n-l1".to_string(),
             consensus: "poa".to_string(),
             bootstrap_peers: Vec::new(),
             node_role: NodeRole::default(),

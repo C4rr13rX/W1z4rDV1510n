@@ -30,6 +30,8 @@ pub struct NodeRegistration {
     pub wallet_address: String,
     #[serde(default)]
     pub wallet_public_key: String,
+    #[serde(default)]
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +112,8 @@ pub struct WorkProof {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossChainTransfer {
+    #[serde(default)]
+    pub node_id: String,
     pub source_chain: String,
     pub target_chain: String,
     pub token_symbol: String,
@@ -118,6 +122,55 @@ pub struct CrossChainTransfer {
     pub timestamp: Timestamp,
     #[serde(default)]
     pub signature: String,
+}
+
+pub fn work_proof_payload(proof: &WorkProof) -> String {
+    format!(
+        "work|{}|{}|{:?}|{}|{:.6}",
+        proof.work_id,
+        proof.node_id,
+        proof.kind,
+        proof.completed_at.unix,
+        proof.score
+    )
+}
+
+pub fn sensor_commitment_payload(commitment: &SensorCommitment) -> String {
+    format!(
+        "sensor|{}|{}|{}|{}",
+        commitment.node_id, commitment.sensor_id, commitment.timestamp.unix, commitment.payload_hash
+    )
+}
+
+pub fn cross_chain_transfer_payload(transfer: &CrossChainTransfer) -> String {
+    format!(
+        "xfer|{}|{}|{}|{}|{}|{}|{}",
+        transfer.node_id,
+        transfer.source_chain,
+        transfer.target_chain,
+        transfer.token_symbol,
+        transfer.amount,
+        transfer.payload_hash,
+        transfer.timestamp.unix
+    )
+}
+
+fn node_role_label(role: &NodeRole) -> &'static str {
+    match role {
+        NodeRole::Validator => "VALIDATOR",
+        NodeRole::Worker => "WORKER",
+        NodeRole::Sensor => "SENSOR",
+    }
+}
+
+pub fn node_registration_payload(registration: &NodeRegistration) -> String {
+    format!(
+        "register|{}|{}|{}|{}",
+        registration.node_id,
+        node_role_label(&registration.role),
+        registration.wallet_address,
+        registration.wallet_public_key
+    )
 }
 
 pub trait BlockchainLedger: Send + Sync {

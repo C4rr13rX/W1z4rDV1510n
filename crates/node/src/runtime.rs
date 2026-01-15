@@ -3,7 +3,7 @@ use crate::config::NodeConfig;
 use crate::ledger::LocalLedger;
 use crate::openstack::OpenStackControlPlane;
 use crate::paths::node_data_dir;
-use crate::wallet::{WalletInfo, WalletStore, node_id_from_wallet};
+use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
 use crate::p2p::NodeNetwork;
 use anyhow::Result;
 use tracing::{info, warn};
@@ -19,18 +19,18 @@ pub struct NodeRuntime {
     ledger: Box<dyn BlockchainLedger>,
     profile: HardwareProfile,
     openstack: Option<OpenStackControlPlane>,
-    wallet: WalletInfo,
+    wallet: WalletSigner,
 }
 
 impl NodeRuntime {
     pub fn new(mut config: NodeConfig) -> Result<Self> {
-        let wallet = WalletStore::load_or_create(&config.wallet)?;
+        let wallet = WalletStore::load_or_create_signer(&config.wallet)?;
         if config.network.bootstrap_peers.is_empty() && !config.blockchain.bootstrap_peers.is_empty()
         {
             config.network.bootstrap_peers = config.blockchain.bootstrap_peers.clone();
         }
         if config.node_id.trim().is_empty() || config.node_id == "node-001" {
-            config.node_id = node_id_from_wallet(&wallet.address);
+            config.node_id = node_id_from_wallet(&wallet.wallet().address);
         }
         let chain_spec = ChainSpec::load(&config.chain_spec)?;
         let profile = HardwareProfile::detect();
@@ -65,7 +65,7 @@ impl NodeRuntime {
             peer_count = self.network.peer_count(),
             compute_target = ?target,
             chain_id = self.chain_spec.chain_id,
-            wallet_address = self.wallet.address.as_str(),
+            wallet_address = self.wallet.wallet().address.as_str(),
             "node runtime started"
         );
         Ok(())
@@ -89,9 +89,13 @@ impl NodeRuntime {
             role: self.config.node_role.clone(),
             capabilities,
             sensors: self.config.sensors.clone(),
-            wallet_address: self.wallet.address.clone(),
-            wallet_public_key: self.wallet.public_key.clone(),
+            wallet_address: self.wallet.wallet().address.clone(),
+            wallet_public_key: self.wallet.wallet().public_key.clone(),
+            signature: String::new(),
         };
+        let payload = w1z4rdv1510n::blockchain::node_registration_payload(&registration);
+        let mut registration = registration;
+        registration.signature = self.wallet.sign_payload(payload.as_bytes());
         if let Err(err) = self.ledger.register_node(registration) {
             warn!(
                 target: "w1z4rdv1510n::node",

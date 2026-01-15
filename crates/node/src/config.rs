@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::paths::node_data_dir;
+use crate::chain::ChainSpec;
+use serde::{Deserialize, Serialize};
 use w1z4rdv1510n::blockchain::SensorDescriptor;
 use w1z4rdv1510n::config::{
     BlockchainConfig, ClusterConfig, ComputeRoutingConfig, LedgerConfig, NodeRole,
@@ -66,6 +67,17 @@ impl NodeConfig {
             anyhow::ensure!(
                 !self.ledger.backend.trim().is_empty(),
                 "ledger.backend must be set when ledger is enabled"
+            );
+        }
+        if self.blockchain.enabled {
+            let spec = ChainSpec::load(&self.chain_spec)?;
+            anyhow::ensure!(
+                spec.chain_id == self.blockchain.chain_id,
+                "blockchain.chain_id must match chain spec"
+            );
+            anyhow::ensure!(
+                spec.consensus == self.blockchain.consensus,
+                "blockchain.consensus must match chain spec"
             );
         }
         Ok(())

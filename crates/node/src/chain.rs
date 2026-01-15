@@ -1,5 +1,5 @@
 use crate::config::ChainSpecConfig;
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
@@ -51,14 +51,70 @@ impl ChainSpec {
         let reward_contract: RewardContractSpec = read_json(&paths.reward_contract_path)?;
         let bridge_contract: BridgeContractSpec = read_json(&paths.bridge_contract_path)?;
         let token_standard: TokenStandardSpec = read_json(&paths.token_standard_path)?;
-        Ok(Self {
+        let spec = Self {
             chain_id: genesis.chain_id.clone(),
             consensus: genesis.consensus.clone(),
             genesis,
             reward_contract,
             bridge_contract,
             token_standard,
-        })
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(!self.chain_id.trim().is_empty(), "chain_id must be non-empty");
+        ensure!(!self.consensus.trim().is_empty(), "consensus must be non-empty");
+        ensure!(
+            self.chain_id == self.genesis.chain_id,
+            "genesis.chain_id must match chain_id"
+        );
+        ensure!(
+            self.consensus == self.genesis.consensus,
+            "genesis.consensus must match consensus"
+        );
+        ensure!(
+            !self.genesis.token_symbol.trim().is_empty(),
+            "genesis.token_symbol must be non-empty"
+        );
+        ensure!(
+            self.token_standard.symbol == self.genesis.token_symbol,
+            "token_standard.symbol must match genesis token_symbol"
+        );
+        ensure!(
+            !self.token_standard.name.trim().is_empty(),
+            "token_standard.name must be non-empty"
+        );
+        ensure!(
+            !self.reward_contract.contract_id.trim().is_empty(),
+            "reward_contract.contract_id must be non-empty"
+        );
+        ensure!(
+            !self.reward_contract.version.trim().is_empty(),
+            "reward_contract.version must be non-empty"
+        );
+        ensure!(
+            !self.bridge_contract.contract_id.trim().is_empty(),
+            "bridge_contract.contract_id must be non-empty"
+        );
+        ensure!(
+            !self.bridge_contract.version.trim().is_empty(),
+            "bridge_contract.version must be non-empty"
+        );
+        if self.consensus.eq_ignore_ascii_case("poa") {
+            ensure!(
+                !self.genesis.initial_validators.is_empty(),
+                "genesis.initial_validators must be non-empty for poa"
+            );
+        }
+        if self.token_standard.transferable {
+            ensure!(
+                !self.bridge_contract.supported_chains.is_empty(),
+                "bridge_contract.supported_chains must be non-empty when token is transferable"
+            );
+        }
+        Ok(())
     }
 }
 

@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use w1z4rdv1510n::blockchain::{
+    CrossChainTransfer, SensorCommitment, WorkProof,
+    cross_chain_transfer_payload, sensor_commitment_payload, work_proof_payload,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletFile {
@@ -81,6 +85,24 @@ impl WalletSigner {
     pub fn sign_payload(&self, payload: &[u8]) -> String {
         let signature: Signature = self.signing_key.sign(payload);
         hex_encode(&signature.to_bytes())
+    }
+
+    pub fn sign_work_proof(&self, mut proof: WorkProof) -> WorkProof {
+        let payload = work_proof_payload(&proof);
+        proof.signature = self.sign_payload(payload.as_bytes());
+        proof
+    }
+
+    pub fn sign_sensor_commitment(&self, mut commitment: SensorCommitment) -> SensorCommitment {
+        let payload = sensor_commitment_payload(&commitment);
+        commitment.signature = self.sign_payload(payload.as_bytes());
+        commitment
+    }
+
+    pub fn sign_cross_chain_transfer(&self, mut transfer: CrossChainTransfer) -> CrossChainTransfer {
+        let payload = cross_chain_transfer_payload(&transfer);
+        transfer.signature = self.sign_payload(payload.as_bytes());
+        transfer
     }
 }
 
@@ -380,7 +402,7 @@ fn decode_secret_key(hex: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn address_from_public_key(public_key: &[u8]) -> String {
+pub fn address_from_public_key(public_key: &[u8]) -> String {
     let hash = hash_bytes(public_key);
     format!("w1z{}", hex_encode(&hash[0..20]))
 }
@@ -390,4 +412,78 @@ fn unix_time() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::Verifier;
+    use std::collections::HashMap;
+    use w1z4rdv1510n::blockchain::WorkKind;
+    use w1z4rdv1510n::schema::Timestamp;
+
+    #[test]
+    fn signer_produces_verifiable_signatures() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        let info = WalletInfo {
+            address: address_from_public_key(&public_bytes),
+            public_key: hex_encode(&public_bytes),
+            path: PathBuf::new(),
+        };
+        let signer = WalletSigner { info, signing_key };
+
+        let proof = WorkProof {
+            work_id: "w1".to_string(),
+            node_id: "n1".to_string(),
+            kind: WorkKind::ComputeTask,
+            completed_at: Timestamp { unix: 1 },
+            score: 1.0,
+            metrics: HashMap::new(),
+            signature: String::new(),
+        };
+        let signed_proof = signer.sign_work_proof(proof);
+        assert_signature(&signer, work_proof_payload(&signed_proof), &signed_proof.signature);
+
+        let commitment = SensorCommitment {
+            node_id: "n1".to_string(),
+            sensor_id: "sensor-1".to_string(),
+            timestamp: Timestamp { unix: 2 },
+            payload_hash: "payload".to_string(),
+            signature: String::new(),
+        };
+        let signed_commitment = signer.sign_sensor_commitment(commitment);
+        assert_signature(
+            &signer,
+            sensor_commitment_payload(&signed_commitment),
+            &signed_commitment.signature,
+        );
+
+        let transfer = CrossChainTransfer {
+            node_id: "n1".to_string(),
+            source_chain: "w1z".to_string(),
+            target_chain: "eth".to_string(),
+            token_symbol: "W1Z".to_string(),
+            amount: 100,
+            payload_hash: "payload".to_string(),
+            timestamp: Timestamp { unix: 3 },
+            signature: String::new(),
+        };
+        let signed_transfer = signer.sign_cross_chain_transfer(transfer);
+        assert_signature(
+            &signer,
+            cross_chain_transfer_payload(&signed_transfer),
+            &signed_transfer.signature,
+        );
+    }
+
+    fn assert_signature(signer: &WalletSigner, payload: String, signature_hex: &str) {
+        let signature_bytes = hex_decode(signature_hex).expect("decode signature");
+        let signature = Signature::from_slice(&signature_bytes).expect("signature");
+        signer
+            .signing_key
+            .verifying_key()
+            .verify(payload.as_bytes(), &signature)
+            .expect("verify signature");
+    }
 }
