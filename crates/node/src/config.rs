@@ -12,6 +12,7 @@ pub struct NodeConfig {
     pub node_id: String,
     pub node_role: NodeRole,
     pub network: NodeNetworkConfig,
+    pub api: NodeApiConfig,
     pub openstack: OpenStackConfig,
     pub wallet: WalletConfig,
     pub blockchain: BlockchainConfig,
@@ -29,6 +30,7 @@ impl Default for NodeConfig {
             node_id: "node-001".to_string(),
             node_role: NodeRole::default(),
             network: NodeNetworkConfig::default(),
+            api: NodeApiConfig::default(),
             openstack: OpenStackConfig::default(),
             wallet: WalletConfig::default(),
             blockchain: BlockchainConfig::default(),
@@ -199,6 +201,16 @@ impl NodeConfig {
                 );
             }
         }
+        if self.api.require_api_key {
+            anyhow::ensure!(
+                !self.api.api_key_env.trim().is_empty(),
+                "api.api_key_env must be non-empty when api.require_api_key is true"
+            );
+            anyhow::ensure!(
+                !self.api.api_key_header.trim().is_empty(),
+                "api.api_key_header must be non-empty when api.require_api_key is true"
+            );
+        }
         Ok(())
     }
 }
@@ -212,6 +224,24 @@ pub struct NodeNetworkConfig {
     pub gossip_protocol: String,
     #[serde(default)]
     pub security: NetworkSecurityConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NodeApiConfig {
+    pub require_api_key: bool,
+    pub api_key_env: String,
+    pub api_key_header: String,
+}
+
+impl Default for NodeApiConfig {
+    fn default() -> Self {
+        Self {
+            require_api_key: false,
+            api_key_env: "W1Z4RDV1510N_API_KEY".to_string(),
+            api_key_header: "x-api-key".to_string(),
+        }
+    }
 }
 
 impl Default for NodeNetworkConfig {

@@ -26,6 +26,11 @@
       "public_key_ttl_secs": 600
     }
   },
+  "api": {
+    "require_api_key": true,
+    "api_key_env": "W1Z4RDV1510N_API_KEY",
+    "api_key_header": "x-api-key"
+  },
   "openstack": {
     "enabled": false,
     "mode": "LOCAL_CONTROL_PLANE",
