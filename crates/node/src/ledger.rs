@@ -715,6 +715,11 @@ fn roll_fee_window_if_needed(
         return;
     }
     let elapsed = timestamp.unix - state.fee_market.window_start_unix;
+    if elapsed < 0 {
+        state.fee_market.window_start_unix = timestamp.unix;
+        state.fee_market.window_tx_count = 0;
+        return;
+    }
     if elapsed < window_secs {
         return;
     }
@@ -727,6 +732,7 @@ fn roll_fee_window_if_needed(
     let delta = (usage - 1.0) * config.adjustment_rate;
     base_fee *= 1.0 + delta;
     state.fee_market.base_fee = clamp_base_fee(base_fee, config);
+    distribute_fee_pool(state, timestamp);
     state.fee_market.window_tx_count = 0;
     state.fee_market.window_start_unix = timestamp.unix;
 }
@@ -768,7 +774,7 @@ fn charge_fee(
         .unwrap_or_default();
     let entry = LocalLedger::balance_entry(state, node_id, &wallet_address);
     let available = entry.balance + pending_credit;
-    if fee_paid + 1e-9 > available {
+    if fee_paid > available + 1e-9 {
         anyhow::bail!("insufficient balance to cover fee");
     }
     entry.balance -= fee_paid;
@@ -809,6 +815,56 @@ fn fee_event_payload(
         "fee|{}|{}|{:.6}|{:.6}|{}",
         node_id, timestamp.unix, fee_paid, base_fee, kind
     )
+}
+
+fn distribute_fee_pool(state: &mut LocalLedgerState, timestamp: Timestamp) {
+    if !state.fee_market.pool_balance.is_finite() || state.fee_market.pool_balance <= 0.0 {
+        return;
+    }
+    let mut active_validators: Vec<String> = state
+        .validators
+        .iter()
+        .filter(|(_, record)| {
+            record.status == ValidatorStatus::Active
+                && record
+                    .jailed_until
+                    .map(|until| timestamp.unix >= until.unix)
+                    .unwrap_or(true)
+        })
+        .map(|(node_id, _)| node_id.clone())
+        .collect();
+    if active_validators.is_empty() {
+        return;
+    }
+    active_validators.sort();
+    let count = active_validators.len() as f64;
+    let share = state.fee_market.pool_balance / count;
+    if !share.is_finite() || share <= 0.0 {
+        return;
+    }
+    for node_id in active_validators {
+        let wallet_address = state
+            .nodes
+            .get(&node_id)
+            .map(|reg| reg.wallet_address.clone())
+            .unwrap_or_default();
+        let entry = LocalLedger::balance_entry(state, &node_id, &wallet_address);
+        entry.balance += share;
+        entry.updated_at = timestamp;
+        let reward_event = RewardEvent {
+            node_id: node_id.clone(),
+            kind: RewardEventKind::Uptime,
+            timestamp,
+            score: share,
+        };
+        let reward_payload = reward_event_payload(&reward_event);
+        state.reward_events.push(reward_event);
+        trim_events(&mut state.reward_events);
+        let audit_id = payload_id(reward_payload.as_bytes());
+        record_audit(state, "FEE_DISTRIBUTION", audit_id, timestamp);
+    }
+    let distributed_total = share * count;
+    state.fee_market.pool_balance = (state.fee_market.pool_balance - distributed_total).max(0.0);
 }
 
 fn payload_id(payload: &[u8]) -> String {
@@ -1245,5 +1301,164 @@ mod tests {
 
         let balance = ledger.reward_balance("n1").expect("balance");
         assert!((balance.balance - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fee_pool_distributes_to_active_validators() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let policy = ValidatorPolicyConfig::default();
+        let fee_market = FeeMarketConfig {
+            enabled: true,
+            base_fee: 0.0,
+            min_base_fee: 0.0,
+            max_base_fee: 5.0,
+            target_txs_per_window: 10,
+            window_secs: 10,
+            adjustment_rate: 0.0,
+        };
+        let ledger = LocalLedger::load_or_create(path, policy, fee_market).expect("ledger");
+
+        let signing_key_val1 = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes_val1 = signing_key_val1.verifying_key().to_bytes();
+        let public_key_val1 = hex_encode(public_bytes_val1.as_slice());
+        let wallet_address_val1 = address_from_public_key(&public_bytes_val1);
+        let mut registration_val1 = NodeRegistration {
+            node_id: "val1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Validator,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address: wallet_address_val1,
+            wallet_public_key: public_key_val1.clone(),
+            signature: String::new(),
+        };
+        let payload = node_registration_payload(&registration_val1);
+        let signature = signing_key_val1.sign(payload.as_bytes()).to_bytes();
+        registration_val1.signature = hex_encode(&signature);
+        ledger.register_node(registration_val1).expect("register val1");
+
+        let mut heartbeat_val1 = ValidatorHeartbeat {
+            node_id: "val1".to_string(),
+            timestamp: Timestamp { unix: 1 },
+            fee_paid: 0.0,
+            signature: String::new(),
+        };
+        let payload = validator_heartbeat_payload(&heartbeat_val1);
+        let signature = signing_key_val1.sign(payload.as_bytes()).to_bytes();
+        heartbeat_val1.signature = hex_encode(&signature);
+        ledger
+            .submit_validator_heartbeat(heartbeat_val1)
+            .expect("heartbeat val1");
+
+        let signing_key_val2 = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes_val2 = signing_key_val2.verifying_key().to_bytes();
+        let public_key_val2 = hex_encode(public_bytes_val2.as_slice());
+        let wallet_address_val2 = address_from_public_key(&public_bytes_val2);
+        let mut registration_val2 = NodeRegistration {
+            node_id: "val2".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Validator,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address: wallet_address_val2,
+            wallet_public_key: public_key_val2.clone(),
+            signature: String::new(),
+        };
+        let payload = node_registration_payload(&registration_val2);
+        let signature = signing_key_val2.sign(payload.as_bytes()).to_bytes();
+        registration_val2.signature = hex_encode(&signature);
+        ledger.register_node(registration_val2).expect("register val2");
+
+        let mut heartbeat_val2 = ValidatorHeartbeat {
+            node_id: "val2".to_string(),
+            timestamp: Timestamp { unix: 1 },
+            fee_paid: 0.0,
+            signature: String::new(),
+        };
+        let payload = validator_heartbeat_payload(&heartbeat_val2);
+        let signature = signing_key_val2.sign(payload.as_bytes()).to_bytes();
+        heartbeat_val2.signature = hex_encode(&signature);
+        ledger
+            .submit_validator_heartbeat(heartbeat_val2)
+            .expect("heartbeat val2");
+
+        let signing_key_worker = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public_bytes_worker = signing_key_worker.verifying_key().to_bytes();
+        let public_key_worker = hex_encode(public_bytes_worker.as_slice());
+        let wallet_address_worker = address_from_public_key(&public_bytes_worker);
+        let mut registration_worker = NodeRegistration {
+            node_id: "worker1".to_string(),
+            role: w1z4rdv1510n::config::NodeRole::Worker,
+            capabilities: w1z4rdv1510n::blockchain::NodeCapabilities {
+                cpu_cores: 1,
+                memory_gb: 1.0,
+                gpu_count: 0,
+            },
+            sensors: Vec::new(),
+            wallet_address: wallet_address_worker,
+            wallet_public_key: public_key_worker.clone(),
+            signature: String::new(),
+        };
+        let payload = node_registration_payload(&registration_worker);
+        let signature = signing_key_worker.sign(payload.as_bytes()).to_bytes();
+        registration_worker.signature = hex_encode(&signature);
+        ledger
+            .register_node(registration_worker)
+            .expect("register worker");
+
+        let reward = RewardEvent {
+            node_id: "worker1".to_string(),
+            kind: RewardEventKind::ComputeContribution,
+            timestamp: Timestamp { unix: 1 },
+            score: 5.0,
+        };
+        ledger.submit_reward_event(reward).expect("reward");
+
+        let commitment = SensorCommitment {
+            node_id: "worker1".to_string(),
+            sensor_id: "sensor-1".to_string(),
+            timestamp: Timestamp { unix: 2 },
+            payload_hash: "payload".to_string(),
+            fee_paid: 4.0,
+            signature: String::new(),
+        };
+        let payload = sensor_commitment_payload(&commitment);
+        let signature = signing_key_worker.sign(payload.as_bytes()).to_bytes();
+        let mut signed = commitment.clone();
+        signed.signature = hex_encode(&signature);
+        ledger
+            .submit_sensor_commitment(signed)
+            .expect("commitment");
+
+        let rollover = SensorCommitment {
+            node_id: "worker1".to_string(),
+            sensor_id: "sensor-2".to_string(),
+            timestamp: Timestamp { unix: 15 },
+            payload_hash: "payload2".to_string(),
+            fee_paid: 0.0,
+            signature: String::new(),
+        };
+        let payload = sensor_commitment_payload(&rollover);
+        let signature = signing_key_worker.sign(payload.as_bytes()).to_bytes();
+        let mut signed = rollover.clone();
+        signed.signature = hex_encode(&signature);
+        ledger
+            .submit_sensor_commitment(signed)
+            .expect("rollover commitment");
+
+        let balance_val1 = ledger.reward_balance("val1").expect("balance val1");
+        let balance_val2 = ledger.reward_balance("val2").expect("balance val2");
+        assert!((balance_val1.balance - 2.0).abs() < 1e-6);
+        assert!((balance_val2.balance - 2.0).abs() < 1e-6);
+
+        let balance_worker = ledger.reward_balance("worker1").expect("balance worker");
+        assert!((balance_worker.balance - 1.0).abs() < 1e-6);
     }
 }
