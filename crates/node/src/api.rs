@@ -9,7 +9,8 @@ use axum::{Json, Router};
 use blake2::{Blake2s256, Digest};
 use serde::Serialize;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use w1z4rdv1510n::blockchain::{BlockchainLedger, NoopLedger, RewardBalance};
 use w1z4rdv1510n::bridge::{BridgeProof, bridge_deposit_id};
 
@@ -19,6 +20,7 @@ struct ApiState {
     require_api_key: bool,
     api_key_hashes: Vec<[u8; 32]>,
     api_key_header: HeaderName,
+    limiter: Arc<Mutex<ApiLimiter>>,
 }
 
 #[derive(Serialize)]
@@ -60,11 +62,13 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .api_key_header
         .parse()
         .context("invalid api_key_header")?;
+    let limiter = Arc::new(Mutex::new(ApiLimiter::new(60, 10)));
     let state = ApiState {
         ledger,
         require_api_key: config.api.require_api_key,
         api_key_hashes,
         api_key_header,
+        limiter,
     };
     let max_body = config
         .blockchain
@@ -97,6 +101,15 @@ async fn submit_bridge_proof(
     headers: HeaderMap,
     Json(proof): Json<BridgeProof>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "bridge") {
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
     if let Err(err) = authorize(&state, &headers) {
         let response = ErrorResponse {
             error: err.to_string(),
@@ -135,6 +148,15 @@ async fn get_balance(
     headers: HeaderMap,
     Path(node_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "balance") {
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
     if let Err(err) = authorize(&state, &headers) {
         let response = ErrorResponse {
             error: err.to_string(),
@@ -178,6 +200,17 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<()> {
         anyhow::bail!("invalid api key");
     }
     Ok(())
+}
+
+fn rate_limit(state: &ApiState, headers: &HeaderMap, route: &str) -> Result<()> {
+    let key = headers
+        .get(&state.api_key_header)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("anonymous");
+    let mut limiter = state.limiter.lock().expect("api limiter lock");
+    limiter.check_and_update(key, route)
 }
 
 fn hash_allowed(candidate: &[u8; 32], allowlist: &[[u8; 32]]) -> bool {
@@ -253,6 +286,47 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(LUT[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+#[derive(Debug)]
+struct ApiLimiter {
+    window_secs: u64,
+    max_requests: u32,
+    entries: std::collections::HashMap<String, ApiLimiterEntry>,
+}
+
+#[derive(Debug)]
+struct ApiLimiterEntry {
+    window_start: Instant,
+    count: u32,
+}
+
+impl ApiLimiter {
+    fn new(window_secs: u64, max_requests: u32) -> Self {
+        Self {
+            window_secs,
+            max_requests,
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    fn check_and_update(&mut self, key: &str, route: &str) -> Result<()> {
+        let now = Instant::now();
+        let full_key = format!("{key}:{route}");
+        let entry = self.entries.entry(full_key).or_insert(ApiLimiterEntry {
+            window_start: now,
+            count: 0,
+        });
+        if now.duration_since(entry.window_start).as_secs() >= self.window_secs {
+            entry.window_start = now;
+            entry.count = 0;
+        }
+        entry.count = entry.count.saturating_add(1);
+        if entry.count > self.max_requests {
+            anyhow::bail!("rate limit exceeded");
+        }
+        Ok(())
+    }
 }
 
 fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {
