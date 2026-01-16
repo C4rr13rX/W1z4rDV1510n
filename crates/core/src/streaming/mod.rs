@@ -8,6 +8,7 @@ pub mod processor;
 pub mod spike_router;
 pub mod align;
 pub mod service;
+pub mod motor;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -22,3 +23,4 @@ pub use processor::{StreamingInference, StreamingProcessor};
 pub use spike_router::UltradianSpikeRouter;
 pub use align::StreamingAligner;
 pub use service::{StreamingService, StreamingServiceConfig};
+pub use motor::{BoundingBox, Keypoint, MotorFeatureExtractor, MotorFeatureOutput, MotorFeatures, MotorConfig, PoseFrame};

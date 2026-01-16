@@ -2,6 +2,7 @@ use crate::config::StreamingConfig;
 use crate::orchestrator::{RunOutcome, run_with_snapshot};
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
 use crate::streaming::align::StreamingAligner;
+use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -10,7 +11,7 @@ use crate::streaming::topic::{TopicEventExtractor, TopicSample, TopicConfig};
 use crate::streaming::ultradian::{SignalSample, UltradianLayerExtractor};
 use crate::config::RunConfig;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +38,7 @@ struct TopicSignal {
 pub struct StreamingProcessor {
     config: StreamingConfig,
     people_extractors: HashMap<String, UltradianLayerExtractor>,
+    motor_extractor: MotorFeatureExtractor,
     flow_extractor: FlowLayerExtractor,
     topic_extractor: TopicEventExtractor,
 }
@@ -46,6 +48,7 @@ impl StreamingProcessor {
         Self {
             config,
             people_extractors: HashMap::new(),
+            motor_extractor: MotorFeatureExtractor::new(crate::streaming::motor::MotorConfig::default()),
             flow_extractor: FlowLayerExtractor::new(FlowConfig::default()),
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
         }
@@ -78,17 +81,38 @@ impl StreamingProcessor {
     }
 
     fn handle_people_video(&mut self, envelope: StreamEnvelope) -> Option<TokenBatch> {
-        let payload = match envelope.payload {
+        let StreamEnvelope {
+            timestamp,
+            payload,
+            metadata,
+            ..
+        } = envelope;
+        let payload = match payload {
             StreamPayload::Json { value } => value,
             _ => return None,
         };
-        let signal: PeopleSignal = serde_json::from_value(payload).ok()?;
+        if let Ok(signal) = serde_json::from_value::<PeopleSignal>(payload.clone()) {
+            return self.handle_people_signal(signal, timestamp, metadata);
+        }
+        let mut frame: PoseFrame = serde_json::from_value(payload).ok()?;
+        if frame.timestamp.is_none() {
+            frame.timestamp = Some(timestamp);
+        }
+        self.handle_people_pose(frame, metadata)
+    }
+
+    fn handle_people_signal(
+        &mut self,
+        signal: PeopleSignal,
+        timestamp: crate::schema::Timestamp,
+        metadata: HashMap<String, Value>,
+    ) -> Option<TokenBatch> {
         let extractor = self
             .people_extractors
             .entry(signal.entity_id.clone())
             .or_insert_with(UltradianLayerExtractor::new);
         extractor.push_sample(SignalSample {
-            timestamp: envelope.timestamp,
+            timestamp,
             value: signal.signal,
         });
         let mut layers = extractor.extract_layers();
@@ -101,7 +125,7 @@ impl StreamingProcessor {
         let tokens = vec![EventToken {
             id: String::new(),
             kind: EventKind::BehavioralAtom,
-            onset: envelope.timestamp,
+            onset: timestamp,
             duration_secs: 1.0,
             confidence: 1.0,
             attributes: HashMap::from([
@@ -111,10 +135,94 @@ impl StreamingProcessor {
             source: Some(StreamSource::PeopleVideo),
         }];
         Some(TokenBatch {
-            timestamp: envelope.timestamp,
+            timestamp,
             tokens,
             layers,
-            source_confidence: HashMap::from([(StreamSource::PeopleVideo, confidence_from_meta(&envelope.metadata))]),
+            source_confidence: HashMap::from([(
+                StreamSource::PeopleVideo,
+                confidence_from_meta(&metadata),
+            )]),
+        })
+    }
+
+    fn handle_people_pose(
+        &mut self,
+        frame: PoseFrame,
+        metadata: HashMap<String, Value>,
+    ) -> Option<TokenBatch> {
+        let output = self.motor_extractor.extract(frame)?;
+        let extractor = self
+            .people_extractors
+            .entry(output.entity_id.clone())
+            .or_insert_with(UltradianLayerExtractor::new);
+        extractor.push_sample(SignalSample {
+            timestamp: output.timestamp,
+            value: output.signal,
+        });
+        let mut layers = extractor.extract_layers();
+        for layer in &mut layers {
+            layer.attributes.insert(
+                "entity_id".to_string(),
+                Value::String(output.entity_id.clone()),
+            );
+        }
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "entity_id".to_string(),
+            Value::String(output.entity_id.clone()),
+        );
+        attributes.insert("atom_type".to_string(), Value::String("motor".to_string()));
+        attributes.insert("motor_signal".to_string(), Value::from(output.signal));
+        attributes.insert(
+            "motion_energy".to_string(),
+            Value::from(output.features.motion_energy),
+        );
+        attributes.insert(
+            "motion_variance".to_string(),
+            Value::from(output.features.motion_variance),
+        );
+        attributes.insert(
+            "posture_shift".to_string(),
+            Value::from(output.features.posture_shift),
+        );
+        attributes.insert(
+            "micro_jitter".to_string(),
+            Value::from(output.features.micro_jitter),
+        );
+        attributes.insert(
+            "keypoint_confidence".to_string(),
+            Value::from(output.features.confidence),
+        );
+        attributes.insert(
+            "keypoint_count".to_string(),
+            Value::from(output.keypoint_count as u64),
+        );
+        if let Some(area) = output.bbox_area {
+            attributes.insert("bbox_area".to_string(), Value::from(area));
+        }
+        if !output.metadata.is_empty() {
+            attributes.insert(
+                "metadata".to_string(),
+                Value::Object(map_from_metadata(&output.metadata)),
+            );
+        }
+        let tokens = vec![EventToken {
+            id: String::new(),
+            kind: EventKind::BehavioralAtom,
+            onset: output.timestamp,
+            duration_secs: 1.0,
+            confidence: output.features.confidence,
+            attributes,
+            source: Some(StreamSource::PeopleVideo),
+        }];
+        Some(TokenBatch {
+            timestamp: output.timestamp,
+            tokens,
+            layers,
+            source_confidence: HashMap::from([(
+                StreamSource::PeopleVideo,
+                confidence_from_meta(&metadata),
+            )]),
         })
     }
 
@@ -206,11 +314,20 @@ fn confidence_from_meta(metadata: &HashMap<String, Value>) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+fn map_from_metadata(input: &HashMap<String, Value>) -> Map<String, Value> {
+    let mut map = Map::new();
+    for (key, value) in input {
+        map.insert(key.clone(), value.clone());
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::Timestamp;
     use crate::streaming::schema::{StreamEnvelope, StreamPayload};
+    use std::f64::consts::PI;
 
     #[test]
     fn processor_handles_people_signal() {
@@ -235,6 +352,42 @@ mod tests {
         }
         let batch = last.expect("batch");
         assert!(!batch.layers.is_empty());
+    }
+
+    #[test]
+    fn processor_handles_people_pose_frame() {
+        let mut config = StreamingConfig::default();
+        config.enabled = true;
+        config.ingest.people_video = true;
+        let mut processor = StreamingProcessor::new(config);
+        let period_secs = 30.0 * 60.0;
+        let omega = 2.0 * PI / period_secs;
+        let base = 1_000_000_i64;
+        let mut last = None;
+        for idx in 0..40 {
+            let t = base + idx * 60;
+            let x = (omega * t as f64).sin();
+            let envelope = StreamEnvelope {
+                source: StreamSource::PeopleVideo,
+                timestamp: Timestamp { unix: t },
+                payload: StreamPayload::Json {
+                    value: serde_json::json!({
+                        "entity_id": "e1",
+                        "keypoints": [
+                            { "name": "head", "x": x, "y": 0.0, "confidence": 1.0 },
+                            { "name": "hand", "x": x + 0.4, "y": 0.2, "confidence": 0.9 },
+                            { "name": "foot", "x": x - 0.3, "y": -0.1, "confidence": 0.8 }
+                        ]
+                    }),
+                },
+                metadata: HashMap::new(),
+            };
+            last = processor.ingest(envelope);
+        }
+        let batch = last.expect("batch");
+        assert!(!batch.tokens.is_empty());
+        let token = &batch.tokens[0];
+        assert!(token.attributes.contains_key("motion_energy"));
     }
 
     #[test]
