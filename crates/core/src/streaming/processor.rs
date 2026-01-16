@@ -173,6 +173,21 @@ impl StreamingProcessor {
         );
         attributes.insert("atom_type".to_string(), Value::String("motor".to_string()));
         attributes.insert("motor_signal".to_string(), Value::from(output.signal));
+        attributes.insert("motor_signal_raw".to_string(), Value::from(output.raw_signal));
+        attributes.insert(
+            "motor_signal_norm".to_string(),
+            Value::from(output.normalized_signal),
+        );
+        attributes.insert("baseline_mean".to_string(), Value::from(output.baseline_mean));
+        attributes.insert("baseline_std".to_string(), Value::from(output.baseline_std));
+        attributes.insert(
+            "baseline_samples".to_string(),
+            Value::from(output.baseline_samples as u64),
+        );
+        attributes.insert(
+            "baseline_ready".to_string(),
+            Value::from(output.baseline_ready),
+        );
         attributes.insert(
             "motion_energy".to_string(),
             Value::from(output.features.motion_energy),

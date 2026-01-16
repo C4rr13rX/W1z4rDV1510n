@@ -49,6 +49,12 @@ pub struct MotorFeatureOutput {
     pub keypoint_count: usize,
     pub bbox_area: Option<f64>,
     pub features: MotorFeatures,
+    pub raw_signal: f64,
+    pub normalized_signal: f64,
+    pub baseline_mean: f64,
+    pub baseline_std: f64,
+    pub baseline_samples: usize,
+    pub baseline_ready: bool,
     pub signal: f64,
     pub metadata: HashMap<String, Value>,
 }
@@ -60,6 +66,10 @@ pub struct MotorConfig {
     pub posture_norm: f64,
     pub min_keypoints: usize,
     pub signal_alpha: f64,
+    pub baseline_alpha: f64,
+    pub baseline_min_samples: usize,
+    pub baseline_std_floor: f64,
+    pub baseline_norm_clamp: f64,
 }
 
 impl Default for MotorConfig {
@@ -70,6 +80,10 @@ impl Default for MotorConfig {
             posture_norm: 0.75,
             min_keypoints: 3,
             signal_alpha: 0.3,
+            baseline_alpha: 0.05,
+            baseline_min_samples: 12,
+            baseline_std_floor: 0.05,
+            baseline_norm_clamp: 3.0,
         }
     }
 }
@@ -90,6 +104,9 @@ struct EntityMotionState {
     last_centroid: Option<(f64, f64)>,
     last_dispersion: f64,
     signal_ema: f64,
+    baseline_mean: f64,
+    baseline_var: f64,
+    baseline_samples: usize,
 }
 
 impl EntityMotionState {
@@ -100,7 +117,43 @@ impl EntityMotionState {
             last_centroid: None,
             last_dispersion: 0.0,
             signal_ema: 0.0,
+            baseline_mean: 0.0,
+            baseline_var: 0.0,
+            baseline_samples: 0,
         }
+    }
+
+    fn update_baseline(
+        &mut self,
+        raw_signal: f64,
+        config: &MotorConfig,
+    ) -> (f64, f64, usize, bool, f64) {
+        if self.baseline_samples == 0 {
+            self.baseline_mean = raw_signal;
+            self.baseline_var = 0.0;
+            self.baseline_samples = 1;
+        } else {
+            let alpha = config.baseline_alpha.clamp(0.0, 1.0);
+            let diff = raw_signal - self.baseline_mean;
+            self.baseline_mean += alpha * diff;
+            self.baseline_var = (1.0 - alpha) * (self.baseline_var + alpha * diff * diff);
+            self.baseline_samples = self.baseline_samples.saturating_add(1);
+        }
+        let baseline_std = self.baseline_var.sqrt().max(config.baseline_std_floor);
+        let baseline_ready = self.baseline_samples >= config.baseline_min_samples;
+        let normalized = if baseline_ready {
+            let clamp = config.baseline_norm_clamp.max(0.1);
+            ((raw_signal - self.baseline_mean) / baseline_std).clamp(-clamp, clamp)
+        } else {
+            raw_signal
+        };
+        (
+            self.baseline_mean,
+            baseline_std,
+            self.baseline_samples,
+            baseline_ready,
+            normalized,
+        )
     }
 }
 
@@ -230,9 +283,12 @@ impl MotorFeatureExtractor {
         let motion_norm = (mean_speed / self.config.velocity_norm).clamp(0.0, 1.0);
         let jitter_norm = (micro_jitter / self.config.jitter_norm).clamp(0.0, 1.0);
         let posture_norm = (posture_shift / self.config.posture_norm).clamp(0.0, 1.0);
-        let raw_signal = (motion_norm * 0.6 + jitter_norm * 0.3 + posture_norm * 0.1).clamp(0.0, 1.0);
+        let raw_signal =
+            (motion_norm * 0.6 + jitter_norm * 0.3 + posture_norm * 0.1).clamp(0.0, 1.0);
+        let (baseline_mean, baseline_std, baseline_samples, baseline_ready, normalized_signal) =
+            state.update_baseline(raw_signal, &self.config);
         let alpha = self.config.signal_alpha.clamp(0.0, 1.0);
-        let signal = alpha * raw_signal + (1.0 - alpha) * state.signal_ema;
+        let signal = alpha * normalized_signal + (1.0 - alpha) * state.signal_ema;
 
         state.last_timestamp = timestamp;
         state.keypoints = next_keypoints;
@@ -252,6 +308,12 @@ impl MotorFeatureExtractor {
                 micro_jitter,
                 confidence,
             },
+            raw_signal,
+            normalized_signal,
+            baseline_mean,
+            baseline_std,
+            baseline_samples,
+            baseline_ready,
             signal,
             metadata: std::mem::take(&mut frame.metadata),
         })
@@ -365,7 +427,9 @@ mod tests {
         };
         let _ = extractor.extract(frame_a);
         let output = extractor.extract(frame_b).expect("output");
-        assert!(output.signal > 0.0);
+        assert!(output.raw_signal > 0.0);
+        assert!(output.signal.is_finite());
         assert!(output.features.motion_energy > 0.0);
+        assert!(output.baseline_samples >= 2);
     }
 }
