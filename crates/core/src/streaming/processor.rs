@@ -8,6 +8,7 @@ use crate::streaming::schema::{
 };
 use crate::streaming::symbolize::{SymbolizeConfig, token_batch_to_snapshot};
 use crate::streaming::topic::{TopicEventExtractor, TopicSample, TopicConfig};
+use crate::streaming::spike_runtime::StreamingSpikeRuntime;
 use crate::streaming::temporal::TemporalInferenceCore;
 use crate::streaming::ultradian::{SignalSample, UltradianLayerExtractor};
 use crate::config::RunConfig;
@@ -289,6 +290,7 @@ pub struct StreamingInference {
     processor: StreamingProcessor,
     aligner: StreamingAligner,
     temporal: TemporalInferenceCore,
+    spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
 }
@@ -301,10 +303,16 @@ impl StreamingInference {
             run_config.streaming.temporal.clone(),
             run_config.streaming.hypergraph.clone(),
         );
+        let spike_runtime = if run_config.streaming.spike.enabled {
+            Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
+        } else {
+            None
+        };
         Self {
             processor,
             aligner,
             temporal,
+            spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
         }
@@ -323,12 +331,27 @@ impl StreamingInference {
             None => return Ok(None),
         };
         let temporal_report = self.temporal.update(&batch);
+        let spike_messages = self
+            .spike_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.route_batch(&batch, temporal_report.as_ref()));
         let mut snapshot = token_batch_to_snapshot(&batch, &self.symbolizer);
         if let Some(report) = temporal_report {
             snapshot.metadata.insert(
                 "temporal_inference".to_string(),
                 serde_json::to_value(report)?,
             );
+        }
+        if let Some(mut messages) = spike_messages {
+            if let Some(runtime) = &self.spike_runtime {
+                if runtime.embed_in_snapshot() {
+                    messages.truncate(runtime.max_frames_per_snapshot());
+                    snapshot.metadata.insert(
+                        "spike_messages".to_string(),
+                        serde_json::to_value(messages)?,
+                    );
+                }
+            }
         }
         let outcome = run_with_snapshot(snapshot, self.run_config.clone())?;
         Ok(Some(outcome))

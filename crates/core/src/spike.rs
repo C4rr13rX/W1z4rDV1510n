@@ -122,6 +122,10 @@ impl SpikePool {
         id
     }
 
+    pub fn neuron_count(&self) -> usize {
+        self.neurons.len()
+    }
+
     pub fn connect(&mut self, from: u32, to: u32, weight: f32) {
         if let Some(neuron) = self.neurons.get_mut(from as usize) {
             neuron.outgoing.push(SpikeSynapse { target: to, weight });

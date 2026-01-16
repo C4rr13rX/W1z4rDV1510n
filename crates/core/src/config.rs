@@ -288,6 +288,44 @@ impl RunConfig {
                     "streaming.temporal.excitation_boost must be >= 0"
                 );
             }
+            if self.streaming.spike.enabled {
+                anyhow::ensure!(
+                    self.streaming.spike.max_neurons_per_pool > 0,
+                    "streaming.spike.max_neurons_per_pool must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.spike.max_inputs_per_pool > 0,
+                    "streaming.spike.max_inputs_per_pool must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.spike.max_frames_per_snapshot > 0,
+                    "streaming.spike.max_frames_per_snapshot must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.spike.membrane_decay),
+                    "streaming.spike.membrane_decay must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.spike.threshold > 0.0,
+                    "streaming.spike.threshold must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.spike.intensity_norm > 0.0,
+                    "streaming.spike.intensity_norm must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.spike.evidence_norm > 0.0,
+                    "streaming.spike.evidence_norm must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.spike.hypergraph_node_norm > 0.0,
+                    "streaming.spike.hypergraph_node_norm must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.spike.hypergraph_edge_norm > 0.0,
+                    "streaming.spike.hypergraph_edge_norm must be > 0"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -840,6 +878,8 @@ pub struct StreamingConfig {
     #[serde(default)]
     pub temporal: TemporalInferenceConfig,
     #[serde(default)]
+    pub spike: StreamingSpikeConfig,
+    #[serde(default)]
     pub branching: BranchingFuturesConfig,
     #[serde(default)]
     pub causal: CausalDiscoveryConfig,
@@ -861,6 +901,7 @@ impl Default for StreamingConfig {
             layer_flags: StreamingLayerFlags::default(),
             hypergraph: StreamingHypergraphConfig::default(),
             temporal: TemporalInferenceConfig::default(),
+            spike: StreamingSpikeConfig::default(),
             branching: BranchingFuturesConfig::default(),
             causal: CausalDiscoveryConfig::default(),
             consistency: ConsistencyChunkingConfig::default(),
@@ -966,6 +1007,42 @@ impl Default for StreamingLayerFlags {
             flow_enabled: true,
             topic_event_enabled: true,
             physiology_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingSpikeConfig {
+    pub enabled: bool,
+    pub max_neurons_per_pool: usize,
+    pub max_inputs_per_pool: usize,
+    pub embed_in_snapshot: bool,
+    pub max_frames_per_snapshot: usize,
+    pub threshold: f32,
+    pub membrane_decay: f32,
+    pub refractory_steps: u32,
+    pub intensity_norm: f64,
+    pub evidence_norm: f64,
+    pub hypergraph_node_norm: f64,
+    pub hypergraph_edge_norm: f64,
+}
+
+impl Default for StreamingSpikeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_neurons_per_pool: 256,
+            max_inputs_per_pool: 256,
+            embed_in_snapshot: false,
+            max_frames_per_snapshot: 64,
+            threshold: 1.0,
+            membrane_decay: 0.95,
+            refractory_steps: 2,
+            intensity_norm: 5.0,
+            evidence_norm: 10.0,
+            hypergraph_node_norm: 200.0,
+            hypergraph_edge_norm: 500.0,
         }
     }
 }
