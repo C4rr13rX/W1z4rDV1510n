@@ -2,6 +2,7 @@ use crate::branching::{BranchNode, BranchingFutures, Retrodiction};
 use crate::config::BranchingFuturesConfig;
 use crate::schema::Timestamp;
 use crate::streaming::causal_stream::CausalReport;
+use crate::streaming::physiology_runtime::PhysiologyReport;
 use crate::streaming::schema::{EventKind, TokenBatch};
 use crate::streaming::temporal::{EventIntensity, TemporalInferenceReport};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,7 @@ impl StreamingBranchingRuntime {
         batch: &TokenBatch,
         report: &TemporalInferenceReport,
         causal: Option<&CausalReport>,
+        physiology: Option<&PhysiologyReport>,
     ) -> Option<BranchingReport> {
         if !self.config.enabled {
             return None;
@@ -59,7 +61,7 @@ impl StreamingBranchingRuntime {
                 0.0
             };
             let uncertainty = (1.0 - probability).clamp(0.0, 1.0);
-            let payload = branch_payload(intensity, causal);
+            let payload = branch_payload(intensity, causal, physiology);
             if let Some(id) = self
                 .futures
                 .add_branch(root, now, probability, uncertainty, payload)
@@ -119,7 +121,11 @@ impl StreamingBranchingRuntime {
     }
 }
 
-fn branch_payload(intensity: &EventIntensity, causal: Option<&CausalReport>) -> Value {
+fn branch_payload(
+    intensity: &EventIntensity,
+    causal: Option<&CausalReport>,
+    physiology: Option<&PhysiologyReport>,
+) -> Value {
     let mut payload = HashMap::new();
     payload.insert(
         "event_kind".to_string(),
@@ -146,6 +152,16 @@ fn branch_payload(intensity: &EventIntensity, causal: Option<&CausalReport>) -> 
                 .collect::<Vec<_>>();
             payload.insert("counterfactuals".to_string(), Value::from(deltas));
         }
+    }
+    if let Some(phys_report) = physiology {
+        payload.insert(
+            "physiology_overall_index".to_string(),
+            Value::from(phys_report.overall_index),
+        );
+        payload.insert(
+            "physiology_contexts".to_string(),
+            Value::from(phys_report.deviations.len() as u64),
+        );
     }
     Value::Object(payload.into_iter().collect())
 }
@@ -213,7 +229,7 @@ mod tests {
             layers: Vec::new(),
             source_confidence: HashMap::new(),
         };
-        let update = runtime.update(&batch, &report, None).expect("report");
+        let update = runtime.update(&batch, &report, None, None).expect("report");
         assert!(!update.branches.is_empty());
         assert!(!update.retrodictions.is_empty());
     }

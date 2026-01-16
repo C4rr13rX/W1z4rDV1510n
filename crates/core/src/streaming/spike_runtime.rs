@@ -3,6 +3,9 @@ use crate::spike::{NeuronKind, SpikeConfig, SpikeInput, SpikeMessage, SpikeMessa
 use crate::streaming::branching_runtime::BranchingReport;
 use crate::streaming::causal_stream::CausalReport;
 use crate::streaming::schema::TokenBatch;
+use crate::streaming::ontology_runtime::OntologyReport;
+use crate::streaming::plasticity_runtime::PlasticityReport;
+use crate::streaming::physiology_runtime::PhysiologyReport;
 use crate::streaming::temporal::{DirichletPosterior, TemporalInferenceReport};
 use std::collections::HashMap;
 
@@ -20,6 +23,8 @@ pub enum StreamingSpikePoolKind {
     Branching,
     Retrodiction,
     Ontology,
+    Plasticity,
+    Physiology,
 }
 
 impl StreamingSpikePoolKind {
@@ -37,6 +42,8 @@ impl StreamingSpikePoolKind {
             StreamingSpikePoolKind::Branching,
             StreamingSpikePoolKind::Retrodiction,
             StreamingSpikePoolKind::Ontology,
+            StreamingSpikePoolKind::Plasticity,
+            StreamingSpikePoolKind::Physiology,
         ]
     }
 }
@@ -72,6 +79,9 @@ impl StreamingSpikeRuntime {
         temporal: Option<&TemporalInferenceReport>,
         causal: Option<&CausalReport>,
         branching: Option<&BranchingReport>,
+        plasticity: Option<&PlasticityReport>,
+        ontology: Option<&OntologyReport>,
+        physiology: Option<&PhysiologyReport>,
     ) -> Option<Vec<SpikeMessage>> {
         if !self.config.enabled {
             return None;
@@ -92,6 +102,15 @@ impl StreamingSpikeRuntime {
         }
         if let Some(report) = branching {
             self.route_branching(report, &mut inputs);
+        }
+        if let Some(report) = plasticity {
+            self.route_plasticity(report, &mut inputs);
+        }
+        if let Some(report) = ontology {
+            self.route_ontology(report, &mut inputs);
+        }
+        if let Some(report) = physiology {
+            self.route_physiology(report, &mut inputs);
         }
 
         let mut bus = SpikeMessageBus::default();
@@ -310,6 +329,78 @@ impl StreamingSpikeRuntime {
         }
     }
 
+    fn route_plasticity(&mut self, report: &PlasticityReport, inputs: &mut HashMap<StreamingSpikePoolKind, Vec<SpikeInput>>) {
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Plasticity, "surprise") {
+            push_input(inputs, StreamingSpikePoolKind::Plasticity, SpikeInput {
+                target: neuron,
+                excitatory: report.surprise_score.clamp(0.0, 1.0) as f32,
+                inhibitory: 0.0,
+            });
+        }
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Plasticity, "calibration") {
+            push_input(inputs, StreamingSpikePoolKind::Plasticity, SpikeInput {
+                target: neuron,
+                excitatory: report.calibration_score.clamp(0.0, 1.0) as f32,
+                inhibitory: report.drift_score.clamp(0.0, 1.0) as f32,
+            });
+        }
+        let rollback_count = report
+            .updates
+            .iter()
+            .filter(|update| update.rollback)
+            .count();
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Plasticity, "rollbacks") {
+            let excitatory = (rollback_count as f64 / self.config.max_inputs_per_pool.max(1) as f64).clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Plasticity, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+    }
+
+    fn route_ontology(&mut self, report: &OntologyReport, inputs: &mut HashMap<StreamingSpikePoolKind, Vec<SpikeInput>>) {
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Ontology, "labels") {
+            let excitatory = (report.labels.len() as f64 / self.config.max_inputs_per_pool.max(1) as f64)
+                .clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Ontology, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Ontology, "templates") {
+            let excitatory = (report.total_templates as f64 / self.config.max_neurons_per_pool.max(1) as f64)
+                .clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Ontology, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+    }
+
+    fn route_physiology(&mut self, report: &PhysiologyReport, inputs: &mut HashMap<StreamingSpikePoolKind, Vec<SpikeInput>>) {
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Physiology, "health_deviation") {
+            let norm = self.config.intensity_norm.max(1e-6);
+            let excitatory = (report.overall_index / norm).clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Physiology, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Physiology, "contexts") {
+            let excitatory = (report.deviations.len() as f64 / self.config.max_inputs_per_pool.max(1) as f64)
+                .clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Physiology, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+    }
+
     fn neuron_for(&mut self, pool: StreamingSpikePoolKind, label: &str) -> Option<u32> {
         let key = (pool, label.to_string());
         if let Some(id) = self.neuron_map.get(&key) {
@@ -339,6 +430,8 @@ fn pool_label(kind: StreamingSpikePoolKind) -> &'static str {
         StreamingSpikePoolKind::Branching => "branching",
         StreamingSpikePoolKind::Retrodiction => "retrodiction",
         StreamingSpikePoolKind::Ontology => "ontology",
+        StreamingSpikePoolKind::Plasticity => "plasticity",
+        StreamingSpikePoolKind::Physiology => "physiology",
     }
 }
 
@@ -437,7 +530,7 @@ mod tests {
             source_confidence: HashMap::from([(StreamSource::PeopleVideo, 0.9)]),
         };
         let messages = runtime
-            .route_batch(&batch, None, None, None)
+            .route_batch(&batch, None, None, None, None, None, None)
             .expect("messages");
         assert!(!messages.is_empty());
     }

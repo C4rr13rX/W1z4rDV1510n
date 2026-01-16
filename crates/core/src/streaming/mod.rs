@@ -15,6 +15,9 @@ pub mod temporal;
 pub mod spike_runtime;
 pub mod causal_stream;
 pub mod branching_runtime;
+pub mod plasticity_runtime;
+pub mod ontology_runtime;
+pub mod physiology_runtime;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -36,3 +39,6 @@ pub use temporal::{TemporalInferenceCore, TemporalInferenceReport, LayerPredicti
 pub use spike_runtime::{StreamingSpikePoolKind, StreamingSpikeRuntime};
 pub use causal_stream::{CausalReport, StreamingCausalRuntime};
 pub use branching_runtime::{BranchingReport, StreamingBranchingRuntime};
+pub use plasticity_runtime::{PlasticityReport, StreamingPlasticityRuntime};
+pub use ontology_runtime::{OntologyReport, OntologyRuntime};
+pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};

@@ -364,6 +364,85 @@ impl RunConfig {
                     "streaming.causal.max_nodes must be > 0"
                 );
             }
+            if self.streaming.plasticity.enabled {
+                anyhow::ensure!(
+                    self.streaming.plasticity.surprise_threshold >= 0.0,
+                    "streaming.plasticity.surprise_threshold must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.trust_region >= 0.0,
+                    "streaming.plasticity.trust_region must be >= 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.plasticity.ema_teacher_alpha),
+                    "streaming.plasticity.ema_teacher_alpha must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.drift_threshold >= 0.0,
+                    "streaming.plasticity.drift_threshold must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.rollback_threshold >= 0.0,
+                    "streaming.plasticity.rollback_threshold must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.reservoir_capacity > 0,
+                    "streaming.plasticity.reservoir_capacity must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.horizon_initial_secs > 0.0,
+                    "streaming.plasticity.horizon_initial_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.horizon_max_secs
+                        >= self.streaming.plasticity.horizon_initial_secs,
+                    "streaming.plasticity.horizon_max_secs must be >= horizon_initial_secs"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.horizon_growth_factor >= 1.0,
+                    "streaming.plasticity.horizon_growth_factor must be >= 1"
+                );
+                anyhow::ensure!(
+                    self.streaming.plasticity.horizon_improvement_steps > 0,
+                    "streaming.plasticity.horizon_improvement_steps must be > 0"
+                );
+            }
+            if self.streaming.ontology.enabled {
+                anyhow::ensure!(
+                    self.streaming.ontology.window_minutes > 0,
+                    "streaming.ontology.window_minutes must be > 0"
+                );
+                anyhow::ensure!(
+                    !self.streaming.ontology.version_prefix.trim().is_empty(),
+                    "streaming.ontology.version_prefix must be non-empty"
+                );
+            }
+            if self.streaming.physiology.enabled {
+                anyhow::ensure!(
+                    self.streaming.physiology.min_samples > 0,
+                    "streaming.physiology.min_samples must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.physiology.update_alpha),
+                    "streaming.physiology.update_alpha must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.physiology.covariance_floor >= 0.0,
+                    "streaming.physiology.covariance_floor must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.physiology.max_deviation_update > 0.0,
+                    "streaming.physiology.max_deviation_update must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.physiology.max_templates > 0,
+                    "streaming.physiology.max_templates must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.physiology.prior_strength),
+                    "streaming.physiology.prior_strength must be in [0,1]"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -927,6 +1006,8 @@ pub struct StreamingConfig {
     pub plasticity: OnlinePlasticityConfig,
     #[serde(default)]
     pub ontology: OntologyConfig,
+    #[serde(default)]
+    pub physiology: PhysiologyConfig,
 }
 
 impl Default for StreamingConfig {
@@ -945,6 +1026,7 @@ impl Default for StreamingConfig {
             consistency: ConsistencyChunkingConfig::default(),
             plasticity: OnlinePlasticityConfig::default(),
             ontology: OntologyConfig::default(),
+            physiology: PhysiologyConfig::default(),
         }
     }
 }
@@ -1162,6 +1244,13 @@ pub struct OnlinePlasticityConfig {
     pub surprise_threshold: f64,
     pub trust_region: f64,
     pub ema_teacher_alpha: f64,
+    pub drift_threshold: f64,
+    pub rollback_threshold: f64,
+    pub reservoir_capacity: usize,
+    pub horizon_initial_secs: f64,
+    pub horizon_max_secs: f64,
+    pub horizon_growth_factor: f64,
+    pub horizon_improvement_steps: usize,
 }
 
 impl Default for OnlinePlasticityConfig {
@@ -1171,6 +1260,13 @@ impl Default for OnlinePlasticityConfig {
             surprise_threshold: 0.7,
             trust_region: 0.1,
             ema_teacher_alpha: 0.98,
+            drift_threshold: 0.4,
+            rollback_threshold: 0.1,
+            reservoir_capacity: 256,
+            horizon_initial_secs: 60.0,
+            horizon_max_secs: 3600.0,
+            horizon_growth_factor: 1.25,
+            horizon_improvement_steps: 3,
         }
     }
 }
@@ -1189,6 +1285,32 @@ impl Default for OntologyConfig {
             enabled: true,
             window_minutes: 60,
             version_prefix: "v".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhysiologyConfig {
+    pub enabled: bool,
+    pub min_samples: usize,
+    pub update_alpha: f64,
+    pub covariance_floor: f64,
+    pub max_deviation_update: f64,
+    pub max_templates: usize,
+    pub prior_strength: f64,
+}
+
+impl Default for PhysiologyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_samples: 5,
+            update_alpha: 0.2,
+            covariance_floor: 1e-3,
+            max_deviation_update: 3.0,
+            max_templates: 4096,
+            prior_strength: 0.2,
         }
     }
 }

@@ -5,6 +5,9 @@ use crate::streaming::align::StreamingAligner;
 use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
 use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
+use crate::streaming::ontology_runtime::OntologyRuntime;
+use crate::streaming::physiology_runtime::PhysiologyRuntime;
+use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -294,6 +297,9 @@ pub struct StreamingInference {
     temporal: TemporalInferenceCore,
     causal: StreamingCausalRuntime,
     branching: StreamingBranchingRuntime,
+    plasticity: StreamingPlasticityRuntime,
+    ontology: OntologyRuntime,
+    physiology: PhysiologyRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
@@ -309,6 +315,13 @@ impl StreamingInference {
         );
         let causal = StreamingCausalRuntime::new(run_config.streaming.causal.clone());
         let branching = StreamingBranchingRuntime::new(run_config.streaming.branching.clone());
+        let plasticity = StreamingPlasticityRuntime::new(run_config.streaming.plasticity.clone());
+        let ontology =
+            OntologyRuntime::new(run_config.streaming.ontology.clone(), run_config.streaming.consistency.clone());
+        let mut physiology_config = run_config.streaming.physiology.clone();
+        physiology_config.enabled =
+            physiology_config.enabled && run_config.streaming.layer_flags.physiology_enabled;
+        let physiology = PhysiologyRuntime::new(physiology_config);
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
         } else {
@@ -320,6 +333,9 @@ impl StreamingInference {
             temporal,
             causal,
             branching,
+            plasticity,
+            ontology,
+            physiology,
             spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
@@ -338,12 +354,18 @@ impl StreamingInference {
             Some(batch) => batch,
             None => return Ok(None),
         };
+        let physiology_report = self.physiology.update(&batch);
         let temporal_report = self.temporal.update(&batch);
+        let plasticity_report = temporal_report
+            .as_ref()
+            .and_then(|report| self.plasticity.update(&batch, report, physiology_report.as_ref()));
+        let ontology_report = self.ontology.update(&batch);
         let causal_report = temporal_report
             .as_ref()
             .and_then(|report| self.causal.update(report));
         let branching_report = temporal_report.as_ref().and_then(|report| {
-            self.branching.update(&batch, report, causal_report.as_ref())
+            self.branching
+                .update(&batch, report, causal_report.as_ref(), physiology_report.as_ref())
         });
         let spike_messages = self.spike_runtime.as_mut().and_then(|runtime| {
             runtime.route_batch(
@@ -351,12 +373,33 @@ impl StreamingInference {
                 temporal_report.as_ref(),
                 causal_report.as_ref(),
                 branching_report.as_ref(),
+                plasticity_report.as_ref(),
+                ontology_report.as_ref(),
+                physiology_report.as_ref(),
             )
         });
         let mut snapshot = token_batch_to_snapshot(&batch, &self.symbolizer);
         if let Some(report) = temporal_report {
             snapshot.metadata.insert(
                 "temporal_inference".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = plasticity_report {
+            snapshot.metadata.insert(
+                "plasticity_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = ontology_report {
+            snapshot.metadata.insert(
+                "ontology_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = physiology_report {
+            snapshot.metadata.insert(
+                "physiology_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }

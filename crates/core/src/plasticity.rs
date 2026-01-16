@@ -58,7 +58,8 @@ pub struct OnlinePlasticity {
 }
 
 impl OnlinePlasticity {
-    pub fn new(config: OnlinePlasticityConfig, reservoir_capacity: usize) -> Self {
+    pub fn new(config: OnlinePlasticityConfig) -> Self {
+        let reservoir_capacity = config.reservoir_capacity;
         Self {
             config,
             reservoir: ReplayReservoir::new(reservoir_capacity),
@@ -85,6 +86,10 @@ impl OnlinePlasticity {
     pub fn reservoir(&self) -> &ReplayReservoir {
         &self.reservoir
     }
+
+    pub fn bucket_count(&self) -> usize {
+        self.reservoir.buckets.len()
+    }
 }
 
 #[cfg(test)]
@@ -98,8 +103,15 @@ mod tests {
             surprise_threshold: 0.5,
             trust_region: 0.1,
             ema_teacher_alpha: 0.9,
+            drift_threshold: 0.5,
+            rollback_threshold: 0.1,
+            reservoir_capacity: 8,
+            horizon_initial_secs: 60.0,
+            horizon_max_secs: 600.0,
+            horizon_growth_factor: 1.2,
+            horizon_improvement_steps: 2,
         };
-        let mut plasticity = OnlinePlasticity::new(config, 8);
+        let mut plasticity = OnlinePlasticity::new(config);
         let signal = OutcomeSignal {
             domain: "crowd".to_string(),
             context: "zone_a".to_string(),
