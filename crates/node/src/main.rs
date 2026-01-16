@@ -8,6 +8,7 @@ mod chain;
 mod bridge;
 mod api;
 mod config;
+mod data_mesh;
 mod ledger;
 mod openstack;
 mod paths;

@@ -1,6 +1,9 @@
 use crate::config::NodeConfig;
+use crate::data_mesh::{DataIngestRequest, DataMeshHandle, start_data_mesh};
 use crate::ledger::LocalLedger;
+use crate::p2p::NodeNetwork;
 use crate::paths::node_data_dir;
+use crate::wallet::{WalletStore, node_id_from_wallet};
 use anyhow::{Context, Result};
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
@@ -30,6 +33,7 @@ struct ApiState {
     rate_limit_default_max: u32,
     rate_limit_bridge_max: u32,
     rate_limit_balance_max: u32,
+    data_mesh: Option<DataMeshHandle>,
     metrics: Arc<ApiMetrics>,
 }
 
@@ -96,10 +100,14 @@ struct ApiMetricsSnapshot {
     metrics_requests: u64,
     bridge_chain_requests: u64,
     bridge_intent_requests: u64,
+    data_ingest_requests: u64,
+    data_status_requests: u64,
     bridge_success: u64,
     balance_success: u64,
     bridge_chain_success: u64,
     bridge_intent_success: u64,
+    data_ingest_success: u64,
+    data_status_success: u64,
     rate_limit_hits: u64,
     auth_failures: u64,
 }
@@ -112,10 +120,14 @@ struct ApiMetrics {
     metrics_requests: AtomicU64,
     bridge_chain_requests: AtomicU64,
     bridge_intent_requests: AtomicU64,
+    data_ingest_requests: AtomicU64,
+    data_status_requests: AtomicU64,
     bridge_success: AtomicU64,
     balance_success: AtomicU64,
     bridge_chain_success: AtomicU64,
     bridge_intent_success: AtomicU64,
+    data_ingest_success: AtomicU64,
+    data_status_success: AtomicU64,
     rate_limit_hits: AtomicU64,
     auth_failures: AtomicU64,
 }
@@ -150,6 +162,16 @@ impl ApiMetrics {
         self.bridge_intent_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_data_ingest_request(&self) {
+        self.inc_request();
+        self.data_ingest_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_data_status_request(&self) {
+        self.inc_request();
+        self.data_status_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_bridge_success(&self) {
         self.bridge_success.fetch_add(1, Ordering::Relaxed);
     }
@@ -164,6 +186,14 @@ impl ApiMetrics {
 
     fn inc_bridge_intent_success(&self) {
         self.bridge_intent_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_data_ingest_success(&self) {
+        self.data_ingest_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_data_status_success(&self) {
+        self.data_status_success.fetch_add(1, Ordering::Relaxed);
     }
 
     fn inc_rate_limit_hit(&self) {
@@ -182,18 +212,47 @@ impl ApiMetrics {
             metrics_requests: self.metrics_requests.load(Ordering::Relaxed),
             bridge_chain_requests: self.bridge_chain_requests.load(Ordering::Relaxed),
             bridge_intent_requests: self.bridge_intent_requests.load(Ordering::Relaxed),
+            data_ingest_requests: self.data_ingest_requests.load(Ordering::Relaxed),
+            data_status_requests: self.data_status_requests.load(Ordering::Relaxed),
             bridge_success: self.bridge_success.load(Ordering::Relaxed),
             balance_success: self.balance_success.load(Ordering::Relaxed),
             bridge_chain_success: self.bridge_chain_success.load(Ordering::Relaxed),
             bridge_intent_success: self.bridge_intent_success.load(Ordering::Relaxed),
+            data_ingest_success: self.data_ingest_success.load(Ordering::Relaxed),
+            data_status_success: self.data_status_success.load(Ordering::Relaxed),
             rate_limit_hits: self.rate_limit_hits.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
         }
     }
 }
 
-pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
+pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let ledger = build_ledger(&config)?;
+    let mut data_mesh = None;
+    if config.data.enabled {
+        let wallet = Arc::new(WalletStore::load_or_create_signer(&config.wallet)?);
+        if config.node_id.trim().is_empty() || config.node_id == "node-001" {
+            config.node_id = node_id_from_wallet(&wallet.wallet().address);
+        }
+        let mut network = NodeNetwork::new(config.network.clone());
+        network.start(&config.node_id)?;
+        network.connect_bootstrap()?;
+        let publisher = network
+            .publisher()
+            .ok_or_else(|| anyhow::anyhow!("p2p network not started"))?;
+        let network_rx = network
+            .take_message_receiver()
+            .ok_or_else(|| anyhow::anyhow!("p2p message receiver unavailable"))?;
+        let handle = start_data_mesh(
+            config.data.clone(),
+            config.node_id.clone(),
+            wallet,
+            ledger.clone(),
+            publisher,
+            network_rx,
+        )?;
+        data_mesh = Some(handle);
+    }
     let mut api_key_hashes = Vec::new();
     if config.api.require_api_key {
         for hash in &config.api.api_key_hashes {
@@ -232,17 +291,26 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         rate_limit_default_max: config.api.rate_limit_max_requests,
         rate_limit_bridge_max: config.api.rate_limit_bridge_max_requests,
         rate_limit_balance_max: config.api.rate_limit_balance_max_requests,
+        data_mesh,
         metrics: Arc::new(ApiMetrics::default()),
+    };
+    let data_limit = if config.data.enabled {
+        config.data.max_payload_bytes.saturating_mul(2)
+    } else {
+        0
     };
     let max_body = config
         .blockchain
         .bridge
         .max_proof_bytes
+        .max(data_limit)
         .max(1024);
     let app = Router::new()
         .route("/bridge/proof", post(submit_bridge_proof))
         .route("/bridge/chains", get(get_bridge_chains))
         .route("/bridge/intent", post(submit_bridge_intent))
+        .route("/data/ingest", post(submit_data_ingest))
+        .route("/data/:data_id", get(get_data_status))
         .route("/balance/:node_id", get(get_balance))
         .route("/metrics", get(get_metrics))
         .with_state(state)
@@ -584,6 +652,116 @@ async fn submit_bridge_intent(
                 max_deposit_amount: policy.max_deposit_amount,
             };
             state.metrics.inc_bridge_intent_success();
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+        Err(err) => {
+            let response = ErrorResponse {
+                error: err.to_string(),
+            };
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+    }
+}
+
+async fn submit_data_ingest(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<DataIngestRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_data_ingest_request();
+    if let Err(err) = rate_limit(&state, &headers, "data") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let Some(mesh) = state.data_mesh.as_ref() else {
+        let response = ErrorResponse {
+            error: "data mesh disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    };
+    match mesh.ingest(request).await {
+        Ok(response) => {
+            state.metrics.inc_data_ingest_success();
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+        Err(err) => {
+            let response = ErrorResponse {
+                error: err.to_string(),
+            };
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+    }
+}
+
+async fn get_data_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(data_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_data_status_request();
+    if let Err(err) = rate_limit(&state, &headers, "data") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let Some(mesh) = state.data_mesh.as_ref() else {
+        let response = ErrorResponse {
+            error: "data mesh disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    };
+    match mesh.status(data_id).await {
+        Ok(response) => {
+            state.metrics.inc_data_status_success();
             (
                 StatusCode::OK,
                 Json(serde_json::to_value(response).unwrap_or_default()),

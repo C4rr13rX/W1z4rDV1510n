@@ -1,11 +1,13 @@
 use crate::chain::ChainSpec;
 use crate::config::NodeConfig;
+use crate::data_mesh::{DataMeshHandle, start_data_mesh};
 use crate::ledger::LocalLedger;
 use crate::openstack::OpenStackControlPlane;
 use crate::paths::node_data_dir;
 use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
 use crate::p2p::NodeNetwork;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use std::sync::Arc;
 use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, NoopLedger, NodeCapabilities, NodeRegistration, ValidatorHeartbeat,
@@ -20,15 +22,16 @@ pub struct NodeRuntime {
     chain_spec: ChainSpec,
     compute_router: ComputeRouter,
     network: NodeNetwork,
-    ledger: Box<dyn BlockchainLedger>,
+    ledger: Arc<dyn BlockchainLedger>,
     profile: HardwareProfile,
     openstack: Option<OpenStackControlPlane>,
-    wallet: WalletSigner,
+    wallet: Arc<WalletSigner>,
+    data_mesh: Option<DataMeshHandle>,
 }
 
 impl NodeRuntime {
     pub fn new(mut config: NodeConfig) -> Result<Self> {
-        let wallet = WalletStore::load_or_create_signer(&config.wallet)?;
+        let wallet = Arc::new(WalletStore::load_or_create_signer(&config.wallet)?);
         if config.network.bootstrap_peers.is_empty() && !config.blockchain.bootstrap_peers.is_empty()
         {
             config.network.bootstrap_peers = config.blockchain.bootstrap_peers.clone();
@@ -55,12 +58,14 @@ impl NodeRuntime {
             profile,
             openstack,
             wallet,
+            data_mesh: None,
         })
     }
 
     pub fn start(mut self) -> Result<()> {
         self.network.start(&self.config.node_id)?;
         self.network.connect_bootstrap()?;
+        self.start_data_mesh()?;
         self.register_node()?;
         self.maybe_send_validator_heartbeat()?;
         let target = self.compute_router.route(ComputeJobKind::TensorHeavy);
@@ -73,6 +78,28 @@ impl NodeRuntime {
             wallet_address = self.wallet.wallet().address.as_str(),
             "node runtime started"
         );
+        Ok(())
+    }
+
+    fn start_data_mesh(&mut self) -> Result<()> {
+        if !self.config.data.enabled {
+            return Ok(());
+        }
+        let Some(publisher) = self.network.publisher() else {
+            return Err(anyhow!("p2p network not started"));
+        };
+        let Some(network_rx) = self.network.take_message_receiver() else {
+            return Err(anyhow!("p2p message receiver unavailable"));
+        };
+        let handle = start_data_mesh(
+            self.config.data.clone(),
+            self.config.node_id.clone(),
+            self.wallet.clone(),
+            self.ledger.clone(),
+            publisher,
+            network_rx,
+        )?;
+        self.data_mesh = Some(handle);
         Ok(())
     }
 
@@ -138,9 +165,9 @@ impl NodeRuntime {
     }
 }
 
-fn build_ledger(config: &NodeConfig) -> Result<Box<dyn BlockchainLedger>> {
+fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {
     if !config.ledger.enabled {
-        return Ok(Box::new(NoopLedger::default()));
+        return Ok(Arc::new(NoopLedger::default()));
     }
     let backend = config.ledger.backend.trim().to_ascii_lowercase();
     match backend.as_str() {
@@ -150,21 +177,21 @@ fn build_ledger(config: &NodeConfig) -> Result<Box<dyn BlockchainLedger>> {
             } else {
                 config.ledger.endpoint.clone().into()
             };
-            Ok(Box::new(LocalLedger::load_or_create(
+            Ok(Arc::new(LocalLedger::load_or_create(
                 path,
                 config.blockchain.validator_policy.clone(),
                 config.blockchain.fee_market.clone(),
                 config.blockchain.bridge.clone(),
             )?))
         }
-        "none" | "" => Ok(Box::new(NoopLedger::default())),
+        "none" | "" => Ok(Arc::new(NoopLedger::default())),
         other => {
             warn!(
                 target: "w1z4rdv1510n::node",
                 backend = %other,
                 "unknown ledger backend; falling back to noop ledger"
             );
-            Ok(Box::new(NoopLedger::default()))
+            Ok(Arc::new(NoopLedger::default()))
         }
     }
 }

@@ -7,6 +7,7 @@ use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageAuthenticity
 use libp2p::identify;
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::mdns;
+use libp2p::relay;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{
     connection_limits, identity, multiaddr::Protocol, Multiaddr, PeerId, Swarm, SwarmBuilder,
@@ -28,6 +29,7 @@ pub struct NodeNetwork {
     config: NodeNetworkConfig,
     peer_count: Arc<AtomicUsize>,
     command_tx: Option<mpsc::UnboundedSender<NetworkCommand>>,
+    message_rx: Option<mpsc::UnboundedReceiver<NetworkEnvelope>>,
 }
 
 impl NodeNetwork {
@@ -36,6 +38,7 @@ impl NodeNetwork {
             config,
             peer_count: Arc::new(AtomicUsize::new(0)),
             command_tx: None,
+            message_rx: None,
         }
     }
 
@@ -44,7 +47,9 @@ impl NodeNetwork {
             return Ok(());
         }
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
         self.command_tx = Some(command_tx);
+        self.message_rx = Some(message_rx);
         let config = self.config.clone();
         let node_id = node_id.to_string();
         let peer_count = self.peer_count.clone();
@@ -60,7 +65,7 @@ impl NodeNetwork {
                 }
             };
             runtime.block_on(async move {
-                if let Err(err) = run_swarm(config, node_id, peer_count, command_rx).await {
+                if let Err(err) = run_swarm(config, node_id, peer_count, command_rx, message_tx).await {
                     warn!(target: "w1z4rdv1510n::node", error = %err, "p2p swarm exited");
                 }
             });
@@ -69,7 +74,11 @@ impl NodeNetwork {
     }
 
     pub fn connect_bootstrap(&mut self) -> Result<()> {
-        let peers = collect_bootstrap(&self.config)?;
+        let mut peers = collect_bootstrap(&self.config)?;
+        if self.config.routing.enable_relay {
+            let mut relays = collect_relays(&self.config)?;
+            peers.append(&mut relays);
+        }
         if peers.is_empty() {
             warn!(
                 target: "w1z4rdv1510n::node",
@@ -89,11 +98,41 @@ impl NodeNetwork {
     pub fn peer_count(&self) -> usize {
         self.peer_count.load(Ordering::Relaxed)
     }
+
+    pub fn publisher(&self) -> Option<NetworkPublisher> {
+        self.command_tx
+            .as_ref()
+            .map(|tx| NetworkPublisher { tx: tx.clone() })
+    }
+
+    pub fn take_message_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<NetworkEnvelope>> {
+        self.message_rx.take()
+    }
+}
+
+#[derive(Clone)]
+pub struct NetworkPublisher {
+    tx: mpsc::UnboundedSender<NetworkCommand>,
+}
+
+impl NetworkPublisher {
+    pub fn publish(&self, envelope: NetworkEnvelope) -> Result<()> {
+        self.tx
+            .send(NetworkCommand::Publish(envelope))
+            .map_err(|_| anyhow!("p2p command channel closed"))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_publisher() -> NetworkPublisher {
+    let (tx, _rx) = mpsc::unbounded_channel::<NetworkCommand>();
+    NetworkPublisher { tx }
 }
 
 #[derive(Debug)]
 enum NetworkCommand {
     Dial(Multiaddr),
+    Publish(NetworkEnvelope),
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -103,6 +142,7 @@ struct NodeBehaviour {
     identify: identify::Behaviour,
     kademlia: kad::Behaviour<MemoryStore>,
     mdns: mdns::tokio::Behaviour,
+    relay: relay::client::Behaviour,
     limits: connection_limits::Behaviour,
 }
 
@@ -112,6 +152,7 @@ enum NodeBehaviourEvent {
     Identify(identify::Event),
     Kademlia(kad::Event),
     Mdns(mdns::Event),
+    Relay(relay::client::Event),
     Limits(void::Void),
 }
 
@@ -139,6 +180,12 @@ impl From<mdns::Event> for NodeBehaviourEvent {
     }
 }
 
+impl From<relay::client::Event> for NodeBehaviourEvent {
+    fn from(event: relay::client::Event) -> Self {
+        NodeBehaviourEvent::Relay(event)
+    }
+}
+
 impl From<void::Void> for NodeBehaviourEvent {
     fn from(event: void::Void) -> Self {
         match event {}
@@ -150,6 +197,7 @@ async fn run_swarm(
     node_id: String,
     peer_count: Arc<AtomicUsize>,
     mut command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
+    message_tx: mpsc::UnboundedSender<NetworkEnvelope>,
 ) -> Result<()> {
     let identity = load_or_create_identity()?;
     let local_peer_id = PeerId::from(identity.public());
@@ -161,7 +209,11 @@ async fn run_swarm(
             libp2p::yamux::Config::default,
         )?
         .with_dns()?
-        .with_behaviour(|key| {
+        .with_relay_client(
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_behaviour(|key, relay| {
             let gossipsub = build_gossipsub(key, &config)?;
             let identify = identify::Behaviour::new(identify::Config::new(
                 "w1z4rdv1510n/1.0".to_string(),
@@ -177,6 +229,7 @@ async fn run_swarm(
                 identify,
                 kademlia,
                 mdns,
+                relay,
                 limits,
             })
         })?
@@ -184,6 +237,19 @@ async fn run_swarm(
     swarm
         .listen_on(parse_listen_addr(&config.listen_addr)?)
         .context("listen on network address")?;
+    for addr in &config.routing.external_addresses {
+        match addr.parse::<Multiaddr>() {
+            Ok(parsed) => swarm.add_external_address(parsed),
+            Err(err) => {
+                warn!(
+                    target: "w1z4rdv1510n::node",
+                    error = %err,
+                    address = addr.as_str(),
+                    "invalid external address"
+                );
+            }
+        }
+    }
 
     info!(
         target: "w1z4rdv1510n::node",
@@ -193,6 +259,7 @@ async fn run_swarm(
     );
 
     let guard = Arc::new(Mutex::new(MessageGuard::new(&config.security)));
+    let topic = IdentTopic::new(config.gossip_protocol.clone());
 
     loop {
         tokio::select! {
@@ -203,10 +270,27 @@ async fn run_swarm(
                             warn!(target: "w1z4rdv1510n::node", error = %err, address = %addr, "dial failed");
                         }
                     }
+                    NetworkCommand::Publish(envelope) => {
+                        if let Ok(payload) = serde_json::to_vec(&envelope) {
+                            if payload.len() > config.security.max_message_bytes {
+                                warn!(
+                                    target: "w1z4rdv1510n::node",
+                                    size = payload.len(),
+                                    "dropping publish: payload exceeds max_message_bytes"
+                                );
+                            } else if let Err(err) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload) {
+                                warn!(
+                                    target: "w1z4rdv1510n::node",
+                                    error = %err,
+                                    "gossipsub publish failed"
+                                );
+                            }
+                        }
+                    }
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &peer_count, &config, &guard)?;
+                handle_swarm_event(event, &mut swarm, &peer_count, &config, &guard, &message_tx)?;
             }
         }
     }
@@ -218,6 +302,7 @@ fn handle_swarm_event(
     peer_count: &Arc<AtomicUsize>,
     config: &NodeNetworkConfig,
     guard: &Arc<Mutex<MessageGuard>>,
+    message_tx: &mpsc::UnboundedSender<NetworkEnvelope>,
 ) -> Result<()> {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -237,7 +322,7 @@ fn handle_swarm_event(
             }).ok();
         }
         SwarmEvent::Behaviour(NodeBehaviourEvent::Gossipsub(event)) => {
-            handle_gossipsub_event(event, swarm, config, guard);
+            handle_gossipsub_event(event, swarm, config, guard, message_tx);
         }
         SwarmEvent::Behaviour(NodeBehaviourEvent::Mdns(event)) => match event {
             mdns::Event::Discovered(list) => {
@@ -252,6 +337,7 @@ fn handle_swarm_event(
                 }
             }
         },
+        SwarmEvent::Behaviour(NodeBehaviourEvent::Relay(_event)) => {}
         _ => {}
     }
     Ok(())
@@ -285,6 +371,7 @@ fn handle_gossipsub_event(
     swarm: &mut Swarm<NodeBehaviour>,
     config: &NodeNetworkConfig,
     guard: &Arc<Mutex<MessageGuard>>,
+    message_tx: &mpsc::UnboundedSender<NetworkEnvelope>,
 ) {
     if let gossipsub::Event::Message {
         propagation_source,
@@ -292,12 +379,18 @@ fn handle_gossipsub_event(
         message,
     } = event
     {
-        let acceptance = validate_message(&message, config, guard);
+        let (acceptance, envelope) = validate_message(&message, config, guard);
+        let accepted = matches!(acceptance, MessageAcceptance::Accept);
         let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
             &message_id,
             &propagation_source,
             acceptance,
         );
+        if accepted {
+            if let Some(envelope) = envelope {
+                let _ = message_tx.send(envelope);
+            }
+        }
     }
 }
 
@@ -305,44 +398,44 @@ fn validate_message(
     message: &gossipsub::Message,
     config: &NodeNetworkConfig,
     guard: &Arc<Mutex<MessageGuard>>,
-) -> MessageAcceptance {
+) -> (MessageAcceptance, Option<NetworkEnvelope>) {
     if message.data.len() > config.security.max_message_bytes {
-        return MessageAcceptance::Reject;
+        return (MessageAcceptance::Reject, None);
     }
     if message.topic.as_str() != config.gossip_protocol {
-        return MessageAcceptance::Reject;
+        return (MessageAcceptance::Reject, None);
     }
     let envelope: NetworkEnvelope = match serde_json::from_slice(&message.data) {
         Ok(envelope) => envelope,
-        Err(_) => return MessageAcceptance::Reject,
+        Err(_) => return (MessageAcceptance::Reject, None),
     };
     if envelope.version != NETWORK_ENVELOPE_VERSION {
-        return MessageAcceptance::Reject;
+        return (MessageAcceptance::Reject, None);
     }
     if envelope.validate_basic().is_err() {
-        return MessageAcceptance::Reject;
+        return (MessageAcceptance::Reject, None);
     }
     let now = now_unix();
     if validate_envelope_clock(&envelope, config, now).is_err() {
-        return MessageAcceptance::Reject;
+        return (MessageAcceptance::Reject, None);
     }
     if config.security.require_signed_payloads {
         if envelope.public_key.trim().is_empty() || envelope.signature.trim().is_empty() {
-            return MessageAcceptance::Reject;
+            return (MessageAcceptance::Reject, None);
         }
         if verify_envelope_signature(&envelope).is_err() {
-            return MessageAcceptance::Reject;
+            return (MessageAcceptance::Reject, None);
         }
     }
     match guard.lock() {
         Ok(mut guard) => {
             if guard.validate(&envelope, now).is_err() {
-                return MessageAcceptance::Reject;
+                return (MessageAcceptance::Reject, None);
             }
         }
-        Err(_) => return MessageAcceptance::Reject,
+        Err(_) => return (MessageAcceptance::Reject, None),
     }
-    MessageAcceptance::Accept
+    (MessageAcceptance::Accept, Some(envelope))
 }
 
 fn build_connection_limits(config: &NodeNetworkConfig) -> connection_limits::ConnectionLimits {
@@ -658,6 +751,27 @@ fn collect_bootstrap(config: &NodeNetworkConfig) -> Result<Vec<Multiaddr>> {
                     error = %err,
                     peer = peer.as_str(),
                     "invalid bootstrap multiaddr"
+                );
+            }
+        }
+    }
+    Ok(addrs)
+}
+
+fn collect_relays(config: &NodeNetworkConfig) -> Result<Vec<Multiaddr>> {
+    let mut addrs = Vec::new();
+    for relay in &config.routing.relay_servers {
+        if relay.trim().is_empty() {
+            continue;
+        }
+        match relay.parse::<Multiaddr>() {
+            Ok(addr) => addrs.push(addr),
+            Err(err) => {
+                warn!(
+                    target: "w1z4rdv1510n::node",
+                    error = %err,
+                    relay = relay.as_str(),
+                    "invalid relay multiaddr"
                 );
             }
         }

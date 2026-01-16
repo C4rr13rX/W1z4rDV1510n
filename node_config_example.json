@@ -6,6 +6,11 @@
     "bootstrap_peers": [],
     "max_peers": 128,
     "gossip_protocol": "w1z4rdv1510n-gossip",
+    "routing": {
+      "enable_relay": false,
+      "relay_servers": [],
+      "external_addresses": []
+    },
     "security": {
       "max_message_bytes": 262144,
       "max_messages_per_rpc": 128,
@@ -51,6 +56,17 @@
     "encrypted": true,
     "passphrase_env": "W1Z4RDV1510N_WALLET_PASSPHRASE",
     "prompt_on_load": true
+  },
+  "data": {
+    "enabled": true,
+    "storage_path": "data",
+    "max_payload_bytes": 524288,
+    "chunk_size_bytes": 32768,
+    "replication_factor": 3,
+    "receipt_quorum": 2,
+    "require_manifest_signature": true,
+    "require_receipt_signature": true,
+    "max_pending_chunks": 1024
   },
   "blockchain": {
     "enabled": true,

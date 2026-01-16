@@ -15,6 +15,7 @@ pub struct NodeConfig {
     pub api: NodeApiConfig,
     pub openstack: OpenStackConfig,
     pub wallet: WalletConfig,
+    pub data: DataMeshConfig,
     pub blockchain: BlockchainConfig,
     pub compute: ComputeRoutingConfig,
     pub cluster: ClusterConfig,
@@ -33,6 +34,7 @@ impl Default for NodeConfig {
             api: NodeApiConfig::default(),
             openstack: OpenStackConfig::default(),
             wallet: WalletConfig::default(),
+            data: DataMeshConfig::default(),
             blockchain: BlockchainConfig::default(),
             compute: ComputeRoutingConfig::default(),
             cluster: ClusterConfig::default(),
@@ -93,6 +95,18 @@ impl NodeConfig {
             self.network.security.public_key_ttl_secs >= 0,
             "network.security.public_key_ttl_secs must be >= 0"
         );
+        if self.network.routing.enable_relay {
+            anyhow::ensure!(
+                !self.network.routing.relay_servers.is_empty(),
+                "network.routing.relay_servers must be non-empty when relay is enabled"
+            );
+        }
+        for addr in &self.network.routing.external_addresses {
+            anyhow::ensure!(
+                !addr.trim().is_empty(),
+                "network.routing.external_addresses entries must be non-empty"
+            );
+        }
         anyhow::ensure!(
             self.wallet.enabled,
             "wallet must be enabled for production nodes"
@@ -245,6 +259,37 @@ impl NodeConfig {
             self.api.rate_limit_balance_max_requests > 0,
             "api.rate_limit_balance_max_requests must be > 0"
         );
+        if self.data.enabled {
+            anyhow::ensure!(
+                self.data.chunk_size_bytes > 0,
+                "data.chunk_size_bytes must be > 0"
+            );
+            anyhow::ensure!(
+                self.data.max_payload_bytes >= self.data.chunk_size_bytes,
+                "data.max_payload_bytes must be >= chunk_size_bytes"
+            );
+            anyhow::ensure!(
+                self.data.chunk_size_bytes.saturating_mul(2)
+                    <= self.network.security.max_message_bytes,
+                "data.chunk_size_bytes must fit within network.security.max_message_bytes"
+            );
+            anyhow::ensure!(
+                self.data.replication_factor > 0,
+                "data.replication_factor must be > 0"
+            );
+            anyhow::ensure!(
+                self.data.receipt_quorum > 0,
+                "data.receipt_quorum must be > 0"
+            );
+            anyhow::ensure!(
+                self.data.receipt_quorum <= self.data.replication_factor,
+                "data.receipt_quorum must be <= replication_factor"
+            );
+            anyhow::ensure!(
+                !self.data.storage_path.trim().is_empty(),
+                "data.storage_path must be set when data is enabled"
+            );
+        }
         Ok(())
     }
 }
@@ -256,6 +301,8 @@ pub struct NodeNetworkConfig {
     pub bootstrap_peers: Vec<String>,
     pub max_peers: usize,
     pub gossip_protocol: String,
+    #[serde(default)]
+    pub routing: NodeNetworkRoutingConfig,
     #[serde(default)]
     pub security: NetworkSecurityConfig,
 }
@@ -296,7 +343,26 @@ impl Default for NodeNetworkConfig {
             bootstrap_peers: Vec::new(),
             max_peers: 128,
             gossip_protocol: "w1z4rdv1510n-gossip".to_string(),
+            routing: NodeNetworkRoutingConfig::default(),
             security: NetworkSecurityConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NodeNetworkRoutingConfig {
+    pub enable_relay: bool,
+    pub relay_servers: Vec<String>,
+    pub external_addresses: Vec<String>,
+}
+
+impl Default for NodeNetworkRoutingConfig {
+    fn default() -> Self {
+        Self {
+            enable_relay: false,
+            relay_servers: Vec::new(),
+            external_addresses: Vec::new(),
         }
     }
 }
@@ -393,6 +459,36 @@ impl Default for WalletConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DataMeshConfig {
+    pub enabled: bool,
+    pub storage_path: String,
+    pub max_payload_bytes: usize,
+    pub chunk_size_bytes: usize,
+    pub replication_factor: usize,
+    pub receipt_quorum: usize,
+    pub require_manifest_signature: bool,
+    pub require_receipt_signature: bool,
+    pub max_pending_chunks: usize,
+}
+
+impl Default for DataMeshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            storage_path: default_data_path(),
+            max_payload_bytes: 512 * 1024,
+            chunk_size_bytes: 32 * 1024,
+            replication_factor: 3,
+            receipt_quorum: 2,
+            require_manifest_signature: true,
+            require_receipt_signature: true,
+            max_pending_chunks: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OpenStackMode {
     LocalControlPlane,
@@ -433,6 +529,11 @@ pub struct EnergyReportingConfig {
 
 fn default_wallet_path() -> String {
     let path = node_data_dir().join("wallet.json");
+    path.to_string_lossy().into_owned()
+}
+
+fn default_data_path() -> String {
+    let path = node_data_dir().join("data");
     path.to_string_lossy().into_owned()
 }
 
