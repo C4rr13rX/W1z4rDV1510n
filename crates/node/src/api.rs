@@ -302,6 +302,7 @@ struct ApiLimiter {
 struct ApiLimiterEntry {
     window_start: Instant,
     count: u32,
+    last_seen: Instant,
 }
 
 impl ApiLimiter {
@@ -315,20 +316,29 @@ impl ApiLimiter {
 
     fn check_and_update(&mut self, key: &str, route: &str) -> Result<()> {
         let now = Instant::now();
+        self.prune(now);
         let full_key = format!("{key}:{route}");
         let entry = self.entries.entry(full_key).or_insert(ApiLimiterEntry {
             window_start: now,
             count: 0,
+            last_seen: now,
         });
         if now.duration_since(entry.window_start).as_secs() >= self.window_secs {
             entry.window_start = now;
             entry.count = 0;
         }
         entry.count = entry.count.saturating_add(1);
+        entry.last_seen = now;
         if entry.count > self.max_requests {
             anyhow::bail!("rate limit exceeded");
         }
         Ok(())
+    }
+
+    fn prune(&mut self, now: Instant) {
+        let ttl_secs = self.window_secs.saturating_mul(2);
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.last_seen).as_secs() <= ttl_secs);
     }
 }
 
