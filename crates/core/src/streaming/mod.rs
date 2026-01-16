@@ -9,6 +9,7 @@ pub mod spike_router;
 pub mod align;
 pub mod service;
 pub mod motor;
+pub mod video;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -24,3 +25,4 @@ pub use spike_router::UltradianSpikeRouter;
 pub use align::StreamingAligner;
 pub use service::{StreamingService, StreamingServiceConfig};
 pub use motor::{BoundingBox, Keypoint, MotorFeatureExtractor, MotorFeatureOutput, MotorFeatures, MotorConfig, PoseFrame};
+pub use video::{PoseCommandConfig, PoseCommandIngestor};

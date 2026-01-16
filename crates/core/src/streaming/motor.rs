@@ -1,9 +1,9 @@
 use crate::schema::Timestamp;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Keypoint {
     pub name: Option<String>,
     pub x: f64,
@@ -12,7 +12,7 @@ pub struct Keypoint {
     pub confidence: Option<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BoundingBox {
     pub x: f64,
     pub y: f64,
@@ -20,7 +20,7 @@ pub struct BoundingBox {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PoseFrame {
     pub entity_id: String,
     #[serde(default)]

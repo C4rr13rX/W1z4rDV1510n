@@ -5,7 +5,8 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use w1z4rdv1510n::config::RunConfig;
 use w1z4rdv1510n::streaming::{
-    StreamEnvelope, StreamIngestor, StreamingInference, StreamingService, StreamingServiceConfig,
+    PoseCommandConfig, PoseCommandIngestor, StreamEnvelope, StreamIngestor, StreamingInference,
+    StreamingService, StreamingServiceConfig,
 };
 
 #[derive(Parser, Debug)]
@@ -15,6 +16,12 @@ struct Args {
     config: PathBuf,
     #[arg(long)]
     input: Option<PathBuf>,
+    #[arg(long)]
+    pose_source: Option<String>,
+    #[arg(long)]
+    pose_cmd: Option<String>,
+    #[arg(long = "pose-arg")]
+    pose_args: Vec<String>,
     #[arg(long, default_value_t = 32)]
     max_batch: usize,
     #[arg(long, default_value_t = 50)]
@@ -61,6 +68,27 @@ impl StreamIngestor for JsonLineIngestor {
     }
 }
 
+enum IngestorKind {
+    Json(JsonLineIngestor),
+    Pose(PoseCommandIngestor),
+}
+
+impl StreamIngestor for IngestorKind {
+    fn poll(&mut self) -> anyhow::Result<Option<StreamEnvelope>> {
+        match self {
+            IngestorKind::Json(ingestor) => ingestor.poll(),
+            IngestorKind::Pose(ingestor) => ingestor.poll(),
+        }
+    }
+
+    fn is_drained(&self) -> bool {
+        match self {
+            IngestorKind::Json(ingestor) => ingestor.is_drained(),
+            IngestorKind::Pose(ingestor) => ingestor.is_drained(),
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -77,18 +105,36 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("streaming.enabled must be true to run the streaming service");
     }
 
+    let using_pose = args.pose_cmd.is_some() || args.pose_source.is_some();
+    if using_pose && (args.pose_cmd.is_none() || args.pose_source.is_none()) {
+        anyhow::bail!("pose_cmd and pose_source must be provided together");
+    }
+
     let input_is_file = args
         .input
         .as_deref()
         .map(|path| path != Path::new("-"))
         .unwrap_or(false);
-    let exit_on_drain = args.exit_on_drain || input_is_file;
-
-    let reader: Box<dyn BufRead + Send + Sync> = match args.input.as_deref() {
-        Some(path) if path != Path::new("-") => Box::new(BufReader::new(File::open(path)?)),
-        _ => Box::new(BufReader::new(io::stdin())),
+    let exit_on_drain = if using_pose {
+        args.exit_on_drain
+    } else {
+        args.exit_on_drain || input_is_file
     };
-    let ingestor = JsonLineIngestor::new(reader);
+
+    let ingestor = if using_pose {
+        let mut command = Vec::new();
+        command.push(args.pose_cmd.clone().unwrap());
+        command.extend(args.pose_args.clone());
+        let pose_config = PoseCommandConfig::new(command, args.pose_source.clone().unwrap());
+        IngestorKind::Pose(PoseCommandIngestor::spawn(pose_config)?)
+    } else {
+        let reader: Box<dyn BufRead + Send + Sync> = match args.input.as_deref() {
+            Some(path) if path != Path::new("-") => Box::new(BufReader::new(File::open(path)?)),
+            _ => Box::new(BufReader::new(io::stdin())),
+        };
+        IngestorKind::Json(JsonLineIngestor::new(reader))
+    };
+
     let inference = StreamingInference::new(run_config);
     let service_config = StreamingServiceConfig {
         max_batch: args.max_batch,
