@@ -1,6 +1,6 @@
 # W1z4rDV1510n
 
-W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like neural fabric for predicting and completing symbol sequences. It simulates many parallel futures from any symbolic snapshot (chess plies, reaction steps, traffic frames, code edits) and uses relational priors, neurogenesis, and simulated quantum annealing to fill gaps and forecast where symbols will be next—comfortably on an i5/32GB CPU.
+W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like neural fabric for predicting and completing symbol sequences, plus a CPU-first node stack for distributed execution and multi-chain stablecoin deposits. It simulates many parallel futures from any symbolic snapshot (chess plies, reaction steps, traffic frames, code edits) and uses relational priors, neurogenesis, and simulated quantum annealing to fill gaps and forecast where symbols will be next on an i5/32GB CPU.
 
 ---
 
@@ -14,15 +14,29 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 
 ## Core capabilities
 
-- **Hardware-smart execution** – `HardwareBackendType::Auto` chooses CPU, multi-threaded CPU, GPU, or distributed; env/overrides cap threads and disable accelerators when needed.
-- **Search-integrated proposals** – occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible; caches avoid rebuild churn.
-- **Goal/role/relational priors** – ML hooks (`None`, `SimpleRules`, `GoalAnchor`), relational graphs, and hashed motifs bias initialization and energy scoring without heavy models.
-- **Quantum-inspired stacks** – optional `quantum` mode couples Trotter slices; `energy.w_stack_hash` aligns with past trajectories (`stack_history`) and pulls toward likely futures for gap-filling.
-- **Brain-like neuro layer** – neurons carry dendrites/axon splits, excitatory & inhibitory synapses, light synaptic fatigue, winner-take-all sparsity, and STDP-lite nudges. The pool learns co-occurring roles/zones, spawns composite neurons + cross-linked mini-networks, and feeds proposal biasing plus `energy.w_neuro_alignment`.
-- **Resource-aware scheduling** – capped rayon pools, memory-aware budgets (`W1Z4RDV1510N_THREAD_BUDGET`, `hardware_overrides.max_threads`), and chunked updates keep an i5/32GB responsive.
-- **Homeostasis controller** – detects plateaus and reheats/mutates briefly to escape local minima while chasing 90–100% accuracy.
-- **Structured telemetry** – deterministic tracing (JSON/compact), ESS/resampling notices, occupancy/path diagnostics, hardware detection logs, and persisted run artifacts.
-- **Tooling** – `calibrate_energy` for weight tuning, REST API with persistence, relational prior builder, chess/chemistry scripts, and comprehensive tests (`cargo test`).
+- **Hardware-smart execution** - `HardwareBackendType::Auto` chooses CPU, multi-threaded CPU, GPU, or distributed; env/overrides cap threads and disable accelerators when needed.
+- **Search-integrated proposals** - occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible; caches avoid rebuild churn.
+- **Goal/role/relational priors** - ML hooks (`None`, `SimpleRules`, `GoalAnchor`), relational graphs, and hashed motifs bias initialization and energy scoring without heavy models.
+- **Quantum-inspired stacks** - optional `quantum` mode couples Trotter slices; `energy.w_stack_hash` aligns with past trajectories (`stack_history`) and pulls toward likely futures for gap-filling.
+- **Brain-like neuro layer** - neurons carry dendrites/axon splits, excitatory & inhibitory synapses, light synaptic fatigue, winner-take-all sparsity, and STDP-lite nudges. The pool learns co-occurring roles/zones, spawns composite neurons + cross-linked mini-networks, and feeds proposal biasing plus `energy.w_neuro_alignment`.
+- **Resource-aware scheduling** - capped rayon pools, memory-aware budgets (`W1Z4RDV1510N_THREAD_BUDGET`, `hardware_overrides.max_threads`), and chunked updates keep an i5/32GB responsive.
+- **Homeostasis controller** - detects plateaus and reheats/mutates briefly to escape local minima while chasing 90-100% accuracy.
+- **Structured telemetry** - deterministic tracing (JSON/compact), ESS/resampling notices, occupancy/path diagnostics, hardware detection logs, and persisted run artifacts.
+- **Tooling** - `calibrate_energy` for weight tuning, REST API with persistence, relational prior builder, chess/chemistry scripts, node simulation, and comprehensive tests (`cargo test`).
+
+## Node stack capabilities
+
+- **P2P networking** - libp2p gossipsub + Kademlia + mDNS discovery with rate limits, message validation, and clock skew checks.
+- **Local ledger** - reward tracking, validator heartbeats, fee market scaffolding, and immutable audit logs.
+- **Wallet** - encrypted Ed25519 wallet with deterministic address derivation for node identity and rewards.
+- **Bridge + deposits** - multi-chain stablecoin deposits with relayer quorum verification, intent idempotency, and offline tooling.
+- **API services** - auth + rate limits + metrics for bridge, balance, and operations endpoints.
+- **Simulation + OpenStack stubs** - 10k node simulation and minimal OpenStack control-plane abstractions for future cluster plans.
+
+## Governance and streaming flags
+
+- **Governance defaults** - no face ID, no PII, public-only enforcement, immutable audit logs, explainability on, and optional DP/federated learning toggles.
+- **Streaming flags** - config-driven ingestion for people video, crowd/traffic, and public topics, plus layer flags for ultradian/flow/topic/physiology.
 
 ## How it works (stack)
 
@@ -47,6 +61,8 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **hardware** - CPU, multi-threaded CPU, RAM-optimized, GPU (`wgpu`), distributed, and experimental backends + auto-detection/fallback logic.
 - **service_api / service_storage / telemetry** - shared request/response structs, run persistence, health/readiness metrics, and run-id telemetry for the Axum service.
 - **bin/predict_state** - CLI driver for JSON configs; **bin/service** - REST API with health probes + persistent runs.
+- **crates/node** - node runtime (config, wallet, p2p, local ledger, bridge, API, OpenStack stubs, simulation).
+- **chain/** - chain spec, reward, bridge, and token-standard JSON configs.
 
 ## Multi-Chain Bridge (stablecoin deposits)
 
@@ -54,7 +70,7 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **Flow** - deposit on source chain -> relayer quorum signs canonical `BridgeDeposit` payload -> submit `BridgeProof` -> ledger mints `StakeDeposit`.
 - **Security tiers** - `RELAYER_QUORUM` (implemented), `OPTIMISTIC` (challenge window), `LIGHT_CLIENT`/`ZK` (highest security, planned).
 - **Config** - `blockchain.bridge` in `node_config_example.json` controls chain policies, relayer keys/quorum, allowed assets, max deposit sizes, and per-chain `deposit_address` + `recipient_tag_template`.
-- **API** - `GET /bridge/chains` lists enabled chains; `POST /bridge/intent` returns deposit instructions with an idempotent `intent_id` (optional `idempotency_key` supported); `POST /bridge/proof` submits relayer-signed proofs.
+- **API** - `GET /bridge/chains` lists enabled chains; `POST /bridge/intent` returns deposit instructions with an idempotent `intent_id` (optional `idempotency_key` supported); `POST /bridge/proof` submits relayer-signed proofs; `GET /balance/:node_id` and `GET /metrics` report status.
 - **CLI** - `w1z4rdv1510n-node bridge-intent-create` generates offline intents + payload hashes; `w1z4rdv1510n-node bridge-intent-verify` validates intent payload hashes.
 - **Schema** - `schemas/bridge_intent_schema.json` defines the `BridgeIntent` JSON shape for offline tooling and validation.
 - **Extensibility** - add new chains by appending policies; `chain/bridge_contract.json` lists supported chains/assets.
@@ -66,7 +82,10 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - Cargo.toml (workspace)
 - README.md
 - crates/core (engine + binaries)
+- crates/node (node runtime, ledger, wallet, p2p, API, bridge, simulation)
 - crates/experimental-hw (experimental hardware backends)
+- chain/ (chain spec + token/bridge configs)
+- schemas/ (JSON schemas for offline tooling)
 - scripts/
 - data/, logs/, etc.
 
@@ -91,7 +110,48 @@ cargo fmt
 cargo test
 ```
 
-Tests cover calibration heuristics, hardware auto-selection, search constraint repairs, proposal mixing, and GoalAnchor ML updates.
+Tests cover calibration heuristics, hardware auto-selection, search constraint repairs, proposal mixing, GoalAnchor ML updates, and node ledger/bridge logic. For node-only tests: `cargo test -p w1z4rdv1510n-node`.
+
+---
+
+## Node quickstart
+
+1. **Initialize config + wallet**
+
+```powershell
+cargo run --bin w1z4rdv1510n-node -- init
+```
+
+2. **Run the node**
+
+```powershell
+cargo run --bin w1z4rdv1510n-node
+```
+
+3. **Start the node API (optional)**
+
+```powershell
+cargo run --bin w1z4rdv1510n-node -- api --addr 127.0.0.1:8090
+```
+
+4. **Simulate a network (optional)**
+
+```powershell
+cargo run --bin w1z4rdv1510n-node -- sim --nodes 10000 --ticks 100
+```
+
+5. **Create and verify a bridge intent offline (optional)**
+
+```powershell
+cargo run --bin w1z4rdv1510n-node -- bridge-intent-create `
+  --chain-id ethereum --chain-kind evm --asset USDC --amount 25 `
+  --recipient-node-id node-abc123 --deposit-address 0xbridge `
+  --recipient-tag node:node-abc123
+
+cargo run --bin w1z4rdv1510n-node -- bridge-intent-verify --json '{...}'
+```
+
+Config lives in `node_config.json` (generated from defaults). `node_config_example.json` shows all available fields, including API keys, rate limits, and bridge policies.
 
 ---
 
