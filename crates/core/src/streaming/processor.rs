@@ -8,6 +8,7 @@ use crate::streaming::schema::{
 };
 use crate::streaming::symbolize::{SymbolizeConfig, token_batch_to_snapshot};
 use crate::streaming::topic::{TopicEventExtractor, TopicSample, TopicConfig};
+use crate::streaming::temporal::TemporalInferenceCore;
 use crate::streaming::ultradian::{SignalSample, UltradianLayerExtractor};
 use crate::config::RunConfig;
 use serde::Deserialize;
@@ -287,6 +288,7 @@ impl StreamingProcessor {
 pub struct StreamingInference {
     processor: StreamingProcessor,
     aligner: StreamingAligner,
+    temporal: TemporalInferenceCore,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
 }
@@ -295,9 +297,14 @@ impl StreamingInference {
     pub fn new(run_config: RunConfig) -> Self {
         let processor = StreamingProcessor::new(run_config.streaming.clone());
         let aligner = StreamingAligner::new(&run_config.streaming);
+        let temporal = TemporalInferenceCore::new(
+            run_config.streaming.temporal.clone(),
+            run_config.streaming.hypergraph.clone(),
+        );
         Self {
             processor,
             aligner,
+            temporal,
             run_config,
             symbolizer: SymbolizeConfig::default(),
         }
@@ -315,7 +322,14 @@ impl StreamingInference {
             Some(batch) => batch,
             None => return Ok(None),
         };
-        let snapshot = token_batch_to_snapshot(&batch, &self.symbolizer);
+        let temporal_report = self.temporal.update(&batch);
+        let mut snapshot = token_batch_to_snapshot(&batch, &self.symbolizer);
+        if let Some(report) = temporal_report {
+            snapshot.metadata.insert(
+                "temporal_inference".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
         let outcome = run_with_snapshot(snapshot, self.run_config.clone())?;
         Ok(Some(outcome))
     }

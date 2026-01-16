@@ -227,6 +227,67 @@ impl RunConfig {
                 self.streaming.ingest.enabled_source_count() > 0,
                 "streaming ingest must enable at least one source"
             );
+            if self.streaming.hypergraph.enabled {
+                anyhow::ensure!(
+                    self.streaming.hypergraph.max_edges > 0,
+                    "streaming.hypergraph.max_edges must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.hypergraph.edge_decay),
+                    "streaming.hypergraph.edge_decay must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.hypergraph.edge_ttl_secs >= 0.0,
+                    "streaming.hypergraph.edge_ttl_secs must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.hypergraph.min_weight >= 0.0,
+                    "streaming.hypergraph.min_weight must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.hypergraph.max_nodes_per_batch > 0,
+                    "streaming.hypergraph.max_nodes_per_batch must be > 0"
+                );
+            }
+            if self.streaming.temporal.enabled {
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.temporal.layer_ema_alpha),
+                    "streaming.temporal.layer_ema_alpha must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.temporal.coherence_alpha),
+                    "streaming.temporal.coherence_alpha must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.temporal.event_decay_tau_secs > 0.0,
+                    "streaming.temporal.event_decay_tau_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.temporal.base_rate_alpha),
+                    "streaming.temporal.base_rate_alpha must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.temporal.dirichlet_prior > 0.0,
+                    "streaming.temporal.dirichlet_prior must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.temporal.intensity_floor >= 0.0,
+                    "streaming.temporal.intensity_floor must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.temporal.calm_threshold >= 0.0,
+                    "streaming.temporal.calm_threshold must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.temporal.surge_threshold
+                        >= self.streaming.temporal.calm_threshold,
+                    "streaming.temporal.surge_threshold must be >= calm_threshold"
+                );
+                anyhow::ensure!(
+                    self.streaming.temporal.excitation_boost >= 0.0,
+                    "streaming.temporal.excitation_boost must be >= 0"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -775,6 +836,10 @@ pub struct StreamingConfig {
     #[serde(default)]
     pub layer_flags: StreamingLayerFlags,
     #[serde(default)]
+    pub hypergraph: StreamingHypergraphConfig,
+    #[serde(default)]
+    pub temporal: TemporalInferenceConfig,
+    #[serde(default)]
     pub branching: BranchingFuturesConfig,
     #[serde(default)]
     pub causal: CausalDiscoveryConfig,
@@ -794,11 +859,69 @@ impl Default for StreamingConfig {
             temporal_tolerance_secs: 2.0,
             confidence_gate: 0.5,
             layer_flags: StreamingLayerFlags::default(),
+            hypergraph: StreamingHypergraphConfig::default(),
+            temporal: TemporalInferenceConfig::default(),
             branching: BranchingFuturesConfig::default(),
             causal: CausalDiscoveryConfig::default(),
             consistency: ConsistencyChunkingConfig::default(),
             plasticity: OnlinePlasticityConfig::default(),
             ontology: OntologyConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingHypergraphConfig {
+    pub enabled: bool,
+    pub max_edges: usize,
+    pub edge_decay: f64,
+    pub edge_ttl_secs: f64,
+    pub min_weight: f64,
+    pub max_nodes_per_batch: usize,
+}
+
+impl Default for StreamingHypergraphConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_edges: 20_000,
+            edge_decay: 0.98,
+            edge_ttl_secs: 3600.0,
+            min_weight: 0.02,
+            max_nodes_per_batch: 48,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TemporalInferenceConfig {
+    pub enabled: bool,
+    pub layer_ema_alpha: f64,
+    pub coherence_alpha: f64,
+    pub event_decay_tau_secs: f64,
+    pub base_rate_alpha: f64,
+    pub dirichlet_prior: f64,
+    pub intensity_floor: f64,
+    pub calm_threshold: f64,
+    pub surge_threshold: f64,
+    pub excitation_boost: f64,
+}
+
+impl Default for TemporalInferenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            layer_ema_alpha: 0.2,
+            coherence_alpha: 0.15,
+            event_decay_tau_secs: 300.0,
+            base_rate_alpha: 0.2,
+            dirichlet_prior: 1.0,
+            intensity_floor: 0.01,
+            calm_threshold: 0.5,
+            surge_threshold: 2.0,
+            excitation_boost: 0.05,
         }
     }
 }

@@ -10,6 +10,8 @@ pub mod align;
 pub mod service;
 pub mod motor;
 pub mod video;
+pub mod hypergraph;
+pub mod temporal;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -26,3 +28,5 @@ pub use align::StreamingAligner;
 pub use service::{StreamingService, StreamingServiceConfig};
 pub use motor::{BoundingBox, Keypoint, MotorFeatureExtractor, MotorFeatureOutput, MotorFeatures, MotorConfig, PoseFrame};
 pub use video::{PoseCommandConfig, PoseCommandIngestor};
+pub use hypergraph::{DomainKind, HypergraphEdge, HypergraphNode, HypergraphNodeKind, HypergraphUpdate, MultiDomainHypergraph};
+pub use temporal::{TemporalInferenceCore, TemporalInferenceReport, LayerPrediction, CoherencePrediction, EventIntensity, DirichletPosterior, HypergraphStats};
