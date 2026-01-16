@@ -812,7 +812,7 @@ pub struct StreamingIngestConfig {
 }
 
 impl StreamingIngestConfig {
-    fn enabled_source_count(&self) -> usize {
+    pub fn enabled_source_count(&self) -> usize {
         self.people_video as usize + self.crowd_traffic as usize + self.public_topics as usize
     }
 }

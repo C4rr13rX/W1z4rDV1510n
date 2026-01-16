@@ -6,6 +6,8 @@ pub mod flow;
 pub mod topic;
 pub mod processor;
 pub mod spike_router;
+pub mod align;
+pub mod service;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -18,3 +20,5 @@ pub use flow::{FlowConfig, FlowExtraction, FlowLayerExtractor, FlowSample};
 pub use topic::{TopicConfig, TopicEventExtractor, TopicExtraction, TopicSample};
 pub use processor::{StreamingInference, StreamingProcessor};
 pub use spike_router::UltradianSpikeRouter;
+pub use align::StreamingAligner;
+pub use service::{StreamingService, StreamingServiceConfig};

@@ -1,6 +1,7 @@
 use crate::config::StreamingConfig;
 use crate::orchestrator::{RunOutcome, run_with_snapshot};
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
+use crate::streaming::align::StreamingAligner;
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -162,6 +163,7 @@ impl StreamingProcessor {
 
 pub struct StreamingInference {
     processor: StreamingProcessor,
+    aligner: StreamingAligner,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
 }
@@ -169,8 +171,10 @@ pub struct StreamingInference {
 impl StreamingInference {
     pub fn new(run_config: RunConfig) -> Self {
         let processor = StreamingProcessor::new(run_config.streaming.clone());
+        let aligner = StreamingAligner::new(&run_config.streaming);
         Self {
             processor,
+            aligner,
             run_config,
             symbolizer: SymbolizeConfig::default(),
         }
@@ -181,6 +185,10 @@ impl StreamingInference {
         envelope: StreamEnvelope,
     ) -> anyhow::Result<Option<RunOutcome>> {
         let batch = match self.processor.ingest(envelope) {
+            Some(batch) => batch,
+            None => return Ok(None),
+        };
+        let batch = match self.aligner.push(batch) {
             Some(batch) => batch,
             None => return Ok(None),
         };

@@ -1,0 +1,108 @@
+use anyhow::Context;
+use clap::Parser;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use w1z4rdv1510n::config::RunConfig;
+use w1z4rdv1510n::streaming::{
+    StreamEnvelope, StreamIngestor, StreamingInference, StreamingService, StreamingServiceConfig,
+};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Run the streaming inference loop over JSONL envelopes")]
+struct Args {
+    #[arg(long, default_value = "run_config.json")]
+    config: PathBuf,
+    #[arg(long)]
+    input: Option<PathBuf>,
+    #[arg(long, default_value_t = 32)]
+    max_batch: usize,
+    #[arg(long, default_value_t = 50)]
+    idle_ms: u64,
+    #[arg(long)]
+    exit_on_drain: bool,
+}
+
+struct JsonLineIngestor {
+    reader: Box<dyn BufRead + Send + Sync>,
+    eof: bool,
+}
+
+impl JsonLineIngestor {
+    fn new(reader: Box<dyn BufRead + Send + Sync>) -> Self {
+        Self { reader, eof: false }
+    }
+}
+
+impl StreamIngestor for JsonLineIngestor {
+    fn poll(&mut self) -> anyhow::Result<Option<StreamEnvelope>> {
+        if self.eof {
+            return Ok(None);
+        }
+        loop {
+            let mut line = String::new();
+            let bytes = self.reader.read_line(&mut line)?;
+            if bytes == 0 {
+                self.eof = true;
+                return Ok(None);
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let envelope = serde_json::from_str(trimmed)
+                .with_context(|| "invalid JSON stream envelope")?;
+            return Ok(Some(envelope));
+        }
+    }
+
+    fn is_drained(&self) -> bool {
+        self.eof
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let args = Args::parse();
+    let config_data = std::fs::read_to_string(&args.config)
+        .with_context(|| format!("failed to read config {:?}", args.config))?;
+    let run_config: RunConfig = serde_json::from_str(&config_data)
+        .with_context(|| format!("failed to parse config {:?}", args.config))?;
+    if !run_config.streaming.enabled {
+        anyhow::bail!("streaming.enabled must be true to run the streaming service");
+    }
+
+    let input_is_file = args
+        .input
+        .as_deref()
+        .map(|path| path != Path::new("-"))
+        .unwrap_or(false);
+    let exit_on_drain = args.exit_on_drain || input_is_file;
+
+    let reader: Box<dyn BufRead + Send + Sync> = match args.input.as_deref() {
+        Some(path) if path != Path::new("-") => Box::new(BufReader::new(File::open(path)?)),
+        _ => Box::new(BufReader::new(io::stdin())),
+    };
+    let ingestor = JsonLineIngestor::new(reader);
+    let inference = StreamingInference::new(run_config);
+    let service_config = StreamingServiceConfig {
+        max_batch: args.max_batch,
+        idle_sleep_ms: args.idle_ms,
+        exit_on_drain,
+    };
+    let mut service = StreamingService::new(inference, ingestor, service_config);
+    service.run(|outcome| {
+        tracing::info!(
+            target: "w1z4rdv1510n::streaming",
+            best_energy = outcome.results.best_energy,
+            symbols = outcome.results.best_state.symbol_states.len(),
+            "streaming batch processed"
+        );
+    })?;
+    Ok(())
+}

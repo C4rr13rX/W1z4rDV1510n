@@ -9,6 +9,10 @@ pub struct StreamIngestBatch {
 pub trait StreamIngestor: Send + Sync {
     fn poll(&mut self) -> Result<Option<StreamEnvelope>>;
 
+    fn is_drained(&self) -> bool {
+        false
+    }
+
     fn poll_batch(&mut self, max_items: usize) -> Result<StreamIngestBatch> {
         let mut batch = StreamIngestBatch::default();
         for _ in 0..max_items.max(1) {
