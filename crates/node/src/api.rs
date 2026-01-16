@@ -10,6 +10,7 @@ use blake2::{Blake2s256, Digest};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use w1z4rdv1510n::blockchain::{BlockchainLedger, NoopLedger, RewardBalance};
 use w1z4rdv1510n::bridge::{BridgeProof, bridge_deposit_id};
@@ -24,6 +25,7 @@ struct ApiState {
     rate_limit_default_max: u32,
     rate_limit_bridge_max: u32,
     rate_limit_balance_max: u32,
+    metrics: Arc<ApiMetrics>,
 }
 
 #[derive(Serialize)]
@@ -36,6 +38,80 @@ struct BridgeSubmitResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Serialize)]
+struct ApiMetricsSnapshot {
+    requests_total: u64,
+    bridge_requests: u64,
+    balance_requests: u64,
+    metrics_requests: u64,
+    bridge_success: u64,
+    balance_success: u64,
+    rate_limit_hits: u64,
+    auth_failures: u64,
+}
+
+#[derive(Default)]
+struct ApiMetrics {
+    requests_total: AtomicU64,
+    bridge_requests: AtomicU64,
+    balance_requests: AtomicU64,
+    metrics_requests: AtomicU64,
+    bridge_success: AtomicU64,
+    balance_success: AtomicU64,
+    rate_limit_hits: AtomicU64,
+    auth_failures: AtomicU64,
+}
+
+impl ApiMetrics {
+    fn inc_request(&self) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_bridge_request(&self) {
+        self.inc_request();
+        self.bridge_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_balance_request(&self) {
+        self.inc_request();
+        self.balance_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_metrics_request(&self) {
+        self.inc_request();
+        self.metrics_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_bridge_success(&self) {
+        self.bridge_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_balance_success(&self) {
+        self.balance_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_rate_limit_hit(&self) {
+        self.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_auth_failure(&self) {
+        self.auth_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> ApiMetricsSnapshot {
+        ApiMetricsSnapshot {
+            requests_total: self.requests_total.load(Ordering::Relaxed),
+            bridge_requests: self.bridge_requests.load(Ordering::Relaxed),
+            balance_requests: self.balance_requests.load(Ordering::Relaxed),
+            metrics_requests: self.metrics_requests.load(Ordering::Relaxed),
+            bridge_success: self.bridge_success.load(Ordering::Relaxed),
+            balance_success: self.balance_success.load(Ordering::Relaxed),
+            rate_limit_hits: self.rate_limit_hits.load(Ordering::Relaxed),
+            auth_failures: self.auth_failures.load(Ordering::Relaxed),
+        }
+    }
 }
 
 pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
@@ -77,6 +153,7 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         rate_limit_default_max: config.api.rate_limit_max_requests,
         rate_limit_bridge_max: config.api.rate_limit_bridge_max_requests,
         rate_limit_balance_max: config.api.rate_limit_balance_max_requests,
+        metrics: Arc::new(ApiMetrics::default()),
     };
     let max_body = config
         .blockchain
@@ -86,6 +163,7 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let app = Router::new()
         .route("/bridge/proof", post(submit_bridge_proof))
         .route("/balance/:node_id", get(get_balance))
+        .route("/metrics", get(get_metrics))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -109,7 +187,9 @@ async fn submit_bridge_proof(
     headers: HeaderMap,
     Json(proof): Json<BridgeProof>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_bridge_request();
     if let Err(err) = rate_limit(&state, &headers, "bridge") {
+        state.metrics.inc_rate_limit_hit();
         let response = ErrorResponse {
             error: err.to_string(),
         };
@@ -119,6 +199,7 @@ async fn submit_bridge_proof(
         );
     }
     if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
         let response = ErrorResponse {
             error: err.to_string(),
         };
@@ -131,6 +212,7 @@ async fn submit_bridge_proof(
     let node_id = proof.deposit.recipient_node_id.clone();
     match state.ledger.submit_bridge_proof(proof) {
         Ok(()) => {
+            state.metrics.inc_bridge_success();
             let balance = state.ledger.reward_balance(&node_id).ok();
             let response = BridgeSubmitResponse {
                 status: "OK",
@@ -156,7 +238,9 @@ async fn get_balance(
     headers: HeaderMap,
     Path(node_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_balance_request();
     if let Err(err) = rate_limit(&state, &headers, "balance") {
+        state.metrics.inc_rate_limit_hit();
         let response = ErrorResponse {
             error: err.to_string(),
         };
@@ -166,6 +250,7 @@ async fn get_balance(
         );
     }
     if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
         let response = ErrorResponse {
             error: err.to_string(),
         };
@@ -176,7 +261,10 @@ async fn get_balance(
     }
     match state.ledger.reward_balance(&node_id) {
         Ok(balance) => (
-            StatusCode::OK,
+            {
+                state.metrics.inc_balance_success();
+                StatusCode::OK
+            },
             Json(serde_json::to_value(balance).unwrap_or_default()),
         ),
         Err(err) => {
@@ -189,6 +277,38 @@ async fn get_balance(
             )
         }
     }
+}
+
+async fn get_metrics(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_metrics_request();
+    if let Err(err) = rate_limit(&state, &headers, "metrics") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let snapshot = state.metrics.snapshot();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(snapshot).unwrap_or_default()),
+    )
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<()> {
