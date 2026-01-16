@@ -21,6 +21,9 @@ struct ApiState {
     api_key_hashes: Vec<[u8; 32]>,
     api_key_header: HeaderName,
     limiter: Arc<Mutex<ApiLimiter>>,
+    rate_limit_default_max: u32,
+    rate_limit_bridge_max: u32,
+    rate_limit_balance_max: u32,
 }
 
 #[derive(Serialize)]
@@ -64,7 +67,6 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .context("invalid api_key_header")?;
     let limiter = Arc::new(Mutex::new(ApiLimiter::new(
         config.api.rate_limit_window_secs,
-        config.api.rate_limit_max_requests,
     )));
     let state = ApiState {
         ledger,
@@ -72,6 +74,9 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         api_key_hashes,
         api_key_header,
         limiter,
+        rate_limit_default_max: config.api.rate_limit_max_requests,
+        rate_limit_bridge_max: config.api.rate_limit_bridge_max_requests,
+        rate_limit_balance_max: config.api.rate_limit_balance_max_requests,
     };
     let max_body = config
         .blockchain
@@ -213,7 +218,12 @@ fn rate_limit(state: &ApiState, headers: &HeaderMap, route: &str) -> Result<()> 
         .filter(|value| !value.is_empty())
         .unwrap_or("anonymous");
     let mut limiter = state.limiter.lock().expect("api limiter lock");
-    limiter.check_and_update(key, route)
+    let max_requests = match route {
+        "bridge" => state.rate_limit_bridge_max,
+        "balance" => state.rate_limit_balance_max,
+        _ => state.rate_limit_default_max,
+    };
+    limiter.check_and_update(key, route, max_requests)
 }
 
 fn hash_allowed(candidate: &[u8; 32], allowlist: &[[u8; 32]]) -> bool {
@@ -294,7 +304,6 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[derive(Debug)]
 struct ApiLimiter {
     window_secs: u64,
-    max_requests: u32,
     entries: std::collections::HashMap<String, ApiLimiterEntry>,
 }
 
@@ -306,15 +315,14 @@ struct ApiLimiterEntry {
 }
 
 impl ApiLimiter {
-    fn new(window_secs: u64, max_requests: u32) -> Self {
+    fn new(window_secs: u64) -> Self {
         Self {
             window_secs,
-            max_requests,
             entries: std::collections::HashMap::new(),
         }
     }
 
-    fn check_and_update(&mut self, key: &str, route: &str) -> Result<()> {
+    fn check_and_update(&mut self, key: &str, route: &str, max_requests: u32) -> Result<()> {
         let now = Instant::now();
         self.prune(now);
         let full_key = format!("{key}:{route}");
@@ -329,7 +337,7 @@ impl ApiLimiter {
         }
         entry.count = entry.count.saturating_add(1);
         entry.last_seen = now;
-        if entry.count > self.max_requests {
+        if entry.count > max_requests {
             anyhow::bail!("rate limit exceeded");
         }
         Ok(())

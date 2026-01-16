@@ -225,6 +225,14 @@ impl NodeConfig {
             self.api.rate_limit_max_requests > 0,
             "api.rate_limit_max_requests must be > 0"
         );
+        anyhow::ensure!(
+            self.api.rate_limit_bridge_max_requests > 0,
+            "api.rate_limit_bridge_max_requests must be > 0"
+        );
+        anyhow::ensure!(
+            self.api.rate_limit_balance_max_requests > 0,
+            "api.rate_limit_balance_max_requests must be > 0"
+        );
         Ok(())
     }
 }
@@ -250,6 +258,8 @@ pub struct NodeApiConfig {
     pub api_key_hashes: Vec<String>,
     pub rate_limit_window_secs: u64,
     pub rate_limit_max_requests: u32,
+    pub rate_limit_bridge_max_requests: u32,
+    pub rate_limit_balance_max_requests: u32,
 }
 
 impl Default for NodeApiConfig {
@@ -261,6 +271,8 @@ impl Default for NodeApiConfig {
             api_key_hashes: Vec::new(),
             rate_limit_window_secs: 60,
             rate_limit_max_requests: 10,
+            rate_limit_bridge_max_requests: 10,
+            rate_limit_balance_max_requests: 10,
         }
     }
 }
