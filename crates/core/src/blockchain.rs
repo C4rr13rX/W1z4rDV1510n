@@ -1,5 +1,6 @@
-use crate::bridge::BridgeProof;
+use crate::bridge::{BridgeProof, ChainKind};
 use crate::config::{BlockchainConfig, NodeRole, RewardPolicyConfig};
+use crate::network::compute_payload_hash;
 use crate::schema::Timestamp;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,23 @@ pub struct StakeDeposit {
     pub source: String,
     #[serde(default)]
     pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeIntent {
+    pub intent_id: String,
+    pub chain_id: String,
+    #[serde(default)]
+    pub chain_kind: ChainKind,
+    pub asset: String,
+    pub amount: f64,
+    pub recipient_node_id: String,
+    #[serde(default)]
+    pub deposit_address: String,
+    #[serde(default)]
+    pub recipient_tag: Option<String>,
+    pub idempotency_key: String,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +264,25 @@ pub fn stake_deposit_payload(deposit: &StakeDeposit) -> String {
     )
 }
 
+pub fn bridge_intent_payload(intent: &BridgeIntent) -> String {
+    format!(
+        "bridge_intent|{}|{:?}|{}|{:.6}|{}|{}|{}|{}",
+        intent.chain_id,
+        intent.chain_kind,
+        intent.asset,
+        intent.amount,
+        intent.recipient_node_id,
+        intent.deposit_address,
+        intent.recipient_tag.clone().unwrap_or_default(),
+        intent.idempotency_key
+    )
+}
+
+pub fn bridge_intent_id(intent: &BridgeIntent) -> String {
+    let payload = bridge_intent_payload(intent);
+    compute_payload_hash(payload.as_bytes())
+}
+
 pub fn validator_slash_payload(slash: &ValidatorSlashEvent) -> String {
     format!(
         "slash|{}|{:?}|{}|{:.6}",
@@ -282,6 +319,10 @@ pub trait BlockchainLedger: Send + Sync {
     }
     fn submit_bridge_proof(&self, _proof: BridgeProof) -> Result<()> {
         anyhow::bail!("bridge proof submission not implemented")
+    }
+
+    fn submit_bridge_intent(&self, _intent: BridgeIntent) -> Result<BridgeIntent> {
+        anyhow::bail!("bridge intent submission not implemented")
     }
 
     fn submit_work_proof(&self, _proof: WorkProof) -> Result<()> {
@@ -330,6 +371,10 @@ impl BlockchainLedger for NoopLedger {
     }
 
     fn submit_bridge_proof(&self, _proof: BridgeProof) -> Result<()> {
+        anyhow::bail!("ledger not configured")
+    }
+
+    fn submit_bridge_intent(&self, _intent: BridgeIntent) -> Result<BridgeIntent> {
         anyhow::bail!("ledger not configured")
     }
 

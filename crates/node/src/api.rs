@@ -12,9 +12,12 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use w1z4rdv1510n::blockchain::{BlockchainLedger, NoopLedger, RewardBalance};
+use w1z4rdv1510n::blockchain::{
+    BlockchainLedger, BridgeIntent, NoopLedger, RewardBalance, bridge_intent_id,
+};
 use w1z4rdv1510n::bridge::{BridgeProof, BridgeVerificationMode, ChainKind, bridge_deposit_id};
 use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy};
+use w1z4rdv1510n::schema::Timestamp;
 
 #[derive(Clone)]
 struct ApiState {
@@ -43,11 +46,15 @@ struct BridgeIntentRequest {
     asset: String,
     amount: f64,
     recipient_node_id: String,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Serialize)]
 struct BridgeIntentResponse {
     status: &'static str,
+    intent_id: String,
+    created_at: Timestamp,
     chain_id: String,
     chain_kind: ChainKind,
     asset: String,
@@ -530,25 +537,68 @@ async fn submit_bridge_intent(
     };
     let recipient_tag = sanitize_option(&policy.recipient_tag_template)
         .map(|template| render_recipient_tag(&template, recipient_node_id));
-    let response = BridgeIntentResponse {
-        status: "OK",
+    if let Some(tag) = &recipient_tag {
+        if tag.trim().is_empty() {
+            let response = ErrorResponse {
+                error: "bridge recipient_tag_template produced empty tag".to_string(),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            );
+        }
+    }
+    let idempotency_key = sanitize_option(&intent.idempotency_key)
+        .unwrap_or_else(|| default_idempotency_key(chain_id, &asset, intent.amount, recipient_node_id));
+    let created_at = now_timestamp();
+    let mut bridge_intent = BridgeIntent {
+        intent_id: String::new(),
         chain_id: policy.chain_id.clone(),
         chain_kind: policy.chain_kind.clone(),
-        asset,
+        asset: asset.clone(),
         amount: intent.amount,
         recipient_node_id: recipient_node_id.to_string(),
         deposit_address,
         recipient_tag,
-        min_confirmations: policy.min_confirmations,
-        verification: policy.verification.clone(),
-        relayer_quorum: policy.relayer_quorum,
-        max_deposit_amount: policy.max_deposit_amount,
+        idempotency_key,
+        created_at,
     };
-    state.metrics.inc_bridge_intent_success();
-    (
-        StatusCode::OK,
-        Json(serde_json::to_value(response).unwrap_or_default()),
-    )
+    let intent_id = bridge_intent_id(&bridge_intent);
+    bridge_intent.intent_id = intent_id;
+    match state.ledger.submit_bridge_intent(bridge_intent) {
+        Ok(stored) => {
+            let response = BridgeIntentResponse {
+                status: "OK",
+                intent_id: stored.intent_id,
+                created_at: stored.created_at,
+                chain_id: stored.chain_id,
+                chain_kind: stored.chain_kind,
+                asset: stored.asset,
+                amount: stored.amount,
+                recipient_node_id: stored.recipient_node_id,
+                deposit_address: stored.deposit_address,
+                recipient_tag: stored.recipient_tag,
+                min_confirmations: policy.min_confirmations,
+                verification: policy.verification.clone(),
+                relayer_quorum: policy.relayer_quorum,
+                max_deposit_amount: policy.max_deposit_amount,
+            };
+            state.metrics.inc_bridge_intent_success();
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+        Err(err) => {
+            let response = ErrorResponse {
+                error: err.to_string(),
+            };
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+    }
 }
 
 async fn get_metrics(
@@ -630,10 +680,11 @@ fn find_chain_policy<'a>(
 
 fn sanitize_option(value: &Option<String>) -> Option<String> {
     value.as_ref().and_then(|item| {
-        if item.trim().is_empty() {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
             None
         } else {
-            Some(item.clone())
+            Some(trimmed.to_string())
         }
     })
 }
@@ -642,6 +693,27 @@ fn render_recipient_tag(template: &str, recipient_node_id: &str) -> String {
     template
         .replace("{node_id}", recipient_node_id)
         .replace("{recipient_node_id}", recipient_node_id)
+}
+
+fn default_idempotency_key(
+    chain_id: &str,
+    asset: &str,
+    amount: f64,
+    recipient_node_id: &str,
+) -> String {
+    format!(
+        "intent|{}|{}|{:.6}|{}",
+        chain_id, asset, amount, recipient_node_id
+    )
+}
+
+fn now_timestamp() -> Timestamp {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    Timestamp { unix }
 }
 
 fn hash_allowed(candidate: &[u8; 32], allowlist: &[[u8; 32]]) -> bool {

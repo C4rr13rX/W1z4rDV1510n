@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use w1z4rdv1510n::blockchain::{
-    BlockchainLedger, CrossChainTransfer, EnergyEfficiencySample, NodeRegistration, RewardBalance,
-    RewardEvent, RewardEventKind, SensorCommitment, StakeDeposit, WorkKind, WorkProof,
-    ValidatorHeartbeat, ValidatorRecord, ValidatorSlashEvent, ValidatorSlashReason,
-    ValidatorStatus,
-    cross_chain_transfer_payload, node_registration_payload, sensor_commitment_payload,
-    stake_deposit_payload, validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
+    BlockchainLedger, BridgeIntent, CrossChainTransfer, EnergyEfficiencySample, NodeRegistration,
+    RewardBalance, RewardEvent, RewardEventKind, SensorCommitment, StakeDeposit, WorkKind,
+    WorkProof, ValidatorHeartbeat, ValidatorRecord, ValidatorSlashEvent, ValidatorSlashReason,
+    ValidatorStatus, bridge_intent_id, bridge_intent_payload, cross_chain_transfer_payload,
+    node_registration_payload, sensor_commitment_payload, stake_deposit_payload,
+    validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
 };
 use w1z4rdv1510n::bridge::BridgeProof;
 use w1z4rdv1510n::config::{BridgeConfig, FeeMarketConfig, ValidatorPolicyConfig};
@@ -39,6 +39,9 @@ struct LocalLedgerState {
     cross_chain_transfers: Vec<CrossChainTransfer>,
     cross_chain_transfer_ids: VecDeque<String>,
     cross_chain_transfer_id_set: HashSet<String>,
+    bridge_intents: Vec<BridgeIntent>,
+    bridge_intent_ids: VecDeque<String>,
+    bridge_intent_id_set: HashSet<String>,
     stake_deposits: Vec<StakeDeposit>,
     stake_deposit_ids: VecDeque<String>,
     stake_deposit_id_set: HashSet<String>,
@@ -335,6 +338,30 @@ impl BlockchainLedger for LocalLedger {
         Ok(())
     }
 
+    fn submit_bridge_intent(&self, intent: BridgeIntent) -> Result<BridgeIntent> {
+        let payload = bridge_intent_payload(&intent);
+        let expected_id = bridge_intent_id(&intent);
+        if expected_id != intent.intent_id {
+            anyhow::bail!("bridge intent id mismatch");
+        }
+        let mut state = self.state.lock().expect("local ledger mutex poisoned");
+        if state.bridge_intent_id_set.contains(&intent.intent_id) {
+            if let Some(existing) = state
+                .bridge_intents
+                .iter()
+                .find(|item| item.intent_id == intent.intent_id)
+            {
+                if bridge_intent_payload(existing) != payload {
+                    anyhow::bail!("bridge intent id already used for different payload");
+                }
+                return Ok(existing.clone());
+            }
+        }
+        let stored = record_bridge_intent(&mut state, intent, payload)?;
+        self.persist(&state)?;
+        Ok(stored)
+    }
+
     fn submit_work_proof(&self, proof: WorkProof) -> Result<()> {
         if proof.work_id.trim().is_empty() {
             anyhow::bail!("work proof id must be non-empty");
@@ -616,6 +643,7 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
     trim_events(&mut state.work_proofs);
     trim_events(&mut state.sensor_commitments);
     trim_events(&mut state.cross_chain_transfers);
+    trim_events(&mut state.bridge_intents);
     trim_events(&mut state.reward_events);
     trim_events(&mut state.energy_samples);
     trim_events(&mut state.stake_deposits);
@@ -648,6 +676,22 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
         let id = payload_id(payload.as_bytes());
         if state.cross_chain_transfer_id_set.insert(id.clone()) {
             state.cross_chain_transfer_ids.push_back(id);
+        }
+    }
+
+    state.bridge_intent_ids.clear();
+    state.bridge_intent_id_set.clear();
+    for intent in &state.bridge_intents {
+        let id = if intent.intent_id.trim().is_empty() {
+            bridge_intent_id(intent)
+        } else {
+            intent.intent_id.clone()
+        };
+        if id.trim().is_empty() {
+            continue;
+        }
+        if state.bridge_intent_id_set.insert(id.clone()) {
+            state.bridge_intent_ids.push_back(id);
         }
     }
 
@@ -725,6 +769,49 @@ fn record_audit(
     state.audit_head = hash;
     state.audit_log.push(event);
     trim_events(&mut state.audit_log);
+}
+
+fn record_bridge_intent(
+    state: &mut LocalLedgerState,
+    intent: BridgeIntent,
+    payload: String,
+) -> Result<BridgeIntent> {
+    if intent.intent_id.trim().is_empty() {
+        anyhow::bail!("bridge intent id must be non-empty");
+    }
+    if intent.chain_id.trim().is_empty() {
+        anyhow::bail!("bridge intent chain_id must be non-empty");
+    }
+    if intent.asset.trim().is_empty() {
+        anyhow::bail!("bridge intent asset must be non-empty");
+    }
+    if !intent.amount.is_finite() || intent.amount <= 0.0 {
+        anyhow::bail!("bridge intent amount must be > 0 and finite");
+    }
+    if intent.recipient_node_id.trim().is_empty() {
+        anyhow::bail!("bridge intent recipient_node_id must be non-empty");
+    }
+    if intent.deposit_address.trim().is_empty() {
+        anyhow::bail!("bridge intent deposit_address must be non-empty");
+    }
+    if intent.idempotency_key.trim().is_empty() {
+        anyhow::bail!("bridge intent idempotency_key must be non-empty");
+    }
+    if state.bridge_intent_id_set.contains(&intent.intent_id) {
+        anyhow::bail!("duplicate bridge intent id");
+    }
+    let intent_id = intent.intent_id.clone();
+    let timestamp = intent.created_at;
+    push_event_with_id(
+        &mut state.bridge_intents,
+        &mut state.bridge_intent_ids,
+        &mut state.bridge_intent_id_set,
+        intent.clone(),
+        intent_id,
+    );
+    let audit_id = payload_id(payload.as_bytes());
+    record_audit(state, "BRIDGE_INTENT", audit_id, timestamp);
+    Ok(intent)
 }
 
 fn record_stake_deposit(
@@ -1714,5 +1801,48 @@ mod tests {
 
         let balance = ledger.reward_balance("n1").expect("balance");
         assert!((balance.balance - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bridge_intent_is_idempotent() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ledger.json");
+        let ledger = LocalLedger::load_or_create(
+            path,
+            ValidatorPolicyConfig::default(),
+            FeeMarketConfig::default(),
+            BridgeConfig::default(),
+        )
+        .expect("ledger");
+
+        let created_at = Timestamp { unix: 42 };
+        let mut intent = BridgeIntent {
+            intent_id: String::new(),
+            chain_id: "ethereum".to_string(),
+            chain_kind: w1z4rdv1510n::bridge::ChainKind::Evm,
+            asset: "USDC".to_string(),
+            amount: 10.0,
+            recipient_node_id: "n1".to_string(),
+            deposit_address: "0xbridge".to_string(),
+            recipient_tag: Some("node:n1".to_string()),
+            idempotency_key: "intent-1".to_string(),
+            created_at,
+        };
+        let intent_id = bridge_intent_id(&intent);
+        intent.intent_id = intent_id.clone();
+
+        let stored = ledger
+            .submit_bridge_intent(intent.clone())
+            .expect("intent");
+        assert_eq!(stored.intent_id, intent_id);
+
+        let stored_again = ledger.submit_bridge_intent(intent).expect("intent again");
+        assert_eq!(stored_again.intent_id, intent_id);
+        assert_eq!(stored_again.created_at.unix, created_at.unix);
+
+        let mut mismatched = stored_again.clone();
+        mismatched.amount = 11.0;
+        let result = ledger.submit_bridge_intent(mismatched);
+        assert!(result.is_err());
     }
 }

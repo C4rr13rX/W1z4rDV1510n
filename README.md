@@ -54,7 +54,7 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **Flow** - deposit on source chain -> relayer quorum signs canonical `BridgeDeposit` payload -> submit `BridgeProof` -> ledger mints `StakeDeposit`.
 - **Security tiers** - `RELAYER_QUORUM` (implemented), `OPTIMISTIC` (challenge window), `LIGHT_CLIENT`/`ZK` (highest security, planned).
 - **Config** - `blockchain.bridge` in `node_config_example.json` controls chain policies, relayer keys/quorum, allowed assets, max deposit sizes, and per-chain `deposit_address` + `recipient_tag_template`.
-- **API** - `GET /bridge/chains` lists enabled chains; `POST /bridge/intent` returns deposit instructions; `POST /bridge/proof` submits relayer-signed proofs.
+- **API** - `GET /bridge/chains` lists enabled chains; `POST /bridge/intent` returns deposit instructions with an idempotent `intent_id` (optional `idempotency_key` supported); `POST /bridge/proof` submits relayer-signed proofs.
 - **Extensibility** - add new chains by appending policies; `chain/bridge_contract.json` lists supported chains/assets.
 
 ---
