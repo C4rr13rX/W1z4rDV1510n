@@ -88,6 +88,12 @@ pub struct DataIngestResponse {
     pub chunk_count: u32,
     pub stored: bool,
     pub receipt_count: usize,
+    pub replication_factor: usize,
+    pub receipt_quorum: usize,
+    pub quorum_met: bool,
+    pub replication_met: bool,
+    pub pending_quorum: usize,
+    pub pending_replicas: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +101,12 @@ pub struct DataStatusResponse {
     pub data_id: String,
     pub stored: bool,
     pub receipt_count: usize,
+    pub replication_factor: usize,
+    pub receipt_quorum: usize,
+    pub quorum_met: bool,
+    pub replication_met: bool,
+    pub pending_quorum: usize,
+    pub pending_replicas: usize,
     pub manifest: Option<DataManifest>,
 }
 
@@ -268,12 +280,14 @@ fn ingest_local(
     store.store_manifest(&signed_manifest)?;
     store.store_payload(&data_id, &payload)?;
     let receipt = build_receipt(&data_id, &payload_hash, node_id, wallet);
-    let receipt_count = store.record_receipt(receipt.clone())?;
+    let receipt_record = store.record_receipt(receipt.clone())?;
     let _ = publisher.publish(signed_envelope(DataMessage::Manifest(signed_manifest), wallet));
     for chunk in chunks {
         let _ = publisher.publish(signed_envelope(DataMessage::Chunk(chunk), wallet));
     }
-    let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+    if receipt_record.stored {
+        let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+    }
     let commitment = SensorCommitment {
         node_id: node_id.to_string(),
         sensor_id: request.sensor_id,
@@ -290,12 +304,20 @@ fn ingest_local(
             "ledger sensor commitment rejected"
         );
     }
+    let receipt_count = receipt_record.count;
+    let state = quorum_state(receipt_count, config);
     Ok(DataIngestResponse {
         data_id,
         payload_hash,
         chunk_count,
         stored: true,
         receipt_count,
+        replication_factor: config.replication_factor,
+        receipt_quorum: config.receipt_quorum,
+        quorum_met: state.quorum_met,
+        replication_met: state.replication_met,
+        pending_quorum: state.pending_quorum,
+        pending_replicas: state.pending_replicas,
     })
 }
 
@@ -320,12 +342,17 @@ fn handle_network_message(
                         node_id,
                         wallet,
                     );
-                    if store.record_receipt(receipt.clone()).is_ok() {
-                        let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+                    if let Ok(record) = store.record_receipt(receipt.clone()) {
+                        if record.stored {
+                            let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+                        }
                     }
                 } else {
-                    let request = build_request(&manifest.data_id, node_id, wallet);
-                    let _ = publisher.publish(signed_envelope(DataMessage::Request(request), wallet));
+                    let receipt_count = store.receipt_count(&manifest.data_id);
+                    if receipt_count < config.replication_factor {
+                        let request = build_request(&manifest.data_id, node_id, wallet);
+                        let _ = publisher.publish(signed_envelope(DataMessage::Request(request), wallet));
+                    }
                 }
             }
         }
@@ -340,8 +367,10 @@ fn handle_network_message(
                             node_id,
                             wallet,
                         );
-                        if store.record_receipt(receipt.clone()).is_ok() {
-                            let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+                        if let Ok(record) = store.record_receipt(receipt.clone()) {
+                            if record.stored {
+                                let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+                            }
                         }
                     }
                 }
@@ -674,7 +703,7 @@ impl DataStore {
         Ok(())
     }
 
-    fn record_receipt(&mut self, receipt: ReplicationReceipt) -> Result<usize> {
+    fn record_receipt(&mut self, receipt: ReplicationReceipt) -> Result<ReceiptRecord> {
         let path = self.receipt_path(&receipt.data_id);
         let mut file = if path.exists() {
             let raw = fs::read_to_string(&path)?;
@@ -687,11 +716,24 @@ impl DataStore {
             .iter()
             .any(|existing| existing.replica_node_id == receipt.replica_node_id)
         {
-            return Ok(file.receipts.len());
+            return Ok(ReceiptRecord {
+                count: file.receipts.len(),
+                stored: false,
+            });
+        }
+        let max_receipts = self.config.replication_factor.max(1);
+        if file.receipts.len() >= max_receipts {
+            return Ok(ReceiptRecord {
+                count: file.receipts.len(),
+                stored: false,
+            });
         }
         file.receipts.push(receipt);
         fs::write(&path, serde_json::to_string_pretty(&file)?)?;
-        Ok(file.receipts.len())
+        Ok(ReceiptRecord {
+            count: file.receipts.len(),
+            stored: true,
+        })
     }
 
     fn receipt_count(&self, data_id: &str) -> usize {
@@ -710,10 +752,18 @@ impl DataStore {
 
     fn status(&self, data_id: &str) -> Result<DataStatusResponse> {
         let manifest = self.load_manifest(data_id)?;
+        let receipt_count = self.receipt_count(data_id);
+        let state = quorum_state(receipt_count, &self.config);
         Ok(DataStatusResponse {
             data_id: data_id.to_string(),
             stored: self.has_data(data_id),
-            receipt_count: self.receipt_count(data_id),
+            receipt_count,
+            replication_factor: self.config.replication_factor,
+            receipt_quorum: self.config.receipt_quorum,
+            quorum_met: state.quorum_met,
+            replication_met: state.replication_met,
+            pending_quorum: state.pending_quorum,
+            pending_replicas: state.pending_replicas,
             manifest,
         })
     }
@@ -745,6 +795,31 @@ impl DataStore {
 struct ReceiptFile {
     #[serde(default)]
     receipts: Vec<ReplicationReceipt>,
+}
+
+struct ReceiptRecord {
+    count: usize,
+    stored: bool,
+}
+
+struct QuorumState {
+    quorum_met: bool,
+    replication_met: bool,
+    pending_quorum: usize,
+    pending_replicas: usize,
+}
+
+fn quorum_state(receipt_count: usize, config: &DataMeshConfig) -> QuorumState {
+    let receipt_quorum = config.receipt_quorum.max(1);
+    let replication_factor = config.replication_factor.max(receipt_quorum);
+    let quorum_met = receipt_count >= receipt_quorum;
+    let replication_met = receipt_count >= replication_factor;
+    QuorumState {
+        quorum_met,
+        replication_met,
+        pending_quorum: receipt_quorum.saturating_sub(receipt_count),
+        pending_replicas: replication_factor.saturating_sub(receipt_count),
+    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -848,6 +923,8 @@ mod tests {
         let dir = tempdir().expect("tmp dir");
         let mut config = DataMeshConfig::default();
         config.storage_path = dir.path().to_string_lossy().into_owned();
+        config.replication_factor = 1;
+        config.receipt_quorum = 1;
         let wallet = Arc::new(test_wallet());
         let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
         let publisher = test_publisher();
@@ -871,6 +948,8 @@ mod tests {
         };
         let response = handle.ingest(request).await.expect("ingest");
         assert!(response.receipt_count >= 1);
+        assert!(response.quorum_met);
+        assert!(response.replication_met);
         drop(net_tx);
     }
 }
