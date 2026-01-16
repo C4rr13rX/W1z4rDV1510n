@@ -21,6 +21,10 @@ use runtime::NodeRuntime;
 use api::run_api;
 use wallet::{WalletStore, node_id_from_wallet};
 use w1z4rdv1510n::hardware::HardwareProfile;
+use w1z4rdv1510n::blockchain::{BridgeIntent, bridge_intent_id, bridge_intent_payload};
+use w1z4rdv1510n::bridge::ChainKind;
+use w1z4rdv1510n::network::compute_payload_hash;
+use w1z4rdv1510n::schema::Timestamp;
 
 #[derive(Parser, Debug)]
 #[command(name = "w1z4rdv1510n-node")]
@@ -66,6 +70,36 @@ enum Command {
     Api {
         #[arg(long, default_value = "127.0.0.1:8090")]
         addr: String,
+    },
+    BridgeIntentCreate {
+        #[arg(long)]
+        chain_id: String,
+        #[arg(long, default_value = "OTHER")]
+        chain_kind: String,
+        #[arg(long)]
+        asset: String,
+        #[arg(long)]
+        amount: f64,
+        #[arg(long)]
+        recipient_node_id: String,
+        #[arg(long)]
+        deposit_address: String,
+        #[arg(long)]
+        recipient_tag: Option<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[arg(long)]
+        created_at_unix: Option<i64>,
+        #[arg(long)]
+        out: Option<String>,
+    },
+    BridgeIntentVerify {
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        json: Option<String>,
+        #[arg(long)]
+        expected_hash: Option<String>,
     },
     HashApiKey {
         #[arg(long)]
@@ -120,6 +154,32 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Api { addr }) => run_api_mode(&config_path, &addr),
+        Some(Command::BridgeIntentCreate {
+            chain_id,
+            chain_kind,
+            asset,
+            amount,
+            recipient_node_id,
+            deposit_address,
+            recipient_tag,
+            idempotency_key,
+            created_at_unix,
+            out,
+        }) => bridge_intent_create(
+            chain_id,
+            chain_kind,
+            asset,
+            amount,
+            recipient_node_id,
+            deposit_address,
+            recipient_tag,
+            idempotency_key,
+            created_at_unix,
+            out,
+        ),
+        Some(Command::BridgeIntentVerify { file, json, expected_hash }) => {
+            bridge_intent_verify(file, json, expected_hash)
+        }
         Some(Command::HashApiKey { key }) => {
             println!("{}", api::hash_api_key_hex(&key));
             Ok(())
@@ -233,6 +293,144 @@ fn chain_status(config: &NodeConfig) -> ChainStatus {
             error: err.to_string(),
         },
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BridgeIntentOutput {
+    intent: BridgeIntent,
+    payload: String,
+    payload_hash: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BridgeIntentVerifyOutput {
+    status: &'static str,
+    intent_id: String,
+    payload_hash: String,
+    payload: String,
+}
+
+fn bridge_intent_create(
+    chain_id: String,
+    chain_kind: String,
+    asset: String,
+    amount: f64,
+    recipient_node_id: String,
+    deposit_address: String,
+    recipient_tag: Option<String>,
+    idempotency_key: Option<String>,
+    created_at_unix: Option<i64>,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let chain_kind = parse_chain_kind(&chain_kind)?;
+    let created_at = Timestamp {
+        unix: created_at_unix.unwrap_or_else(now_unix),
+    };
+    let idempotency_key = idempotency_key.unwrap_or_else(|| {
+        default_intent_key(&chain_id, &asset, amount, &recipient_node_id)
+    });
+    let mut intent = BridgeIntent {
+        intent_id: String::new(),
+        chain_id,
+        chain_kind,
+        asset,
+        amount,
+        recipient_node_id,
+        deposit_address,
+        recipient_tag,
+        idempotency_key,
+        created_at,
+    };
+    let intent_id = bridge_intent_id(&intent);
+    intent.intent_id = intent_id.clone();
+    let payload = bridge_intent_payload(&intent);
+    let payload_hash = compute_payload_hash(payload.as_bytes());
+    if payload_hash != intent_id {
+        anyhow::bail!("bridge intent payload hash mismatch");
+    }
+    let output = BridgeIntentOutput {
+        intent,
+        payload,
+        payload_hash,
+    };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    if let Some(path) = out {
+        fs::write(path, json)?;
+    }
+    Ok(())
+}
+
+fn bridge_intent_verify(
+    file: Option<String>,
+    json: Option<String>,
+    expected_hash: Option<String>,
+) -> anyhow::Result<()> {
+    let raw = match (file, json) {
+        (Some(path), None) => fs::read_to_string(path)?,
+        (None, Some(json)) => json,
+        (None, None) => anyhow::bail!("provide --file or --json"),
+        _ => anyhow::bail!("provide only one of --file or --json"),
+    };
+    let intent: BridgeIntent = serde_json::from_str(&raw)?;
+    if intent.intent_id.trim().is_empty() {
+        anyhow::bail!("intent_id must be provided");
+    }
+    let payload = bridge_intent_payload(&intent);
+    let payload_hash = compute_payload_hash(payload.as_bytes());
+    if payload_hash != intent.intent_id {
+        anyhow::bail!("intent_id does not match payload hash");
+    }
+    if let Some(expected) = expected_hash {
+        let expected = expected.trim().to_ascii_lowercase();
+        if payload_hash != expected {
+            anyhow::bail!("payload hash does not match expected value");
+        }
+    }
+    let output = BridgeIntentVerifyOutput {
+        status: "OK",
+        intent_id: intent.intent_id,
+        payload_hash,
+        payload,
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn parse_chain_kind(raw: &str) -> anyhow::Result<ChainKind> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        anyhow::bail!("chain_kind must be non-empty");
+    }
+    let kind = match normalized.as_str() {
+        "evm" | "ethereum" => ChainKind::Evm,
+        "solana" => ChainKind::Solana,
+        "bitcoin" | "btc" => ChainKind::Bitcoin,
+        "cosmos" => ChainKind::Cosmos,
+        "other" => ChainKind::Other,
+        _ => anyhow::bail!("unsupported chain_kind: {raw}"),
+    };
+    Ok(kind)
+}
+
+fn default_intent_key(
+    chain_id: &str,
+    asset: &str,
+    amount: f64,
+    recipient_node_id: &str,
+) -> String {
+    format!(
+        "intent|{}|{}|{:.6}|{}",
+        chain_id, asset, amount, recipient_node_id
+    )
+}
+
+fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[derive(Debug, serde::Serialize)]

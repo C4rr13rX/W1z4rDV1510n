@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://w1z4rdv1510n.local/schemas/bridge_intent_schema.json",
+  "title": "BridgeIntent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "intent_id",
+    "chain_id",
+    "chain_kind",
+    "asset",
+    "amount",
+    "recipient_node_id",
+    "deposit_address",
+    "idempotency_key",
+    "created_at"
+  ],
+  "properties": {
+    "intent_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "chain_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "chain_kind": {
+      "type": "string",
+      "enum": ["EVM", "SOLANA", "BITCOIN", "COSMOS", "OTHER"]
+    },
+    "asset": {
+      "type": "string",
+      "minLength": 1
+    },
+    "amount": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "recipient_node_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deposit_address": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recipient_tag": {
+      "type": ["string", "null"]
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unix"],
+      "properties": {
+        "unix": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}
