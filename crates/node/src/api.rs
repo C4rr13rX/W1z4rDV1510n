@@ -7,17 +7,19 @@ use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blake2::{Blake2s256, Digest};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use w1z4rdv1510n::blockchain::{BlockchainLedger, NoopLedger, RewardBalance};
-use w1z4rdv1510n::bridge::{BridgeProof, bridge_deposit_id};
+use w1z4rdv1510n::bridge::{BridgeProof, BridgeVerificationMode, ChainKind, bridge_deposit_id};
+use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy};
 
 #[derive(Clone)]
 struct ApiState {
     ledger: Arc<dyn BlockchainLedger>,
+    bridge_config: BridgeConfig,
     require_api_key: bool,
     api_key_hashes: Vec<[u8; 32]>,
     api_key_header: HeaderName,
@@ -35,6 +37,45 @@ struct BridgeSubmitResponse {
     balance: Option<RewardBalance>,
 }
 
+#[derive(Deserialize)]
+struct BridgeIntentRequest {
+    chain_id: String,
+    asset: String,
+    amount: f64,
+    recipient_node_id: String,
+}
+
+#[derive(Serialize)]
+struct BridgeIntentResponse {
+    status: &'static str,
+    chain_id: String,
+    chain_kind: ChainKind,
+    asset: String,
+    amount: f64,
+    recipient_node_id: String,
+    deposit_address: String,
+    recipient_tag: Option<String>,
+    min_confirmations: u32,
+    verification: BridgeVerificationMode,
+    relayer_quorum: u32,
+    max_deposit_amount: f64,
+}
+
+#[derive(Serialize)]
+struct BridgeChainInfo {
+    chain_id: String,
+    chain_kind: ChainKind,
+    verification: BridgeVerificationMode,
+    min_confirmations: u32,
+    relayer_quorum: u32,
+    allowed_assets: Vec<String>,
+    max_deposit_amount: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deposit_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recipient_tag_template: Option<String>,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -46,8 +87,12 @@ struct ApiMetricsSnapshot {
     bridge_requests: u64,
     balance_requests: u64,
     metrics_requests: u64,
+    bridge_chain_requests: u64,
+    bridge_intent_requests: u64,
     bridge_success: u64,
     balance_success: u64,
+    bridge_chain_success: u64,
+    bridge_intent_success: u64,
     rate_limit_hits: u64,
     auth_failures: u64,
 }
@@ -58,8 +103,12 @@ struct ApiMetrics {
     bridge_requests: AtomicU64,
     balance_requests: AtomicU64,
     metrics_requests: AtomicU64,
+    bridge_chain_requests: AtomicU64,
+    bridge_intent_requests: AtomicU64,
     bridge_success: AtomicU64,
     balance_success: AtomicU64,
+    bridge_chain_success: AtomicU64,
+    bridge_intent_success: AtomicU64,
     rate_limit_hits: AtomicU64,
     auth_failures: AtomicU64,
 }
@@ -84,12 +133,30 @@ impl ApiMetrics {
         self.metrics_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_bridge_chain_request(&self) {
+        self.inc_request();
+        self.bridge_chain_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_bridge_intent_request(&self) {
+        self.inc_request();
+        self.bridge_intent_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_bridge_success(&self) {
         self.bridge_success.fetch_add(1, Ordering::Relaxed);
     }
 
     fn inc_balance_success(&self) {
         self.balance_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_bridge_chain_success(&self) {
+        self.bridge_chain_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_bridge_intent_success(&self) {
+        self.bridge_intent_success.fetch_add(1, Ordering::Relaxed);
     }
 
     fn inc_rate_limit_hit(&self) {
@@ -106,8 +173,12 @@ impl ApiMetrics {
             bridge_requests: self.bridge_requests.load(Ordering::Relaxed),
             balance_requests: self.balance_requests.load(Ordering::Relaxed),
             metrics_requests: self.metrics_requests.load(Ordering::Relaxed),
+            bridge_chain_requests: self.bridge_chain_requests.load(Ordering::Relaxed),
+            bridge_intent_requests: self.bridge_intent_requests.load(Ordering::Relaxed),
             bridge_success: self.bridge_success.load(Ordering::Relaxed),
             balance_success: self.balance_success.load(Ordering::Relaxed),
+            bridge_chain_success: self.bridge_chain_success.load(Ordering::Relaxed),
+            bridge_intent_success: self.bridge_intent_success.load(Ordering::Relaxed),
             rate_limit_hits: self.rate_limit_hits.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
         }
@@ -146,6 +217,7 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
     )));
     let state = ApiState {
         ledger,
+        bridge_config: config.blockchain.bridge.clone(),
         require_api_key: config.api.require_api_key,
         api_key_hashes,
         api_key_header,
@@ -162,6 +234,8 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .max(1024);
     let app = Router::new()
         .route("/bridge/proof", post(submit_bridge_proof))
+        .route("/bridge/chains", get(get_bridge_chains))
+        .route("/bridge/intent", post(submit_bridge_intent))
         .route("/balance/:node_id", get(get_balance))
         .route("/metrics", get(get_metrics))
         .with_state(state)
@@ -279,6 +353,204 @@ async fn get_balance(
     }
 }
 
+async fn get_bridge_chains(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_bridge_chain_request();
+    if let Err(err) = rate_limit(&state, &headers, "bridge") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !state.bridge_config.enabled {
+        let response = ErrorResponse {
+            error: "bridge disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let chains: Vec<BridgeChainInfo> = state
+        .bridge_config
+        .chains
+        .iter()
+        .map(|chain| BridgeChainInfo {
+            chain_id: chain.chain_id.clone(),
+            chain_kind: chain.chain_kind.clone(),
+            verification: chain.verification.clone(),
+            min_confirmations: chain.min_confirmations,
+            relayer_quorum: chain.relayer_quorum,
+            allowed_assets: chain.allowed_assets.clone(),
+            max_deposit_amount: chain.max_deposit_amount,
+            deposit_address: sanitize_option(&chain.deposit_address),
+            recipient_tag_template: sanitize_option(&chain.recipient_tag_template),
+        })
+        .collect();
+    state.metrics.inc_bridge_chain_success();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(chains).unwrap_or_default()),
+    )
+}
+
+async fn submit_bridge_intent(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(intent): Json<BridgeIntentRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_bridge_intent_request();
+    if let Err(err) = rate_limit(&state, &headers, "bridge") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !state.bridge_config.enabled {
+        let response = ErrorResponse {
+            error: "bridge disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let chain_id = intent.chain_id.trim();
+    if chain_id.is_empty() {
+        let response = ErrorResponse {
+            error: "chain_id must be provided".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let asset = intent.asset.trim();
+    if asset.is_empty() {
+        let response = ErrorResponse {
+            error: "asset must be provided".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !intent.amount.is_finite() || intent.amount <= 0.0 {
+        let response = ErrorResponse {
+            error: "amount must be > 0 and finite".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let recipient_node_id = intent.recipient_node_id.trim();
+    if recipient_node_id.is_empty() {
+        let response = ErrorResponse {
+            error: "recipient_node_id must be provided".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let Some(policy) = find_chain_policy(&state.bridge_config, chain_id) else {
+        let response = ErrorResponse {
+            error: "bridge chain not supported".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    };
+    let allowed_asset = policy
+        .allowed_assets
+        .iter()
+        .find(|allowed| allowed.eq_ignore_ascii_case(asset))
+        .cloned();
+    let Some(asset) = allowed_asset else {
+        let response = ErrorResponse {
+            error: "asset not allowed for chain".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    };
+    if intent.amount > policy.max_deposit_amount {
+        let response = ErrorResponse {
+            error: "amount exceeds max_deposit_amount".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let deposit_address = match sanitize_option(&policy.deposit_address) {
+        Some(address) => address,
+        None => {
+            let response = ErrorResponse {
+                error: "bridge deposit_address not configured".to_string(),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            );
+        }
+    };
+    let recipient_tag = sanitize_option(&policy.recipient_tag_template)
+        .map(|template| render_recipient_tag(&template, recipient_node_id));
+    let response = BridgeIntentResponse {
+        status: "OK",
+        chain_id: policy.chain_id.clone(),
+        chain_kind: policy.chain_kind.clone(),
+        asset,
+        amount: intent.amount,
+        recipient_node_id: recipient_node_id.to_string(),
+        deposit_address,
+        recipient_tag,
+        min_confirmations: policy.min_confirmations,
+        verification: policy.verification.clone(),
+        relayer_quorum: policy.relayer_quorum,
+        max_deposit_amount: policy.max_deposit_amount,
+    };
+    state.metrics.inc_bridge_intent_success();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
 async fn get_metrics(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -344,6 +616,32 @@ fn rate_limit(state: &ApiState, headers: &HeaderMap, route: &str) -> Result<()> 
         _ => state.rate_limit_default_max,
     };
     limiter.check_and_update(key, route, max_requests)
+}
+
+fn find_chain_policy<'a>(
+    config: &'a BridgeConfig,
+    chain_id: &str,
+) -> Option<&'a BridgeChainPolicy> {
+    config
+        .chains
+        .iter()
+        .find(|chain| chain.chain_id.eq_ignore_ascii_case(chain_id))
+}
+
+fn sanitize_option(value: &Option<String>) -> Option<String> {
+    value.as_ref().and_then(|item| {
+        if item.trim().is_empty() {
+            None
+        } else {
+            Some(item.clone())
+        }
+    })
+}
+
+fn render_recipient_tag(template: &str, recipient_node_id: &str) -> String {
+    template
+        .replace("{node_id}", recipient_node_id)
+        .replace("{recipient_node_id}", recipient_node_id)
 }
 
 fn hash_allowed(candidate: &[u8; 32], allowlist: &[[u8; 32]]) -> bool {

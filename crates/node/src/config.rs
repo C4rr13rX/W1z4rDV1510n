@@ -156,6 +156,18 @@ impl NodeConfig {
                         !chain.allowed_assets.is_empty(),
                         "blockchain.bridge.allowed_assets must be non-empty"
                     );
+                    if let Some(address) = &chain.deposit_address {
+                        anyhow::ensure!(
+                            !address.trim().is_empty(),
+                            "blockchain.bridge.deposit_address must be non-empty when set"
+                        );
+                    }
+                    if let Some(template) = &chain.recipient_tag_template {
+                        anyhow::ensure!(
+                            !template.trim().is_empty(),
+                            "blockchain.bridge.recipient_tag_template must be non-empty when set"
+                        );
+                    }
                     if matches!(
                         chain.verification,
                         w1z4rdv1510n::bridge::BridgeVerificationMode::RelayerQuorum

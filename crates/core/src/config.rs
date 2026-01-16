@@ -327,6 +327,18 @@ impl RunConfig {
                         !chain.allowed_assets.is_empty(),
                         "bridge.allowed_assets must be non-empty"
                     );
+                    if let Some(address) = &chain.deposit_address {
+                        anyhow::ensure!(
+                            !address.trim().is_empty(),
+                            "bridge.deposit_address must be non-empty when set"
+                        );
+                    }
+                    if let Some(template) = &chain.recipient_tag_template {
+                        anyhow::ensure!(
+                            !template.trim().is_empty(),
+                            "bridge.recipient_tag_template must be non-empty when set"
+                        );
+                    }
                     if matches!(chain.verification, BridgeVerificationMode::RelayerQuorum) {
                         anyhow::ensure!(
                             chain.relayer_public_keys.len() as u32 >= chain.relayer_quorum,
@@ -1081,6 +1093,10 @@ pub struct BridgeChainPolicy {
     pub relayer_public_keys: Vec<String>,
     #[serde(default)]
     pub allowed_assets: Vec<String>,
+    #[serde(default)]
+    pub deposit_address: Option<String>,
+    #[serde(default)]
+    pub recipient_tag_template: Option<String>,
     pub max_deposit_amount: f64,
 }
 
@@ -1094,6 +1110,8 @@ impl Default for BridgeChainPolicy {
             relayer_quorum: 2,
             relayer_public_keys: Vec::new(),
             allowed_assets: Vec::new(),
+            deposit_address: None,
+            recipient_tag_template: None,
             max_deposit_amount: 0.0,
         }
     }

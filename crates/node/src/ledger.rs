@@ -1648,6 +1648,8 @@ mod tests {
                 relayer_quorum: 2,
                 relayer_public_keys: vec![relayer_pub1.clone(), relayer_pub2.clone()],
                 allowed_assets: vec!["USDC".to_string()],
+                deposit_address: None,
+                recipient_tag_template: None,
                 max_deposit_amount: 10000.0,
             }],
         };

@@ -101,6 +101,8 @@
           "relayer_quorum": 2,
           "relayer_public_keys": [],
           "allowed_assets": ["USDC", "USDT"],
+          "deposit_address": "0xbridge_contract_placeholder",
+          "recipient_tag_template": "node:{node_id}",
           "max_deposit_amount": 100000.0
         },
         {
@@ -111,6 +113,8 @@
           "relayer_quorum": 2,
           "relayer_public_keys": [],
           "allowed_assets": ["USDC", "USDT"],
+          "deposit_address": "0xbridge_contract_placeholder",
+          "recipient_tag_template": "node:{node_id}",
           "max_deposit_amount": 100000.0
         },
         {
@@ -121,6 +125,8 @@
           "relayer_quorum": 2,
           "relayer_public_keys": [],
           "allowed_assets": ["USDC", "USDT"],
+          "deposit_address": "bridge_program_placeholder",
+          "recipient_tag_template": "node:{node_id}",
           "max_deposit_amount": 100000.0
         },
         {
@@ -131,6 +137,8 @@
           "relayer_quorum": 2,
           "relayer_public_keys": [],
           "allowed_assets": ["USDC", "USDT"],
+          "deposit_address": "bc1_bridge_placeholder",
+          "recipient_tag_template": "node:{node_id}",
           "max_deposit_amount": 100000.0
         }
       ]
