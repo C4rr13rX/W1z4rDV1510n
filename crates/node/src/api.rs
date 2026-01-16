@@ -62,7 +62,10 @@ pub fn run_api(config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .api_key_header
         .parse()
         .context("invalid api_key_header")?;
-    let limiter = Arc::new(Mutex::new(ApiLimiter::new(60, 10)));
+    let limiter = Arc::new(Mutex::new(ApiLimiter::new(
+        config.api.rate_limit_window_secs,
+        config.api.rate_limit_max_requests,
+    )));
     let state = ApiState {
         ledger,
         require_api_key: config.api.require_api_key,

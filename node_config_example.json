@@ -32,7 +32,9 @@
     "api_key_header": "x-api-key",
     "api_key_hashes": [
       "21c3b60f43b4f04d70a9fbcce6f7231b5225d9e8e49cc5ee1f0f8ae9cc5bb5d1"
-    ]
+    ],
+    "rate_limit_window_secs": 60,
+    "rate_limit_max_requests": 10
   },
   "openstack": {
     "enabled": false,
