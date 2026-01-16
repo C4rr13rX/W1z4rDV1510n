@@ -3,6 +3,8 @@ use crate::orchestrator::{RunOutcome, run_with_snapshot};
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
 use crate::streaming::align::StreamingAligner;
 use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
+use crate::streaming::branching_runtime::StreamingBranchingRuntime;
+use crate::streaming::causal_stream::StreamingCausalRuntime;
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -290,6 +292,8 @@ pub struct StreamingInference {
     processor: StreamingProcessor,
     aligner: StreamingAligner,
     temporal: TemporalInferenceCore,
+    causal: StreamingCausalRuntime,
+    branching: StreamingBranchingRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
@@ -303,6 +307,8 @@ impl StreamingInference {
             run_config.streaming.temporal.clone(),
             run_config.streaming.hypergraph.clone(),
         );
+        let causal = StreamingCausalRuntime::new(run_config.streaming.causal.clone());
+        let branching = StreamingBranchingRuntime::new(run_config.streaming.branching.clone());
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
         } else {
@@ -312,6 +318,8 @@ impl StreamingInference {
             processor,
             aligner,
             temporal,
+            causal,
+            branching,
             spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
@@ -331,14 +339,36 @@ impl StreamingInference {
             None => return Ok(None),
         };
         let temporal_report = self.temporal.update(&batch);
-        let spike_messages = self
-            .spike_runtime
-            .as_mut()
-            .and_then(|runtime| runtime.route_batch(&batch, temporal_report.as_ref()));
+        let causal_report = temporal_report
+            .as_ref()
+            .and_then(|report| self.causal.update(report));
+        let branching_report = temporal_report.as_ref().and_then(|report| {
+            self.branching.update(&batch, report, causal_report.as_ref())
+        });
+        let spike_messages = self.spike_runtime.as_mut().and_then(|runtime| {
+            runtime.route_batch(
+                &batch,
+                temporal_report.as_ref(),
+                causal_report.as_ref(),
+                branching_report.as_ref(),
+            )
+        });
         let mut snapshot = token_batch_to_snapshot(&batch, &self.symbolizer);
         if let Some(report) = temporal_report {
             snapshot.metadata.insert(
                 "temporal_inference".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = causal_report {
+            snapshot.metadata.insert(
+                "causal_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = branching_report {
+            snapshot.metadata.insert(
+                "branching_futures".to_string(),
                 serde_json::to_value(report)?,
             );
         }

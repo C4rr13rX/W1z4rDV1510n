@@ -326,6 +326,44 @@ impl RunConfig {
                     "streaming.spike.hypergraph_edge_norm must be > 0"
                 );
             }
+            if self.streaming.branching.enabled {
+                anyhow::ensure!(
+                    self.streaming.branching.max_branches > 0,
+                    "streaming.branching.max_branches must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.branching.max_depth > 0,
+                    "streaming.branching.max_depth must be > 0"
+                );
+                if self.streaming.branching.retrodiction_enabled {
+                    anyhow::ensure!(
+                        self.streaming.branching.retrodiction_min_intensity >= 0.0,
+                        "streaming.branching.retrodiction_min_intensity must be >= 0"
+                    );
+                    anyhow::ensure!(
+                        self.streaming.branching.retrodiction_max > 0,
+                        "streaming.branching.retrodiction_max must be > 0"
+                    );
+                }
+            }
+            if self.streaming.causal.enabled {
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.causal.edge_decay),
+                    "streaming.causal.edge_decay must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.causal.min_weight >= 0.0,
+                    "streaming.causal.min_weight must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.causal.max_edges > 0,
+                    "streaming.causal.max_edges must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.causal.max_nodes > 0,
+                    "streaming.causal.max_nodes must be > 0"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -1054,6 +1092,8 @@ pub struct BranchingFuturesConfig {
     pub max_branches: usize,
     pub max_depth: usize,
     pub retrodiction_enabled: bool,
+    pub retrodiction_min_intensity: f64,
+    pub retrodiction_max: usize,
 }
 
 impl Default for BranchingFuturesConfig {
@@ -1063,6 +1103,8 @@ impl Default for BranchingFuturesConfig {
             max_branches: 64,
             max_depth: 6,
             retrodiction_enabled: true,
+            retrodiction_min_intensity: 0.8,
+            retrodiction_max: 8,
         }
     }
 }
@@ -1073,6 +1115,10 @@ pub struct CausalDiscoveryConfig {
     pub enabled: bool,
     pub max_lag_secs: f64,
     pub intervention_enabled: bool,
+    pub min_weight: f64,
+    pub edge_decay: f64,
+    pub max_edges: usize,
+    pub max_nodes: usize,
 }
 
 impl Default for CausalDiscoveryConfig {
@@ -1081,6 +1127,10 @@ impl Default for CausalDiscoveryConfig {
             enabled: false,
             max_lag_secs: 3600.0,
             intervention_enabled: false,
+            min_weight: 0.05,
+            edge_decay: 0.98,
+            max_edges: 2048,
+            max_nodes: 64,
         }
     }
 }

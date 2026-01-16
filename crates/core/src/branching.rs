@@ -118,6 +118,8 @@ mod tests {
             max_branches: 4,
             max_depth: 3,
             retrodiction_enabled: true,
+            retrodiction_min_intensity: 0.8,
+            retrodiction_max: 4,
         };
         let mut futures = BranchingFutures::new(config, serde_json::json!({"root": true}));
         let root = futures.root_id();

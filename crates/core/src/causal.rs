@@ -26,6 +26,17 @@ impl CausalGraph {
         self.edges.values().cloned().collect()
     }
 
+    pub fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub fn retain_edges<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&CausalEdge) -> bool,
+    {
+        self.edges.retain(|_, edge| predicate(edge));
+    }
+
     pub fn intervene(&self, intervention: Intervention) -> Vec<CausalDelta> {
         let mut deltas = Vec::new();
         for edge in self.edges.values() {

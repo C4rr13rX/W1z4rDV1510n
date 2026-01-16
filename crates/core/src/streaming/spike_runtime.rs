@@ -1,5 +1,7 @@
 use crate::config::StreamingSpikeConfig;
 use crate::spike::{NeuronKind, SpikeConfig, SpikeInput, SpikeMessage, SpikeMessageBus, SpikePool};
+use crate::streaming::branching_runtime::BranchingReport;
+use crate::streaming::causal_stream::CausalReport;
 use crate::streaming::schema::TokenBatch;
 use crate::streaming::temporal::{DirichletPosterior, TemporalInferenceReport};
 use std::collections::HashMap;
@@ -68,6 +70,8 @@ impl StreamingSpikeRuntime {
         &mut self,
         batch: &TokenBatch,
         temporal: Option<&TemporalInferenceReport>,
+        causal: Option<&CausalReport>,
+        branching: Option<&BranchingReport>,
     ) -> Option<Vec<SpikeMessage>> {
         if !self.config.enabled {
             return None;
@@ -82,6 +86,12 @@ impl StreamingSpikeRuntime {
             self.route_event_intensity(report, &mut inputs);
             self.route_evidential(report, &mut inputs);
             self.route_hypergraph(report, &mut inputs);
+        }
+        if let Some(report) = causal {
+            self.route_causal(report, &mut inputs);
+        }
+        if let Some(report) = branching {
+            self.route_branching(report, &mut inputs);
         }
 
         let mut bus = SpikeMessageBus::default();
@@ -258,6 +268,48 @@ impl StreamingSpikeRuntime {
         }
     }
 
+    fn route_causal(&mut self, report: &CausalReport, inputs: &mut HashMap<StreamingSpikePoolKind, Vec<SpikeInput>>) {
+        let edge_norm = self.config.hypergraph_edge_norm.max(1.0);
+        let intervention_norm = self.config.intensity_norm.max(1.0);
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Causal, "edges") {
+            let excitatory = (report.edge_count as f64 / edge_norm).clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Causal, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Causal, "interventions") {
+            let excitatory = (report.interventions.len() as f64 / intervention_norm).clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Causal, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+    }
+
+    fn route_branching(&mut self, report: &BranchingReport, inputs: &mut HashMap<StreamingSpikePoolKind, Vec<SpikeInput>>) {
+        let branch_norm = self.config.hypergraph_node_norm.max(1.0);
+        let retro_norm = self.config.hypergraph_edge_norm.max(1.0);
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Branching, "branches") {
+            let excitatory = (report.branches.len() as f64 / branch_norm).clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Branching, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+        if let Some(neuron) = self.neuron_for(StreamingSpikePoolKind::Retrodiction, "retrodictions") {
+            let excitatory = (report.retrodictions.len() as f64 / retro_norm).clamp(0.0, 1.0);
+            push_input(inputs, StreamingSpikePoolKind::Retrodiction, SpikeInput {
+                target: neuron,
+                excitatory: excitatory as f32,
+                inhibitory: 0.0,
+            });
+        }
+    }
+
     fn neuron_for(&mut self, pool: StreamingSpikePoolKind, label: &str) -> Option<u32> {
         let key = (pool, label.to_string());
         if let Some(id) = self.neuron_map.get(&key) {
@@ -384,7 +436,9 @@ mod tests {
             }],
             source_confidence: HashMap::from([(StreamSource::PeopleVideo, 0.9)]),
         };
-        let messages = runtime.route_batch(&batch, None).expect("messages");
+        let messages = runtime
+            .route_batch(&batch, None, None, None)
+            .expect("messages");
         assert!(!messages.is_empty());
     }
 }
