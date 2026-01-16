@@ -1,5 +1,7 @@
 # W1z4rDV1510n
 
+**Ultradian Rhythm Dynamic Stability Analysis System** - flag-driven mode for layered ultradian phase/amplitude/coherence tracking, stability baselines, and cross-entity motif discovery with human-first governance.
+
 W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like neural fabric for predicting and completing symbol sequences, plus a CPU-first node stack for distributed execution and multi-chain stablecoin deposits. It simulates many parallel futures from any symbolic snapshot (chess plies, reaction steps, traffic frames, code edits) and uses relational priors, neurogenesis, and simulated quantum annealing to fill gaps and forecast where symbols will be next on an i5/32GB CPU.
 
 ---
@@ -31,6 +33,7 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **Wallet** - encrypted Ed25519 wallet with deterministic address derivation for node identity and rewards.
 - **Bridge + deposits** - multi-chain stablecoin deposits with relayer quorum verification, intent idempotency, and offline tooling.
 - **API services** - auth + rate limits + metrics for bridge, balance, and operations endpoints.
+- **Data mesh ingestion** - manifest/chunk/receipt replication with quorum tracking, retention GC, and integrity audits; `/data/ingest` + `/data/:data_id` endpoints.
 - **Simulation + OpenStack stubs** - 10k node simulation and minimal OpenStack control-plane abstractions for future cluster plans.
 
 ## Governance and streaming flags
@@ -151,7 +154,7 @@ cargo run --bin w1z4rdv1510n-node -- bridge-intent-create `
 cargo run --bin w1z4rdv1510n-node -- bridge-intent-verify --json '{...}'
 ```
 
-Config lives in `node_config.json` (generated from defaults). `node_config_example.json` shows all available fields, including API keys, rate limits, and bridge policies.
+Config lives in `node_config.json` (generated from defaults). `node_config_example.json` shows all available fields, including API keys, rate limits, bridge policies, and data mesh retention/audit settings.
 
 ---
 

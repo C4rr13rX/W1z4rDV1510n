@@ -6,11 +6,13 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tracing::warn;
+use tokio::time::Duration;
+use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{BlockchainLedger, SensorCommitment};
 use w1z4rdv1510n::network::{NetworkEnvelope, compute_payload_hash};
 use w1z4rdv1510n::schema::Timestamp;
@@ -172,7 +174,21 @@ pub fn start_data_mesh(
             }
         };
         runtime.block_on(async move {
+            let mut maintenance = if config.maintenance_enabled {
+                Some(tokio::time::interval(Duration::from_secs(
+                    config.maintenance_interval_secs.max(1),
+                )))
+            } else {
+                None
+            };
             loop {
+                let maintenance_tick = async {
+                    if let Some(interval) = maintenance.as_mut() {
+                        interval.tick().await;
+                    } else {
+                        future::pending::<()>().await;
+                    }
+                };
                 tokio::select! {
                     Some(command) = command_rx.recv() => {
                         handle_command(
@@ -196,6 +212,9 @@ pub fn start_data_mesh(
                             &publisher,
                             &mut store,
                         );
+                    }
+                    _ = maintenance_tick => {
+                        run_maintenance(&config, &node_id_clone, &wallet, &publisher, &mut store);
                     }
                 }
             }
@@ -232,6 +251,51 @@ fn handle_command(
                 }
             }
         }
+    }
+}
+
+fn run_maintenance(
+    config: &DataMeshConfig,
+    node_id: &str,
+    wallet: &WalletSigner,
+    publisher: &NetworkPublisher,
+    store: &mut DataStore,
+) {
+    if !config.maintenance_enabled {
+        return;
+    }
+    let mut outcome = store.audit_and_gc(now_unix(), node_id);
+    let mut sent = 0usize;
+    for data_id in outcome.repair_requests.drain(..) {
+        let request = build_request(&data_id, node_id, wallet);
+        if publisher
+            .publish(signed_envelope(DataMessage::Request(request), wallet))
+            .is_ok()
+        {
+            sent = sent.saturating_add(1);
+        }
+    }
+    if outcome.expired > 0
+        || outcome.corrupted_blob > 0
+        || outcome.missing_blob > 0
+        || outcome.orphan_blobs > 0
+        || outcome.orphan_receipts > 0
+        || outcome.size_evicted > 0
+        || sent > 0
+    {
+        info!(
+            target: "w1z4rdv1510n::node",
+            scanned = outcome.scanned,
+            expired = outcome.expired,
+            corrupted = outcome.corrupted_blob,
+            missing = outcome.missing_blob,
+            orphan_blobs = outcome.orphan_blobs,
+            orphan_receipts = outcome.orphan_receipts,
+            size_evicted = outcome.size_evicted,
+            bytes_freed = outcome.bytes_freed,
+            repair_requests = sent,
+            "data mesh maintenance"
+        );
     }
 }
 
@@ -736,6 +800,244 @@ impl DataStore {
         })
     }
 
+    fn audit_and_gc(&mut self, now: i64, node_id: &str) -> MaintenanceOutcome {
+        let mut outcome = MaintenanceOutcome {
+            scanned: 0,
+            expired: 0,
+            missing_blob: 0,
+            corrupted_blob: 0,
+            orphan_blobs: 0,
+            orphan_receipts: 0,
+            size_evicted: 0,
+            bytes_freed: 0,
+            repair_requests: Vec::new(),
+        };
+        let retention_secs = if self.config.retention_days == 0 {
+            None
+        } else {
+            Some(self.config.retention_days as i64 * 86_400)
+        };
+        let mut manifest_ids = HashSet::new();
+        let mut size_entries = Vec::new();
+        let mut repair_candidates = HashSet::new();
+        let max_repairs = self.config.max_repair_requests_per_tick.max(1);
+
+        if let Ok(entries) = fs::read_dir(&self.manifest_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(data_id) = data_id_from_path(&path) else {
+                    continue;
+                };
+                let raw = match fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    Err(err) => {
+                        warn!(
+                            target: "w1z4rdv1510n::node",
+                            error = %err,
+                            data_id = data_id.as_str(),
+                            "failed to read manifest"
+                        );
+                        continue;
+                    }
+                };
+                let manifest: DataManifest = match serde_json::from_str(&raw) {
+                    Ok(manifest) => manifest,
+                    Err(err) => {
+                        warn!(
+                            target: "w1z4rdv1510n::node",
+                            error = %err,
+                            data_id = data_id.as_str(),
+                            "invalid manifest; removing"
+                        );
+                        outcome.bytes_freed = outcome.bytes_freed.saturating_add(
+                            self.remove_data_entry(&data_id),
+                        );
+                        continue;
+                    }
+                };
+                if self.config.require_manifest_signature && verify_manifest(&manifest).is_err() {
+                    warn!(
+                        target: "w1z4rdv1510n::node",
+                        data_id = data_id.as_str(),
+                        "manifest signature invalid; removing data"
+                    );
+                    outcome.bytes_freed = outcome.bytes_freed.saturating_add(
+                        self.remove_data_entry(&data_id),
+                    );
+                    continue;
+                }
+                outcome.scanned = outcome.scanned.saturating_add(1);
+                if let Some(retention) = retention_secs {
+                    if now.saturating_sub(manifest.timestamp.unix) > retention {
+                        outcome.expired = outcome.expired.saturating_add(1);
+                        outcome.bytes_freed = outcome.bytes_freed.saturating_add(
+                            self.remove_data_entry(&data_id),
+                        );
+                        continue;
+                    }
+                }
+                manifest_ids.insert(data_id.clone());
+
+                let blob_path = self.blob_path(&data_id);
+                if !blob_path.exists() {
+                    outcome.missing_blob = outcome.missing_blob.saturating_add(1);
+                    let _ = self.prune_receipt(&data_id, node_id);
+                    if self.receipt_count(&data_id) < self.config.replication_factor {
+                        repair_candidates.insert(data_id.clone());
+                    }
+                    continue;
+                }
+                let blob_bytes = fs::metadata(&blob_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                if blob_bytes != manifest.size_bytes as u64 {
+                    outcome.corrupted_blob = outcome.corrupted_blob.saturating_add(1);
+                    outcome.bytes_freed = outcome
+                        .bytes_freed
+                        .saturating_add(self.remove_blob(&data_id));
+                    let _ = self.prune_receipt(&data_id, node_id);
+                    if self.receipt_count(&data_id) < self.config.replication_factor {
+                        repair_candidates.insert(data_id.clone());
+                    }
+                    continue;
+                }
+                match fs::read(&blob_path) {
+                    Ok(payload) => {
+                        let hash = compute_payload_hash(&payload);
+                        if hash != manifest.payload_hash {
+                            outcome.corrupted_blob = outcome.corrupted_blob.saturating_add(1);
+                            outcome.bytes_freed = outcome
+                                .bytes_freed
+                                .saturating_add(self.remove_blob(&data_id));
+                            let _ = self.prune_receipt(&data_id, node_id);
+                            if self.receipt_count(&data_id) < self.config.replication_factor {
+                                repair_candidates.insert(data_id.clone());
+                            }
+                            continue;
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            target: "w1z4rdv1510n::node",
+                            error = %err,
+                            data_id = data_id.as_str(),
+                            "failed to read blob"
+                        );
+                        outcome.missing_blob = outcome.missing_blob.saturating_add(1);
+                        let _ = self.prune_receipt(&data_id, node_id);
+                        if self.receipt_count(&data_id) < self.config.replication_factor {
+                            repair_candidates.insert(data_id.clone());
+                        }
+                        continue;
+                    }
+                }
+                size_entries.push(ManifestSizeEntry {
+                    data_id,
+                    timestamp: manifest.timestamp.unix,
+                    size_bytes: blob_bytes,
+                });
+            }
+        }
+
+        if self.config.max_storage_bytes > 0 {
+            let mut total_bytes: u64 = size_entries.iter().map(|entry| entry.size_bytes).sum();
+            if total_bytes > self.config.max_storage_bytes {
+                size_entries.sort_by_key(|entry| entry.timestamp);
+                for entry in size_entries {
+                    if total_bytes <= self.config.max_storage_bytes {
+                        break;
+                    }
+                    let freed = self.remove_data_entry(&entry.data_id);
+                    total_bytes = total_bytes.saturating_sub(entry.size_bytes);
+                    outcome.bytes_freed = outcome.bytes_freed.saturating_add(freed);
+                    outcome.size_evicted = outcome.size_evicted.saturating_add(1);
+                    manifest_ids.remove(&entry.data_id);
+                }
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(&self.blob_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("bin") {
+                    continue;
+                }
+                let Some(data_id) = data_id_from_path(&path) else {
+                    continue;
+                };
+                if manifest_ids.contains(&data_id) {
+                    continue;
+                }
+                outcome.bytes_freed = outcome.bytes_freed.saturating_add(
+                    self.remove_data_entry(&data_id),
+                );
+                outcome.orphan_blobs = outcome.orphan_blobs.saturating_add(1);
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(&self.receipt_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(data_id) = data_id_from_path(&path) else {
+                    continue;
+                };
+                if manifest_ids.contains(&data_id) {
+                    continue;
+                }
+                let _ = fs::remove_file(&path);
+                outcome.orphan_receipts = outcome.orphan_receipts.saturating_add(1);
+            }
+        }
+
+        for data_id in repair_candidates.into_iter().take(max_repairs) {
+            outcome.repair_requests.push(data_id);
+        }
+
+        outcome
+    }
+
+    fn remove_data_entry(&mut self, data_id: &str) -> u64 {
+        let bytes = self.remove_blob(data_id);
+        let _ = fs::remove_file(self.manifest_path(data_id));
+        let _ = fs::remove_file(self.receipt_path(data_id));
+        self.pending.remove(data_id);
+        bytes
+    }
+
+    fn remove_blob(&mut self, data_id: &str) -> u64 {
+        let path = self.blob_path(data_id);
+        let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(self.staging_dir.join(data_id));
+        bytes
+    }
+
+    fn prune_receipt(&mut self, data_id: &str, node_id: &str) -> Result<()> {
+        let path = self.receipt_path(data_id);
+        if !path.exists() {
+            return Ok(());
+        }
+        let raw = fs::read_to_string(&path)?;
+        let mut file: ReceiptFile = serde_json::from_str(&raw)?;
+        let original_len = file.receipts.len();
+        file.receipts.retain(|receipt| receipt.replica_node_id != node_id);
+        if file.receipts.len() == original_len {
+            return Ok(());
+        }
+        if file.receipts.is_empty() {
+            let _ = fs::remove_file(&path);
+            return Ok(());
+        }
+        fs::write(&path, serde_json::to_string_pretty(&file)?)?;
+        Ok(())
+    }
+
     fn receipt_count(&self, data_id: &str) -> usize {
         let path = self.receipt_path(data_id);
         if !path.exists() {
@@ -802,6 +1104,24 @@ struct ReceiptRecord {
     stored: bool,
 }
 
+struct MaintenanceOutcome {
+    scanned: usize,
+    expired: usize,
+    missing_blob: usize,
+    corrupted_blob: usize,
+    orphan_blobs: usize,
+    orphan_receipts: usize,
+    size_evicted: usize,
+    bytes_freed: u64,
+    repair_requests: Vec<String>,
+}
+
+struct ManifestSizeEntry {
+    data_id: String,
+    timestamp: i64,
+    size_bytes: u64,
+}
+
 struct QuorumState {
     quorum_met: bool,
     replication_met: bool,
@@ -820,6 +1140,12 @@ fn quorum_state(receipt_count: usize, config: &DataMeshConfig) -> QuorumState {
         pending_quorum: receipt_quorum.saturating_sub(receipt_count),
         pending_replicas: replication_factor.saturating_sub(receipt_count),
     }
+}
+
+fn data_id_from_path(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

@@ -289,6 +289,16 @@ impl NodeConfig {
                 !self.data.storage_path.trim().is_empty(),
                 "data.storage_path must be set when data is enabled"
             );
+            if self.data.maintenance_enabled {
+                anyhow::ensure!(
+                    self.data.maintenance_interval_secs > 0,
+                    "data.maintenance_interval_secs must be > 0 when maintenance is enabled"
+                );
+                anyhow::ensure!(
+                    self.data.max_repair_requests_per_tick > 0,
+                    "data.max_repair_requests_per_tick must be > 0 when maintenance is enabled"
+                );
+            }
         }
         Ok(())
     }
@@ -470,6 +480,11 @@ pub struct DataMeshConfig {
     pub require_manifest_signature: bool,
     pub require_receipt_signature: bool,
     pub max_pending_chunks: usize,
+    pub maintenance_enabled: bool,
+    pub maintenance_interval_secs: u64,
+    pub retention_days: u32,
+    pub max_storage_bytes: u64,
+    pub max_repair_requests_per_tick: usize,
 }
 
 impl Default for DataMeshConfig {
@@ -484,6 +499,11 @@ impl Default for DataMeshConfig {
             require_manifest_signature: true,
             require_receipt_signature: true,
             max_pending_chunks: 1024,
+            maintenance_enabled: true,
+            maintenance_interval_secs: 300,
+            retention_days: 30,
+            max_storage_bytes: 0,
+            max_repair_requests_per_tick: 64,
         }
     }
 }
