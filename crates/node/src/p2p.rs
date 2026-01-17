@@ -1,14 +1,19 @@
-use crate::config::{NetworkSecurityConfig, NodeNetworkConfig};
+use crate::config::{NetworkSecurityConfig, NodeNetworkConfig, NodeNetworkRoutingConfig};
 use crate::paths::node_data_dir;
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::StreamExt;
-use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageAuthenticity};
+use libp2p::autonat;
+use libp2p::gossipsub::{
+    self, IdentTopic, MessageAcceptance, MessageAuthenticity, PeerScoreParams,
+    PeerScoreThresholds, TopicScoreParams,
+};
 use libp2p::identify;
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::mdns;
 use libp2p::relay;
-use libp2p::swarm::SwarmEvent;
+use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::swarm::{ConnectionId, SwarmEvent};
 use libp2p::{
     connection_limits, identity, multiaddr::Protocol, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
@@ -143,6 +148,7 @@ struct NodeBehaviour {
     kademlia: kad::Behaviour<MemoryStore>,
     mdns: mdns::tokio::Behaviour,
     relay: relay::client::Behaviour,
+    autonat: autonat::Behaviour,
     limits: connection_limits::Behaviour,
 }
 
@@ -153,6 +159,7 @@ enum NodeBehaviourEvent {
     Kademlia(kad::Event),
     Mdns(mdns::Event),
     Relay(relay::client::Event),
+    Autonat(autonat::Event),
     Limits(void::Void),
 }
 
@@ -186,6 +193,12 @@ impl From<relay::client::Event> for NodeBehaviourEvent {
     }
 }
 
+impl From<autonat::Event> for NodeBehaviourEvent {
+    fn from(event: autonat::Event) -> Self {
+        NodeBehaviourEvent::Autonat(event)
+    }
+}
+
 impl From<void::Void> for NodeBehaviourEvent {
     fn from(event: void::Void) -> Self {
         match event {}
@@ -201,42 +214,26 @@ async fn run_swarm(
 ) -> Result<()> {
     let identity = load_or_create_identity()?;
     let local_peer_id = PeerId::from(identity.public());
-    let mut swarm = SwarmBuilder::with_existing_identity(identity)
-        .with_tokio()
-        .with_tcp(
-            libp2p::tcp::Config::default(),
-            libp2p::noise::Config::new,
-            libp2p::yamux::Config::default,
-        )?
-        .with_dns()?
-        .with_relay_client(
-            libp2p::noise::Config::new,
-            libp2p::yamux::Config::default,
-        )?
-        .with_behaviour(|key, relay| {
-            let gossipsub = build_gossipsub(key, &config)?;
-            let identify = identify::Behaviour::new(identify::Config::new(
-                "w1z4rdv1510n/1.0".to_string(),
-                key.public(),
-            ));
-            let peer_id = PeerId::from(key.public());
-            let mut kademlia = kad::Behaviour::new(peer_id, MemoryStore::new(peer_id));
-            kademlia.set_mode(Some(kad::Mode::Client));
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
-            let limits = connection_limits::Behaviour::new(build_connection_limits(&config));
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(NodeBehaviour {
-                gossipsub,
-                identify,
-                kademlia,
-                mdns,
-                relay,
-                limits,
-            })
-        })?
-        .build();
+    let mut swarm = if config.routing.enable_quic {
+        build_swarm_with_quic(identity, &config)?
+    } else {
+        build_swarm_with_tcp(identity, &config)?
+    };
     swarm
         .listen_on(parse_listen_addr(&config.listen_addr)?)
         .context("listen on network address")?;
+    if config.routing.enable_quic {
+        if let Some(addr) = quic_listen_addr(&config.listen_addr)? {
+            if let Err(err) = swarm.listen_on(addr.clone()) {
+                warn!(
+                    target: "w1z4rdv1510n::node",
+                    error = %err,
+                    address = %addr,
+                    "failed to listen on quic address"
+                );
+            }
+        }
+    }
     for addr in &config.routing.external_addresses {
         match addr.parse::<Multiaddr>() {
             Ok(parsed) => swarm.add_external_address(parsed),
@@ -250,6 +247,33 @@ async fn run_swarm(
             }
         }
     }
+    if config.routing.enable_relay && config.routing.reserve_relays {
+        if let Ok(relays) = collect_relays(&config) {
+            for relay in relays {
+                let listen_addr = relay_reservation_addr(&relay);
+                if let Err(err) = swarm.listen_on(listen_addr.clone()) {
+                    warn!(
+                        target: "w1z4rdv1510n::node",
+                        error = %err,
+                        address = %listen_addr,
+                        "failed to reserve relay address"
+                    );
+                }
+            }
+        }
+    }
+    if config.routing.enable_autonat {
+        if let Ok(relays) = collect_relays(&config) {
+            for relay in relays {
+                if let Some(peer_id) = peer_id_from_multiaddr(&relay) {
+                    swarm
+                        .behaviour_mut()
+                        .autonat
+                        .add_server(peer_id, Some(relay.clone()));
+                }
+            }
+        }
+    }
 
     info!(
         target: "w1z4rdv1510n::node",
@@ -260,15 +284,20 @@ async fn run_swarm(
 
     let guard = Arc::new(Mutex::new(MessageGuard::new(&config.security)));
     let topic = IdentTopic::new(config.gossip_protocol.clone());
+    let mut dial_backoff = DialBackoff::new(&config.routing);
+    let mut pending_dials = HashMap::new();
 
     loop {
         tokio::select! {
             Some(command) = command_rx.recv() => {
                 match command {
                     NetworkCommand::Dial(addr) => {
-                        if let Err(err) = swarm.dial(addr.clone()) {
-                            warn!(target: "w1z4rdv1510n::node", error = %err, address = %addr, "dial failed");
-                        }
+                        dial_with_backoff(
+                            &mut swarm,
+                            &mut dial_backoff,
+                            &mut pending_dials,
+                            addr,
+                        );
                     }
                     NetworkCommand::Publish(envelope) => {
                         if let Ok(payload) = serde_json::to_vec(&envelope) {
@@ -290,10 +319,107 @@ async fn run_swarm(
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut swarm, &peer_count, &config, &guard, &message_tx)?;
+                handle_swarm_event(
+                    event,
+                    &mut swarm,
+                    &peer_count,
+                    &config,
+                    &guard,
+                    &message_tx,
+                    &mut dial_backoff,
+                    &mut pending_dials,
+                )?;
             }
         }
     }
+}
+
+fn build_swarm_with_tcp(
+    identity: identity::Keypair,
+    config: &NodeNetworkConfig,
+) -> Result<Swarm<NodeBehaviour>> {
+    let config_clone = config.clone();
+    let swarm = SwarmBuilder::with_existing_identity(identity)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_dns()?
+        .with_relay_client(
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_behaviour(move |key, relay| build_behaviour(key, relay, &config_clone))?
+        .build();
+    Ok(swarm)
+}
+
+fn build_swarm_with_quic(
+    identity: identity::Keypair,
+    config: &NodeNetworkConfig,
+) -> Result<Swarm<NodeBehaviour>> {
+    let config_clone = config.clone();
+    let swarm = SwarmBuilder::with_existing_identity(identity)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_quic()
+        .with_dns()?
+        .with_relay_client(
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_behaviour(move |key, relay| build_behaviour(key, relay, &config_clone))?
+        .build();
+    Ok(swarm)
+}
+
+fn build_behaviour(
+    key: &identity::Keypair,
+    relay: relay::client::Behaviour,
+    config: &NodeNetworkConfig,
+) -> Result<NodeBehaviour, Box<dyn std::error::Error + Send + Sync>> {
+    let gossipsub = build_gossipsub(key, config).map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+        err.into()
+    })?;
+    let identify = identify::Behaviour::new(identify::Config::new(
+        "w1z4rdv1510n/1.0".to_string(),
+        key.public(),
+    ));
+    let peer_id = PeerId::from(key.public());
+    let mut kademlia = kad::Behaviour::new(peer_id, MemoryStore::new(peer_id));
+    kademlia.set_mode(Some(kad::Mode::Client));
+    let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
+        .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err.into() })?;
+    let autonat_config = build_autonat_config(config);
+    let autonat = autonat::Behaviour::new(peer_id, autonat_config);
+    let limits = connection_limits::Behaviour::new(build_connection_limits(config));
+    Ok(NodeBehaviour {
+        gossipsub,
+        identify,
+        kademlia,
+        mdns,
+        relay,
+        autonat,
+        limits,
+    })
+}
+
+fn build_autonat_config(config: &NodeNetworkConfig) -> autonat::Config {
+    let mut autonat_config = autonat::Config::default();
+    if !config.routing.enable_autonat {
+        autonat_config.use_connected = false;
+        let delay = Duration::from_secs(365 * 24 * 60 * 60);
+        autonat_config.boot_delay = delay;
+        autonat_config.retry_interval = delay;
+        autonat_config.refresh_interval = delay;
+    }
+    autonat_config
 }
 
 fn handle_swarm_event(
@@ -303,6 +429,8 @@ fn handle_swarm_event(
     config: &NodeNetworkConfig,
     guard: &Arc<Mutex<MessageGuard>>,
     message_tx: &mpsc::UnboundedSender<NetworkEnvelope>,
+    dial_backoff: &mut DialBackoff,
+    pending_dials: &mut HashMap<ConnectionId, Multiaddr>,
 ) -> Result<()> {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -312,23 +440,60 @@ fn handle_swarm_event(
                 "p2p listening"
             );
         }
-        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+        SwarmEvent::ConnectionEstablished { peer_id, connection_id, .. } => {
             peer_count.fetch_add(1, Ordering::Relaxed);
             swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+            if let Some(addr) = pending_dials.remove(&connection_id) {
+                dial_backoff.record_success(&addr);
+            }
         }
         SwarmEvent::ConnectionClosed { .. } => {
             peer_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_sub(1))
             }).ok();
         }
+        SwarmEvent::OutgoingConnectionError { connection_id, error, .. } => {
+            if let Some(addr) = pending_dials.remove(&connection_id) {
+                let delay = dial_backoff.record_failure(&addr);
+                warn!(
+                    target: "w1z4rdv1510n::node",
+                    error = %error,
+                    address = %addr,
+                    backoff_secs = delay,
+                    "outgoing dial failed"
+                );
+            }
+        }
+        SwarmEvent::NewExternalAddrCandidate { address } => {
+            if config.routing.use_observed_addresses {
+                swarm.add_external_address(address);
+            }
+        }
+        SwarmEvent::ExternalAddrConfirmed { address } => {
+            if config.routing.use_observed_addresses {
+                swarm.add_external_address(address);
+            }
+        }
         SwarmEvent::Behaviour(NodeBehaviourEvent::Gossipsub(event)) => {
             handle_gossipsub_event(event, swarm, config, guard, message_tx);
+        }
+        SwarmEvent::Behaviour(NodeBehaviourEvent::Identify(event)) => {
+            if let identify::Event::Received { info, .. } = event {
+                if config.routing.use_observed_addresses {
+                    swarm.add_external_address(info.observed_addr);
+                }
+            }
         }
         SwarmEvent::Behaviour(NodeBehaviourEvent::Mdns(event)) => match event {
             mdns::Event::Discovered(list) => {
                 for (peer_id, addr) in list {
                     swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
-                    let _ = swarm.dial(addr);
+                    dial_with_backoff(
+                        swarm,
+                        dial_backoff,
+                        pending_dials,
+                        addr,
+                    );
                 }
             }
             mdns::Event::Expired(list) => {
@@ -338,6 +503,15 @@ fn handle_swarm_event(
             }
         },
         SwarmEvent::Behaviour(NodeBehaviourEvent::Relay(_event)) => {}
+        SwarmEvent::Behaviour(NodeBehaviourEvent::Autonat(event)) => {
+            if let autonat::Event::StatusChanged { new, .. } = event {
+                if let autonat::NatStatus::Public(address) = new {
+                    if config.routing.use_observed_addresses {
+                        swarm.add_external_address(address);
+                    }
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -363,7 +537,117 @@ fn build_gossipsub(
     .map_err(|err| anyhow!("gossipsub init: {err}"))?;
     let topic = IdentTopic::new(config.gossip_protocol.clone());
     gossipsub.subscribe(&topic)?;
+    if config.routing.enable_peer_scoring {
+        let mut params = PeerScoreParams::default();
+        params.topics.insert(topic.hash(), TopicScoreParams::default());
+        let thresholds = PeerScoreThresholds::default();
+        gossipsub
+            .with_peer_score(params, thresholds)
+            .map_err(|err| anyhow!("gossipsub peer score init: {err}"))?;
+    }
     Ok(gossipsub)
+}
+
+struct DialBackoffEntry {
+    failures: u32,
+    next_allowed_unix: i64,
+}
+
+struct DialBackoff {
+    base_secs: i64,
+    max_secs: i64,
+    entries: HashMap<String, DialBackoffEntry>,
+}
+
+impl DialBackoff {
+    fn new(config: &NodeNetworkRoutingConfig) -> Self {
+        Self {
+            base_secs: config.dial_backoff_base_secs as i64,
+            max_secs: config.dial_backoff_max_secs as i64,
+            entries: HashMap::new(),
+        }
+    }
+
+    fn allow(&self, addr: &Multiaddr, now: i64) -> bool {
+        self.entries
+            .get(&addr.to_string())
+            .map(|entry| now >= entry.next_allowed_unix)
+            .unwrap_or(true)
+    }
+
+    fn remaining(&self, addr: &Multiaddr, now: i64) -> i64 {
+        self.entries
+            .get(&addr.to_string())
+            .map(|entry| (entry.next_allowed_unix - now).max(0))
+            .unwrap_or(0)
+    }
+
+    fn record_failure(&mut self, addr: &Multiaddr) -> i64 {
+        let now = now_unix();
+        let entry = self
+            .entries
+            .entry(addr.to_string())
+            .or_insert(DialBackoffEntry {
+                failures: 0,
+                next_allowed_unix: now,
+            });
+        entry.failures = entry.failures.saturating_add(1);
+        let mut delay = self.base_secs.max(1);
+        for _ in 1..entry.failures {
+            delay = delay.saturating_mul(2).min(self.max_secs);
+        }
+        delay = delay.min(self.max_secs);
+        entry.next_allowed_unix = now.saturating_add(delay);
+        delay
+    }
+
+    fn record_success(&mut self, addr: &Multiaddr) {
+        self.entries.remove(&addr.to_string());
+    }
+}
+
+fn dial_with_backoff(
+    swarm: &mut Swarm<NodeBehaviour>,
+    dial_backoff: &mut DialBackoff,
+    pending_dials: &mut HashMap<ConnectionId, Multiaddr>,
+    addr: Multiaddr,
+) {
+    let now = now_unix();
+    if !dial_backoff.allow(&addr, now) {
+        let remaining = dial_backoff.remaining(&addr, now);
+        warn!(
+            target: "w1z4rdv1510n::node",
+            address = %addr,
+            backoff_remaining = remaining,
+            "dial suppressed due to backoff"
+        );
+        return;
+    }
+    let opts = dial_opts_for_address(addr.clone());
+    let connection_id = opts.connection_id();
+    pending_dials.insert(connection_id, addr.clone());
+    if let Err(err) = swarm.dial(opts) {
+        pending_dials.remove(&connection_id);
+        let delay = dial_backoff.record_failure(&addr);
+        warn!(
+            target: "w1z4rdv1510n::node",
+            error = %err,
+            address = %addr,
+            backoff_secs = delay,
+            "dial failed"
+        );
+    }
+}
+
+fn dial_opts_for_address(addr: Multiaddr) -> DialOpts {
+    if let Some(peer_id) = peer_id_from_multiaddr(&addr) {
+        DialOpts::peer_id(peer_id)
+            .addresses(vec![addr])
+            .extend_addresses_through_behaviour()
+            .build()
+    } else {
+        DialOpts::unknown_peer_id().address(addr).build()
+    }
 }
 
 fn handle_gossipsub_event(
@@ -708,6 +992,48 @@ mod tests {
         second.message_id = second.expected_message_id();
         assert!(guard.validate(&second, 201).is_err());
     }
+}
+
+fn quic_listen_addr(value: &str) -> Result<Option<Multiaddr>> {
+    if value.contains('/') {
+        let addr: Multiaddr = value.parse().context("parse quic listen multiaddr")?;
+        let has_udp = addr.iter().any(|p| matches!(p, Protocol::Udp(_)));
+        let has_quic = addr.iter().any(|p| matches!(p, Protocol::QuicV1));
+        if has_udp && has_quic {
+            return Ok(Some(addr));
+        }
+        return Ok(None);
+    }
+    let socket: SocketAddr = value.parse().context("parse quic listen socket")?;
+    let mut addr = Multiaddr::empty();
+    match socket {
+        SocketAddr::V4(v4) => {
+            addr.push(Protocol::Ip4(*v4.ip()));
+            addr.push(Protocol::Udp(v4.port()));
+        }
+        SocketAddr::V6(v6) => {
+            addr.push(Protocol::Ip6(*v6.ip()));
+            addr.push(Protocol::Udp(v6.port()));
+        }
+    }
+    addr.push(Protocol::QuicV1);
+    Ok(Some(addr))
+}
+
+fn relay_reservation_addr(relay: &Multiaddr) -> Multiaddr {
+    let mut addr = relay.clone();
+    let has_circuit = addr.iter().any(|p| matches!(p, Protocol::P2pCircuit));
+    if !has_circuit {
+        addr.push(Protocol::P2pCircuit);
+    }
+    addr
+}
+
+fn peer_id_from_multiaddr(addr: &Multiaddr) -> Option<PeerId> {
+    addr.iter().find_map(|p| match p {
+        Protocol::P2p(peer_id) => Some(peer_id),
+        _ => None,
+    })
 }
 
 fn parse_listen_addr(value: &str) -> Result<Multiaddr> {

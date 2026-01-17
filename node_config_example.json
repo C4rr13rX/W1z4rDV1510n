@@ -9,7 +9,14 @@
     "routing": {
       "enable_relay": false,
       "relay_servers": [],
-      "external_addresses": []
+      "external_addresses": [],
+      "reserve_relays": true,
+      "enable_quic": false,
+      "enable_autonat": true,
+      "use_observed_addresses": true,
+      "enable_peer_scoring": true,
+      "dial_backoff_base_secs": 5,
+      "dial_backoff_max_secs": 300
     },
     "security": {
       "max_message_bytes": 262144,

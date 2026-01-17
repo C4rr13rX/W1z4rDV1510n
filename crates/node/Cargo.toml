@@ -12,7 +12,7 @@ clap = { version = "4.5", features = ["derive"] }
 argon2 = "0.5"
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 futures = "0.3"
-libp2p = { version = "0.53", features = ["tokio", "tcp", "dns", "noise", "yamux", "gossipsub", "identify", "kad", "mdns", "macros", "relay"] }
+libp2p = { version = "0.53", features = ["tokio", "tcp", "dns", "noise", "yamux", "gossipsub", "identify", "kad", "mdns", "macros", "relay", "autonat", "quic"] }
 rand = "0.8"
 rpassword = "7.3"
 serde = { version = "1.0", features = ["derive"] }

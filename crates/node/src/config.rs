@@ -107,6 +107,15 @@ impl NodeConfig {
                 "network.routing.external_addresses entries must be non-empty"
             );
         }
+        if self.network.routing.dial_backoff_base_secs == 0
+            || self.network.routing.dial_backoff_max_secs == 0
+        {
+            anyhow::bail!("network.routing.dial_backoff_*_secs must be > 0");
+        }
+        anyhow::ensure!(
+            self.network.routing.dial_backoff_max_secs >= self.network.routing.dial_backoff_base_secs,
+            "network.routing.dial_backoff_max_secs must be >= dial_backoff_base_secs"
+        );
         anyhow::ensure!(
             self.wallet.enabled,
             "wallet must be enabled for production nodes"
@@ -365,6 +374,13 @@ pub struct NodeNetworkRoutingConfig {
     pub enable_relay: bool,
     pub relay_servers: Vec<String>,
     pub external_addresses: Vec<String>,
+    pub reserve_relays: bool,
+    pub enable_quic: bool,
+    pub enable_autonat: bool,
+    pub use_observed_addresses: bool,
+    pub enable_peer_scoring: bool,
+    pub dial_backoff_base_secs: u64,
+    pub dial_backoff_max_secs: u64,
 }
 
 impl Default for NodeNetworkRoutingConfig {
@@ -373,6 +389,13 @@ impl Default for NodeNetworkRoutingConfig {
             enable_relay: false,
             relay_servers: Vec::new(),
             external_addresses: Vec::new(),
+            reserve_relays: true,
+            enable_quic: false,
+            enable_autonat: true,
+            use_observed_addresses: true,
+            enable_peer_scoring: true,
+            dial_backoff_base_secs: 5,
+            dial_backoff_max_secs: 300,
         }
     }
 }
