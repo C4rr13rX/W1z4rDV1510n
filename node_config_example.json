@@ -11,7 +11,7 @@
       "relay_servers": [],
       "external_addresses": [],
       "reserve_relays": true,
-      "enable_quic": false,
+      "enable_quic": true,
       "enable_autonat": true,
       "use_observed_addresses": true,
       "enable_peer_scoring": true,
