@@ -39,6 +39,8 @@ pub struct MotorFeatures {
     pub motion_variance: f64,
     pub posture_shift: f64,
     pub micro_jitter: f64,
+    pub camera_motion: f64,
+    pub stability: f64,
     pub confidence: f64,
 }
 
@@ -98,11 +100,23 @@ struct KeypointState {
 }
 
 #[derive(Debug, Clone)]
+struct MotionSample {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    prev_vx: f64,
+    prev_vy: f64,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone)]
 struct EntityMotionState {
     last_timestamp: Timestamp,
     keypoints: HashMap<String, KeypointState>,
     last_centroid: Option<(f64, f64)>,
     last_dispersion: f64,
+    last_centroid_velocity: Option<(f64, f64)>,
     signal_ema: f64,
     baseline_mean: f64,
     baseline_var: f64,
@@ -116,6 +130,7 @@ impl EntityMotionState {
             keypoints: HashMap::new(),
             last_centroid: None,
             last_dispersion: 0.0,
+            last_centroid_velocity: None,
             signal_ema: 0.0,
             baseline_mean: 0.0,
             baseline_var: 0.0,
@@ -185,40 +200,35 @@ impl MotorFeatureExtractor {
         let dt = (timestamp.unix - state.last_timestamp.unix).abs() as f64;
         let dt = if dt > 0.0 { dt } else { 1.0 };
 
-        let mut speed_sum = 0.0;
-        let mut speed_sq_sum = 0.0;
-        let mut jitter_sum = 0.0;
         let mut conf_sum = 0.0;
         let mut centroid_x = 0.0;
         let mut centroid_y = 0.0;
         let mut centroid_weight = 0.0;
+        let mut centroid_vx = 0.0;
+        let mut centroid_vy = 0.0;
 
         let mut next_keypoints = HashMap::new();
+        let mut samples: Vec<MotionSample> = Vec::with_capacity(keypoint_count);
         for (label, kp) in keypoints {
             let conf = kp.confidence.clamp(0.0, 1.0);
             let prev = state.keypoints.get(&label);
-            let (vx, vy, accel) = if let Some(prev_state) = prev {
+            let (vx, vy, prev_vx, prev_vy) = if let Some(prev_state) = prev {
                 let dx = kp.x - prev_state.x;
                 let dy = kp.y - prev_state.y;
                 let vx = dx / dt;
                 let vy = dy / dt;
-                let dvx = vx - prev_state.vx;
-                let dvy = vy - prev_state.vy;
-                let accel = (dvx * dvx + dvy * dvy).sqrt() / dt;
-                (vx, vy, accel)
+                (vx, vy, prev_state.vx, prev_state.vy)
             } else {
-                (0.0, 0.0, 0.0)
+                (0.0, 0.0, 0.0, 0.0)
             };
-            let speed = (vx * vx + vy * vy).sqrt();
-            speed_sum += speed * conf;
-            speed_sq_sum += speed * speed;
-            jitter_sum += accel * conf;
             conf_sum += conf;
             centroid_x += kp.x * conf;
             centroid_y += kp.y * conf;
             centroid_weight += conf;
+            centroid_vx += vx * conf;
+            centroid_vy += vy * conf;
             next_keypoints.insert(
-                label,
+                label.clone(),
                 KeypointState {
                     x: kp.x,
                     y: kp.y,
@@ -227,24 +237,17 @@ impl MotorFeatureExtractor {
                     confidence: conf,
                 },
             );
+            samples.push(MotionSample {
+                x: kp.x,
+                y: kp.y,
+                vx,
+                vy,
+                prev_vx,
+                prev_vy,
+                confidence: conf,
+            });
         }
 
-        let mean_speed = if conf_sum > 0.0 {
-            speed_sum / conf_sum
-        } else {
-            0.0
-        };
-        let variance = if keypoint_count > 0 {
-            let mean_unweighted = speed_sq_sum / keypoint_count as f64;
-            (mean_unweighted - mean_speed * mean_speed).max(0.0)
-        } else {
-            0.0
-        };
-        let micro_jitter = if conf_sum > 0.0 {
-            jitter_sum / conf_sum
-        } else {
-            0.0
-        };
         let confidence = if keypoint_count > 0 {
             conf_sum / keypoint_count as f64
         } else {
@@ -256,11 +259,54 @@ impl MotorFeatureExtractor {
         } else {
             (0.0, 0.0)
         };
+        let (centroid_vx, centroid_vy) = if conf_sum > 0.0 {
+            (centroid_vx / conf_sum, centroid_vy / conf_sum)
+        } else {
+            (0.0, 0.0)
+        };
+        let camera_motion = (centroid_vx * centroid_vx + centroid_vy * centroid_vy).sqrt();
+        let (prev_centroid_vx, prev_centroid_vy) =
+            state.last_centroid_velocity.unwrap_or((0.0, 0.0));
+
+        let mut rel_speed_sum = 0.0;
+        let mut rel_speed_sq_sum = 0.0;
+        let mut rel_jitter_sum = 0.0;
+        for sample in &samples {
+            let rel_vx = sample.vx - centroid_vx;
+            let rel_vy = sample.vy - centroid_vy;
+            let prev_rel_vx = sample.prev_vx - prev_centroid_vx;
+            let prev_rel_vy = sample.prev_vy - prev_centroid_vy;
+            let rel_speed = (rel_vx * rel_vx + rel_vy * rel_vy).sqrt();
+            rel_speed_sum += rel_speed * sample.confidence;
+            rel_speed_sq_sum += rel_speed * rel_speed;
+            let rel_dvx = rel_vx - prev_rel_vx;
+            let rel_dvy = rel_vy - prev_rel_vy;
+            let rel_accel = (rel_dvx * rel_dvx + rel_dvy * rel_dvy).sqrt() / dt;
+            rel_jitter_sum += rel_accel * sample.confidence;
+        }
+
+        let mean_speed = if conf_sum > 0.0 {
+            rel_speed_sum / conf_sum
+        } else {
+            0.0
+        };
+        let variance = if keypoint_count > 0 {
+            let mean_unweighted = rel_speed_sq_sum / keypoint_count as f64;
+            (mean_unweighted - mean_speed * mean_speed).max(0.0)
+        } else {
+            0.0
+        };
+        let micro_jitter = if conf_sum > 0.0 {
+            rel_jitter_sum / conf_sum
+        } else {
+            0.0
+        };
+
         let mut dispersion = dispersion_hint.unwrap_or_else(|| {
             let mut sum = 0.0;
-            for kp in next_keypoints.values() {
-                let dx = kp.x - centroid_x;
-                let dy = kp.y - centroid_y;
+            for sample in &samples {
+                let dx = sample.x - centroid_x;
+                let dy = sample.y - centroid_y;
                 sum += (dx * dx + dy * dy).sqrt();
             }
             if keypoint_count > 0 {
@@ -283,6 +329,8 @@ impl MotorFeatureExtractor {
         let motion_norm = (mean_speed / self.config.velocity_norm).clamp(0.0, 1.0);
         let jitter_norm = (micro_jitter / self.config.jitter_norm).clamp(0.0, 1.0);
         let posture_norm = (posture_shift / self.config.posture_norm).clamp(0.0, 1.0);
+        let camera_norm = (camera_motion / self.config.velocity_norm).clamp(0.0, 1.0);
+        let stability = (1.0 - (0.7 * jitter_norm + 0.3 * camera_norm)).clamp(0.0, 1.0);
         let raw_signal =
             (motion_norm * 0.6 + jitter_norm * 0.3 + posture_norm * 0.1).clamp(0.0, 1.0);
         let (baseline_mean, baseline_std, baseline_samples, baseline_ready, normalized_signal) =
@@ -294,6 +342,7 @@ impl MotorFeatureExtractor {
         state.keypoints = next_keypoints;
         state.last_centroid = Some((centroid_x, centroid_y));
         state.last_dispersion = dispersion;
+        state.last_centroid_velocity = Some((centroid_vx, centroid_vy));
         state.signal_ema = signal;
 
         Some(MotorFeatureOutput {
@@ -306,6 +355,8 @@ impl MotorFeatureExtractor {
                 motion_variance: variance,
                 posture_shift,
                 micro_jitter,
+                camera_motion,
+                stability,
                 confidence,
             },
             raw_signal,

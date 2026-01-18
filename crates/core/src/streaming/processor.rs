@@ -114,20 +114,25 @@ impl StreamingProcessor {
         timestamp: crate::schema::Timestamp,
         metadata: HashMap<String, Value>,
     ) -> Option<TokenBatch> {
-        let extractor = self
-            .people_extractors
-            .entry(signal.entity_id.clone())
-            .or_insert_with(UltradianLayerExtractor::new);
-        extractor.push_sample(SignalSample {
-            timestamp,
-            value: signal.signal,
-        });
-        let mut layers = extractor.extract_layers();
-        for layer in &mut layers {
-            layer.attributes.insert(
-                "entity_id".to_string(),
-                Value::String(signal.entity_id.clone()),
-            );
+        let quality = sample_quality_from_meta(&metadata);
+        let mut layers = Vec::new();
+        if self.config.layer_flags.ultradian_enabled {
+            let extractor = self
+                .people_extractors
+                .entry(signal.entity_id.clone())
+                .or_insert_with(UltradianLayerExtractor::new);
+            extractor.push_sample(SignalSample {
+                timestamp,
+                value: signal.signal,
+                quality,
+            });
+            layers = extractor.extract_layers();
+            for layer in &mut layers {
+                layer.attributes.insert(
+                    "entity_id".to_string(),
+                    Value::String(signal.entity_id.clone()),
+                );
+            }
         }
         let tokens = vec![EventToken {
             id: String::new(),
@@ -138,6 +143,7 @@ impl StreamingProcessor {
             attributes: HashMap::from([
                 ("entity_id".to_string(), Value::String(signal.entity_id)),
                 ("signal".to_string(), Value::from(signal.signal)),
+                ("signal_quality".to_string(), Value::from(quality)),
             ]),
             source: Some(StreamSource::PeopleVideo),
         }];
@@ -158,20 +164,30 @@ impl StreamingProcessor {
         metadata: HashMap<String, Value>,
     ) -> Option<TokenBatch> {
         let output = self.motor_extractor.extract(frame)?;
-        let extractor = self
-            .people_extractors
-            .entry(output.entity_id.clone())
-            .or_insert_with(UltradianLayerExtractor::new);
-        extractor.push_sample(SignalSample {
-            timestamp: output.timestamp,
-            value: output.signal,
-        });
-        let mut layers = extractor.extract_layers();
-        for layer in &mut layers {
-            layer.attributes.insert(
-                "entity_id".to_string(),
-                Value::String(output.entity_id.clone()),
-            );
+        let meta_quality = sample_quality_from_meta(&metadata);
+        let signal_quality = (meta_quality
+            * output.features.confidence
+            * output.features.stability)
+            .clamp(0.0, 1.0);
+        let mut layers = Vec::new();
+        if self.config.layer_flags.ultradian_enabled {
+            let extractor = self
+                .people_extractors
+                .entry(output.entity_id.clone())
+                .or_insert_with(UltradianLayerExtractor::new);
+            extractor.push_sample(SignalSample {
+                timestamp: output.timestamp,
+                value: output.signal,
+                quality: signal_quality,
+            });
+            let mut extracted = extractor.extract_layers();
+            for layer in &mut extracted {
+                layer.attributes.insert(
+                    "entity_id".to_string(),
+                    Value::String(output.entity_id.clone()),
+                );
+            }
+            layers = extracted;
         }
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -184,6 +200,10 @@ impl StreamingProcessor {
         attributes.insert(
             "motor_signal_norm".to_string(),
             Value::from(output.normalized_signal),
+        );
+        attributes.insert(
+            "signal_quality".to_string(),
+            Value::from(signal_quality),
         );
         attributes.insert("baseline_mean".to_string(), Value::from(output.baseline_mean));
         attributes.insert("baseline_std".to_string(), Value::from(output.baseline_std));
@@ -204,12 +224,20 @@ impl StreamingProcessor {
             Value::from(output.features.motion_variance),
         );
         attributes.insert(
+            "camera_motion".to_string(),
+            Value::from(output.features.camera_motion),
+        );
+        attributes.insert(
             "posture_shift".to_string(),
             Value::from(output.features.posture_shift),
         );
         attributes.insert(
             "micro_jitter".to_string(),
             Value::from(output.features.micro_jitter),
+        );
+        attributes.insert(
+            "stability".to_string(),
+            Value::from(output.features.stability),
         );
         attributes.insert(
             "keypoint_confidence".to_string(),
@@ -439,6 +467,15 @@ fn confidence_from_meta(metadata: &HashMap<String, Value>) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+fn sample_quality_from_meta(metadata: &HashMap<String, Value>) -> f64 {
+    metadata
+        .get("quality")
+        .or_else(|| metadata.get("confidence"))
+        .and_then(|val| val.as_f64())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0)
+}
+
 fn map_from_metadata(input: &HashMap<String, Value>) -> Map<String, Value> {
     let mut map = Map::new();
     for (key, value) in input {
@@ -459,6 +496,7 @@ mod tests {
         let mut config = StreamingConfig::default();
         config.enabled = true;
         config.ingest.people_video = true;
+        config.layer_flags.ultradian_enabled = true;
         let mut processor = StreamingProcessor::new(config);
         let mut last = None;
         for idx in 0..40 {
@@ -484,6 +522,7 @@ mod tests {
         let mut config = StreamingConfig::default();
         config.enabled = true;
         config.ingest.people_video = true;
+        config.layer_flags.ultradian_enabled = true;
         let mut processor = StreamingProcessor::new(config);
         let period_secs = 30.0 * 60.0;
         let omega = 2.0 * PI / period_secs;
