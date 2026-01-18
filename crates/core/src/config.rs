@@ -1118,6 +1118,7 @@ pub struct StreamingLayerFlags {
     pub flow_enabled: bool,
     pub topic_event_enabled: bool,
     pub physiology_enabled: bool,
+    pub behavior_enabled: bool,
 }
 
 impl Default for StreamingLayerFlags {
@@ -1127,6 +1128,7 @@ impl Default for StreamingLayerFlags {
             flow_enabled: true,
             topic_event_enabled: true,
             physiology_enabled: false,
+            behavior_enabled: true,
         }
     }
 }

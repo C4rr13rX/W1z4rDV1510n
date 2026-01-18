@@ -1,5 +1,9 @@
 use crate::config::StreamingConfig;
 use crate::orchestrator::{RunOutcome, run_with_snapshot};
+use crate::streaming::behavior::{
+    BehaviorInput, BehaviorMotif, BehaviorSubstrate, BehaviorSubstrateConfig, SensorKind,
+    SensorSample, SpeciesKind,
+};
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
 use crate::streaming::align::StreamingAligner;
 use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
@@ -46,6 +50,7 @@ pub struct StreamingProcessor {
     config: StreamingConfig,
     people_extractors: HashMap<String, UltradianLayerExtractor>,
     motor_extractor: MotorFeatureExtractor,
+    behavior_substrate: BehaviorSubstrate,
     flow_extractor: FlowLayerExtractor,
     topic_extractor: TopicEventExtractor,
 }
@@ -56,6 +61,7 @@ impl StreamingProcessor {
             config,
             people_extractors: HashMap::new(),
             motor_extractor: MotorFeatureExtractor::new(crate::streaming::motor::MotorConfig::default()),
+            behavior_substrate: BehaviorSubstrate::new(BehaviorSubstrateConfig::default()),
             flow_extractor: FlowLayerExtractor::new(FlowConfig::default()),
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
         }
@@ -115,6 +121,7 @@ impl StreamingProcessor {
         metadata: HashMap<String, Value>,
     ) -> Option<TokenBatch> {
         let quality = sample_quality_from_meta(&metadata);
+        let entity_id = signal.entity_id.clone();
         let mut layers = Vec::new();
         if self.config.layer_flags.ultradian_enabled {
             let extractor = self
@@ -141,12 +148,27 @@ impl StreamingProcessor {
             duration_secs: 1.0,
             confidence: 1.0,
             attributes: HashMap::from([
-                ("entity_id".to_string(), Value::String(signal.entity_id)),
+                ("entity_id".to_string(), Value::String(entity_id.clone())),
                 ("signal".to_string(), Value::from(signal.signal)),
                 ("signal_quality".to_string(), Value::from(quality)),
             ]),
             source: Some(StreamSource::PeopleVideo),
         }];
+        let mut tokens = tokens;
+        let behavior_input = BehaviorInput {
+            entity_id,
+            timestamp,
+            species: species_from_meta(&metadata),
+            sensors: vec![SensorSample {
+                kind: SensorKind::Motion,
+                values: HashMap::from([("signal".to_string(), signal.signal)]),
+                quality,
+            }],
+            actions: Vec::new(),
+            pose: None,
+            metadata: metadata.clone(),
+        };
+        self.append_behavior_tokens(behavior_input, &mut tokens, StreamSource::PeopleVideo);
         Some(TokenBatch {
             timestamp,
             tokens,
@@ -163,6 +185,7 @@ impl StreamingProcessor {
         frame: PoseFrame,
         metadata: HashMap<String, Value>,
     ) -> Option<TokenBatch> {
+        let behavior_frame = frame.clone();
         let output = self.motor_extractor.extract(frame)?;
         let meta_quality = sample_quality_from_meta(&metadata);
         let signal_quality = (meta_quality
@@ -265,6 +288,17 @@ impl StreamingProcessor {
             attributes,
             source: Some(StreamSource::PeopleVideo),
         }];
+        let mut tokens = tokens;
+        let behavior_input = BehaviorInput {
+            entity_id: output.entity_id.clone(),
+            timestamp: output.timestamp,
+            species: species_from_meta(&metadata),
+            sensors: Vec::new(),
+            actions: Vec::new(),
+            pose: Some(behavior_frame),
+            metadata: metadata.clone(),
+        };
+        self.append_behavior_tokens(behavior_input, &mut tokens, StreamSource::PeopleVideo);
         Some(TokenBatch {
             timestamp: output.timestamp,
             tokens,
@@ -316,6 +350,54 @@ impl StreamingProcessor {
             layers: extraction.layers,
             source_confidence: HashMap::from([(StreamSource::PublicTopics, confidence_from_meta(&envelope.metadata))]),
         })
+    }
+
+    fn append_behavior_tokens(
+        &mut self,
+        input: BehaviorInput,
+        tokens: &mut Vec<EventToken>,
+        source: StreamSource,
+    ) {
+        if !self.config.layer_flags.behavior_enabled {
+            return;
+        }
+        let entity_id = input.entity_id.clone();
+        let frame = self.behavior_substrate.ingest(input);
+        for motif in frame.motifs.into_iter().filter(|motif| motif.entity_id == entity_id) {
+            let mut attributes = HashMap::new();
+            attributes.insert("entity_id".to_string(), Value::String(motif.entity_id.clone()));
+            attributes.insert("motif_id".to_string(), Value::String(motif.id.clone()));
+            attributes.insert("support".to_string(), Value::from(motif.support as u64));
+            attributes.insert(
+                "description_length".to_string(),
+                Value::from(motif.description_length),
+            );
+            attributes.insert(
+                "graph_coherence".to_string(),
+                Value::from(motif.graph_signature.mean_coherence),
+            );
+            attributes.insert(
+                "graph_proximity".to_string(),
+                Value::from(motif.graph_signature.mean_proximity),
+            );
+            attributes.insert(
+                "tf_amplitudes".to_string(),
+                Value::Array(motif.time_frequency.amplitudes.iter().copied().map(Value::from).collect()),
+            );
+            attributes.insert(
+                "tf_phases".to_string(),
+                Value::Array(motif.time_frequency.phases.iter().copied().map(Value::from).collect()),
+            );
+            tokens.push(EventToken {
+                id: String::new(),
+                kind: EventKind::BehavioralToken,
+                onset: frame.timestamp,
+                duration_secs: motif.duration_secs,
+                confidence: motif_confidence(&motif),
+                attributes,
+                source: Some(source),
+            });
+        }
     }
 }
 
@@ -484,6 +566,29 @@ fn map_from_metadata(input: &HashMap<String, Value>) -> Map<String, Value> {
     map
 }
 
+fn species_from_meta(metadata: &HashMap<String, Value>) -> SpeciesKind {
+    let raw = metadata
+        .get("species")
+        .and_then(|value| value.as_str())
+        .unwrap_or("HUMAN");
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "HUMAN" => SpeciesKind::Human,
+        "CANINE" => SpeciesKind::Canine,
+        "FELINE" => SpeciesKind::Feline,
+        "AVIAN" => SpeciesKind::Avian,
+        "AQUATIC" => SpeciesKind::Aquatic,
+        "INSECT" => SpeciesKind::Insect,
+        _ => SpeciesKind::Other(raw.to_string()),
+    }
+}
+
+fn motif_confidence(motif: &BehaviorMotif) -> f64 {
+    let support = motif.support as f64;
+    let support_factor = support / (support + 3.0);
+    let coherence = motif.graph_signature.mean_coherence.clamp(0.0, 1.0);
+    (0.6 * support_factor + 0.4 * coherence).clamp(0.05, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +602,7 @@ mod tests {
         config.enabled = true;
         config.ingest.people_video = true;
         config.layer_flags.ultradian_enabled = true;
+        config.layer_flags.behavior_enabled = true;
         let mut processor = StreamingProcessor::new(config);
         let mut last = None;
         for idx in 0..40 {
@@ -515,6 +621,7 @@ mod tests {
         }
         let batch = last.expect("batch");
         assert!(!batch.layers.is_empty());
+        assert!(batch.tokens.iter().any(|token| token.kind == EventKind::BehavioralToken));
     }
 
     #[test]
