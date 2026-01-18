@@ -18,6 +18,7 @@ pub mod branching_runtime;
 pub mod plasticity_runtime;
 pub mod ontology_runtime;
 pub mod physiology_runtime;
+pub mod behavior;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -42,3 +43,10 @@ pub use branching_runtime::{BranchingReport, StreamingBranchingRuntime};
 pub use plasticity_runtime::{PlasticityReport, StreamingPlasticityRuntime};
 pub use ontology_runtime::{OntologyReport, OntologyRuntime};
 pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};
+pub use behavior::{
+    ActionChannel, ActionConstraint, ActionKind, ActionSample, BackpressureStatus, BehaviorConstraints,
+    BehaviorFrame, BehaviorGraph, BehaviorInput, BehaviorMotif, BehaviorPrediction, BehaviorState,
+    BehaviorSubstrate, BehaviorSubstrateConfig, BodySchema, BodySchemaAdapter, CouplingMetrics,
+    GraphSignature, SensorChannel, SensorKind, SensorSample, SoftObjective, SpeciesKind,
+    TimeFrequencySummary,
+};
