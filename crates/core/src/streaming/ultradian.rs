@@ -330,4 +330,23 @@ mod tests {
         assert!(micro.amplitude > 0.2);
         assert!((micro.phase).is_finite());
     }
+
+    #[test]
+    fn extractor_ignores_low_quality_samples() {
+        let mut extractor = UltradianLayerExtractor::new();
+        let period_secs = 30.0 * 60.0;
+        let omega = 2.0 * PI / period_secs;
+        let start = 2_000_000_i64;
+        for idx in 0..40 {
+            let t = start + (idx * 60) as i64;
+            let value = (omega * t as f64).sin();
+            extractor.push_sample(SignalSample {
+                timestamp: Timestamp { unix: t },
+                value,
+                quality: 0.05,
+            });
+        }
+        let layers = extractor.extract_layers();
+        assert!(layers.is_empty());
+    }
 }

@@ -324,13 +324,18 @@ impl MotorFeatureExtractor {
             .map(|(px, py)| ((centroid_x - px).powi(2) + (centroid_y - py).powi(2)).sqrt())
             .unwrap_or(0.0);
         let dispersion_shift = (dispersion - state.last_dispersion).abs();
-        let posture_shift = centroid_shift + dispersion_shift;
+        let camera_dominance = if camera_motion + mean_speed > 1e-6 {
+            (camera_motion / (camera_motion + mean_speed)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let posture_shift = dispersion_shift + centroid_shift * (1.0 - camera_dominance);
 
         let motion_norm = (mean_speed / self.config.velocity_norm).clamp(0.0, 1.0);
         let jitter_norm = (micro_jitter / self.config.jitter_norm).clamp(0.0, 1.0);
         let posture_norm = (posture_shift / self.config.posture_norm).clamp(0.0, 1.0);
-        let camera_norm = (camera_motion / self.config.velocity_norm).clamp(0.0, 1.0);
-        let stability = (1.0 - (0.7 * jitter_norm + 0.3 * camera_norm)).clamp(0.0, 1.0);
+        let stability = (1.0 - jitter_norm).clamp(0.0, 1.0)
+            * (1.0 - 0.8 * camera_dominance).clamp(0.0, 1.0);
         let raw_signal =
             (motion_norm * 0.6 + jitter_norm * 0.3 + posture_norm * 0.1).clamp(0.0, 1.0);
         let (baseline_mean, baseline_std, baseline_samples, baseline_ready, normalized_signal) =
@@ -482,5 +487,68 @@ mod tests {
         assert!(output.signal.is_finite());
         assert!(output.features.motion_energy > 0.0);
         assert!(output.baseline_samples >= 2);
+    }
+
+    #[test]
+    fn motor_extractor_reduces_camera_shake_signal() {
+        let mut extractor = MotorFeatureExtractor::new(MotorConfig::default());
+        let frame_a = PoseFrame {
+            entity_id: "e1".to_string(),
+            timestamp: Some(Timestamp { unix: 2000 }),
+            keypoints: vec![
+                Keypoint {
+                    name: Some("head".to_string()),
+                    x: 0.0,
+                    y: 0.0,
+                    confidence: Some(1.0),
+                },
+                Keypoint {
+                    name: Some("hand".to_string()),
+                    x: 1.0,
+                    y: 0.5,
+                    confidence: Some(0.9),
+                },
+                Keypoint {
+                    name: Some("foot".to_string()),
+                    x: -0.5,
+                    y: -0.2,
+                    confidence: Some(0.8),
+                },
+            ],
+            bbox: None,
+            metadata: HashMap::new(),
+        };
+        let frame_b = PoseFrame {
+            entity_id: "e1".to_string(),
+            timestamp: Some(Timestamp { unix: 2001 }),
+            keypoints: vec![
+                Keypoint {
+                    name: Some("head".to_string()),
+                    x: 2.0,
+                    y: 0.0,
+                    confidence: Some(1.0),
+                },
+                Keypoint {
+                    name: Some("hand".to_string()),
+                    x: 3.0,
+                    y: 0.5,
+                    confidence: Some(0.9),
+                },
+                Keypoint {
+                    name: Some("foot".to_string()),
+                    x: 1.5,
+                    y: -0.2,
+                    confidence: Some(0.8),
+                },
+            ],
+            bbox: None,
+            metadata: HashMap::new(),
+        };
+        let _ = extractor.extract(frame_a);
+        let output = extractor.extract(frame_b).expect("output");
+        assert!(output.features.camera_motion > 1.0);
+        assert!(output.features.motion_energy < 0.1);
+        assert!(output.raw_signal < 0.1);
+        assert!(output.features.stability < 0.4);
     }
 }
