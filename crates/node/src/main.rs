@@ -198,7 +198,7 @@ fn run_node(config_path: &Path) -> anyhow::Result<()> {
         "loaded node config"
     );
     let runtime = NodeRuntime::new(config)?;
-    runtime.start()
+    runtime.run_until_shutdown()
 }
 
 fn init_node(config_path: &Path, force: bool, report_path: Option<&Path>) -> anyhow::Result<()> {

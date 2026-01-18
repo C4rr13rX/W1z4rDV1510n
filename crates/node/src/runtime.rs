@@ -8,6 +8,7 @@ use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
 use crate::p2p::NodeNetwork;
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, NoopLedger, NodeCapabilities, NodeRegistration, ValidatorHeartbeat,
@@ -62,12 +63,13 @@ impl NodeRuntime {
         })
     }
 
-    pub fn start(mut self) -> Result<()> {
+    pub fn start(&mut self) -> Result<()> {
         self.network.start(&self.config.node_id)?;
         self.network.connect_bootstrap()?;
         self.start_data_mesh()?;
         self.register_node()?;
         self.maybe_send_validator_heartbeat()?;
+        self.start_validator_heartbeat_loop();
         let target = self.compute_router.route(ComputeJobKind::TensorHeavy);
         info!(
             target: "w1z4rdv1510n::node",
@@ -78,6 +80,12 @@ impl NodeRuntime {
             wallet_address = self.wallet.wallet().address.as_str(),
             "node runtime started"
         );
+        Ok(())
+    }
+
+    pub fn run_until_shutdown(mut self) -> Result<()> {
+        self.start()?;
+        wait_for_shutdown()?;
         Ok(())
     }
 
@@ -160,9 +168,65 @@ impl NodeRuntime {
         Ok(())
     }
 
+    fn start_validator_heartbeat_loop(&self) {
+        if !self.config.blockchain.enabled {
+            return;
+        }
+        if !matches!(self.config.node_role, NodeRole::Validator) {
+            return;
+        }
+        let interval = self
+            .config
+            .blockchain
+            .validator_policy
+            .heartbeat_interval_secs
+            .max(1);
+        let ledger = self.ledger.clone();
+        let node_id = self.config.node_id.clone();
+        let wallet = self.wallet.clone();
+        std::thread::spawn(move || {
+            let delay = Duration::from_secs(interval);
+            loop {
+                std::thread::sleep(delay);
+                let heartbeat = ValidatorHeartbeat {
+                    node_id: node_id.clone(),
+                    timestamp: now_timestamp(),
+                    fee_paid: 0.0,
+                    signature: String::new(),
+                };
+                let heartbeat = wallet.sign_validator_heartbeat(heartbeat);
+                if let Err(err) = ledger.submit_validator_heartbeat(heartbeat) {
+                    warn!(
+                        target: "w1z4rdv1510n::node",
+                        error = %err,
+                        "validator heartbeat rejected"
+                    );
+                }
+            }
+        });
+    }
+
     pub fn openstack_control_plane(&self) -> Option<&OpenStackControlPlane> {
         self.openstack.as_ref()
     }
+}
+
+fn wait_for_shutdown() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| anyhow!("build shutdown runtime: {err}"))?;
+    runtime.block_on(async {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|err| anyhow!("shutdown signal error: {err}"))?;
+        info!(
+            target: "w1z4rdv1510n::node",
+            "shutdown signal received"
+        );
+        Ok::<_, anyhow::Error>(())
+    })?;
+    Ok(())
 }
 
 fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {

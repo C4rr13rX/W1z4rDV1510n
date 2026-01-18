@@ -32,7 +32,7 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **Local ledger** - reward tracking, validator heartbeats, fee market scaffolding, and immutable audit logs.
 - **Wallet** - encrypted Ed25519 wallet with deterministic address derivation for node identity and rewards.
 - **Bridge + deposits** - multi-chain stablecoin deposits with relayer quorum verification, intent idempotency, and offline tooling.
-- **API services** - auth + rate limits + metrics for bridge, balance, and operations endpoints.
+- **API services** - auth + rate limits + metrics + health/readiness for bridge, balance, and operations endpoints.
 - **Data mesh ingestion** - manifest/chunk/receipt replication with quorum tracking, retention GC, and integrity audits; `/data/ingest` + `/data/:data_id` endpoints.
 - **Simulation + OpenStack stubs** - 10k node simulation and minimal OpenStack control-plane abstractions for future cluster plans.
 
@@ -125,7 +125,7 @@ Tests cover calibration heuristics, hardware auto-selection, search constraint r
 cargo run --bin w1z4rdv1510n-node -- init
 ```
 
-2. **Run the node**
+2. **Run the node (blocks until Ctrl+C)**
 
 ```powershell
 cargo run --bin w1z4rdv1510n-node
@@ -136,6 +136,8 @@ cargo run --bin w1z4rdv1510n-node
 ```powershell
 cargo run --bin w1z4rdv1510n-node -- api --addr 127.0.0.1:8090
 ```
+
+The node API exposes `GET /health` and `GET /ready` (auth required if `api.require_api_key` is enabled).
 
 4. **Simulate a network (optional)**
 
@@ -154,7 +156,7 @@ cargo run --bin w1z4rdv1510n-node -- bridge-intent-create `
 cargo run --bin w1z4rdv1510n-node -- bridge-intent-verify --json '{...}'
 ```
 
-Config lives in `node_config.json` (generated from defaults). `node_config_example.json` shows all available fields, including API keys, rate limits, bridge policies, and data mesh retention/audit settings.
+Config lives in `node_config.json` (generated from defaults). `node_config_example.json` shows all available fields, including QUIC/AutoNAT routing toggles, API keys, rate limits, bridge policies, and data mesh retention/audit settings.
 
 ---
 

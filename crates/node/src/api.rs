@@ -24,6 +24,11 @@ use w1z4rdv1510n::schema::Timestamp;
 
 #[derive(Clone)]
 struct ApiState {
+    node_id: String,
+    ledger_backend: String,
+    data_enabled: bool,
+    bridge_enabled: bool,
+    started_at: Instant,
     ledger: Arc<dyn BlockchainLedger>,
     bridge_config: BridgeConfig,
     require_api_key: bool,
@@ -93,11 +98,24 @@ struct ErrorResponse {
 }
 
 #[derive(Serialize)]
+struct ApiHealthSnapshot {
+    status: &'static str,
+    node_id: String,
+    uptime_secs: u64,
+    data_mesh_enabled: bool,
+    data_mesh_active: bool,
+    bridge_enabled: bool,
+    ledger_backend: String,
+}
+
+#[derive(Serialize)]
 struct ApiMetricsSnapshot {
     requests_total: u64,
+    health_requests: u64,
     bridge_requests: u64,
     balance_requests: u64,
     metrics_requests: u64,
+    health_success: u64,
     bridge_chain_requests: u64,
     bridge_intent_requests: u64,
     data_ingest_requests: u64,
@@ -115,9 +133,11 @@ struct ApiMetricsSnapshot {
 #[derive(Default)]
 struct ApiMetrics {
     requests_total: AtomicU64,
+    health_requests: AtomicU64,
     bridge_requests: AtomicU64,
     balance_requests: AtomicU64,
     metrics_requests: AtomicU64,
+    health_success: AtomicU64,
     bridge_chain_requests: AtomicU64,
     bridge_intent_requests: AtomicU64,
     data_ingest_requests: AtomicU64,
@@ -140,6 +160,11 @@ impl ApiMetrics {
     fn inc_bridge_request(&self) {
         self.inc_request();
         self.bridge_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_health_request(&self) {
+        self.inc_request();
+        self.health_requests.fetch_add(1, Ordering::Relaxed);
     }
 
     fn inc_balance_request(&self) {
@@ -176,6 +201,10 @@ impl ApiMetrics {
         self.bridge_success.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_health_success(&self) {
+        self.health_success.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_balance_success(&self) {
         self.balance_success.fetch_add(1, Ordering::Relaxed);
     }
@@ -207,9 +236,11 @@ impl ApiMetrics {
     fn snapshot(&self) -> ApiMetricsSnapshot {
         ApiMetricsSnapshot {
             requests_total: self.requests_total.load(Ordering::Relaxed),
+            health_requests: self.health_requests.load(Ordering::Relaxed),
             bridge_requests: self.bridge_requests.load(Ordering::Relaxed),
             balance_requests: self.balance_requests.load(Ordering::Relaxed),
             metrics_requests: self.metrics_requests.load(Ordering::Relaxed),
+            health_success: self.health_success.load(Ordering::Relaxed),
             bridge_chain_requests: self.bridge_chain_requests.load(Ordering::Relaxed),
             bridge_intent_requests: self.bridge_intent_requests.load(Ordering::Relaxed),
             data_ingest_requests: self.data_ingest_requests.load(Ordering::Relaxed),
@@ -281,7 +312,17 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let limiter = Arc::new(Mutex::new(ApiLimiter::new(
         config.api.rate_limit_window_secs,
     )));
+    let ledger_backend = if config.ledger.enabled {
+        config.ledger.backend.clone()
+    } else {
+        "disabled".to_string()
+    };
     let state = ApiState {
+        node_id: config.node_id.clone(),
+        ledger_backend,
+        data_enabled: config.data.enabled,
+        bridge_enabled: config.blockchain.bridge.enabled,
+        started_at: Instant::now(),
         ledger,
         bridge_config: config.blockchain.bridge.clone(),
         require_api_key: config.api.require_api_key,
@@ -306,6 +347,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .max(data_limit)
         .max(1024);
     let app = Router::new()
+        .route("/health", get(get_health))
+        .route("/ready", get(get_ready))
         .route("/bridge/proof", post(submit_bridge_proof))
         .route("/bridge/chains", get(get_bridge_chains))
         .route("/bridge/intent", post(submit_bridge_intent))
@@ -779,6 +822,76 @@ async fn get_data_status(
     }
 }
 
+async fn get_health(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_health_request();
+    if let Err(err) = rate_limit(&state, &headers, "health") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let snapshot = build_health_snapshot(&state, "OK");
+    state.metrics.inc_health_success();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(snapshot).unwrap_or_default()),
+    )
+}
+
+async fn get_ready(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_health_request();
+    if let Err(err) = rate_limit(&state, &headers, "health") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let ready = state.data_mesh.is_some() || !state.data_enabled;
+    let status = if ready { "READY" } else { "NOT_READY" };
+    let snapshot = build_health_snapshot(&state, status);
+    if ready {
+        state.metrics.inc_health_success();
+    }
+    (
+        if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
+        Json(serde_json::to_value(snapshot).unwrap_or_default()),
+    )
+}
+
 async fn get_metrics(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -809,6 +922,18 @@ async fn get_metrics(
         StatusCode::OK,
         Json(serde_json::to_value(snapshot).unwrap_or_default()),
     )
+}
+
+fn build_health_snapshot(state: &ApiState, status: &'static str) -> ApiHealthSnapshot {
+    ApiHealthSnapshot {
+        status,
+        node_id: state.node_id.clone(),
+        uptime_secs: state.started_at.elapsed().as_secs(),
+        data_mesh_enabled: state.data_enabled,
+        data_mesh_active: state.data_mesh.is_some(),
+        bridge_enabled: state.bridge_enabled,
+        ledger_backend: state.ledger_backend.clone(),
+    }
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<()> {
