@@ -1676,6 +1676,7 @@ mod tests {
             tokens: Vec::new(),
             layers: Vec::new(),
             motifs: Vec::new(),
+            motif_transitions: Vec::new(),
             metadata: HashMap::new(),
         };
         let mut events = handle.subscribe();

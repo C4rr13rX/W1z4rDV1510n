@@ -69,8 +69,8 @@ pub use behavior::{
     ActionChannel, ActionConstraint, ActionKind, ActionSample, BackpressureStatus, BehaviorConstraints,
     BehaviorFrame, BehaviorGraph, BehaviorInput, BehaviorMotif, BehaviorPrediction, BehaviorState,
     BehaviorSubstrate, BehaviorSubstrateConfig, BodySchema, BodySchemaAdapter, CouplingMetrics,
-    GraphSignature, SensorChannel, SensorKind, SensorSample, SoftObjective, SpeciesKind,
-    TimeFrequencySummary,
+    GraphSignature, MotifTransition, SensorChannel, SensorKind, SensorSample, SoftObjective,
+    SpeciesKind, TimeFrequencySummary,
 };
 pub use fabric::NeuralFabricShare;
 pub use spatial::{SpatialConfig, SpatialEstimate, SpatialEstimator, insert_spatial_attrs};

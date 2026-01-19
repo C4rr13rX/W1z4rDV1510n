@@ -1,5 +1,5 @@
 use crate::schema::Timestamp;
-use crate::streaming::behavior::BehaviorMotif;
+use crate::streaming::behavior::{BehaviorMotif, MotifTransition};
 use crate::streaming::schema::{EventToken, LayerState, TokenBatch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +16,8 @@ pub struct NeuralFabricShare {
     #[serde(default)]
     pub motifs: Vec<BehaviorMotif>,
     #[serde(default)]
+    pub motif_transitions: Vec<MotifTransition>,
+    #[serde(default)]
     pub metadata: HashMap<String, Value>,
 }
 
@@ -27,6 +29,7 @@ impl NeuralFabricShare {
             tokens: batch.tokens,
             layers: batch.layers,
             motifs,
+            motif_transitions: Vec::new(),
             metadata: HashMap::new(),
         }
     }
@@ -84,6 +87,7 @@ mod tests {
             }],
             layers: Vec::new(),
             motifs: Vec::new(),
+            motif_transitions: Vec::new(),
             metadata: HashMap::new(),
         };
         let batch = share.to_token_batch();

@@ -2,7 +2,7 @@ use crate::config::StreamingConfig;
 use crate::orchestrator::{RunOutcome, run_with_snapshot};
 use crate::streaming::behavior::{
     BehaviorInput, BehaviorMotif, BehaviorState, BehaviorSubstrate, BehaviorSubstrateConfig,
-    SensorKind, SensorSample, SpeciesKind,
+    MotifTransition, SensorKind, SensorSample, SpeciesKind,
 };
 use crate::streaming::fabric::NeuralFabricShare;
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
@@ -124,7 +124,18 @@ impl StreamingProcessor {
         if !share.motifs.is_empty() {
             self.behavior_substrate.ingest_shared_motifs(&share.motifs);
         }
+        if !share.motif_transitions.is_empty() {
+            self.behavior_substrate
+                .ingest_shared_transitions(&share.motif_transitions);
+        }
         Some(share.to_token_batch())
+    }
+
+    pub fn behavior_transition_snapshot(&self) -> Vec<MotifTransition> {
+        if !self.config.layer_flags.behavior_enabled {
+            return Vec::new();
+        }
+        self.behavior_substrate.transition_snapshot()
     }
 
     fn handle_people_video(&mut self, envelope: StreamEnvelope) -> Option<TokenBatch> {
@@ -565,6 +576,7 @@ impl StreamingInference {
         let batch = self.last_batch.take()?;
         let motifs = std::mem::take(&mut self.last_motifs);
         let mut share = NeuralFabricShare::from_batch(node_id, batch, motifs);
+        share.motif_transitions = self.processor.behavior_transition_snapshot();
         if !self.last_report_metadata.is_empty() {
             share.metadata = std::mem::take(&mut self.last_report_metadata);
         }

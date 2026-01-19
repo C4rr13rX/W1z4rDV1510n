@@ -500,6 +500,13 @@ pub struct BehaviorMotif {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotifTransition {
+    pub from: String,
+    pub to: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeFrequencySummary {
     pub amplitudes: Vec<f64>,
     pub phases: Vec<f64>,
@@ -583,6 +590,7 @@ pub struct BehaviorSubstrateConfig {
     pub motif_min_len: usize,
     pub motif_max_len: usize,
     pub motif_max_count: usize,
+    pub transition_max_count: usize,
     pub stft_window: usize,
     pub stft_hop: usize,
     pub stft_bins: usize,
@@ -602,6 +610,7 @@ impl Default for BehaviorSubstrateConfig {
             motif_min_len: 8,
             motif_max_len: 128,
             motif_max_count: 256,
+            transition_max_count: 1024,
             stft_window: 16,
             stft_hop: 8,
             stft_bins: 6,
@@ -707,8 +716,21 @@ impl BehaviorSubstrate {
         self.motifs.merge_shared(motifs);
     }
 
+    pub fn ingest_shared_transitions(&mut self, transitions: &[MotifTransition]) {
+        self.motifs.merge_transitions(transitions);
+    }
+
+    pub fn transition_snapshot(&self) -> Vec<MotifTransition> {
+        self.motifs
+            .transition_snapshot(self.config.transition_max_count)
+    }
+
     pub fn motif_count(&self) -> usize {
         self.motifs.motif_count()
+    }
+
+    pub fn transition_count(&self) -> usize {
+        self.motifs.transition_count()
     }
 
     pub fn estimate_spatial(&self, input: &BehaviorInput) -> SpatialEstimate {
@@ -837,6 +859,7 @@ impl MotifExtractor {
                 latest_motifs.push(motif);
             }
         }
+        self.prune_transitions();
         latest_motifs
     }
 
@@ -898,7 +921,7 @@ impl MotifExtractor {
         let duration_secs = segment.duration_secs;
         let description_length = mdl_cost(duration_secs, best_score);
 
-        let motif = if let Some(idx) = best_idx {
+        let mut motif = if let Some(idx) = best_idx {
             if best_score <= self.config.dtw_threshold {
                 let existing = &mut self.motifs[idx];
                 existing.support += 1;
@@ -915,6 +938,7 @@ impl MotifExtractor {
         };
 
         self.prune_motifs();
+        motif.entity_id = entity_id.to_string();
         motif
     }
 
@@ -951,6 +975,63 @@ impl MotifExtractor {
                 .then_with(|| b.description_length.total_cmp(&a.description_length))
         });
         self.motifs.truncate(max_count);
+    }
+
+    fn transition_snapshot(&self, max_count: usize) -> Vec<MotifTransition> {
+        let max_count = max_count.max(1);
+        let mut entries: Vec<_> = self
+            .transitions
+            .iter()
+            .map(|((from, to), count)| MotifTransition {
+                from: from.clone(),
+                to: to.clone(),
+                count: *count as u64,
+            })
+            .collect();
+        entries.sort_by(|a, b| b.count.cmp(&a.count));
+        entries.truncate(max_count);
+        entries
+    }
+
+    fn merge_transitions(&mut self, incoming: &[MotifTransition]) {
+        if incoming.is_empty() {
+            return;
+        }
+        for transition in incoming {
+            if transition.from.trim().is_empty() || transition.to.trim().is_empty() {
+                continue;
+            }
+            if transition.count == 0 {
+                continue;
+            }
+            let count = transition.count.min(usize::MAX as u64) as usize;
+            let key = (transition.from.clone(), transition.to.clone());
+            let entry = self.transitions.entry(key).or_insert(0);
+            *entry = entry.saturating_add(count.max(1));
+        }
+        self.prune_transitions();
+    }
+
+    fn transition_count(&self) -> usize {
+        self.transitions.len()
+    }
+
+    fn prune_transitions(&mut self) {
+        let max_count = self.config.transition_max_count.max(1);
+        if self.transitions.len() <= max_count {
+            return;
+        }
+        let mut entries: Vec<_> = self
+            .transitions
+            .iter()
+            .map(|((from, to), count)| (from.clone(), to.clone(), *count))
+            .collect();
+        entries.sort_by(|a, b| b.2.cmp(&a.2));
+        entries.truncate(max_count);
+        self.transitions.clear();
+        for (from, to, count) in entries {
+            self.transitions.insert((from, to), count);
+        }
     }
 
     fn merge_shared(&mut self, incoming: &[BehaviorMotif]) {
@@ -1416,6 +1497,25 @@ fn l2_distance(a: &[f64], b: &[f64]) -> f64 {
 mod tests {
     use super::*;
 
+    fn sample_input(entity_id: &str, timestamp: i64, value: f64) -> BehaviorInput {
+        BehaviorInput {
+            entity_id: entity_id.to_string(),
+            timestamp: Timestamp { unix: timestamp },
+            species: SpeciesKind::Human,
+            sensors: vec![SensorSample {
+                kind: SensorKind::Motion,
+                values: HashMap::from([
+                    ("signal".to_string(), value),
+                    ("energy".to_string(), value * 0.5),
+                ]),
+                quality: 1.0,
+            }],
+            actions: Vec::new(),
+            pose: None,
+            metadata: HashMap::new(),
+        }
+    }
+
     #[test]
     fn dtw_respects_time_warp_similarity() {
         let a = vec![
@@ -1496,5 +1596,31 @@ mod tests {
         };
         substrate.ingest_shared_motifs(&[motif]);
         assert!(substrate.motif_count() >= 1);
+    }
+
+    #[test]
+    fn substrate_merges_shared_transitions() {
+        let mut substrate = BehaviorSubstrate::new(BehaviorSubstrateConfig::default());
+        let transitions = vec![MotifTransition {
+            from: "m1".to_string(),
+            to: "m2".to_string(),
+            count: 3,
+        }];
+        substrate.ingest_shared_transitions(&transitions);
+        assert!(substrate.transition_count() >= 1);
+    }
+
+    #[test]
+    fn substrate_relabels_motifs_for_new_entity() {
+        let mut substrate = BehaviorSubstrate::new(BehaviorSubstrateConfig::default());
+        for idx in 0..16 {
+            let _ = substrate.ingest(sample_input("e1", idx, 0.2));
+        }
+        let mut last_frame = None;
+        for idx in 0..16 {
+            last_frame = Some(substrate.ingest(sample_input("e2", 100 + idx, 0.2)));
+        }
+        let frame = last_frame.expect("frame");
+        assert!(frame.motifs.iter().any(|motif| motif.entity_id == "e2"));
     }
 }
