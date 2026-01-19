@@ -1,5 +1,6 @@
 use crate::schema::Timestamp;
 use crate::streaming::behavior::{BehaviorFrame, BehaviorState, SpeciesKind};
+use crate::streaming::knowledge::HealthKnowledgeStore;
 use crate::streaming::physiology_runtime::PhysiologyReport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -110,6 +111,7 @@ impl SurvivalRuntime {
         &mut self,
         frame: &BehaviorFrame,
         physiology: Option<&PhysiologyReport>,
+        knowledge: Option<&HealthKnowledgeStore>,
     ) -> SurvivalReport {
         let physiology_scores = physiology_scores(physiology);
         let intents = compute_intents(&frame.states);
@@ -153,14 +155,17 @@ impl SurvivalRuntime {
             let play = normalize_sum(play_in.get(&state.entity_id).copied().unwrap_or(0.0));
             let phys = physiology_scores.get(&state.entity_id).copied();
             let physiology_score = phys.unwrap_or(0.5);
-            let survival_score = combine_scores(
+            let phenotype_key = phenotype_key(state);
+            let mut survival_score = combine_scores(
                 physiology_score,
                 coop,
                 conflict,
                 play,
                 &self.config,
             );
-            let phenotype_key = phenotype_key(state);
+            survival_score = knowledge
+                .map(|store| store.apply_survival_bias(phenotype_key.as_deref(), survival_score))
+                .unwrap_or(survival_score);
             let baseline = self
                 .baselines
                 .entry(state.entity_id.clone())
@@ -395,7 +400,7 @@ mod tests {
             backpressure: crate::streaming::behavior::BackpressureStatus::Ok,
         };
         let mut runtime = SurvivalRuntime::default();
-        let report = runtime.update(&frame, None);
+        let report = runtime.update(&frame, None, None);
         assert_eq!(report.entities.len(), 2);
         let coop = report
             .entities

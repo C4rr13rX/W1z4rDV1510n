@@ -170,12 +170,13 @@ fn route_submission(
 }
 
 fn random_work_kind(rng: &mut StdRng) -> WorkKind {
-    match rng.gen_range(0..5) {
+    match rng.gen_range(0..6) {
         0 => WorkKind::SensorIngest,
         1 => WorkKind::ComputeTask,
         2 => WorkKind::ModelUpdate,
         3 => WorkKind::CausalDiscovery,
-        _ => WorkKind::Forecasting,
+        4 => WorkKind::Forecasting,
+        _ => WorkKind::HumanAnnotation,
     }
 }
 

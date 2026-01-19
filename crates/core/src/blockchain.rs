@@ -118,6 +118,7 @@ pub enum WorkKind {
     ModelUpdate,
     CausalDiscovery,
     Forecasting,
+    HumanAnnotation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

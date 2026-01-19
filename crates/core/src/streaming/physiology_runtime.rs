@@ -1,5 +1,6 @@
 use crate::config::PhysiologyConfig;
 use crate::schema::Timestamp;
+use crate::streaming::knowledge::HealthKnowledgeStore;
 use crate::streaming::schema::{EventToken, LayerKind, LayerState, TokenBatch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -67,6 +68,7 @@ impl FeatureAccumulator {
 
 struct ContextMeta {
     cohort_key: Option<String>,
+    phenotype_key: Option<String>,
 }
 
 pub struct PhysiologyRuntime {
@@ -84,7 +86,11 @@ impl PhysiologyRuntime {
         }
     }
 
-    pub fn update(&mut self, batch: &TokenBatch) -> Option<PhysiologyReport> {
+    pub fn update(
+        &mut self,
+        batch: &TokenBatch,
+        knowledge: Option<&HealthKnowledgeStore>,
+    ) -> Option<PhysiologyReport> {
         if !self.config.enabled {
             return None;
         }
@@ -98,13 +104,16 @@ impl PhysiologyRuntime {
         for (context, accumulator) in features {
             let vector = accumulator.finalize();
             let cohort_key = meta.get(&context).and_then(|m| m.cohort_key.clone());
+            let phenotype_key = meta.get(&context).and_then(|m| m.phenotype_key.clone());
             let template = self.templates.get_mut(&context);
             if template.is_none() {
                 let mean = apply_prior(
                     &vector,
                     cohort_key.as_deref(),
+                    phenotype_key.as_deref(),
                     &self.templates,
                     self.config.prior_strength,
+                    knowledge,
                 );
                 let variance = vec![self.config.covariance_floor.max(1e-6); FEATURE_COUNT];
                 let template = PhysiologyTemplate {
@@ -176,18 +185,33 @@ fn collect_features(batch: &TokenBatch) -> (HashMap<String, FeatureAccumulator>,
         let context = context_from_attrs(&token.attributes);
         let entry = features.entry(context.clone()).or_insert_with(FeatureAccumulator::new);
         let cohort_key = cohort_from_attrs(&token.attributes);
+        let phenotype_key = phenotype_from_attrs(&token.attributes);
         meta.entry(context.clone())
             .and_modify(|m| {
                 if m.cohort_key.is_none() {
                     m.cohort_key = cohort_key.clone();
                 }
+                if m.phenotype_key.is_none() {
+                    m.phenotype_key = phenotype_key.clone();
+                }
             })
-            .or_insert(ContextMeta { cohort_key });
+            .or_insert(ContextMeta { cohort_key, phenotype_key });
         apply_token_features(entry, token);
     }
     for layer in &batch.layers {
         let context = context_from_attrs(&layer.attributes);
         let entry = features.entry(context.clone()).or_insert_with(FeatureAccumulator::new);
+        let phenotype_key = phenotype_from_attrs(&layer.attributes);
+        meta.entry(context.clone())
+            .and_modify(|m| {
+                if m.phenotype_key.is_none() {
+                    m.phenotype_key = phenotype_key.clone();
+                }
+            })
+            .or_insert(ContextMeta {
+                cohort_key: None,
+                phenotype_key,
+            });
         apply_layer_features(entry, layer);
     }
     (features, meta)
@@ -211,6 +235,28 @@ fn cohort_from_attrs(attrs: &HashMap<String, Value>) -> Option<String> {
         }
     }
     None
+}
+
+fn phenotype_from_attrs(attrs: &HashMap<String, Value>) -> Option<String> {
+    if let Some(val) = attrs.get("phenotype_key").and_then(|v| v.as_str()) {
+        if !val.trim().is_empty() {
+            return Some(val.to_string());
+        }
+    }
+    let mut parts = Vec::new();
+    for key in ["species", "phenotype", "size_class", "age_bucket", "cohort_id", "genotype"] {
+        if let Some(val) = attrs.get(key).and_then(|v| v.as_str()) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+    if parts.len() > 1 {
+        Some(parts.join("|"))
+    } else {
+        None
+    }
 }
 
 fn apply_layer_features(acc: &mut FeatureAccumulator, layer: &LayerState) {
@@ -261,11 +307,15 @@ fn apply_token_features(acc: &mut FeatureAccumulator, token: &EventToken) {
 fn apply_prior(
     vector: &[f64],
     cohort_key: Option<&str>,
+    phenotype_key: Option<&str>,
     templates: &HashMap<String, PhysiologyTemplate>,
     prior_strength: f64,
+    knowledge: Option<&HealthKnowledgeStore>,
 ) -> Vec<f64> {
     let Some(cohort) = cohort_key else {
-        return vector.to_vec();
+        return knowledge
+            .map(|store| store.apply_physiology_prior(phenotype_key, vector, prior_strength))
+            .unwrap_or_else(|| vector.to_vec());
     };
     let mut prior = vec![0.0; FEATURE_COUNT];
     let mut count = 0.0;
@@ -289,7 +339,9 @@ fn apply_prior(
     for idx in 0..FEATURE_COUNT {
         blended[idx] = vector[idx] * (1.0 - strength) + prior[idx] * strength;
     }
-    blended
+    knowledge
+        .map(|store| store.apply_physiology_prior(phenotype_key, &blended, prior_strength))
+        .unwrap_or(blended)
 }
 
 fn update_template(
@@ -365,7 +417,7 @@ mod tests {
             }],
             source_confidence: HashMap::new(),
         };
-        let report = runtime.update(&batch).expect("report");
+        let report = runtime.update(&batch, None).expect("report");
         assert_eq!(report.template_count, 1);
         assert_eq!(report.deviations.len(), 1);
     }

@@ -12,6 +12,7 @@ use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
 use crate::streaming::dimensions::DimensionTracker;
 use crate::streaming::health_overlay::HealthOverlayRuntime;
+use crate::streaming::knowledge::{AssociationVote, KnowledgeDocument, KnowledgeIngestReport, KnowledgeRuntime};
 use crate::streaming::survival::SurvivalRuntime;
 use crate::streaming::ontology_runtime::OntologyRuntime;
 use crate::streaming::physiology_runtime::PhysiologyRuntime;
@@ -463,6 +464,7 @@ pub struct StreamingInference {
     labels: LabelQueue,
     health_overlay: HealthOverlayRuntime,
     survival: SurvivalRuntime,
+    knowledge: KnowledgeRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
@@ -492,6 +494,7 @@ impl StreamingInference {
         let labels = LabelQueue::default();
         let health_overlay = HealthOverlayRuntime::default();
         let survival = SurvivalRuntime::default();
+        let knowledge = KnowledgeRuntime::default();
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
         } else {
@@ -510,6 +513,7 @@ impl StreamingInference {
             labels,
             health_overlay,
             survival,
+            knowledge,
             spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
@@ -541,6 +545,18 @@ impl StreamingInference {
         self.process_batch(batch)
     }
 
+    pub fn ingest_knowledge_document(
+        &mut self,
+        doc: KnowledgeDocument,
+        timestamp: crate::schema::Timestamp,
+    ) -> KnowledgeIngestReport {
+        self.knowledge.ingest_document(doc, timestamp)
+    }
+
+    pub fn submit_knowledge_vote(&mut self, vote: AssociationVote) -> Option<crate::streaming::knowledge::KnowledgeAssociation> {
+        self.knowledge.submit_vote(vote)
+    }
+
     pub fn take_last_fabric_share(&mut self, node_id: String) -> Option<NeuralFabricShare> {
         let batch = self.last_batch.take()?;
         let motifs = std::mem::take(&mut self.last_motifs);
@@ -561,11 +577,13 @@ impl StreamingInference {
         let behavior_frame = self.processor.take_last_behavior_frame();
         self.last_report_metadata.clear();
         let dimension_report = self.dimensions.update(&batch);
-        let physiology_report = self.physiology.update(&batch);
+        let physiology_report = self
+            .physiology
+            .update(&batch, Some(self.knowledge.store()));
         let label_report = self.labels.update(&batch, dimension_report.as_ref());
         let survival_report = behavior_frame
             .as_ref()
-            .map(|frame| self.survival.update(frame, physiology_report.as_ref()));
+            .map(|frame| self.survival.update(frame, physiology_report.as_ref(), Some(self.knowledge.store())));
         let health_report =
             self.health_overlay
                 .update(
@@ -659,6 +677,25 @@ impl StreamingInference {
                 serde_json::to_value(report)?,
             );
         }
+        if let Some(report) = self.knowledge.queue_report(batch.timestamp) {
+            report_metadata.insert(
+                "knowledge_queue".to_string(),
+                serde_json::to_value(&report)?,
+            );
+            snapshot.metadata.insert(
+                "knowledge_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        let knowledge_store_report = self.knowledge.store_report(batch.timestamp);
+        report_metadata.insert(
+            "knowledge_store".to_string(),
+            serde_json::to_value(&knowledge_store_report)?,
+        );
+        snapshot.metadata.insert(
+            "knowledge_store".to_string(),
+            serde_json::to_value(knowledge_store_report)?,
+        );
         if let Some(report) = &survival_report {
             report_metadata.insert(
                 "survival_report".to_string(),

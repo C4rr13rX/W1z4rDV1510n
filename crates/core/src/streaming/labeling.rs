@@ -1,3 +1,4 @@
+use crate::blockchain::WorkKind;
 use crate::network::compute_payload_hash;
 use crate::schema::Timestamp;
 use crate::streaming::dimensions::DimensionReport;
@@ -9,12 +10,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabelCandidate {
     pub id: String,
+    pub work_id: String,
+    pub work_kind: WorkKind,
     pub timestamp: Timestamp,
     pub summary: String,
     #[serde(default)]
     pub entity_id: Option<String>,
     pub feature: String,
     pub priority: f64,
+    pub reward_score: f64,
     pub source: String,
     #[serde(default)]
     pub evidence: HashMap<String, Value>,
@@ -77,11 +81,14 @@ impl LabelQueue {
                 evidence.insert("count".to_string(), Value::from(info.count as u64));
                 let candidate = LabelCandidate {
                     id: candidate_id(&info.name, report.timestamp),
+                    work_id: work_id_for(&info.name, report.timestamp),
+                    work_kind: WorkKind::HumanAnnotation,
                     timestamp: report.timestamp,
                     summary,
                     entity_id: None,
                     feature: info.name.clone(),
                     priority: 0.8,
+                    reward_score: 0.8,
                     source: "dimension_tracker".to_string(),
                     evidence,
                 };
@@ -110,11 +117,14 @@ impl LabelQueue {
                 evidence.insert("raw_value".to_string(), value.clone());
                 let candidate = LabelCandidate {
                     id: candidate_id(&feature_key, batch.timestamp),
+                    work_id: work_id_for(&feature_key, batch.timestamp),
+                    work_kind: WorkKind::HumanAnnotation,
                     timestamp: batch.timestamp,
                     summary,
                     entity_id: entity_id.clone(),
                     feature: feature_key,
                     priority,
+                    reward_score: priority,
                     source: "token_attribute".to_string(),
                     evidence,
                 };
@@ -144,11 +154,14 @@ impl LabelQueue {
                 evidence.insert("raw_value".to_string(), value.clone());
                 let candidate = LabelCandidate {
                     id: candidate_id(&feature_key, batch.timestamp),
+                    work_id: work_id_for(&feature_key, batch.timestamp),
+                    work_kind: WorkKind::HumanAnnotation,
                     timestamp: batch.timestamp,
                     summary,
                     entity_id: entity_id.clone(),
                     feature: feature_key,
                     priority,
+                    reward_score: priority,
                     source: "layer_attribute".to_string(),
                     evidence,
                 };
@@ -192,6 +205,11 @@ impl Default for LabelQueue {
 
 fn candidate_id(feature: &str, ts: Timestamp) -> String {
     let payload = format!("label|{}|{}", feature, ts.unix);
+    compute_payload_hash(payload.as_bytes())
+}
+
+fn work_id_for(feature: &str, ts: Timestamp) -> String {
+    let payload = format!("work|label|{}|{}", feature, ts.unix);
     compute_payload_hash(payload.as_bytes())
 }
 

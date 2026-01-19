@@ -25,6 +25,7 @@ pub mod dimensions;
 pub mod labeling;
 pub mod health_overlay;
 pub mod survival;
+pub mod knowledge;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -53,6 +54,12 @@ pub use dimensions::{DimensionConfig, DimensionInfo, DimensionReport, DimensionT
 pub use labeling::{LabelCandidate, LabelQueue, LabelQueueConfig, LabelQueueReport};
 pub use health_overlay::{HealthDimensionPalette, HealthDimensionScore, HealthEntityOverlay, HealthOverlayConfig, HealthOverlayReport, HealthOverlayRuntime};
 pub use survival::{SurvivalConfig, SurvivalEntityMetrics, SurvivalInteraction, SurvivalReport, SurvivalRuntime};
+pub use knowledge::{
+    AssociationStatus, AssociationVote, FigureAsset, FigureAssociationTask, HealthKnowledgeStore,
+    KnowledgeAssociation, KnowledgeDocument, KnowledgeIngestReport, KnowledgeQueue,
+    KnowledgeQueueConfig, KnowledgeQueueReport, KnowledgeRuntime, KnowledgeStoreReport, TextBlock,
+    TextCandidate,
+};
 pub use behavior::{
     ActionChannel, ActionConstraint, ActionKind, ActionSample, BackpressureStatus, BehaviorConstraints,
     BehaviorFrame, BehaviorGraph, BehaviorInput, BehaviorMotif, BehaviorPrediction, BehaviorState,
