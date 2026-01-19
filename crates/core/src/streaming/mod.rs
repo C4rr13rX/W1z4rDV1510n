@@ -20,6 +20,10 @@ pub mod ontology_runtime;
 pub mod physiology_runtime;
 pub mod behavior;
 pub mod fabric;
+pub mod spatial;
+pub mod dimensions;
+pub mod labeling;
+pub mod health_overlay;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -44,6 +48,9 @@ pub use branching_runtime::{BranchingReport, StreamingBranchingRuntime};
 pub use plasticity_runtime::{PlasticityReport, StreamingPlasticityRuntime};
 pub use ontology_runtime::{OntologyReport, OntologyRuntime};
 pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};
+pub use dimensions::{DimensionConfig, DimensionInfo, DimensionReport, DimensionTracker};
+pub use labeling::{LabelCandidate, LabelQueue, LabelQueueConfig, LabelQueueReport};
+pub use health_overlay::{HealthDimensionPalette, HealthDimensionScore, HealthEntityOverlay, HealthOverlayConfig, HealthOverlayReport, HealthOverlayRuntime};
 pub use behavior::{
     ActionChannel, ActionConstraint, ActionKind, ActionSample, BackpressureStatus, BehaviorConstraints,
     BehaviorFrame, BehaviorGraph, BehaviorInput, BehaviorMotif, BehaviorPrediction, BehaviorState,
@@ -52,3 +59,4 @@ pub use behavior::{
     TimeFrequencySummary,
 };
 pub use fabric::NeuralFabricShare;
+pub use spatial::{SpatialConfig, SpatialEstimate, SpatialEstimator, insert_spatial_attrs};

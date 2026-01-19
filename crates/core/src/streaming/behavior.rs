@@ -1,6 +1,7 @@
 
 use crate::schema::Timestamp;
 use crate::streaming::motor::{MotorConfig, MotorFeatureExtractor, PoseFrame};
+use crate::streaming::spatial::{insert_spatial_attrs, SpatialEstimate, SpatialEstimator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -614,6 +615,7 @@ pub struct BehaviorSubstrate {
     history: HashMap<String, VecDeque<BehaviorState>>,
     motifs: MotifExtractor,
     constraints: BehaviorConstraints,
+    spatial: SpatialEstimator,
 }
 
 impl BehaviorSubstrate {
@@ -624,6 +626,7 @@ impl BehaviorSubstrate {
             adapters: HashMap::new(),
             history: HashMap::new(),
             constraints: BehaviorConstraints::default(),
+            spatial: SpatialEstimator::default(),
         }
     }
 
@@ -648,6 +651,19 @@ impl BehaviorSubstrate {
         let history = self.history.entry(input.entity_id.clone()).or_insert_with(VecDeque::new);
         let prev_state = history.back();
         let mut state = adapter.map_input(&input, prev_state);
+        let mut spatial = self.spatial.estimate(input.pose.as_ref(), &input.metadata);
+        if spatial.position.is_none() {
+            if let Some(pos) = state.position {
+                spatial.position = Some(pos);
+                spatial.dimensionality = spatial.dimensionality.max(2);
+                spatial.confidence = spatial.confidence.max(state.confidence);
+                spatial.source = "adapter".to_string();
+            }
+        }
+        if spatial.position.is_some() {
+            state.position = spatial.position;
+        }
+        insert_spatial_attrs(&mut state.attributes, &spatial);
         self.constraints.apply(&mut state.action);
 
         history.push_back(state.clone());
@@ -692,6 +708,10 @@ impl BehaviorSubstrate {
 
     pub fn motif_count(&self) -> usize {
         self.motifs.motif_count()
+    }
+
+    pub fn estimate_spatial(&self, input: &BehaviorInput) -> SpatialEstimate {
+        self.spatial.estimate(input.pose.as_ref(), &input.metadata)
     }
 
     fn latest_states(&self) -> Vec<BehaviorState> {

@@ -28,6 +28,8 @@ pub fn token_batch_to_snapshot(batch: &TokenBatch, config: &SymbolizeConfig) -> 
     let mut max_x = 0.0;
     let mut min_y = 0.0;
     let mut max_y = 0.0;
+    let mut min_z = 0.0;
+    let mut max_z = 0.0;
 
     for (idx, token) in batch.tokens.iter().enumerate() {
         let (position, source_label) =
@@ -52,7 +54,7 @@ pub fn token_batch_to_snapshot(batch: &TokenBatch, config: &SymbolizeConfig) -> 
                 Value::Object(map_from_attributes(&token.attributes)),
             );
         }
-        update_bounds(position, &mut min_x, &mut max_x, &mut min_y, &mut max_y);
+        update_bounds(position, &mut min_x, &mut max_x, &mut min_y, &mut max_y, &mut min_z, &mut max_z);
         symbols.push(Symbol {
             id,
             symbol_type: SymbolType::Custom,
@@ -78,7 +80,7 @@ pub fn token_batch_to_snapshot(batch: &TokenBatch, config: &SymbolizeConfig) -> 
                 Value::Object(map_from_attributes(&layer.attributes)),
             );
         }
-        update_bounds(position, &mut min_x, &mut max_x, &mut min_y, &mut max_y);
+        update_bounds(position, &mut min_x, &mut max_x, &mut min_y, &mut max_y, &mut min_z, &mut max_z);
         symbols.push(Symbol {
             id,
             symbol_type: SymbolType::Custom,
@@ -89,9 +91,11 @@ pub fn token_batch_to_snapshot(batch: &TokenBatch, config: &SymbolizeConfig) -> 
 
     let width = (max_x - min_x).abs().max(1.0) + 1.0;
     let height = (max_y - min_y).abs().max(1.0) + 1.0;
+    let depth = (max_z - min_z).abs().max(1.0) + 1.0;
     let mut bounds = HashMap::new();
     bounds.insert("width".to_string(), width);
     bounds.insert("height".to_string(), height);
+    bounds.insert("depth".to_string(), depth);
 
     let mut metadata = HashMap::new();
     if !batch.source_confidence.is_empty() {
@@ -123,6 +127,9 @@ fn token_position(
     let x = offset_secs * config.time_scale;
     let (source_idx, label) = source_index(token.source);
     let y = source_idx as f64 * config.domain_spacing;
+    if let Some(pos) = position_from_attrs(&token.attributes) {
+        return (pos, label);
+    }
     (
         Position {
             x,
@@ -142,7 +149,7 @@ fn layer_position(
     let offset_secs = (layer.timestamp.unix - batch_time.unix) as f64;
     let x = offset_secs * config.time_scale;
     let y = config.layer_base_y + idx as f64 * config.layer_spacing;
-    Position { x, y, z: 0.0 }
+    position_from_attrs(&layer.attributes).unwrap_or(Position { x, y, z: 0.0 })
 }
 
 fn token_symbol_id(token: &EventToken, idx: usize) -> String {
@@ -225,7 +232,15 @@ fn map_from_attributes(input: &HashMap<String, Value>) -> Map<String, Value> {
     map
 }
 
-fn update_bounds(pos: Position, min_x: &mut f64, max_x: &mut f64, min_y: &mut f64, max_y: &mut f64) {
+fn update_bounds(
+    pos: Position,
+    min_x: &mut f64,
+    max_x: &mut f64,
+    min_y: &mut f64,
+    max_y: &mut f64,
+    min_z: &mut f64,
+    max_z: &mut f64,
+) {
     if pos.x < *min_x {
         *min_x = pos.x;
     }
@@ -238,6 +253,35 @@ fn update_bounds(pos: Position, min_x: &mut f64, max_x: &mut f64, min_y: &mut f6
     if pos.y > *max_y {
         *max_y = pos.y;
     }
+    if pos.z < *min_z {
+        *min_z = pos.z;
+    }
+    if pos.z > *max_z {
+        *max_z = pos.z;
+    }
+}
+
+fn position_from_attrs(attrs: &HashMap<String, Value>) -> Option<Position> {
+    let x = attrs.get("pos_x").and_then(|v| v.as_f64());
+    let y = attrs.get("pos_y").and_then(|v| v.as_f64());
+    let z = attrs.get("pos_z").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    if let (Some(x), Some(y)) = (x, y) {
+        return Some(Position { x, y, z });
+    }
+    if let Some(Value::Array(arr)) = attrs.get("position") {
+        let mut coords = [0.0; 3];
+        for (idx, val) in arr.iter().take(3).enumerate() {
+            if let Some(num) = val.as_f64() {
+                coords[idx] = num;
+            }
+        }
+        return Some(Position {
+            x: coords[0],
+            y: coords[1],
+            z: coords[2],
+        });
+    }
+    None
 }
 
 #[cfg(test)]

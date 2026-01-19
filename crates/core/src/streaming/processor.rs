@@ -1,8 +1,8 @@
 use crate::config::StreamingConfig;
 use crate::orchestrator::{RunOutcome, run_with_snapshot};
 use crate::streaming::behavior::{
-    BehaviorInput, BehaviorMotif, BehaviorSubstrate, BehaviorSubstrateConfig, SensorKind,
-    SensorSample, SpeciesKind,
+    BehaviorInput, BehaviorMotif, BehaviorState, BehaviorSubstrate, BehaviorSubstrateConfig,
+    SensorKind, SensorSample, SpeciesKind,
 };
 use crate::streaming::fabric::NeuralFabricShare;
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
@@ -10,17 +10,21 @@ use crate::streaming::align::StreamingAligner;
 use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
 use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
+use crate::streaming::dimensions::DimensionTracker;
+use crate::streaming::health_overlay::HealthOverlayRuntime;
 use crate::streaming::ontology_runtime::OntologyRuntime;
 use crate::streaming::physiology_runtime::PhysiologyRuntime;
 use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
+use crate::streaming::labeling::LabelQueue;
 use crate::streaming::symbolize::{SymbolizeConfig, token_batch_to_snapshot};
 use crate::streaming::topic::{TopicEventExtractor, TopicSample, TopicConfig};
 use crate::streaming::spike_runtime::StreamingSpikeRuntime;
 use crate::streaming::temporal::TemporalInferenceCore;
 use crate::streaming::ultradian::{SignalSample, UltradianLayerExtractor};
+use crate::streaming::spatial::insert_spatial_attrs;
 use crate::config::RunConfig;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -160,20 +164,6 @@ impl StreamingProcessor {
                 );
             }
         }
-        let tokens = vec![EventToken {
-            id: String::new(),
-            kind: EventKind::BehavioralAtom,
-            onset: timestamp,
-            duration_secs: 1.0,
-            confidence: 1.0,
-            attributes: HashMap::from([
-                ("entity_id".to_string(), Value::String(entity_id.clone())),
-                ("signal".to_string(), Value::from(signal.signal)),
-                ("signal_quality".to_string(), Value::from(quality)),
-            ]),
-            source: Some(StreamSource::PeopleVideo),
-        }];
-        let mut tokens = tokens;
         let behavior_input = BehaviorInput {
             entity_id,
             timestamp,
@@ -187,6 +177,25 @@ impl StreamingProcessor {
             pose: None,
             metadata: metadata.clone(),
         };
+        let spatial = self.behavior_substrate.estimate_spatial(&behavior_input);
+        for layer in &mut layers {
+            insert_spatial_attrs(&mut layer.attributes, &spatial);
+        }
+        let mut attributes = HashMap::from([
+            ("entity_id".to_string(), Value::String(behavior_input.entity_id.clone())),
+            ("signal".to_string(), Value::from(signal.signal)),
+            ("signal_quality".to_string(), Value::from(quality)),
+        ]);
+        insert_spatial_attrs(&mut attributes, &spatial);
+        let mut tokens = vec![EventToken {
+            id: String::new(),
+            kind: EventKind::BehavioralAtom,
+            onset: timestamp,
+            duration_secs: 1.0,
+            confidence: 1.0,
+            attributes,
+            source: Some(StreamSource::PeopleVideo),
+        }];
         self.append_behavior_tokens(behavior_input, &mut tokens, StreamSource::PeopleVideo);
         Some(TokenBatch {
             timestamp,
@@ -298,16 +307,6 @@ impl StreamingProcessor {
                 Value::Object(map_from_metadata(&output.metadata)),
             );
         }
-        let tokens = vec![EventToken {
-            id: String::new(),
-            kind: EventKind::BehavioralAtom,
-            onset: output.timestamp,
-            duration_secs: 1.0,
-            confidence: output.features.confidence,
-            attributes,
-            source: Some(StreamSource::PeopleVideo),
-        }];
-        let mut tokens = tokens;
         let behavior_input = BehaviorInput {
             entity_id: output.entity_id.clone(),
             timestamp: output.timestamp,
@@ -317,6 +316,20 @@ impl StreamingProcessor {
             pose: Some(behavior_frame),
             metadata: metadata.clone(),
         };
+        let spatial = self.behavior_substrate.estimate_spatial(&behavior_input);
+        for layer in &mut layers {
+            insert_spatial_attrs(&mut layer.attributes, &spatial);
+        }
+        insert_spatial_attrs(&mut attributes, &spatial);
+        let mut tokens = vec![EventToken {
+            id: String::new(),
+            kind: EventKind::BehavioralAtom,
+            onset: output.timestamp,
+            duration_secs: 1.0,
+            confidence: output.features.confidence,
+            attributes,
+            source: Some(StreamSource::PeopleVideo),
+        }];
         self.append_behavior_tokens(behavior_input, &mut tokens, StreamSource::PeopleVideo);
         Some(TokenBatch {
             timestamp: output.timestamp,
@@ -385,6 +398,7 @@ impl StreamingProcessor {
         let motifs = frame.motifs;
         self.last_behavior_motifs
             .extend(motifs.iter().cloned());
+        let state = frame.states.iter().find(|state| state.entity_id == entity_id);
         for motif in motifs.into_iter().filter(|motif| motif.entity_id == entity_id) {
             let mut attributes = HashMap::new();
             attributes.insert("entity_id".to_string(), Value::String(motif.entity_id.clone()));
@@ -410,6 +424,9 @@ impl StreamingProcessor {
                 "tf_phases".to_string(),
                 Value::Array(motif.time_frequency.phases.iter().copied().map(Value::from).collect()),
             );
+            if let Some(state) = state {
+                copy_spatial_from_state(&mut attributes, state);
+            }
             tokens.push(EventToken {
                 id: String::new(),
                 kind: EventKind::BehavioralToken,
@@ -432,6 +449,9 @@ pub struct StreamingInference {
     plasticity: StreamingPlasticityRuntime,
     ontology: OntologyRuntime,
     physiology: PhysiologyRuntime,
+    dimensions: DimensionTracker,
+    labels: LabelQueue,
+    health_overlay: HealthOverlayRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
@@ -457,6 +477,9 @@ impl StreamingInference {
         physiology_config.enabled =
             physiology_config.enabled && run_config.streaming.layer_flags.physiology_enabled;
         let physiology = PhysiologyRuntime::new(physiology_config);
+        let dimensions = DimensionTracker::default();
+        let labels = LabelQueue::default();
+        let health_overlay = HealthOverlayRuntime::default();
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
         } else {
@@ -471,6 +494,9 @@ impl StreamingInference {
             plasticity,
             ontology,
             physiology,
+            dimensions,
+            labels,
+            health_overlay,
             spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
@@ -520,7 +546,12 @@ impl StreamingInference {
         self.last_batch = Some(batch.clone());
         self.last_motifs = self.processor.take_last_motifs();
         self.last_report_metadata.clear();
+        let dimension_report = self.dimensions.update(&batch);
         let physiology_report = self.physiology.update(&batch);
+        let label_report = self.labels.update(&batch, dimension_report.as_ref());
+        let health_report =
+            self.health_overlay
+                .update(&batch, physiology_report.as_ref(), dimension_report.as_ref());
         let temporal_report = self.temporal.update(&batch);
         let plasticity_report = temporal_report
             .as_ref()
@@ -586,6 +617,36 @@ impl StreamingInference {
                 serde_json::to_value(report)?,
             );
         }
+        if let Some(report) = &dimension_report {
+            report_metadata.insert(
+                "dimension_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "dimension_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &label_report {
+            report_metadata.insert(
+                "label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &health_report {
+            report_metadata.insert(
+                "health_overlay".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "health_overlay".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
         if let Some(report) = causal_report {
             report_metadata.insert(
                 "causal_report".to_string(),
@@ -646,6 +707,27 @@ fn map_from_metadata(input: &HashMap<String, Value>) -> Map<String, Value> {
         map.insert(key.clone(), value.clone());
     }
     map
+}
+
+fn copy_spatial_from_state(attrs: &mut HashMap<String, Value>, state: &BehaviorState) {
+    for key in [
+        "space_frame",
+        "space_dimensionality",
+        "space_confidence",
+        "space_source",
+        "pos_x",
+        "pos_y",
+        "pos_z",
+    ] {
+        if let Some(val) = state.attributes.get(key) {
+            attrs.insert(key.to_string(), val.clone());
+        }
+    }
+    if let Some(pos) = state.position {
+        attrs.entry("pos_x".to_string()).or_insert_with(|| Value::from(pos[0]));
+        attrs.entry("pos_y".to_string()).or_insert_with(|| Value::from(pos[1]));
+        attrs.entry("pos_z".to_string()).or_insert_with(|| Value::from(pos[2]));
+    }
 }
 
 fn species_from_meta(metadata: &HashMap<String, Value>) -> SpeciesKind {
