@@ -23,6 +23,7 @@ pub enum ComputeJobKind {
     EventIntensity,
     CausalDiscovery,
     QuantumAnneal,
+    QuantumCalibration,
 }
 
 #[derive(Debug, Clone)]
@@ -108,7 +109,7 @@ impl ComputeRouter {
         if self.compute.quantum_endpoints.is_empty() {
             return false;
         }
-        matches!(job, ComputeJobKind::QuantumAnneal)
+        matches!(job, ComputeJobKind::QuantumAnneal | ComputeJobKind::QuantumCalibration)
     }
 
     fn should_use_gpu(&self, job: ComputeJobKind) -> bool {

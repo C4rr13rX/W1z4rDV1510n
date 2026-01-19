@@ -21,6 +21,7 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **Search-integrated proposals** - occupancy grids + A* planning, teleport-on-failure, and overlap repair keep particles feasible; caches avoid rebuild churn.
 - **Goal/role/relational priors** - ML hooks (`None`, `SimpleRules`, `GoalAnchor`), relational graphs, and hashed motifs bias initialization and energy scoring without heavy models.
 - **Quantum-inspired stacks** - optional `quantum` mode couples Trotter slices; `energy.w_stack_hash` aligns with past trajectories (`stack_history`) and pulls toward likely futures for gap-filling.
+- **Quantum API hooks** - optional remote quantum endpoints (HTTP) with calibration feedback that tunes simulator parameters; simulator fallback stays active when endpoints are absent.
 - **Brain-like neuro layer** - neurons carry dendrites/axon splits, excitatory & inhibitory synapses, light synaptic fatigue, winner-take-all sparsity, and STDP-lite nudges. The pool learns co-occurring roles/zones, spawns composite neurons + cross-linked mini-networks, and feeds proposal biasing plus `energy.w_neuro_alignment`.
 - **Resource-aware scheduling** - capped rayon pools, memory-aware budgets (`W1Z4RDV1510N_THREAD_BUDGET`, `hardware_overrides.max_threads`), and chunked updates keep an i5/32GB responsive.
 - **Homeostasis controller** - detects plateaus and reheats/mutates briefly to escape local minima while chasing 90-100% accuracy.
@@ -235,6 +236,37 @@ Output:
 - `logs/results.json` (best state, energy breakdown, path diagnostics).
 - `logs/run.jsonl` (if `log_path` set): structured logs with iteration metrics.
 - **Quantum + stack hashing:** add a `stack_history` array to the snapshot, set `energy.w_stack_hash` > 0, and toggle `"quantum": { "enabled": true, ... }` to run the coupled Trotter-slice annealer. `energy.stack_alignment_topk`, `energy.stack_alignment_weight`, `energy.stack_future_horizon`, and `energy.stack_future_weight` let you bias toward the closest history frames (by overlap distance) and softly pull particles toward where those frames are headed, which is handy when the observed sequence is sparse/staggered. `quantum.driver_final_strength` lets you taper the transverse-field driver toward the end of the schedule.
+- **Quantum API calibration (optional):** set `compute.allow_quantum=true`, add `compute.quantum_endpoints`, and toggle `quantum.remote_enabled=true` with a `quantum.calibration_path` to persist adjustments from remote runs. Remote calls fall back to the local simulator if endpoints are unavailable.
+
+Example config excerpt for remote calibration:
+
+```json
+{
+  "compute": {
+    "allow_quantum": true,
+    "quantum_endpoints": [
+      {
+        "name": "quantum-gateway",
+        "provider": "GENERIC",
+        "url": "http://localhost:5050/quantum/submit",
+        "timeout_secs": 45,
+        "priority": 10,
+        "auth_env": "W1Z4RDV1510N_QUANTUM_TOKEN",
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer "
+      }
+    ]
+  },
+  "quantum": {
+    "enabled": true,
+    "remote_enabled": true,
+    "remote_timeout_secs": 45,
+    "remote_trace_samples": 128,
+    "calibration_alpha": 0.2,
+    "calibration_path": "data/quantum_calibration.json"
+  }
+}
+```
 
 ### Logging Options
 

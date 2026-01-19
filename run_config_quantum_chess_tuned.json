@@ -61,7 +61,12 @@
     "driver_strength": 0.25,
     "driver_final_strength": 0.05,
     "worldline_mix_prob": 0.08,
-    "slice_temperature_scale": 1.0
+    "slice_temperature_scale": 1.0,
+    "remote_enabled": false,
+    "remote_timeout_secs": 45,
+    "remote_trace_samples": 128,
+    "calibration_alpha": 0.2,
+    "calibration_path": "data/quantum_calibration.json"
   },
   "random_seed": 2026,
   "random": { "provider": "DETERMINISTIC", "seed": 2026 },

@@ -44,6 +44,8 @@ axum = { version = "0.7", features = ["macros", "json"] }
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
 cfg-if = "1.0"
 quick-xml = "0.31"
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",

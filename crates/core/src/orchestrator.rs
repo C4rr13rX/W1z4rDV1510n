@@ -8,6 +8,11 @@ use crate::neuro::NeuroRuntime;
 use crate::objective::GameObjective;
 use crate::proposal::DefaultProposalKernel;
 use crate::quantum::anneal_quantum;
+use crate::quantum_calibration::{
+    QuantumCalibrationState, build_calibration_job, build_calibration_request,
+    parse_calibration_response,
+};
+use crate::quantum_executor::QuantumHttpExecutor;
 use crate::random::{RandomProviderDescriptor, create_random_provider};
 use crate::results::{Results, analyze_results};
 use crate::schema::{EnvironmentSnapshot, Population, Position};
@@ -19,7 +24,8 @@ use rand::rngs::StdRng;
 use std::collections::HashSet;
 use std::fs;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+use crate::compute::QuantumExecutor;
 
 pub struct RunOutcome {
     pub results: Results,
@@ -45,6 +51,7 @@ pub fn run_with_snapshot(
     let live_neuro = LiveNeuroSink::from_config(&config.logging);
     let random_provider = create_random_provider(&config.random, config.random_seed)?;
     let random_descriptor = random_provider.descriptor();
+    let calibration_seed = random_provider.next_seed("quantum_calibration");
     info!(
         target: "w1z4rdv1510n::random",
         provider = ?random_descriptor,
@@ -59,12 +66,55 @@ pub fn run_with_snapshot(
         "starting simulation run"
     );
     let snapshot = Arc::new(snapshot);
+    let calibration_run_id = format!(
+        "quantum-calibration-{}-{}",
+        snapshot.timestamp.unix,
+        calibration_seed
+    );
     info!(
         target: "w1z4rdv1510n::orchestrator",
         symbols = snapshot.symbols.len(),
         timestamp = snapshot.timestamp.unix,
         "snapshot loaded"
     );
+    let mut calibration_state = config
+        .quantum
+        .calibration_path
+        .as_ref()
+        .and_then(|path| match QuantumCalibrationState::load(path) {
+            Ok(state) => Some(state),
+            Err(err) => {
+                warn!(
+                    target: "w1z4rdv1510n::annealing::quantum",
+                    error = %err,
+                    path = ?path,
+                    "failed to load quantum calibration state"
+                );
+                None
+            }
+        });
+    let mut quantum_config = config.quantum.clone();
+    if let Some(state) = calibration_state.as_ref() {
+        quantum_config = state.apply(&quantum_config);
+    }
+    let quantum_executor = if config.quantum.remote_enabled
+        && config.compute.allow_quantum
+        && !config.compute.quantum_endpoints.is_empty()
+    {
+        match QuantumHttpExecutor::new(config.compute.quantum_endpoints.clone()) {
+            Ok(executor) => Some(executor),
+            Err(err) => {
+                warn!(
+                    target: "w1z4rdv1510n::annealing::quantum",
+                    error = %err,
+                    "failed to initialize quantum HTTP executor"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let neuro_runtime = if config.neuro.enabled {
         Some(Arc::new(NeuroRuntime::new(
             snapshot.as_ref(),
@@ -170,7 +220,7 @@ pub fn run_with_snapshot(
             neuro_runtime.clone(),
             &config.homeostasis,
             &mut rng,
-            &config.quantum,
+            &quantum_config,
             live_frame.as_ref(),
             live_neuro.as_ref(),
         );
@@ -200,6 +250,73 @@ pub fn run_with_snapshot(
         Some(&search_module),
         snapshot.as_ref(),
     );
+    if config.quantum.remote_enabled {
+        if calibration_state.is_none() {
+            warn!(
+                target: "w1z4rdv1510n::annealing::quantum",
+                "quantum remote enabled but calibration_path is not set; skipping calibration"
+            );
+        } else if let Some(executor) = quantum_executor.as_ref() {
+            let request = build_calibration_request(
+                calibration_run_id.clone(),
+                results.best_energy,
+                acceptance_trace.last().copied(),
+                &results.diagnostics.energy_trace,
+                &quantum_config,
+                config.quantum.remote_trace_samples,
+            );
+            match build_calibration_job(&request, config.quantum.remote_timeout_secs) {
+                Ok(job) => match executor.submit(job) {
+                    Ok(result) => match parse_calibration_response(result) {
+                        Ok(response) => {
+                            if let Some(state) = calibration_state.as_mut() {
+                                state.update_from_adjustment(
+                                    &response.adjustments,
+                                    config.quantum.calibration_alpha,
+                                );
+                                if let Some(path) = config.quantum.calibration_path.as_ref() {
+                                    if let Err(err) = state.save(path) {
+                                        warn!(
+                                            target: "w1z4rdv1510n::annealing::quantum",
+                                            error = %err,
+                                            path = ?path,
+                                            "failed to persist quantum calibration"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                target: "w1z4rdv1510n::annealing::quantum",
+                                error = %err,
+                                "quantum calibration response rejected"
+                            );
+                        }
+                    },
+                    Err(err) => {
+                        warn!(
+                            target: "w1z4rdv1510n::annealing::quantum",
+                            error = %err,
+                            "quantum calibration request failed"
+                        );
+                    }
+                },
+                Err(err) => {
+                    warn!(
+                        target: "w1z4rdv1510n::annealing::quantum",
+                        error = %err,
+                        "failed to build quantum calibration job"
+                    );
+                }
+            }
+        } else {
+            warn!(
+                target: "w1z4rdv1510n::annealing::quantum",
+                "quantum remote enabled but no executor available"
+            );
+        }
+    }
     info!(
         target: "w1z4rdv1510n::orchestrator",
         best_energy = results.best_energy,

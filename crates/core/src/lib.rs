@@ -20,6 +20,8 @@ pub mod plasticity;
 pub mod planner;
 pub mod proposal;
 pub mod quantum;
+pub mod quantum_calibration;
+pub mod quantum_executor;
 pub mod random;
 pub mod results;
 pub mod schema;

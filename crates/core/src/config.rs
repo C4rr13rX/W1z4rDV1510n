@@ -126,6 +126,28 @@ impl RunConfig {
                 "quantum.worldline_mix_prob must be in [0,1]"
             );
         }
+        if self.quantum.remote_enabled {
+            anyhow::ensure!(
+                self.compute.allow_quantum,
+                "quantum.remote_enabled requires compute.allow_quantum"
+            );
+            anyhow::ensure!(
+                !self.compute.quantum_endpoints.is_empty(),
+                "quantum.remote_enabled requires compute.quantum_endpoints"
+            );
+            anyhow::ensure!(
+                self.quantum.remote_timeout_secs > 0,
+                "quantum.remote_timeout_secs must be > 0"
+            );
+            anyhow::ensure!(
+                self.quantum.remote_trace_samples > 0,
+                "quantum.remote_trace_samples must be > 0"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.quantum.calibration_alpha),
+                "quantum.calibration_alpha must be in [0,1]"
+            );
+        }
         anyhow::ensure!(
             self.proposal.local_move_prob
                 + self.proposal.group_move_prob
@@ -463,6 +485,10 @@ impl RunConfig {
                 anyhow::ensure!(
                     !endpoint.url.trim().is_empty(),
                     "compute.quantum_endpoints url must be non-empty"
+                );
+                anyhow::ensure!(
+                    endpoint.timeout_secs > 0,
+                    "compute.quantum_endpoints timeout_secs must be > 0"
                 );
             }
         }
@@ -806,6 +832,16 @@ pub struct QuantumConfig {
     pub worldline_mix_prob: f64,
     #[serde(default = "QuantumConfig::default_temp_scale")]
     pub slice_temperature_scale: f64,
+    #[serde(default)]
+    pub remote_enabled: bool,
+    #[serde(default = "QuantumConfig::default_remote_timeout")]
+    pub remote_timeout_secs: u64,
+    #[serde(default = "QuantumConfig::default_remote_trace_samples")]
+    pub remote_trace_samples: usize,
+    #[serde(default = "QuantumConfig::default_calibration_alpha")]
+    pub calibration_alpha: f64,
+    #[serde(default)]
+    pub calibration_path: Option<PathBuf>,
 }
 
 impl QuantumConfig {
@@ -828,6 +864,18 @@ impl QuantumConfig {
     fn default_temp_scale() -> f64 {
         1.0
     }
+
+    fn default_remote_timeout() -> u64 {
+        45
+    }
+
+    fn default_remote_trace_samples() -> usize {
+        128
+    }
+
+    fn default_calibration_alpha() -> f64 {
+        0.2
+    }
 }
 
 impl Default for QuantumConfig {
@@ -839,6 +887,11 @@ impl Default for QuantumConfig {
             driver_final_strength: Self::default_driver_final(),
             worldline_mix_prob: Self::default_worldline(),
             slice_temperature_scale: Self::default_temp_scale(),
+            remote_enabled: false,
+            remote_timeout_secs: Self::default_remote_timeout(),
+            remote_trace_samples: Self::default_remote_trace_samples(),
+            calibration_alpha: Self::default_calibration_alpha(),
+            calibration_path: None,
         }
     }
 }
@@ -1373,11 +1426,16 @@ impl Default for ComputeRoutingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct QuantumEndpointConfig {
     pub name: String,
     pub url: String,
-    #[serde(default)]
     pub timeout_secs: u64,
+    pub provider: String,
+    pub priority: u8,
+    pub auth_env: Option<String>,
+    pub auth_header: String,
+    pub auth_prefix: String,
 }
 
 impl Default for QuantumEndpointConfig {
@@ -1386,6 +1444,11 @@ impl Default for QuantumEndpointConfig {
             name: "default".to_string(),
             url: String::new(),
             timeout_secs: 30,
+            provider: "generic".to_string(),
+            priority: 50,
+            auth_env: None,
+            auth_header: "Authorization".to_string(),
+            auth_prefix: "Bearer ".to_string(),
         }
     }
 }
@@ -1713,4 +1776,39 @@ fn env_usize(key: &str) -> Option<usize> {
     std::env::var(key)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunConfig;
+
+    #[test]
+    fn quantum_remote_requires_endpoints() {
+        let raw = r#"{
+            "t_end": { "unix": 0 },
+            "quantum": { "enabled": true, "remote_enabled": true },
+            "compute": { "allow_quantum": true, "quantum_endpoints": [] }
+        }"#;
+        let config: RunConfig = serde_json::from_str(raw).expect("config");
+        let err = config.validate().expect_err("should fail");
+        assert!(
+            err.to_string().contains("quantum.remote_enabled requires compute.quantum_endpoints")
+        );
+    }
+
+    #[test]
+    fn quantum_remote_accepts_endpoint() {
+        let raw = r#"{
+            "t_end": { "unix": 0 },
+            "quantum": { "enabled": true, "remote_enabled": true },
+            "compute": {
+                "allow_quantum": true,
+                "quantum_endpoints": [
+                    { "name": "test", "url": "http://localhost:5050/quantum/submit" }
+                ]
+            }
+        }"#;
+        let config: RunConfig = serde_json::from_str(raw).expect("config");
+        config.validate().expect("valid config");
+    }
 }
