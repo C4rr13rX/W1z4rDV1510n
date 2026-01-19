@@ -54,6 +54,7 @@ pub struct StreamingProcessor {
     behavior_substrate: BehaviorSubstrate,
     flow_extractor: FlowLayerExtractor,
     topic_extractor: TopicEventExtractor,
+    last_behavior_motifs: Vec<BehaviorMotif>,
 }
 
 impl StreamingProcessor {
@@ -65,6 +66,7 @@ impl StreamingProcessor {
             behavior_substrate: BehaviorSubstrate::new(BehaviorSubstrateConfig::default()),
             flow_extractor: FlowLayerExtractor::new(FlowConfig::default()),
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
+            last_behavior_motifs: Vec::new(),
         }
     }
 
@@ -72,6 +74,7 @@ impl StreamingProcessor {
         if !self.config.enabled {
             return None;
         }
+        self.last_behavior_motifs.clear();
         match envelope.source {
             StreamSource::PeopleVideo => {
                 if !self.config.ingest.people_video {
@@ -94,10 +97,15 @@ impl StreamingProcessor {
         }
     }
 
+    pub fn take_last_motifs(&mut self) -> Vec<BehaviorMotif> {
+        std::mem::take(&mut self.last_behavior_motifs)
+    }
+
     pub fn ingest_fabric_share(&mut self, share: NeuralFabricShare) -> Option<TokenBatch> {
         if !self.config.enabled {
             return None;
         }
+        self.last_behavior_motifs.clear();
         if !share.motifs.is_empty() {
             self.behavior_substrate.ingest_shared_motifs(&share.motifs);
         }
@@ -374,7 +382,10 @@ impl StreamingProcessor {
         }
         let entity_id = input.entity_id.clone();
         let frame = self.behavior_substrate.ingest(input);
-        for motif in frame.motifs.into_iter().filter(|motif| motif.entity_id == entity_id) {
+        let motifs = frame.motifs;
+        self.last_behavior_motifs
+            .extend(motifs.iter().cloned());
+        for motif in motifs.into_iter().filter(|motif| motif.entity_id == entity_id) {
             let mut attributes = HashMap::new();
             attributes.insert("entity_id".to_string(), Value::String(motif.entity_id.clone()));
             attributes.insert("motif_id".to_string(), Value::String(motif.id.clone()));
@@ -424,6 +435,9 @@ pub struct StreamingInference {
     spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
+    last_batch: Option<TokenBatch>,
+    last_motifs: Vec<BehaviorMotif>,
+    last_report_metadata: HashMap<String, Value>,
 }
 
 impl StreamingInference {
@@ -460,6 +474,9 @@ impl StreamingInference {
             spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
+            last_batch: None,
+            last_motifs: Vec::new(),
+            last_report_metadata: HashMap::new(),
         }
     }
 
@@ -485,11 +502,24 @@ impl StreamingInference {
         self.process_batch(batch)
     }
 
+    pub fn take_last_fabric_share(&mut self, node_id: String) -> Option<NeuralFabricShare> {
+        let batch = self.last_batch.take()?;
+        let motifs = std::mem::take(&mut self.last_motifs);
+        let mut share = NeuralFabricShare::from_batch(node_id, batch, motifs);
+        if !self.last_report_metadata.is_empty() {
+            share.metadata = std::mem::take(&mut self.last_report_metadata);
+        }
+        Some(share)
+    }
+
     fn process_batch(&mut self, batch: TokenBatch) -> anyhow::Result<Option<RunOutcome>> {
         let batch = match self.aligner.push(batch) {
             Some(batch) => batch,
             None => return Ok(None),
         };
+        self.last_batch = Some(batch.clone());
+        self.last_motifs = self.processor.take_last_motifs();
+        self.last_report_metadata.clear();
         let physiology_report = self.physiology.update(&batch);
         let temporal_report = self.temporal.update(&batch);
         let plasticity_report = temporal_report
@@ -515,37 +545,62 @@ impl StreamingInference {
             )
         });
         let mut snapshot = token_batch_to_snapshot(&batch, &self.symbolizer);
+        let mut report_metadata = HashMap::new();
         if let Some(report) = temporal_report {
+            report_metadata.insert(
+                "temporal_inference".to_string(),
+                serde_json::to_value(&report)?,
+            );
             snapshot.metadata.insert(
                 "temporal_inference".to_string(),
                 serde_json::to_value(report)?,
             );
         }
         if let Some(report) = plasticity_report {
+            report_metadata.insert(
+                "plasticity_report".to_string(),
+                serde_json::to_value(&report)?,
+            );
             snapshot.metadata.insert(
                 "plasticity_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }
         if let Some(report) = ontology_report {
+            report_metadata.insert(
+                "ontology_report".to_string(),
+                serde_json::to_value(&report)?,
+            );
             snapshot.metadata.insert(
                 "ontology_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }
         if let Some(report) = physiology_report {
+            report_metadata.insert(
+                "physiology_report".to_string(),
+                serde_json::to_value(&report)?,
+            );
             snapshot.metadata.insert(
                 "physiology_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }
         if let Some(report) = causal_report {
+            report_metadata.insert(
+                "causal_report".to_string(),
+                serde_json::to_value(&report)?,
+            );
             snapshot.metadata.insert(
                 "causal_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }
         if let Some(report) = branching_report {
+            report_metadata.insert(
+                "branching_futures".to_string(),
+                serde_json::to_value(&report)?,
+            );
             snapshot.metadata.insert(
                 "branching_futures".to_string(),
                 serde_json::to_value(report)?,
@@ -562,6 +617,7 @@ impl StreamingInference {
                 }
             }
         }
+        self.last_report_metadata = report_metadata;
         let outcome = run_with_snapshot(snapshot, self.run_config.clone())?;
         Ok(Some(outcome))
     }

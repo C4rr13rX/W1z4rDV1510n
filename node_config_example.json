@@ -80,6 +80,18 @@
     "max_storage_bytes": 0,
     "max_repair_requests_per_tick": 64
   },
+  "streaming": {
+    "enabled": false,
+    "run_config_path": "run_config.json",
+    "publish_streams": true,
+    "publish_shares": true,
+    "consume_streams": true,
+    "consume_shares": true,
+    "stream_payload_kind": "stream.envelope.v1",
+    "share_payload_kind": "neural.fabric.v1",
+    "min_cpu_cores": 2,
+    "min_memory_gb": 4.0
+  },
   "blockchain": {
     "enabled": true,
     "chain_id": "w1z4rdv1510n-l1",

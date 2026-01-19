@@ -16,11 +16,12 @@ use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{BlockchainLedger, SensorCommitment};
 use w1z4rdv1510n::network::{NetworkEnvelope, compute_payload_hash};
 use w1z4rdv1510n::schema::Timestamp;
-use w1z4rdv1510n::streaming::NeuralFabricShare;
+use w1z4rdv1510n::streaming::{NeuralFabricShare, StreamEnvelope};
 
 const DATA_MESSAGE_KIND: &str = "data.message";
 const DATA_EVENT_BUFFER: usize = 1024;
 const NEURAL_FABRIC_KIND: &str = "neural.fabric.v1";
+const STREAM_ENVELOPE_KIND: &str = "stream.envelope.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataManifest {
@@ -178,6 +179,24 @@ impl DataMeshHandle {
         self.ingest(request).await
     }
 
+    pub async fn ingest_stream_envelope(
+        &self,
+        sensor_id: String,
+        envelope: &StreamEnvelope,
+    ) -> Result<DataIngestResponse> {
+        let payload_json =
+            serde_json::to_value(envelope).map_err(|err| anyhow!("serialize stream envelope: {err}"))?;
+        let request = DataIngestRequest {
+            sensor_id,
+            payload_kind: STREAM_ENVELOPE_KIND.to_string(),
+            payload_hex: None,
+            payload_text: None,
+            payload_json: Some(payload_json),
+            timestamp_unix: Some(envelope.timestamp.unix),
+        };
+        self.ingest(request).await
+    }
+
     pub async fn next_fabric_share(
         &self,
         receiver: &mut broadcast::Receiver<DataMeshEvent>,
@@ -199,6 +218,31 @@ impl DataMeshHandle {
             let payload = self.load_payload(data_id).await.ok()?;
             if let Ok(share) = serde_json::from_slice::<NeuralFabricShare>(&payload) {
                 return Some(share);
+            }
+        }
+    }
+
+    pub async fn next_stream_envelope(
+        &self,
+        receiver: &mut broadcast::Receiver<DataMeshEvent>,
+    ) -> Option<StreamEnvelope> {
+        loop {
+            let event = receiver.recv().await.ok()?;
+            let data_id = match event {
+                DataMeshEvent::PayloadReady {
+                    data_id,
+                    payload_kind,
+                    ..
+                } => {
+                    if payload_kind != STREAM_ENVELOPE_KIND {
+                        continue;
+                    }
+                    data_id
+                }
+            };
+            let payload = self.load_payload(data_id).await.ok()?;
+            if let Ok(envelope) = serde_json::from_slice::<StreamEnvelope>(&payload) {
+                return Some(envelope);
             }
         }
     }
@@ -1490,6 +1534,47 @@ mod tests {
             .expect("share payload");
         assert_eq!(received.node_id, "node-test");
         assert_eq!(received.timestamp.unix, 30);
+        assert_eq!(response.chunk_count, 1);
+    }
+
+    #[tokio::test]
+    async fn next_stream_envelope_reads_payload() {
+        let dir = tempdir().expect("tmp dir");
+        let mut config = DataMeshConfig::default();
+        config.storage_path = dir.path().to_string_lossy().into_owned();
+        config.replication_factor = 1;
+        config.receipt_quorum = 1;
+        let wallet = Arc::new(test_wallet());
+        let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
+        let publisher = test_publisher();
+        let (_net_tx, net_rx) = mpsc::unbounded_channel();
+        let handle = start_data_mesh(
+            config,
+            "node-test".to_string(),
+            wallet,
+            ledger,
+            publisher,
+            net_rx,
+        )
+        .expect("mesh");
+        let envelope = StreamEnvelope {
+            source: w1z4rdv1510n::streaming::StreamSource::PeopleVideo,
+            timestamp: Timestamp { unix: 40 },
+            payload: w1z4rdv1510n::streaming::StreamPayload::Json {
+                value: serde_json::json!({ "entity_id": "e1", "signal": 1.0 }),
+            },
+            metadata: HashMap::new(),
+        };
+        let mut events = handle.subscribe();
+        let response = handle
+            .ingest_stream_envelope("sensor-stream".to_string(), &envelope)
+            .await
+            .expect("stream ingest");
+        let received = timeout(Duration::from_secs(2), handle.next_stream_envelope(&mut events))
+            .await
+            .expect("stream ready")
+            .expect("stream payload");
+        assert_eq!(received.timestamp.unix, 40);
         assert_eq!(response.chunk_count, 1);
     }
 }

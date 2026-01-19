@@ -16,6 +16,7 @@ pub struct NodeConfig {
     pub openstack: OpenStackConfig,
     pub wallet: WalletConfig,
     pub data: DataMeshConfig,
+    pub streaming: StreamingRuntimeConfig,
     pub blockchain: BlockchainConfig,
     pub compute: ComputeRoutingConfig,
     pub cluster: ClusterConfig,
@@ -35,6 +36,7 @@ impl Default for NodeConfig {
             openstack: OpenStackConfig::default(),
             wallet: WalletConfig::default(),
             data: DataMeshConfig::default(),
+            streaming: StreamingRuntimeConfig::default(),
             blockchain: BlockchainConfig::default(),
             compute: ComputeRoutingConfig::default(),
             cluster: ClusterConfig::default(),
@@ -309,6 +311,20 @@ impl NodeConfig {
                 );
             }
         }
+        if self.streaming.enabled {
+            anyhow::ensure!(
+                !self.streaming.run_config_path.trim().is_empty(),
+                "streaming.run_config_path must be set when streaming is enabled"
+            );
+            anyhow::ensure!(
+                !self.streaming.stream_payload_kind.trim().is_empty(),
+                "streaming.stream_payload_kind must be non-empty"
+            );
+            anyhow::ensure!(
+                !self.streaming.share_payload_kind.trim().is_empty(),
+                "streaming.share_payload_kind must be non-empty"
+            );
+        }
         Ok(())
     }
 }
@@ -527,6 +543,38 @@ impl Default for DataMeshConfig {
             retention_days: 30,
             max_storage_bytes: 0,
             max_repair_requests_per_tick: 64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingRuntimeConfig {
+    pub enabled: bool,
+    pub run_config_path: String,
+    pub publish_streams: bool,
+    pub publish_shares: bool,
+    pub consume_streams: bool,
+    pub consume_shares: bool,
+    pub stream_payload_kind: String,
+    pub share_payload_kind: String,
+    pub min_cpu_cores: usize,
+    pub min_memory_gb: f64,
+}
+
+impl Default for StreamingRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            run_config_path: "run_config.json".to_string(),
+            publish_streams: true,
+            publish_shares: true,
+            consume_streams: true,
+            consume_shares: true,
+            stream_payload_kind: "stream.envelope.v1".to_string(),
+            share_payload_kind: "neural.fabric.v1".to_string(),
+            min_cpu_cores: 2,
+            min_memory_gb: 4.0,
         }
     }
 }
