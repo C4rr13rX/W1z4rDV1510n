@@ -5,7 +5,7 @@ use crate::p2p::NodeNetwork;
 use crate::paths::node_data_dir;
 use crate::wallet::{WalletStore, node_id_from_wallet};
 use anyhow::{Context, Result};
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -21,6 +21,11 @@ use w1z4rdv1510n::blockchain::{
 use w1z4rdv1510n::bridge::{BridgeProof, BridgeVerificationMode, ChainKind, bridge_deposit_id};
 use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy};
 use w1z4rdv1510n::schema::Timestamp;
+use w1z4rdv1510n::streaming::{
+    AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
+    KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueueReport, KnowledgeRuntime,
+    NlmJatsIngestor,
+};
 
 #[derive(Clone)]
 struct ApiState {
@@ -40,6 +45,7 @@ struct ApiState {
     rate_limit_balance_max: u32,
     data_mesh: Option<DataMeshHandle>,
     metrics: Arc<ApiMetrics>,
+    knowledge: Arc<Mutex<KnowledgeRuntime>>,
 }
 
 #[derive(Serialize)]
@@ -92,6 +98,53 @@ struct BridgeChainInfo {
     recipient_tag_template: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+struct KnowledgeIngestOptions {
+    source: Option<String>,
+    require_image_bytes: Option<bool>,
+    normalize_whitespace: Option<bool>,
+    include_ocr_blocks: Option<bool>,
+    ocr_command: Option<Vec<String>>,
+    ocr_timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct KnowledgeIngestRequest {
+    #[serde(default)]
+    xml: Option<String>,
+    #[serde(default)]
+    document: Option<KnowledgeDocument>,
+    #[serde(default)]
+    options: KnowledgeIngestOptions,
+    #[serde(default)]
+    include_tasks: bool,
+}
+
+#[derive(Deserialize)]
+struct KnowledgeQueueQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct KnowledgeIngestResponse {
+    status: &'static str,
+    report: KnowledgeIngestReport,
+    pending: Option<Vec<FigureAssociationTask>>,
+}
+
+#[derive(Serialize)]
+struct KnowledgeQueueResponse {
+    status: &'static str,
+    report: Option<KnowledgeQueueReport>,
+}
+
+#[derive(Serialize)]
+struct KnowledgeVoteResponse {
+    status: &'static str,
+    association: Option<KnowledgeAssociation>,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -120,12 +173,18 @@ struct ApiMetricsSnapshot {
     bridge_intent_requests: u64,
     data_ingest_requests: u64,
     data_status_requests: u64,
+    knowledge_ingest_requests: u64,
+    knowledge_queue_requests: u64,
+    knowledge_vote_requests: u64,
     bridge_success: u64,
     balance_success: u64,
     bridge_chain_success: u64,
     bridge_intent_success: u64,
     data_ingest_success: u64,
     data_status_success: u64,
+    knowledge_ingest_success: u64,
+    knowledge_queue_success: u64,
+    knowledge_vote_success: u64,
     rate_limit_hits: u64,
     auth_failures: u64,
 }
@@ -142,12 +201,18 @@ struct ApiMetrics {
     bridge_intent_requests: AtomicU64,
     data_ingest_requests: AtomicU64,
     data_status_requests: AtomicU64,
+    knowledge_ingest_requests: AtomicU64,
+    knowledge_queue_requests: AtomicU64,
+    knowledge_vote_requests: AtomicU64,
     bridge_success: AtomicU64,
     balance_success: AtomicU64,
     bridge_chain_success: AtomicU64,
     bridge_intent_success: AtomicU64,
     data_ingest_success: AtomicU64,
     data_status_success: AtomicU64,
+    knowledge_ingest_success: AtomicU64,
+    knowledge_queue_success: AtomicU64,
+    knowledge_vote_success: AtomicU64,
     rate_limit_hits: AtomicU64,
     auth_failures: AtomicU64,
 }
@@ -197,6 +262,23 @@ impl ApiMetrics {
         self.data_status_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_knowledge_ingest_request(&self) {
+        self.inc_request();
+        self.knowledge_ingest_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_knowledge_queue_request(&self) {
+        self.inc_request();
+        self.knowledge_queue_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_knowledge_vote_request(&self) {
+        self.inc_request();
+        self.knowledge_vote_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_bridge_success(&self) {
         self.bridge_success.fetch_add(1, Ordering::Relaxed);
     }
@@ -225,6 +307,19 @@ impl ApiMetrics {
         self.data_status_success.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_knowledge_ingest_success(&self) {
+        self.knowledge_ingest_success
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_knowledge_queue_success(&self) {
+        self.knowledge_queue_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_knowledge_vote_success(&self) {
+        self.knowledge_vote_success.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_rate_limit_hit(&self) {
         self.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
     }
@@ -245,12 +340,18 @@ impl ApiMetrics {
             bridge_intent_requests: self.bridge_intent_requests.load(Ordering::Relaxed),
             data_ingest_requests: self.data_ingest_requests.load(Ordering::Relaxed),
             data_status_requests: self.data_status_requests.load(Ordering::Relaxed),
+            knowledge_ingest_requests: self.knowledge_ingest_requests.load(Ordering::Relaxed),
+            knowledge_queue_requests: self.knowledge_queue_requests.load(Ordering::Relaxed),
+            knowledge_vote_requests: self.knowledge_vote_requests.load(Ordering::Relaxed),
             bridge_success: self.bridge_success.load(Ordering::Relaxed),
             balance_success: self.balance_success.load(Ordering::Relaxed),
             bridge_chain_success: self.bridge_chain_success.load(Ordering::Relaxed),
             bridge_intent_success: self.bridge_intent_success.load(Ordering::Relaxed),
             data_ingest_success: self.data_ingest_success.load(Ordering::Relaxed),
             data_status_success: self.data_status_success.load(Ordering::Relaxed),
+            knowledge_ingest_success: self.knowledge_ingest_success.load(Ordering::Relaxed),
+            knowledge_queue_success: self.knowledge_queue_success.load(Ordering::Relaxed),
+            knowledge_vote_success: self.knowledge_vote_success.load(Ordering::Relaxed),
             rate_limit_hits: self.rate_limit_hits.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
         }
@@ -334,6 +435,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         rate_limit_balance_max: config.api.rate_limit_balance_max_requests,
         data_mesh,
         metrics: Arc::new(ApiMetrics::default()),
+        knowledge: Arc::new(Mutex::new(KnowledgeRuntime::default())),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -354,6 +456,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/bridge/intent", post(submit_bridge_intent))
         .route("/data/ingest", post(submit_data_ingest))
         .route("/data/:data_id", get(get_data_status))
+        .route("/knowledge/ingest", post(submit_knowledge_ingest))
+        .route("/knowledge/queue", get(get_knowledge_queue))
+        .route("/knowledge/vote", post(submit_knowledge_vote))
         .route("/balance/:node_id", get(get_balance))
         .route("/metrics", get(get_metrics))
         .with_state(state)
@@ -767,6 +872,200 @@ async fn submit_data_ingest(
     }
 }
 
+async fn submit_knowledge_ingest(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<KnowledgeIngestRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_knowledge_ingest_request();
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let now = now_timestamp();
+    let document = match (request.document, request.xml) {
+        (Some(_), Some(_)) => {
+            let response = ErrorResponse {
+                error: "provide either document or xml, not both".to_string(),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            );
+        }
+        (Some(document), None) => document,
+        (None, Some(xml)) => {
+            if xml.trim().is_empty() {
+                let response = ErrorResponse {
+                    error: "xml payload must be non-empty".to_string(),
+                };
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::to_value(response).unwrap_or_default()),
+                );
+            }
+            let config = build_ingest_config(request.options);
+            let ingestor = NlmJatsIngestor::new(config);
+            match ingestor.parse_str(&xml, now) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    let response = ErrorResponse {
+                        error: format!("failed to parse JATS xml: {err}"),
+                    };
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::to_value(response).unwrap_or_default()),
+                    );
+                }
+            }
+        }
+        (None, None) => {
+            let response = ErrorResponse {
+                error: "document or xml must be provided".to_string(),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            );
+        }
+    };
+    let (report, pending) = {
+        let mut knowledge = state.knowledge.lock().expect("knowledge mutex");
+        let report = knowledge.ingest_document(document, now);
+        let pending = if request.include_tasks {
+            knowledge
+                .queue_report(now)
+                .map(|report| report.pending)
+        } else {
+            None
+        };
+        (report, pending)
+    };
+    let response = KnowledgeIngestResponse {
+        status: "OK",
+        report,
+        pending,
+    };
+    state.metrics.inc_knowledge_ingest_success();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
+async fn get_knowledge_queue(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<KnowledgeQueueQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_knowledge_queue_request();
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let now = now_timestamp();
+    let mut report = {
+        let knowledge = state.knowledge.lock().expect("knowledge mutex");
+        knowledge.queue_report(now)
+    };
+    if let (Some(report), Some(limit)) = (report.as_mut(), query.limit) {
+        report.pending.truncate(limit.max(1));
+    }
+    let response = KnowledgeQueueResponse {
+        status: "OK",
+        report,
+    };
+    state.metrics.inc_knowledge_queue_success();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
+async fn submit_knowledge_vote(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(vote): Json<AssociationVote>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_knowledge_vote_request();
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if vote.worker_id.trim().is_empty() {
+        let response = ErrorResponse {
+            error: "worker_id must be provided".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let association = {
+        let mut knowledge = state.knowledge.lock().expect("knowledge mutex");
+        knowledge.submit_vote(vote)
+    };
+    if association.is_some() {
+        state.metrics.inc_knowledge_vote_success();
+    }
+    let response = KnowledgeVoteResponse {
+        status: if association.is_some() { "VERIFIED" } else { "PENDING" },
+        association,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
 async fn get_data_status(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1017,6 +1316,32 @@ fn now_timestamp() -> Timestamp {
         .unwrap_or_default()
         .as_secs() as i64;
     Timestamp { unix }
+}
+
+fn build_ingest_config(options: KnowledgeIngestOptions) -> KnowledgeIngestConfig {
+    let mut config = KnowledgeIngestConfig::default();
+    if let Some(source) = options.source {
+        if !source.trim().is_empty() {
+            config.source = source;
+        }
+    }
+    config.require_image_bytes = options.require_image_bytes.unwrap_or(false);
+    if let Some(normalize) = options.normalize_whitespace {
+        config.normalize_whitespace = normalize;
+    }
+    if let Some(include) = options.include_ocr_blocks {
+        config.include_ocr_blocks = include;
+    }
+    if let Some(command) = options.ocr_command {
+        if !command.is_empty() {
+            config.ocr_command = Some(command);
+        }
+    }
+    if let Some(timeout) = options.ocr_timeout_secs {
+        config.ocr_timeout_secs = timeout.max(1);
+    }
+    config.asset_root = None;
+    config
 }
 
 fn hash_allowed(candidate: &[u8; 32], allowlist: &[[u8; 32]]) -> bool {

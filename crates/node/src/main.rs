@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use serde::{Deserialize, Serialize};
 
 mod chain;
 mod bridge;
@@ -26,6 +27,10 @@ use w1z4rdv1510n::blockchain::{BridgeIntent, bridge_intent_id, bridge_intent_pay
 use w1z4rdv1510n::bridge::ChainKind;
 use w1z4rdv1510n::network::compute_payload_hash;
 use w1z4rdv1510n::schema::Timestamp;
+use w1z4rdv1510n::streaming::{
+    AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
+    KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue, NlmJatsIngestor,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "w1z4rdv1510n-node")]
@@ -101,6 +106,40 @@ enum Command {
         json: Option<String>,
         #[arg(long)]
         expected_hash: Option<String>,
+    },
+    KnowledgeIngest {
+        #[arg(long)]
+        xml_file: Option<String>,
+        #[arg(long)]
+        xml: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        asset_root: Option<String>,
+        #[arg(long)]
+        require_image_bytes: bool,
+        #[arg(long)]
+        normalize_whitespace: bool,
+        #[arg(long)]
+        include_ocr_blocks: bool,
+        #[arg(long, num_args = 1..)]
+        ocr_command: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        ocr_timeout_secs: u64,
+        #[arg(long)]
+        out: Option<String>,
+    },
+    KnowledgeVote {
+        #[arg(long)]
+        ingest_file: Option<String>,
+        #[arg(long)]
+        ingest_json: Option<String>,
+        #[arg(long)]
+        votes_file: Option<String>,
+        #[arg(long)]
+        votes_json: Option<String>,
+        #[arg(long)]
+        out: Option<String>,
     },
     HashApiKey {
         #[arg(long)]
@@ -181,6 +220,36 @@ fn main() -> anyhow::Result<()> {
         Some(Command::BridgeIntentVerify { file, json, expected_hash }) => {
             bridge_intent_verify(file, json, expected_hash)
         }
+        Some(Command::KnowledgeIngest {
+            xml_file,
+            xml,
+            source,
+            asset_root,
+            require_image_bytes,
+            normalize_whitespace,
+            include_ocr_blocks,
+            ocr_command,
+            ocr_timeout_secs,
+            out,
+        }) => knowledge_ingest(
+            xml_file,
+            xml,
+            source,
+            asset_root,
+            require_image_bytes,
+            normalize_whitespace,
+            include_ocr_blocks,
+            ocr_command,
+            ocr_timeout_secs,
+            out,
+        ),
+        Some(Command::KnowledgeVote {
+            ingest_file,
+            ingest_json,
+            votes_file,
+            votes_json,
+            out,
+        }) => knowledge_vote(ingest_file, ingest_json, votes_file, votes_json, out),
         Some(Command::HashApiKey { key }) => {
             println!("{}", api::hash_api_key_hex(&key));
             Ok(())
@@ -398,6 +467,108 @@ fn bridge_intent_verify(
     Ok(())
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct KnowledgeIngestOutput {
+    timestamp: Timestamp,
+    document: KnowledgeDocument,
+    report: KnowledgeIngestReport,
+    pending_tasks: Vec<FigureAssociationTask>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct KnowledgeVoteOutput {
+    status: &'static str,
+    associations: Vec<KnowledgeAssociation>,
+    pending_tasks: Vec<FigureAssociationTask>,
+    total_pending: usize,
+}
+
+fn knowledge_ingest(
+    xml_file: Option<String>,
+    xml: Option<String>,
+    source: Option<String>,
+    asset_root: Option<String>,
+    require_image_bytes: bool,
+    normalize_whitespace: bool,
+    include_ocr_blocks: bool,
+    ocr_command: Vec<String>,
+    ocr_timeout_secs: u64,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let xml = load_text_input(xml_file, xml)?;
+    let mut config = KnowledgeIngestConfig::default();
+    if let Some(source) = source {
+        if !source.trim().is_empty() {
+            config.source = source;
+        }
+    }
+    config.asset_root = asset_root.map(PathBuf::from);
+    config.require_image_bytes = require_image_bytes;
+    config.normalize_whitespace = normalize_whitespace;
+    config.include_ocr_blocks = include_ocr_blocks;
+    if !ocr_command.is_empty() {
+        config.ocr_command = Some(ocr_command);
+    }
+    config.ocr_timeout_secs = ocr_timeout_secs.max(1);
+    let timestamp = Timestamp { unix: now_unix() };
+    let ingestor = NlmJatsIngestor::new(config);
+    let document = ingestor.parse_str(&xml, timestamp)?;
+    let mut queue = KnowledgeQueue::default();
+    let report = queue.enqueue_document(document.clone(), timestamp);
+    let pending_tasks = queue
+        .pending_report(timestamp)
+        .map(|report| report.pending)
+        .unwrap_or_default();
+    let output = KnowledgeIngestOutput {
+        timestamp,
+        document,
+        report,
+        pending_tasks,
+    };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    if let Some(path) = out {
+        fs::write(path, json)?;
+    }
+    Ok(())
+}
+
+fn knowledge_vote(
+    ingest_file: Option<String>,
+    ingest_json: Option<String>,
+    votes_file: Option<String>,
+    votes_json: Option<String>,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let ingest = load_ingest_output(ingest_file, ingest_json)?;
+    let votes = load_votes(votes_file, votes_json)?;
+    let mut queue = KnowledgeQueue::default();
+    queue.enqueue_document(ingest.document.clone(), ingest.timestamp);
+    let mut associations = Vec::new();
+    for vote in votes {
+        if let Some(association) = queue.record_vote(vote) {
+            associations.push(association);
+        }
+    }
+    let report = queue.pending_report(Timestamp { unix: now_unix() });
+    let (pending_tasks, total_pending) = match report {
+        Some(report) => (report.pending, report.total_pending),
+        None => (Vec::new(), 0),
+    };
+    let output = KnowledgeVoteOutput {
+        status: "OK",
+        associations,
+        pending_tasks,
+        total_pending,
+    };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    if let Some(path) = out {
+        fs::write(path, json)?;
+    }
+    Ok(())
+}
+
 fn parse_chain_kind(raw: &str) -> anyhow::Result<ChainKind> {
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -432,6 +603,42 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn load_text_input(file: Option<String>, inline: Option<String>) -> anyhow::Result<String> {
+    match (file, inline) {
+        (Some(path), None) => Ok(fs::read_to_string(path)?),
+        (None, Some(text)) => Ok(text),
+        (None, None) => anyhow::bail!("provide --xml or --xml-file"),
+        _ => anyhow::bail!("provide only one of --xml or --xml-file"),
+    }
+}
+
+fn load_ingest_output(file: Option<String>, json: Option<String>) -> anyhow::Result<KnowledgeIngestOutput> {
+    let raw = match (file, json) {
+        (Some(path), None) => fs::read_to_string(path)?,
+        (None, Some(json)) => json,
+        (None, None) => anyhow::bail!("provide --ingest-file or --ingest-json"),
+        _ => anyhow::bail!("provide only one of --ingest-file or --ingest-json"),
+    };
+    let output: KnowledgeIngestOutput = serde_json::from_str(&raw)?;
+    Ok(output)
+}
+
+fn load_votes(file: Option<String>, json: Option<String>) -> anyhow::Result<Vec<AssociationVote>> {
+    let raw = match (file, json) {
+        (Some(path), None) => fs::read_to_string(path)?,
+        (None, Some(json)) => json,
+        (None, None) => anyhow::bail!("provide --votes-file or --votes-json"),
+        _ => anyhow::bail!("provide only one of --votes-file or --votes-json"),
+    };
+    let value: serde_json::Value = serde_json::from_str(&raw)?;
+    if value.is_array() {
+        Ok(serde_json::from_value(value)?)
+    } else {
+        let vote: AssociationVote = serde_json::from_value(value)?;
+        Ok(vec![vote])
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

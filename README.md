@@ -157,6 +157,13 @@ cargo run --bin w1z4rdv1510n-node -- bridge-intent-create `
 cargo run --bin w1z4rdv1510n-node -- bridge-intent-verify --json '{...}'
 ```
 
+6. **Knowledge ingest (offline CLI)**
+
+```powershell
+cargo run --bin w1z4rdv1510n-node -- knowledge-ingest --xml-file data/article.xml --out logs/knowledge_ingest.json
+cargo run --bin w1z4rdv1510n-node -- knowledge-vote --ingest-file logs/knowledge_ingest.json --votes-file logs/knowledge_votes.json
+```
+
 Config lives in `node_config.json` (generated from defaults). `node_config_example.json` shows all available fields, including QUIC/AutoNAT routing toggles, API keys, rate limits, bridge policies, and data mesh retention/audit settings.
 
 ---
@@ -261,10 +268,11 @@ Output:
 - Launch via `W1Z4RDV1510N_SERVICE_ADDR=0.0.0.0:8080 cargo run --bin service`.
 - `POST /predict` – same payload as the CLI accepts; response now includes a monotonic `run_id`, backend, and acceptance ratio.
 - `GET /healthz` – always returns HTTP 200 with a `HealthReport { status, ready, uptime, total_requests, ... }`.
-- `GET /readyz` – returns HTTP 200 only after at least one successful run (otherwise HTTP 503 but with the same JSON payload). Perfect for load balancer readiness checks.
+- `GET /readyz` - returns HTTP 200 only after at least one successful run (otherwise HTTP 503 but with the same JSON payload). Perfect for load balancer readiness checks.
 - Structured telemetry records start/end timestamps, backend choice, and best energy per run; logs also include the `run_id` for correlation.
-- `GET /runs?limit=20` – lists the most recent persisted runs (best energy, backend, timestamp). `GET /runs/{run_id}` returns the original request + response payload for that run, exactly as they were processed.
+- `GET /runs?limit=20` - lists the most recent persisted runs (best energy, backend, timestamp). `GET /runs/{run_id}` returns the original request + response payload for that run, exactly as they were processed.
 - Every POSTed job is persisted under `logs/service_runs/run_<id>.json` by default (override via `W1Z4RDV1510N_SERVICE_STORAGE`). This makes post-mortem analysis and dataset building straightforward.
+- Knowledge ingest endpoints (node API): `POST /knowledge/ingest` (JATS XML or document), `GET /knowledge/queue`, and `POST /knowledge/vote`. The node API does not read local asset paths; include image bytes via OCR tooling or keep `require_image_bytes=false`.
 
 ## Chess validation loop
 
