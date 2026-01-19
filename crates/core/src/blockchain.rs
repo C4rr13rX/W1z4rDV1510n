@@ -114,6 +114,7 @@ pub struct BridgeIntent {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkKind {
     SensorIngest,
+    StorageContribution,
     ComputeTask,
     ModelUpdate,
     CausalDiscovery,

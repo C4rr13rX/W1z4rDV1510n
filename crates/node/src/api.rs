@@ -1,4 +1,4 @@
-use crate::config::NodeConfig;
+use crate::config::{KnowledgeConfig, NodeConfig};
 use crate::data_mesh::{DataIngestRequest, DataMeshHandle, start_data_mesh};
 use crate::ledger::LocalLedger;
 use crate::p2p::NodeNetwork;
@@ -12,9 +12,12 @@ use axum::{Json, Router};
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use tracing::warn;
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, BridgeIntent, NoopLedger, RewardBalance, bridge_intent_id,
 };
@@ -23,8 +26,8 @@ use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy};
 use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
-    KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueueReport, KnowledgeRuntime,
-    NlmJatsIngestor,
+    HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
+    KnowledgeQueueReport, KnowledgeRuntime, NlmJatsIngestor,
 };
 
 #[derive(Clone)]
@@ -33,6 +36,7 @@ struct ApiState {
     ledger_backend: String,
     data_enabled: bool,
     bridge_enabled: bool,
+    knowledge_enabled: bool,
     started_at: Instant,
     ledger: Arc<dyn BlockchainLedger>,
     bridge_config: BridgeConfig,
@@ -46,6 +50,13 @@ struct ApiState {
     data_mesh: Option<DataMeshHandle>,
     metrics: Arc<ApiMetrics>,
     knowledge: Arc<Mutex<KnowledgeRuntime>>,
+    knowledge_persist: KnowledgePersist,
+}
+
+#[derive(Clone)]
+struct KnowledgePersist {
+    enabled: bool,
+    path: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -413,6 +424,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let limiter = Arc::new(Mutex::new(ApiLimiter::new(
         config.api.rate_limit_window_secs,
     )));
+    let (knowledge_runtime, knowledge_persist) = build_knowledge_runtime(&config.knowledge);
     let ledger_backend = if config.ledger.enabled {
         config.ledger.backend.clone()
     } else {
@@ -423,6 +435,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         ledger_backend,
         data_enabled: config.data.enabled,
         bridge_enabled: config.blockchain.bridge.enabled,
+        knowledge_enabled: config.knowledge.enabled,
         started_at: Instant::now(),
         ledger,
         bridge_config: config.blockchain.bridge.clone(),
@@ -435,7 +448,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         rate_limit_balance_max: config.api.rate_limit_balance_max_requests,
         data_mesh,
         metrics: Arc::new(ApiMetrics::default()),
-        knowledge: Arc::new(Mutex::new(KnowledgeRuntime::default())),
+        knowledge: Arc::new(Mutex::new(knowledge_runtime)),
+        knowledge_persist,
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -898,6 +912,15 @@ async fn submit_knowledge_ingest(
             Json(serde_json::to_value(response).unwrap_or_default()),
         );
     }
+    if !state.knowledge_enabled {
+        let response = ErrorResponse {
+            error: "knowledge ingest disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
     let now = now_timestamp();
     let document = match (request.document, request.xml) {
         (Some(_), Some(_)) => {
@@ -962,6 +985,15 @@ async fn submit_knowledge_ingest(
         report,
         pending,
     };
+    if let Err(err) = persist_knowledge_runtime(&state.knowledge_persist, &state.knowledge) {
+        let response = ErrorResponse {
+            error: format!("failed to persist knowledge: {err}"),
+        };
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
     state.metrics.inc_knowledge_ingest_success();
     (
         StatusCode::OK,
@@ -992,6 +1024,15 @@ async fn get_knowledge_queue(
         };
         return (
             StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !state.knowledge_enabled {
+        let response = ErrorResponse {
+            error: "knowledge queue disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
             Json(serde_json::to_value(response).unwrap_or_default()),
         );
     }
@@ -1040,6 +1081,15 @@ async fn submit_knowledge_vote(
             Json(serde_json::to_value(response).unwrap_or_default()),
         );
     }
+    if !state.knowledge_enabled {
+        let response = ErrorResponse {
+            error: "knowledge vote disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
     if vote.worker_id.trim().is_empty() {
         let response = ErrorResponse {
             error: "worker_id must be provided".to_string(),
@@ -1060,6 +1110,15 @@ async fn submit_knowledge_vote(
         status: if association.is_some() { "VERIFIED" } else { "PENDING" },
         association,
     };
+    if let Err(err) = persist_knowledge_runtime(&state.knowledge_persist, &state.knowledge) {
+        let response = ErrorResponse {
+            error: format!("failed to persist knowledge: {err}"),
+        };
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
     (
         StatusCode::OK,
         Json(serde_json::to_value(response).unwrap_or_default()),
@@ -1316,6 +1375,54 @@ fn now_timestamp() -> Timestamp {
         .unwrap_or_default()
         .as_secs() as i64;
     Timestamp { unix }
+}
+
+fn build_knowledge_runtime(config: &KnowledgeConfig) -> (KnowledgeRuntime, KnowledgePersist) {
+    let persist = KnowledgePersist {
+        enabled: config.enabled && config.persist_state,
+        path: PathBuf::from(&config.state_path),
+    };
+    if persist.enabled && persist.path.exists() {
+        if let Ok(raw) = fs::read_to_string(&persist.path) {
+            if let Ok(runtime) = serde_json::from_str::<KnowledgeRuntime>(&raw) {
+                return (runtime, persist);
+            }
+            warn!(
+                target: "w1z4rdv1510n::node",
+                path = %persist.path.display(),
+                "failed to deserialize knowledge state; starting fresh"
+            );
+        } else {
+            warn!(
+                target: "w1z4rdv1510n::node",
+                path = %persist.path.display(),
+                "failed to read knowledge state; starting fresh"
+            );
+        }
+    }
+    let queue = KnowledgeQueue::new(config.queue.clone());
+    let runtime = KnowledgeRuntime::new(queue, HealthKnowledgeStore::default());
+    (runtime, persist)
+}
+
+fn persist_knowledge_runtime(
+    persist: &KnowledgePersist,
+    runtime: &Arc<Mutex<KnowledgeRuntime>>,
+) -> Result<()> {
+    if !persist.enabled {
+        return Ok(());
+    }
+    let runtime = runtime.lock().expect("knowledge mutex");
+    let payload = serde_json::to_string_pretty(&*runtime)?;
+    if let Some(parent) = persist.path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let tmp_path = persist.path.with_extension("tmp");
+    fs::write(&tmp_path, payload)?;
+    fs::rename(tmp_path, &persist.path)?;
+    Ok(())
 }
 
 fn build_ingest_config(options: KnowledgeIngestOptions) -> KnowledgeIngestConfig {

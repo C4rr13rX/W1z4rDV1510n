@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{info, warn};
-use w1z4rdv1510n::blockchain::{BlockchainLedger, SensorCommitment};
+use w1z4rdv1510n::blockchain::{BlockchainLedger, SensorCommitment, WorkKind, WorkProof};
 use w1z4rdv1510n::network::{NetworkEnvelope, compute_payload_hash};
 use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{NeuralFabricShare, StreamEnvelope};
@@ -414,6 +414,7 @@ fn handle_command(
                         config,
                         node_id,
                         wallet,
+                        ledger,
                         publisher,
                         event_tx,
                         store,
@@ -432,6 +433,9 @@ fn run_maintenance(
     store: &mut DataStore,
 ) {
     if !config.maintenance_enabled {
+        return;
+    }
+    if !config.host_storage {
         return;
     }
     let mut outcome = store.audit_and_gc(now_unix(), node_id);
@@ -516,7 +520,26 @@ fn ingest_local(
     store.store_payload(&data_id, &payload)?;
     emit_payload_ready(event_tx, &signed_manifest);
     let receipt = build_receipt(&data_id, &payload_hash, node_id, wallet);
-    let receipt_record = store.record_receipt(receipt.clone())?;
+    let receipt_record = if config.host_storage {
+        let record = store.record_receipt(receipt.clone())?;
+        if record.stored {
+            maybe_submit_storage_reward(
+                config,
+                ledger,
+                wallet,
+                node_id,
+                &data_id,
+                &payload_hash,
+                payload.len(),
+            );
+        }
+        record
+    } else {
+        ReceiptRecord {
+            count: store.receipt_count(&data_id),
+            stored: false,
+        }
+    };
     let _ = publisher.publish(signed_envelope(DataMessage::Manifest(signed_manifest), wallet));
     for chunk in chunks {
         let _ = publisher.publish(signed_envelope(DataMessage::Chunk(chunk), wallet));
@@ -541,12 +564,13 @@ fn ingest_local(
         );
     }
     let receipt_count = receipt_record.count;
+    let stored = store.has_data(&data_id);
     let state = quorum_state(receipt_count, config);
     Ok(DataIngestResponse {
         data_id,
         payload_hash,
         chunk_count,
-        stored: true,
+        stored,
         receipt_count,
         replication_factor: config.replication_factor,
         receipt_quorum: config.receipt_quorum,
@@ -562,12 +586,16 @@ fn handle_network_message(
     config: &DataMeshConfig,
     node_id: &str,
     wallet: &WalletSigner,
+    ledger: &Arc<dyn BlockchainLedger>,
     publisher: &NetworkPublisher,
     event_tx: &broadcast::Sender<DataMeshEvent>,
     store: &mut DataStore,
 ) {
     match message {
         DataMessage::Manifest(manifest) => {
+            if !config.host_storage {
+                return;
+            }
             if config.require_manifest_signature && verify_manifest(&manifest).is_err() {
                 return;
             }
@@ -582,6 +610,15 @@ fn handle_network_message(
                     if let Ok(record) = store.record_receipt(receipt.clone()) {
                         if record.stored {
                             let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+                            maybe_submit_storage_reward(
+                                config,
+                                ledger,
+                                wallet,
+                                node_id,
+                                &manifest.data_id,
+                                &manifest.payload_hash,
+                                manifest.size_bytes,
+                            );
                         }
                     }
                 } else {
@@ -594,6 +631,9 @@ fn handle_network_message(
             }
         }
         DataMessage::Chunk(chunk) => {
+            if !config.host_storage {
+                return;
+            }
             let manifest = store.load_manifest(&chunk.data_id).ok().flatten();
             if store.apply_chunk(chunk, manifest.as_ref()).is_ok() {
                 if let Some(manifest) = manifest {
@@ -608,6 +648,15 @@ fn handle_network_message(
                         if let Ok(record) = store.record_receipt(receipt.clone()) {
                             if record.stored {
                                 let _ = publisher.publish(signed_envelope(DataMessage::Receipt(receipt), wallet));
+                                maybe_submit_storage_reward(
+                                    config,
+                                    ledger,
+                                    wallet,
+                                    node_id,
+                                    &manifest.data_id,
+                                    &manifest.payload_hash,
+                                    manifest.size_bytes,
+                                );
                             }
                         }
                     }
@@ -823,6 +872,77 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn maybe_submit_storage_reward(
+    config: &DataMeshConfig,
+    ledger: &Arc<dyn BlockchainLedger>,
+    wallet: &WalletSigner,
+    node_id: &str,
+    data_id: &str,
+    payload_hash: &str,
+    size_bytes: usize,
+) {
+    if !config.storage_reward_enabled {
+        return;
+    }
+    let score = storage_reward_score(size_bytes, config);
+    if score <= 0.0 {
+        return;
+    }
+    let completed_at = Timestamp { unix: now_unix() };
+    let work_id = storage_work_id(node_id, data_id, payload_hash);
+    let mut metrics = HashMap::new();
+    metrics.insert("data_id".to_string(), Value::String(data_id.to_string()));
+    metrics.insert(
+        "payload_hash".to_string(),
+        Value::String(payload_hash.to_string()),
+    );
+    metrics.insert("size_bytes".to_string(), Value::from(size_bytes as u64));
+    metrics.insert(
+        "replication_factor".to_string(),
+        Value::from(config.replication_factor as u64),
+    );
+    metrics.insert(
+        "receipt_quorum".to_string(),
+        Value::from(config.receipt_quorum as u64),
+    );
+    metrics.insert(
+        "storage_reward_score".to_string(),
+        Value::from(score),
+    );
+    let proof = WorkProof {
+        work_id,
+        node_id: node_id.to_string(),
+        kind: WorkKind::StorageContribution,
+        completed_at,
+        score,
+        fee_paid: 0.0,
+        metrics,
+        signature: String::new(),
+    };
+    let signed = wallet.sign_work_proof(proof);
+    if let Err(err) = ledger.submit_work_proof(signed) {
+        warn!(
+            target: "w1z4rdv1510n::node",
+            error = %err,
+            "storage work proof rejected"
+        );
+    }
+}
+
+fn storage_reward_score(size_bytes: usize, config: &DataMeshConfig) -> f64 {
+    let size_mb = (size_bytes as f64 / 1_048_576.0).max(0.01);
+    let mut score = config.storage_reward_base + size_mb * config.storage_reward_per_mb;
+    if config.replication_factor > 0 {
+        score /= config.replication_factor as f64;
+    }
+    score.clamp(0.01, 100.0)
+}
+
+fn storage_work_id(node_id: &str, data_id: &str, payload_hash: &str) -> String {
+    let payload = format!("storage|{}|{}|{}", node_id, data_id, payload_hash);
+    compute_payload_hash(payload.as_bytes())
 }
 
 struct PendingAssembly {

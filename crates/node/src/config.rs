@@ -5,6 +5,7 @@ use w1z4rdv1510n::blockchain::SensorDescriptor;
 use w1z4rdv1510n::config::{
     BlockchainConfig, ClusterConfig, ComputeRoutingConfig, LedgerConfig, NodeRole,
 };
+use w1z4rdv1510n::streaming::KnowledgeQueueConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +18,7 @@ pub struct NodeConfig {
     pub wallet: WalletConfig,
     pub data: DataMeshConfig,
     pub streaming: StreamingRuntimeConfig,
+    pub knowledge: KnowledgeConfig,
     pub blockchain: BlockchainConfig,
     pub compute: ComputeRoutingConfig,
     pub cluster: ClusterConfig,
@@ -37,6 +39,7 @@ impl Default for NodeConfig {
             wallet: WalletConfig::default(),
             data: DataMeshConfig::default(),
             streaming: StreamingRuntimeConfig::default(),
+            knowledge: KnowledgeConfig::default(),
             blockchain: BlockchainConfig::default(),
             compute: ComputeRoutingConfig::default(),
             cluster: ClusterConfig::default(),
@@ -310,6 +313,14 @@ impl NodeConfig {
                     "data.max_repair_requests_per_tick must be > 0 when maintenance is enabled"
                 );
             }
+            anyhow::ensure!(
+                self.data.storage_reward_base.is_finite() && self.data.storage_reward_base >= 0.0,
+                "data.storage_reward_base must be >= 0 and finite"
+            );
+            anyhow::ensure!(
+                self.data.storage_reward_per_mb.is_finite() && self.data.storage_reward_per_mb >= 0.0,
+                "data.storage_reward_per_mb must be >= 0 and finite"
+            );
         }
         if self.streaming.enabled {
             anyhow::ensure!(
@@ -323,6 +334,32 @@ impl NodeConfig {
             anyhow::ensure!(
                 !self.streaming.share_payload_kind.trim().is_empty(),
                 "streaming.share_payload_kind must be non-empty"
+            );
+            anyhow::ensure!(
+                self.streaming.ultradian_node,
+                "streaming.ultradian_node must be true when streaming is enabled"
+            );
+        }
+        if self.knowledge.enabled {
+            anyhow::ensure!(
+                !self.knowledge.state_path.trim().is_empty(),
+                "knowledge.state_path must be set when knowledge is enabled"
+            );
+            anyhow::ensure!(
+                self.knowledge.queue.min_votes > 0,
+                "knowledge.queue.min_votes must be > 0"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.knowledge.queue.min_confidence),
+                "knowledge.queue.min_confidence must be in [0,1]"
+            );
+            anyhow::ensure!(
+                self.knowledge.queue.max_pending > 0,
+                "knowledge.queue.max_pending must be > 0"
+            );
+            anyhow::ensure!(
+                self.knowledge.queue.candidate_limit > 0,
+                "knowledge.queue.candidate_limit must be > 0"
             );
         }
         Ok(())
@@ -512,6 +549,7 @@ impl Default for WalletConfig {
 pub struct DataMeshConfig {
     pub enabled: bool,
     pub storage_path: String,
+    pub host_storage: bool,
     pub max_payload_bytes: usize,
     pub chunk_size_bytes: usize,
     pub replication_factor: usize,
@@ -524,6 +562,9 @@ pub struct DataMeshConfig {
     pub retention_days: u32,
     pub max_storage_bytes: u64,
     pub max_repair_requests_per_tick: usize,
+    pub storage_reward_enabled: bool,
+    pub storage_reward_base: f64,
+    pub storage_reward_per_mb: f64,
 }
 
 impl Default for DataMeshConfig {
@@ -531,6 +572,7 @@ impl Default for DataMeshConfig {
         Self {
             enabled: true,
             storage_path: default_data_path(),
+            host_storage: true,
             max_payload_bytes: 512 * 1024,
             chunk_size_bytes: 32 * 1024,
             replication_factor: 3,
@@ -543,6 +585,9 @@ impl Default for DataMeshConfig {
             retention_days: 30,
             max_storage_bytes: 0,
             max_repair_requests_per_tick: 64,
+            storage_reward_enabled: true,
+            storage_reward_base: 0.15,
+            storage_reward_per_mb: 0.05,
         }
     }
 }
@@ -551,6 +596,7 @@ impl Default for DataMeshConfig {
 #[serde(default)]
 pub struct StreamingRuntimeConfig {
     pub enabled: bool,
+    pub ultradian_node: bool,
     pub run_config_path: String,
     pub publish_streams: bool,
     pub publish_shares: bool,
@@ -566,6 +612,7 @@ impl Default for StreamingRuntimeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            ultradian_node: false,
             run_config_path: "run_config.json".to_string(),
             publish_streams: true,
             publish_shares: true,
@@ -575,6 +622,26 @@ impl Default for StreamingRuntimeConfig {
             share_payload_kind: "neural.fabric.v1".to_string(),
             min_cpu_cores: 2,
             min_memory_gb: 4.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeConfig {
+    pub enabled: bool,
+    pub persist_state: bool,
+    pub state_path: String,
+    pub queue: KnowledgeQueueConfig,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            persist_state: false,
+            state_path: default_knowledge_path(),
+            queue: KnowledgeQueueConfig::default(),
         }
     }
 }
@@ -625,6 +692,11 @@ fn default_wallet_path() -> String {
 
 fn default_data_path() -> String {
     let path = node_data_dir().join("data");
+    path.to_string_lossy().into_owned()
+}
+
+fn default_knowledge_path() -> String {
+    let path = node_data_dir().join("knowledge_state.json");
     path.to_string_lossy().into_owned()
 }
 

@@ -123,7 +123,7 @@ pub struct KnowledgeQueueReport {
     pub total_pending: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeQueueConfig {
     pub min_votes: usize,
     pub min_confidence: f64,
@@ -146,6 +146,8 @@ impl Default for KnowledgeQueueConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KnowledgeQueue {
     config: KnowledgeQueueConfig,
     documents: HashMap<String, KnowledgeDocument>,
@@ -259,7 +261,8 @@ pub struct KnowledgeStoreReport {
     pub phenotype_priors: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HealthKnowledgeStore {
     phenotype_priors: HashMap<String, PhenotypePrior>,
     prior_alpha: f64,
@@ -365,6 +368,8 @@ impl Default for HealthKnowledgeStore {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KnowledgeRuntime {
     queue: KnowledgeQueue,
     store: HealthKnowledgeStore,

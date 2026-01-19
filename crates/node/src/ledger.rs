@@ -399,7 +399,8 @@ impl BlockchainLedger for LocalLedger {
             | WorkKind::ModelUpdate
             | WorkKind::CausalDiscovery
             | WorkKind::Forecasting
-            | WorkKind::HumanAnnotation => RewardEventKind::ComputeContribution,
+            | WorkKind::HumanAnnotation
+            | WorkKind::StorageContribution => RewardEventKind::ComputeContribution,
         };
         let reward_event = RewardEvent {
             node_id: proof.node_id.clone(),

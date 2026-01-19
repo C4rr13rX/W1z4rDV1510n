@@ -124,6 +124,13 @@ impl NodeRuntime {
         if !streaming.enabled {
             return Ok(());
         }
+        if !streaming.ultradian_node {
+            warn!(
+                target: "w1z4rdv1510n::node",
+                "streaming runtime disabled; ultradian_node flag is false"
+            );
+            return Ok(());
+        }
         let Some(mesh) = self.data_mesh.clone() else {
             return Err(anyhow!("streaming runtime requires data mesh"));
         };

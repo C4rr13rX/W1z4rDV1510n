@@ -67,6 +67,7 @@
   "data": {
     "enabled": true,
     "storage_path": "data",
+    "host_storage": true,
     "max_payload_bytes": 524288,
     "chunk_size_bytes": 32768,
     "replication_factor": 3,
@@ -78,10 +79,14 @@
     "maintenance_interval_secs": 300,
     "retention_days": 30,
     "max_storage_bytes": 0,
-    "max_repair_requests_per_tick": 64
+    "max_repair_requests_per_tick": 64,
+    "storage_reward_enabled": true,
+    "storage_reward_base": 0.15,
+    "storage_reward_per_mb": 0.05
   },
   "streaming": {
     "enabled": false,
+    "ultradian_node": false,
     "run_config_path": "run_config.json",
     "publish_streams": true,
     "publish_shares": true,
@@ -91,6 +96,19 @@
     "share_payload_kind": "neural.fabric.v1",
     "min_cpu_cores": 2,
     "min_memory_gb": 4.0
+  },
+  "knowledge": {
+    "enabled": false,
+    "persist_state": false,
+    "state_path": "data/knowledge_state.json",
+    "queue": {
+      "min_votes": 2,
+      "min_confidence": 0.85,
+      "max_pending": 256,
+      "candidate_limit": 6,
+      "reward_base": 0.8,
+      "reward_per_candidate": 0.1
+    }
   },
   "blockchain": {
     "enabled": true,

@@ -35,6 +35,7 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **Bridge + deposits** - multi-chain stablecoin deposits with relayer quorum verification, intent idempotency, and offline tooling.
 - **API services** - auth + rate limits + metrics + health/readiness for bridge, balance, and operations endpoints.
 - **Data mesh ingestion** - manifest/chunk/receipt replication with quorum tracking, retention GC, and integrity audits; `/data/ingest` + `/data/:data_id` endpoints.
+- **Storage + knowledge flags** - `data.host_storage` controls storage participation; `streaming.ultradian_node` gates ultradian runtime; `knowledge.persist_state` toggles on-disk knowledge queue persistence.
 - **Simulation + OpenStack stubs** - 10k node simulation and minimal OpenStack control-plane abstractions for future cluster plans.
 
 ## Governance and streaming flags
