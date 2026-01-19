@@ -8,6 +8,7 @@ use crate::streaming::fabric::NeuralFabricShare;
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
 use crate::streaming::align::StreamingAligner;
 use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
+use crate::streaming::analysis_runtime::StreamingAnalysisRuntime;
 use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
 use crate::streaming::dimensions::DimensionTracker;
@@ -460,6 +461,7 @@ pub struct StreamingInference {
     plasticity: StreamingPlasticityRuntime,
     ontology: OntologyRuntime,
     physiology: PhysiologyRuntime,
+    analysis: StreamingAnalysisRuntime,
     dimensions: DimensionTracker,
     labels: LabelQueue,
     health_overlay: HealthOverlayRuntime,
@@ -490,6 +492,7 @@ impl StreamingInference {
         physiology_config.enabled =
             physiology_config.enabled && run_config.streaming.layer_flags.physiology_enabled;
         let physiology = PhysiologyRuntime::new(physiology_config);
+        let analysis = StreamingAnalysisRuntime::new(run_config.streaming.analysis.clone());
         let dimensions = DimensionTracker::default();
         let labels = LabelQueue::default();
         let health_overlay = HealthOverlayRuntime::default();
@@ -509,6 +512,7 @@ impl StreamingInference {
             plasticity,
             ontology,
             physiology,
+            analysis,
             dimensions,
             labels,
             health_overlay,
@@ -592,6 +596,7 @@ impl StreamingInference {
                     dimension_report.as_ref(),
                     survival_report.as_ref(),
                 );
+        let analysis_report = self.analysis.update(&batch);
         let temporal_report = self.temporal.update(&batch);
         let plasticity_report = temporal_report
             .as_ref()
@@ -713,6 +718,16 @@ impl StreamingInference {
             );
             snapshot.metadata.insert(
                 "health_overlay".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &analysis_report {
+            report_metadata.insert(
+                "analysis_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "analysis_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }

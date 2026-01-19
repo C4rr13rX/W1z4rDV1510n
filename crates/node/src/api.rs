@@ -1605,3 +1605,54 @@ fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+    use w1z4rdv1510n::network::compute_payload_hash;
+    use w1z4rdv1510n::streaming::{FigureAsset, KnowledgeDocument, TextBlock};
+
+    #[test]
+    fn knowledge_persistence_roundtrip() {
+        let dir = tempdir().expect("tempdir");
+        let state_path = dir.path().join("knowledge_state.json");
+        let mut config = KnowledgeConfig::default();
+        config.enabled = true;
+        config.persist_state = true;
+        config.state_path = state_path.to_string_lossy().into_owned();
+        let (mut runtime, persist) = build_knowledge_runtime(&config);
+        let doc = KnowledgeDocument {
+            doc_id: "doc1".to_string(),
+            source: "NLM".to_string(),
+            title: Some("Sample".to_string()),
+            text_blocks: vec![TextBlock {
+                block_id: "t1".to_string(),
+                text: "Figure 1 shows data.".to_string(),
+                section: None,
+                order: 0,
+                figure_refs: vec!["F1".to_string()],
+                source: "xml".to_string(),
+                confidence: 1.0,
+            }],
+            figures: vec![FigureAsset {
+                figure_id: "F1".to_string(),
+                label: Some("Figure 1".to_string()),
+                caption: Some("Cap".to_string()),
+                image_ref: "fig1.png".to_string(),
+                image_hash: compute_payload_hash(b"img"),
+                order: 0,
+                ocr_text: None,
+            }],
+            metadata: HashMap::new(),
+        };
+        let ts = Timestamp { unix: 1 };
+        runtime.ingest_document(doc, ts);
+        let runtime = Arc::new(Mutex::new(runtime));
+        persist_knowledge_runtime(&persist, &runtime).expect("persist");
+        let (loaded, _) = build_knowledge_runtime(&config);
+        let report = loaded.queue_report(Timestamp { unix: 2 });
+        assert!(report.is_some());
+    }
+}

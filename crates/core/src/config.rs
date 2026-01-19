@@ -443,6 +443,20 @@ impl RunConfig {
                     "streaming.physiology.prior_strength must be in [0,1]"
                 );
             }
+            if self.streaming.analysis.enabled {
+                anyhow::ensure!(
+                    self.streaming.analysis.interval_batches > 0,
+                    "streaming.analysis.interval_batches must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.analysis.max_tokens > 0,
+                    "streaming.analysis.max_tokens must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.analysis.max_layers > 0,
+                    "streaming.analysis.max_layers must be > 0"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -1008,6 +1022,8 @@ pub struct StreamingConfig {
     pub ontology: OntologyConfig,
     #[serde(default)]
     pub physiology: PhysiologyConfig,
+    #[serde(default)]
+    pub analysis: StreamingAnalysisConfig,
 }
 
 impl Default for StreamingConfig {
@@ -1027,6 +1043,27 @@ impl Default for StreamingConfig {
             plasticity: OnlinePlasticityConfig::default(),
             ontology: OntologyConfig::default(),
             physiology: PhysiologyConfig::default(),
+            analysis: StreamingAnalysisConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingAnalysisConfig {
+    pub enabled: bool,
+    pub interval_batches: usize,
+    pub max_tokens: usize,
+    pub max_layers: usize,
+}
+
+impl Default for StreamingAnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_batches: 3,
+            max_tokens: 256,
+            max_layers: 128,
         }
     }
 }

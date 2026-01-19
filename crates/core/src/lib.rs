@@ -13,6 +13,7 @@ pub mod logging;
 pub mod ml;
 pub mod neuro;
 pub mod network;
+pub mod math_toolbox;
 pub mod objective;
 pub mod orchestrator;
 pub mod plasticity;

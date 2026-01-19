@@ -10,9 +10,10 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 
 - **Domain-agnostic sequence reasoning** – chess games, USPTO reaction steps, crowd/traffic frames, clickstreams, market ticks, log lines, code edits: if you can encode symbols/roles/positions, the sampler can predict/complete the sequence.
 - **Gap-filling + forecasting** – handles sparse or staggered histories, predicts missing frames, and projects plausible futures with stack hashing + relational priors.
-- **Low-overhead ML** – no GPU required; thread-capped, CPU-friendly kernels with deterministic seeds keep experiments reproducible on modest hardware.
-- **Inspectable & tunable** – every energy term, prior, neuro plasticity knob, and homeostasis control is JSON-configurable and logged.
-- **Cross-discipline fusion** – quantum-inspired annealing, graph/relational hashing, and cortical-style neurogenesis cooperate in one engine.
+- **Low-overhead ML** - no GPU required; thread-capped, CPU-friendly kernels with deterministic seeds keep experiments reproducible on modest hardware.
+- **Inspectable & tunable** - every energy term, prior, neuro plasticity knob, and homeostasis control is JSON-configurable and logged.
+- **Cross-discipline fusion** - quantum-inspired annealing, graph/relational hashing, and cortical-style neurogenesis cooperate in one engine.
+- **Math + analysis toolbox** - stats/probability/tensor/vector/matrix utilities drive streaming accuracy diagnostics and drift tracking.
 
 ## Core capabilities
 
