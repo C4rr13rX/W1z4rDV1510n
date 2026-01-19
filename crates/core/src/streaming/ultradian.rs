@@ -493,4 +493,57 @@ mod tests {
         let layers = extractor.extract_layers();
         assert!(layers.is_empty());
     }
+
+    #[test]
+    fn extractor_requires_min_cycles() {
+        let mut extractor = UltradianLayerExtractor::new();
+        let start = 3_000_000_i64;
+        for idx in 0..40 {
+            let t = start + (idx * 10) as i64;
+            let value = (idx as f64 * 0.1).sin();
+            extractor.push_sample(SignalSample {
+                timestamp: Timestamp { unix: t },
+                value,
+                quality: 1.0,
+            });
+        }
+        let layers = extractor.extract_layers();
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn extractor_tracks_phase_drift() {
+        let mut extractor = UltradianLayerExtractor::new();
+        let period_secs = 30.0 * 60.0;
+        let omega = 2.0 * PI / period_secs;
+        let start = 4_000_000_i64;
+        for idx in 0..80 {
+            let t = start + (idx * 60) as i64;
+            let value = (omega * t as f64).sin();
+            extractor.push_sample(SignalSample {
+                timestamp: Timestamp { unix: t },
+                value,
+                quality: 1.0,
+            });
+        }
+        let first_layers = extractor.extract_layers();
+        assert!(first_layers
+            .iter()
+            .any(|layer| matches!(layer.kind, LayerKind::UltradianMicroArousal)));
+        for idx in 80..90 {
+            let t = start + (idx * 60) as i64;
+            let value = (omega * t as f64).sin();
+            extractor.push_sample(SignalSample {
+                timestamp: Timestamp { unix: t },
+                value,
+                quality: 1.0,
+            });
+        }
+        let layers = extractor.extract_layers();
+        let micro = layers
+            .iter()
+            .find(|layer| matches!(layer.kind, LayerKind::UltradianMicroArousal))
+            .expect("micro layer");
+        assert!(micro.attributes.contains_key("phase_drift_rad_s"));
+    }
 }
