@@ -166,11 +166,20 @@ impl DataMeshHandle {
     }
 
     pub async fn ingest_fabric_share(&self, share: &NeuralFabricShare) -> Result<DataIngestResponse> {
+        self.ingest_fabric_share_with_kind(share, NEURAL_FABRIC_KIND)
+            .await
+    }
+
+    pub async fn ingest_fabric_share_with_kind(
+        &self,
+        share: &NeuralFabricShare,
+        payload_kind: &str,
+    ) -> Result<DataIngestResponse> {
         let payload_json = serde_json::to_value(share)
             .map_err(|err| anyhow!("serialize neural fabric share: {err}"))?;
         let request = DataIngestRequest {
             sensor_id: format!("neural-fabric:{}", share.node_id),
-            payload_kind: NEURAL_FABRIC_KIND.to_string(),
+            payload_kind: payload_kind.to_string(),
             payload_hex: None,
             payload_text: None,
             payload_json: Some(payload_json),
@@ -184,11 +193,21 @@ impl DataMeshHandle {
         sensor_id: String,
         envelope: &StreamEnvelope,
     ) -> Result<DataIngestResponse> {
+        self.ingest_stream_envelope_with_kind(sensor_id, envelope, STREAM_ENVELOPE_KIND)
+            .await
+    }
+
+    pub async fn ingest_stream_envelope_with_kind(
+        &self,
+        sensor_id: String,
+        envelope: &StreamEnvelope,
+        payload_kind: &str,
+    ) -> Result<DataIngestResponse> {
         let payload_json =
             serde_json::to_value(envelope).map_err(|err| anyhow!("serialize stream envelope: {err}"))?;
         let request = DataIngestRequest {
             sensor_id,
-            payload_kind: STREAM_ENVELOPE_KIND.to_string(),
+            payload_kind: payload_kind.to_string(),
             payload_hex: None,
             payload_text: None,
             payload_json: Some(payload_json),
@@ -202,7 +221,11 @@ impl DataMeshHandle {
         receiver: &mut broadcast::Receiver<DataMeshEvent>,
     ) -> Option<NeuralFabricShare> {
         loop {
-            let event = receiver.recv().await.ok()?;
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            };
             let data_id = match event {
                 DataMeshEvent::PayloadReady {
                     data_id,
@@ -227,7 +250,11 @@ impl DataMeshHandle {
         receiver: &mut broadcast::Receiver<DataMeshEvent>,
     ) -> Option<StreamEnvelope> {
         loop {
-            let event = receiver.recv().await.ok()?;
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            };
             let data_id = match event {
                 DataMeshEvent::PayloadReady {
                     data_id,

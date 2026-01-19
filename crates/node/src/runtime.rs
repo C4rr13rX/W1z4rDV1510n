@@ -8,18 +8,22 @@ use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
 use crate::p2p::NodeNetwork;
 use anyhow::{Result, anyhow};
 use std::fs;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{
-    BlockchainLedger, NoopLedger, NodeCapabilities, NodeRegistration, ValidatorHeartbeat,
+    BlockchainLedger, EnergyEfficiencySample, NoopLedger, NodeCapabilities, NodeRegistration,
+    ValidatorHeartbeat, WorkKind, WorkProof,
 };
-use w1z4rdv1510n::compute::{ComputeJobKind, ComputeRouter};
+use w1z4rdv1510n::compute::{ComputeJobKind, ComputeRouter, ComputeTarget};
 use w1z4rdv1510n::config::NodeRole;
 use w1z4rdv1510n::hardware::HardwareProfile;
+use w1z4rdv1510n::network::compute_payload_hash;
 use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{NeuralFabricShare, StreamEnvelope, StreamingInference};
 use w1z4rdv1510n::config::RunConfig;
+use serde_json::Value;
 
 pub struct NodeRuntime {
     config: NodeConfig,
@@ -127,6 +131,12 @@ impl NodeRuntime {
         let node_id = self.config.node_id.clone();
         let cpu_cores = self.profile.cpu_cores;
         let memory_gb = self.profile.total_memory_gb;
+        let profile = self.profile.clone();
+        let ledger = self.ledger.clone();
+        let wallet = self.wallet.clone();
+        let compute_config = self.config.compute.clone();
+        let cluster_config = self.config.cluster.clone();
+        let energy_reporting = self.config.energy_reporting.clone();
         let can_process_streams =
             cpu_cores >= streaming.min_cpu_cores && memory_gb >= streaming.min_memory_gb;
         let consume_streams = streaming.consume_streams && can_process_streams;
@@ -191,6 +201,10 @@ impl NodeRuntime {
             };
             runtime.block_on(async move {
                 let mut inference = StreamingInference::new(run_config);
+                let compute_router = ComputeRouter::new(compute_config, cluster_config);
+                let mut processed_queue: VecDeque<String> = VecDeque::new();
+                let mut processed_set: HashSet<String> = HashSet::new();
+                let max_processed = 4096usize;
                 let mut events = mesh.subscribe();
                 loop {
                     let event = match events.recv().await {
@@ -200,20 +214,210 @@ impl NodeRuntime {
                     let DataMeshEvent::PayloadReady {
                         data_id,
                         payload_kind,
+                        payload_hash,
+                        node_id: origin_node_id,
+                        sensor_id,
                         ..
                     } = event;
                     if payload_kind == stream_kind && consume_streams {
-                        if let Ok(payload) = mesh.load_payload(data_id).await {
-                            if let Ok(envelope) = serde_json::from_slice::<StreamEnvelope>(&payload) {
-                                let _ = inference.handle_envelope(envelope);
-                                if publish_shares {
-                                    if let Some(share) =
-                                        inference.take_last_fabric_share(node_id.clone())
-                                    {
-                                        let _ = mesh.ingest_fabric_share(&share).await;
-                                    }
-                                }
+                        if processed_set.contains(&data_id) {
+                            continue;
+                        }
+                        processed_set.insert(data_id.clone());
+                        processed_queue.push_back(data_id.clone());
+                        while processed_queue.len() > max_processed {
+                            if let Some(old) = processed_queue.pop_front() {
+                                processed_set.remove(&old);
                             }
+                        }
+                        let payload = match mesh.load_payload(data_id.clone()).await {
+                            Ok(payload) => payload,
+                            Err(_) => continue,
+                        };
+                        let envelope = match serde_json::from_slice::<StreamEnvelope>(&payload) {
+                            Ok(envelope) => envelope,
+                            Err(_) => continue,
+                        };
+                        let payload_bytes = payload.len();
+                        let input_hash = if payload_hash.trim().is_empty() {
+                            compute_payload_hash(&payload)
+                        } else {
+                            payload_hash
+                        };
+                        let start = Instant::now();
+                        let outcome = match inference.handle_envelope(envelope) {
+                            Ok(outcome) => outcome,
+                            Err(_) => None,
+                        };
+                        if outcome.is_none() {
+                            continue;
+                        }
+                        let elapsed_secs = start.elapsed().as_secs_f64().max(0.001);
+                        let compute_target = compute_router.route(ComputeJobKind::TensorHeavy);
+                        let watts = estimate_watts(&profile, compute_target);
+                        let energy_joules = watts * elapsed_secs;
+                        let throughput = payload_bytes as f64 / elapsed_secs;
+                        if energy_reporting.enabled {
+                            let sample = EnergyEfficiencySample {
+                                node_id: node_id.clone(),
+                                timestamp: now_timestamp(),
+                                watts,
+                                throughput,
+                            };
+                            if let Err(err) = ledger.submit_energy_sample(sample) {
+                                warn!(
+                                    target: "w1z4rdv1510n::node",
+                                    error = %err,
+                                    "energy sample rejected"
+                                );
+                            }
+                        }
+                        let mut output_hash = None;
+                        if publish_shares {
+                            if let Some(mut share) =
+                                inference.take_last_fabric_share(node_id.clone())
+                            {
+                                share.metadata.insert(
+                                    "source_data_id".to_string(),
+                                    Value::String(data_id.clone()),
+                                );
+                                share.metadata.insert(
+                                    "source_payload_hash".to_string(),
+                                    Value::String(input_hash.clone()),
+                                );
+                                share.metadata.insert(
+                                    "source_node_id".to_string(),
+                                    Value::String(origin_node_id.clone()),
+                                );
+                                share.metadata.insert(
+                                    "source_sensor_id".to_string(),
+                                    Value::String(sensor_id.clone()),
+                                );
+                                share.metadata.insert(
+                                    "compute_node_id".to_string(),
+                                    Value::String(node_id.clone()),
+                                );
+                                share.metadata.insert(
+                                    "compute_target".to_string(),
+                                    Value::String(format!("{compute_target:?}")),
+                                );
+                                share.metadata.insert(
+                                    "compute_elapsed_secs".to_string(),
+                                    Value::from(elapsed_secs),
+                                );
+                                share.metadata.insert(
+                                    "energy_joules".to_string(),
+                                    Value::from(energy_joules),
+                                );
+                                share.metadata.insert(
+                                    "energy_watts_est".to_string(),
+                                    Value::from(watts),
+                                );
+                                share.metadata.insert(
+                                    "throughput_bps".to_string(),
+                                    Value::from(throughput),
+                                );
+                                share.metadata.insert(
+                                    "energy_estimated".to_string(),
+                                    Value::from(true),
+                                );
+                                if let Ok(serialized) = serde_json::to_vec(&share) {
+                                    output_hash = Some(compute_payload_hash(&serialized));
+                                }
+                                let _ = mesh
+                                    .ingest_fabric_share_with_kind(&share, &share_kind)
+                                    .await;
+                            }
+                        }
+                        let score = compute_reward_score(energy_joules, payload_bytes);
+                        let completed_at = now_timestamp();
+                        let work_id = work_id_for(
+                            &node_id,
+                            &data_id,
+                            &input_hash,
+                            output_hash.as_deref(),
+                            completed_at,
+                        );
+                        let mut metrics = HashMap::new();
+                        metrics.insert(
+                            "stream_data_id".to_string(),
+                            Value::String(data_id.clone()),
+                        );
+                        metrics.insert(
+                            "input_payload_hash".to_string(),
+                            Value::String(input_hash),
+                        );
+                        metrics.insert(
+                            "input_payload_bytes".to_string(),
+                            Value::from(payload_bytes as u64),
+                        );
+                        if let Some(hash) = output_hash {
+                            metrics.insert(
+                                "output_payload_hash".to_string(),
+                                Value::String(hash),
+                            );
+                        }
+                        metrics.insert(
+                            "origin_node_id".to_string(),
+                            Value::String(origin_node_id),
+                        );
+                        metrics.insert(
+                            "origin_sensor_id".to_string(),
+                            Value::String(sensor_id),
+                        );
+                        metrics.insert(
+                            "compute_target".to_string(),
+                            Value::String(format!("{compute_target:?}")),
+                        );
+                        metrics.insert(
+                            "elapsed_secs".to_string(),
+                            Value::from(elapsed_secs),
+                        );
+                        metrics.insert(
+                            "energy_joules".to_string(),
+                            Value::from(energy_joules),
+                        );
+                        metrics.insert(
+                            "energy_watts_est".to_string(),
+                            Value::from(watts),
+                        );
+                        metrics.insert(
+                            "throughput_bps".to_string(),
+                            Value::from(throughput),
+                        );
+                        metrics.insert(
+                            "energy_estimated".to_string(),
+                            Value::from(true),
+                        );
+                        metrics.insert(
+                            "hardware_cpu_cores".to_string(),
+                            Value::from(profile.cpu_cores as u64),
+                        );
+                        metrics.insert(
+                            "hardware_memory_gb".to_string(),
+                            Value::from(profile.total_memory_gb),
+                        );
+                        metrics.insert(
+                            "hardware_has_gpu".to_string(),
+                            Value::from(profile.has_gpu),
+                        );
+                        let proof = WorkProof {
+                            work_id,
+                            node_id: node_id.clone(),
+                            kind: WorkKind::ComputeTask,
+                            completed_at,
+                            score,
+                            fee_paid: 0.0,
+                            metrics,
+                            signature: String::new(),
+                        };
+                        let signed = wallet.sign_work_proof(proof);
+                        if let Err(err) = ledger.submit_work_proof(signed) {
+                            warn!(
+                                target: "w1z4rdv1510n::node",
+                                error = %err,
+                                "work proof rejected"
+                            );
                         }
                     } else if payload_kind == share_kind && consume_shares {
                         if let Ok(payload) = mesh.load_payload(data_id).await {
@@ -386,6 +590,51 @@ fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {
             Ok(Arc::new(NoopLedger::default()))
         }
     }
+}
+
+fn estimate_watts(profile: &HardwareProfile, target: ComputeTarget) -> f64 {
+    let cpu = profile.cpu_cores as f64;
+    let mem = profile.total_memory_gb.max(0.5);
+    let mut watts = 8.0 + mem * 0.3;
+    match target {
+        ComputeTarget::Cpu => {
+            watts += cpu * 1.6;
+        }
+        ComputeTarget::Gpu => {
+            watts += cpu * 1.0 + if profile.has_gpu { 60.0 } else { 0.0 };
+        }
+        ComputeTarget::Cluster => {
+            watts += cpu * 1.2;
+        }
+        ComputeTarget::Quantum => {
+            watts += 25.0;
+        }
+    }
+    watts.clamp(5.0, 500.0)
+}
+
+fn compute_reward_score(energy_joules: f64, payload_bytes: usize) -> f64 {
+    let size_factor = ((payload_bytes as f64) / 65_536.0).clamp(0.5, 4.0);
+    let base = (energy_joules / 150.0) * size_factor;
+    base.clamp(0.05, 100.0)
+}
+
+fn work_id_for(
+    node_id: &str,
+    data_id: &str,
+    input_hash: &str,
+    output_hash: Option<&str>,
+    completed_at: Timestamp,
+) -> String {
+    let marker = format!(
+        "work|{}|{}|{}|{}|{}",
+        node_id,
+        data_id,
+        input_hash,
+        output_hash.unwrap_or(""),
+        completed_at.unix
+    );
+    compute_payload_hash(marker.as_bytes())
 }
 
 fn now_timestamp() -> Timestamp {
