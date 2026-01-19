@@ -1,4 +1,5 @@
 use crate::config::DataMeshConfig;
+use crate::performance::NodeMetricsReport;
 use crate::p2p::NetworkPublisher;
 use crate::wallet::{WalletSigner, address_from_public_key, node_id_from_wallet};
 use anyhow::{anyhow, Context, Result};
@@ -71,6 +72,7 @@ pub enum DataMessage {
     Chunk(DataChunk),
     Receipt(ReplicationReceipt),
     Request(DataRequest),
+    NodeMetrics(NodeMetricsReport),
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +84,9 @@ pub enum DataMeshEvent {
         timestamp: Timestamp,
         node_id: String,
         sensor_id: String,
+    },
+    NodeMetrics {
+        report: NodeMetricsReport,
     },
 }
 
@@ -237,6 +242,7 @@ impl DataMeshHandle {
                     }
                     data_id
                 }
+                DataMeshEvent::NodeMetrics { .. } => continue,
             };
             let payload = self.load_payload(data_id).await.ok()?;
             if let Ok(share) = serde_json::from_slice::<NeuralFabricShare>(&payload) {
@@ -266,6 +272,7 @@ impl DataMeshHandle {
                     }
                     data_id
                 }
+                DataMeshEvent::NodeMetrics { .. } => continue,
             };
             let payload = self.load_payload(data_id).await.ok()?;
             if let Ok(envelope) = serde_json::from_slice::<StreamEnvelope>(&payload) {
@@ -276,6 +283,12 @@ impl DataMeshHandle {
 
     pub fn subscribe(&self) -> broadcast::Receiver<DataMeshEvent> {
         self.event_tx.subscribe()
+    }
+
+    pub fn publish_node_metrics(&self, report: NodeMetricsReport) -> Result<()> {
+        self.command_tx
+            .send(DataMeshCommand::PublishMetrics { report })
+            .map_err(|_| anyhow!("data mesh command channel closed"))
     }
 }
 
@@ -293,6 +306,9 @@ enum DataMeshCommand {
         respond_to: oneshot::Sender<Result<Vec<u8>>>,
     },
     NetworkEnvelope(NetworkEnvelope),
+    PublishMetrics {
+        report: NodeMetricsReport,
+    },
 }
 
 pub fn start_data_mesh(
@@ -411,6 +427,7 @@ fn handle_command(
                 if let Ok(message) = serde_json::from_slice::<DataMessage>(&bytes) {
                     handle_network_message(
                         message,
+                        Some(&envelope.public_key),
                         config,
                         node_id,
                         wallet,
@@ -421,6 +438,12 @@ fn handle_command(
                     );
                 }
             }
+        }
+        DataMeshCommand::PublishMetrics { report } => {
+            if !config.enabled {
+                return;
+            }
+            let _ = publisher.publish(signed_envelope(DataMessage::NodeMetrics(report), wallet));
         }
     }
 }
@@ -583,6 +606,7 @@ fn ingest_local(
 
 fn handle_network_message(
     message: DataMessage,
+    envelope_public_key: Option<&str>,
     config: &DataMeshConfig,
     node_id: &str,
     wallet: &WalletSigner,
@@ -679,6 +703,14 @@ fn handle_network_message(
                     let _ = publisher.publish(signed_envelope(DataMessage::Chunk(chunk), wallet));
                 }
             }
+        }
+        DataMessage::NodeMetrics(report) => {
+            if let Some(public_key) = envelope_public_key {
+                if verify_node_metrics(&report, public_key).is_err() {
+                    return;
+                }
+            }
+            emit_node_metrics(event_tx, report);
         }
     }
 }
@@ -804,6 +836,10 @@ fn emit_payload_ready(event_tx: &broadcast::Sender<DataMeshEvent>, manifest: &Da
     let _ = event_tx.send(event);
 }
 
+fn emit_node_metrics(event_tx: &broadcast::Sender<DataMeshEvent>, report: NodeMetricsReport) {
+    let _ = event_tx.send(DataMeshEvent::NodeMetrics { report });
+}
+
 fn verify_manifest(manifest: &DataManifest) -> Result<()> {
     let public_key = decode_public_key(&manifest.public_key)?;
     let signature = decode_signature(&manifest.signature)?;
@@ -842,6 +878,18 @@ fn verify_request(request: &DataRequest) -> Result<()> {
     let expected_node_id = node_id_from_public_key(&public_key)?;
     if request.requester_node_id != expected_node_id {
         anyhow::bail!("request node_id mismatch");
+    }
+    Ok(())
+}
+
+fn verify_node_metrics(report: &NodeMetricsReport, public_key_hex: &str) -> Result<()> {
+    if public_key_hex.trim().is_empty() {
+        return Ok(());
+    }
+    let public_key = decode_public_key(public_key_hex)?;
+    let expected_node_id = node_id_from_public_key(&public_key)?;
+    if report.node_id != expected_node_id {
+        anyhow::bail!("metrics node_id mismatch");
     }
     Ok(())
 }
@@ -1640,6 +1688,9 @@ mod tests {
                 assert_eq!(node_id, expected_node_id);
                 assert_eq!(sensor_id, "sensor-1");
                 data_id
+            }
+            DataMeshEvent::NodeMetrics { .. } => {
+                panic!("unexpected node metrics event in test")
             }
         };
         let payload = handle.load_payload(data_id).await.expect("payload");

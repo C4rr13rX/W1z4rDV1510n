@@ -97,6 +97,24 @@
     "min_cpu_cores": 2,
     "min_memory_gb": 4.0
   },
+  "workload": {
+    "enable_sensor_ingest": true,
+    "enable_stream_processing": true,
+    "enable_share_publish": true,
+    "enable_share_consume": true,
+    "enable_storage": true
+  },
+  "peer_scoring": {
+    "enabled": true,
+    "publish_interval_secs": 30,
+    "report_ttl_secs": 300,
+    "ema_alpha": 0.2,
+    "efficiency_offload_threshold": 0.25,
+    "capacity_threshold": 0.5,
+    "accuracy_threshold": 0.4,
+    "min_peer_reports": 3,
+    "target_latency_ms": 500.0
+  },
   "knowledge": {
     "enabled": false,
     "persist_state": false,

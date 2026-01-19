@@ -5,11 +5,12 @@ use crate::ledger::LocalLedger;
 use crate::openstack::OpenStackControlPlane;
 use crate::paths::node_data_dir;
 use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
+use crate::performance::{LocalPerformanceSample, NodePerformanceTracker};
 use crate::p2p::NodeNetwork;
 use anyhow::{Result, anyhow};
 use std::fs;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{
@@ -35,11 +36,15 @@ pub struct NodeRuntime {
     openstack: Option<OpenStackControlPlane>,
     wallet: Arc<WalletSigner>,
     data_mesh: Option<DataMeshHandle>,
+    performance: Arc<Mutex<NodePerformanceTracker>>,
 }
 
 impl NodeRuntime {
     pub fn new(mut config: NodeConfig) -> Result<Self> {
         let wallet = Arc::new(WalletStore::load_or_create_signer(&config.wallet)?);
+        if !config.workload.enable_storage {
+            config.data.host_storage = false;
+        }
         if config.network.bootstrap_peers.is_empty() && !config.blockchain.bootstrap_peers.is_empty()
         {
             config.network.bootstrap_peers = config.blockchain.bootstrap_peers.clone();
@@ -57,6 +62,11 @@ impl NodeRuntime {
         } else {
             None
         };
+        let performance = Arc::new(Mutex::new(NodePerformanceTracker::new(
+            config.node_id.clone(),
+            config.peer_scoring.clone(),
+            config.workload.clone(),
+        )));
         Ok(Self {
             config,
             chain_spec,
@@ -67,6 +77,7 @@ impl NodeRuntime {
             openstack,
             wallet,
             data_mesh: None,
+            performance,
         })
     }
 
@@ -134,6 +145,9 @@ impl NodeRuntime {
         let Some(mesh) = self.data_mesh.clone() else {
             return Err(anyhow!("streaming runtime requires data mesh"));
         };
+        let workload = self.config.workload.clone();
+        let peer_scoring = self.config.peer_scoring.clone();
+        let performance = self.performance.clone();
         let run_config_path = streaming.run_config_path.clone();
         let node_id = self.config.node_id.clone();
         let cpu_cores = self.profile.cpu_cores;
@@ -146,9 +160,10 @@ impl NodeRuntime {
         let energy_reporting = self.config.energy_reporting.clone();
         let can_process_streams =
             cpu_cores >= streaming.min_cpu_cores && memory_gb >= streaming.min_memory_gb;
-        let consume_streams = streaming.consume_streams && can_process_streams;
-        let consume_shares = streaming.consume_shares;
-        let publish_shares = streaming.publish_shares;
+        let consume_streams =
+            streaming.consume_streams && can_process_streams && workload.enable_stream_processing;
+        let consume_shares = streaming.consume_shares && workload.enable_share_consume;
+        let publish_shares = streaming.publish_shares && workload.enable_share_publish;
         if streaming.consume_streams && !can_process_streams {
             warn!(
                 target: "w1z4rdv1510n::node",
@@ -218,15 +233,38 @@ impl NodeRuntime {
                         Ok(event) => event,
                         Err(_) => continue,
                     };
-                    let DataMeshEvent::PayloadReady {
-                        data_id,
-                        payload_kind,
-                        payload_hash,
-                        node_id: origin_node_id,
-                        sensor_id,
-                        ..
-                    } = event;
+                    let (data_id, payload_kind, payload_hash, origin_node_id, sensor_id) = match event {
+                        DataMeshEvent::PayloadReady {
+                            data_id,
+                            payload_kind,
+                            payload_hash,
+                            node_id: origin_node_id,
+                            sensor_id,
+                            ..
+                        } => (data_id, payload_kind, payload_hash, origin_node_id, sensor_id),
+                        DataMeshEvent::NodeMetrics { report } => {
+                            if peer_scoring.enabled {
+                                let now = now_timestamp();
+                                if let Ok(mut tracker) = performance.lock() {
+                                    tracker.ingest_peer_report(report, now);
+                                }
+                            }
+                            continue;
+                        }
+                    };
                     if payload_kind == stream_kind && consume_streams {
+                        let now = now_timestamp();
+                        let should_process = if peer_scoring.enabled {
+                            match performance.lock() {
+                                Ok(mut tracker) => tracker.should_process_streams(now, true),
+                                Err(_) => true,
+                            }
+                        } else {
+                            true
+                        };
+                        if !should_process {
+                            continue;
+                        }
                         if processed_set.contains(&data_id) {
                             continue;
                         }
@@ -280,60 +318,80 @@ impl NodeRuntime {
                             }
                         }
                         let mut output_hash = None;
-                        if publish_shares {
-                            if let Some(mut share) =
-                                inference.take_last_fabric_share(node_id.clone())
-                            {
-                                share.metadata.insert(
-                                    "source_data_id".to_string(),
-                                    Value::String(data_id.clone()),
-                                );
-                                share.metadata.insert(
-                                    "source_payload_hash".to_string(),
-                                    Value::String(input_hash.clone()),
-                                );
-                                share.metadata.insert(
-                                    "source_node_id".to_string(),
-                                    Value::String(origin_node_id.clone()),
-                                );
-                                share.metadata.insert(
-                                    "source_sensor_id".to_string(),
-                                    Value::String(sensor_id.clone()),
-                                );
-                                share.metadata.insert(
-                                    "compute_node_id".to_string(),
-                                    Value::String(node_id.clone()),
-                                );
-                                share.metadata.insert(
-                                    "compute_target".to_string(),
-                                    Value::String(format!("{compute_target:?}")),
-                                );
-                                share.metadata.insert(
-                                    "compute_elapsed_secs".to_string(),
-                                    Value::from(elapsed_secs),
-                                );
-                                share.metadata.insert(
-                                    "energy_joules".to_string(),
-                                    Value::from(energy_joules),
-                                );
-                                share.metadata.insert(
-                                    "energy_watts_est".to_string(),
-                                    Value::from(watts),
-                                );
-                                share.metadata.insert(
-                                    "throughput_bps".to_string(),
-                                    Value::from(throughput),
-                                );
-                                share.metadata.insert(
-                                    "energy_estimated".to_string(),
-                                    Value::from(true),
-                                );
-                                if let Ok(serialized) = serde_json::to_vec(&share) {
-                                    output_hash = Some(compute_payload_hash(&serialized));
-                                }
+                        let mut accuracy = None;
+                        if let Some(mut share) = inference.take_last_fabric_share(node_id.clone()) {
+                            accuracy = accuracy_from_metadata(&share.metadata);
+                            share.metadata.insert(
+                                "source_data_id".to_string(),
+                                Value::String(data_id.clone()),
+                            );
+                            share.metadata.insert(
+                                "source_payload_hash".to_string(),
+                                Value::String(input_hash.clone()),
+                            );
+                            share.metadata.insert(
+                                "source_node_id".to_string(),
+                                Value::String(origin_node_id.clone()),
+                            );
+                            share.metadata.insert(
+                                "source_sensor_id".to_string(),
+                                Value::String(sensor_id.clone()),
+                            );
+                            share.metadata.insert(
+                                "compute_node_id".to_string(),
+                                Value::String(node_id.clone()),
+                            );
+                            share.metadata.insert(
+                                "compute_target".to_string(),
+                                Value::String(format!("{compute_target:?}")),
+                            );
+                            share.metadata.insert(
+                                "compute_elapsed_secs".to_string(),
+                                Value::from(elapsed_secs),
+                            );
+                            share.metadata.insert(
+                                "energy_joules".to_string(),
+                                Value::from(energy_joules),
+                            );
+                            share.metadata.insert(
+                                "energy_watts_est".to_string(),
+                                Value::from(watts),
+                            );
+                            share.metadata.insert(
+                                "throughput_bps".to_string(),
+                                Value::from(throughput),
+                            );
+                            share.metadata.insert(
+                                "energy_estimated".to_string(),
+                                Value::from(true),
+                            );
+                            if let Ok(serialized) = serde_json::to_vec(&share) {
+                                output_hash = Some(compute_payload_hash(&serialized));
+                            }
+                            if publish_shares {
                                 let _ = mesh
                                     .ingest_fabric_share_with_kind(&share, &share_kind)
                                     .await;
+                            }
+                        }
+                        if peer_scoring.enabled {
+                            let sample = LocalPerformanceSample {
+                                timestamp: now_timestamp(),
+                                payload_bytes,
+                                elapsed_secs,
+                                energy_joules,
+                                accuracy,
+                            };
+                            let report = match performance.lock() {
+                                Ok(mut tracker) => {
+                                    let sample_ts = sample.timestamp;
+                                    tracker.update_local(sample);
+                                    tracker.take_report(sample_ts)
+                                }
+                                Err(_) => None,
+                            };
+                            if let Some(report) = report {
+                                let _ = mesh.publish_node_metrics(report);
                             }
                         }
                         let score = compute_reward_score(energy_joules, payload_bytes);
@@ -624,6 +682,22 @@ fn compute_reward_score(energy_joules: f64, payload_bytes: usize) -> f64 {
     let size_factor = ((payload_bytes as f64) / 65_536.0).clamp(0.5, 4.0);
     let base = (energy_joules / 150.0) * size_factor;
     base.clamp(0.05, 100.0)
+}
+
+fn accuracy_from_metadata(metadata: &HashMap<String, Value>) -> Option<f64> {
+    if let Some(score) = metadata
+        .get("plasticity_report")
+        .and_then(|val| val.get("calibration_score"))
+        .and_then(|val| val.as_f64())
+    {
+        return Some(score.clamp(0.0, 1.0));
+    }
+    metadata
+        .get("analysis_report")
+        .and_then(|val| val.get("token_confidence"))
+        .and_then(|val| val.get("mean"))
+        .and_then(|val| val.as_f64())
+        .map(|score| score.clamp(0.0, 1.0))
 }
 
 fn work_id_for(

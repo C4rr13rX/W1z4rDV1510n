@@ -35,6 +35,7 @@ struct ApiState {
     node_id: String,
     ledger_backend: String,
     data_enabled: bool,
+    sensor_ingest_enabled: bool,
     bridge_enabled: bool,
     knowledge_enabled: bool,
     started_at: Instant,
@@ -434,6 +435,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         node_id: config.node_id.clone(),
         ledger_backend,
         data_enabled: config.data.enabled,
+        sensor_ingest_enabled: config.workload.enable_sensor_ingest,
         bridge_enabled: config.blockchain.bridge.enabled,
         knowledge_enabled: config.knowledge.enabled,
         started_at: Instant::now(),
@@ -854,6 +856,15 @@ async fn submit_data_ingest(
         };
         return (
             StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !state.sensor_ingest_enabled {
+        let response = ErrorResponse {
+            error: "sensor ingest disabled by workload profile".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
             Json(serde_json::to_value(response).unwrap_or_default()),
         );
     }

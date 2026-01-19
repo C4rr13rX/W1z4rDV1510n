@@ -18,6 +18,8 @@ pub struct NodeConfig {
     pub wallet: WalletConfig,
     pub data: DataMeshConfig,
     pub streaming: StreamingRuntimeConfig,
+    pub workload: WorkloadProfileConfig,
+    pub peer_scoring: PeerScoringConfig,
     pub knowledge: KnowledgeConfig,
     pub blockchain: BlockchainConfig,
     pub compute: ComputeRoutingConfig,
@@ -39,6 +41,8 @@ impl Default for NodeConfig {
             wallet: WalletConfig::default(),
             data: DataMeshConfig::default(),
             streaming: StreamingRuntimeConfig::default(),
+            workload: WorkloadProfileConfig::default(),
+            peer_scoring: PeerScoringConfig::default(),
             knowledge: KnowledgeConfig::default(),
             blockchain: BlockchainConfig::default(),
             compute: ComputeRoutingConfig::default(),
@@ -340,6 +344,40 @@ impl NodeConfig {
                 "streaming.ultradian_node must be true when streaming is enabled"
             );
         }
+        if self.peer_scoring.enabled {
+            anyhow::ensure!(
+                self.peer_scoring.publish_interval_secs > 0,
+                "peer_scoring.publish_interval_secs must be > 0"
+            );
+            anyhow::ensure!(
+                self.peer_scoring.report_ttl_secs > 0,
+                "peer_scoring.report_ttl_secs must be > 0"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.peer_scoring.ema_alpha),
+                "peer_scoring.ema_alpha must be in [0,1]"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.peer_scoring.efficiency_offload_threshold),
+                "peer_scoring.efficiency_offload_threshold must be in [0,1]"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.peer_scoring.capacity_threshold),
+                "peer_scoring.capacity_threshold must be in [0,1]"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.peer_scoring.accuracy_threshold),
+                "peer_scoring.accuracy_threshold must be in [0,1]"
+            );
+            anyhow::ensure!(
+                self.peer_scoring.min_peer_reports > 0,
+                "peer_scoring.min_peer_reports must be > 0"
+            );
+            anyhow::ensure!(
+                self.peer_scoring.target_latency_ms > 0.0,
+                "peer_scoring.target_latency_ms must be > 0"
+            );
+        }
         if self.knowledge.enabled {
             anyhow::ensure!(
                 !self.knowledge.state_path.trim().is_empty(),
@@ -622,6 +660,58 @@ impl Default for StreamingRuntimeConfig {
             share_payload_kind: "neural.fabric.v1".to_string(),
             min_cpu_cores: 2,
             min_memory_gb: 4.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkloadProfileConfig {
+    pub enable_sensor_ingest: bool,
+    pub enable_stream_processing: bool,
+    pub enable_share_publish: bool,
+    pub enable_share_consume: bool,
+    pub enable_storage: bool,
+}
+
+impl Default for WorkloadProfileConfig {
+    fn default() -> Self {
+        Self {
+            enable_sensor_ingest: true,
+            enable_stream_processing: true,
+            enable_share_publish: true,
+            enable_share_consume: true,
+            enable_storage: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerScoringConfig {
+    pub enabled: bool,
+    pub publish_interval_secs: u64,
+    pub report_ttl_secs: u64,
+    pub ema_alpha: f64,
+    pub efficiency_offload_threshold: f64,
+    pub capacity_threshold: f64,
+    pub accuracy_threshold: f64,
+    pub min_peer_reports: usize,
+    pub target_latency_ms: f64,
+}
+
+impl Default for PeerScoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            publish_interval_secs: 30,
+            report_ttl_secs: 300,
+            ema_alpha: 0.2,
+            efficiency_offload_threshold: 0.25,
+            capacity_threshold: 0.5,
+            accuracy_threshold: 0.4,
+            min_peer_reports: 3,
+            target_latency_ms: 500.0,
         }
     }
 }

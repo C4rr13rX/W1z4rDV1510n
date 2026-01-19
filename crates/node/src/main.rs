@@ -14,6 +14,7 @@ mod ledger;
 mod openstack;
 mod paths;
 mod p2p;
+mod performance;
 mod runtime;
 mod sim;
 mod wallet;
