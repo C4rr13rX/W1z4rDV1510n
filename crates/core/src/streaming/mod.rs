@@ -19,6 +19,7 @@ pub mod plasticity_runtime;
 pub mod ontology_runtime;
 pub mod physiology_runtime;
 pub mod behavior;
+pub mod fabric;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -50,3 +51,4 @@ pub use behavior::{
     GraphSignature, SensorChannel, SensorKind, SensorSample, SoftObjective, SpeciesKind,
     TimeFrequencySummary,
 };
+pub use fabric::NeuralFabricShare;

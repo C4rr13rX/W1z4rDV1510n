@@ -4,6 +4,7 @@ use crate::streaming::behavior::{
     BehaviorInput, BehaviorMotif, BehaviorSubstrate, BehaviorSubstrateConfig, SensorKind,
     SensorSample, SpeciesKind,
 };
+use crate::streaming::fabric::NeuralFabricShare;
 use crate::streaming::flow::{FlowLayerExtractor, FlowSample, FlowConfig};
 use crate::streaming::align::StreamingAligner;
 use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
@@ -91,6 +92,16 @@ impl StreamingProcessor {
                 self.handle_public_topics(envelope)
             }
         }
+    }
+
+    pub fn ingest_fabric_share(&mut self, share: NeuralFabricShare) -> Option<TokenBatch> {
+        if !self.config.enabled {
+            return None;
+        }
+        if !share.motifs.is_empty() {
+            self.behavior_substrate.ingest_shared_motifs(&share.motifs);
+        }
+        Some(share.to_token_batch())
     }
 
     fn handle_people_video(&mut self, envelope: StreamEnvelope) -> Option<TokenBatch> {
@@ -460,6 +471,21 @@ impl StreamingInference {
             Some(batch) => batch,
             None => return Ok(None),
         };
+        self.process_batch(batch)
+    }
+
+    pub fn handle_fabric_share(
+        &mut self,
+        share: NeuralFabricShare,
+    ) -> anyhow::Result<Option<RunOutcome>> {
+        let batch = match self.processor.ingest_fabric_share(share) {
+            Some(batch) => batch,
+            None => return Ok(None),
+        };
+        self.process_batch(batch)
+    }
+
+    fn process_batch(&mut self, batch: TokenBatch) -> anyhow::Result<Option<RunOutcome>> {
         let batch = match self.aligner.push(batch) {
             Some(batch) => batch,
             None => return Ok(None),

@@ -10,14 +10,17 @@ use std::future;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{BlockchainLedger, SensorCommitment};
 use w1z4rdv1510n::network::{NetworkEnvelope, compute_payload_hash};
 use w1z4rdv1510n::schema::Timestamp;
+use w1z4rdv1510n::streaming::NeuralFabricShare;
 
 const DATA_MESSAGE_KIND: &str = "data.message";
+const DATA_EVENT_BUFFER: usize = 1024;
+const NEURAL_FABRIC_KIND: &str = "neural.fabric.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataManifest {
@@ -69,6 +72,18 @@ pub enum DataMessage {
     Request(DataRequest),
 }
 
+#[derive(Debug, Clone)]
+pub enum DataMeshEvent {
+    PayloadReady {
+        data_id: String,
+        payload_kind: String,
+        payload_hash: String,
+        timestamp: Timestamp,
+        node_id: String,
+        sensor_id: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataIngestRequest {
     pub sensor_id: String,
@@ -115,6 +130,7 @@ pub struct DataStatusResponse {
 #[derive(Clone)]
 pub struct DataMeshHandle {
     command_tx: mpsc::UnboundedSender<DataMeshCommand>,
+    event_tx: broadcast::Sender<DataMeshEvent>,
 }
 
 impl DataMeshHandle {
@@ -137,6 +153,59 @@ impl DataMeshHandle {
             .await
             .map_err(|_| anyhow!("data mesh status response dropped"))?
     }
+
+    pub async fn load_payload(&self, data_id: String) -> Result<Vec<u8>> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.command_tx
+            .send(DataMeshCommand::LoadPayload { data_id, respond_to: resp_tx })
+            .map_err(|_| anyhow!("data mesh command channel closed"))?;
+        resp_rx
+            .await
+            .map_err(|_| anyhow!("data mesh load response dropped"))?
+    }
+
+    pub async fn ingest_fabric_share(&self, share: &NeuralFabricShare) -> Result<DataIngestResponse> {
+        let payload_json = serde_json::to_value(share)
+            .map_err(|err| anyhow!("serialize neural fabric share: {err}"))?;
+        let request = DataIngestRequest {
+            sensor_id: format!("neural-fabric:{}", share.node_id),
+            payload_kind: NEURAL_FABRIC_KIND.to_string(),
+            payload_hex: None,
+            payload_text: None,
+            payload_json: Some(payload_json),
+            timestamp_unix: Some(share.timestamp.unix),
+        };
+        self.ingest(request).await
+    }
+
+    pub async fn next_fabric_share(
+        &self,
+        receiver: &mut broadcast::Receiver<DataMeshEvent>,
+    ) -> Option<NeuralFabricShare> {
+        loop {
+            let event = receiver.recv().await.ok()?;
+            let data_id = match event {
+                DataMeshEvent::PayloadReady {
+                    data_id,
+                    payload_kind,
+                    ..
+                } => {
+                    if payload_kind != NEURAL_FABRIC_KIND {
+                        continue;
+                    }
+                    data_id
+                }
+            };
+            let payload = self.load_payload(data_id).await.ok()?;
+            if let Ok(share) = serde_json::from_slice::<NeuralFabricShare>(&payload) {
+                return Some(share);
+            }
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<DataMeshEvent> {
+        self.event_tx.subscribe()
+    }
 }
 
 enum DataMeshCommand {
@@ -147,6 +216,10 @@ enum DataMeshCommand {
     Status {
         data_id: String,
         respond_to: oneshot::Sender<Result<DataStatusResponse>>,
+    },
+    LoadPayload {
+        data_id: String,
+        respond_to: oneshot::Sender<Result<Vec<u8>>>,
     },
     NetworkEnvelope(NetworkEnvelope),
 }
@@ -160,8 +233,10 @@ pub fn start_data_mesh(
     mut network_rx: mpsc::UnboundedReceiver<NetworkEnvelope>,
 ) -> Result<DataMeshHandle> {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    let (event_tx, _) = broadcast::channel(DATA_EVENT_BUFFER);
     let mut store = DataStore::new(config.clone())?;
     let node_id_clone = node_id.clone();
+    let event_tx_clone = event_tx.clone();
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -198,6 +273,7 @@ pub fn start_data_mesh(
                             &wallet,
                             &ledger,
                             &publisher,
+                            &event_tx_clone,
                             &mut store,
                         );
                     }
@@ -210,6 +286,7 @@ pub fn start_data_mesh(
                             &wallet,
                             &ledger,
                             &publisher,
+                            &event_tx_clone,
                             &mut store,
                         );
                     }
@@ -220,7 +297,7 @@ pub fn start_data_mesh(
             }
         });
     });
-    Ok(DataMeshHandle { command_tx })
+    Ok(DataMeshHandle { command_tx, event_tx })
 }
 
 fn handle_command(
@@ -230,15 +307,29 @@ fn handle_command(
     wallet: &WalletSigner,
     ledger: &Arc<dyn BlockchainLedger>,
     publisher: &NetworkPublisher,
+    event_tx: &broadcast::Sender<DataMeshEvent>,
     store: &mut DataStore,
 ) {
     match command {
         DataMeshCommand::Ingest { request, respond_to } => {
-            let response = ingest_local(request, config, node_id, wallet, ledger, publisher, store);
+            let response = ingest_local(
+                request,
+                config,
+                node_id,
+                wallet,
+                ledger,
+                publisher,
+                event_tx,
+                store,
+            );
             let _ = respond_to.send(response);
         }
         DataMeshCommand::Status { data_id, respond_to } => {
             let response = store.status(&data_id);
+            let _ = respond_to.send(response);
+        }
+        DataMeshCommand::LoadPayload { data_id, respond_to } => {
+            let response = store.load_payload(&data_id);
             let _ = respond_to.send(response);
         }
         DataMeshCommand::NetworkEnvelope(envelope) => {
@@ -247,7 +338,15 @@ fn handle_command(
             }
             if let Ok(bytes) = envelope.payload_bytes() {
                 if let Ok(message) = serde_json::from_slice::<DataMessage>(&bytes) {
-                    handle_network_message(message, config, node_id, wallet, publisher, store);
+                    handle_network_message(
+                        message,
+                        config,
+                        node_id,
+                        wallet,
+                        publisher,
+                        event_tx,
+                        store,
+                    );
                 }
             }
         }
@@ -306,6 +405,7 @@ fn ingest_local(
     wallet: &WalletSigner,
     ledger: &Arc<dyn BlockchainLedger>,
     publisher: &NetworkPublisher,
+    event_tx: &broadcast::Sender<DataMeshEvent>,
     store: &mut DataStore,
 ) -> Result<DataIngestResponse> {
     if !config.enabled {
@@ -343,6 +443,7 @@ fn ingest_local(
     let signed_manifest = sign_manifest(manifest, wallet);
     store.store_manifest(&signed_manifest)?;
     store.store_payload(&data_id, &payload)?;
+    emit_payload_ready(event_tx, &signed_manifest);
     let receipt = build_receipt(&data_id, &payload_hash, node_id, wallet);
     let receipt_record = store.record_receipt(receipt.clone())?;
     let _ = publisher.publish(signed_envelope(DataMessage::Manifest(signed_manifest), wallet));
@@ -391,6 +492,7 @@ fn handle_network_message(
     node_id: &str,
     wallet: &WalletSigner,
     publisher: &NetworkPublisher,
+    event_tx: &broadcast::Sender<DataMeshEvent>,
     store: &mut DataStore,
 ) {
     match message {
@@ -425,6 +527,7 @@ fn handle_network_message(
             if store.apply_chunk(chunk, manifest.as_ref()).is_ok() {
                 if let Some(manifest) = manifest {
                     if store.has_data(&manifest.data_id) {
+                        emit_payload_ready(event_tx, &manifest);
                         let receipt = build_receipt(
                             &manifest.data_id,
                             &manifest.payload_hash,
@@ -567,6 +670,18 @@ fn signed_envelope(message: DataMessage, wallet: &WalletSigner) -> NetworkEnvelo
     envelope.message_id = envelope.expected_message_id();
     envelope.signature = wallet.sign_payload(envelope.signing_payload().as_bytes());
     envelope
+}
+
+fn emit_payload_ready(event_tx: &broadcast::Sender<DataMeshEvent>, manifest: &DataManifest) {
+    let event = DataMeshEvent::PayloadReady {
+        data_id: manifest.data_id.clone(),
+        payload_kind: manifest.payload_kind.clone(),
+        payload_hash: manifest.payload_hash.clone(),
+        timestamp: manifest.timestamp,
+        node_id: manifest.node_id.clone(),
+        sensor_id: manifest.sensor_id.clone(),
+    };
+    let _ = event_tx.send(event);
 }
 
 fn verify_manifest(manifest: &DataManifest) -> Result<()> {
@@ -1203,6 +1318,7 @@ mod tests {
     use crate::p2p::test_publisher;
     use crate::wallet::WalletStore;
     use tempfile::tempdir;
+    use tokio::time::timeout;
     use w1z4rdv1510n::blockchain::NoopLedger;
 
     fn test_wallet() -> WalletSigner {
@@ -1277,5 +1393,103 @@ mod tests {
         assert!(response.quorum_met);
         assert!(response.replication_met);
         drop(net_tx);
+    }
+
+    #[tokio::test]
+    async fn ingest_emits_payload_ready_event() {
+        let dir = tempdir().expect("tmp dir");
+        let mut config = DataMeshConfig::default();
+        config.storage_path = dir.path().to_string_lossy().into_owned();
+        config.replication_factor = 1;
+        config.receipt_quorum = 1;
+        let wallet = Arc::new(test_wallet());
+        let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
+        let publisher = test_publisher();
+        let (_net_tx, net_rx) = mpsc::unbounded_channel();
+        let handle = start_data_mesh(
+            config,
+            "node-test".to_string(),
+            wallet,
+            ledger,
+            publisher,
+            net_rx,
+        )
+        .expect("mesh");
+        let mut events = handle.subscribe();
+        let request = DataIngestRequest {
+            sensor_id: "sensor-1".to_string(),
+            payload_kind: "neural.fabric.v1".to_string(),
+            payload_text: Some("hello".to_string()),
+            payload_hex: None,
+            payload_json: None,
+            timestamp_unix: Some(20),
+        };
+        let response = handle.ingest(request).await.expect("ingest");
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event ready")
+            .expect("event recv");
+        let data_id = match event {
+            DataMeshEvent::PayloadReady {
+                data_id,
+                payload_kind,
+                payload_hash,
+                timestamp,
+                node_id,
+                sensor_id,
+            } => {
+                assert_eq!(payload_kind, "neural.fabric.v1");
+                assert!(!payload_hash.is_empty());
+                assert_eq!(timestamp.unix, 20);
+                assert_eq!(node_id, "node-test");
+                assert_eq!(sensor_id, "sensor-1");
+                data_id
+            }
+        };
+        let payload = handle.load_payload(data_id).await.expect("payload");
+        assert_eq!(payload, b"hello");
+        assert_eq!(response.chunk_count, 1);
+    }
+
+    #[tokio::test]
+    async fn next_fabric_share_reads_payload() {
+        let dir = tempdir().expect("tmp dir");
+        let mut config = DataMeshConfig::default();
+        config.storage_path = dir.path().to_string_lossy().into_owned();
+        config.replication_factor = 1;
+        config.receipt_quorum = 1;
+        let wallet = Arc::new(test_wallet());
+        let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
+        let publisher = test_publisher();
+        let (_net_tx, net_rx) = mpsc::unbounded_channel();
+        let handle = start_data_mesh(
+            config,
+            "node-test".to_string(),
+            wallet,
+            ledger,
+            publisher,
+            net_rx,
+        )
+        .expect("mesh");
+        let share = NeuralFabricShare {
+            node_id: "node-test".to_string(),
+            timestamp: Timestamp { unix: 30 },
+            tokens: Vec::new(),
+            layers: Vec::new(),
+            motifs: Vec::new(),
+            metadata: HashMap::new(),
+        };
+        let mut events = handle.subscribe();
+        let response = handle
+            .ingest_fabric_share(&share)
+            .await
+            .expect("share ingest");
+        let received = timeout(Duration::from_secs(2), handle.next_fabric_share(&mut events))
+            .await
+            .expect("share ready")
+            .expect("share payload");
+        assert_eq!(received.node_id, "node-test");
+        assert_eq!(received.timestamp.unix, 30);
+        assert_eq!(response.chunk_count, 1);
     }
 }

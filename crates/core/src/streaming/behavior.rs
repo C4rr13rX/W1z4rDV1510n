@@ -686,6 +686,14 @@ impl BehaviorSubstrate {
         }
     }
 
+    pub fn ingest_shared_motifs(&mut self, motifs: &[BehaviorMotif]) {
+        self.motifs.merge_shared(motifs);
+    }
+
+    pub fn motif_count(&self) -> usize {
+        self.motifs.motif_count()
+    }
+
     fn latest_states(&self) -> Vec<BehaviorState> {
         let mut states = Vec::new();
         for history in self.history.values() {
@@ -923,6 +931,54 @@ impl MotifExtractor {
         });
         self.motifs.truncate(max_count);
     }
+
+    fn merge_shared(&mut self, incoming: &[BehaviorMotif]) {
+        for motif in incoming {
+            if motif.prototype.is_empty() {
+                continue;
+            }
+            let mut best_idx = None;
+            let mut best_score = f64::MAX;
+            for (idx, existing) in self.motifs.iter().enumerate() {
+                if existing.prototype.is_empty() {
+                    continue;
+                }
+                let dtw = soft_dtw_distance(&motif.prototype, &existing.prototype, 0.5);
+                let graph_score = graph_distance(&motif.graph_signature, &existing.graph_signature);
+                let score = dtw + graph_score;
+                if score < best_score {
+                    best_score = score;
+                    best_idx = Some(idx);
+                }
+            }
+            if let Some(idx) = best_idx {
+                if best_score <= self.config.dtw_threshold {
+                    let existing = &mut self.motifs[idx];
+                    let support = motif.support.max(1);
+                    existing.support = existing.support.saturating_add(support);
+                    existing.description_length =
+                        0.7 * existing.description_length + 0.3 * motif.description_length;
+                    existing.time_frequency =
+                        blend_time_frequency(&existing.time_frequency, &motif.time_frequency);
+                    existing.graph_signature =
+                        blend_graph_signature(&existing.graph_signature, &motif.graph_signature);
+                    if let Some(blended) = blend_prototype(&existing.prototype, &motif.prototype, 0.8)
+                    {
+                        existing.prototype = blended;
+                    } else if motif.support > existing.support {
+                        existing.prototype = motif.prototype.clone();
+                    }
+                    continue;
+                }
+            }
+            self.motifs.push(motif.clone());
+        }
+        self.prune_motifs();
+    }
+
+    fn motif_count(&self) -> usize {
+        self.motifs.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1132,6 +1188,24 @@ fn blend_graph_signature(a: &GraphSignature, b: &GraphSignature) -> GraphSignatu
 
 fn graph_distance(a: &GraphSignature, b: &GraphSignature) -> f64 {
     (a.mean_proximity - b.mean_proximity).abs() + (a.mean_coherence - b.mean_coherence).abs()
+}
+
+fn blend_prototype(a: &[Vec<f64>], b: &[Vec<f64>], alpha: f64) -> Option<Vec<Vec<f64>>> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut blended = Vec::with_capacity(a.len());
+    for (row_a, row_b) in a.iter().zip(b.iter()) {
+        if row_a.len() != row_b.len() {
+            return None;
+        }
+        let mut row = Vec::with_capacity(row_a.len());
+        for (val_a, val_b) in row_a.iter().zip(row_b.iter()) {
+            row.push(alpha * val_a + (1.0 - alpha) * val_b);
+        }
+        blended.push(row);
+    }
+    Some(blended)
 }
 
 fn mdl_cost(duration_secs: f64, score: f64) -> f64 {
@@ -1360,5 +1434,28 @@ mod tests {
         };
         let frame = substrate.ingest(input);
         assert!(matches!(frame.backpressure, BackpressureStatus::Hold { .. }));
+    }
+
+    #[test]
+    fn substrate_merges_shared_motifs() {
+        let mut substrate = BehaviorSubstrate::new(BehaviorSubstrateConfig::default());
+        let motif = BehaviorMotif {
+            id: "motif-remote".to_string(),
+            entity_id: "e1".to_string(),
+            support: 2,
+            duration_secs: 12.0,
+            description_length: 3.0,
+            prototype: vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+            time_frequency: TimeFrequencySummary {
+                amplitudes: vec![0.2, 0.3],
+                phases: vec![0.1, 0.2],
+            },
+            graph_signature: GraphSignature {
+                mean_proximity: 0.2,
+                mean_coherence: 0.4,
+            },
+        };
+        substrate.ingest_shared_motifs(&[motif]);
+        assert!(substrate.motif_count() >= 1);
     }
 }
