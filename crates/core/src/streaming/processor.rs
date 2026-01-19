@@ -12,6 +12,7 @@ use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
 use crate::streaming::dimensions::DimensionTracker;
 use crate::streaming::health_overlay::HealthOverlayRuntime;
+use crate::streaming::survival::SurvivalRuntime;
 use crate::streaming::ontology_runtime::OntologyRuntime;
 use crate::streaming::physiology_runtime::PhysiologyRuntime;
 use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
@@ -59,6 +60,7 @@ pub struct StreamingProcessor {
     flow_extractor: FlowLayerExtractor,
     topic_extractor: TopicEventExtractor,
     last_behavior_motifs: Vec<BehaviorMotif>,
+    last_behavior_frame: Option<crate::streaming::behavior::BehaviorFrame>,
 }
 
 impl StreamingProcessor {
@@ -71,6 +73,7 @@ impl StreamingProcessor {
             flow_extractor: FlowLayerExtractor::new(FlowConfig::default()),
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
             last_behavior_motifs: Vec::new(),
+            last_behavior_frame: None,
         }
     }
 
@@ -79,6 +82,7 @@ impl StreamingProcessor {
             return None;
         }
         self.last_behavior_motifs.clear();
+        self.last_behavior_frame = None;
         match envelope.source {
             StreamSource::PeopleVideo => {
                 if !self.config.ingest.people_video {
@@ -105,11 +109,16 @@ impl StreamingProcessor {
         std::mem::take(&mut self.last_behavior_motifs)
     }
 
+    pub fn take_last_behavior_frame(&mut self) -> Option<crate::streaming::behavior::BehaviorFrame> {
+        self.last_behavior_frame.take()
+    }
+
     pub fn ingest_fabric_share(&mut self, share: NeuralFabricShare) -> Option<TokenBatch> {
         if !self.config.enabled {
             return None;
         }
         self.last_behavior_motifs.clear();
+        self.last_behavior_frame = None;
         if !share.motifs.is_empty() {
             self.behavior_substrate.ingest_shared_motifs(&share.motifs);
         }
@@ -395,6 +404,7 @@ impl StreamingProcessor {
         }
         let entity_id = input.entity_id.clone();
         let frame = self.behavior_substrate.ingest(input);
+        self.last_behavior_frame = Some(frame.clone());
         let motifs = frame.motifs;
         self.last_behavior_motifs
             .extend(motifs.iter().cloned());
@@ -452,6 +462,7 @@ pub struct StreamingInference {
     dimensions: DimensionTracker,
     labels: LabelQueue,
     health_overlay: HealthOverlayRuntime,
+    survival: SurvivalRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
@@ -480,6 +491,7 @@ impl StreamingInference {
         let dimensions = DimensionTracker::default();
         let labels = LabelQueue::default();
         let health_overlay = HealthOverlayRuntime::default();
+        let survival = SurvivalRuntime::default();
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
         } else {
@@ -497,6 +509,7 @@ impl StreamingInference {
             dimensions,
             labels,
             health_overlay,
+            survival,
             spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
@@ -545,13 +558,22 @@ impl StreamingInference {
         };
         self.last_batch = Some(batch.clone());
         self.last_motifs = self.processor.take_last_motifs();
+        let behavior_frame = self.processor.take_last_behavior_frame();
         self.last_report_metadata.clear();
         let dimension_report = self.dimensions.update(&batch);
         let physiology_report = self.physiology.update(&batch);
         let label_report = self.labels.update(&batch, dimension_report.as_ref());
+        let survival_report = behavior_frame
+            .as_ref()
+            .map(|frame| self.survival.update(frame, physiology_report.as_ref()));
         let health_report =
             self.health_overlay
-                .update(&batch, physiology_report.as_ref(), dimension_report.as_ref());
+                .update(
+                    &batch,
+                    physiology_report.as_ref(),
+                    dimension_report.as_ref(),
+                    survival_report.as_ref(),
+                );
         let temporal_report = self.temporal.update(&batch);
         let plasticity_report = temporal_report
             .as_ref()
@@ -634,6 +656,16 @@ impl StreamingInference {
             );
             snapshot.metadata.insert(
                 "label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &survival_report {
+            report_metadata.insert(
+                "survival_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "survival_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }

@@ -24,6 +24,7 @@ pub mod spatial;
 pub mod dimensions;
 pub mod labeling;
 pub mod health_overlay;
+pub mod survival;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -51,6 +52,7 @@ pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};
 pub use dimensions::{DimensionConfig, DimensionInfo, DimensionReport, DimensionTracker};
 pub use labeling::{LabelCandidate, LabelQueue, LabelQueueConfig, LabelQueueReport};
 pub use health_overlay::{HealthDimensionPalette, HealthDimensionScore, HealthEntityOverlay, HealthOverlayConfig, HealthOverlayReport, HealthOverlayRuntime};
+pub use survival::{SurvivalConfig, SurvivalEntityMetrics, SurvivalInteraction, SurvivalReport, SurvivalRuntime};
 pub use behavior::{
     ActionChannel, ActionConstraint, ActionKind, ActionSample, BackpressureStatus, BehaviorConstraints,
     BehaviorFrame, BehaviorGraph, BehaviorInput, BehaviorMotif, BehaviorPrediction, BehaviorState,

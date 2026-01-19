@@ -340,6 +340,7 @@ impl BodySchemaAdapter for GenericBodySchemaAdapter {
         let mut confidence_sum = 0.0;
         let mut confidence_count = 0.0;
         let mut position = None;
+        apply_metadata_attributes(&mut attributes, &input.metadata);
 
         if let Some(pose) = input.pose.clone() {
             if let Some(motor) = self.motor.extract(pose) {
@@ -1330,6 +1331,24 @@ fn write_action(field_map: &FieldMap, key: &str, value: f64, action: &mut [f64])
     if let Some(idx) = field_map.action.get(key) {
         if *idx < action.len() {
             action[*idx] = value;
+        }
+    }
+}
+
+fn apply_metadata_attributes(attrs: &mut HashMap<String, Value>, metadata: &HashMap<String, Value>) {
+    for key in [
+        "phenotype",
+        "size_class",
+        "age_bucket",
+        "cohort_id",
+        "genotype",
+        "lineage",
+        "anatomy_site",
+        "context_scope",
+        "species_tag",
+    ] {
+        if let Some(value) = metadata.get(key) {
+            attrs.insert(key.to_string(), value.clone());
         }
     }
 }

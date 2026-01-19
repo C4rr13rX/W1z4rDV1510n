@@ -1,6 +1,7 @@
 use crate::schema::Timestamp;
 use crate::streaming::dimensions::DimensionReport;
 use crate::streaming::physiology_runtime::PhysiologyReport;
+use crate::streaming::survival::SurvivalReport;
 use crate::streaming::schema::TokenBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,6 +37,16 @@ pub struct HealthEntityOverlay {
     pub label: String,
     #[serde(default)]
     pub dimensions: Vec<HealthDimensionScore>,
+    #[serde(default)]
+    pub survival_score: Option<f64>,
+    #[serde(default)]
+    pub cooperation: Option<f64>,
+    #[serde(default)]
+    pub conflict: Option<f64>,
+    #[serde(default)]
+    pub play_index: Option<f64>,
+    #[serde(default)]
+    pub baseline_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +68,7 @@ pub struct HealthOverlayConfig {
     pub score_ema_alpha: f64,
     pub deviation_scale: f64,
     pub max_palette: usize,
+    pub survival_weight: f64,
 }
 
 impl Default for HealthOverlayConfig {
@@ -66,6 +78,7 @@ impl Default for HealthOverlayConfig {
             score_ema_alpha: 0.3,
             deviation_scale: 3.0,
             max_palette: 32,
+            survival_weight: 0.55,
         }
     }
 }
@@ -88,16 +101,26 @@ impl HealthOverlayRuntime {
         batch: &TokenBatch,
         physiology: Option<&PhysiologyReport>,
         dimensions: Option<&DimensionReport>,
+        survival: Option<&SurvivalReport>,
     ) -> Option<HealthOverlayReport> {
         if !self.config.enabled {
             return None;
         }
         let physiology = physiology?;
+        let survival_map = survival_entity_map(survival);
         let positions = extract_positions(batch);
         let mut entities = Vec::new();
         for deviation in &physiology.deviations {
             let raw_score = health_score_from_deviation(deviation.deviation_index);
-            let score = self.update_baseline(&deviation.context, raw_score);
+            let survival_entry = survival_map.get(&deviation.context);
+            let survival_score = survival_entry.map(|entry| entry.survival_score);
+            let blended = if let Some(score) = survival_score {
+                let weight = self.config.survival_weight.clamp(0.0, 1.0);
+                raw_score * (1.0 - weight) + score * weight
+            } else {
+                raw_score
+            };
+            let score = self.update_baseline(&deviation.context, blended);
             let color = grayscale_color(score);
             let label = health_label(score).to_string();
             let position = positions.get(&deviation.context).copied();
@@ -121,6 +144,11 @@ impl HealthOverlayRuntime {
                 color,
                 label,
                 dimensions: dims,
+                survival_score,
+                cooperation: survival_entry.map(|entry| entry.cooperation_in),
+                conflict: survival_entry.map(|entry| entry.conflict_in),
+                play_index: survival_entry.map(|entry| entry.play_index),
+                baseline_score: survival_entry.map(|entry| entry.baseline_score),
             });
         }
         let palette = dimension_palette(dimensions, self.config.max_palette);
@@ -239,6 +267,19 @@ fn dimension_palette(dimensions: Option<&DimensionReport>, max_len: usize) -> Ve
     palette
 }
 
+fn survival_entity_map(
+    report: Option<&SurvivalReport>,
+) -> HashMap<String, crate::streaming::survival::SurvivalEntityMetrics> {
+    let mut map = HashMap::new();
+    let Some(report) = report else {
+        return map;
+    };
+    for entity in &report.entities {
+        map.insert(entity.entity_id.clone(), entity.clone());
+    }
+    map
+}
+
 fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
     let c = v * s;
     let h_prime = (h / 60.0) % 6.0;
@@ -291,7 +332,7 @@ mod tests {
             source_confidence: HashMap::new(),
         };
         let overlay = runtime
-            .update(&batch, Some(&report), None)
+            .update(&batch, Some(&report), None, None)
             .expect("overlay");
         assert_eq!(overlay.entities.len(), 1);
         assert!(overlay.entities[0].color.starts_with('#'));
