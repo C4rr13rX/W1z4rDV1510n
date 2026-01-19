@@ -26,6 +26,7 @@ pub mod labeling;
 pub mod health_overlay;
 pub mod survival;
 pub mod knowledge;
+pub mod knowledge_ingest;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -60,6 +61,7 @@ pub use knowledge::{
     KnowledgeQueueConfig, KnowledgeQueueReport, KnowledgeRuntime, KnowledgeStoreReport, TextBlock,
     TextCandidate,
 };
+pub use knowledge_ingest::{KnowledgeIngestConfig, NlmJatsIngestor};
 pub use behavior::{
     ActionChannel, ActionConstraint, ActionKind, ActionSample, BackpressureStatus, BehaviorConstraints,
     BehaviorFrame, BehaviorGraph, BehaviorInput, BehaviorMotif, BehaviorPrediction, BehaviorState,

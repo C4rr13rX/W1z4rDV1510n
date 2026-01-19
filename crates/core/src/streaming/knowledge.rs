@@ -13,17 +13,27 @@ pub struct TextBlock {
     pub section: Option<String>,
     #[serde(default)]
     pub order: usize,
+    #[serde(default)]
+    pub figure_refs: Vec<String>,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FigureAsset {
     pub figure_id: String,
     #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
     pub caption: Option<String>,
     pub image_ref: String,
     pub image_hash: String,
     #[serde(default)]
     pub order: usize,
+    #[serde(default)]
+    pub ocr_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +55,8 @@ pub struct TextCandidate {
     pub block_id: String,
     pub text_excerpt: String,
     pub text_hash: String,
+    #[serde(default)]
+    pub match_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,18 +445,39 @@ fn select_candidates(
     limit: usize,
 ) -> Vec<TextCandidate> {
     let mut candidates = Vec::new();
-    let figure_id = figure.figure_id.to_lowercase();
+    let limit = limit.max(1);
+    let figure_id = normalize_figure_id(&figure.figure_id);
+    let label_id = figure.label.as_ref().map(|label| normalize_figure_id(label));
+
     for block in &doc.text_blocks {
-        if mentions_figure(&block.text, &figure_id) {
-            candidates.push(candidate_from_block(block));
+        let refs: Vec<String> = block.figure_refs.iter().map(|val| normalize_figure_id(val)).collect();
+        if refs.iter().any(|val| val == &figure_id)
+            || label_id.as_ref().map(|label| refs.iter().any(|val| val == label)).unwrap_or(false)
+        {
+            candidates.push(candidate_from_block(block, "xref"));
         }
     }
+
     if candidates.is_empty() {
-        for block in doc.text_blocks.iter().take(limit.max(1)) {
-            candidates.push(candidate_from_block(block));
+        for block in &doc.text_blocks {
+            if mentions_figure(&block.text, &figure_id)
+                || label_id
+                    .as_ref()
+                    .map(|label| mentions_figure(&block.text, label))
+                    .unwrap_or(false)
+            {
+                candidates.push(candidate_from_block(block, "text_hint"));
+            }
         }
     }
-    candidates.truncate(limit.max(1));
+
+    if candidates.is_empty() {
+        for block in doc.text_blocks.iter().take(limit) {
+            candidates.push(candidate_from_block(block, "fallback"));
+        }
+    }
+
+    candidates.truncate(limit);
     candidates
 }
 
@@ -456,12 +489,13 @@ fn mentions_figure(text: &str, figure_id: &str) -> bool {
     lower.contains("fig.") || lower.contains("figure")
 }
 
-fn candidate_from_block(block: &TextBlock) -> TextCandidate {
+fn candidate_from_block(block: &TextBlock, reason: &str) -> TextCandidate {
     let text_hash = compute_payload_hash(block.text.as_bytes());
     TextCandidate {
         block_id: block.block_id.clone(),
         text_excerpt: excerpt(&block.text, 240),
         text_hash,
+        match_reason: reason.to_string(),
     }
 }
 
@@ -473,6 +507,13 @@ fn excerpt(text: &str, max_len: usize) -> String {
     let mut output = trimmed[..max_len].to_string();
     output.push_str("...");
     output
+}
+
+fn normalize_figure_id(raw: &str) -> String {
+    raw.trim()
+        .to_ascii_lowercase()
+        .replace([' ', '\t', '\n', '\r'], "")
+        .replace("figure", "fig")
 }
 
 fn phenotype_key_from_meta(metadata: &HashMap<String, Value>) -> Option<String> {
@@ -529,13 +570,18 @@ mod tests {
                 text: "Figure 1 shows a gait change.".to_string(),
                 section: None,
                 order: 0,
+                figure_refs: vec!["F1".to_string()],
+                source: "xml".to_string(),
+                confidence: 1.0,
             }],
             figures: vec![FigureAsset {
                 figure_id: "Figure 1".to_string(),
+                label: Some("Figure 1".to_string()),
                 caption: Some("Gait".to_string()),
                 image_ref: "fig1.png".to_string(),
                 image_hash: compute_payload_hash(b"img"),
                 order: 0,
+                ocr_text: None,
             }],
             metadata: HashMap::new(),
         };

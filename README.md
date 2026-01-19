@@ -24,6 +24,7 @@ W1z4rDV1510n is a Rust-first, quantum-inspired annealer fused with a brain-like 
 - **Resource-aware scheduling** - capped rayon pools, memory-aware budgets (`W1Z4RDV1510N_THREAD_BUDGET`, `hardware_overrides.max_threads`), and chunked updates keep an i5/32GB responsive.
 - **Homeostasis controller** - detects plateaus and reheats/mutates briefly to escape local minima while chasing 90-100% accuracy.
 - **Structured telemetry** - deterministic tracing (JSON/compact), ESS/resampling notices, occupancy/path diagnostics, hardware detection logs, and persisted run artifacts.
+- **Knowledge ingest + human annotation queue** - JATS (NLM/NCBI) parsing, figure/text association tasks, optional OCR blocks, and reward-ready verification.
 - **Tooling** - `calibrate_energy` for weight tuning, REST API with persistence, relational prior builder, chess/chemistry scripts, node simulation, and comprehensive tests (`cargo test`).
 
 ## Node stack capabilities

@@ -43,6 +43,7 @@ blake2 = "0.10"
 axum = { version = "0.7", features = ["macros", "json"] }
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
 cfg-if = "1.0"
+quick-xml = "0.31"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
