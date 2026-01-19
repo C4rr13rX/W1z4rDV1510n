@@ -1012,7 +1012,7 @@ impl DataStore {
 
     fn load_payload(&self, data_id: &str) -> Result<Vec<u8>> {
         let path = self.blob_path(data_id);
-        fs::read(path).map_err(|err| anyhow!("read payload: {err}"))
+        fs::read(&path).map_err(|err| anyhow!("read payload {}: {err}", path.display()))
     }
 
     fn has_data(&self, data_id: &str) -> bool {
@@ -1558,13 +1558,15 @@ mod tests {
         config.storage_path = dir.path().to_string_lossy().into_owned();
         config.replication_factor = 1;
         config.receipt_quorum = 1;
+        config.maintenance_enabled = false;
         let wallet = Arc::new(test_wallet());
+        let node_id = node_id_from_wallet(&wallet.wallet().address);
         let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
         let publisher = test_publisher();
         let (net_tx, net_rx) = mpsc::unbounded_channel();
         let handle = start_data_mesh(
             config,
-            "node-test".to_string(),
+            node_id,
             wallet,
             ledger,
             publisher,
@@ -1583,6 +1585,7 @@ mod tests {
         assert!(response.receipt_count >= 1);
         assert!(response.quorum_met);
         assert!(response.replication_met);
+        drop(dir);
         drop(net_tx);
     }
 
@@ -1593,13 +1596,15 @@ mod tests {
         config.storage_path = dir.path().to_string_lossy().into_owned();
         config.replication_factor = 1;
         config.receipt_quorum = 1;
+        config.maintenance_enabled = false;
         let wallet = Arc::new(test_wallet());
+        let expected_node_id = node_id_from_wallet(&wallet.wallet().address);
         let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
         let publisher = test_publisher();
         let (_net_tx, net_rx) = mpsc::unbounded_channel();
         let handle = start_data_mesh(
             config,
-            "node-test".to_string(),
+            expected_node_id.clone(),
             wallet,
             ledger,
             publisher,
@@ -1632,7 +1637,7 @@ mod tests {
                 assert_eq!(payload_kind, "neural.fabric.v1");
                 assert!(!payload_hash.is_empty());
                 assert_eq!(timestamp.unix, 20);
-                assert_eq!(node_id, "node-test");
+                assert_eq!(node_id, expected_node_id);
                 assert_eq!(sensor_id, "sensor-1");
                 data_id
             }
@@ -1640,6 +1645,7 @@ mod tests {
         let payload = handle.load_payload(data_id).await.expect("payload");
         assert_eq!(payload, b"hello");
         assert_eq!(response.chunk_count, 1);
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1649,13 +1655,15 @@ mod tests {
         config.storage_path = dir.path().to_string_lossy().into_owned();
         config.replication_factor = 1;
         config.receipt_quorum = 1;
+        config.maintenance_enabled = false;
         let wallet = Arc::new(test_wallet());
+        let node_id = node_id_from_wallet(&wallet.wallet().address);
         let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
         let publisher = test_publisher();
         let (_net_tx, net_rx) = mpsc::unbounded_channel();
         let handle = start_data_mesh(
             config,
-            "node-test".to_string(),
+            node_id.clone(),
             wallet,
             ledger,
             publisher,
@@ -1663,7 +1671,7 @@ mod tests {
         )
         .expect("mesh");
         let share = NeuralFabricShare {
-            node_id: "node-test".to_string(),
+            node_id: node_id.clone(),
             timestamp: Timestamp { unix: 30 },
             tokens: Vec::new(),
             layers: Vec::new(),
@@ -1679,9 +1687,10 @@ mod tests {
             .await
             .expect("share ready")
             .expect("share payload");
-        assert_eq!(received.node_id, "node-test");
+        assert_eq!(received.node_id, node_id);
         assert_eq!(received.timestamp.unix, 30);
         assert_eq!(response.chunk_count, 1);
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1691,13 +1700,15 @@ mod tests {
         config.storage_path = dir.path().to_string_lossy().into_owned();
         config.replication_factor = 1;
         config.receipt_quorum = 1;
+        config.maintenance_enabled = false;
         let wallet = Arc::new(test_wallet());
+        let node_id = node_id_from_wallet(&wallet.wallet().address);
         let ledger: Arc<dyn BlockchainLedger> = Arc::new(NoopLedger::default());
         let publisher = test_publisher();
         let (_net_tx, net_rx) = mpsc::unbounded_channel();
         let handle = start_data_mesh(
             config,
-            "node-test".to_string(),
+            node_id,
             wallet,
             ledger,
             publisher,
@@ -1723,5 +1734,6 @@ mod tests {
             .expect("stream payload");
         assert_eq!(received.timestamp.unix, 40);
         assert_eq!(response.chunk_count, 1);
+        drop(dir);
     }
 }
