@@ -245,6 +245,24 @@ impl RunConfig {
                 (0.0..=1.0).contains(&self.streaming.confidence_gate),
                 "streaming.confidence_gate must be in [0,1]"
             );
+            if self.streaming.quality.enabled {
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.quality.quality_ema_alpha),
+                    "streaming.quality.quality_ema_alpha must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.quality.snr_weight),
+                    "streaming.quality.snr_weight must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.quality.snr_norm > 0.0,
+                    "streaming.quality.snr_norm must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.quality.snr_cap > 0.0,
+                    "streaming.quality.snr_cap must be > 0"
+                );
+            }
             anyhow::ensure!(
                 self.streaming.ingest.enabled_source_count() > 0,
                 "streaming ingest must enable at least one source"
@@ -477,6 +495,32 @@ impl RunConfig {
                 anyhow::ensure!(
                     self.streaming.analysis.max_layers > 0,
                     "streaming.analysis.max_layers must be > 0"
+                );
+            }
+            if self.streaming.network_fabric.enabled {
+                anyhow::ensure!(
+                    self.streaming.network_fabric.max_threads > 0,
+                    "streaming.network_fabric.max_threads must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.network_fabric.max_shared_threads > 0,
+                    "streaming.network_fabric.max_shared_threads must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.network_fabric.min_support > 0,
+                    "streaming.network_fabric.min_support must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.network_fabric.match_threshold),
+                    "streaming.network_fabric.match_threshold must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.network_fabric.max_speed_units_per_sec >= 0.0,
+                    "streaming.network_fabric.max_speed_units_per_sec must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.network_fabric.max_phenotype_tokens > 0,
+                    "streaming.network_fabric.max_phenotype_tokens must be > 0"
                 );
             }
         }
@@ -1058,6 +1102,8 @@ pub struct StreamingConfig {
     #[serde(default)]
     pub layer_flags: StreamingLayerFlags,
     #[serde(default)]
+    pub quality: StreamingQualityConfig,
+    #[serde(default)]
     pub hypergraph: StreamingHypergraphConfig,
     #[serde(default)]
     pub temporal: TemporalInferenceConfig,
@@ -1077,6 +1123,8 @@ pub struct StreamingConfig {
     pub physiology: PhysiologyConfig,
     #[serde(default)]
     pub analysis: StreamingAnalysisConfig,
+    #[serde(default)]
+    pub network_fabric: NetworkFabricConfig,
 }
 
 impl Default for StreamingConfig {
@@ -1087,6 +1135,7 @@ impl Default for StreamingConfig {
             temporal_tolerance_secs: 2.0,
             confidence_gate: 0.5,
             layer_flags: StreamingLayerFlags::default(),
+            quality: StreamingQualityConfig::default(),
             hypergraph: StreamingHypergraphConfig::default(),
             temporal: TemporalInferenceConfig::default(),
             spike: StreamingSpikeConfig::default(),
@@ -1097,6 +1146,7 @@ impl Default for StreamingConfig {
             ontology: OntologyConfig::default(),
             physiology: PhysiologyConfig::default(),
             analysis: StreamingAnalysisConfig::default(),
+            network_fabric: NetworkFabricConfig::default(),
         }
     }
 }
@@ -1110,6 +1160,40 @@ pub struct StreamingAnalysisConfig {
     pub max_layers: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingQualityConfig {
+    pub enabled: bool,
+    pub quality_ema_alpha: f64,
+    pub jitter_weight: f64,
+    pub missing_weight: f64,
+    pub drift_weight: f64,
+    pub snr_weight: f64,
+    pub snr_norm: f64,
+    pub snr_cap: f64,
+    pub drift_norm_rad_s: f64,
+    pub drift_norm_slope: f64,
+    pub min_quality: f64,
+}
+
+impl Default for StreamingQualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            quality_ema_alpha: 0.2,
+            jitter_weight: 0.8,
+            missing_weight: 0.9,
+            drift_weight: 0.6,
+            snr_weight: 0.25,
+            snr_norm: 2.0,
+            snr_cap: 20.0,
+            drift_norm_rad_s: 0.05,
+            drift_norm_slope: 0.02,
+            min_quality: 0.0,
+        }
+    }
+}
+
 impl Default for StreamingAnalysisConfig {
     fn default() -> Self {
         Self {
@@ -1117,6 +1201,32 @@ impl Default for StreamingAnalysisConfig {
             interval_batches: 3,
             max_tokens: 256,
             max_layers: 128,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkFabricConfig {
+    pub enabled: bool,
+    pub max_threads: usize,
+    pub max_shared_threads: usize,
+    pub min_support: usize,
+    pub match_threshold: f64,
+    pub max_speed_units_per_sec: f64,
+    pub max_phenotype_tokens: usize,
+}
+
+impl Default for NetworkFabricConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_threads: 2048,
+            max_shared_threads: 256,
+            min_support: 3,
+            match_threshold: 0.55,
+            max_speed_units_per_sec: 8.0,
+            max_phenotype_tokens: 24,
         }
     }
 }

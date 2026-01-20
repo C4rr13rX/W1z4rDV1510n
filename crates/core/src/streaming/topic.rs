@@ -1,4 +1,5 @@
 use crate::schema::Timestamp;
+use crate::math_toolbox::RunningStats;
 use crate::streaming::schema::{EventKind, EventToken, LayerKind, LayerState, StreamSource};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -90,6 +91,13 @@ impl TopicEventExtractor {
             return extraction;
         }
 
+        let (mean_intensity, intensity_std) = intensity_stats(&window);
+        let intensity_snr = if intensity_std > 1e-6 {
+            mean_intensity / intensity_std
+        } else {
+            mean_intensity
+        };
+
         let mut max_burst: f64 = 0.0;
         let mut decay_sum = 0.0;
         let mut decay_count = 0.0;
@@ -133,6 +141,7 @@ impl TopicEventExtractor {
         } else {
             0.0
         };
+        let snr_proxy = ((intensity_snr + max_burst) * 0.5).clamp(0.0, 50.0);
         let (period_amp, period_phase, period_secs) = self.periodicity(latest);
 
         extraction.layers.push(layer(
@@ -141,7 +150,14 @@ impl TopicEventExtractor {
             0.0,
             burst_amp,
             0.0,
-            layer_attrs("burst_count", burst_count, period_secs),
+            layer_attrs(
+                "burst_count",
+                burst_count,
+                period_secs,
+                snr_proxy,
+                mean_intensity,
+                intensity_std,
+            ),
         ));
         extraction.layers.push(layer(
             LayerKind::TopicDecay,
@@ -149,7 +165,14 @@ impl TopicEventExtractor {
             0.0,
             decay_amp,
             0.0,
-            layer_attrs("decay_samples", decay_count as u64, period_secs),
+            layer_attrs(
+                "decay_samples",
+                decay_count as u64,
+                period_secs,
+                snr_proxy,
+                mean_intensity,
+                intensity_std,
+            ),
         ));
         extraction.layers.push(layer(
             LayerKind::TopicExcitation,
@@ -157,7 +180,14 @@ impl TopicEventExtractor {
             0.0,
             excitation_amp,
             0.0,
-            layer_attrs("excitation_samples", window.len() as u64, period_secs),
+            layer_attrs(
+                "excitation_samples",
+                window.len() as u64,
+                period_secs,
+                snr_proxy,
+                mean_intensity,
+                intensity_std,
+            ),
         ));
         extraction.layers.push(layer(
             LayerKind::TopicLeadLag,
@@ -165,7 +195,14 @@ impl TopicEventExtractor {
             0.0,
             lead_lag_amp,
             0.0,
-            layer_attrs("lead_lag_span_secs", lead_lag_amp, period_secs),
+            layer_attrs(
+                "lead_lag_span_secs",
+                lead_lag_amp,
+                period_secs,
+                snr_proxy,
+                mean_intensity,
+                intensity_std,
+            ),
         ));
         extraction.layers.push(layer(
             LayerKind::TopicPeriodicity,
@@ -173,7 +210,14 @@ impl TopicEventExtractor {
             period_phase,
             period_amp,
             0.0,
-            layer_attrs("period_secs", period_secs, period_secs),
+            layer_attrs(
+                "period_secs",
+                period_secs,
+                period_secs,
+                snr_proxy,
+                mean_intensity,
+                intensity_std,
+            ),
         ));
         apply_topic_coherence(&mut extraction.layers);
 
@@ -254,6 +298,7 @@ fn topic_token(sample: &TopicSample, burst_score: f64, duration_secs: f64) -> Ev
     attrs.insert("topic".to_string(), Value::String(sample.topic.clone()));
     attrs.insert("intensity".to_string(), Value::from(sample.intensity));
     attrs.insert("burst_score".to_string(), Value::from(burst_score));
+    attrs.insert("snr_proxy".to_string(), Value::from(burst_score));
     EventToken {
         id: String::new(),
         kind: EventKind::TopicEventToken,
@@ -284,13 +329,33 @@ fn layer(
     }
 }
 
-fn layer_attrs(key: &str, value: impl Into<Value>, period_secs: f64) -> HashMap<String, Value> {
+fn layer_attrs(
+    key: &str,
+    value: impl Into<Value>,
+    period_secs: f64,
+    snr_proxy: f64,
+    mean_intensity: f64,
+    intensity_std: f64,
+) -> HashMap<String, Value> {
     let mut attrs = HashMap::new();
     attrs.insert(key.to_string(), value.into());
+    attrs.insert("intensity_mean".to_string(), Value::from(mean_intensity));
+    attrs.insert("intensity_std".to_string(), Value::from(intensity_std));
+    attrs.insert("snr_proxy".to_string(), Value::from(snr_proxy));
     if period_secs > 0.0 {
         attrs.insert("period_secs".to_string(), Value::from(period_secs));
     }
     attrs
+}
+
+fn intensity_stats(window: &[&TopicSample]) -> (f64, f64) {
+    let mut stats = RunningStats::default();
+    for sample in window {
+        stats.update(sample.intensity);
+    }
+    let mean = stats.mean().unwrap_or(0.0);
+    let std = stats.stddev(0).unwrap_or(0.0);
+    (mean, std)
 }
 
 fn apply_topic_coherence(layers: &mut [LayerState]) {

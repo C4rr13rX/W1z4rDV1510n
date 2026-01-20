@@ -21,9 +21,11 @@ pub mod physiology_runtime;
 pub mod analysis_runtime;
 pub mod behavior;
 pub mod fabric;
+pub mod network_fabric;
 pub mod spatial;
 pub mod dimensions;
 pub mod labeling;
+pub mod quality;
 pub mod health_overlay;
 pub mod survival;
 pub mod knowledge;
@@ -53,7 +55,8 @@ pub use plasticity_runtime::{PlasticityReport, StreamingPlasticityRuntime};
 pub use ontology_runtime::{OntologyReport, OntologyRuntime};
 pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};
 pub use analysis_runtime::{AnalysisReport, StreamingAnalysisRuntime};
-pub use crate::config::StreamingAnalysisConfig;
+pub use quality::{QualityReport, SourceQuality, StreamingQualityRuntime};
+pub use crate::config::{StreamingAnalysisConfig, StreamingQualityConfig};
 pub use dimensions::{DimensionConfig, DimensionInfo, DimensionReport, DimensionTracker};
 pub use labeling::{LabelCandidate, LabelQueue, LabelQueueConfig, LabelQueueReport};
 pub use health_overlay::{HealthDimensionPalette, HealthDimensionScore, HealthEntityOverlay, HealthOverlayConfig, HealthOverlayReport, HealthOverlayRuntime};
@@ -73,4 +76,5 @@ pub use behavior::{
     SpeciesKind, TimeFrequencySummary,
 };
 pub use fabric::NeuralFabricShare;
+pub use network_fabric::{NetworkMatch, NetworkPatternReport, NetworkPatternRuntime, NetworkPatternSummary};
 pub use spatial::{SpatialConfig, SpatialEstimate, SpatialEstimator, insert_spatial_attrs};

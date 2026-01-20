@@ -1,5 +1,6 @@
 use crate::schema::Timestamp;
 use crate::streaming::schema::{LayerKind, LayerState};
+use crate::math_toolbox::RunningStats;
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 
@@ -66,6 +67,8 @@ pub struct UltradianLayerExtractor {
     min_cycles: usize,
     min_confidence: f64,
     phase_smoothing: f64,
+    resample_jitter_threshold: f64,
+    resample_max_points: usize,
     last_phases: std::collections::HashMap<LayerKind, f64>,
     last_phase_times: std::collections::HashMap<LayerKind, Timestamp>,
 }
@@ -93,7 +96,7 @@ impl UltradianLayerExtractor {
             .iter()
             .map(|band| band.max_period_secs * 3.0)
             .fold(0.0, f64::max);
-        Self::with_bands(bands, max_age_secs, 32, 5, 0.1, 2, 0.1, 0.6)
+        Self::with_bands(bands, max_age_secs, 32, 5, 0.1, 2, 0.1, 0.6, 0.35, 512)
     }
 
     pub fn with_bands(
@@ -105,6 +108,8 @@ impl UltradianLayerExtractor {
         min_cycles: usize,
         min_confidence: f64,
         phase_smoothing: f64,
+        resample_jitter_threshold: f64,
+        resample_max_points: usize,
     ) -> Self {
         Self {
             bands,
@@ -115,6 +120,8 @@ impl UltradianLayerExtractor {
             min_cycles: min_cycles.max(1),
             min_confidence: min_confidence.clamp(0.0, 1.0),
             phase_smoothing: phase_smoothing.clamp(0.0, 1.0),
+            resample_jitter_threshold: resample_jitter_threshold.clamp(0.0, 5.0),
+            resample_max_points: resample_max_points.max(64),
             last_phases: std::collections::HashMap::new(),
             last_phase_times: std::collections::HashMap::new(),
         }
@@ -162,6 +169,18 @@ impl UltradianLayerExtractor {
         }
         if samples.len() < self.min_samples {
             return None;
+        }
+        let (sample_dt_mean, sample_dt_std, jitter_ratio) = sample_dt_metrics(&samples);
+        let mut resampled = false;
+        if jitter_ratio >= self.resample_jitter_threshold && samples.len() >= self.min_samples {
+            if let Some(resampled_samples) =
+                resample_uniform(&samples, band, self.resample_max_points)
+            {
+                if resampled_samples.len() >= self.min_samples {
+                    samples = resampled_samples;
+                    resampled = true;
+                }
+            }
         }
         let span_secs = (max_ts - min_ts).max(0.0);
         let min_span_secs = band.min_period_secs * self.min_cycles as f64;
@@ -216,25 +235,11 @@ impl UltradianLayerExtractor {
             residual_sum_sq += weight * detrended * detrended;
         }
         let rms = (residual_sum_sq / weight_total).max(0.0).sqrt().max(1e-6);
-        let mut dt_sum = 0.0;
-        let mut dt_count = 0.0;
-        let mut last_ts: Option<f64> = None;
-        for sample in &samples {
-            let ts = sample.timestamp.unix as f64;
-            if let Some(prev) = last_ts {
-                dt_sum += (ts - prev).abs();
-                dt_count += 1.0;
-            }
-            last_ts = Some(ts);
-        }
-        let sample_dt_mean = if dt_count > 0.0 {
-            dt_sum / dt_count
-        } else {
-            0.0
-        };
+        let (sample_dt_mean_resampled, sample_dt_std_resampled, _) = sample_dt_metrics(&samples);
         let mut best_period = band.center_period();
         let mut best_amplitude = 0.0;
         let mut best_phase = 0.0;
+        let mut best_magnitude = 0.0;
         let t_ref = timestamp.unix as f64;
         for period in self.candidate_periods(band) {
             let omega = 2.0 * PI / period.max(1.0);
@@ -257,8 +262,43 @@ impl UltradianLayerExtractor {
                 best_amplitude = amplitude;
                 best_phase = sum_sin.atan2(sum_cos);
                 best_period = period;
+                best_magnitude = magnitude;
             }
         }
+        let omega_best = 2.0 * PI / best_period.max(1.0);
+        let amplitude_fit = if weight_total > 0.0 {
+            (2.0 * best_magnitude / weight_total).abs()
+        } else {
+            0.0
+        };
+        let mut noise_sum = 0.0;
+        for sample in &samples {
+            let weight = sample.quality.clamp(0.0, 1.0);
+            if weight <= 0.0 {
+                continue;
+            }
+            let t = sample.timestamp.unix as f64;
+            let centered = (sample.value - mean) - slope * (t - t_mean);
+            let t_offset = t - t_ref;
+            let fitted = amplitude_fit * (omega_best * t_offset + best_phase).sin();
+            let residual = centered - fitted;
+            noise_sum += weight * residual * residual;
+        }
+        let noise_rms = if weight_total > 0.0 {
+            (noise_sum / weight_total).sqrt()
+        } else {
+            0.0
+        };
+        let noise_rms = if noise_rms.is_finite() {
+            noise_rms.max(1e-6)
+        } else {
+            0.0
+        };
+        let snr_ratio = if noise_rms > 0.0 {
+            (amplitude_fit / noise_rms).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
         let phase_raw = best_phase;
         let phase = if let Some(prev) = self.last_phases.get(&band.kind) {
             let delta = wrap_phase_diff(phase_raw, *prev);
@@ -324,8 +364,40 @@ impl UltradianLayerExtractor {
         );
         attributes.insert("rms".to_string(), serde_json::Value::from(rms));
         attributes.insert(
+            "oscillation_amplitude".to_string(),
+            serde_json::Value::from(amplitude_fit),
+        );
+        attributes.insert(
+            "noise_rms".to_string(),
+            serde_json::Value::from(noise_rms),
+        );
+        attributes.insert(
+            "snr_ratio".to_string(),
+            serde_json::Value::from(snr_ratio),
+        );
+        attributes.insert(
             "sample_dt_mean".to_string(),
+            serde_json::Value::from(sample_dt_mean_resampled),
+        );
+        attributes.insert(
+            "sample_dt_std".to_string(),
+            serde_json::Value::from(sample_dt_std_resampled),
+        );
+        attributes.insert(
+            "sample_dt_mean_raw".to_string(),
             serde_json::Value::from(sample_dt_mean),
+        );
+        attributes.insert(
+            "sample_dt_std_raw".to_string(),
+            serde_json::Value::from(sample_dt_std),
+        );
+        attributes.insert(
+            "jitter_ratio_raw".to_string(),
+            serde_json::Value::from(jitter_ratio),
+        );
+        attributes.insert(
+            "resampled".to_string(),
+            serde_json::Value::from(resampled),
         );
         attributes.insert(
             "quality_avg".to_string(),
@@ -395,6 +467,89 @@ impl UltradianLayerExtractor {
         }
         periods
     }
+}
+
+fn sample_dt_metrics(samples: &[SignalSample]) -> (f64, f64, f64) {
+    let mut stats = RunningStats::default();
+    let mut last_ts: Option<f64> = None;
+    for sample in samples {
+        let ts = sample.timestamp.unix as f64;
+        if let Some(prev) = last_ts {
+            let dt = (ts - prev).abs();
+            if dt.is_finite() && dt > 0.0 {
+                stats.update(dt);
+            }
+        }
+        last_ts = Some(ts);
+    }
+    let mean = stats.mean().unwrap_or(0.0);
+    let std = stats.stddev(0).unwrap_or(0.0);
+    let jitter_ratio = if mean > 0.0 {
+        (std / mean).clamp(0.0, 10.0)
+    } else {
+        0.0
+    };
+    (mean, std, jitter_ratio)
+}
+
+fn resample_uniform(
+    samples: &[SignalSample],
+    band: &UltradianBand,
+    max_points: usize,
+) -> Option<Vec<SignalSample>> {
+    if samples.len() < 2 {
+        return None;
+    }
+    let mut ordered = samples.to_vec();
+    ordered.sort_by_key(|sample| sample.timestamp.unix);
+    let (dt_mean, _, _) = sample_dt_metrics(&ordered);
+    if dt_mean <= 0.0 {
+        return None;
+    }
+    let min_dt = (band.min_period_secs / 24.0).max(1.0);
+    let max_dt = (band.max_period_secs / 8.0).max(min_dt);
+    let mut target_dt = dt_mean.clamp(min_dt, max_dt);
+    let start = ordered.first()?.timestamp.unix as f64;
+    let end = ordered.last()?.timestamp.unix as f64;
+    let span = (end - start).max(0.0);
+    if span <= 0.0 {
+        return None;
+    }
+    let mut points = (span / target_dt).ceil() as usize + 1;
+    let max_points = max_points.max(64);
+    if points > max_points {
+        target_dt = span / max_points as f64;
+        points = max_points;
+    }
+    let mut resampled = Vec::with_capacity(points);
+    let mut idx = 0usize;
+    for step in 0..points {
+        let t = start + (step as f64 * target_dt);
+        while idx + 1 < ordered.len() && ordered[idx + 1].timestamp.unix as f64 <= t {
+            idx += 1;
+        }
+        let a = &ordered[idx];
+        if (a.timestamp.unix as f64 - t).abs() < 1e-6 {
+            resampled.push(*a);
+            continue;
+        }
+        if idx + 1 >= ordered.len() {
+            break;
+        }
+        let b = &ordered[idx + 1];
+        let ta = a.timestamp.unix as f64;
+        let tb = b.timestamp.unix as f64;
+        let denom = (tb - ta).max(1e-6);
+        let w = ((t - ta) / denom).clamp(0.0, 1.0);
+        let value = a.value + w * (b.value - a.value);
+        let quality = a.quality + w * (b.quality - a.quality);
+        resampled.push(SignalSample {
+            timestamp: Timestamp { unix: t.round() as i64 },
+            value,
+            quality: quality.clamp(0.0, 1.0),
+        });
+    }
+    Some(resampled)
 }
 
 fn apply_coherence(layers: &mut [LayerState]) {

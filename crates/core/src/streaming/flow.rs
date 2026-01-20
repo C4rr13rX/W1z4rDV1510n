@@ -1,4 +1,5 @@
 use crate::schema::Timestamp;
+use crate::math_toolbox::RunningStats;
 use crate::streaming::schema::{EventKind, EventToken, LayerKind, LayerState, StreamSource};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -104,6 +105,8 @@ impl FlowLayerExtractor {
         let dir_mag = (dir_sin.powi(2) + dir_cos.powi(2)).sqrt() / count.max(1.0);
         let dir_phase = dir_sin.atan2(dir_cos);
         let stop_go_ratio = stop_go_count / count.max(1.0);
+        let (density_std, velocity_std, snr_proxy) =
+            window_stats(&window, mean_density, mean_velocity);
 
         extraction.layers.push(layer_state(
             LayerKind::FlowDensity,
@@ -111,7 +114,7 @@ impl FlowLayerExtractor {
             0.0,
             (mean_density / self.config.density_norm).clamp(0.0, 1.0),
             0.0,
-            base_attrs(&window, mean_density, mean_velocity),
+            base_attrs(&window, mean_density, mean_velocity, density_std, velocity_std, snr_proxy),
         ));
         extraction.layers.push(layer_state(
             LayerKind::FlowVelocity,
@@ -119,7 +122,7 @@ impl FlowLayerExtractor {
             0.0,
             (mean_velocity / self.config.velocity_norm).clamp(0.0, 1.0),
             0.0,
-            base_attrs(&window, mean_density, mean_velocity),
+            base_attrs(&window, mean_density, mean_velocity, density_std, velocity_std, snr_proxy),
         ));
         extraction.layers.push(layer_state(
             LayerKind::FlowDirectionality,
@@ -127,7 +130,7 @@ impl FlowLayerExtractor {
             dir_phase,
             dir_mag.clamp(0.0, 1.0),
             0.0,
-            base_attrs(&window, mean_density, mean_velocity),
+            base_attrs(&window, mean_density, mean_velocity, density_std, velocity_std, snr_proxy),
         ));
 
         extraction.layers.push(layer_state(
@@ -136,7 +139,7 @@ impl FlowLayerExtractor {
             0.0,
             stop_go_ratio.clamp(0.0, 1.0),
             0.0,
-            base_attrs(&window, mean_density, mean_velocity),
+            base_attrs(&window, mean_density, mean_velocity, density_std, velocity_std, snr_proxy),
         ));
 
         let motif_amp = if mean_density >= self.config.motif_density_threshold
@@ -152,7 +155,7 @@ impl FlowLayerExtractor {
             0.0,
             motif_amp,
             0.0,
-            base_attrs(&window, mean_density, mean_velocity),
+            base_attrs(&window, mean_density, mean_velocity, density_std, velocity_std, snr_proxy),
         ));
 
         let (daily_phase, weekly_phase) = seasonal_phases(latest);
@@ -162,7 +165,7 @@ impl FlowLayerExtractor {
             daily_phase,
             1.0,
             0.0,
-            base_attrs(&window, mean_density, mean_velocity),
+            base_attrs(&window, mean_density, mean_velocity, density_std, velocity_std, snr_proxy),
         ));
         extraction.layers.push(layer_state(
             LayerKind::FlowSeasonalWeekly,
@@ -170,7 +173,7 @@ impl FlowLayerExtractor {
             weekly_phase,
             1.0,
             0.0,
-            base_attrs(&window, mean_density, mean_velocity),
+            base_attrs(&window, mean_density, mean_velocity, density_std, velocity_std, snr_proxy),
         ));
 
         apply_flow_coherence(&mut extraction.layers);
@@ -184,6 +187,7 @@ impl FlowLayerExtractor {
                 [
                     ("density", Value::from(mean_density)),
                     ("velocity", Value::from(mean_velocity)),
+                    ("snr_proxy", Value::from(snr_proxy)),
                 ],
             ));
         }
@@ -196,6 +200,7 @@ impl FlowLayerExtractor {
                 [
                     ("stop_go_ratio", Value::from(stop_go_ratio)),
                     ("velocity", Value::from(mean_velocity)),
+                    ("snr_proxy", Value::from(snr_proxy)),
                 ],
             ));
         }
@@ -214,12 +219,37 @@ impl FlowLayerExtractor {
     }
 }
 
-fn base_attrs(window: &[FlowSample], density: f64, velocity: f64) -> HashMap<String, Value> {
+fn base_attrs(
+    window: &[FlowSample],
+    density: f64,
+    velocity: f64,
+    density_std: f64,
+    velocity_std: f64,
+    snr_proxy: f64,
+) -> HashMap<String, Value> {
     let mut attrs = HashMap::new();
     attrs.insert("sample_count".to_string(), Value::from(window.len() as u64));
     attrs.insert("mean_density".to_string(), Value::from(density));
     attrs.insert("mean_velocity".to_string(), Value::from(velocity));
+    attrs.insert("density_std".to_string(), Value::from(density_std));
+    attrs.insert("velocity_std".to_string(), Value::from(velocity_std));
+    attrs.insert("snr_proxy".to_string(), Value::from(snr_proxy));
     attrs
+}
+
+fn window_stats(window: &[FlowSample], mean_density: f64, mean_velocity: f64) -> (f64, f64, f64) {
+    let mut density_stats = RunningStats::default();
+    let mut velocity_stats = RunningStats::default();
+    for sample in window {
+        density_stats.update(sample.density);
+        velocity_stats.update(sample.velocity);
+    }
+    let density_std = density_stats.stddev(0).unwrap_or(0.0);
+    let velocity_std = velocity_stats.stddev(0).unwrap_or(0.0);
+    let density_snr = mean_density / density_std.max(1e-6);
+    let velocity_snr = mean_velocity / velocity_std.max(1e-6);
+    let snr_proxy = ((density_snr + velocity_snr) * 0.5).clamp(0.0, 50.0);
+    (density_std, velocity_std, snr_proxy)
 }
 
 fn layer_state(

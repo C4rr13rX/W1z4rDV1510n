@@ -1,0 +1,41 @@
+W1z4rDV1510n Upgrade Roadmap (ordered)
+
+Tracking: use this list in order; mark items as done when completed.
+
+[ ] 1) Scientific signal validity pipeline
+    - Sensor-specific quality gates (SNR, jitter, missingness, drift).
+    - Robust resampling/detrending for irregular sampling.
+    - Integrate quality into source confidence and labeling metadata.
+    - Status: in progress (quality gate + ultradian resampling + SNR + label metadata added).
+
+[ ] 2) Sub-ultradian -> ultradian multi-resolution extraction
+    - Wavelets / multitaper PSD / EMD-HHT where CPU-viable.
+    - Cross-frequency coupling to link sub-ultradian motifs to ultradian layers.
+
+[ ] 3) 3D motion + camera rigor
+    - Camera stabilization (optical flow / IMU), multi-person tracking.
+    - Depth inference or multi-view triangulation in spatial estimator.
+
+[ ] 4) Minicolumn neurogenesis with inhibitory arbitration
+    - Spawn minicolumns from stable motif signatures.
+    - Collapse back to multineuron column when inhibition rises.
+
+[ ] 5) Motif playback + human labeling
+    - 3D replay capsules for motif review.
+    - Queue and reward workflow for human validation.
+
+[ ] 6) Network merge fidelity
+    - Versioned motif lineage + provenance.
+    - CRDT-style conflict handling and peer-weighted merges.
+
+[ ] 7) Delegated compute scheduler
+    - Capacity advertising, task routing, reward alignment.
+    - Graceful offload when nodes miss accuracy/efficiency targets.
+
+[ ] 8) Risk + narrative reconstruction
+    - Plain-English causal histories with multi-scale zoom.
+    - Tie narrative severity to health overlay spectrum.
+
+[ ] 9) Quantum path integration
+    - Use quantum APIs for branch scoring where enabled.
+    - Feed calibration back into simulator parameters.

@@ -2,7 +2,7 @@ use crate::blockchain::WorkKind;
 use crate::network::compute_payload_hash;
 use crate::schema::Timestamp;
 use crate::streaming::dimensions::DimensionReport;
-use crate::streaming::schema::TokenBatch;
+use crate::streaming::schema::{StreamSource, TokenBatch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -115,6 +115,7 @@ impl LabelQueue {
                 let mut evidence = HashMap::new();
                 evidence.insert("token_kind".to_string(), Value::String(format!("{:?}", token.kind)));
                 evidence.insert("raw_value".to_string(), value.clone());
+                attach_source_evidence(&mut evidence, token.source, batch);
                 let candidate = LabelCandidate {
                     id: candidate_id(&feature_key, batch.timestamp),
                     work_id: work_id_for(&feature_key, batch.timestamp),
@@ -152,6 +153,7 @@ impl LabelQueue {
                 let mut evidence = HashMap::new();
                 evidence.insert("layer_kind".to_string(), Value::String(format!("{:?}", layer.kind)));
                 evidence.insert("raw_value".to_string(), value.clone());
+                attach_source_evidence(&mut evidence, source_for_layer(batch), batch);
                 let candidate = LabelCandidate {
                     id: candidate_id(&feature_key, batch.timestamp),
                     work_id: work_id_for(&feature_key, batch.timestamp),
@@ -211,6 +213,26 @@ fn candidate_id(feature: &str, ts: Timestamp) -> String {
 fn work_id_for(feature: &str, ts: Timestamp) -> String {
     let payload = format!("work|label|{}|{}", feature, ts.unix);
     compute_payload_hash(payload.as_bytes())
+}
+
+fn attach_source_evidence(
+    evidence: &mut HashMap<String, Value>,
+    source: Option<StreamSource>,
+    batch: &TokenBatch,
+) {
+    let source = source.or_else(|| source_for_layer(batch));
+    let Some(source) = source else { return };
+    evidence.insert("source".to_string(), Value::String(format!("{:?}", source)));
+    if let Some(confidence) = batch.source_confidence.get(&source) {
+        evidence.insert("source_quality".to_string(), Value::from(*confidence));
+    }
+}
+
+fn source_for_layer(batch: &TokenBatch) -> Option<StreamSource> {
+    if batch.source_confidence.len() == 1 {
+        return batch.source_confidence.keys().next().copied();
+    }
+    None
 }
 
 fn should_ignore_key(key: &str) -> bool {

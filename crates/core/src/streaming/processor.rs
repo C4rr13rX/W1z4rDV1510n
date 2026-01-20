@@ -13,8 +13,10 @@ use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
 use crate::streaming::dimensions::DimensionTracker;
 use crate::streaming::health_overlay::HealthOverlayRuntime;
+use crate::streaming::quality::StreamingQualityRuntime;
 use crate::streaming::knowledge::{AssociationVote, KnowledgeDocument, KnowledgeIngestReport, KnowledgeRuntime};
 use crate::streaming::survival::SurvivalRuntime;
+use crate::streaming::network_fabric::{NetworkPatternRuntime, NetworkPatternSummary};
 use crate::streaming::ontology_runtime::OntologyRuntime;
 use crate::streaming::physiology_runtime::PhysiologyRuntime;
 use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
@@ -208,6 +210,8 @@ impl StreamingProcessor {
             ("signal".to_string(), Value::from(signal.signal)),
             ("signal_quality".to_string(), Value::from(quality)),
         ]);
+        let snr_proxy = (signal.signal.abs() * 2.0 * quality).clamp(0.0, 20.0);
+        attributes.insert("snr_proxy".to_string(), Value::from(snr_proxy));
         insert_spatial_attrs(&mut attributes, &spatial);
         let mut tokens = vec![EventToken {
             id: String::new(),
@@ -320,6 +324,15 @@ impl StreamingProcessor {
             "keypoint_count".to_string(),
             Value::from(output.keypoint_count as u64),
         );
+        let signal_strength = output.features.motion_energy + 0.5 * output.features.posture_shift;
+        let noise_strength = output.features.micro_jitter + output.features.camera_motion;
+        let snr_proxy = if noise_strength > 1e-6 {
+            signal_strength / noise_strength
+        } else {
+            signal_strength
+        };
+        let snr_proxy = (snr_proxy * output.features.confidence).clamp(0.0, 50.0);
+        attributes.insert("snr_proxy".to_string(), Value::from(snr_proxy));
         if let Some(area) = output.bbox_area {
             attributes.insert("bbox_area".to_string(), Value::from(area));
         }
@@ -466,6 +479,7 @@ impl StreamingProcessor {
 pub struct StreamingInference {
     processor: StreamingProcessor,
     aligner: StreamingAligner,
+    quality: StreamingQualityRuntime,
     temporal: TemporalInferenceCore,
     causal: StreamingCausalRuntime,
     branching: StreamingBranchingRuntime,
@@ -478,11 +492,13 @@ pub struct StreamingInference {
     health_overlay: HealthOverlayRuntime,
     survival: SurvivalRuntime,
     knowledge: KnowledgeRuntime,
+    network_fabric: NetworkPatternRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
     last_batch: Option<TokenBatch>,
     last_motifs: Vec<BehaviorMotif>,
+    last_network_patterns: Vec<NetworkPatternSummary>,
     last_report_metadata: HashMap<String, Value>,
 }
 
@@ -490,6 +506,7 @@ impl StreamingInference {
     pub fn new(run_config: RunConfig) -> Self {
         let processor = StreamingProcessor::new(run_config.streaming.clone());
         let aligner = StreamingAligner::new(&run_config.streaming);
+        let quality = StreamingQualityRuntime::new(run_config.streaming.quality.clone());
         let temporal = TemporalInferenceCore::new(
             run_config.streaming.temporal.clone(),
             run_config.streaming.hypergraph.clone(),
@@ -509,6 +526,7 @@ impl StreamingInference {
         let health_overlay = HealthOverlayRuntime::default();
         let survival = SurvivalRuntime::default();
         let knowledge = KnowledgeRuntime::default();
+        let network_fabric = NetworkPatternRuntime::new(run_config.streaming.network_fabric.clone());
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
         } else {
@@ -517,6 +535,7 @@ impl StreamingInference {
         Self {
             processor,
             aligner,
+            quality,
             temporal,
             causal,
             branching,
@@ -529,11 +548,13 @@ impl StreamingInference {
             health_overlay,
             survival,
             knowledge,
+            network_fabric,
             spike_runtime,
             run_config,
             symbolizer: SymbolizeConfig::default(),
             last_batch: None,
             last_motifs: Vec::new(),
+            last_network_patterns: Vec::new(),
             last_report_metadata: HashMap::new(),
         }
     }
@@ -553,6 +574,11 @@ impl StreamingInference {
         &mut self,
         share: NeuralFabricShare,
     ) -> anyhow::Result<Option<RunOutcome>> {
+        let share = share;
+        if !share.network_patterns.is_empty() {
+            self.network_fabric
+                .ingest_shared_patterns(&share.network_patterns);
+        }
         let batch = match self.processor.ingest_fabric_share(share) {
             Some(batch) => batch,
             None => return Ok(None),
@@ -577,6 +603,7 @@ impl StreamingInference {
         let motifs = std::mem::take(&mut self.last_motifs);
         let mut share = NeuralFabricShare::from_batch(node_id, batch, motifs);
         share.motif_transitions = self.processor.behavior_transition_snapshot();
+        share.network_patterns = std::mem::take(&mut self.last_network_patterns);
         if !self.last_report_metadata.is_empty() {
             share.metadata = std::mem::take(&mut self.last_report_metadata);
         }
@@ -584,6 +611,8 @@ impl StreamingInference {
     }
 
     fn process_batch(&mut self, batch: TokenBatch) -> anyhow::Result<Option<RunOutcome>> {
+        let mut batch = batch;
+        let _ = self.quality.update(&mut batch);
         let batch = match self.aligner.push(batch) {
             Some(batch) => batch,
             None => return Ok(None),
@@ -592,11 +621,17 @@ impl StreamingInference {
         self.last_motifs = self.processor.take_last_motifs();
         let behavior_frame = self.processor.take_last_behavior_frame();
         self.last_report_metadata.clear();
+        let quality_report = self
+            .quality
+            .report_for(batch.timestamp, batch.source_confidence.keys().copied());
         let dimension_report = self.dimensions.update(&batch);
         let physiology_report = self
             .physiology
             .update(&batch, Some(self.knowledge.store()));
         let label_report = self.labels.update(&batch, dimension_report.as_ref());
+        let network_report = self
+            .network_fabric
+            .update(&batch, behavior_frame.as_ref());
         let survival_report = behavior_frame
             .as_ref()
             .map(|frame| self.survival.update(frame, physiology_report.as_ref(), Some(self.knowledge.store())));
@@ -684,6 +719,16 @@ impl StreamingInference {
                 serde_json::to_value(report)?,
             );
         }
+        if let Some(report) = &quality_report {
+            report_metadata.insert(
+                "quality_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "quality_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
         if let Some(report) = &label_report {
             report_metadata.insert(
                 "label_queue".to_string(),
@@ -742,6 +787,19 @@ impl StreamingInference {
                 "analysis_report".to_string(),
                 serde_json::to_value(report)?,
             );
+        }
+        if let Some(report) = &network_report {
+            report_metadata.insert(
+                "network_patterns".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "network_patterns".to_string(),
+                serde_json::to_value(report)?,
+            );
+            self.last_network_patterns = report.shared_patterns.clone();
+        } else {
+            self.last_network_patterns.clear();
         }
         if let Some(report) = causal_report {
             report_metadata.insert(
@@ -865,14 +923,19 @@ mod tests {
         config.layer_flags.behavior_enabled = true;
         let mut processor = StreamingProcessor::new(config);
         let mut last = None;
-        for idx in 0..40 {
+        let period_secs = 30.0 * 60.0;
+        let omega = 2.0 * PI / period_secs;
+        let base = 1_000_000_i64;
+        for idx in 0..80 {
+            let t = base + idx * 60;
+            let signal = (omega * t as f64).sin();
             let envelope = StreamEnvelope {
                 source: StreamSource::PeopleVideo,
-                timestamp: Timestamp { unix: 10 + idx },
+                timestamp: Timestamp { unix: t },
                 payload: StreamPayload::Json {
                     value: serde_json::json!({
                         "entity_id": "e1",
-                        "signal": 0.9
+                        "signal": signal
                     }),
                 },
                 metadata: HashMap::new(),
