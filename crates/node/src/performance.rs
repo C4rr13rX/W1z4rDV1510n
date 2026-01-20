@@ -56,6 +56,29 @@ pub struct NodeMetricsReport {
     pub tags: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffloadReason {
+    LowEfficiency,
+    Overloaded,
+    LowAccuracy,
+}
+
+impl OffloadReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OffloadReason::LowEfficiency => "low_efficiency",
+            OffloadReason::Overloaded => "overloaded",
+            OffloadReason::LowAccuracy => "low_accuracy",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OffloadCandidate {
+    pub node_id: String,
+    pub score: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalPerformanceSample {
     pub timestamp: Timestamp,
@@ -188,6 +211,79 @@ impl NodePerformanceTracker {
             return false;
         }
         true
+    }
+
+    pub fn offload_reason(&mut self, now: Timestamp) -> Option<OffloadReason> {
+        if !self.config.enabled || self.metrics.samples == 0 {
+            return None;
+        }
+        self.prune(now);
+        let avg_eff = self.average_efficiency(now);
+        let eff_ratio = avg_eff
+            .map(|avg| ratio(self.metrics.efficiency, avg))
+            .unwrap_or(1.0);
+        let low_eff = eff_ratio < self.config.efficiency_offload_threshold;
+        let overloaded = self.metrics.capacity_ratio < self.config.capacity_threshold;
+        let low_accuracy = self.metrics.accuracy_samples > 0
+            && self.metrics.accuracy < self.config.accuracy_threshold;
+        if !self.has_available_peer(now) {
+            return None;
+        }
+        if low_accuracy {
+            return Some(OffloadReason::LowAccuracy);
+        }
+        if overloaded {
+            return Some(OffloadReason::Overloaded);
+        }
+        if low_eff {
+            return Some(OffloadReason::LowEfficiency);
+        }
+        None
+    }
+
+    pub fn select_offload_peer(&mut self, now: Timestamp) -> Option<OffloadCandidate> {
+        if !self.config.enabled {
+            return None;
+        }
+        self.prune(now);
+        let mut max_eff: f64 = 0.0;
+        for entry in self.peers.values() {
+            let report = &entry.report;
+            if !report.work_profile.stream_processing || !report.available_capacity {
+                continue;
+            }
+            max_eff = max_eff.max(report.efficiency);
+        }
+        let max_eff = if max_eff <= 0.0 { 1.0 } else { max_eff };
+        let mut best: Option<OffloadCandidate> = None;
+        for entry in self.peers.values() {
+            let report = &entry.report;
+            if report.node_id.trim().is_empty() || report.node_id == self.node_id {
+                continue;
+            }
+            if !report.work_profile.stream_processing || !report.available_capacity {
+                continue;
+            }
+            if report.capacity_ratio < self.config.capacity_threshold {
+                continue;
+            }
+            if report.accuracy < self.config.accuracy_threshold {
+                continue;
+            }
+            let eff_norm = (report.efficiency / max_eff).clamp(0.0, 1.0);
+            let score =
+                0.45 * report.accuracy + 0.35 * eff_norm + 0.2 * report.capacity_ratio;
+            match &best {
+                Some(candidate) if score <= candidate.score => {}
+                _ => {
+                    best = Some(OffloadCandidate {
+                        node_id: report.node_id.clone(),
+                        score,
+                    });
+                }
+            }
+        }
+        best
     }
 
     pub fn take_report(&mut self, now: Timestamp) -> Option<NodeMetricsReport> {

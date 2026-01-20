@@ -5,7 +5,7 @@ use crate::ledger::LocalLedger;
 use crate::openstack::OpenStackControlPlane;
 use crate::paths::node_data_dir;
 use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
-use crate::performance::{LocalPerformanceSample, NodePerformanceTracker};
+use crate::performance::{LocalPerformanceSample, NodePerformanceTracker, OffloadReason};
 use crate::p2p::NodeNetwork;
 use anyhow::{Result, anyhow};
 use std::fs;
@@ -25,6 +25,8 @@ use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{NeuralFabricShare, StreamEnvelope, StreamingInference};
 use w1z4rdv1510n::config::RunConfig;
 use serde_json::Value;
+
+const OFFLOAD_MAX_HOPS: u64 = 2;
 
 pub struct NodeRuntime {
     config: NodeConfig,
@@ -164,6 +166,7 @@ impl NodeRuntime {
             streaming.consume_streams && can_process_streams && workload.enable_stream_processing;
         let consume_shares = streaming.consume_shares && workload.enable_share_consume;
         let publish_shares = streaming.publish_shares && workload.enable_share_publish;
+        let publish_streams = streaming.publish_streams;
         if streaming.consume_streams && !can_process_streams {
             warn!(
                 target: "w1z4rdv1510n::node",
@@ -253,18 +256,6 @@ impl NodeRuntime {
                         }
                     };
                     if payload_kind == stream_kind && consume_streams {
-                        let now = now_timestamp();
-                        let should_process = if peer_scoring.enabled {
-                            match performance.lock() {
-                                Ok(mut tracker) => tracker.should_process_streams(now, true),
-                                Err(_) => true,
-                            }
-                        } else {
-                            true
-                        };
-                        if !should_process {
-                            continue;
-                        }
                         if processed_set.contains(&data_id) {
                             continue;
                         }
@@ -279,16 +270,79 @@ impl NodeRuntime {
                             Ok(payload) => payload,
                             Err(_) => continue,
                         };
-                        let envelope = match serde_json::from_slice::<StreamEnvelope>(&payload) {
+                        let mut envelope = match serde_json::from_slice::<StreamEnvelope>(&payload) {
                             Ok(envelope) => envelope,
                             Err(_) => continue,
                         };
+                        let offload_target = offload_target_from_metadata(&envelope.metadata);
+                        if let Some(target) = offload_target.as_ref() {
+                            if target != &node_id {
+                                continue;
+                            }
+                        }
+                        let offload_hops = offload_hops_from_metadata(&envelope.metadata);
+                        let force_process = offload_target.as_deref() == Some(node_id.as_str());
                         let payload_bytes = payload.len();
                         let input_hash = if payload_hash.trim().is_empty() {
                             compute_payload_hash(&payload)
                         } else {
                             payload_hash
                         };
+                        let now = now_timestamp();
+                        let mut should_process = true;
+                        let mut offload_reason = None;
+                        let mut offload_candidate = None;
+                        if peer_scoring.enabled {
+                            match performance.lock() {
+                                Ok(mut tracker) => {
+                                    should_process = tracker.should_process_streams(now, true);
+                                    if !should_process {
+                                        offload_reason = tracker.offload_reason(now);
+                                        offload_candidate = tracker.select_offload_peer(now);
+                                    }
+                                }
+                                Err(_) => {
+                                    should_process = true;
+                                }
+                            }
+                        }
+                        if force_process {
+                            should_process = true;
+                        }
+                        if !should_process {
+                            if publish_streams
+                                && offload_target.is_none()
+                                && offload_hops < OFFLOAD_MAX_HOPS
+                            {
+                                if let Some(candidate) = offload_candidate {
+                                    let reason =
+                                        offload_reason.unwrap_or(OffloadReason::Overloaded);
+                                    apply_offload_metadata(
+                                        &mut envelope.metadata,
+                                        &node_id,
+                                        &candidate.node_id,
+                                        reason,
+                                        &origin_node_id,
+                                        &data_id,
+                                        &input_hash,
+                                        &sensor_id,
+                                        offload_hops.saturating_add(1),
+                                        now,
+                                    );
+                                    let offload_sensor =
+                                        format!("offload:{}:{}", node_id, sensor_id);
+                                    let _ = mesh
+                                        .ingest_stream_envelope_with_kind(
+                                            offload_sensor,
+                                            &envelope,
+                                            &stream_kind,
+                                        )
+                                        .await;
+                                }
+                            }
+                            continue;
+                        }
+                        let offload_metrics = extract_offload_metrics(&envelope.metadata);
                         let start = Instant::now();
                         let outcome = match inference.handle_envelope(envelope) {
                             Ok(outcome) => outcome,
@@ -466,6 +520,9 @@ impl NodeRuntime {
                             "hardware_has_gpu".to_string(),
                             Value::from(profile.has_gpu),
                         );
+                        for (key, value) in offload_metrics {
+                            metrics.insert(key, value);
+                        }
                         let proof = WorkProof {
                             work_id,
                             node_id: node_id.clone(),
@@ -698,6 +755,87 @@ fn accuracy_from_metadata(metadata: &HashMap<String, Value>) -> Option<f64> {
         .and_then(|val| val.get("mean"))
         .and_then(|val| val.as_f64())
         .map(|score| score.clamp(0.0, 1.0))
+}
+
+fn offload_target_from_metadata(metadata: &HashMap<String, Value>) -> Option<String> {
+    metadata
+        .get("offload_target_node_id")
+        .and_then(|val| val.as_str())
+        .map(|val| val.to_string())
+}
+
+fn offload_hops_from_metadata(metadata: &HashMap<String, Value>) -> u64 {
+    metadata
+        .get("offload_hops")
+        .and_then(|val| val.as_u64())
+        .unwrap_or(0)
+}
+
+fn apply_offload_metadata(
+    metadata: &mut HashMap<String, Value>,
+    origin_node_id: &str,
+    target_node_id: &str,
+    reason: OffloadReason,
+    source_node_id: &str,
+    source_data_id: &str,
+    source_payload_hash: &str,
+    source_sensor_id: &str,
+    hops: u64,
+    now: Timestamp,
+) {
+    metadata.insert(
+        "offload_origin_node_id".to_string(),
+        Value::String(origin_node_id.to_string()),
+    );
+    metadata.insert(
+        "offload_target_node_id".to_string(),
+        Value::String(target_node_id.to_string()),
+    );
+    metadata.insert(
+        "offload_reason".to_string(),
+        Value::String(reason.as_str().to_string()),
+    );
+    metadata.insert("offload_hops".to_string(), Value::from(hops));
+    metadata.insert(
+        "offload_requested_at".to_string(),
+        Value::from(now.unix),
+    );
+    metadata.insert(
+        "offload_source_node_id".to_string(),
+        Value::String(source_node_id.to_string()),
+    );
+    metadata.insert(
+        "offload_source_data_id".to_string(),
+        Value::String(source_data_id.to_string()),
+    );
+    metadata.insert(
+        "offload_source_payload_hash".to_string(),
+        Value::String(source_payload_hash.to_string()),
+    );
+    metadata.insert(
+        "offload_source_sensor_id".to_string(),
+        Value::String(source_sensor_id.to_string()),
+    );
+}
+
+fn extract_offload_metrics(metadata: &HashMap<String, Value>) -> HashMap<String, Value> {
+    let mut out = HashMap::new();
+    for key in [
+        "offload_origin_node_id",
+        "offload_target_node_id",
+        "offload_reason",
+        "offload_hops",
+        "offload_requested_at",
+        "offload_source_node_id",
+        "offload_source_data_id",
+        "offload_source_payload_hash",
+        "offload_source_sensor_id",
+    ] {
+        if let Some(value) = metadata.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    out
 }
 
 fn work_id_for(

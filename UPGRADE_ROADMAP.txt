@@ -29,7 +29,7 @@ Tracking: use this list in order; mark items as done when completed.
     - Versioned motif lineage + provenance.
     - CRDT-style conflict handling and peer-weighted merges.
 
-[ ] 7) Delegated compute scheduler
+[x] 7) Delegated compute scheduler
     - Capacity advertising, task routing, reward alignment.
     - Graceful offload when nodes miss accuracy/efficiency targets.
 
