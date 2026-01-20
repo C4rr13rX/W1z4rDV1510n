@@ -523,6 +523,34 @@ impl RunConfig {
                     "streaming.network_fabric.max_phenotype_tokens must be > 0"
                 );
             }
+            if self.streaming.narrative.enabled {
+                anyhow::ensure!(
+                    self.streaming.narrative.max_history > 0,
+                    "streaming.narrative.max_history must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.narrative.max_entities > 0,
+                    "streaming.narrative.max_entities must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.narrative.max_steps > 0,
+                    "streaming.narrative.max_steps must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.narrative.recent_window_secs > 0,
+                    "streaming.narrative.recent_window_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.narrative.short_window_secs
+                        >= self.streaming.narrative.recent_window_secs,
+                    "streaming.narrative.short_window_secs must be >= recent_window_secs"
+                );
+                anyhow::ensure!(
+                    self.streaming.narrative.long_window_secs
+                        >= self.streaming.narrative.short_window_secs,
+                    "streaming.narrative.long_window_secs must be >= short_window_secs"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -1125,6 +1153,8 @@ pub struct StreamingConfig {
     pub analysis: StreamingAnalysisConfig,
     #[serde(default)]
     pub network_fabric: NetworkFabricConfig,
+    #[serde(default)]
+    pub narrative: NarrativeConfig,
 }
 
 impl Default for StreamingConfig {
@@ -1147,6 +1177,33 @@ impl Default for StreamingConfig {
             physiology: PhysiologyConfig::default(),
             analysis: StreamingAnalysisConfig::default(),
             network_fabric: NetworkFabricConfig::default(),
+            narrative: NarrativeConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NarrativeConfig {
+    pub enabled: bool,
+    pub max_history: usize,
+    pub max_entities: usize,
+    pub max_steps: usize,
+    pub recent_window_secs: i64,
+    pub short_window_secs: i64,
+    pub long_window_secs: i64,
+}
+
+impl Default for NarrativeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_history: 128,
+            max_entities: 24,
+            max_steps: 6,
+            recent_window_secs: 300,
+            short_window_secs: 1800,
+            long_window_secs: 10800,
         }
     }
 }

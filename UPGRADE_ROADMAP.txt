@@ -33,7 +33,7 @@ Tracking: use this list in order; mark items as done when completed.
     - Capacity advertising, task routing, reward alignment.
     - Graceful offload when nodes miss accuracy/efficiency targets.
 
-[ ] 8) Risk + narrative reconstruction
+[x] 8) Risk + narrative reconstruction
     - Plain-English causal histories with multi-scale zoom.
     - Tie narrative severity to health overlay spectrum.
 
