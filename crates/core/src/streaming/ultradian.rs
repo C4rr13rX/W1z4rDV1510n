@@ -292,7 +292,7 @@ impl UltradianLayerExtractor {
             residual_sum_sq += weight * detrended * detrended;
         }
         let rms = (residual_sum_sq / weight_total).max(0.0).sqrt().max(1e-6);
-        let (sample_dt_mean_resampled, sample_dt_std_resampled, _) = sample_dt_metrics(&samples);
+    let (sample_dt_mean_resampled, sample_dt_std_resampled, _) = sample_dt_metrics(&samples);
         let mut best_period = band.center_period();
         let mut best_amplitude = 0.0;
         let mut best_phase = 0.0;
@@ -645,6 +645,13 @@ struct PeriodogramMetrics {
     entropy: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WaveletMetrics {
+    energy_mean: f64,
+    energy_std: f64,
+    energy_peak: f64,
+}
+
 fn estimate_sub_bands(
     sub_bands: &[SubUltradianBand],
     samples: &[SignalSample],
@@ -694,6 +701,28 @@ fn estimate_sub_bands(
             weight_total,
             candidate_count.saturating_mul(2),
         );
+        let multitaper = multitaper_band_metrics(
+            samples,
+            band,
+            mean,
+            slope,
+            t_mean,
+            t_ref,
+            weight_total,
+            min_ts,
+            max_ts,
+            candidate_count.saturating_mul(2),
+        );
+        let wavelet = wavelet_band_metrics(
+            samples,
+            estimate.period_secs,
+            mean,
+            slope,
+            t_mean,
+            min_ts,
+            max_ts,
+            segments,
+        );
         let pac = phase_amplitude_coupling(
             samples,
             min_ts,
@@ -740,6 +769,38 @@ fn estimate_sub_bands(
             out.push((
                 format!("{prefix}_psd_entropy"),
                 serde_json::Value::from(metrics.entropy),
+            ));
+        }
+        if let Some(metrics) = multitaper {
+            out.push((
+                format!("{prefix}_psd_mt_peak_period_secs"),
+                serde_json::Value::from(metrics.peak_period),
+            ));
+            out.push((
+                format!("{prefix}_psd_mt_peak_power"),
+                serde_json::Value::from(metrics.peak_power),
+            ));
+            out.push((
+                format!("{prefix}_psd_mt_band_power"),
+                serde_json::Value::from(metrics.band_power),
+            ));
+            out.push((
+                format!("{prefix}_psd_mt_entropy"),
+                serde_json::Value::from(metrics.entropy),
+            ));
+        }
+        if let Some(metrics) = wavelet {
+            out.push((
+                format!("{prefix}_wavelet_energy_mean"),
+                serde_json::Value::from(metrics.energy_mean),
+            ));
+            out.push((
+                format!("{prefix}_wavelet_energy_std"),
+                serde_json::Value::from(metrics.energy_std),
+            ));
+            out.push((
+                format!("{prefix}_wavelet_energy_peak"),
+                serde_json::Value::from(metrics.energy_peak),
             ));
         }
         out.push((
@@ -873,6 +934,162 @@ fn periodogram_band_metrics(
         peak_power,
         band_power,
         entropy,
+    })
+}
+
+fn multitaper_band_metrics(
+    samples: &[SignalSample],
+    band: &SubUltradianBand,
+    mean: f64,
+    slope: f64,
+    t_mean: f64,
+    t_ref: f64,
+    weight_total: f64,
+    min_ts: f64,
+    max_ts: f64,
+    candidate_count: usize,
+) -> Option<PeriodogramMetrics> {
+    if samples.len() < 2 || weight_total <= 0.0 {
+        return None;
+    }
+    let span = (max_ts - min_ts).max(0.0);
+    if span <= 0.0 {
+        return None;
+    }
+    let periods = band_candidate_periods(band, candidate_count.max(2));
+    if periods.is_empty() {
+        return None;
+    }
+    let mut powers = Vec::with_capacity(periods.len());
+    let mut peak_period = periods[0];
+    let mut peak_power = 0.0;
+    for period in periods {
+        let omega = 2.0 * PI / period.max(1.0);
+        let mut taper_powers = Vec::new();
+        for taper in 0..3 {
+            let mut sum_sin = 0.0;
+            let mut sum_cos = 0.0;
+            let mut taper_weight_total = 0.0;
+            for sample in samples {
+                let weight = sample.quality.clamp(0.0, 1.0);
+                if weight <= 0.0 {
+                    continue;
+                }
+                let t = sample.timestamp.unix as f64;
+                let centered = (sample.value - mean) - slope * (t - t_mean);
+                let t_offset = t - t_ref;
+                let x = ((t - min_ts) / span).clamp(0.0, 1.0);
+                let taper_weight = taper_weight(taper, x);
+                let w = weight * taper_weight;
+                if w <= 0.0 {
+                    continue;
+                }
+                sum_sin += w * centered * (omega * t_offset).sin();
+                sum_cos += w * centered * (omega * t_offset).cos();
+                taper_weight_total += w;
+            }
+            if taper_weight_total <= 0.0 {
+                continue;
+            }
+            let magnitude = (sum_sin.powi(2) + sum_cos.powi(2)).sqrt();
+            let amplitude_raw = (2.0 * magnitude / taper_weight_total).abs();
+            let power = (amplitude_raw * amplitude_raw).max(0.0);
+            taper_powers.push(power);
+        }
+        if taper_powers.is_empty() {
+            powers.push(0.0);
+            continue;
+        }
+        let power = math_toolbox::mean(&taper_powers).unwrap_or(0.0);
+        if power > peak_power {
+            peak_power = power;
+            peak_period = period;
+        }
+        powers.push(power);
+    }
+    let band_power = math_toolbox::mean(&powers).unwrap_or(0.0);
+    let entropy = math_toolbox::entropy(&powers);
+    Some(PeriodogramMetrics {
+        peak_period,
+        peak_power,
+        band_power,
+        entropy,
+    })
+}
+
+fn taper_weight(taper: usize, x: f64) -> f64 {
+    let theta = 2.0 * PI * x;
+    match taper {
+        0 => (0.5 - 0.5 * theta.cos()).clamp(0.0, 1.0),
+        1 => (0.54 - 0.46 * theta.cos()).clamp(0.0, 1.0),
+        _ => (0.42 - 0.5 * theta.cos() + 0.08 * (2.0 * theta).cos()).clamp(0.0, 1.0),
+    }
+}
+
+fn wavelet_band_metrics(
+    samples: &[SignalSample],
+    period: f64,
+    mean: f64,
+    slope: f64,
+    t_mean: f64,
+    min_ts: f64,
+    max_ts: f64,
+    segments: usize,
+) -> Option<WaveletMetrics> {
+    if samples.len() < 2 || period <= 0.0 || segments < 2 {
+        return None;
+    }
+    let span = (max_ts - min_ts).max(0.0);
+    if span <= 0.0 {
+        return None;
+    }
+    let omega = 2.0 * PI / period.max(1.0);
+    let sigma = (period * 0.5).max(1.0);
+    let segment_len = span / segments as f64;
+    let mut stats = RunningStats::default();
+    let mut peak = 0.0;
+    for idx in 0..segments {
+        let center = min_ts + (idx as f64 + 0.5) * segment_len;
+        let mut sum_sin = 0.0;
+        let mut sum_cos = 0.0;
+        let mut weight_total = 0.0;
+        for sample in samples {
+            let weight = sample.quality.clamp(0.0, 1.0);
+            if weight <= 0.0 {
+                continue;
+            }
+            let t = sample.timestamp.unix as f64;
+            let centered = (sample.value - mean) - slope * (t - t_mean);
+            let dt = t - center;
+            let gauss = (-dt * dt / (2.0 * sigma * sigma)).exp();
+            let w = weight * gauss;
+            if w <= 0.0 {
+                continue;
+            }
+            sum_sin += w * centered * (omega * dt).sin();
+            sum_cos += w * centered * (omega * dt).cos();
+            weight_total += w;
+        }
+        if weight_total <= 0.0 {
+            continue;
+        }
+        let magnitude = (sum_sin.powi(2) + sum_cos.powi(2)).sqrt();
+        let amplitude_raw = (2.0 * magnitude / weight_total).abs();
+        let energy = (amplitude_raw * amplitude_raw).max(0.0);
+        stats.update(energy);
+        if energy > peak {
+            peak = energy;
+        }
+    }
+    if stats.count() == 0 {
+        return None;
+    }
+    let energy_mean = stats.mean().unwrap_or(0.0);
+    let energy_std = stats.stddev(0).unwrap_or(0.0);
+    Some(WaveletMetrics {
+        energy_mean,
+        energy_std,
+        energy_peak: peak,
     })
 }
 
