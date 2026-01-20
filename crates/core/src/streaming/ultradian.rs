@@ -652,6 +652,15 @@ struct WaveletMetrics {
     energy_peak: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EmdMetrics {
+    imf_energy: f64,
+    residual_energy: f64,
+    envelope_mean: f64,
+    envelope_peak: f64,
+    zero_cross_hz: f64,
+}
+
 fn estimate_sub_bands(
     sub_bands: &[SubUltradianBand],
     samples: &[SignalSample],
@@ -723,6 +732,7 @@ fn estimate_sub_bands(
             max_ts,
             segments,
         );
+        let emd = emd_band_metrics(samples, estimate.period_secs, min_ts, max_ts);
         let pac = phase_amplitude_coupling(
             samples,
             min_ts,
@@ -801,6 +811,28 @@ fn estimate_sub_bands(
             out.push((
                 format!("{prefix}_wavelet_energy_peak"),
                 serde_json::Value::from(metrics.energy_peak),
+            ));
+        }
+        if let Some(metrics) = emd {
+            out.push((
+                format!("{prefix}_emd_imf_energy"),
+                serde_json::Value::from(metrics.imf_energy),
+            ));
+            out.push((
+                format!("{prefix}_emd_residual_energy"),
+                serde_json::Value::from(metrics.residual_energy),
+            ));
+            out.push((
+                format!("{prefix}_emd_envelope_mean"),
+                serde_json::Value::from(metrics.envelope_mean),
+            ));
+            out.push((
+                format!("{prefix}_emd_envelope_peak"),
+                serde_json::Value::from(metrics.envelope_peak),
+            ));
+            out.push((
+                format!("{prefix}_emd_zero_cross_hz"),
+                serde_json::Value::from(metrics.zero_cross_hz),
             ));
         }
         out.push((
@@ -1090,6 +1122,80 @@ fn wavelet_band_metrics(
         energy_mean,
         energy_std,
         energy_peak: peak,
+    })
+}
+
+fn emd_band_metrics(
+    samples: &[SignalSample],
+    period: f64,
+    min_ts: f64,
+    max_ts: f64,
+) -> Option<EmdMetrics> {
+    if samples.len() < 3 || period <= 0.0 {
+        return None;
+    }
+    let span = (max_ts - min_ts).max(0.0);
+    if span <= 0.0 {
+        return None;
+    }
+    let mut ordered = samples.to_vec();
+    ordered.sort_by_key(|sample| sample.timestamp.unix);
+    let (dt_mean, _, _) = sample_dt_metrics(&ordered);
+    if dt_mean <= 0.0 {
+        return None;
+    }
+    let window_len = (period / dt_mean).round() as usize;
+    let window_len = window_len.clamp(3, ordered.len());
+    let mut values = Vec::with_capacity(ordered.len());
+    for sample in &ordered {
+        values.push(sample.value);
+    }
+    let smooth = math_toolbox::moving_average(&values, window_len);
+    if smooth.len() != values.len() {
+        return None;
+    }
+    let mut imf = Vec::with_capacity(values.len());
+    let mut residual_energy = 0.0;
+    let mut imf_energy = 0.0;
+    let mut envelope_mean = 0.0;
+    let mut envelope_peak = 0.0;
+    let mut zero_crossings = 0usize;
+    let mut prev_imf: f64 = 0.0;
+    for (idx, (value, base)) in values.iter().zip(smooth.iter()).enumerate() {
+        let component = value - base;
+        imf.push(component);
+        imf_energy += component * component;
+        residual_energy += base * base;
+        let envelope = component.abs();
+        envelope_mean += envelope;
+        if envelope > envelope_peak {
+            envelope_peak = envelope;
+        }
+        if idx > 0 && prev_imf.signum() != 0.0 && component.signum() != 0.0 {
+            if prev_imf.signum() != component.signum() {
+                zero_crossings += 1;
+            }
+        }
+        prev_imf = component;
+    }
+    let count = imf.len() as f64;
+    if count <= 0.0 {
+        return None;
+    }
+    imf_energy /= count;
+    residual_energy /= count;
+    envelope_mean /= count;
+    let zero_cross_hz = if span > 0.0 {
+        zero_crossings as f64 / (2.0 * span)
+    } else {
+        0.0
+    };
+    Some(EmdMetrics {
+        imf_energy,
+        residual_energy,
+        envelope_mean,
+        envelope_peak,
+        zero_cross_hz,
     })
 }
 
