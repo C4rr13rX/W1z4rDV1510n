@@ -120,6 +120,10 @@ mod tests {
             retrodiction_enabled: true,
             retrodiction_min_intensity: 0.8,
             retrodiction_max: 4,
+            quantum_enabled: false,
+            quantum_blend_alpha: 0.35,
+            quantum_max_candidates: 8,
+            quantum_temperature: 0.7,
         };
         let mut futures = BranchingFutures::new(config, serde_json::json!({"root": true}));
         let root = futures.root_id();

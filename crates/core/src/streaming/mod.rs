@@ -55,7 +55,7 @@ pub use hypergraph::{DomainKind, HypergraphEdge, HypergraphNode, HypergraphNodeK
 pub use temporal::{TemporalInferenceCore, TemporalInferenceReport, LayerPrediction, CoherencePrediction, EventIntensity, DirichletPosterior, HypergraphStats};
 pub use spike_runtime::{StreamingSpikePoolKind, StreamingSpikeRuntime};
 pub use causal_stream::{CausalReport, StreamingCausalRuntime};
-pub use branching_runtime::{BranchingReport, StreamingBranchingRuntime};
+pub use branching_runtime::{BranchingQuantumReport, BranchingReport, StreamingBranchingRuntime};
 pub use plasticity_runtime::{PlasticityReport, StreamingPlasticityRuntime};
 pub use ontology_runtime::{OntologyReport, OntologyRuntime};
 pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};

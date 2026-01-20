@@ -37,6 +37,6 @@ Tracking: use this list in order; mark items as done when completed.
     - Plain-English causal histories with multi-scale zoom.
     - Tie narrative severity to health overlay spectrum.
 
-[ ] 9) Quantum path integration
+[x] 9) Quantum path integration
     - Use quantum APIs for branch scoring where enabled.
     - Feed calibration back into simulator parameters.

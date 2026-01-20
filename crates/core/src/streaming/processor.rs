@@ -10,6 +10,7 @@ use crate::streaming::align::StreamingAligner;
 use crate::streaming::motor::{MotorFeatureExtractor, PoseFrame};
 use crate::streaming::analysis_runtime::StreamingAnalysisRuntime;
 use crate::streaming::branching_runtime::StreamingBranchingRuntime;
+use crate::compute::QuantumExecutor;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
 use crate::streaming::dimensions::DimensionTracker;
 use crate::streaming::health_overlay::HealthOverlayRuntime;
@@ -38,6 +39,7 @@ use crate::streaming::tracking::PoseTracker;
 use crate::neuro::{NeuroRuntime, NeuroSnapshot};
 use crate::schema::EnvironmentSnapshot;
 use crate::config::{MetacognitionConfig, RunConfig};
+use crate::quantum_executor::QuantumHttpExecutor;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -582,7 +584,24 @@ impl StreamingInference {
             run_config.streaming.hypergraph.clone(),
         );
         let causal = StreamingCausalRuntime::new(run_config.streaming.causal.clone());
-        let branching = StreamingBranchingRuntime::new(run_config.streaming.branching.clone());
+        let quantum_executor: Option<Box<dyn QuantumExecutor>> =
+            if run_config.streaming.branching.quantum_enabled
+                && run_config.quantum.remote_enabled
+                && run_config.compute.allow_quantum
+                && !run_config.compute.quantum_endpoints.is_empty()
+            {
+                match QuantumHttpExecutor::new(run_config.compute.quantum_endpoints.clone()) {
+                    Ok(executor) => Some(Box::new(executor)),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+        let branching = StreamingBranchingRuntime::new(
+            run_config.streaming.branching.clone(),
+            run_config.quantum.clone(),
+            quantum_executor,
+        );
         let plasticity = StreamingPlasticityRuntime::new(run_config.streaming.plasticity.clone());
         let ontology =
             OntologyRuntime::new(run_config.streaming.ontology.clone(), run_config.streaming.consistency.clone());

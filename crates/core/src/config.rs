@@ -385,6 +385,20 @@ impl RunConfig {
                         "streaming.branching.retrodiction_max must be > 0"
                     );
                 }
+                if self.streaming.branching.quantum_enabled {
+                    anyhow::ensure!(
+                        (0.0..=1.0).contains(&self.streaming.branching.quantum_blend_alpha),
+                        "streaming.branching.quantum_blend_alpha must be in [0,1]"
+                    );
+                    anyhow::ensure!(
+                        self.streaming.branching.quantum_max_candidates > 0,
+                        "streaming.branching.quantum_max_candidates must be > 0"
+                    );
+                    anyhow::ensure!(
+                        self.streaming.branching.quantum_temperature > 0.0,
+                        "streaming.branching.quantum_temperature must be > 0"
+                    );
+                }
             }
             if self.streaming.causal.enabled {
                 anyhow::ensure!(
@@ -1549,6 +1563,10 @@ pub struct BranchingFuturesConfig {
     pub retrodiction_enabled: bool,
     pub retrodiction_min_intensity: f64,
     pub retrodiction_max: usize,
+    pub quantum_enabled: bool,
+    pub quantum_blend_alpha: f64,
+    pub quantum_max_candidates: usize,
+    pub quantum_temperature: f64,
 }
 
 impl Default for BranchingFuturesConfig {
@@ -1560,6 +1578,10 @@ impl Default for BranchingFuturesConfig {
             retrodiction_enabled: true,
             retrodiction_min_intensity: 0.8,
             retrodiction_max: 8,
+            quantum_enabled: false,
+            quantum_blend_alpha: 0.35,
+            quantum_max_candidates: 8,
+            quantum_temperature: 0.7,
         }
     }
 }
