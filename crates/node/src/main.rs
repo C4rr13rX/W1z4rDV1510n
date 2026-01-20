@@ -25,6 +25,7 @@ use runtime::NodeRuntime;
 use api::run_api;
 use wallet::{WalletStore, node_id_from_wallet};
 use w1z4rdv1510n::hardware::HardwareProfile;
+use w1z4rdv1510n::config::RunConfig;
 use w1z4rdv1510n::blockchain::{BridgeIntent, bridge_intent_id, bridge_intent_payload};
 use w1z4rdv1510n::bridge::ChainKind;
 use w1z4rdv1510n::network::compute_payload_hash;
@@ -147,6 +148,26 @@ enum Command {
         #[arg(long)]
         key: String,
     },
+    MetacognitionTune {
+        #[arg(long)]
+        min_depth: Option<usize>,
+        #[arg(long)]
+        max_depth: Option<usize>,
+        #[arg(long)]
+        confident_depth: Option<usize>,
+        #[arg(long)]
+        accuracy_target: Option<f64>,
+        #[arg(long)]
+        confident_uncertainty_threshold: Option<f64>,
+        #[arg(long)]
+        novelty_depth_boost: Option<usize>,
+        #[arg(long)]
+        min_depth_samples: Option<u64>,
+        #[arg(long)]
+        depth_improvement_margin: Option<f64>,
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -256,6 +277,28 @@ fn main() -> anyhow::Result<()> {
             println!("{}", api::hash_api_key_hex(&key));
             Ok(())
         }
+        Some(Command::MetacognitionTune {
+            min_depth,
+            max_depth,
+            confident_depth,
+            accuracy_target,
+            confident_uncertainty_threshold,
+            novelty_depth_boost,
+            min_depth_samples,
+            depth_improvement_margin,
+            out,
+        }) => metacognition_tune(
+            &config_path,
+            min_depth,
+            max_depth,
+            confident_depth,
+            accuracy_target,
+            confident_uncertainty_threshold,
+            novelty_depth_boost,
+            min_depth_samples,
+            depth_improvement_margin,
+            out,
+        ),
         None => run_node(&config_path),
     }
 }
@@ -310,6 +353,73 @@ fn run_api_mode(config_path: &Path, addr: &str) -> anyhow::Result<()> {
         "starting node api"
     );
     run_api(config, addr)
+}
+
+fn metacognition_tune(
+    config_path: &Path,
+    min_depth: Option<usize>,
+    max_depth: Option<usize>,
+    confident_depth: Option<usize>,
+    accuracy_target: Option<f64>,
+    confident_uncertainty_threshold: Option<f64>,
+    novelty_depth_boost: Option<usize>,
+    min_depth_samples: Option<u64>,
+    depth_improvement_margin: Option<f64>,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let config = load_or_create_config(config_path)?;
+    let run_config_path = PathBuf::from(&config.streaming.run_config_path);
+    let raw = fs::read_to_string(&run_config_path)?;
+    let mut run_config: RunConfig = serde_json::from_str(&raw)?;
+    let (min_depth_value, max_depth_value, confident_depth_value, accuracy_target_value, uncertainty_threshold_value);
+    {
+        let meta = &mut run_config.streaming.metacognition;
+        if let Some(value) = min_depth {
+            meta.min_reflection_depth = value;
+        }
+        if let Some(value) = max_depth {
+            meta.max_reflection_depth = value;
+        }
+        if let Some(value) = confident_depth {
+            meta.confident_depth = value;
+        }
+        if let Some(value) = accuracy_target {
+            meta.accuracy_target = value;
+        }
+        if let Some(value) = confident_uncertainty_threshold {
+            meta.confident_uncertainty_threshold = value;
+        }
+        if let Some(value) = novelty_depth_boost {
+            meta.novelty_depth_boost = value;
+        }
+        if let Some(value) = min_depth_samples {
+            meta.min_depth_samples = value;
+        }
+        if let Some(value) = depth_improvement_margin {
+            meta.depth_improvement_margin = value;
+        }
+        min_depth_value = meta.min_reflection_depth;
+        max_depth_value = meta.max_reflection_depth;
+        confident_depth_value = meta.confident_depth;
+        accuracy_target_value = meta.accuracy_target;
+        uncertainty_threshold_value = meta.confident_uncertainty_threshold;
+    }
+
+    let payload = serde_json::to_string_pretty(&run_config)?;
+    fs::write(&run_config_path, payload.as_bytes())?;
+    if let Some(path) = out {
+        fs::write(path, payload.as_bytes())?;
+    }
+    println!(
+        "Updated metacognition settings in {} (min_depth={}, max_depth={}, confident_depth={}, accuracy_target={:.2}, uncertainty_threshold={:.2}).",
+        run_config_path.display(),
+        min_depth_value,
+        max_depth_value,
+        confident_depth_value,
+        accuracy_target_value,
+        uncertainty_threshold_value
+    );
+    Ok(())
 }
 
 fn load_or_create_config(config_path: &Path) -> anyhow::Result<NodeConfig> {

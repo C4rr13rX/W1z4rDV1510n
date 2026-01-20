@@ -10,8 +10,9 @@ use crate::p2p::NodeNetwork;
 use anyhow::{Result, anyhow};
 use std::fs;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, EnergyEfficiencySample, NoopLedger, NodeCapabilities, NodeRegistration,
@@ -230,8 +231,34 @@ impl NodeRuntime {
                 let mut processed_queue: VecDeque<String> = VecDeque::new();
                 let mut processed_set: HashSet<String> = HashSet::new();
                 let max_processed = 4096usize;
+                let run_config_path = PathBuf::from(&run_config_path);
+                let mut last_config_check = Instant::now();
+                let mut last_run_config_mtime = config_modified_time(&run_config_path).ok();
                 let mut events = mesh.subscribe();
                 loop {
+                    if last_config_check.elapsed() >= Duration::from_secs(2) {
+                        last_config_check = Instant::now();
+                        if let Ok(modified) = config_modified_time(&run_config_path) {
+                            let should_reload = last_run_config_mtime
+                                .map(|prev| modified > prev)
+                                .unwrap_or(true);
+                            if should_reload {
+                                if let Ok(raw) = fs::read_to_string(&run_config_path) {
+                                    if let Ok(updated) = serde_json::from_str::<RunConfig>(&raw) {
+                                        inference.update_metacognition_config(
+                                            updated.streaming.metacognition.clone(),
+                                        );
+                                        last_run_config_mtime = Some(modified);
+                                        info!(
+                                            target: "w1z4rdv1510n::node",
+                                            path = %run_config_path.display(),
+                                            "reloaded metacognition config"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let event = match events.recv().await {
                         Ok(event) => event,
                         Err(_) => continue,
@@ -863,4 +890,9 @@ fn now_timestamp() -> Timestamp {
         .unwrap_or_default()
         .as_secs() as i64;
     Timestamp { unix }
+}
+
+fn config_modified_time(path: &PathBuf) -> Result<SystemTime> {
+    let metadata = fs::metadata(path)?;
+    metadata.modified().map_err(|err| anyhow!(err))
 }

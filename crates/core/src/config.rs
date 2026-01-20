@@ -573,8 +573,31 @@ impl RunConfig {
                     "streaming.metacognition.max_reflection_depth must be > 0"
                 );
                 anyhow::ensure!(
+                    self.streaming.metacognition.min_reflection_depth > 0,
+                    "streaming.metacognition.min_reflection_depth must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.confident_depth > 0,
+                    "streaming.metacognition.confident_depth must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.min_reflection_depth
+                        <= self.streaming.metacognition.max_reflection_depth,
+                    "streaming.metacognition.min_reflection_depth must be <= max_reflection_depth"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.confident_depth
+                        <= self.streaming.metacognition.max_reflection_depth,
+                    "streaming.metacognition.confident_depth must be <= max_reflection_depth"
+                );
+                anyhow::ensure!(
                     (0.0..=1.0).contains(&self.streaming.metacognition.accuracy_target),
                     "streaming.metacognition.accuracy_target must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0)
+                        .contains(&self.streaming.metacognition.confident_uncertainty_threshold),
+                    "streaming.metacognition.confident_uncertainty_threshold must be in [0,1]"
                 );
                 anyhow::ensure!(
                     self.streaming.metacognition.min_event_intensity >= 0.0,
@@ -585,6 +608,16 @@ impl RunConfig {
                         &self.streaming.metacognition.substream_stability_threshold
                     ),
                     "streaming.metacognition.substream_stability_threshold must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.min_depth_samples > 0,
+                    "streaming.metacognition.min_depth_samples must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(
+                        &self.streaming.metacognition.depth_improvement_margin
+                    ),
+                    "streaming.metacognition.depth_improvement_margin must be in [0,1]"
                 );
             }
         }
@@ -1256,10 +1289,15 @@ pub struct MetacognitionConfig {
     pub max_new_hypotheses: usize,
     pub prediction_window_secs: i64,
     pub max_reflection_depth: usize,
+    pub min_reflection_depth: usize,
+    pub confident_depth: usize,
     pub accuracy_target: f64,
+    pub confident_uncertainty_threshold: f64,
     pub min_event_intensity: f64,
     pub substream_stability_threshold: f64,
     pub novelty_depth_boost: usize,
+    pub min_depth_samples: u64,
+    pub depth_improvement_margin: f64,
 }
 
 impl Default for MetacognitionConfig {
@@ -1271,10 +1309,15 @@ impl Default for MetacognitionConfig {
             max_new_hypotheses: 4,
             prediction_window_secs: 120,
             max_reflection_depth: 6,
+            min_reflection_depth: 1,
+            confident_depth: 2,
             accuracy_target: 0.7,
+            confident_uncertainty_threshold: 0.4,
             min_event_intensity: 0.1,
             substream_stability_threshold: 0.6,
             novelty_depth_boost: 1,
+            min_depth_samples: 6,
+            depth_improvement_margin: 0.05,
         }
     }
 }

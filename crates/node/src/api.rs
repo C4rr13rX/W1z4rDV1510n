@@ -1338,6 +1338,7 @@ async fn submit_identity_verify(
             motifs: Vec::new(),
             motif_transitions: Vec::new(),
             network_patterns: vec![pattern],
+            metacognition: None,
             metadata: HashMap::from([
                 ("identity_thread_id".to_string(), serde_json::Value::String(outcome.binding.thread_id.clone())),
                 ("identity_wallet".to_string(), serde_json::Value::String(outcome.binding.wallet_address.clone())),

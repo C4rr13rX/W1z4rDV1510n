@@ -1729,6 +1729,7 @@ mod tests {
             motifs: Vec::new(),
             motif_transitions: Vec::new(),
             network_patterns: Vec::new(),
+            metacognition: None,
             metadata: HashMap::new(),
         };
         let mut events = handle.subscribe();

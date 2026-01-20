@@ -87,4 +87,7 @@ pub use tracking::{PoseTracker, PoseTrackerConfig, TrackingResult};
 pub use neuro_bridge::{NeuroStreamBridge, SubstreamOutput, SubstreamRuntime};
 pub use motif_playback::{MotifPlaybackQueue, MotifPlaybackReport, MotifPlaybackTask, MotifReplay, MotifReplayFrame, build_motif_replays};
 pub use narrative_runtime::{NarrativeEntitySummary, NarrativeReport, NarrativeRuntime, NarrativeStep, NarrativeZoomSummary};
-pub use metacognition_runtime::{EmpathyNote, MetacognitionEntity, MetacognitionExperiment, MetacognitionReport, MetacognitionRuntime};
+pub use metacognition_runtime::{
+    DepthAccuracyShare, EmpathyNote, MetacognitionEntity, MetacognitionExperiment,
+    MetacognitionReport, MetacognitionRuntime, MetacognitionShare,
+};

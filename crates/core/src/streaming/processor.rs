@@ -23,7 +23,7 @@ use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
 use crate::streaming::neuro_bridge::{NeuroStreamBridge, SubstreamRuntime};
 use crate::streaming::motif_playback::{MotifPlaybackQueue, MotifReplay, build_motif_replays};
 use crate::streaming::narrative_runtime::NarrativeRuntime;
-use crate::streaming::metacognition_runtime::MetacognitionRuntime;
+use crate::streaming::metacognition_runtime::{MetacognitionRuntime, MetacognitionShare};
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -37,7 +37,7 @@ use crate::streaming::spatial::insert_spatial_attrs;
 use crate::streaming::tracking::PoseTracker;
 use crate::neuro::{NeuroRuntime, NeuroSnapshot};
 use crate::schema::EnvironmentSnapshot;
-use crate::config::RunConfig;
+use crate::config::{MetacognitionConfig, RunConfig};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -568,6 +568,7 @@ pub struct StreamingInference {
     last_batch: Option<TokenBatch>,
     last_motifs: Vec<BehaviorMotif>,
     last_network_patterns: Vec<NetworkPatternSummary>,
+    last_metacognition_share: Option<MetacognitionShare>,
     last_report_metadata: HashMap<String, Value>,
 }
 
@@ -640,6 +641,7 @@ impl StreamingInference {
             last_batch: None,
             last_motifs: Vec::new(),
             last_network_patterns: Vec::new(),
+            last_metacognition_share: None,
             last_report_metadata: HashMap::new(),
         }
     }
@@ -670,6 +672,9 @@ impl StreamingInference {
             self.network_fabric
                 .ingest_shared_patterns(&share.network_patterns);
         }
+        if let Some(report) = share.metacognition.as_ref() {
+            self.metacognition.ingest_peer_share(report);
+        }
         let batch = match self.processor.ingest_fabric_share(share) {
             Some(batch) => batch,
             None => return Ok(None),
@@ -695,6 +700,7 @@ impl StreamingInference {
         let mut share = NeuralFabricShare::from_batch(node_id, batch, motifs);
         share.motif_transitions = self.processor.behavior_transition_snapshot();
         share.network_patterns = std::mem::take(&mut self.last_network_patterns);
+        share.metacognition = self.last_metacognition_share.take();
         if !self.last_report_metadata.is_empty() {
             share.metadata = std::mem::take(&mut self.last_report_metadata);
         }
@@ -706,6 +712,11 @@ impl StreamingInference {
             }
         }
         Some(share)
+    }
+
+    pub fn update_metacognition_config(&mut self, config: MetacognitionConfig) {
+        self.metacognition.update_config(config.clone());
+        self.run_config.streaming.metacognition = config;
     }
 
     fn process_batch(&mut self, batch: TokenBatch) -> anyhow::Result<Option<RunOutcome>> {
@@ -782,6 +793,9 @@ impl StreamingInference {
             survival_report.as_ref(),
             temporal_report.as_ref(),
         );
+        self.last_metacognition_share = metacognition_report
+            .as_ref()
+            .map(|report| self.metacognition.share_snapshot(report));
         let narrative_report = self.narrative.update(
             batch.timestamp,
             behavior_frame.as_ref(),

@@ -9,10 +9,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-const MIN_DEPTH_SAMPLES: u64 = 6;
-const DEPTH_IMPROVEMENT_MARGIN: f64 = 0.05;
-const UNCERTAINTY_STOP_THRESHOLD: f64 = 0.4;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetacognitionExperiment {
     pub name: String,
@@ -65,6 +61,24 @@ pub struct MetacognitionReport {
     pub summary: String,
     #[serde(default)]
     pub metadata: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepthAccuracyShare {
+    pub depth: usize,
+    pub correct: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetacognitionShare {
+    pub timestamp: Timestamp,
+    pub reflection_depth: usize,
+    pub model_accuracy: f64,
+    pub baseline_accuracy: f64,
+    pub uncertainty: f64,
+    #[serde(default)]
+    pub depth_accuracy: Vec<DepthAccuracyShare>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +139,7 @@ pub struct MetacognitionRuntime {
     outcomes: VecDeque<HypothesisOutcome>,
     accuracy: AccuracyTracker,
     depth_stats: HashMap<usize, DepthStats>,
+    peer_depth_stats: HashMap<usize, DepthStats>,
 }
 
 impl MetacognitionRuntime {
@@ -135,6 +150,48 @@ impl MetacognitionRuntime {
             outcomes: VecDeque::new(),
             accuracy: AccuracyTracker::default(),
             depth_stats: HashMap::new(),
+            peer_depth_stats: HashMap::new(),
+        }
+    }
+
+    pub fn update_config(&mut self, config: MetacognitionConfig) {
+        self.config = config;
+    }
+
+    pub fn share_snapshot(&self, report: &MetacognitionReport) -> MetacognitionShare {
+        let uncertainty = report
+            .metadata
+            .get("uncertainty")
+            .and_then(|val| val.as_f64())
+            .unwrap_or(0.5);
+        let mut depth_accuracy: Vec<DepthAccuracyShare> = self
+            .depth_stats
+            .iter()
+            .map(|(depth, stats)| DepthAccuracyShare {
+                depth: *depth,
+                correct: stats.correct,
+                total: stats.total,
+            })
+            .collect();
+        depth_accuracy.sort_by_key(|entry| entry.depth);
+        MetacognitionShare {
+            timestamp: report.timestamp,
+            reflection_depth: report.reflection_depth,
+            model_accuracy: report.model_accuracy,
+            baseline_accuracy: report.baseline_accuracy,
+            uncertainty,
+            depth_accuracy,
+        }
+    }
+
+    pub fn ingest_peer_share(&mut self, share: &MetacognitionShare) {
+        for entry in &share.depth_accuracy {
+            let stats = self
+                .peer_depth_stats
+                .entry(entry.depth.max(1))
+                .or_default();
+            stats.total = stats.total.saturating_add(entry.total);
+            stats.correct = stats.correct.saturating_add(entry.correct);
         }
     }
 
@@ -162,14 +219,20 @@ impl MetacognitionRuntime {
         let entity_count = behavior_frame
             .map(|frame| frame.states.len())
             .unwrap_or(0);
+        let merged_stats = merge_depth_stats(&self.depth_stats, &self.peer_depth_stats);
         let decision = decide_reflection_depth(
             self.config.max_reflection_depth,
+            self.config.min_reflection_depth,
+            self.config.confident_depth,
             self.config.accuracy_target,
+            self.config.confident_uncertainty_threshold,
             model_accuracy,
             uncertainty,
             substream_stats.novelty,
-            &self.depth_stats,
+            &merged_stats,
             self.config.novelty_depth_boost,
+            self.config.min_depth_samples,
+            self.config.depth_improvement_margin,
         );
         let reflection_depth = decision.depth;
         let hypothesis_budget = hypothesis_budget(
@@ -193,7 +256,10 @@ impl MetacognitionRuntime {
             self.config.max_reflection_depth,
         );
         let empathy_notes = build_empathy_notes(survival);
-        let (depth_accuracy, depth_samples) = depth_accuracy(&self.depth_stats, reflection_depth);
+        let (depth_accuracy_score, depth_samples) =
+            depth_accuracy(&merged_stats, reflection_depth);
+        let (local_depth_accuracy, local_depth_samples) =
+            depth_accuracy(&self.depth_stats, reflection_depth);
         let mut experiments = Vec::new();
         experiments.push(MetacognitionExperiment {
             name: "event_prediction".to_string(),
@@ -208,9 +274,9 @@ impl MetacognitionRuntime {
         });
         experiments.push(MetacognitionExperiment {
             name: "reflection_depth".to_string(),
-            model_accuracy: depth_accuracy,
+            model_accuracy: depth_accuracy_score,
             baseline_accuracy: model_accuracy,
-            winner: if depth_accuracy >= model_accuracy {
+            winner: if depth_accuracy_score >= model_accuracy {
                 "depth".to_string()
             } else {
                 "global".to_string()
@@ -222,7 +288,7 @@ impl MetacognitionRuntime {
             reflection_depth,
             model_accuracy,
             baseline_accuracy,
-            depth_accuracy,
+            depth_accuracy_score,
             uncertainty,
             decision.reason
         );
@@ -234,6 +300,14 @@ impl MetacognitionRuntime {
             ("depth_target".to_string(), Value::from(decision.base_depth as u64)),
             ("hypothesis_budget".to_string(), Value::from(hypothesis_budget as u64)),
             ("entity_count".to_string(), Value::from(entity_count as u64)),
+            (
+                "depth_accuracy_local".to_string(),
+                Value::from(local_depth_accuracy),
+            ),
+            (
+                "depth_samples_local".to_string(),
+                Value::from(local_depth_samples),
+            ),
         ]);
         if let Some(min_stability) = substream_stats.min_stability {
             metadata.insert(
@@ -457,33 +531,51 @@ fn evidential_uncertainty(report: Option<&TemporalInferenceReport>) -> f64 {
 
 fn reflection_depth(
     max_depth: usize,
+    min_depth: usize,
     accuracy_target: f64,
     accuracy: f64,
     uncertainty: f64,
 ) -> usize {
     let max_depth = max_depth.max(1);
+    let min_depth = min_depth.max(1).min(max_depth);
     let gap = (accuracy_target - accuracy).max(0.0);
     let bump = (gap * max_depth as f64).ceil() as usize;
     let uncertainty_boost = if uncertainty > 0.6 { 1 } else { 0 };
-    let depth = 1 + bump + uncertainty_boost;
-    depth.min(max_depth)
+    let depth = min_depth + bump + uncertainty_boost;
+    depth.clamp(min_depth, max_depth)
 }
 
 fn decide_reflection_depth(
     max_depth: usize,
+    min_depth: usize,
+    confident_depth: usize,
     accuracy_target: f64,
+    confident_uncertainty_threshold: f64,
     model_accuracy: f64,
     uncertainty: f64,
     substream_novelty: bool,
     depth_stats: &HashMap<usize, DepthStats>,
     novelty_boost: usize,
+    min_depth_samples: u64,
+    depth_improvement_margin: f64,
 ) -> ReflectionDecision {
     let max_depth = max_depth.max(1);
-    let base_depth = reflection_depth(max_depth, accuracy_target, model_accuracy, uncertainty);
+    let min_depth = min_depth.max(1).min(max_depth);
+    let confident_depth = confident_depth.max(min_depth).min(max_depth);
+    let base_depth = reflection_depth(
+        max_depth,
+        min_depth,
+        accuracy_target,
+        model_accuracy,
+        uncertainty,
+    );
     let mut depth = base_depth;
     let mut reason = "accuracy_gap".to_string();
-    if model_accuracy >= accuracy_target && uncertainty <= UNCERTAINTY_STOP_THRESHOLD && !substream_novelty {
-        depth = depth.min(2);
+    if model_accuracy >= accuracy_target
+        && uncertainty <= confident_uncertainty_threshold
+        && !substream_novelty
+    {
+        depth = confident_depth;
         reason = "accuracy_target_met".to_string();
     }
     if substream_novelty {
@@ -492,11 +584,14 @@ fn decide_reflection_depth(
     }
     let mut best_depth = None;
     let mut best_accuracy = None;
-    if let Some((candidate_depth, candidate_accuracy, _)) = best_depth_stats(depth_stats) {
+    if let Some((candidate_depth, candidate_accuracy, _)) =
+        best_depth_stats(depth_stats, min_depth_samples)
+    {
         best_depth = Some(candidate_depth);
         best_accuracy = Some(candidate_accuracy);
-        if model_accuracy < accuracy_target
-            && candidate_accuracy + DEPTH_IMPROVEMENT_MARGIN >= model_accuracy
+        if !substream_novelty
+            && model_accuracy < accuracy_target
+            && candidate_accuracy + depth_improvement_margin >= model_accuracy
         {
             depth = candidate_depth.min(max_depth);
             reason = "depth_accuracy_best".to_string();
@@ -526,10 +621,26 @@ fn depth_accuracy(depth_stats: &HashMap<usize, DepthStats>, depth: usize) -> (f6
     }
 }
 
-fn best_depth_stats(depth_stats: &HashMap<usize, DepthStats>) -> Option<(usize, f64, u64)> {
+fn merge_depth_stats(
+    local: &HashMap<usize, DepthStats>,
+    peers: &HashMap<usize, DepthStats>,
+) -> HashMap<usize, DepthStats> {
+    let mut merged = local.clone();
+    for (depth, stats) in peers {
+        let entry = merged.entry(*depth).or_default();
+        entry.total = entry.total.saturating_add(stats.total);
+        entry.correct = entry.correct.saturating_add(stats.correct);
+    }
+    merged
+}
+
+fn best_depth_stats(
+    depth_stats: &HashMap<usize, DepthStats>,
+    min_samples: u64,
+) -> Option<(usize, f64, u64)> {
     let mut best: Option<(usize, f64, u64)> = None;
     for (depth, stats) in depth_stats {
-        if stats.total < MIN_DEPTH_SAMPLES {
+        if stats.total < min_samples {
             continue;
         }
         let accuracy = stats.accuracy();
@@ -680,6 +791,8 @@ fn empathy_label(entry: &SurvivalEntityMetrics) -> (String, f64, Vec<String>) {
 mod tests {
     use super::*;
     use crate::schema::Timestamp;
+    use crate::streaming::schema::{EventKind, EventToken};
+    use serde_json::Value;
 
     #[test]
     fn metacognition_tracks_hypotheses() {
@@ -694,5 +807,74 @@ mod tests {
         assert!(report.is_some());
         let report = report.unwrap();
         assert!(report.summary.contains("Reflection depth"));
+    }
+
+    #[test]
+    fn metacognition_prefers_best_depth_when_better() {
+        let mut stats = HashMap::new();
+        stats.insert(2, DepthStats { total: 10, correct: 6 });
+        stats.insert(4, DepthStats { total: 10, correct: 9 });
+        let decision = decide_reflection_depth(
+            6,
+            1,
+            2,
+            0.8,
+            0.4,
+            0.5,
+            0.5,
+            false,
+            &stats,
+            1,
+            6,
+            0.05,
+        );
+        assert_eq!(decision.depth, 4);
+        assert_eq!(decision.reason, "depth_accuracy_best");
+    }
+
+    #[test]
+    fn substream_novelty_escalates_depth() {
+        let mut stats = HashMap::new();
+        stats.insert(1, DepthStats { total: 10, correct: 6 });
+        let decision = decide_reflection_depth(
+            5,
+            1,
+            2,
+            0.8,
+            0.4,
+            0.6,
+            0.7,
+            true,
+            &stats,
+            2,
+            6,
+            0.05,
+        );
+        assert!(decision.depth >= 3);
+        assert_eq!(decision.reason, "substream_novelty");
+    }
+
+    #[test]
+    fn substream_stats_flags_low_stability() {
+        let mut attrs = HashMap::new();
+        attrs.insert("substream_key".to_string(), Value::String("mini::attr::speed::fast".to_string()));
+        attrs.insert("substream_stability".to_string(), Value::from(0.4));
+        let batch = TokenBatch {
+            timestamp: Timestamp { unix: 42 },
+            tokens: vec![EventToken {
+                id: "t1".to_string(),
+                kind: EventKind::BehavioralToken,
+                onset: Timestamp { unix: 42 },
+                duration_secs: 1.0,
+                confidence: 0.8,
+                attributes: attrs,
+                source: None,
+            }],
+            layers: vec![],
+            source_confidence: HashMap::new(),
+        };
+        let stats = substream_stats(&batch, 0.6);
+        assert!(stats.novelty);
+        assert_eq!(stats.count, 1);
     }
 }

@@ -1,6 +1,7 @@
 use crate::schema::Timestamp;
 use crate::streaming::behavior::{BehaviorMotif, MotifTransition};
 use crate::streaming::network_fabric::NetworkPatternSummary;
+use crate::streaming::metacognition_runtime::MetacognitionShare;
 use crate::streaming::schema::{EventToken, LayerState, TokenBatch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +22,8 @@ pub struct NeuralFabricShare {
     #[serde(default)]
     pub network_patterns: Vec<NetworkPatternSummary>,
     #[serde(default)]
+    pub metacognition: Option<MetacognitionShare>,
+    #[serde(default)]
     pub metadata: HashMap<String, Value>,
 }
 
@@ -34,6 +37,7 @@ impl NeuralFabricShare {
             motifs,
             motif_transitions: Vec::new(),
             network_patterns: Vec::new(),
+            metacognition: None,
             metadata: HashMap::new(),
         }
     }
@@ -93,6 +97,7 @@ mod tests {
             motifs: Vec::new(),
             motif_transitions: Vec::new(),
             network_patterns: Vec::new(),
+            metacognition: None,
             metadata: HashMap::new(),
         };
         let batch = share.to_token_batch();
