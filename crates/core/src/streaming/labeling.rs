@@ -20,6 +20,10 @@ pub struct LabelCandidate {
     pub priority: f64,
     pub reward_score: f64,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_quality: Option<f64>,
     #[serde(default)]
     pub evidence: HashMap<String, Value>,
 }
@@ -90,6 +94,8 @@ impl LabelQueue {
                     priority: 0.8,
                     reward_score: 0.8,
                     source: "dimension_tracker".to_string(),
+                    stream_source: None,
+                    source_quality: None,
                     evidence,
                 };
                 added |= self.push(candidate);
@@ -112,10 +118,11 @@ impl LabelQueue {
                 }
                 let summary = label_summary(&feature_key);
                 let priority = numeric_priority(value);
+                let (stream_source, source_quality) = stream_source_quality(token.source, batch);
                 let mut evidence = HashMap::new();
                 evidence.insert("token_kind".to_string(), Value::String(format!("{:?}", token.kind)));
                 evidence.insert("raw_value".to_string(), value.clone());
-                attach_source_evidence(&mut evidence, token.source, batch);
+                attach_source_evidence(&mut evidence, stream_source, source_quality);
                 let candidate = LabelCandidate {
                     id: candidate_id(&feature_key, batch.timestamp),
                     work_id: work_id_for(&feature_key, batch.timestamp),
@@ -127,6 +134,8 @@ impl LabelQueue {
                     priority,
                     reward_score: priority,
                     source: "token_attribute".to_string(),
+                    stream_source: stream_source.map(|src| format!("{:?}", src)),
+                    source_quality,
                     evidence,
                 };
                 added |= self.push(candidate);
@@ -150,10 +159,11 @@ impl LabelQueue {
                 }
                 let summary = label_summary(&feature_key);
                 let priority = numeric_priority(value);
+                let (stream_source, source_quality) = stream_source_quality(None, batch);
                 let mut evidence = HashMap::new();
                 evidence.insert("layer_kind".to_string(), Value::String(format!("{:?}", layer.kind)));
                 evidence.insert("raw_value".to_string(), value.clone());
-                attach_source_evidence(&mut evidence, source_for_layer(batch), batch);
+                attach_source_evidence(&mut evidence, stream_source, source_quality);
                 let candidate = LabelCandidate {
                     id: candidate_id(&feature_key, batch.timestamp),
                     work_id: work_id_for(&feature_key, batch.timestamp),
@@ -165,6 +175,8 @@ impl LabelQueue {
                     priority,
                     reward_score: priority,
                     source: "layer_attribute".to_string(),
+                    stream_source: stream_source.map(|src| format!("{:?}", src)),
+                    source_quality,
                     evidence,
                 };
                 added |= self.push(candidate);
@@ -215,16 +227,24 @@ fn work_id_for(feature: &str, ts: Timestamp) -> String {
     compute_payload_hash(payload.as_bytes())
 }
 
+fn stream_source_quality(
+    source: Option<StreamSource>,
+    batch: &TokenBatch,
+) -> (Option<StreamSource>, Option<f64>) {
+    let source = source.or_else(|| source_for_layer(batch));
+    let quality = source.and_then(|src| batch.source_confidence.get(&src).copied());
+    (source, quality)
+}
+
 fn attach_source_evidence(
     evidence: &mut HashMap<String, Value>,
     source: Option<StreamSource>,
-    batch: &TokenBatch,
+    source_quality: Option<f64>,
 ) {
-    let source = source.or_else(|| source_for_layer(batch));
     let Some(source) = source else { return };
     evidence.insert("source".to_string(), Value::String(format!("{:?}", source)));
-    if let Some(confidence) = batch.source_confidence.get(&source) {
-        evidence.insert("source_quality".to_string(), Value::from(*confidence));
+    if let Some(confidence) = source_quality {
+        evidence.insert("source_quality".to_string(), Value::from(confidence));
     }
 }
 
@@ -314,9 +334,13 @@ mod tests {
                 coherence: 0.6,
                 attributes: HashMap::new(),
             }],
-            source_confidence: HashMap::new(),
+            source_confidence: HashMap::from([(StreamSource::PeopleVideo, 0.8)]),
         };
         let report = queue.update(&batch, None).expect("report");
         assert!(!report.pending.is_empty());
+        assert!(report
+            .pending
+            .iter()
+            .any(|candidate| candidate.source_quality.is_some()));
     }
 }

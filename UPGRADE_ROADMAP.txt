@@ -2,15 +2,16 @@ W1z4rDV1510n Upgrade Roadmap (ordered)
 
 Tracking: use this list in order; mark items as done when completed.
 
-[ ] 1) Scientific signal validity pipeline
+[x] 1) Scientific signal validity pipeline
     - Sensor-specific quality gates (SNR, jitter, missingness, drift).
     - Robust resampling/detrending for irregular sampling.
     - Integrate quality into source confidence and labeling metadata.
-    - Status: in progress (quality gate + ultradian resampling + SNR + label metadata added).
+    - Status: complete.
 
 [ ] 2) Sub-ultradian -> ultradian multi-resolution extraction
     - Wavelets / multitaper PSD / EMD-HHT where CPU-viable.
     - Cross-frequency coupling to link sub-ultradian motifs to ultradian layers.
+    - Status: in progress (sub-ultradian band + PAC attributes added).
 
 [ ] 3) 3D motion + camera rigor
     - Camera stabilization (optical flow / IMU), multi-person tracking.

@@ -58,8 +58,22 @@ impl UltradianBand {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SubUltradianBand {
+    pub name: &'static str,
+    pub min_period_secs: f64,
+    pub max_period_secs: f64,
+}
+
+impl SubUltradianBand {
+    pub fn center_period(&self) -> f64 {
+        0.5 * (self.min_period_secs + self.max_period_secs)
+    }
+}
+
 pub struct UltradianLayerExtractor {
     bands: Vec<UltradianBand>,
+    sub_bands: Vec<SubUltradianBand>,
     series: SignalSeries,
     min_samples: usize,
     candidate_count: usize,
@@ -69,6 +83,9 @@ pub struct UltradianLayerExtractor {
     phase_smoothing: f64,
     resample_jitter_threshold: f64,
     resample_max_points: usize,
+    sub_band_candidate_count: usize,
+    sub_band_segments: usize,
+    sub_band_min_cycles: usize,
     last_phases: std::collections::HashMap<LayerKind, f64>,
     last_phase_times: std::collections::HashMap<LayerKind, Timestamp>,
 }
@@ -96,11 +113,44 @@ impl UltradianLayerExtractor {
             .iter()
             .map(|band| band.max_period_secs * 3.0)
             .fold(0.0, f64::max);
-        Self::with_bands(bands, max_age_secs, 32, 5, 0.1, 2, 0.1, 0.6, 0.35, 512)
+        let sub_bands = vec![
+            SubUltradianBand {
+                name: "fast",
+                min_period_secs: 30.0,
+                max_period_secs: 120.0,
+            },
+            SubUltradianBand {
+                name: "mid",
+                min_period_secs: 120.0,
+                max_period_secs: 600.0,
+            },
+            SubUltradianBand {
+                name: "slow",
+                min_period_secs: 600.0,
+                max_period_secs: 1200.0,
+            },
+        ];
+        Self::with_bands(
+            bands,
+            sub_bands,
+            max_age_secs,
+            32,
+            5,
+            0.1,
+            2,
+            0.1,
+            0.6,
+            0.35,
+            512,
+            3,
+            4,
+            2,
+        )
     }
 
     pub fn with_bands(
         bands: Vec<UltradianBand>,
+        sub_bands: Vec<SubUltradianBand>,
         max_age_secs: f64,
         min_samples: usize,
         candidate_count: usize,
@@ -110,9 +160,13 @@ impl UltradianLayerExtractor {
         phase_smoothing: f64,
         resample_jitter_threshold: f64,
         resample_max_points: usize,
+        sub_band_candidate_count: usize,
+        sub_band_segments: usize,
+        sub_band_min_cycles: usize,
     ) -> Self {
         Self {
             bands,
+            sub_bands,
             series: SignalSeries::new(max_age_secs),
             min_samples: min_samples.max(4),
             candidate_count: candidate_count.max(1),
@@ -122,6 +176,9 @@ impl UltradianLayerExtractor {
             phase_smoothing: phase_smoothing.clamp(0.0, 1.0),
             resample_jitter_threshold: resample_jitter_threshold.clamp(0.0, 5.0),
             resample_max_points: resample_max_points.max(64),
+            sub_band_candidate_count: sub_band_candidate_count.max(1),
+            sub_band_segments: sub_band_segments.max(2),
+            sub_band_min_cycles: sub_band_min_cycles.max(1),
             last_phases: std::collections::HashMap::new(),
             last_phase_times: std::collections::HashMap::new(),
         }
@@ -320,6 +377,23 @@ impl UltradianLayerExtractor {
         if confidence < self.min_confidence {
             return None;
         }
+        let sub_band_metrics = estimate_sub_bands(
+            &self.sub_bands,
+            &samples,
+            min_ts,
+            max_ts,
+            mean,
+            slope,
+            t_mean,
+            t_ref,
+            weight_total,
+            rms,
+            best_period,
+            phase_raw,
+            self.sub_band_candidate_count,
+            self.sub_band_segments,
+            self.sub_band_min_cycles,
+        );
         let mut attributes = std::collections::HashMap::new();
         attributes.insert(
             "min_period_secs".to_string(),
@@ -375,6 +449,9 @@ impl UltradianLayerExtractor {
             "snr_ratio".to_string(),
             serde_json::Value::from(snr_ratio),
         );
+        for (key, value) in sub_band_metrics {
+            attributes.insert(key, value);
+        }
         attributes.insert(
             "sample_dt_mean".to_string(),
             serde_json::Value::from(sample_dt_mean_resampled),
@@ -550,6 +627,279 @@ fn resample_uniform(
         });
     }
     Some(resampled)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BandEstimate {
+    period_secs: f64,
+    amplitude_norm: f64,
+    amplitude_raw: f64,
+    snr: f64,
+}
+
+fn estimate_sub_bands(
+    sub_bands: &[SubUltradianBand],
+    samples: &[SignalSample],
+    min_ts: f64,
+    max_ts: f64,
+    mean: f64,
+    slope: f64,
+    t_mean: f64,
+    t_ref: f64,
+    weight_total: f64,
+    rms: f64,
+    ultra_period: f64,
+    ultra_phase: f64,
+    candidate_count: usize,
+    segments: usize,
+    min_cycles: usize,
+) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    let span = (max_ts - min_ts).max(0.0);
+    if samples.is_empty() || span <= 0.0 {
+        return out;
+    }
+    for band in sub_bands {
+        if span < band.min_period_secs * min_cycles as f64 {
+            continue;
+        }
+        let Some(estimate) = estimate_band(
+            samples,
+            band,
+            mean,
+            slope,
+            t_mean,
+            t_ref,
+            weight_total,
+            rms,
+            candidate_count,
+        ) else {
+            continue;
+        };
+        let pac = phase_amplitude_coupling(
+            samples,
+            min_ts,
+            max_ts,
+            estimate.period_secs,
+            mean,
+            slope,
+            t_mean,
+            t_ref,
+            ultra_period,
+            ultra_phase,
+            segments,
+        );
+        let prefix = format!("sub_band_{}", band.name);
+        out.push((
+            format!("{prefix}_period_secs"),
+            serde_json::Value::from(estimate.period_secs),
+        ));
+        out.push((
+            format!("{prefix}_amplitude"),
+            serde_json::Value::from(estimate.amplitude_norm),
+        ));
+        out.push((
+            format!("{prefix}_amplitude_raw"),
+            serde_json::Value::from(estimate.amplitude_raw),
+        ));
+        out.push((
+            format!("{prefix}_snr"),
+            serde_json::Value::from(estimate.snr),
+        ));
+        out.push((
+            format!("{prefix}_pac"),
+            serde_json::Value::from(pac),
+        ));
+    }
+    out
+}
+
+fn estimate_band(
+    samples: &[SignalSample],
+    band: &SubUltradianBand,
+    mean: f64,
+    slope: f64,
+    t_mean: f64,
+    t_ref: f64,
+    weight_total: f64,
+    rms: f64,
+    candidate_count: usize,
+) -> Option<BandEstimate> {
+    if weight_total <= 0.0 || rms <= 0.0 {
+        return None;
+    }
+    let mut best_period = band.center_period();
+    let mut best_phase = 0.0;
+    let mut best_magnitude = 0.0;
+    for period in band_candidate_periods(band, candidate_count) {
+        let omega = 2.0 * PI / period.max(1.0);
+        let mut sum_sin = 0.0;
+        let mut sum_cos = 0.0;
+        for sample in samples {
+            let weight = sample.quality.clamp(0.0, 1.0);
+            if weight <= 0.0 {
+                continue;
+            }
+            let t = sample.timestamp.unix as f64;
+            let centered = (sample.value - mean) - slope * (t - t_mean);
+            let t_offset = t - t_ref;
+            sum_sin += weight * centered * (omega * t_offset).sin();
+            sum_cos += weight * centered * (omega * t_offset).cos();
+        }
+        let magnitude = (sum_sin.powi(2) + sum_cos.powi(2)).sqrt();
+        if magnitude > best_magnitude {
+            best_magnitude = magnitude;
+            best_period = period;
+            best_phase = sum_sin.atan2(sum_cos);
+        }
+    }
+    if best_magnitude <= 0.0 {
+        return None;
+    }
+    let amplitude_raw = (2.0 * best_magnitude / weight_total).abs();
+    let amplitude_norm = (best_magnitude / (weight_total * rms) * 2.0_f64.sqrt()).clamp(0.0, 1.0);
+    let omega = 2.0 * PI / best_period.max(1.0);
+    let mut noise_sum = 0.0;
+    for sample in samples {
+        let weight = sample.quality.clamp(0.0, 1.0);
+        if weight <= 0.0 {
+            continue;
+        }
+        let t = sample.timestamp.unix as f64;
+        let centered = (sample.value - mean) - slope * (t - t_mean);
+        let t_offset = t - t_ref;
+        let fitted = amplitude_raw * (omega * t_offset + best_phase).sin();
+        let residual = centered - fitted;
+        noise_sum += weight * residual * residual;
+    }
+    let noise_rms = if noise_sum.is_finite() && weight_total > 0.0 {
+        (noise_sum / weight_total).sqrt().max(1e-6)
+    } else {
+        1e-6
+    };
+    let snr = (amplitude_raw / noise_rms).clamp(0.0, 100.0);
+    Some(BandEstimate {
+        period_secs: best_period,
+        amplitude_norm,
+        amplitude_raw,
+        snr,
+    })
+}
+
+fn band_candidate_periods(band: &SubUltradianBand, count: usize) -> Vec<f64> {
+    if count <= 1 || band.min_period_secs <= 0.0 || band.max_period_secs <= 0.0 {
+        return vec![band.center_period()];
+    }
+    let min_log = band.min_period_secs.ln();
+    let max_log = band.max_period_secs.ln();
+    let steps = (count - 1) as f64;
+    let mut periods = Vec::with_capacity(count);
+    for idx in 0..count {
+        let frac = if steps > 0.0 { idx as f64 / steps } else { 0.0 };
+        let period = (min_log + frac * (max_log - min_log)).exp();
+        periods.push(period);
+    }
+    periods
+}
+
+fn phase_amplitude_coupling(
+    samples: &[SignalSample],
+    min_ts: f64,
+    max_ts: f64,
+    band_period: f64,
+    mean: f64,
+    slope: f64,
+    t_mean: f64,
+    t_ref: f64,
+    ultra_period: f64,
+    ultra_phase: f64,
+    segments: usize,
+) -> f64 {
+    if samples.is_empty() || segments < 2 || band_period <= 0.0 || ultra_period <= 0.0 {
+        return 0.0;
+    }
+    let span = (max_ts - min_ts).max(0.0);
+    if span <= 0.0 {
+        return 0.0;
+    }
+    let segment_len = span / segments as f64;
+    let mut sum_amp = 0.0;
+    let mut sum_cos = 0.0;
+    let mut sum_sin = 0.0;
+    for idx in 0..segments {
+        let start = min_ts + idx as f64 * segment_len;
+        let end = if idx + 1 == segments {
+            max_ts
+        } else {
+            start + segment_len
+        };
+        let mut seg_samples = Vec::new();
+        for sample in samples {
+            let ts = sample.timestamp.unix as f64;
+            if ts >= start && ts <= end {
+                seg_samples.push(*sample);
+            }
+        }
+        let Some(amplitude) =
+            segment_amplitude_raw(&seg_samples, band_period, mean, slope, t_mean, t_ref)
+        else {
+            continue;
+        };
+        if amplitude <= 0.0 {
+            continue;
+        }
+        let mid = 0.5 * (start + end);
+        let phase = phase_at_time(ultra_phase, ultra_period, t_ref, mid);
+        sum_amp += amplitude;
+        sum_cos += amplitude * phase.cos();
+        sum_sin += amplitude * phase.sin();
+    }
+    if sum_amp <= 0.0 {
+        return 0.0;
+    }
+    ((sum_cos * sum_cos + sum_sin * sum_sin).sqrt() / sum_amp).clamp(0.0, 1.0)
+}
+
+fn segment_amplitude_raw(
+    samples: &[SignalSample],
+    period: f64,
+    mean: f64,
+    slope: f64,
+    t_mean: f64,
+    t_ref: f64,
+) -> Option<f64> {
+    if samples.len() < 2 || period <= 0.0 {
+        return None;
+    }
+    let omega = 2.0 * PI / period.max(1.0);
+    let mut sum_sin = 0.0;
+    let mut sum_cos = 0.0;
+    let mut weight_total = 0.0;
+    for sample in samples {
+        let weight = sample.quality.clamp(0.0, 1.0);
+        if weight <= 0.0 {
+            continue;
+        }
+        let t = sample.timestamp.unix as f64;
+        let centered = (sample.value - mean) - slope * (t - t_mean);
+        let t_offset = t - t_ref;
+        sum_sin += weight * centered * (omega * t_offset).sin();
+        sum_cos += weight * centered * (omega * t_offset).cos();
+        weight_total += weight;
+    }
+    if weight_total <= 0.0 {
+        return None;
+    }
+    let magnitude = (sum_sin.powi(2) + sum_cos.powi(2)).sqrt();
+    Some((2.0 * magnitude / weight_total).abs())
+}
+
+fn phase_at_time(phase_ref: f64, period: f64, t_ref: f64, t: f64) -> f64 {
+    if period <= 0.0 {
+        return phase_ref;
+    }
+    let omega = 2.0 * PI / period.max(1.0);
+    wrap_phase(phase_ref + omega * (t - t_ref))
 }
 
 fn apply_coherence(layers: &mut [LayerState]) {
