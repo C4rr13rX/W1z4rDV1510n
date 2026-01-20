@@ -53,6 +53,10 @@ pub struct MotorFeatureOutput {
     pub keypoint_count: usize,
     pub bbox_area: Option<f64>,
     pub features: MotorFeatures,
+    pub camera_shift_dx: f64,
+    pub camera_shift_dy: f64,
+    pub camera_shift_confidence: f64,
+    pub camera_shift_source: String,
     pub raw_signal: f64,
     pub normalized_signal: f64,
     pub baseline_mean: f64,
@@ -74,6 +78,9 @@ pub struct MotorConfig {
     pub baseline_min_samples: usize,
     pub baseline_std_floor: f64,
     pub baseline_norm_clamp: f64,
+    pub camera_flow_min_keypoints: usize,
+    pub camera_flow_max_std: f64,
+    pub camera_motion_alpha: f64,
 }
 
 impl Default for MotorConfig {
@@ -88,6 +95,9 @@ impl Default for MotorConfig {
             baseline_min_samples: 12,
             baseline_std_floor: 0.05,
             baseline_norm_clamp: 3.0,
+            camera_flow_min_keypoints: 4,
+            camera_flow_max_std: 0.35,
+            camera_motion_alpha: 0.4,
         }
     }
 }
@@ -98,6 +108,13 @@ struct KeypointState {
     y: f64,
     vx: f64,
     vy: f64,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RawKeypointState {
+    x: f64,
+    y: f64,
     confidence: f64,
 }
 
@@ -116,6 +133,7 @@ struct MotionSample {
 struct EntityMotionState {
     last_timestamp: Timestamp,
     keypoints: HashMap<String, KeypointState>,
+    raw_keypoints: HashMap<String, RawKeypointState>,
     last_centroid: Option<(f64, f64)>,
     last_dispersion: f64,
     last_centroid_velocity: Option<(f64, f64)>,
@@ -123,6 +141,8 @@ struct EntityMotionState {
     baseline_mean: f64,
     baseline_var: f64,
     baseline_samples: usize,
+    camera_shift_ema: (f64, f64),
+    camera_confidence_ema: f64,
 }
 
 impl EntityMotionState {
@@ -130,6 +150,7 @@ impl EntityMotionState {
         Self {
             last_timestamp: timestamp,
             keypoints: HashMap::new(),
+            raw_keypoints: HashMap::new(),
             last_centroid: None,
             last_dispersion: 0.0,
             last_centroid_velocity: None,
@@ -137,6 +158,8 @@ impl EntityMotionState {
             baseline_mean: 0.0,
             baseline_var: 0.0,
             baseline_samples: 0,
+            camera_shift_ema: (0.0, 0.0),
+            camera_confidence_ema: 0.0,
         }
     }
 
@@ -174,6 +197,14 @@ impl EntityMotionState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CameraShift {
+    dx: f64,
+    dy: f64,
+    confidence: f64,
+    source: &'static str,
+}
+
 pub struct MotorFeatureExtractor {
     config: MotorConfig,
     states: HashMap<String, EntityMotionState>,
@@ -189,11 +220,6 @@ impl MotorFeatureExtractor {
 
     pub fn extract(&mut self, mut frame: PoseFrame) -> Option<MotorFeatureOutput> {
         let timestamp = frame.timestamp?;
-        let (keypoints, bbox_area, dispersion_hint) = normalize_keypoints(&frame);
-        if keypoints.is_empty() {
-            return None;
-        }
-        let keypoint_count = keypoints.len();
         let state = self
             .states
             .entry(frame.entity_id.clone())
@@ -201,6 +227,16 @@ impl MotorFeatureExtractor {
 
         let dt = (timestamp.unix - state.last_timestamp.unix).abs() as f64;
         let dt = if dt > 0.0 { dt } else { 1.0 };
+        let raw_keypoints = raw_keypoints_from_frame(&frame);
+        let shift = estimate_camera_shift(&frame, &raw_keypoints, state, &self.config);
+        let (shift_dx, shift_dy, shift_confidence, shift_source) =
+            apply_camera_shift(shift, state, &self.config);
+        let (keypoints, bbox_area, dispersion_hint) =
+            normalize_keypoints(&frame, Some((shift_dx, shift_dy)));
+        if keypoints.is_empty() {
+            return None;
+        }
+        let keypoint_count = keypoints.len();
 
         let mut conf_sum = 0.0;
         let mut centroid_x = 0.0;
@@ -266,7 +302,11 @@ impl MotorFeatureExtractor {
         } else {
             (0.0, 0.0)
         };
-        let camera_motion = (centroid_vx * centroid_vx + centroid_vy * centroid_vy).sqrt();
+        let camera_motion = if shift_confidence > 0.0 {
+            (shift_dx * shift_dx + shift_dy * shift_dy).sqrt() / dt
+        } else {
+            (centroid_vx * centroid_vx + centroid_vy * centroid_vy).sqrt()
+        };
         let (prev_centroid_vx, prev_centroid_vy) =
             state.last_centroid_velocity.unwrap_or((0.0, 0.0));
 
@@ -351,6 +391,7 @@ impl MotorFeatureExtractor {
         state.last_dispersion = dispersion;
         state.last_centroid_velocity = Some((centroid_vx, centroid_vy));
         state.signal_ema = signal;
+        state.raw_keypoints = raw_keypoints;
 
         Some(MotorFeatureOutput {
             entity_id: frame.entity_id,
@@ -366,6 +407,10 @@ impl MotorFeatureExtractor {
                 stability,
                 confidence,
             },
+            camera_shift_dx: shift_dx,
+            camera_shift_dy: shift_dy,
+            camera_shift_confidence: shift_confidence,
+            camera_shift_source: shift_source,
             raw_signal,
             normalized_signal,
             baseline_mean,
@@ -380,22 +425,18 @@ impl MotorFeatureExtractor {
 
 fn normalize_keypoints(
     frame: &PoseFrame,
+    camera_shift: Option<(f64, f64)>,
 ) -> (Vec<(String, KeypointState)>, Option<f64>, Option<f64>) {
+    let (shift_x, shift_y) = camera_shift.unwrap_or((0.0, 0.0));
     if !frame.keypoints.is_empty() {
         let mut normalized = Vec::with_capacity(frame.keypoints.len());
         for (idx, kp) in frame.keypoints.iter().enumerate() {
-            let label = kp
-                .name
-                .as_ref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("k{idx}"));
+            let label = keypoint_label(kp.name.as_deref(), idx);
             normalized.push((
                 label,
                 KeypointState {
-                    x: kp.x,
-                    y: kp.y,
+                    x: kp.x - shift_x,
+                    y: kp.y - shift_y,
                     vx: 0.0,
                     vy: 0.0,
                     confidence: kp.confidence.unwrap_or(1.0),
@@ -408,8 +449,8 @@ fn normalize_keypoints(
         return (Vec::new(), None, None);
     };
     let area = bbox.width.abs() * bbox.height.abs();
-    let center_x = bbox.x + bbox.width * 0.5;
-    let center_y = bbox.y + bbox.height * 0.5;
+    let center_x = bbox.x + bbox.width * 0.5 - shift_x;
+    let center_y = bbox.y + bbox.height * 0.5 - shift_y;
     let dispersion_hint = (bbox.width.abs() + bbox.height.abs()) * 0.5;
     let normalized = vec![(
         "bbox_center".to_string(),
@@ -422,6 +463,238 @@ fn normalize_keypoints(
         },
     )];
     (normalized, Some(area), Some(dispersion_hint))
+}
+
+fn keypoint_label(name: Option<&str>, idx: usize) -> String {
+    name.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("k{idx}"))
+}
+
+fn raw_keypoints_from_frame(frame: &PoseFrame) -> HashMap<String, RawKeypointState> {
+    let (raw, _, _) = normalize_keypoints(frame, None);
+    let mut map = HashMap::new();
+    for (label, kp) in raw {
+        map.insert(
+            label,
+            RawKeypointState {
+                x: kp.x,
+                y: kp.y,
+                confidence: kp.confidence,
+            },
+        );
+    }
+    map
+}
+
+fn estimate_camera_shift(
+    frame: &PoseFrame,
+    raw_keypoints: &HashMap<String, RawKeypointState>,
+    state: &EntityMotionState,
+    config: &MotorConfig,
+) -> CameraShift {
+    if let Some(shift) = camera_shift_from_metadata(&frame.metadata) {
+        return shift;
+    }
+    if let Some(shift) = camera_shift_from_keypoints(raw_keypoints, &state.raw_keypoints, config)
+    {
+        return shift;
+    }
+    CameraShift {
+        dx: 0.0,
+        dy: 0.0,
+        confidence: 0.0,
+        source: "none",
+    }
+}
+
+fn apply_camera_shift(
+    shift: CameraShift,
+    state: &mut EntityMotionState,
+    config: &MotorConfig,
+) -> (f64, f64, f64, String) {
+    let alpha = config.camera_motion_alpha.clamp(0.0, 1.0);
+    if shift.confidence > 0.0 {
+        state.camera_shift_ema.0 =
+            alpha * shift.dx + (1.0 - alpha) * state.camera_shift_ema.0;
+        state.camera_shift_ema.1 =
+            alpha * shift.dy + (1.0 - alpha) * state.camera_shift_ema.1;
+        state.camera_confidence_ema =
+            alpha * shift.confidence + (1.0 - alpha) * state.camera_confidence_ema;
+        return (
+            state.camera_shift_ema.0,
+            state.camera_shift_ema.1,
+            state.camera_confidence_ema,
+            shift.source.to_string(),
+        );
+    }
+    let decay = 1.0 - alpha;
+    state.camera_shift_ema.0 *= decay;
+    state.camera_shift_ema.1 *= decay;
+    state.camera_confidence_ema *= decay;
+    let source = if state.camera_confidence_ema > 0.0 {
+        "ema"
+    } else {
+        "none"
+    };
+    (
+        state.camera_shift_ema.0,
+        state.camera_shift_ema.1,
+        state.camera_confidence_ema,
+        source.to_string(),
+    )
+}
+
+fn camera_shift_from_metadata(metadata: &HashMap<String, Value>) -> Option<CameraShift> {
+    let confidence = shift_confidence_from_metadata(metadata);
+    if let Some((dx, dy)) =
+        vector_from_metadata(metadata, &["camera_shift", "imu_shift", "optical_flow", "flow"])
+    {
+        return Some(CameraShift {
+            dx,
+            dy,
+            confidence,
+            source: "metadata",
+        });
+    }
+    let pairs = [
+        ("camera_dx", "camera_dy", "camera"),
+        ("imu_dx", "imu_dy", "imu"),
+        ("shift_dx", "shift_dy", "shift"),
+        ("flow_dx", "flow_dy", "flow"),
+    ];
+    for (dx_key, dy_key, source) in pairs {
+        let dx = metadata.get(dx_key).and_then(|val| val.as_f64());
+        let dy = metadata.get(dy_key).and_then(|val| val.as_f64());
+        if let (Some(dx), Some(dy)) = (dx, dy) {
+            if dx.is_finite() && dy.is_finite() {
+                return Some(CameraShift {
+                    dx,
+                    dy,
+                    confidence,
+                    source,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn camera_shift_from_keypoints(
+    current: &HashMap<String, RawKeypointState>,
+    previous: &HashMap<String, RawKeypointState>,
+    config: &MotorConfig,
+) -> Option<CameraShift> {
+    if current.is_empty() || previous.is_empty() {
+        return None;
+    }
+    let mut samples = Vec::new();
+    let mut sum_w = 0.0;
+    let mut sum_dx = 0.0;
+    let mut sum_dy = 0.0;
+    for (label, curr) in current {
+        let Some(prev) = previous.get(label) else {
+            continue;
+        };
+        let dx = curr.x - prev.x;
+        let dy = curr.y - prev.y;
+        if !dx.is_finite() || !dy.is_finite() {
+            continue;
+        }
+        let weight = ((curr.confidence + prev.confidence) * 0.5).clamp(0.05, 1.0);
+        samples.push((dx, dy, weight));
+        sum_w += weight;
+        sum_dx += dx * weight;
+        sum_dy += dy * weight;
+    }
+    let sample_len = samples.len();
+    if sample_len < config.camera_flow_min_keypoints {
+        return None;
+    }
+    if sum_w <= 0.0 {
+        return None;
+    }
+    let mean_dx = sum_dx / sum_w;
+    let mean_dy = sum_dy / sum_w;
+    let mean_mag = (mean_dx * mean_dx + mean_dy * mean_dy).sqrt();
+    if mean_mag < 1e-6 {
+        return None;
+    }
+    let mut var = 0.0;
+    for (dx, dy, weight) in &samples {
+        let ddx = *dx - mean_dx;
+        let ddy = *dy - mean_dy;
+        var += *weight * (ddx * ddx + ddy * ddy);
+    }
+    let std = (var / sum_w).sqrt();
+    let max_std = config.camera_flow_max_std.max(1e-6);
+    let std_norm = (std / mean_mag.max(1e-6)).min(10.0);
+    if std_norm > max_std {
+        return None;
+    }
+    let consistency = (1.0 - (std_norm / max_std).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let count_factor = sample_len as f64 / (sample_len as f64 + 2.0);
+    let confidence = (consistency * count_factor).clamp(0.0, 1.0);
+    Some(CameraShift {
+        dx: mean_dx,
+        dy: mean_dy,
+        confidence,
+        source: "keypoints",
+    })
+}
+
+fn shift_confidence_from_metadata(metadata: &HashMap<String, Value>) -> f64 {
+    for key in [
+        "camera_shift_confidence",
+        "shift_confidence",
+        "imu_confidence",
+        "flow_confidence",
+    ] {
+        if let Some(val) = metadata.get(key).and_then(|val| val.as_f64()) {
+            return val.clamp(0.0, 1.0);
+        }
+    }
+    1.0
+}
+
+fn vector_from_metadata(metadata: &HashMap<String, Value>, keys: &[&str]) -> Option<(f64, f64)> {
+    for key in keys {
+        if let Some(value) = metadata.get(*key) {
+            if let Some(vec) = vector_from_value(value) {
+                return Some(vec);
+            }
+        }
+    }
+    None
+}
+
+fn vector_from_value(value: &Value) -> Option<(f64, f64)> {
+    if let Some(arr) = value.as_array() {
+        if arr.len() >= 2 {
+            if let (Some(x), Some(y)) = (arr[0].as_f64(), arr[1].as_f64()) {
+                if x.is_finite() && y.is_finite() {
+                    return Some((x, y));
+                }
+            }
+        }
+    }
+    if let Some(obj) = value.as_object() {
+        let x = obj
+            .get("x")
+            .or_else(|| obj.get("dx"))
+            .and_then(|v| v.as_f64());
+        let y = obj
+            .get("y")
+            .or_else(|| obj.get("dy"))
+            .and_then(|v| v.as_f64());
+        if let (Some(x), Some(y)) = (x, y) {
+            if x.is_finite() && y.is_finite() {
+                return Some((x, y));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

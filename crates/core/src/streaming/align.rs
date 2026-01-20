@@ -6,6 +6,8 @@ use std::collections::HashMap;
 pub struct StreamingAligner {
     tolerance_secs: f64,
     confidence_gate: f64,
+    base_tolerance_secs: f64,
+    base_confidence_gate: f64,
     min_pending_sources: usize,
     pending: HashMap<StreamSource, TokenBatch>,
 }
@@ -13,12 +15,30 @@ pub struct StreamingAligner {
 impl StreamingAligner {
     pub fn new(config: &StreamingConfig) -> Self {
         let enabled_sources = config.ingest.enabled_source_count();
+        let tolerance_secs = config.temporal_tolerance_secs.max(0.0);
+        let confidence_gate = config.confidence_gate.clamp(0.0, 1.0);
         Self {
-            tolerance_secs: config.temporal_tolerance_secs.max(0.0),
-            confidence_gate: config.confidence_gate.clamp(0.0, 1.0),
+            tolerance_secs,
+            confidence_gate,
+            base_tolerance_secs: tolerance_secs,
+            base_confidence_gate: confidence_gate,
             min_pending_sources: if enabled_sources > 1 { 2 } else { 1 },
             pending: HashMap::new(),
         }
+    }
+
+    pub fn apply_neuro_feedback(&mut self, confidence: f64) {
+        let confidence = confidence.clamp(0.0, 1.0);
+        if self.base_tolerance_secs > 0.0 {
+            let scale = 1.2 - 0.4 * confidence;
+            self.tolerance_secs = (self.base_tolerance_secs * scale).max(0.0);
+        }
+        if self.base_confidence_gate <= 0.0 {
+            self.confidence_gate = 0.0;
+            return;
+        }
+        let scale = 0.7 + 0.3 * confidence;
+        self.confidence_gate = (self.base_confidence_gate * scale).clamp(0.0, 1.0);
     }
 
     pub fn push(&mut self, batch: TokenBatch) -> Option<TokenBatch> {

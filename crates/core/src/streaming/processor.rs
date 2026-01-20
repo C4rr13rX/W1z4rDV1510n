@@ -20,6 +20,7 @@ use crate::streaming::network_fabric::{NetworkPatternRuntime, NetworkPatternSumm
 use crate::streaming::ontology_runtime::OntologyRuntime;
 use crate::streaming::physiology_runtime::PhysiologyRuntime;
 use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
+use crate::streaming::neuro_bridge::{NeuroStreamBridge, SubstreamRuntime};
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -30,10 +31,14 @@ use crate::streaming::spike_runtime::StreamingSpikeRuntime;
 use crate::streaming::temporal::TemporalInferenceCore;
 use crate::streaming::ultradian::{SignalSample, UltradianLayerExtractor};
 use crate::streaming::spatial::insert_spatial_attrs;
+use crate::streaming::tracking::PoseTracker;
+use crate::neuro::{NeuroRuntime, NeuroSnapshot};
+use crate::schema::EnvironmentSnapshot;
 use crate::config::RunConfig;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 struct PeopleSignal {
@@ -60,6 +65,7 @@ pub struct StreamingProcessor {
     config: StreamingConfig,
     people_extractors: HashMap<String, UltradianLayerExtractor>,
     motor_extractor: MotorFeatureExtractor,
+    pose_tracker: PoseTracker,
     behavior_substrate: BehaviorSubstrate,
     flow_extractor: FlowLayerExtractor,
     topic_extractor: TopicEventExtractor,
@@ -73,6 +79,7 @@ impl StreamingProcessor {
             config,
             people_extractors: HashMap::new(),
             motor_extractor: MotorFeatureExtractor::new(crate::streaming::motor::MotorConfig::default()),
+            pose_tracker: PoseTracker::default(),
             behavior_substrate: BehaviorSubstrate::new(BehaviorSubstrateConfig::default()),
             flow_extractor: FlowLayerExtractor::new(FlowConfig::default()),
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
@@ -236,10 +243,15 @@ impl StreamingProcessor {
 
     fn handle_people_pose(
         &mut self,
-        frame: PoseFrame,
+        mut frame: PoseFrame,
         metadata: HashMap<String, Value>,
     ) -> Option<TokenBatch> {
         let behavior_frame = frame.clone();
+        let tracking = self.pose_tracker.assign(&frame);
+        if frame.entity_id.trim().is_empty() || frame.entity_id.trim().eq_ignore_ascii_case("unknown")
+        {
+            frame.entity_id = tracking.track_id.clone();
+        }
         let output = self.motor_extractor.extract(frame)?;
         let meta_quality = sample_quality_from_meta(&metadata);
         let signal_quality = (meta_quality
@@ -323,6 +335,42 @@ impl StreamingProcessor {
         attributes.insert(
             "keypoint_count".to_string(),
             Value::from(output.keypoint_count as u64),
+        );
+        attributes.insert(
+            "track_id".to_string(),
+            Value::String(tracking.track_id.clone()),
+        );
+        attributes.insert(
+            "track_confidence".to_string(),
+            Value::from(tracking.confidence),
+        );
+        attributes.insert(
+            "track_age_secs".to_string(),
+            Value::from(tracking.age_secs),
+        );
+        attributes.insert(
+            "track_distance".to_string(),
+            Value::from(tracking.distance),
+        );
+        attributes.insert(
+            "track_reused".to_string(),
+            Value::from(tracking.reused),
+        );
+        attributes.insert(
+            "camera_shift_dx".to_string(),
+            Value::from(output.camera_shift_dx),
+        );
+        attributes.insert(
+            "camera_shift_dy".to_string(),
+            Value::from(output.camera_shift_dy),
+        );
+        attributes.insert(
+            "camera_shift_confidence".to_string(),
+            Value::from(output.camera_shift_confidence),
+        );
+        attributes.insert(
+            "camera_shift_source".to_string(),
+            Value::String(output.camera_shift_source.clone()),
         );
         let signal_strength = output.features.motion_energy + 0.5 * output.features.posture_shift;
         let noise_strength = output.features.micro_jitter + output.features.camera_motion;
@@ -494,6 +542,8 @@ pub struct StreamingInference {
     knowledge: KnowledgeRuntime,
     network_fabric: NetworkPatternRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
+    neuro_bridge: Option<NeuroStreamBridge>,
+    substreams: SubstreamRuntime,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
     last_batch: Option<TokenBatch>,
@@ -532,6 +582,14 @@ impl StreamingInference {
         } else {
             None
         };
+        let neuro_bridge = if run_config.neuro.enabled {
+            let snapshot = empty_snapshot();
+            let runtime = Arc::new(NeuroRuntime::new(&snapshot, run_config.neuro.clone()));
+            Some(NeuroStreamBridge::new(runtime, SymbolizeConfig::default()))
+        } else {
+            None
+        };
+        let substreams = SubstreamRuntime::default();
         Self {
             processor,
             aligner,
@@ -550,6 +608,8 @@ impl StreamingInference {
             knowledge,
             network_fabric,
             spike_runtime,
+            neuro_bridge,
+            substreams,
             run_config,
             symbolizer: SymbolizeConfig::default(),
             last_batch: None,
@@ -613,10 +673,27 @@ impl StreamingInference {
     fn process_batch(&mut self, batch: TokenBatch) -> anyhow::Result<Option<RunOutcome>> {
         let mut batch = batch;
         let _ = self.quality.update(&mut batch);
-        let batch = match self.aligner.push(batch) {
+        let mut batch = match self.aligner.push(batch) {
             Some(batch) => batch,
             None => return Ok(None),
         };
+        let mut neuro_snapshot: Option<NeuroSnapshot> = None;
+        if let Some(bridge) = &mut self.neuro_bridge {
+            neuro_snapshot = bridge.observe_batch(&batch);
+        }
+        if let Some(snapshot) = &neuro_snapshot {
+            let feedback = neuro_feedback_confidence(snapshot);
+            self.aligner.apply_neuro_feedback(feedback);
+            self.quality.apply_neuro_feedback(feedback);
+            self.substreams.update_from_neuro(snapshot, batch.timestamp);
+        }
+        let substream_output = self.substreams.ingest(&batch);
+        if !substream_output.tokens.is_empty() {
+            batch.tokens.extend(substream_output.tokens);
+        }
+        if !substream_output.layers.is_empty() {
+            batch.layers.extend(substream_output.layers);
+        }
         self.last_batch = Some(batch.clone());
         self.last_motifs = self.processor.take_last_motifs();
         let behavior_frame = self.processor.take_last_behavior_frame();
@@ -669,6 +746,12 @@ impl StreamingInference {
         });
         let mut snapshot = token_batch_to_snapshot(&batch, &self.symbolizer);
         let mut report_metadata = HashMap::new();
+        if let Some(report) = &neuro_snapshot {
+            report_metadata.insert(
+                "neuro_snapshot".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
         if let Some(report) = temporal_report {
             report_metadata.insert(
                 "temporal_inference".to_string(),
@@ -863,6 +946,20 @@ fn map_from_metadata(input: &HashMap<String, Value>) -> Map<String, Value> {
     map
 }
 
+fn empty_snapshot() -> EnvironmentSnapshot {
+    EnvironmentSnapshot {
+        timestamp: crate::schema::Timestamp { unix: 0 },
+        bounds: HashMap::from([
+            ("width".to_string(), 1.0),
+            ("height".to_string(), 1.0),
+            ("depth".to_string(), 1.0),
+        ]),
+        symbols: Vec::new(),
+        metadata: HashMap::new(),
+        stack_history: Vec::new(),
+    }
+}
+
 fn copy_spatial_from_state(attrs: &mut HashMap<String, Value>, state: &BehaviorState) {
     for key in [
         "space_frame",
@@ -905,6 +1002,21 @@ fn motif_confidence(motif: &BehaviorMotif) -> f64 {
     let support_factor = support / (support + 3.0);
     let coherence = motif.graph_signature.mean_coherence.clamp(0.0, 1.0);
     (0.6 * support_factor + 0.4 * coherence).clamp(0.05, 1.0)
+}
+
+fn neuro_feedback_confidence(snapshot: &NeuroSnapshot) -> f64 {
+    let confidence_mean = mean_map_values(&snapshot.prediction_confidence).unwrap_or(0.5);
+    let surprise_mean = mean_map_values(&snapshot.surprise).unwrap_or(0.0);
+    let surprise_confidence = 1.0 / (1.0 + surprise_mean);
+    ((confidence_mean + surprise_confidence) * 0.5).clamp(0.0, 1.0)
+}
+
+fn mean_map_values(map: &HashMap<String, f64>) -> Option<f64> {
+    if map.is_empty() {
+        return None;
+    }
+    let sum: f64 = map.values().sum();
+    Some(sum / map.len() as f64)
 }
 
 #[cfg(test)]

@@ -40,6 +40,7 @@ struct QualityState {
 
 pub struct StreamingQualityRuntime {
     config: StreamingQualityConfig,
+    base_min_quality: f64,
     states: HashMap<StreamSource, QualityState>,
     latest: HashMap<StreamSource, SourceQuality>,
 }
@@ -47,10 +48,17 @@ pub struct StreamingQualityRuntime {
 impl StreamingQualityRuntime {
     pub fn new(config: StreamingQualityConfig) -> Self {
         Self {
+            base_min_quality: config.min_quality,
             config,
             states: HashMap::new(),
             latest: HashMap::new(),
         }
+    }
+
+    pub fn apply_neuro_feedback(&mut self, confidence: f64) {
+        let confidence = confidence.clamp(0.0, 1.0);
+        let scale = 0.6 + 0.6 * confidence;
+        self.config.min_quality = (self.base_min_quality * scale).clamp(0.0, 1.0);
     }
 
     pub fn update(&mut self, batch: &mut TokenBatch) -> Option<SourceQuality> {

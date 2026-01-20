@@ -1,6 +1,7 @@
-use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolType};
+use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -24,6 +25,24 @@ pub struct NeuroConfig {
     pub wta_k_per_zone: usize,
     /// Scale for STDP-lite weight nudges.
     pub stdp_scale: f32,
+    /// Co-occurrence threshold for spawning minicolumn neurons from stable signatures.
+    pub minicolumn_threshold: u64,
+    /// Maximum number of minicolumn neurons retained.
+    pub minicolumn_max: usize,
+    /// When a minicolumn is active, scale down member activations.
+    pub minicolumn_inhibit_scale: f32,
+    /// EMA decay for minicolumn inhibition (higher keeps inhibition longer).
+    pub minicolumn_inhibition_decay: f32,
+    /// EMA decay for minicolumn stability (higher keeps stability longer).
+    pub minicolumn_stability_decay: f32,
+    /// Minimum stability before a minicolumn suppresses its members.
+    pub minicolumn_activation_threshold: f32,
+    /// Inhibition level at which a minicolumn releases suppression.
+    pub minicolumn_collapse_threshold: f32,
+    /// Maximum number of phenotype attributes to encode in a signature.
+    pub minicolumn_attr_limit: usize,
+    /// Minimum number of labels required to form a minicolumn signature.
+    pub minicolumn_min_signature: usize,
 }
 
 impl Default for NeuroConfig {
@@ -39,6 +58,15 @@ impl Default for NeuroConfig {
             fatigue_decay: 0.98,
             wta_k_per_zone: 4,
             stdp_scale: 0.02,
+            minicolumn_threshold: 18,
+            minicolumn_max: 512,
+            minicolumn_inhibit_scale: 0.35,
+            minicolumn_inhibition_decay: 0.85,
+            minicolumn_stability_decay: 0.9,
+            minicolumn_activation_threshold: 0.65,
+            minicolumn_collapse_threshold: 0.55,
+            minicolumn_attr_limit: 6,
+            minicolumn_min_signature: 3,
         }
     }
 }
@@ -139,6 +167,27 @@ impl Neuron {
             trace: 0.0,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct MinicolumnSignature {
+    key: String,
+    labels: Vec<String>,
+    attr_map: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct MiniColumn {
+    id: u32,
+    label: String,
+    labels: Vec<String>,
+    attr_map: HashMap<String, String>,
+    members: Vec<u32>,
+    stability: f32,
+    inhibition: f32,
+    born_at: u64,
+    last_seen: u64,
+    collapsed: bool,
 }
 
 /// Simple object-pool style neuron store with on-the-fly composite creation from co-occurring symbols.
@@ -365,10 +414,21 @@ pub struct NeuralNetworkSnapshot {
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
+pub struct MinicolumnSnapshot {
+    pub label: String,
+    pub stability: f32,
+    pub inhibition: f32,
+    pub collapsed: bool,
+    pub members: usize,
+    pub born_at: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct NeuroSnapshot {
     pub active_labels: HashSet<String>,
     pub active_composites: HashSet<String>,
     pub active_networks: Vec<NeuralNetworkSnapshot>,
+    pub minicolumns: Vec<MinicolumnSnapshot>,
     pub centroids: HashMap<String, Position>,
     pub network_links: HashMap<String, HashMap<String, f32>>,
     pub temporal_predictions: HashMap<String, Position>,
@@ -384,6 +444,7 @@ impl NeuroSnapshot {
         self.active_labels.is_empty()
             && self.active_composites.is_empty()
             && self.active_networks.is_empty()
+            && self.minicolumns.is_empty()
             && self.centroids.is_empty()
             && self.temporal_predictions.is_empty()
             && self.prediction_error.is_empty()
@@ -429,6 +490,9 @@ struct NeuroState {
     pool: NeuronPool,
     networks: Vec<NeuralNetwork>,
     label_to_network: HashMap<String, u32>,
+    minicolumns: Vec<MiniColumn>,
+    minicolumn_index: HashMap<String, usize>,
+    minicolumn_counts: HashMap<String, u64>,
     positions: HashMap<String, PositionAccumulator>,
     network_cooccur: HashMap<(u32, u32), u64>,
     last_positions: HashMap<String, Position>,
@@ -444,6 +508,9 @@ impl NeuroState {
             pool: NeuronPool::new(config),
             networks: Vec::new(),
             label_to_network: HashMap::new(),
+            minicolumns: Vec::new(),
+            minicolumn_index: HashMap::new(),
+            minicolumn_counts: HashMap::new(),
             positions: HashMap::new(),
             network_cooccur: HashMap::new(),
             last_positions: HashMap::new(),
@@ -470,6 +537,7 @@ impl NeuroState {
         let mut observed: HashSet<String> = HashSet::with_capacity(state.symbol_states.len());
         let mut labels: Vec<String> = Vec::with_capacity(state.symbol_states.len() * 5 + 2);
         let mut zone_map: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut minicolumn_signatures: Vec<MinicolumnSignature> = Vec::new();
         for (symbol_id, symbol_state) in &state.symbol_states {
             observed.insert(symbol_id.clone());
             labels.push(format!("id::{symbol_id}"));
@@ -502,6 +570,18 @@ impl NeuroState {
                     &format!("region::{domain}::{}", zone_label(&symbol_state.position)),
                     &symbol_state.position,
                 );
+                let phenotype =
+                    phenotype_labels(symbol, self.pool.config.minicolumn_attr_limit);
+                for (key, value) in &phenotype {
+                    labels.push(format!("attr::{key}::{value}"));
+                }
+                if let Some(signature) = build_minicolumn_signature(
+                    &role,
+                    &phenotype,
+                    self.pool.config.minicolumn_min_signature,
+                ) {
+                    minicolumn_signatures.push(signature);
+                }
             }
             let id_label = format!("id::{symbol_id}");
             let id_idx = self.pool.get_or_create(&id_label);
@@ -526,6 +606,7 @@ impl NeuroState {
         labels.sort();
         labels.dedup();
         self.pool.record_symbols(&labels);
+        self.update_minicolumns(&minicolumn_signatures);
         self.apply_zone_wta(&zone_map);
         self.apply_stdp();
         self.promote_networks(module_threshold, max_networks);
@@ -606,6 +687,94 @@ impl NeuroState {
         }
     }
 
+    fn update_minicolumns(&mut self, signatures: &[MinicolumnSignature]) {
+        let config = self.pool.config.clone();
+        if config.minicolumn_threshold == 0 || config.minicolumn_max == 0 {
+            return;
+        }
+        let step = self.pool.step_counter();
+        if signatures.is_empty() {
+            let stability_decay = config.minicolumn_stability_decay.clamp(0.0, 1.0);
+            let inhibition_decay = config.minicolumn_inhibition_decay.clamp(0.0, 1.0);
+            let collapse_threshold = config.minicolumn_collapse_threshold.clamp(0.0, 1.0);
+            for column in &mut self.minicolumns {
+                column.stability *= stability_decay;
+                column.inhibition *= inhibition_decay;
+                column.collapsed = column.inhibition >= collapse_threshold;
+                column.last_seen = step;
+            }
+            return;
+        }
+
+        for signature in signatures {
+            let label = format!("mini::{}", signature.key);
+            let count = self
+                .minicolumn_counts
+                .entry(label.clone())
+                .or_insert(0);
+            *count = count.saturating_add(1);
+            if *count < config.minicolumn_threshold {
+                continue;
+            }
+            if self.minicolumn_index.contains_key(&label) {
+                continue;
+            }
+            if self.minicolumns.len() >= config.minicolumn_max {
+                continue;
+            }
+            let id = self.pool.get_or_create(&label);
+            let members = signature
+                .labels
+                .iter()
+                .map(|label| self.pool.get_or_create(label))
+                .collect::<Vec<_>>();
+            let column = MiniColumn {
+                id,
+                label,
+                labels: signature.labels.clone(),
+                attr_map: signature.attr_map.clone(),
+                members,
+                stability: 0.0,
+                inhibition: 0.0,
+                born_at: step,
+                last_seen: step,
+                collapsed: false,
+            };
+            self.minicolumn_index
+                .insert(column.label.clone(), self.minicolumns.len());
+            self.minicolumns.push(column);
+        }
+
+        let stability_decay = config.minicolumn_stability_decay.clamp(0.0, 1.0);
+        let inhibition_decay = config.minicolumn_inhibition_decay.clamp(0.0, 1.0);
+        let activation_threshold = config.minicolumn_activation_threshold.clamp(0.0, 1.0);
+        let collapse_threshold = config.minicolumn_collapse_threshold.clamp(0.0, 1.0);
+        let inhibit_scale = config.minicolumn_inhibit_scale.clamp(0.0, 1.0);
+
+        for column in &mut self.minicolumns {
+            let (evidence, conflict) = best_signature_match(column, signatures);
+            column.stability =
+                column.stability * stability_decay + evidence * (1.0 - stability_decay);
+            column.inhibition =
+                column.inhibition * inhibition_decay + conflict * (1.0 - inhibition_decay);
+            column.last_seen = step;
+            column.collapsed = column.inhibition >= collapse_threshold;
+            let active = column.stability >= activation_threshold && !column.collapsed;
+            let column_activation = (column.stability * (1.0 - column.inhibition)).clamp(0.0, 1.0);
+            if let Some(neuron) = self.pool.neurons.get_mut(column.id as usize) {
+                neuron.activation = neuron.activation.max(column_activation);
+                neuron.use_count = neuron.use_count.saturating_add(active as u64);
+            }
+            if active {
+                for member_id in &column.members {
+                    if let Some(neuron) = self.pool.neurons.get_mut(*member_id as usize) {
+                        neuron.activation *= inhibit_scale;
+                    }
+                }
+            }
+        }
+    }
+
     fn refresh_network_strengths(&mut self, min_activation: f32, decay: f32) {
         let active = self.pool.active_ids(min_activation);
         let mut active_nets = Vec::new();
@@ -671,6 +840,18 @@ impl NeuroState {
                 network_links.insert(net.label.clone(), links);
             }
         }
+        let minicolumns = self
+            .minicolumns
+            .iter()
+            .map(|column| MinicolumnSnapshot {
+                label: column.label.clone(),
+                stability: column.stability,
+                inhibition: column.inhibition,
+                collapsed: column.collapsed,
+                members: column.members.len(),
+                born_at: column.born_at,
+            })
+            .collect::<Vec<_>>();
         let mut temporal_predictions = HashMap::new();
         for (symbol_id, last_pos) in &self.last_positions {
             if let Some(vel) = self.velocities.get(symbol_id) {
@@ -707,6 +888,7 @@ impl NeuroState {
             active_labels,
             active_composites,
             active_networks,
+            minicolumns,
             centroids,
             network_links,
             temporal_predictions,
@@ -976,6 +1158,33 @@ impl NeuroRuntime {
         }
     }
 
+    pub fn observe_snapshot(&self, snapshot: &EnvironmentSnapshot) {
+        if !self.config.enabled {
+            return;
+        }
+        let symbol_lookup = snapshot
+            .symbols
+            .iter()
+            .cloned()
+            .map(|s| (s.id.clone(), s))
+            .collect::<HashMap<_, _>>();
+        let state = dynamic_state_from_snapshot(snapshot);
+        let mut guard = self.inner.lock();
+        guard.pool.step();
+        guard.record_state(
+            &state,
+            &symbol_lookup,
+            self.config.min_activation,
+            self.config.module_threshold,
+            self.config.max_networks,
+            self.config.neuro.decay,
+            self.config.prediction_smoothing,
+            self.config.prediction_horizon,
+            self.config.curiosity_strength,
+            self.config.working_memory,
+        );
+    }
+
     pub fn snapshot(&self) -> NeuroSnapshot {
         if !self.config.enabled {
             return NeuroSnapshot::default();
@@ -990,6 +1199,24 @@ pub fn zone_label(position: &Position) -> String {
     let bx = ((position.x / step).floor() as i32).clamp(0, RELATION_BINS - 1);
     let by = ((position.y / step).floor() as i32).clamp(0, RELATION_BINS - 1);
     format!("zone::{bx},{by}")
+}
+
+fn dynamic_state_from_snapshot(snapshot: &EnvironmentSnapshot) -> DynamicState {
+    let mut symbol_states = HashMap::new();
+    for symbol in &snapshot.symbols {
+        symbol_states.insert(
+            symbol.id.clone(),
+            SymbolState {
+                position: symbol.position,
+                velocity: None,
+                internal_state: symbol.properties.clone(),
+            },
+        );
+    }
+    DynamicState {
+        timestamp: snapshot.timestamp,
+        symbol_states,
+    }
 }
 
 fn role_label(symbol: &Symbol) -> String {
@@ -1034,4 +1261,308 @@ fn domain_label(symbol: &Symbol) -> String {
         .and_then(|v| v.as_str())
         .map(|d| d.to_lowercase())
         .unwrap_or_else(|| "global".to_string())
+}
+
+fn phenotype_labels(symbol: &Symbol, max_labels: usize) -> Vec<(String, String)> {
+    if max_labels == 0 {
+        return Vec::new();
+    }
+    let mut raw_pairs = Vec::new();
+    if let Some(Value::Object(attrs)) = symbol.properties.get("attributes") {
+        collect_string_attributes(attrs.iter(), &mut raw_pairs);
+    }
+    collect_string_attributes(symbol.properties.iter(), &mut raw_pairs);
+    let mut seen_keys = HashSet::new();
+    let mut output = Vec::new();
+    for (raw_key, raw_value) in raw_pairs {
+        if !is_phenotype_key(&raw_key) {
+            continue;
+        }
+        let key = normalize_label_token(&raw_key);
+        let value = normalize_label_token(&raw_value);
+        if key.is_empty() || value.is_empty() {
+            continue;
+        }
+        if seen_keys.insert(key.clone()) {
+            output.push((key, value));
+            if output.len() >= max_labels {
+                break;
+            }
+        }
+    }
+    output
+}
+
+fn collect_string_attributes<'a, I>(source: I, out: &mut Vec<(String, String)>)
+where
+    I: IntoIterator<Item = (&'a String, &'a Value)>,
+{
+    for (key, value) in source {
+        if let Some(text) = value.as_str() {
+            out.push((key.clone(), text.to_string()));
+        }
+    }
+}
+
+fn build_minicolumn_signature(
+    role: &str,
+    phenotype: &[(String, String)],
+    min_labels: usize,
+) -> Option<MinicolumnSignature> {
+    if phenotype.is_empty() {
+        return None;
+    }
+    let mut labels = Vec::with_capacity(phenotype.len() + 1);
+    labels.push(format!("role::{role}"));
+    for (key, value) in phenotype {
+        labels.push(format!("attr::{key}::{value}"));
+    }
+    labels.sort();
+    labels.dedup();
+    if labels.len() < min_labels.max(1) {
+        return None;
+    }
+    let mut attr_map = HashMap::new();
+    for (key, value) in phenotype {
+        attr_map.insert(key.clone(), value.clone());
+    }
+    let key = labels.join("|");
+    Some(MinicolumnSignature {
+        key,
+        labels,
+        attr_map,
+    })
+}
+
+fn best_signature_match(
+    column: &MiniColumn,
+    signatures: &[MinicolumnSignature],
+) -> (f32, f32) {
+    if signatures.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut best_evidence = 0.0;
+    let mut best_conflict = 0.0;
+    for signature in signatures {
+        let evidence = signature_evidence(&column.labels, &signature.labels);
+        if evidence <= 0.0 {
+            continue;
+        }
+        let conflict = signature_conflict(&column.attr_map, &signature.attr_map);
+        if evidence > best_evidence
+            || ((evidence - best_evidence).abs() < 1e-6 && conflict < best_conflict)
+        {
+            best_evidence = evidence;
+            best_conflict = conflict;
+        }
+    }
+    (best_evidence, best_conflict)
+}
+
+fn signature_evidence(column: &[String], candidate: &[String]) -> f32 {
+    if column.is_empty() {
+        return 0.0;
+    }
+    let mut set = HashSet::new();
+    for label in candidate {
+        set.insert(label.as_str());
+    }
+    let matches = column.iter().filter(|label| set.contains(label.as_str())).count();
+    matches as f32 / column.len() as f32
+}
+
+fn signature_conflict(
+    column: &HashMap<String, String>,
+    candidate: &HashMap<String, String>,
+) -> f32 {
+    if column.is_empty() {
+        return 0.0;
+    }
+    let mut conflicts = 0.0_f32;
+    let mut total = 0.0_f32;
+    for (key, value) in column {
+        total += 1.0;
+        if let Some(other) = candidate.get(key) {
+            if other != value {
+                conflicts += 1.0;
+            }
+        }
+    }
+    if total <= 0.0 {
+        0.0
+    } else {
+        (conflicts / total).clamp(0.0, 1.0)
+    }
+}
+
+fn normalize_label_token(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_underscore = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_underscore = false;
+        } else if !last_underscore {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.len() > 40 {
+        out.truncate(40);
+    }
+    out
+}
+
+fn is_phenotype_key(raw: &str) -> bool {
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return false;
+    }
+    if key.starts_with("pos_")
+        || key.starts_with("space_")
+        || key.starts_with("camera_")
+        || key.starts_with("track_")
+    {
+        return false;
+    }
+    if key.ends_with("_id") || key.contains("timestamp") || key.contains("time") {
+        return false;
+    }
+    if matches!(
+        key.as_str(),
+        "entity_id"
+            | "token_kind"
+            | "duration_secs"
+            | "confidence"
+            | "source"
+            | "signal_quality"
+            | "snr_proxy"
+            | "baseline_mean"
+            | "baseline_std"
+            | "baseline_samples"
+            | "baseline_ready"
+            | "space_frame"
+            | "space_source"
+            | "space_dimensionality"
+            | "pos_x"
+            | "pos_y"
+            | "pos_z"
+            | "bbox_area"
+    ) {
+        return false;
+    }
+    if key.starts_with("phenotype_")
+        || key.starts_with("bio_")
+        || key.starts_with("vehicle_")
+        || key.starts_with("anatomy_")
+    {
+        return true;
+    }
+    matches!(
+        key.as_str(),
+        "color"
+            | "make"
+            | "model"
+            | "brand"
+            | "type"
+            | "category"
+            | "class"
+            | "subtype"
+            | "variant"
+            | "species"
+            | "breed"
+            | "sex"
+            | "body_type"
+            | "vehicle_make"
+            | "vehicle_model"
+            | "vehicle_type"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{DynamicState, SymbolState, Timestamp};
+    use std::collections::HashMap;
+
+    fn car_symbol(id: &str, make: &str, model: &str) -> Symbol {
+        let mut properties = HashMap::new();
+        properties.insert("color".to_string(), Value::String("red".to_string()));
+        properties.insert("make".to_string(), Value::String(make.to_string()));
+        properties.insert("model".to_string(), Value::String(model.to_string()));
+        Symbol {
+            id: id.to_string(),
+            symbol_type: SymbolType::Object,
+            position: Position::default(),
+            properties,
+        }
+    }
+
+    fn state_for(id: &str, x: f64) -> DynamicState {
+        let mut symbol_states = HashMap::new();
+        symbol_states.insert(
+            id.to_string(),
+            SymbolState {
+                position: Position { x, y: 1.0, z: 0.0 },
+                velocity: None,
+                internal_state: HashMap::new(),
+            },
+        );
+        DynamicState {
+            timestamp: Timestamp { unix: 1 },
+            symbol_states,
+        }
+    }
+
+    #[test]
+    fn minicolumn_spawns_from_stable_signature() {
+        let mut config = NeuroConfig::default();
+        config.minicolumn_threshold = 2;
+        config.minicolumn_max = 4;
+        let mut state = NeuroState::new(config);
+        let mut symbols = HashMap::new();
+        symbols.insert("car1".to_string(), car_symbol("car1", "hyundai", "sonata"));
+
+        let step = state_for("car1", 1.0);
+        state.pool.step();
+        state.record_state(&step, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+        state.pool.step();
+        state.record_state(&step, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+
+        assert_eq!(state.minicolumns.len(), 1);
+        let column = &state.minicolumns[0];
+        assert!(column.labels.iter().any(|l| l.contains("attr::make::hyundai")));
+    }
+
+    #[test]
+    fn minicolumn_collapses_on_conflict() {
+        let mut config = NeuroConfig::default();
+        config.minicolumn_threshold = 1;
+        config.minicolumn_max = 4;
+        config.minicolumn_inhibition_decay = 0.0;
+        config.minicolumn_collapse_threshold = 0.3;
+        let mut state = NeuroState::new(config);
+        let mut symbols = HashMap::new();
+        symbols.insert("car1".to_string(), car_symbol("car1", "hyundai", "sonata"));
+        symbols.insert("car2".to_string(), car_symbol("car2", "chrysler", "500"));
+
+        let hyundai = state_for("car1", 1.0);
+        state.pool.step();
+        state.record_state(&hyundai, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+
+        let chrysler = state_for("car2", 2.0);
+        state.pool.step();
+        state.record_state(&chrysler, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+
+        let column = state
+            .minicolumns
+            .iter()
+            .find(|col| col.labels.iter().any(|l| l.contains("attr::make::hyundai")))
+            .expect("hyundai column");
+        assert!(column.inhibition > 0.0);
+        assert!(column.collapsed);
+    }
 }

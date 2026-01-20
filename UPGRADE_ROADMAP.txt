@@ -13,13 +13,13 @@ Tracking: use this list in order; mark items as done when completed.
     - Cross-frequency coupling to link sub-ultradian motifs to ultradian layers.
     - Status: complete (sub-ultradian band + PAC + PSD + wavelet + multitaper + EMD-lite added).
 
-[ ] 3) 3D motion + camera rigor
-    - Camera stabilization (optical flow / IMU), multi-person tracking.
-    - Depth inference or multi-view triangulation in spatial estimator.
+[x] 3) 3D motion + camera rigor
+    - Camera stabilization (metadata + keypoint flow) + multi-person tracking.
+    - Stereo depth + multi-view triangulation in spatial estimator.
 
-[ ] 4) Minicolumn neurogenesis with inhibitory arbitration
-    - Spawn minicolumns from stable motif signatures.
-    - Collapse back to multineuron column when inhibition rises.
+[x] 4) Minicolumn neurogenesis with inhibitory arbitration
+    - Spawn minicolumns from stable phenotype signatures.
+    - Sensory mismatch drives inhibition; release back to multineuron detail.
 
 [ ] 5) Motif playback + human labeling
     - 3D replay capsules for motif review.

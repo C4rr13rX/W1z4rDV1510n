@@ -30,6 +30,8 @@ pub mod health_overlay;
 pub mod survival;
 pub mod knowledge;
 pub mod knowledge_ingest;
+pub mod tracking;
+pub mod neuro_bridge;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -78,3 +80,5 @@ pub use behavior::{
 pub use fabric::NeuralFabricShare;
 pub use network_fabric::{NetworkMatch, NetworkPatternReport, NetworkPatternRuntime, NetworkPatternSummary};
 pub use spatial::{SpatialConfig, SpatialEstimate, SpatialEstimator, insert_spatial_attrs};
+pub use tracking::{PoseTracker, PoseTrackerConfig, TrackingResult};
+pub use neuro_bridge::{NeuroStreamBridge, SubstreamOutput, SubstreamRuntime};

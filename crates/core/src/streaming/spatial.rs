@@ -34,6 +34,12 @@ pub struct SpatialEstimator {
     config: SpatialConfig,
 }
 
+#[derive(Debug, Clone)]
+struct Ray {
+    origin: [f64; 3],
+    direction: [f64; 3],
+}
+
 impl SpatialEstimator {
     pub fn new(config: SpatialConfig) -> Self {
         Self { config }
@@ -62,8 +68,25 @@ impl SpatialEstimator {
             };
         }
 
+        if let Some((pos, confidence)) = triangulate_position(metadata) {
+            dimensionality = dimensionality.max(3);
+            return SpatialEstimate {
+                position: Some(pos),
+                confidence,
+                dimensionality,
+                frame,
+                source: "triangulation".to_string(),
+            };
+        }
+
+        let stereo_depth = stereo_depth_from_metadata(metadata);
         if let Some(pose) = pose {
-            if let Some(pos) = position_from_keypoints(pose) {
+            if let Some(mut pos) = position_from_keypoints(pose) {
+                if pos[2].abs() <= 1e-6 {
+                    if let Some(depth) = stereo_depth {
+                        pos[2] = depth;
+                    }
+                }
                 dimensionality = dimensionality.max(if pos[2].abs() > 1e-6 { 3 } else { 2 });
                 return SpatialEstimate {
                     position: Some(pos),
@@ -72,6 +95,18 @@ impl SpatialEstimator {
                     frame,
                     source: "keypoints".to_string(),
                 };
+            }
+            if let Some(depth) = stereo_depth {
+                if let Some(pos) = position_from_bbox_with_depth(pose, depth) {
+                    dimensionality = dimensionality.max(3);
+                    return SpatialEstimate {
+                        position: Some(pos),
+                        confidence: 0.55,
+                        dimensionality,
+                        frame,
+                        source: "stereo_depth".to_string(),
+                    };
+                }
             }
             if let Some(pos) = position_from_bbox(pose, metadata, &self.config) {
                 dimensionality = dimensionality.max(3);
@@ -242,6 +277,195 @@ fn position_from_bbox(
     Some([center_x, center_y, depth])
 }
 
+fn position_from_bbox_with_depth(pose: &PoseFrame, depth: f64) -> Option<[f64; 3]> {
+    let bbox = pose.bbox.as_ref()?;
+    let center_x = bbox.x + bbox.width * 0.5;
+    let center_y = bbox.y + bbox.height * 0.5;
+    if !center_x.is_finite() || !center_y.is_finite() || !depth.is_finite() {
+        return None;
+    }
+    Some([center_x, center_y, depth])
+}
+
+fn stereo_depth_from_metadata(metadata: &HashMap<String, Value>) -> Option<f64> {
+    for key in ["stereo_depth", "depth_m", "depth"] {
+        if let Some(depth) = metadata.get(key).and_then(|val| val.as_f64()) {
+            if depth.is_finite() {
+                return Some(depth);
+            }
+        }
+    }
+    let disparity = metadata
+        .get("stereo_disparity")
+        .or_else(|| metadata.get("disparity"))
+        .or_else(|| metadata.get("disparity_px"))
+        .and_then(|val| val.as_f64());
+    let baseline = metadata
+        .get("camera_baseline_m")
+        .or_else(|| metadata.get("baseline_m"))
+        .or_else(|| metadata.get("baseline"))
+        .and_then(|val| val.as_f64());
+    let focal = metadata
+        .get("focal_length_px")
+        .or_else(|| metadata.get("focal_px"))
+        .or_else(|| metadata.get("focal_length"))
+        .and_then(|val| val.as_f64());
+    match (disparity, baseline, focal) {
+        (Some(d), Some(b), Some(f)) if d.is_finite() && b.is_finite() && f.is_finite() => {
+            if d.abs() <= 1e-6 {
+                None
+            } else {
+                Some((b * f / d).abs())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn triangulate_position(metadata: &HashMap<String, Value>) -> Option<([f64; 3], f64)> {
+    let rays = rays_from_metadata(metadata);
+    if rays.len() < 2 {
+        return None;
+    }
+    let mut a = [[0.0; 3]; 3];
+    let mut b = [0.0; 3];
+    for ray in &rays {
+        let d = normalize_vec3(ray.direction)?;
+        let m = [
+            [1.0 - d[0] * d[0], -d[0] * d[1], -d[0] * d[2]],
+            [-d[1] * d[0], 1.0 - d[1] * d[1], -d[1] * d[2]],
+            [-d[2] * d[0], -d[2] * d[1], 1.0 - d[2] * d[2]],
+        ];
+        for i in 0..3 {
+            for j in 0..3 {
+                a[i][j] += m[i][j];
+            }
+            b[i] += m[i][0] * ray.origin[0]
+                + m[i][1] * ray.origin[1]
+                + m[i][2] * ray.origin[2];
+        }
+    }
+    let pos = solve_3x3(a, b)?;
+    if !pos[0].is_finite() || !pos[1].is_finite() || !pos[2].is_finite() {
+        return None;
+    }
+    let mut residual = 0.0;
+    for ray in &rays {
+        if let Some(d) = normalize_vec3(ray.direction) {
+            residual += distance_point_to_ray(pos, ray.origin, d);
+        }
+    }
+    let avg_residual = residual / rays.len() as f64;
+    let confidence = (1.0 / (1.0 + avg_residual)).clamp(0.05, 0.95);
+    Some((pos, confidence))
+}
+
+fn rays_from_metadata(metadata: &HashMap<String, Value>) -> Vec<Ray> {
+    for key in ["camera_rays", "rays", "views", "camera_views"] {
+        if let Some(values) = metadata.get(key).and_then(|val| val.as_array()) {
+            let mut rays = Vec::new();
+            for value in values {
+                if let Some(ray) = ray_from_value(value) {
+                    rays.push(ray);
+                }
+            }
+            if !rays.is_empty() {
+                return rays;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn ray_from_value(value: &Value) -> Option<Ray> {
+    let obj = value.as_object()?;
+    let origin = obj
+        .get("origin")
+        .or_else(|| obj.get("camera_origin"))
+        .or_else(|| obj.get("position"))
+        .and_then(vec3_from_value)?;
+    let direction = obj
+        .get("direction")
+        .or_else(|| obj.get("ray"))
+        .or_else(|| obj.get("ray_dir"))
+        .and_then(vec3_from_value)?;
+    Some(Ray { origin, direction })
+}
+
+fn vec3_from_value(value: &Value) -> Option<[f64; 3]> {
+    if let Some(arr) = value.as_array() {
+        if arr.len() >= 3 {
+            let x = arr[0].as_f64()?;
+            let y = arr[1].as_f64()?;
+            let z = arr[2].as_f64()?;
+            if x.is_finite() && y.is_finite() && z.is_finite() {
+                return Some([x, y, z]);
+            }
+        }
+    }
+    if let Some(obj) = value.as_object() {
+        let x = obj.get("x").and_then(|val| val.as_f64())?;
+        let y = obj.get("y").and_then(|val| val.as_f64())?;
+        let z = obj.get("z").and_then(|val| val.as_f64())?;
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            return Some([x, y, z]);
+        }
+    }
+    None
+}
+
+fn normalize_vec3(vec: [f64; 3]) -> Option<[f64; 3]> {
+    let norm = (vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]).sqrt();
+    if norm <= 1e-9 {
+        return None;
+    }
+    Some([vec[0] / norm, vec[1] / norm, vec[2] / norm])
+}
+
+fn solve_3x3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
+    for i in 0..3 {
+        let mut pivot = i;
+        for row in (i + 1)..3 {
+            if a[row][i].abs() > a[pivot][i].abs() {
+                pivot = row;
+            }
+        }
+        if a[pivot][i].abs() < 1e-9 {
+            return None;
+        }
+        if pivot != i {
+            a.swap(i, pivot);
+            b.swap(i, pivot);
+        }
+        let diag = a[i][i];
+        for col in i..3 {
+            a[i][col] /= diag;
+        }
+        b[i] /= diag;
+        for row in 0..3 {
+            if row == i {
+                continue;
+            }
+            let factor = a[row][i];
+            for col in i..3 {
+                a[row][col] -= factor * a[i][col];
+            }
+            b[row] -= factor * b[i];
+        }
+    }
+    Some([b[0], b[1], b[2]])
+}
+
+fn distance_point_to_ray(point: [f64; 3], origin: [f64; 3], direction: [f64; 3]) -> f64 {
+    let vx = point[0] - origin[0];
+    let vy = point[1] - origin[1];
+    let vz = point[2] - origin[2];
+    let cx = vy * direction[2] - vz * direction[1];
+    let cy = vz * direction[0] - vx * direction[2];
+    let cz = vx * direction[1] - vy * direction[0];
+    (cx * cx + cy * cy + cz * cz).sqrt()
+}
+
 fn keypoint_confidence(pose: &PoseFrame) -> f64 {
     if pose.keypoints.is_empty() {
         return 0.0;
@@ -325,6 +549,7 @@ mod tests {
     use super::*;
     use crate::schema::Timestamp;
     use crate::streaming::motor::{Keypoint, PoseFrame};
+    use serde_json::json;
 
     #[test]
     fn estimates_position_from_keypoints_with_depth() {
@@ -378,5 +603,57 @@ mod tests {
         assert!((pos[0] - 1.0).abs() < 1e-6);
         assert!((pos[1] - 1.0).abs() < 1e-6);
         assert!(pos[2] > 0.0);
+    }
+
+    #[test]
+    fn estimates_position_from_stereo_metadata() {
+        let pose = PoseFrame {
+            entity_id: "e1".to_string(),
+            timestamp: Some(Timestamp { unix: 1 }),
+            keypoints: vec![
+                Keypoint {
+                    name: Some("head".to_string()),
+                    x: 1.0,
+                    y: 2.0,
+                    z: None,
+                    confidence: Some(0.9),
+                },
+                Keypoint {
+                    name: Some("hand".to_string()),
+                    x: 2.0,
+                    y: 3.0,
+                    z: None,
+                    confidence: Some(0.8),
+                },
+            ],
+            bbox: None,
+            metadata: HashMap::new(),
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert("stereo_disparity".to_string(), Value::from(10.0));
+        metadata.insert("camera_baseline_m".to_string(), Value::from(0.2));
+        metadata.insert("focal_length_px".to_string(), Value::from(100.0));
+        let estimator = SpatialEstimator::default();
+        let estimate = estimator.estimate(Some(&pose), &metadata);
+        let pos = estimate.position.expect("position");
+        assert!((pos[2] - 2.0).abs() < 1e-6);
+        assert!(estimate.dimensionality >= 3);
+    }
+
+    #[test]
+    fn estimates_position_from_camera_rays() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "camera_rays".to_string(),
+            json!([
+                { "origin": [0.0, 0.0, 0.0], "direction": [1.0, 0.0, 0.0] },
+                { "origin": [0.0, 1.0, 0.0], "direction": [1.0, -1.0, 0.0] }
+            ]),
+        );
+        let estimator = SpatialEstimator::default();
+        let estimate = estimator.estimate(None, &metadata);
+        let pos = estimate.position.expect("position");
+        assert!((pos[0] - 1.0).abs() < 1e-6);
+        assert!(pos[1].abs() < 1e-6);
     }
 }
