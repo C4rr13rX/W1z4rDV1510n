@@ -11,7 +11,7 @@ Tracking: use this list in order; mark items as done when completed.
 [ ] 2) Sub-ultradian -> ultradian multi-resolution extraction
     - Wavelets / multitaper PSD / EMD-HHT where CPU-viable.
     - Cross-frequency coupling to link sub-ultradian motifs to ultradian layers.
-    - Status: in progress (sub-ultradian band + PAC attributes added).
+    - Status: in progress (sub-ultradian band + PAC + PSD attributes added).
 
 [ ] 3) 3D motion + camera rigor
     - Camera stabilization (optical flow / IMU), multi-person tracking.

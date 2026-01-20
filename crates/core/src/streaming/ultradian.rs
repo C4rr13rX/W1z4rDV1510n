@@ -1,6 +1,6 @@
 use crate::schema::Timestamp;
 use crate::streaming::schema::{LayerKind, LayerState};
-use crate::math_toolbox::RunningStats;
+use crate::math_toolbox::{self, RunningStats};
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 
@@ -637,6 +637,14 @@ struct BandEstimate {
     snr: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PeriodogramMetrics {
+    peak_period: f64,
+    peak_power: f64,
+    band_power: f64,
+    entropy: f64,
+}
+
 fn estimate_sub_bands(
     sub_bands: &[SubUltradianBand],
     samples: &[SignalSample],
@@ -676,6 +684,16 @@ fn estimate_sub_bands(
         ) else {
             continue;
         };
+        let periodogram = periodogram_band_metrics(
+            samples,
+            band,
+            mean,
+            slope,
+            t_mean,
+            t_ref,
+            weight_total,
+            candidate_count.saturating_mul(2),
+        );
         let pac = phase_amplitude_coupling(
             samples,
             min_ts,
@@ -706,6 +724,24 @@ fn estimate_sub_bands(
             format!("{prefix}_snr"),
             serde_json::Value::from(estimate.snr),
         ));
+        if let Some(metrics) = periodogram {
+            out.push((
+                format!("{prefix}_psd_peak_period_secs"),
+                serde_json::Value::from(metrics.peak_period),
+            ));
+            out.push((
+                format!("{prefix}_psd_peak_power"),
+                serde_json::Value::from(metrics.peak_power),
+            ));
+            out.push((
+                format!("{prefix}_psd_band_power"),
+                serde_json::Value::from(metrics.band_power),
+            ));
+            out.push((
+                format!("{prefix}_psd_entropy"),
+                serde_json::Value::from(metrics.entropy),
+            ));
+        }
         out.push((
             format!("{prefix}_pac"),
             serde_json::Value::from(pac),
@@ -783,6 +819,60 @@ fn estimate_band(
         amplitude_norm,
         amplitude_raw,
         snr,
+    })
+}
+
+fn periodogram_band_metrics(
+    samples: &[SignalSample],
+    band: &SubUltradianBand,
+    mean: f64,
+    slope: f64,
+    t_mean: f64,
+    t_ref: f64,
+    weight_total: f64,
+    candidate_count: usize,
+) -> Option<PeriodogramMetrics> {
+    if samples.len() < 2 || weight_total <= 0.0 {
+        return None;
+    }
+    let periods = band_candidate_periods(band, candidate_count.max(2));
+    if periods.is_empty() {
+        return None;
+    }
+    let mut powers = Vec::with_capacity(periods.len());
+    let mut peak_period = periods[0];
+    let mut peak_power = 0.0;
+    for period in periods {
+        let omega = 2.0 * PI / period.max(1.0);
+        let mut sum_sin = 0.0;
+        let mut sum_cos = 0.0;
+        for sample in samples {
+            let weight = sample.quality.clamp(0.0, 1.0);
+            if weight <= 0.0 {
+                continue;
+            }
+            let t = sample.timestamp.unix as f64;
+            let centered = (sample.value - mean) - slope * (t - t_mean);
+            let t_offset = t - t_ref;
+            sum_sin += weight * centered * (omega * t_offset).sin();
+            sum_cos += weight * centered * (omega * t_offset).cos();
+        }
+        let magnitude = (sum_sin.powi(2) + sum_cos.powi(2)).sqrt();
+        let amplitude_raw = (2.0 * magnitude / weight_total).abs();
+        let power = (amplitude_raw * amplitude_raw).max(0.0);
+        if power > peak_power {
+            peak_power = power;
+            peak_period = period;
+        }
+        powers.push(power);
+    }
+    let band_power = math_toolbox::mean(&powers).unwrap_or(0.0);
+    let entropy = math_toolbox::entropy(&powers);
+    Some(PeriodogramMetrics {
+        peak_period,
+        peak_power,
+        band_power,
+        entropy,
     })
 }
 
