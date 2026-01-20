@@ -4,6 +4,7 @@ use crate::streaming::branching_runtime::BranchingReport;
 use crate::streaming::causal_stream::CausalReport;
 use crate::streaming::behavior::BehaviorFrame;
 use crate::streaming::health_overlay::{HealthEntityOverlay, HealthOverlayReport};
+use crate::streaming::metacognition_runtime::MetacognitionReport;
 use crate::streaming::survival::{SurvivalEntityMetrics, SurvivalReport};
 use crate::streaming::temporal::TemporalInferenceReport;
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,12 @@ pub struct NarrativeEntitySummary {
     #[serde(default)]
     pub health_color: Option<String>,
     pub summary: String,
+    #[serde(default)]
+    pub empathy_label: Option<String>,
+    #[serde(default)]
+    pub empathy_confidence: Option<f64>,
+    #[serde(default)]
+    pub reflection_depth: Option<usize>,
     #[serde(default)]
     pub zoom: Vec<NarrativeZoomSummary>,
     #[serde(default)]
@@ -95,6 +102,7 @@ impl NarrativeRuntime {
         temporal: Option<&TemporalInferenceReport>,
         causal: Option<&CausalReport>,
         branching: Option<&BranchingReport>,
+        metacognition: Option<&MetacognitionReport>,
     ) -> Option<NarrativeReport> {
         if !self.config.enabled {
             return None;
@@ -105,6 +113,7 @@ impl NarrativeRuntime {
         }
         let health_map = map_health(health);
         let survival_map = map_survival(survival);
+        let meta_map = map_metacognition(metacognition);
         let motif_map = map_motifs(behavior_frame);
         for entity_id in &entity_ids {
             let overlay = health_map.get(entity_id).copied();
@@ -148,6 +157,7 @@ impl NarrativeRuntime {
                 temporal,
                 causal,
                 branching,
+                meta_map.get(&entity_id).copied(),
             );
             if let Some(summary) = summary {
                 overall_risk += summary.risk_score;
@@ -246,6 +256,18 @@ fn map_survival(
     map
 }
 
+fn map_metacognition(
+    report: Option<&MetacognitionReport>,
+) -> HashMap<String, &crate::streaming::metacognition_runtime::MetacognitionEntity> {
+    let mut map = HashMap::new();
+    if let Some(report) = report {
+        for entry in &report.entities {
+            map.insert(entry.entity_id.clone(), entry);
+        }
+    }
+    map
+}
+
 fn map_motifs(frame: Option<&BehaviorFrame>) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if let Some(frame) = frame {
@@ -266,6 +288,7 @@ fn build_entity_summary(
     temporal: Option<&TemporalInferenceReport>,
     causal: Option<&CausalReport>,
     branching: Option<&BranchingReport>,
+    metacognition: Option<&crate::streaming::metacognition_runtime::MetacognitionEntity>,
 ) -> Option<NarrativeEntitySummary> {
     let health_score = overlay.map(|entry| entry.score);
     let survival_score = survival.map(|entry| entry.survival_score);
@@ -274,6 +297,9 @@ fn build_entity_summary(
     let health_label = overlay.map(|entry| entry.label.clone());
     let health_color = overlay.map(|entry| entry.color.clone());
     let position = overlay.and_then(|entry| entry.position);
+    let empathy_label = metacognition.and_then(|entry| entry.empathy_label.clone());
+    let empathy_confidence = metacognition.and_then(|entry| entry.empathy_confidence);
+    let reflection_depth = metacognition.map(|entry| entry.reflection_depth);
     let mut summary_parts = Vec::new();
     if let Some(score) = health_score {
         let label = health_label.clone().unwrap_or_else(|| health_label_from_score(score).to_string());
@@ -288,6 +314,9 @@ fn build_entity_summary(
         } else if entry.cooperation_in >= 0.6 {
             summary_parts.push("cooperation strong".to_string());
         }
+    }
+    if let Some(label) = &empathy_label {
+        summary_parts.push(format!("empathy {}", label));
     }
     let summary = if summary_parts.is_empty() {
         format!("Entity {} observed with limited telemetry.", entity_id)
@@ -382,6 +411,9 @@ fn build_entity_summary(
         health_label,
         health_color,
         summary,
+        empathy_label,
+        empathy_confidence,
+        reflection_depth,
         zoom,
         steps,
         evidence,
@@ -640,6 +672,7 @@ mod tests {
             None,
             Some(&health),
             Some(&survival),
+            None,
             None,
             None,
             None,

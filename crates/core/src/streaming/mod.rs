@@ -34,6 +34,7 @@ pub mod tracking;
 pub mod neuro_bridge;
 pub mod motif_playback;
 pub mod narrative_runtime;
+pub mod metacognition_runtime;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -86,3 +87,4 @@ pub use tracking::{PoseTracker, PoseTrackerConfig, TrackingResult};
 pub use neuro_bridge::{NeuroStreamBridge, SubstreamOutput, SubstreamRuntime};
 pub use motif_playback::{MotifPlaybackQueue, MotifPlaybackReport, MotifPlaybackTask, MotifReplay, MotifReplayFrame, build_motif_replays};
 pub use narrative_runtime::{NarrativeEntitySummary, NarrativeReport, NarrativeRuntime, NarrativeStep, NarrativeZoomSummary};
+pub use metacognition_runtime::{EmpathyNote, MetacognitionEntity, MetacognitionExperiment, MetacognitionReport, MetacognitionRuntime};

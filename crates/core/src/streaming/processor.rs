@@ -23,6 +23,7 @@ use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
 use crate::streaming::neuro_bridge::{NeuroStreamBridge, SubstreamRuntime};
 use crate::streaming::motif_playback::{MotifPlaybackQueue, MotifReplay, build_motif_replays};
 use crate::streaming::narrative_runtime::NarrativeRuntime;
+use crate::streaming::metacognition_runtime::MetacognitionRuntime;
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -553,6 +554,7 @@ pub struct StreamingInference {
     dimensions: DimensionTracker,
     labels: LabelQueue,
     motif_playback: MotifPlaybackQueue,
+    metacognition: MetacognitionRuntime,
     narrative: NarrativeRuntime,
     health_overlay: HealthOverlayRuntime,
     survival: SurvivalRuntime,
@@ -591,6 +593,7 @@ impl StreamingInference {
         let dimensions = DimensionTracker::default();
         let labels = LabelQueue::default();
         let motif_playback = MotifPlaybackQueue::default();
+        let metacognition = MetacognitionRuntime::new(run_config.streaming.metacognition.clone());
         let narrative = NarrativeRuntime::new(run_config.streaming.narrative.clone());
         let health_overlay = HealthOverlayRuntime::default();
         let survival = SurvivalRuntime::default();
@@ -623,6 +626,7 @@ impl StreamingInference {
             dimensions,
             labels,
             motif_playback,
+            metacognition,
             narrative,
             health_overlay,
             survival,
@@ -771,6 +775,13 @@ impl StreamingInference {
             self.branching
                 .update(&batch, report, causal_report.as_ref(), physiology_report.as_ref())
         });
+        let metacognition_report = self.metacognition.update(
+            &batch,
+            behavior_frame.as_ref(),
+            health_report.as_ref(),
+            survival_report.as_ref(),
+            temporal_report.as_ref(),
+        );
         let narrative_report = self.narrative.update(
             batch.timestamp,
             behavior_frame.as_ref(),
@@ -779,6 +790,7 @@ impl StreamingInference {
             temporal_report.as_ref(),
             causal_report.as_ref(),
             branching_report.as_ref(),
+            metacognition_report.as_ref(),
         );
         let spike_messages = self.spike_runtime.as_mut().and_then(|runtime| {
             runtime.route_batch(
@@ -915,6 +927,16 @@ impl StreamingInference {
             );
             snapshot.metadata.insert(
                 "health_overlay".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &metacognition_report {
+            report_metadata.insert(
+                "metacognition_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "metacognition_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }

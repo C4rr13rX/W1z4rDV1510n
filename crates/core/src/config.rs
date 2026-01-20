@@ -551,6 +551,42 @@ impl RunConfig {
                     "streaming.narrative.long_window_secs must be >= short_window_secs"
                 );
             }
+            if self.streaming.metacognition.enabled {
+                anyhow::ensure!(
+                    self.streaming.metacognition.max_pending > 0,
+                    "streaming.metacognition.max_pending must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.max_history > 0,
+                    "streaming.metacognition.max_history must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.max_new_hypotheses > 0,
+                    "streaming.metacognition.max_new_hypotheses must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.prediction_window_secs > 0,
+                    "streaming.metacognition.prediction_window_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.max_reflection_depth > 0,
+                    "streaming.metacognition.max_reflection_depth must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.metacognition.accuracy_target),
+                    "streaming.metacognition.accuracy_target must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.metacognition.min_event_intensity >= 0.0,
+                    "streaming.metacognition.min_event_intensity must be >= 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(
+                        &self.streaming.metacognition.substream_stability_threshold
+                    ),
+                    "streaming.metacognition.substream_stability_threshold must be in [0,1]"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -1155,6 +1191,8 @@ pub struct StreamingConfig {
     pub network_fabric: NetworkFabricConfig,
     #[serde(default)]
     pub narrative: NarrativeConfig,
+    #[serde(default)]
+    pub metacognition: MetacognitionConfig,
 }
 
 impl Default for StreamingConfig {
@@ -1178,6 +1216,7 @@ impl Default for StreamingConfig {
             analysis: StreamingAnalysisConfig::default(),
             network_fabric: NetworkFabricConfig::default(),
             narrative: NarrativeConfig::default(),
+            metacognition: MetacognitionConfig::default(),
         }
     }
 }
@@ -1204,6 +1243,38 @@ impl Default for NarrativeConfig {
             recent_window_secs: 300,
             short_window_secs: 1800,
             long_window_secs: 10800,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetacognitionConfig {
+    pub enabled: bool,
+    pub max_pending: usize,
+    pub max_history: usize,
+    pub max_new_hypotheses: usize,
+    pub prediction_window_secs: i64,
+    pub max_reflection_depth: usize,
+    pub accuracy_target: f64,
+    pub min_event_intensity: f64,
+    pub substream_stability_threshold: f64,
+    pub novelty_depth_boost: usize,
+}
+
+impl Default for MetacognitionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_pending: 256,
+            max_history: 512,
+            max_new_hypotheses: 4,
+            prediction_window_secs: 120,
+            max_reflection_depth: 6,
+            accuracy_target: 0.7,
+            min_event_intensity: 0.1,
+            substream_stability_threshold: 0.6,
+            novelty_depth_boost: 1,
         }
     }
 }
