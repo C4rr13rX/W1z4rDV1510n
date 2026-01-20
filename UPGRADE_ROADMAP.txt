@@ -25,7 +25,7 @@ Tracking: use this list in order; mark items as done when completed.
     - 3D replay capsules for motif review.
     - Queue and reward workflow for human validation.
 
-[ ] 6) Network merge fidelity
+[x] 6) Network merge fidelity
     - Versioned motif lineage + provenance.
     - CRDT-style conflict handling and peer-weighted merges.
 

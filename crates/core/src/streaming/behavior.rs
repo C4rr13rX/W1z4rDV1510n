@@ -1,4 +1,5 @@
 
+use crate::network::compute_payload_hash;
 use crate::schema::Timestamp;
 use crate::streaming::motor::{MotorConfig, MotorFeatureExtractor, PoseFrame};
 use crate::streaming::spatial::{insert_spatial_attrs, SpatialEstimate, SpatialEstimator};
@@ -6,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
+
+const MAX_SEEN_REVISIONS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SpeciesKind {
@@ -488,6 +491,55 @@ pub struct GraphSignature {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotifLineage {
+    pub lineage_id: String,
+    pub version: u64,
+    pub updated_at: Timestamp,
+    #[serde(default)]
+    pub parent_ids: Vec<String>,
+    #[serde(default)]
+    pub origin_nodes: Vec<String>,
+}
+
+impl Default for MotifLineage {
+    fn default() -> Self {
+        Self {
+            lineage_id: String::new(),
+            version: 0,
+            updated_at: Timestamp::default(),
+            parent_ids: Vec::new(),
+            origin_nodes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotifProvenance {
+    #[serde(default)]
+    pub source_node_id: Option<String>,
+    #[serde(default)]
+    pub source_timestamp: Timestamp,
+    #[serde(default)]
+    pub peer_weight: f64,
+    #[serde(default)]
+    pub merge_weight: f64,
+    #[serde(default)]
+    pub evidence: HashMap<String, Value>,
+}
+
+impl Default for MotifProvenance {
+    fn default() -> Self {
+        Self {
+            source_node_id: None,
+            source_timestamp: Timestamp::default(),
+            peer_weight: 1.0,
+            merge_weight: 1.0,
+            evidence: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorMotif {
     pub id: String,
     pub entity_id: String,
@@ -497,6 +549,10 @@ pub struct BehaviorMotif {
     pub prototype: Vec<Vec<f64>>,
     pub time_frequency: TimeFrequencySummary,
     pub graph_signature: GraphSignature,
+    #[serde(default)]
+    pub lineage: MotifLineage,
+    #[serde(default)]
+    pub provenance: MotifProvenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,6 +584,54 @@ pub struct BehaviorFrame {
     pub motifs: Vec<BehaviorMotif>,
     pub prediction: Option<BehaviorPrediction>,
     pub backpressure: BackpressureStatus,
+}
+
+impl BehaviorMotif {
+    pub fn ensure_lineage(&mut self, timestamp: Timestamp) {
+        if self.lineage.lineage_id.trim().is_empty() {
+            self.lineage.lineage_id = motif_lineage_id(
+                &self.prototype,
+                &self.time_frequency,
+                &self.graph_signature,
+                self.duration_secs,
+            );
+        }
+        if self.lineage.version == 0 {
+            self.lineage.version = 1;
+        }
+        if self.lineage.updated_at.unix == 0 {
+            self.lineage.updated_at = timestamp;
+        }
+        if self.provenance.peer_weight <= 0.0 {
+            self.provenance.peer_weight = 1.0;
+        }
+        if self.provenance.merge_weight <= 0.0 {
+            self.provenance.merge_weight = self.support.max(1) as f64;
+        }
+    }
+
+    pub fn apply_share_provenance(
+        &mut self,
+        node_id: &str,
+        timestamp: Timestamp,
+        peer_weight: f64,
+    ) {
+        self.ensure_lineage(timestamp);
+        if self.provenance.source_node_id.is_none() && !node_id.trim().is_empty() {
+            self.provenance.source_node_id = Some(node_id.to_string());
+        }
+        if self.provenance.source_timestamp.unix == 0 {
+            self.provenance.source_timestamp = timestamp;
+        }
+        if peer_weight.is_finite() && peer_weight > 0.0 {
+            self.provenance.peer_weight = peer_weight;
+        }
+        if !node_id.trim().is_empty()
+            && !self.lineage.origin_nodes.iter().any(|id| id == node_id)
+        {
+            self.lineage.origin_nodes.push(node_id.to_string());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -833,6 +937,7 @@ struct MotifExtractor {
     motifs: Vec<BehaviorMotif>,
     transitions: HashMap<(String, String), usize>,
     last_motif: HashMap<String, String>,
+    seen_revisions: HashMap<String, VecDeque<String>>,
 }
 
 impl MotifExtractor {
@@ -842,6 +947,7 @@ impl MotifExtractor {
             motifs: Vec::new(),
             transitions: HashMap::new(),
             last_motif: HashMap::new(),
+            seen_revisions: HashMap::new(),
         }
     }
 
@@ -910,6 +1016,7 @@ impl MotifExtractor {
         segment: &Segment,
         graph: &BehaviorGraph,
     ) -> BehaviorMotif {
+        let timestamp = graph.timestamp;
         let signature = graph_signature(entity_id, graph);
         let features = time_frequency_summary(
             &segment.signal,
@@ -934,18 +1041,41 @@ impl MotifExtractor {
 
         let mut motif = if let Some(idx) = best_idx {
             if best_score <= self.config.dtw_threshold {
-                let existing = &mut self.motifs[idx];
-                existing.support += 1;
-                existing.description_length =
-                    0.9 * existing.description_length + 0.1 * description_length;
-                existing.time_frequency = blend_time_frequency(&existing.time_frequency, &features);
-                existing.graph_signature = blend_graph_signature(&existing.graph_signature, &signature);
-                existing.clone()
+                let (clone, lineage_id, revision_id) = {
+                    let existing = &mut self.motifs[idx];
+                    existing.support += 1;
+                    existing.description_length =
+                        0.9 * existing.description_length + 0.1 * description_length;
+                    existing.time_frequency =
+                        blend_time_frequency(&existing.time_frequency, &features);
+                    existing.graph_signature =
+                        blend_graph_signature(&existing.graph_signature, &signature);
+                    touch_local_update(existing, timestamp);
+                    let lineage_id = existing.lineage.lineage_id.clone();
+                    let revision_id = motif_revision_id(existing);
+                    (existing.clone(), lineage_id, revision_id)
+                };
+                self.record_revision_id(&lineage_id, revision_id);
+                clone
             } else {
-                self.create_motif(entity_id, segment, features, signature, description_length)
+                self.create_motif(
+                    entity_id,
+                    segment,
+                    features,
+                    signature,
+                    description_length,
+                    timestamp,
+                )
             }
         } else {
-            self.create_motif(entity_id, segment, features, signature, description_length)
+            self.create_motif(
+                entity_id,
+                segment,
+                features,
+                signature,
+                description_length,
+                timestamp,
+            )
         };
 
         self.prune_motifs();
@@ -960,7 +1090,14 @@ impl MotifExtractor {
         features: TimeFrequencySummary,
         signature: GraphSignature,
         description_length: f64,
+        timestamp: Timestamp,
     ) -> BehaviorMotif {
+        let lineage_id = motif_lineage_id(
+            &segment.sequence,
+            &features,
+            &signature,
+            segment.duration_secs,
+        );
         let motif = BehaviorMotif {
             id: format!("motif-{}", self.motifs.len() + 1),
             entity_id: entity_id.to_string(),
@@ -970,8 +1107,23 @@ impl MotifExtractor {
             prototype: segment.sequence.clone(),
             time_frequency: features,
             graph_signature: signature,
+            lineage: MotifLineage {
+                lineage_id,
+                version: 1,
+                updated_at: timestamp,
+                parent_ids: Vec::new(),
+                origin_nodes: Vec::new(),
+            },
+            provenance: MotifProvenance {
+                source_node_id: None,
+                source_timestamp: timestamp,
+                peer_weight: 1.0,
+                merge_weight: 1.0,
+                evidence: HashMap::new(),
+            },
         };
         self.motifs.push(motif.clone());
+        self.record_revision(&motif);
         motif
     }
 
@@ -1045,9 +1197,50 @@ impl MotifExtractor {
         }
     }
 
+    fn record_revision(&mut self, motif: &BehaviorMotif) -> bool {
+        let lineage_id = motif.lineage.lineage_id.trim();
+        if lineage_id.is_empty() {
+            return true;
+        }
+        let revision_id = motif_revision_id(motif);
+        self.record_revision_id(lineage_id, revision_id)
+    }
+
+    fn record_revision_id(&mut self, lineage_id: &str, revision_id: String) -> bool {
+        if lineage_id.trim().is_empty() {
+            return true;
+        }
+        let entry = self
+            .seen_revisions
+            .entry(lineage_id.to_string())
+            .or_insert_with(VecDeque::new);
+        if entry.iter().any(|id| id == &revision_id) {
+            return false;
+        }
+        entry.push_back(revision_id);
+        while entry.len() > MAX_SEEN_REVISIONS {
+            entry.pop_front();
+        }
+        true
+    }
+
     fn merge_shared(&mut self, incoming: &[BehaviorMotif]) {
         for motif in incoming {
             if motif.prototype.is_empty() {
+                continue;
+            }
+            let mut incoming = motif.clone();
+            incoming.ensure_lineage(incoming.provenance.source_timestamp);
+            if !self.record_revision(&incoming) {
+                continue;
+            }
+            if let Some(idx) = self
+                .motifs
+                .iter()
+                .position(|existing| !existing.lineage.lineage_id.is_empty()
+                    && existing.lineage.lineage_id == incoming.lineage.lineage_id)
+            {
+                merge_motif(&mut self.motifs[idx], &incoming);
                 continue;
             }
             let mut best_idx = None;
@@ -1056,8 +1249,9 @@ impl MotifExtractor {
                 if existing.prototype.is_empty() {
                     continue;
                 }
-                let dtw = soft_dtw_distance(&motif.prototype, &existing.prototype, 0.5);
-                let graph_score = graph_distance(&motif.graph_signature, &existing.graph_signature);
+                let dtw = soft_dtw_distance(&incoming.prototype, &existing.prototype, 0.5);
+                let graph_score =
+                    graph_distance(&incoming.graph_signature, &existing.graph_signature);
                 let score = dtw + graph_score;
                 if score < best_score {
                     best_score = score;
@@ -1066,25 +1260,11 @@ impl MotifExtractor {
             }
             if let Some(idx) = best_idx {
                 if best_score <= self.config.dtw_threshold {
-                    let existing = &mut self.motifs[idx];
-                    let support = motif.support.max(1);
-                    existing.support = existing.support.saturating_add(support);
-                    existing.description_length =
-                        0.7 * existing.description_length + 0.3 * motif.description_length;
-                    existing.time_frequency =
-                        blend_time_frequency(&existing.time_frequency, &motif.time_frequency);
-                    existing.graph_signature =
-                        blend_graph_signature(&existing.graph_signature, &motif.graph_signature);
-                    if let Some(blended) = blend_prototype(&existing.prototype, &motif.prototype, 0.8)
-                    {
-                        existing.prototype = blended;
-                    } else if motif.support > existing.support {
-                        existing.prototype = motif.prototype.clone();
-                    }
+                    merge_motif(&mut self.motifs[idx], &incoming);
                     continue;
                 }
             }
-            self.motifs.push(motif.clone());
+            self.motifs.push(incoming);
         }
         self.prune_motifs();
     }
@@ -1266,6 +1446,28 @@ fn blend_time_frequency(a: &TimeFrequencySummary, b: &TimeFrequencySummary) -> T
     }
 }
 
+fn blend_time_frequency_weighted(
+    a: &TimeFrequencySummary,
+    b: &TimeFrequencySummary,
+    alpha: f64,
+) -> TimeFrequencySummary {
+    let len = a.amplitudes.len().min(b.amplitudes.len()).max(1);
+    let mut amps = Vec::with_capacity(len);
+    let mut phases = Vec::with_capacity(len);
+    let alpha = alpha.clamp(0.0, 1.0);
+    let beta = 1.0 - alpha;
+    for idx in 0..len {
+        let amp = alpha * a.amplitudes[idx] + beta * b.amplitudes[idx];
+        let phase = alpha * a.phases[idx] + beta * b.phases[idx];
+        amps.push(amp);
+        phases.push(phase);
+    }
+    TimeFrequencySummary {
+        amplitudes: amps,
+        phases,
+    }
+}
+
 fn graph_signature(entity_id: &str, graph: &BehaviorGraph) -> GraphSignature {
     let mut prox_sum = 0.0;
     let mut coh_sum = 0.0;
@@ -1299,8 +1501,181 @@ fn blend_graph_signature(a: &GraphSignature, b: &GraphSignature) -> GraphSignatu
     }
 }
 
+fn blend_graph_signature_weighted(a: &GraphSignature, b: &GraphSignature, alpha: f64) -> GraphSignature {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let beta = 1.0 - alpha;
+    GraphSignature {
+        mean_proximity: alpha * a.mean_proximity + beta * b.mean_proximity,
+        mean_coherence: alpha * a.mean_coherence + beta * b.mean_coherence,
+    }
+}
+
 fn graph_distance(a: &GraphSignature, b: &GraphSignature) -> f64 {
     (a.mean_proximity - b.mean_proximity).abs() + (a.mean_coherence - b.mean_coherence).abs()
+}
+
+fn prototype_stats(prototype: &[Vec<f64>]) -> (f64, f64, f64, f64, usize, usize) {
+    let mut sum = 0.0;
+    let mut sum_sq = 0.0;
+    let mut count = 0.0;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut dim = 0usize;
+    for row in prototype {
+        dim = dim.max(row.len());
+        for value in row {
+            if !value.is_finite() {
+                continue;
+            }
+            sum += value;
+            sum_sq += value * value;
+            count += 1.0;
+            if *value < min {
+                min = *value;
+            }
+            if *value > max {
+                max = *value;
+            }
+        }
+    }
+    if count <= 0.0 {
+        return (0.0, 0.0, 0.0, 0.0, prototype.len(), dim);
+    }
+    let mean = sum / count;
+    let var = (sum_sq / count) - mean * mean;
+    let min = if min.is_finite() { min } else { 0.0 };
+    let max = if max.is_finite() { max } else { 0.0 };
+    (mean, var.max(0.0), min, max, prototype.len(), dim)
+}
+
+fn motif_lineage_id(
+    prototype: &[Vec<f64>],
+    time_frequency: &TimeFrequencySummary,
+    graph_signature: &GraphSignature,
+    duration_secs: f64,
+) -> String {
+    let (proto_mean, proto_var, proto_min, proto_max, proto_len, proto_dim) =
+        prototype_stats(prototype);
+    let amp_mean = mean(&time_frequency.amplitudes);
+    let amp_var = variance(&time_frequency.amplitudes, amp_mean);
+    let phase_mean = mean(&time_frequency.phases);
+    let phase_var = variance(&time_frequency.phases, phase_mean);
+    let payload = format!(
+        "motif|{proto_len}|{proto_dim}|{proto_mean:.4}|{proto_var:.4}|{proto_min:.4}|{proto_max:.4}|{amp_mean:.4}|{amp_var:.4}|{phase_mean:.4}|{phase_var:.4}|{:.4}|{:.4}|{duration_secs:.3}",
+        graph_signature.mean_proximity,
+        graph_signature.mean_coherence
+    );
+    format!("lineage-{}", compute_payload_hash(payload.as_bytes()))
+}
+
+fn motif_revision_id(motif: &BehaviorMotif) -> String {
+    let payload = format!(
+        "rev|{}|{}|{}|{}",
+        motif.lineage.lineage_id,
+        motif.lineage.version,
+        motif.lineage.updated_at.unix,
+        motif.provenance
+            .source_node_id
+            .as_deref()
+            .unwrap_or("")
+    );
+    compute_payload_hash(payload.as_bytes())
+}
+
+fn motif_merge_weight(motif: &BehaviorMotif) -> f64 {
+    let base = motif
+        .provenance
+        .merge_weight
+        .max(motif.support.max(1) as f64)
+        .max(1.0);
+    let peer = if motif.provenance.peer_weight.is_finite() {
+        motif.provenance.peer_weight
+    } else {
+        1.0
+    };
+    (base * peer.clamp(0.1, 2.0)).clamp(0.1, 1.0e6)
+}
+
+fn touch_local_update(motif: &mut BehaviorMotif, timestamp: Timestamp) {
+    motif.ensure_lineage(timestamp);
+    motif.lineage.version = motif.lineage.version.saturating_add(1);
+    motif.lineage.updated_at = timestamp;
+    motif.provenance.merge_weight = motif.support.max(1) as f64;
+    if motif.provenance.source_timestamp.unix == 0 {
+        motif.provenance.source_timestamp = timestamp;
+    }
+}
+
+fn merge_motif(existing: &mut BehaviorMotif, incoming: &BehaviorMotif) {
+    let existing_weight = motif_merge_weight(existing);
+    let incoming_weight = motif_merge_weight(incoming);
+    let total = existing_weight + incoming_weight;
+    let alpha = if total > 0.0 {
+        (existing_weight / total).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    existing.support = existing.support.saturating_add(incoming.support.max(1));
+    existing.duration_secs =
+        alpha * existing.duration_secs + (1.0 - alpha) * incoming.duration_secs;
+    existing.description_length =
+        alpha * existing.description_length + (1.0 - alpha) * incoming.description_length;
+    existing.time_frequency = blend_time_frequency_weighted(
+        &existing.time_frequency,
+        &incoming.time_frequency,
+        alpha,
+    );
+    existing.graph_signature = blend_graph_signature_weighted(
+        &existing.graph_signature,
+        &incoming.graph_signature,
+        alpha,
+    );
+    if let Some(blended) = blend_prototype(&existing.prototype, &incoming.prototype, alpha) {
+        existing.prototype = blended;
+    } else if incoming.support > existing.support {
+        existing.prototype = incoming.prototype.clone();
+    }
+    existing.provenance.merge_weight = total.max(existing.provenance.merge_weight);
+    existing.provenance.peer_weight =
+        existing.provenance.peer_weight.max(incoming.provenance.peer_weight);
+    if existing.provenance.source_node_id.is_none() {
+        existing.provenance.source_node_id = incoming.provenance.source_node_id.clone();
+    }
+    if existing.provenance.source_timestamp.unix == 0 {
+        existing.provenance.source_timestamp = incoming.provenance.source_timestamp;
+    }
+    if existing.lineage.lineage_id.is_empty() && !incoming.lineage.lineage_id.is_empty() {
+        existing.lineage.lineage_id = incoming.lineage.lineage_id.clone();
+    }
+    if !incoming.lineage.lineage_id.is_empty()
+        && existing.lineage.lineage_id != incoming.lineage.lineage_id
+        && !existing
+            .lineage
+            .parent_ids
+            .iter()
+            .any(|id| id == &incoming.lineage.lineage_id)
+    {
+        existing
+            .lineage
+            .parent_ids
+            .push(incoming.lineage.lineage_id.clone());
+    }
+    for parent in &incoming.lineage.parent_ids {
+        if !existing.lineage.parent_ids.iter().any(|id| id == parent) {
+            existing.lineage.parent_ids.push(parent.clone());
+        }
+    }
+    for node in &incoming.lineage.origin_nodes {
+        if !existing.lineage.origin_nodes.iter().any(|id| id == node) {
+            existing.lineage.origin_nodes.push(node.clone());
+        }
+    }
+    existing.lineage.version = existing.lineage.version.max(incoming.lineage.version);
+    if existing.lineage.updated_at.unix == 0
+        || incoming.lineage.updated_at.unix > existing.lineage.updated_at.unix
+    {
+        existing.lineage.updated_at = incoming.lineage.updated_at;
+    }
 }
 
 fn blend_prototype(a: &[Vec<f64>], b: &[Vec<f64>], alpha: f64) -> Option<Vec<Vec<f64>>> {
@@ -1389,6 +1764,18 @@ fn mean(values: &[f64]) -> f64 {
         return 0.0;
     }
     values.iter().sum::<f64>() / values.len() as f64
+}
+
+fn variance(values: &[f64], mean: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for value in values {
+        let diff = value - mean;
+        sum += diff * diff;
+    }
+    sum / values.len() as f64
 }
 
 fn sensor_prefix(kind: SensorKind) -> &'static str {
@@ -1604,6 +1991,8 @@ mod tests {
                 mean_proximity: 0.2,
                 mean_coherence: 0.4,
             },
+            lineage: MotifLineage::default(),
+            provenance: MotifProvenance::default(),
         };
         substrate.ingest_shared_motifs(&[motif]);
         assert!(substrate.motif_count() >= 1);

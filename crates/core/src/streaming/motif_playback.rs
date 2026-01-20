@@ -349,6 +349,8 @@ mod tests {
                 mean_coherence: 0.5,
                 mean_proximity: 0.5,
             },
+            lineage: crate::streaming::behavior::MotifLineage::default(),
+            provenance: crate::streaming::behavior::MotifProvenance::default(),
         };
         let frame = BehaviorFrame {
             timestamp: Timestamp { unix: 10 },

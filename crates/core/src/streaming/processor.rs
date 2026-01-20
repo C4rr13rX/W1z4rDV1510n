@@ -651,7 +651,13 @@ impl StreamingInference {
         &mut self,
         share: NeuralFabricShare,
     ) -> anyhow::Result<Option<RunOutcome>> {
-        let share = share;
+        let mut share = share;
+        if !share.motifs.is_empty() {
+            let weight = peer_weight_from_metadata(&share.metadata);
+            for motif in &mut share.motifs {
+                motif.apply_share_provenance(&share.node_id, share.timestamp, weight);
+            }
+        }
         if !share.network_patterns.is_empty() {
             self.network_fabric
                 .ingest_shared_patterns(&share.network_patterns);
@@ -683,6 +689,13 @@ impl StreamingInference {
         share.network_patterns = std::mem::take(&mut self.last_network_patterns);
         if !self.last_report_metadata.is_empty() {
             share.metadata = std::mem::take(&mut self.last_report_metadata);
+        }
+        if !share.motifs.is_empty() {
+            let weight = peer_weight_from_metadata(&share.metadata);
+            let node_id = share.node_id.clone();
+            for motif in &mut share.motifs {
+                motif.apply_share_provenance(&node_id, share.timestamp, weight);
+            }
         }
         Some(share)
     }
@@ -1033,6 +1046,34 @@ fn motif_confidence(motif: &BehaviorMotif) -> f64 {
     let support_factor = support / (support + 3.0);
     let coherence = motif.graph_signature.mean_coherence.clamp(0.0, 1.0);
     (0.6 * support_factor + 0.4 * coherence).clamp(0.05, 1.0)
+}
+
+fn peer_weight_from_metadata(metadata: &HashMap<String, Value>) -> f64 {
+    let weight = metadata
+        .get("peer_weight")
+        .and_then(|val| val.as_f64())
+        .or_else(|| metadata.get("peer_score").and_then(|val| val.as_f64()))
+        .or_else(|| {
+            metadata
+                .get("analysis_report")
+                .and_then(|val| val.get("token_confidence"))
+                .and_then(|val| val.get("mean"))
+                .and_then(|val| val.as_f64())
+        })
+        .or_else(|| {
+            metadata
+                .get("quality_report")
+                .and_then(|val| val.get("overall_quality"))
+                .and_then(|val| val.as_f64())
+        })
+        .or_else(|| {
+            metadata
+                .get("plasticity_report")
+                .and_then(|val| val.get("calibration_score"))
+                .and_then(|val| val.as_f64())
+        })
+        .unwrap_or(1.0);
+    weight.clamp(0.1, 2.0)
 }
 
 fn neuro_feedback_confidence(snapshot: &NeuroSnapshot) -> f64 {
