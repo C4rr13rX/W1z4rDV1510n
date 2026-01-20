@@ -725,6 +725,17 @@ impl BehaviorSubstrate {
             .transition_snapshot(self.config.transition_max_count)
     }
 
+    pub fn history_for(&self, entity_id: &str, max_len: usize) -> Vec<BehaviorState> {
+        let Some(history) = self.history.get(entity_id) else {
+            return Vec::new();
+        };
+        if max_len == 0 {
+            return Vec::new();
+        }
+        let skip = history.len().saturating_sub(max_len);
+        history.iter().skip(skip).cloned().collect()
+    }
+
     pub fn motif_count(&self) -> usize {
         self.motifs.motif_count()
     }

@@ -32,6 +32,7 @@ pub mod knowledge;
 pub mod knowledge_ingest;
 pub mod tracking;
 pub mod neuro_bridge;
+pub mod motif_playback;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -82,3 +83,4 @@ pub use network_fabric::{NetworkMatch, NetworkPatternReport, NetworkPatternRunti
 pub use spatial::{SpatialConfig, SpatialEstimate, SpatialEstimator, insert_spatial_attrs};
 pub use tracking::{PoseTracker, PoseTrackerConfig, TrackingResult};
 pub use neuro_bridge::{NeuroStreamBridge, SubstreamOutput, SubstreamRuntime};
+pub use motif_playback::{MotifPlaybackQueue, MotifPlaybackReport, MotifPlaybackTask, MotifReplay, MotifReplayFrame, build_motif_replays};

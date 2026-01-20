@@ -10,12 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use w1z4rdv1510n::blockchain::{
-    BlockchainLedger, BridgeIntent, CrossChainTransfer, EnergyEfficiencySample, NodeRegistration,
-    RewardBalance, RewardEvent, RewardEventKind, SensorCommitment, StakeDeposit, WorkKind,
-    WorkProof, ValidatorHeartbeat, ValidatorRecord, ValidatorSlashEvent, ValidatorSlashReason,
-    ValidatorStatus, bridge_intent_id, bridge_intent_payload, cross_chain_transfer_payload,
-    node_registration_payload, sensor_commitment_payload, stake_deposit_payload,
-    validator_heartbeat_payload, validator_slash_payload, work_proof_payload,
+    BlockchainLedger, BridgeIntent, CrossChainTransfer, EnergyEfficiencySample, IdentityBinding,
+    NodeRegistration, RewardBalance, RewardEvent, RewardEventKind, SensorCommitment, StakeDeposit,
+    WorkKind, WorkProof, ValidatorHeartbeat, ValidatorRecord, ValidatorSlashEvent,
+    ValidatorSlashReason, ValidatorStatus, bridge_intent_id, bridge_intent_payload,
+    cross_chain_transfer_payload, identity_binding_payload, node_registration_payload,
+    sensor_commitment_payload, stake_deposit_payload, validator_heartbeat_payload,
+    validator_slash_payload, work_proof_payload,
 };
 use w1z4rdv1510n::bridge::BridgeProof;
 use w1z4rdv1510n::config::{BridgeConfig, FeeMarketConfig, ValidatorPolicyConfig};
@@ -42,6 +43,14 @@ struct LocalLedgerState {
     bridge_intents: Vec<BridgeIntent>,
     bridge_intent_ids: VecDeque<String>,
     bridge_intent_id_set: HashSet<String>,
+    #[serde(default)]
+    identity_bindings: HashMap<String, IdentityBinding>,
+    #[serde(default)]
+    identity_binding_history: Vec<IdentityBinding>,
+    #[serde(default)]
+    identity_binding_ids: VecDeque<String>,
+    #[serde(default)]
+    identity_binding_id_set: HashSet<String>,
     stake_deposits: Vec<StakeDeposit>,
     stake_deposit_ids: VecDeque<String>,
     stake_deposit_id_set: HashSet<String>,
@@ -486,6 +495,59 @@ impl BlockchainLedger for LocalLedger {
         Ok(())
     }
 
+    fn submit_identity_binding(&self, binding: IdentityBinding) -> Result<()> {
+        if binding.thread_id.trim().is_empty() {
+            anyhow::bail!("identity binding thread_id must be non-empty");
+        }
+        if binding.wallet_public_key.trim().is_empty() {
+            anyhow::bail!("identity binding wallet_public_key must be non-empty");
+        }
+        if binding.wallet_address.trim().is_empty() {
+            anyhow::bail!("identity binding wallet_address must be non-empty");
+        }
+        if binding.challenge_id.trim().is_empty() {
+            anyhow::bail!("identity binding challenge_id must be non-empty");
+        }
+        if binding.evidence_hash.trim().is_empty() {
+            anyhow::bail!("identity binding evidence_hash must be non-empty");
+        }
+        let derived_address = address_from_public_key_hex(&binding.wallet_public_key)?;
+        if derived_address != binding.wallet_address {
+            anyhow::bail!("identity binding wallet address does not match public key");
+        }
+        let payload = identity_binding_payload(&binding);
+        verify_signature(
+            &binding.wallet_public_key,
+            payload.as_bytes(),
+            &binding.signature,
+        )?;
+        let binding_id = payload_id(payload.as_bytes());
+        let mut state = self.state.lock().expect("local ledger mutex poisoned");
+        if state.identity_binding_id_set.contains(&binding_id) {
+            anyhow::bail!("duplicate identity binding");
+        }
+        state.identity_bindings.insert(binding.thread_id.clone(), binding.clone());
+        state.identity_binding_history.push(binding);
+        trim_events(&mut state.identity_binding_history);
+        state.identity_binding_ids.push_back(binding_id.clone());
+        state.identity_binding_id_set.insert(binding_id.clone());
+        record_audit(&mut state, "IDENTITY_BINDING", binding_id, now());
+        self.persist(&state)?;
+        Ok(())
+    }
+
+    fn identity_binding(&self, thread_id: &str) -> Result<IdentityBinding> {
+        if thread_id.trim().is_empty() {
+            anyhow::bail!("thread_id must be non-empty");
+        }
+        let state = self.state.lock().expect("local ledger mutex poisoned");
+        state
+            .identity_bindings
+            .get(thread_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("identity binding not found"))
+    }
+
     fn submit_validator_heartbeat(&self, heartbeat: ValidatorHeartbeat) -> Result<()> {
         if heartbeat.node_id.trim().is_empty() {
             anyhow::bail!("validator heartbeat node id must be non-empty");
@@ -646,6 +708,7 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
     trim_events(&mut state.sensor_commitments);
     trim_events(&mut state.cross_chain_transfers);
     trim_events(&mut state.bridge_intents);
+    trim_events(&mut state.identity_binding_history);
     trim_events(&mut state.reward_events);
     trim_events(&mut state.energy_samples);
     trim_events(&mut state.stake_deposits);
@@ -694,6 +757,16 @@ fn rebuild_indices(state: &mut LocalLedgerState) {
         }
         if state.bridge_intent_id_set.insert(id.clone()) {
             state.bridge_intent_ids.push_back(id);
+        }
+    }
+
+    state.identity_binding_ids.clear();
+    state.identity_binding_id_set.clear();
+    for binding in &state.identity_binding_history {
+        let payload = identity_binding_payload(binding);
+        let id = payload_id(payload.as_bytes());
+        if state.identity_binding_id_set.insert(id.clone()) {
+            state.identity_binding_ids.push_back(id);
         }
     }
 

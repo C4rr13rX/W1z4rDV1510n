@@ -128,6 +128,16 @@
       "reward_per_candidate": 0.1
     }
   },
+  "identity": {
+    "enabled": false,
+    "challenge_ttl_secs": 180,
+    "position_tolerance": 0.5,
+    "behavior_similarity_threshold": 0.6,
+    "min_match_score": 0.6,
+    "code_length": 8,
+    "max_pending_challenges": 256,
+    "max_cached_patterns": 4096
+  },
   "blockchain": {
     "enabled": true,
     "chain_id": "w1z4rdv1510n-l1",

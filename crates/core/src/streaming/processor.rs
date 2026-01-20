@@ -21,6 +21,7 @@ use crate::streaming::ontology_runtime::OntologyRuntime;
 use crate::streaming::physiology_runtime::PhysiologyRuntime;
 use crate::streaming::plasticity_runtime::StreamingPlasticityRuntime;
 use crate::streaming::neuro_bridge::{NeuroStreamBridge, SubstreamRuntime};
+use crate::streaming::motif_playback::{MotifPlaybackQueue, MotifReplay, build_motif_replays};
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -71,6 +72,7 @@ pub struct StreamingProcessor {
     topic_extractor: TopicEventExtractor,
     last_behavior_motifs: Vec<BehaviorMotif>,
     last_behavior_frame: Option<crate::streaming::behavior::BehaviorFrame>,
+    last_motif_replays: Vec<MotifReplay>,
 }
 
 impl StreamingProcessor {
@@ -85,6 +87,7 @@ impl StreamingProcessor {
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
             last_behavior_motifs: Vec::new(),
             last_behavior_frame: None,
+            last_motif_replays: Vec::new(),
         }
     }
 
@@ -122,6 +125,10 @@ impl StreamingProcessor {
 
     pub fn take_last_behavior_frame(&mut self) -> Option<crate::streaming::behavior::BehaviorFrame> {
         self.last_behavior_frame.take()
+    }
+
+    pub fn take_last_motif_replays(&mut self) -> Vec<MotifReplay> {
+        std::mem::take(&mut self.last_motif_replays)
     }
 
     pub fn ingest_fabric_share(&mut self, share: NeuralFabricShare) -> Option<TokenBatch> {
@@ -479,6 +486,13 @@ impl StreamingProcessor {
         let entity_id = input.entity_id.clone();
         let frame = self.behavior_substrate.ingest(input);
         self.last_behavior_frame = Some(frame.clone());
+        if !frame.motifs.is_empty() {
+            let history = self.behavior_substrate.history_for(&entity_id, 256);
+            let replays = build_motif_replays(&frame, &history, 96);
+            if !replays.is_empty() {
+                self.last_motif_replays.extend(replays);
+            }
+        }
         let motifs = frame.motifs;
         self.last_behavior_motifs
             .extend(motifs.iter().cloned());
@@ -537,6 +551,7 @@ pub struct StreamingInference {
     analysis: StreamingAnalysisRuntime,
     dimensions: DimensionTracker,
     labels: LabelQueue,
+    motif_playback: MotifPlaybackQueue,
     health_overlay: HealthOverlayRuntime,
     survival: SurvivalRuntime,
     knowledge: KnowledgeRuntime,
@@ -573,6 +588,7 @@ impl StreamingInference {
         let analysis = StreamingAnalysisRuntime::new(run_config.streaming.analysis.clone());
         let dimensions = DimensionTracker::default();
         let labels = LabelQueue::default();
+        let motif_playback = MotifPlaybackQueue::default();
         let health_overlay = HealthOverlayRuntime::default();
         let survival = SurvivalRuntime::default();
         let knowledge = KnowledgeRuntime::default();
@@ -603,6 +619,7 @@ impl StreamingInference {
             analysis,
             dimensions,
             labels,
+            motif_playback,
             health_overlay,
             survival,
             knowledge,
@@ -697,6 +714,7 @@ impl StreamingInference {
         self.last_batch = Some(batch.clone());
         self.last_motifs = self.processor.take_last_motifs();
         let behavior_frame = self.processor.take_last_behavior_frame();
+        let motif_replays = self.processor.take_last_motif_replays();
         self.last_report_metadata.clear();
         let quality_report = self
             .quality
@@ -706,6 +724,9 @@ impl StreamingInference {
             .physiology
             .update(&batch, Some(self.knowledge.store()));
         let label_report = self.labels.update(&batch, dimension_report.as_ref());
+        let motif_playback_report = self
+            .motif_playback
+            .update(&motif_replays, batch.timestamp);
         let network_report = self
             .network_fabric
             .update(&batch, behavior_frame.as_ref());
@@ -819,6 +840,16 @@ impl StreamingInference {
             );
             snapshot.metadata.insert(
                 "label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &motif_playback_report {
+            report_metadata.insert(
+                "motif_playback_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "motif_playback_queue".to_string(),
                 serde_json::to_value(report)?,
             );
         }

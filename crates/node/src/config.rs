@@ -21,6 +21,7 @@ pub struct NodeConfig {
     pub workload: WorkloadProfileConfig,
     pub peer_scoring: PeerScoringConfig,
     pub knowledge: KnowledgeConfig,
+    pub identity: IdentityConfig,
     pub blockchain: BlockchainConfig,
     pub compute: ComputeRoutingConfig,
     pub cluster: ClusterConfig,
@@ -44,6 +45,7 @@ impl Default for NodeConfig {
             workload: WorkloadProfileConfig::default(),
             peer_scoring: PeerScoringConfig::default(),
             knowledge: KnowledgeConfig::default(),
+            identity: IdentityConfig::default(),
             blockchain: BlockchainConfig::default(),
             compute: ComputeRoutingConfig::default(),
             cluster: ClusterConfig::default(),
@@ -400,6 +402,40 @@ impl NodeConfig {
                 "knowledge.queue.candidate_limit must be > 0"
             );
         }
+        if self.identity.enabled {
+            anyhow::ensure!(
+                self.identity.challenge_ttl_secs > 0,
+                "identity.challenge_ttl_secs must be > 0"
+            );
+            anyhow::ensure!(
+                self.identity.code_length > 0,
+                "identity.code_length must be > 0"
+            );
+            anyhow::ensure!(
+                self.identity.position_tolerance >= 0.0,
+                "identity.position_tolerance must be >= 0"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.identity.behavior_similarity_threshold),
+                "identity.behavior_similarity_threshold must be in [0,1]"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.identity.min_match_score),
+                "identity.min_match_score must be in [0,1]"
+            );
+            anyhow::ensure!(
+                self.identity.max_pending_challenges > 0,
+                "identity.max_pending_challenges must be > 0"
+            );
+            anyhow::ensure!(
+                self.identity.max_cached_patterns > 0,
+                "identity.max_cached_patterns must be > 0"
+            );
+            anyhow::ensure!(
+                self.ledger.enabled,
+                "identity verification requires ledger.enabled"
+            );
+        }
         Ok(())
     }
 }
@@ -732,6 +768,34 @@ impl Default for KnowledgeConfig {
             persist_state: false,
             state_path: default_knowledge_path(),
             queue: KnowledgeQueueConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdentityConfig {
+    pub enabled: bool,
+    pub challenge_ttl_secs: u64,
+    pub position_tolerance: f64,
+    pub behavior_similarity_threshold: f64,
+    pub min_match_score: f64,
+    pub code_length: usize,
+    pub max_pending_challenges: usize,
+    pub max_cached_patterns: usize,
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            challenge_ttl_secs: 180,
+            position_tolerance: 0.5,
+            behavior_similarity_threshold: 0.6,
+            min_match_score: 0.6,
+            code_length: 8,
+            max_pending_challenges: 256,
+            max_cached_patterns: 4096,
         }
     }
 }

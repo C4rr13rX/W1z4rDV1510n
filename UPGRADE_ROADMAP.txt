@@ -21,7 +21,7 @@ Tracking: use this list in order; mark items as done when completed.
     - Spawn minicolumns from stable phenotype signatures.
     - Sensory mismatch drives inhibition; release back to multineuron detail.
 
-[ ] 5) Motif playback + human labeling
+[x] 5) Motif playback + human labeling
     - 3D replay capsules for motif review.
     - Queue and reward workflow for human validation.
 

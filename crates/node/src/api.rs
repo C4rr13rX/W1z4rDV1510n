@@ -1,5 +1,9 @@
 use crate::config::{KnowledgeConfig, NodeConfig};
-use crate::data_mesh::{DataIngestRequest, DataMeshHandle, start_data_mesh};
+use crate::data_mesh::{DataIngestRequest, DataMeshEvent, DataMeshHandle, start_data_mesh};
+use crate::identity::{
+    IdentityChallengeRequest, IdentityChallengeResponse, IdentityRuntime, IdentityStatusResponse,
+    IdentityVerifyRequest, IdentityVerifyResponse,
+};
 use crate::ledger::LocalLedger;
 use crate::p2p::NodeNetwork;
 use crate::paths::node_data_dir;
@@ -11,6 +15,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::fs;
@@ -27,7 +32,7 @@ use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
     HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
-    KnowledgeQueueReport, KnowledgeRuntime, NlmJatsIngestor,
+    KnowledgeQueueReport, KnowledgeRuntime, NeuralFabricShare, NlmJatsIngestor,
 };
 
 #[derive(Clone)]
@@ -38,6 +43,7 @@ struct ApiState {
     sensor_ingest_enabled: bool,
     bridge_enabled: bool,
     knowledge_enabled: bool,
+    identity_enabled: bool,
     started_at: Instant,
     ledger: Arc<dyn BlockchainLedger>,
     bridge_config: BridgeConfig,
@@ -52,6 +58,8 @@ struct ApiState {
     metrics: Arc<ApiMetrics>,
     knowledge: Arc<Mutex<KnowledgeRuntime>>,
     knowledge_persist: KnowledgePersist,
+    identity: Arc<Mutex<IdentityRuntime>>,
+    fabric_share_kind: String,
 }
 
 #[derive(Clone)]
@@ -188,6 +196,8 @@ struct ApiMetricsSnapshot {
     knowledge_ingest_requests: u64,
     knowledge_queue_requests: u64,
     knowledge_vote_requests: u64,
+    identity_challenge_requests: u64,
+    identity_verify_requests: u64,
     bridge_success: u64,
     balance_success: u64,
     bridge_chain_success: u64,
@@ -197,6 +207,8 @@ struct ApiMetricsSnapshot {
     knowledge_ingest_success: u64,
     knowledge_queue_success: u64,
     knowledge_vote_success: u64,
+    identity_challenge_success: u64,
+    identity_verify_success: u64,
     rate_limit_hits: u64,
     auth_failures: u64,
 }
@@ -216,6 +228,8 @@ struct ApiMetrics {
     knowledge_ingest_requests: AtomicU64,
     knowledge_queue_requests: AtomicU64,
     knowledge_vote_requests: AtomicU64,
+    identity_challenge_requests: AtomicU64,
+    identity_verify_requests: AtomicU64,
     bridge_success: AtomicU64,
     balance_success: AtomicU64,
     bridge_chain_success: AtomicU64,
@@ -225,6 +239,8 @@ struct ApiMetrics {
     knowledge_ingest_success: AtomicU64,
     knowledge_queue_success: AtomicU64,
     knowledge_vote_success: AtomicU64,
+    identity_challenge_success: AtomicU64,
+    identity_verify_success: AtomicU64,
     rate_limit_hits: AtomicU64,
     auth_failures: AtomicU64,
 }
@@ -291,6 +307,16 @@ impl ApiMetrics {
         self.knowledge_vote_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_identity_challenge_request(&self) {
+        self.inc_request();
+        self.identity_challenge_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_identity_verify_request(&self) {
+        self.inc_request();
+        self.identity_verify_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_bridge_success(&self) {
         self.bridge_success.fetch_add(1, Ordering::Relaxed);
     }
@@ -332,6 +358,16 @@ impl ApiMetrics {
         self.knowledge_vote_success.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_identity_challenge_success(&self) {
+        self.identity_challenge_success
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_identity_verify_success(&self) {
+        self.identity_verify_success
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_rate_limit_hit(&self) {
         self.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
     }
@@ -355,6 +391,10 @@ impl ApiMetrics {
             knowledge_ingest_requests: self.knowledge_ingest_requests.load(Ordering::Relaxed),
             knowledge_queue_requests: self.knowledge_queue_requests.load(Ordering::Relaxed),
             knowledge_vote_requests: self.knowledge_vote_requests.load(Ordering::Relaxed),
+            identity_challenge_requests: self
+                .identity_challenge_requests
+                .load(Ordering::Relaxed),
+            identity_verify_requests: self.identity_verify_requests.load(Ordering::Relaxed),
             bridge_success: self.bridge_success.load(Ordering::Relaxed),
             balance_success: self.balance_success.load(Ordering::Relaxed),
             bridge_chain_success: self.bridge_chain_success.load(Ordering::Relaxed),
@@ -364,6 +404,10 @@ impl ApiMetrics {
             knowledge_ingest_success: self.knowledge_ingest_success.load(Ordering::Relaxed),
             knowledge_queue_success: self.knowledge_queue_success.load(Ordering::Relaxed),
             knowledge_vote_success: self.knowledge_vote_success.load(Ordering::Relaxed),
+            identity_challenge_success: self
+                .identity_challenge_success
+                .load(Ordering::Relaxed),
+            identity_verify_success: self.identity_verify_success.load(Ordering::Relaxed),
             rate_limit_hits: self.rate_limit_hits.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
         }
@@ -426,6 +470,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         config.api.rate_limit_window_secs,
     )));
     let (knowledge_runtime, knowledge_persist) = build_knowledge_runtime(&config.knowledge);
+    let identity_runtime = IdentityRuntime::new(config.identity.clone());
+    let share_kind = config.streaming.share_payload_kind.clone();
     let ledger_backend = if config.ledger.enabled {
         config.ledger.backend.clone()
     } else {
@@ -438,6 +484,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         sensor_ingest_enabled: config.workload.enable_sensor_ingest,
         bridge_enabled: config.blockchain.bridge.enabled,
         knowledge_enabled: config.knowledge.enabled,
+        identity_enabled: config.identity.enabled,
         started_at: Instant::now(),
         ledger,
         bridge_config: config.blockchain.bridge.clone(),
@@ -452,6 +499,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         metrics: Arc::new(ApiMetrics::default()),
         knowledge: Arc::new(Mutex::new(knowledge_runtime)),
         knowledge_persist,
+        identity: Arc::new(Mutex::new(identity_runtime)),
+        fabric_share_kind: share_kind.clone(),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -464,6 +513,10 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .max_proof_bytes
         .max(data_limit)
         .max(1024);
+    let identity_enabled = state.identity_enabled;
+    let identity_runtime = Arc::clone(&state.identity);
+    let identity_mesh = state.data_mesh.clone();
+    let identity_share_kind = state.fabric_share_kind.clone();
     let app = Router::new()
         .route("/health", get(get_health))
         .route("/ready", get(get_ready))
@@ -475,6 +528,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/knowledge/ingest", post(submit_knowledge_ingest))
         .route("/knowledge/queue", get(get_knowledge_queue))
         .route("/knowledge/vote", post(submit_knowledge_vote))
+        .route("/identity/challenge", post(submit_identity_challenge))
+        .route("/identity/verify", post(submit_identity_verify))
+        .route("/identity/:thread_id", get(get_identity_status))
         .route("/balance/:node_id", get(get_balance))
         .route("/metrics", get(get_metrics))
         .with_state(state)
@@ -484,6 +540,15 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .build()
         .context("build api runtime")?;
     runtime.block_on(async move {
+        if identity_enabled {
+            if let Some(mesh) = identity_mesh {
+                let identity = identity_runtime;
+                let share_kind = identity_share_kind;
+                tokio::spawn(async move {
+                    identity_pattern_sync(mesh, identity, share_kind).await;
+                });
+            }
+        }
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .context("bind api listener")?;
@@ -1136,6 +1201,226 @@ async fn submit_knowledge_vote(
     )
 }
 
+async fn submit_identity_challenge(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<IdentityChallengeRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_identity_challenge_request();
+    if let Err(err) = rate_limit(&state, &headers, "identity") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !state.identity_enabled {
+        let response = ErrorResponse {
+            error: "identity verification disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let now = now_timestamp();
+    let challenge = {
+        let mut runtime = state.identity.lock().expect("identity runtime lock");
+        match runtime.issue_challenge(request, now) {
+            Ok(challenge) => challenge,
+            Err(err) => {
+                let response = ErrorResponse {
+                    error: err.to_string(),
+                };
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::to_value(response).unwrap_or_default()),
+                );
+            }
+        }
+    };
+    state.metrics.inc_identity_challenge_success();
+    let response = IdentityChallengeResponse {
+        status: "OK".to_string(),
+        challenge,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
+async fn submit_identity_verify(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<IdentityVerifyRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_identity_verify_request();
+    if let Err(err) = rate_limit(&state, &headers, "identity") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !state.identity_enabled {
+        let response = ErrorResponse {
+            error: "identity verification disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let now = now_timestamp();
+    let outcome = {
+        let mut runtime = state.identity.lock().expect("identity runtime lock");
+        match runtime.verify(request, now) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let response = IdentityVerifyResponse {
+                    status: "REJECTED".to_string(),
+                    binding: None,
+                    evidence_hash: None,
+                    reason: Some(err.to_string()),
+                };
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::to_value(response).unwrap_or_default()),
+                );
+            }
+        }
+    };
+    if let Err(err) = state.ledger.submit_identity_binding(outcome.binding.clone()) {
+        let response = IdentityVerifyResponse {
+            status: "REJECTED".to_string(),
+            binding: None,
+            evidence_hash: Some(outcome.evidence_hash),
+            reason: Some(err.to_string()),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let (Some(mesh), Some(pattern)) = (state.data_mesh.as_ref(), outcome.updated_pattern) {
+        let share = NeuralFabricShare {
+            node_id: state.node_id.clone(),
+            timestamp: now,
+            tokens: Vec::new(),
+            layers: Vec::new(),
+            motifs: Vec::new(),
+            motif_transitions: Vec::new(),
+            network_patterns: vec![pattern],
+            metadata: HashMap::from([
+                ("identity_thread_id".to_string(), serde_json::Value::String(outcome.binding.thread_id.clone())),
+                ("identity_wallet".to_string(), serde_json::Value::String(outcome.binding.wallet_address.clone())),
+                ("identity_challenge_id".to_string(), serde_json::Value::String(outcome.binding.challenge_id.clone())),
+            ]),
+        };
+        let _ = mesh
+            .ingest_fabric_share_with_kind(&share, &state.fabric_share_kind)
+            .await;
+    }
+    state.metrics.inc_identity_verify_success();
+    let response = IdentityVerifyResponse {
+        status: "VERIFIED".to_string(),
+        binding: Some(outcome.binding),
+        evidence_hash: Some(outcome.evidence_hash),
+        reason: None,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
+async fn get_identity_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_identity_verify_request();
+    if let Err(err) = rate_limit(&state, &headers, "identity") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if !state.identity_enabled {
+        let response = ErrorResponse {
+            error: "identity verification disabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    match state.ledger.identity_binding(&thread_id) {
+        Ok(binding) => {
+            state.metrics.inc_identity_verify_success();
+            let response = IdentityStatusResponse {
+                status: "OK".to_string(),
+                binding: Some(binding),
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+        Err(err) => {
+            let response = IdentityStatusResponse {
+                status: err.to_string(),
+                binding: None,
+            };
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            )
+        }
+    }
+}
+
 async fn get_data_status(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1291,6 +1576,46 @@ async fn get_metrics(
         StatusCode::OK,
         Json(serde_json::to_value(snapshot).unwrap_or_default()),
     )
+}
+
+async fn identity_pattern_sync(
+    mesh: DataMeshHandle,
+    identity: Arc<Mutex<IdentityRuntime>>,
+    share_kind: String,
+) {
+    let mut events = mesh.subscribe();
+    loop {
+        let event = match events.recv().await {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        let data_id = match event {
+            DataMeshEvent::PayloadReady {
+                data_id,
+                payload_kind,
+                ..
+            } => {
+                if payload_kind != share_kind {
+                    continue;
+                }
+                data_id
+            }
+            DataMeshEvent::NodeMetrics { .. } => continue,
+        };
+        let payload = match mesh.load_payload(data_id).await {
+            Ok(payload) => payload,
+            Err(_) => continue,
+        };
+        let Ok(share) = serde_json::from_slice::<NeuralFabricShare>(&payload) else {
+            continue;
+        };
+        if share.network_patterns.is_empty() {
+            continue;
+        }
+        if let Ok(mut runtime) = identity.lock() {
+            runtime.update_patterns(&share.network_patterns);
+        }
+    }
 }
 
 fn build_health_snapshot(state: &ApiState, status: &'static str) -> ApiHealthSnapshot {

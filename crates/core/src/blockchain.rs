@@ -163,6 +163,18 @@ pub struct CrossChainTransfer {
     pub signature: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityBinding {
+    pub thread_id: String,
+    pub wallet_address: String,
+    pub wallet_public_key: String,
+    pub challenge_id: String,
+    pub evidence_hash: String,
+    pub verified_at: Timestamp,
+    #[serde(default)]
+    pub signature: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ValidatorStatus {
@@ -245,6 +257,18 @@ pub fn cross_chain_transfer_payload(transfer: &CrossChainTransfer) -> String {
         transfer.fee_paid,
         transfer.payload_hash,
         transfer.timestamp.unix
+    )
+}
+
+pub fn identity_binding_payload(binding: &IdentityBinding) -> String {
+    format!(
+        "identity|{}|{}|{}|{}|{}|{}",
+        binding.thread_id,
+        binding.wallet_address,
+        binding.wallet_public_key,
+        binding.challenge_id,
+        binding.evidence_hash,
+        binding.verified_at.unix
     )
 }
 
@@ -335,6 +359,14 @@ pub trait BlockchainLedger: Send + Sync {
         anyhow::bail!("cross-chain transfer not implemented")
     }
 
+    fn submit_identity_binding(&self, _binding: IdentityBinding) -> Result<()> {
+        anyhow::bail!("identity binding not implemented")
+    }
+
+    fn identity_binding(&self, _thread_id: &str) -> Result<IdentityBinding> {
+        anyhow::bail!("identity binding not implemented")
+    }
+
     fn submit_validator_heartbeat(&self, _heartbeat: ValidatorHeartbeat) -> Result<()> {
         anyhow::bail!("validator heartbeat not implemented")
     }
@@ -385,6 +417,14 @@ impl BlockchainLedger for NoopLedger {
     }
 
     fn submit_cross_chain_transfer(&self, _transfer: CrossChainTransfer) -> Result<()> {
+        anyhow::bail!("ledger not configured")
+    }
+
+    fn submit_identity_binding(&self, _binding: IdentityBinding) -> Result<()> {
+        anyhow::bail!("ledger not configured")
+    }
+
+    fn identity_binding(&self, _thread_id: &str) -> Result<IdentityBinding> {
         anyhow::bail!("ledger not configured")
     }
 }
