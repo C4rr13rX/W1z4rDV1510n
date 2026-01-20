@@ -673,7 +673,8 @@ impl StreamingInference {
                 .ingest_shared_patterns(&share.network_patterns);
         }
         if let Some(report) = share.metacognition.as_ref() {
-            self.metacognition.ingest_peer_share(report);
+            let weight = peer_weight_from_metadata(&share.metadata);
+            self.metacognition.ingest_peer_share(report, weight);
         }
         let batch = match self.processor.ingest_fabric_share(share) {
             Some(batch) => batch,

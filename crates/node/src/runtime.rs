@@ -231,6 +231,8 @@ impl NodeRuntime {
                 let mut processed_queue: VecDeque<String> = VecDeque::new();
                 let mut processed_set: HashSet<String> = HashSet::new();
                 let max_processed = 4096usize;
+                let metacognition_log_interval = Duration::from_secs(5);
+                let mut last_metacognition_log = Instant::now();
                 let run_config_path = PathBuf::from(&run_config_path);
                 let mut last_config_check = Instant::now();
                 let mut last_run_config_mtime = config_modified_time(&run_config_path).ok();
@@ -429,6 +431,12 @@ impl NodeRuntime {
                             share.metadata.insert(
                                 "compute_elapsed_secs".to_string(),
                                 Value::from(elapsed_secs),
+                            );
+                            log_metacognition_summary(
+                                &share.metadata,
+                                now,
+                                &mut last_metacognition_log,
+                                metacognition_log_interval,
                             );
                             share.metadata.insert(
                                 "energy_joules".to_string(),
@@ -782,6 +790,44 @@ fn accuracy_from_metadata(metadata: &HashMap<String, Value>) -> Option<f64> {
         .and_then(|val| val.get("mean"))
         .and_then(|val| val.as_f64())
         .map(|score| score.clamp(0.0, 1.0))
+}
+
+fn log_metacognition_summary(
+    metadata: &HashMap<String, Value>,
+    now: Timestamp,
+    last_log: &mut Instant,
+    interval: Duration,
+) {
+    if last_log.elapsed() < interval {
+        return;
+    }
+    let Some(report) = metadata.get("metacognition_report") else {
+        return;
+    };
+    let depth = report.get("reflection_depth").and_then(|val| val.as_u64());
+    let model_accuracy = report.get("model_accuracy").and_then(|val| val.as_f64());
+    let baseline_accuracy = report.get("baseline_accuracy").and_then(|val| val.as_f64());
+    let summary = report.get("summary").and_then(|val| val.as_str());
+    let metadata = report.get("metadata");
+    let uncertainty = metadata
+        .and_then(|val| val.get("uncertainty"))
+        .and_then(|val| val.as_f64());
+    let reason = metadata
+        .and_then(|val| val.get("depth_reason"))
+        .and_then(|val| val.as_str())
+        .unwrap_or("unknown");
+    info!(
+        target: "w1z4rdv1510n::node",
+        timestamp = now.unix,
+        reflection_depth = ?depth,
+        model_accuracy = ?model_accuracy,
+        baseline_accuracy = ?baseline_accuracy,
+        uncertainty = ?uncertainty,
+        depth_reason = %reason,
+        summary = summary.unwrap_or("n/a"),
+        "metacognition reflection update"
+    );
+    *last_log = Instant::now();
 }
 
 fn offload_target_from_metadata(metadata: &HashMap<String, Value>) -> Option<String> {

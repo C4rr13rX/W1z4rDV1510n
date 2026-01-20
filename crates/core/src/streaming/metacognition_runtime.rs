@@ -184,14 +184,27 @@ impl MetacognitionRuntime {
         }
     }
 
-    pub fn ingest_peer_share(&mut self, share: &MetacognitionShare) {
+    pub fn ingest_peer_share(&mut self, share: &MetacognitionShare, weight: f64) {
+        let accuracy_weight = share.model_accuracy.clamp(0.0, 1.0);
+        let effective_weight = (weight * accuracy_weight).clamp(0.0, 2.0);
+        if effective_weight <= 0.0 {
+            return;
+        }
         for entry in &share.depth_accuracy {
             let stats = self
                 .peer_depth_stats
                 .entry(entry.depth.max(1))
                 .or_default();
-            stats.total = stats.total.saturating_add(entry.total);
-            stats.correct = stats.correct.saturating_add(entry.correct);
+            let mut weighted_total = (entry.total as f64 * effective_weight).round() as u64;
+            let mut weighted_correct = (entry.correct as f64 * effective_weight).round() as u64;
+            if weighted_total == 0 && entry.total > 0 {
+                weighted_total = 1;
+            }
+            if weighted_correct == 0 && entry.correct > 0 {
+                weighted_correct = 1;
+            }
+            stats.total = stats.total.saturating_add(weighted_total);
+            stats.correct = stats.correct.saturating_add(weighted_correct);
         }
     }
 

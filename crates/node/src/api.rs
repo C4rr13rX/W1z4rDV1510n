@@ -27,7 +27,7 @@ use w1z4rdv1510n::blockchain::{
     BlockchainLedger, BridgeIntent, NoopLedger, RewardBalance, bridge_intent_id,
 };
 use w1z4rdv1510n::bridge::{BridgeProof, BridgeVerificationMode, ChainKind, bridge_deposit_id};
-use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy};
+use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy, RunConfig};
 use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
@@ -60,6 +60,7 @@ struct ApiState {
     knowledge_persist: KnowledgePersist,
     identity: Arc<Mutex<IdentityRuntime>>,
     fabric_share_kind: String,
+    run_config_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -83,6 +84,32 @@ struct BridgeIntentRequest {
     recipient_node_id: String,
     #[serde(default)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MetacognitionTuneRequest {
+    #[serde(default)]
+    min_depth: Option<usize>,
+    #[serde(default)]
+    max_depth: Option<usize>,
+    #[serde(default)]
+    confident_depth: Option<usize>,
+    #[serde(default)]
+    accuracy_target: Option<f64>,
+    #[serde(default)]
+    confident_uncertainty_threshold: Option<f64>,
+    #[serde(default)]
+    novelty_depth_boost: Option<usize>,
+    #[serde(default)]
+    min_depth_samples: Option<u64>,
+    #[serde(default)]
+    depth_improvement_margin: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct MetacognitionTuneResponse {
+    status: &'static str,
+    metacognition: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -501,6 +528,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         knowledge_persist,
         identity: Arc::new(Mutex::new(identity_runtime)),
         fabric_share_kind: share_kind.clone(),
+        run_config_path: PathBuf::from(&config.streaming.run_config_path),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -528,6 +556,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/knowledge/ingest", post(submit_knowledge_ingest))
         .route("/knowledge/queue", get(get_knowledge_queue))
         .route("/knowledge/vote", post(submit_knowledge_vote))
+        .route("/streaming/metacognition", post(tune_metacognition))
         .route("/identity/challenge", post(submit_identity_challenge))
         .route("/identity/verify", post(submit_identity_verify))
         .route("/identity/:thread_id", get(get_identity_status))
@@ -1195,6 +1224,115 @@ async fn submit_knowledge_vote(
             Json(serde_json::to_value(response).unwrap_or_default()),
         );
     }
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
+async fn tune_metacognition(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<MetacognitionTuneRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_request();
+    if let Err(err) = rate_limit(&state, &headers, "metacognition") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let raw = match fs::read_to_string(&state.run_config_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            let response = ErrorResponse {
+                error: format!("failed to read run config: {err}"),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            );
+        }
+    };
+    let mut run_config: RunConfig = match serde_json::from_str(&raw) {
+        Ok(config) => config,
+        Err(err) => {
+            let response = ErrorResponse {
+                error: format!("invalid run config: {err}"),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            );
+        }
+    };
+    let meta_snapshot = {
+        let meta = &mut run_config.streaming.metacognition;
+        if let Some(value) = request.min_depth {
+            meta.min_reflection_depth = value;
+        }
+        if let Some(value) = request.max_depth {
+            meta.max_reflection_depth = value;
+        }
+        if let Some(value) = request.confident_depth {
+            meta.confident_depth = value;
+        }
+        if let Some(value) = request.accuracy_target {
+            meta.accuracy_target = value;
+        }
+        if let Some(value) = request.confident_uncertainty_threshold {
+            meta.confident_uncertainty_threshold = value;
+        }
+        if let Some(value) = request.novelty_depth_boost {
+            meta.novelty_depth_boost = value;
+        }
+        if let Some(value) = request.min_depth_samples {
+            meta.min_depth_samples = value;
+        }
+        if let Some(value) = request.depth_improvement_margin {
+            meta.depth_improvement_margin = value;
+        }
+        serde_json::to_value(meta).unwrap_or_default()
+    };
+    if let Err(err) = run_config.validate() {
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = fs::write(
+        &state.run_config_path,
+        serde_json::to_string_pretty(&run_config).unwrap_or_default(),
+    ) {
+        let response = ErrorResponse {
+            error: format!("failed to write run config: {err}"),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let response = MetacognitionTuneResponse {
+        status: "OK",
+        metacognition: meta_snapshot,
+    };
     (
         StatusCode::OK,
         Json(serde_json::to_value(response).unwrap_or_default()),
