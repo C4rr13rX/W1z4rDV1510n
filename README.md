@@ -157,7 +157,14 @@ cargo run --bin w1z4rdv1510n-node
 cargo run --bin w1z4rdv1510n-node -- api --addr 127.0.0.1:8090
 ```
 
-4. Simulate a network:
+4. Inspect local label queues (requires data mesh storage on the node):
+
+```powershell
+cargo run --bin w1z4rdv1510n-node -- label-queue --limit 25
+cargo run --bin w1z4rdv1510n-node -- visual-label-queue --limit 25
+```
+
+5. Simulate a network:
 
 ```powershell
 cargo run --bin w1z4rdv1510n-node -- sim --nodes 10000 --ticks 100
@@ -209,6 +216,7 @@ Node API (auth optional, see `node_config_example.json`):
 - /health, /ready, /metrics
 - /data/ingest, /data/:data_id
 - /knowledge/ingest, /knowledge/queue, /knowledge/vote
+- /streaming/labels, /streaming/visual-labels
 - /bridge/chains, /bridge/intent, /bridge/proof, /balance/:node_id
 - /identity/challenge, /identity/verify, /identity/:thread_id
 

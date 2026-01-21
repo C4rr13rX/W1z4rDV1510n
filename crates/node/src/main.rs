@@ -11,6 +11,7 @@ mod api;
 mod config;
 mod data_mesh;
 mod identity;
+mod label_queue;
 mod ledger;
 mod openstack;
 mod paths;
@@ -23,6 +24,7 @@ mod wallet;
 use config::NodeConfig;
 use runtime::NodeRuntime;
 use api::run_api;
+use label_queue::{load_latest_fabric_share, parse_label_queue, parse_visual_label_queue};
 use wallet::{WalletStore, node_id_from_wallet};
 use w1z4rdv1510n::hardware::HardwareProfile;
 use w1z4rdv1510n::config::RunConfig;
@@ -32,7 +34,8 @@ use w1z4rdv1510n::network::compute_payload_hash;
 use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
-    KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue, NlmJatsIngestor,
+    KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue, LabelQueueReport,
+    NlmJatsIngestor, VisualLabelReport,
 };
 
 #[derive(Parser, Debug)]
@@ -141,6 +144,18 @@ enum Command {
         votes_file: Option<String>,
         #[arg(long)]
         votes_json: Option<String>,
+        #[arg(long)]
+        out: Option<String>,
+    },
+    LabelQueue {
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        out: Option<String>,
+    },
+    VisualLabelQueue {
+        #[arg(long)]
+        limit: Option<usize>,
         #[arg(long)]
         out: Option<String>,
     },
@@ -273,6 +288,12 @@ fn main() -> anyhow::Result<()> {
             votes_json,
             out,
         }) => knowledge_vote(ingest_file, ingest_json, votes_file, votes_json, out),
+        Some(Command::LabelQueue { limit, out }) => {
+            label_queue_report(&config_path, limit, out)
+        }
+        Some(Command::VisualLabelQueue { limit, out }) => {
+            visual_label_queue_report(&config_path, limit, out)
+        }
         Some(Command::HashApiKey { key }) => {
             println!("{}", api::hash_api_key_hex(&key));
             Ok(())
@@ -595,6 +616,20 @@ struct KnowledgeVoteOutput {
     total_pending: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct LabelQueueOutput {
+    status: &'static str,
+    updated_at: Option<Timestamp>,
+    queue: Option<LabelQueueReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct VisualLabelQueueOutput {
+    status: &'static str,
+    updated_at: Option<Timestamp>,
+    queue: Option<VisualLabelReport>,
+}
+
 fn knowledge_ingest(
     xml_file: Option<String>,
     xml: Option<String>,
@@ -679,6 +714,68 @@ fn knowledge_vote(
         fs::write(path, json)?;
     }
     Ok(())
+}
+
+fn label_queue_report(
+    config_path: &Path,
+    limit: Option<usize>,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let config = load_config(config_path)?;
+    let share = load_latest_fabric_share(&config)?;
+    let mut report = share.as_ref().and_then(parse_label_queue);
+    if let Some(report) = report.as_mut() {
+        apply_limit(&mut report.pending, limit);
+    }
+    let updated_at = report
+        .as_ref()
+        .and_then(|_| share.as_ref().map(|share| share.timestamp));
+    let output = LabelQueueOutput {
+        status: if report.is_some() { "OK" } else { "EMPTY" },
+        updated_at,
+        queue: report,
+    };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    if let Some(path) = out {
+        fs::write(path, json)?;
+    }
+    Ok(())
+}
+
+fn visual_label_queue_report(
+    config_path: &Path,
+    limit: Option<usize>,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let config = load_config(config_path)?;
+    let share = load_latest_fabric_share(&config)?;
+    let mut report = share.as_ref().and_then(parse_visual_label_queue);
+    if let Some(report) = report.as_mut() {
+        apply_limit(&mut report.pending, limit);
+    }
+    let updated_at = report
+        .as_ref()
+        .and_then(|_| share.as_ref().map(|share| share.timestamp));
+    let output = VisualLabelQueueOutput {
+        status: if report.is_some() { "OK" } else { "EMPTY" },
+        updated_at,
+        queue: report,
+    };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    if let Some(path) = out {
+        fs::write(path, json)?;
+    }
+    Ok(())
+}
+
+fn apply_limit<T>(pending: &mut Vec<T>, limit: Option<usize>) {
+    if let Some(limit) = limit {
+        if pending.len() > limit {
+            pending.truncate(limit);
+        }
+    }
 }
 
 fn parse_chain_kind(raw: &str) -> anyhow::Result<ChainKind> {

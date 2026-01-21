@@ -4,6 +4,7 @@ use crate::identity::{
     IdentityChallengeRequest, IdentityChallengeResponse, IdentityRuntime, IdentityStatusResponse,
     IdentityVerifyRequest, IdentityVerifyResponse,
 };
+use crate::label_queue::{parse_label_queue, parse_visual_label_queue};
 use crate::ledger::LocalLedger;
 use crate::p2p::NodeNetwork;
 use crate::paths::node_data_dir;
@@ -32,7 +33,8 @@ use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
     HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
-    KnowledgeQueueReport, KnowledgeRuntime, NeuralFabricShare, NlmJatsIngestor,
+    KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
+    NlmJatsIngestor, VisualLabelReport,
 };
 
 #[derive(Clone)]
@@ -59,6 +61,7 @@ struct ApiState {
     knowledge: Arc<Mutex<KnowledgeRuntime>>,
     knowledge_persist: KnowledgePersist,
     identity: Arc<Mutex<IdentityRuntime>>,
+    label_state: Arc<Mutex<LabelQueueState>>,
     fabric_share_kind: String,
     run_config_path: PathBuf,
 }
@@ -67,6 +70,13 @@ struct ApiState {
 struct KnowledgePersist {
     enabled: bool,
     path: PathBuf,
+}
+
+#[derive(Default)]
+struct LabelQueueState {
+    label_queue: Option<LabelQueueReport>,
+    visual_label_queue: Option<VisualLabelReport>,
+    updated_at: Option<Timestamp>,
 }
 
 #[derive(Serialize)]
@@ -173,6 +183,12 @@ struct KnowledgeQueueQuery {
     limit: Option<usize>,
 }
 
+#[derive(Default, Deserialize)]
+struct QueueLimitQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 #[derive(Serialize)]
 struct KnowledgeIngestResponse {
     status: &'static str,
@@ -190,6 +206,20 @@ struct KnowledgeQueueResponse {
 struct KnowledgeVoteResponse {
     status: &'static str,
     association: Option<KnowledgeAssociation>,
+}
+
+#[derive(Serialize)]
+struct LabelQueueSnapshot {
+    status: &'static str,
+    updated_at: Option<Timestamp>,
+    queue: Option<LabelQueueReport>,
+}
+
+#[derive(Serialize)]
+struct VisualLabelQueueSnapshot {
+    status: &'static str,
+    updated_at: Option<Timestamp>,
+    queue: Option<VisualLabelReport>,
 }
 
 #[derive(Serialize)]
@@ -223,6 +253,8 @@ struct ApiMetricsSnapshot {
     knowledge_ingest_requests: u64,
     knowledge_queue_requests: u64,
     knowledge_vote_requests: u64,
+    label_queue_requests: u64,
+    visual_label_queue_requests: u64,
     identity_challenge_requests: u64,
     identity_verify_requests: u64,
     bridge_success: u64,
@@ -234,6 +266,8 @@ struct ApiMetricsSnapshot {
     knowledge_ingest_success: u64,
     knowledge_queue_success: u64,
     knowledge_vote_success: u64,
+    label_queue_success: u64,
+    visual_label_queue_success: u64,
     identity_challenge_success: u64,
     identity_verify_success: u64,
     rate_limit_hits: u64,
@@ -255,6 +289,8 @@ struct ApiMetrics {
     knowledge_ingest_requests: AtomicU64,
     knowledge_queue_requests: AtomicU64,
     knowledge_vote_requests: AtomicU64,
+    label_queue_requests: AtomicU64,
+    visual_label_queue_requests: AtomicU64,
     identity_challenge_requests: AtomicU64,
     identity_verify_requests: AtomicU64,
     bridge_success: AtomicU64,
@@ -266,6 +302,8 @@ struct ApiMetrics {
     knowledge_ingest_success: AtomicU64,
     knowledge_queue_success: AtomicU64,
     knowledge_vote_success: AtomicU64,
+    label_queue_success: AtomicU64,
+    visual_label_queue_success: AtomicU64,
     identity_challenge_success: AtomicU64,
     identity_verify_success: AtomicU64,
     rate_limit_hits: AtomicU64,
@@ -334,6 +372,16 @@ impl ApiMetrics {
         self.knowledge_vote_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_label_queue_request(&self) {
+        self.inc_request();
+        self.label_queue_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_visual_label_queue_request(&self) {
+        self.inc_request();
+        self.visual_label_queue_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_identity_challenge_request(&self) {
         self.inc_request();
         self.identity_challenge_requests.fetch_add(1, Ordering::Relaxed);
@@ -385,6 +433,14 @@ impl ApiMetrics {
         self.knowledge_vote_success.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_label_queue_success(&self) {
+        self.label_queue_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_visual_label_queue_success(&self) {
+        self.visual_label_queue_success.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_identity_challenge_success(&self) {
         self.identity_challenge_success
             .fetch_add(1, Ordering::Relaxed);
@@ -418,6 +474,8 @@ impl ApiMetrics {
             knowledge_ingest_requests: self.knowledge_ingest_requests.load(Ordering::Relaxed),
             knowledge_queue_requests: self.knowledge_queue_requests.load(Ordering::Relaxed),
             knowledge_vote_requests: self.knowledge_vote_requests.load(Ordering::Relaxed),
+            label_queue_requests: self.label_queue_requests.load(Ordering::Relaxed),
+            visual_label_queue_requests: self.visual_label_queue_requests.load(Ordering::Relaxed),
             identity_challenge_requests: self
                 .identity_challenge_requests
                 .load(Ordering::Relaxed),
@@ -431,6 +489,8 @@ impl ApiMetrics {
             knowledge_ingest_success: self.knowledge_ingest_success.load(Ordering::Relaxed),
             knowledge_queue_success: self.knowledge_queue_success.load(Ordering::Relaxed),
             knowledge_vote_success: self.knowledge_vote_success.load(Ordering::Relaxed),
+            label_queue_success: self.label_queue_success.load(Ordering::Relaxed),
+            visual_label_queue_success: self.visual_label_queue_success.load(Ordering::Relaxed),
             identity_challenge_success: self
                 .identity_challenge_success
                 .load(Ordering::Relaxed),
@@ -527,6 +587,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         knowledge: Arc::new(Mutex::new(knowledge_runtime)),
         knowledge_persist,
         identity: Arc::new(Mutex::new(identity_runtime)),
+        label_state: Arc::new(Mutex::new(LabelQueueState::default())),
         fabric_share_kind: share_kind.clone(),
         run_config_path: PathBuf::from(&config.streaming.run_config_path),
     };
@@ -545,6 +606,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let identity_runtime = Arc::clone(&state.identity);
     let identity_mesh = state.data_mesh.clone();
     let identity_share_kind = state.fabric_share_kind.clone();
+    let label_state = Arc::clone(&state.label_state);
+    let label_mesh = state.data_mesh.clone();
+    let label_share_kind = state.fabric_share_kind.clone();
     let app = Router::new()
         .route("/health", get(get_health))
         .route("/ready", get(get_ready))
@@ -557,6 +621,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/knowledge/queue", get(get_knowledge_queue))
         .route("/knowledge/vote", post(submit_knowledge_vote))
         .route("/streaming/metacognition", post(tune_metacognition))
+        .route("/streaming/labels", get(get_label_queue))
+        .route("/streaming/visual-labels", get(get_visual_label_queue))
         .route("/identity/challenge", post(submit_identity_challenge))
         .route("/identity/verify", post(submit_identity_verify))
         .route("/identity/:thread_id", get(get_identity_status))
@@ -577,6 +643,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
                     identity_pattern_sync(mesh, identity, share_kind).await;
                 });
             }
+        }
+        if let Some(mesh) = label_mesh {
+            let label_state = label_state;
+            let share_kind = label_share_kind;
+            tokio::spawn(async move {
+                label_queue_sync(mesh, label_state, share_kind).await;
+            });
         }
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -1717,6 +1790,104 @@ async fn get_metrics(
     )
 }
 
+async fn get_label_queue(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<QueueLimitQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_label_queue_request();
+    if let Err(err) = rate_limit(&state, &headers, "labels") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let (queue, updated_at) = match state.label_state.lock() {
+        Ok(state) => (state.label_queue.clone(), state.updated_at),
+        Err(_) => (None, None),
+    };
+    let mut queue = queue;
+    if let Some(queue) = queue.as_mut() {
+        apply_limit(&mut queue.pending, query.limit);
+    }
+    let status = if queue.is_some() { "OK" } else { "EMPTY" };
+    if queue.is_some() {
+        state.metrics.inc_label_queue_success();
+    }
+    let snapshot = LabelQueueSnapshot {
+        status,
+        updated_at,
+        queue,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(snapshot).unwrap_or_default()),
+    )
+}
+
+async fn get_visual_label_queue(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<QueueLimitQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_visual_label_queue_request();
+    if let Err(err) = rate_limit(&state, &headers, "labels") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let (queue, updated_at) = match state.label_state.lock() {
+        Ok(state) => (state.visual_label_queue.clone(), state.updated_at),
+        Err(_) => (None, None),
+    };
+    let mut queue = queue;
+    if let Some(queue) = queue.as_mut() {
+        apply_limit(&mut queue.pending, query.limit);
+    }
+    let status = if queue.is_some() { "OK" } else { "EMPTY" };
+    if queue.is_some() {
+        state.metrics.inc_visual_label_queue_success();
+    }
+    let snapshot = VisualLabelQueueSnapshot {
+        status,
+        updated_at,
+        queue,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(snapshot).unwrap_or_default()),
+    )
+}
+
 async fn identity_pattern_sync(
     mesh: DataMeshHandle,
     identity: Arc<Mutex<IdentityRuntime>>,
@@ -1753,6 +1924,59 @@ async fn identity_pattern_sync(
         }
         if let Ok(mut runtime) = identity.lock() {
             runtime.update_patterns(&share.network_patterns);
+        }
+    }
+}
+
+async fn label_queue_sync(
+    mesh: DataMeshHandle,
+    label_state: Arc<Mutex<LabelQueueState>>,
+    share_kind: String,
+) {
+    let mut events = mesh.subscribe();
+    loop {
+        let event = match events.recv().await {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        let data_id = match event {
+            DataMeshEvent::PayloadReady {
+                data_id,
+                payload_kind,
+                ..
+            } => {
+                if payload_kind != share_kind {
+                    continue;
+                }
+                data_id
+            }
+            DataMeshEvent::NodeMetrics { .. } => continue,
+        };
+        let payload = match mesh.load_payload(data_id).await {
+            Ok(payload) => payload,
+            Err(_) => continue,
+        };
+        let Ok(share) = serde_json::from_slice::<NeuralFabricShare>(&payload) else {
+            continue;
+        };
+        let label_queue = parse_label_queue(&share);
+        let visual_label_queue = parse_visual_label_queue(&share);
+        if label_queue.is_none() && visual_label_queue.is_none() {
+            continue;
+        }
+        if let Ok(mut state) = label_state.lock() {
+            let mut updated = false;
+            if let Some(queue) = label_queue {
+                state.label_queue = Some(queue);
+                updated = true;
+            }
+            if let Some(queue) = visual_label_queue {
+                state.visual_label_queue = Some(queue);
+                updated = true;
+            }
+            if updated {
+                state.updated_at = Some(share.timestamp);
+            }
         }
     }
 }
@@ -1802,6 +2026,14 @@ fn rate_limit(state: &ApiState, headers: &HeaderMap, route: &str) -> Result<()> 
         _ => state.rate_limit_default_max,
     };
     limiter.check_and_update(key, route, max_requests)
+}
+
+fn apply_limit<T>(pending: &mut Vec<T>, limit: Option<usize>) {
+    if let Some(limit) = limit {
+        if pending.len() > limit {
+            pending.truncate(limit);
+        }
+    }
 }
 
 fn find_chain_policy<'a>(
