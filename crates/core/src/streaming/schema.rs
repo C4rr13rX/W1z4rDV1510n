@@ -8,6 +8,7 @@ pub enum StreamSource {
     PeopleVideo,
     CrowdTraffic,
     PublicTopics,
+    TextAnnotations,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +36,7 @@ pub enum EventKind {
     CrowdToken,
     TrafficToken,
     TopicEventToken,
+    TextAnnotation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

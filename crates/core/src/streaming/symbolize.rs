@@ -182,7 +182,8 @@ fn source_index(source: Option<StreamSource>) -> (usize, Option<String>) {
         Some(StreamSource::PeopleVideo) => (0, Some(stream_source_label(StreamSource::PeopleVideo))),
         Some(StreamSource::CrowdTraffic) => (1, Some(stream_source_label(StreamSource::CrowdTraffic))),
         Some(StreamSource::PublicTopics) => (2, Some(stream_source_label(StreamSource::PublicTopics))),
-        None => (3, None),
+        Some(StreamSource::TextAnnotations) => (3, Some(stream_source_label(StreamSource::TextAnnotations))),
+        None => (4, None),
     }
 }
 
@@ -191,6 +192,7 @@ fn stream_source_label(source: StreamSource) -> String {
         StreamSource::PeopleVideo => "PEOPLE_VIDEO".to_string(),
         StreamSource::CrowdTraffic => "CROWD_TRAFFIC".to_string(),
         StreamSource::PublicTopics => "PUBLIC_TOPICS".to_string(),
+        StreamSource::TextAnnotations => "TEXT_ANNOTATIONS".to_string(),
     }
 }
 
@@ -201,6 +203,7 @@ fn event_kind_label(kind: EventKind) -> String {
         EventKind::CrowdToken => "CROWD_TOKEN".to_string(),
         EventKind::TrafficToken => "TRAFFIC_TOKEN".to_string(),
         EventKind::TopicEventToken => "TOPIC_EVENT_TOKEN".to_string(),
+        EventKind::TextAnnotation => "TEXT_ANNOTATION".to_string(),
     }
 }
 

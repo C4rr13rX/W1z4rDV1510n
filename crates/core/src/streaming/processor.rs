@@ -12,6 +12,8 @@ use crate::streaming::analysis_runtime::StreamingAnalysisRuntime;
 use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::compute::QuantumExecutor;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
+use crate::streaming::cross_modal::{CrossModalReport, CrossModalRuntime};
+use crate::streaming::ocr_runtime::FrameOcrRuntime;
 use crate::streaming::dimensions::DimensionTracker;
 use crate::streaming::health_overlay::HealthOverlayRuntime;
 use crate::streaming::quality::StreamingQualityRuntime;
@@ -28,7 +30,9 @@ use crate::streaming::metacognition_runtime::{MetacognitionRuntime, Metacognitio
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
+use crate::network::compute_payload_hash;
 use crate::streaming::labeling::LabelQueue;
+use crate::streaming::visual_labeling::VisualLabelQueue;
 use crate::streaming::symbolize::{SymbolizeConfig, token_batch_to_snapshot};
 use crate::streaming::topic::{TopicEventExtractor, TopicSample, TopicConfig};
 use crate::streaming::spike_runtime::StreamingSpikeRuntime;
@@ -66,11 +70,29 @@ struct TopicSignal {
     metadata: HashMap<String, Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TextAnnotationPayload {
+    text: String,
+    #[serde(default)]
+    entity_id: Option<String>,
+    #[serde(default)]
+    frame_id: Option<String>,
+    #[serde(default)]
+    annotation_id: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    attributes: HashMap<String, Value>,
+    #[serde(default)]
+    confidence: Option<f64>,
+}
+
 pub struct StreamingProcessor {
     config: StreamingConfig,
     people_extractors: HashMap<String, UltradianLayerExtractor>,
     motor_extractor: MotorFeatureExtractor,
     pose_tracker: PoseTracker,
+    ocr_runtime: Option<FrameOcrRuntime>,
     behavior_substrate: BehaviorSubstrate,
     flow_extractor: FlowLayerExtractor,
     topic_extractor: TopicEventExtractor,
@@ -81,11 +103,17 @@ pub struct StreamingProcessor {
 
 impl StreamingProcessor {
     pub fn new(config: StreamingConfig) -> Self {
+        let ocr_runtime = if config.ocr.enabled {
+            Some(FrameOcrRuntime::new(config.ocr.clone()))
+        } else {
+            None
+        };
         Self {
             config,
             people_extractors: HashMap::new(),
             motor_extractor: MotorFeatureExtractor::new(crate::streaming::motor::MotorConfig::default()),
             pose_tracker: PoseTracker::default(),
+            ocr_runtime,
             behavior_substrate: BehaviorSubstrate::new(BehaviorSubstrateConfig::default()),
             flow_extractor: FlowLayerExtractor::new(FlowConfig::default()),
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
@@ -119,6 +147,12 @@ impl StreamingProcessor {
                     return None;
                 }
                 self.handle_public_topics(envelope)
+            }
+            StreamSource::TextAnnotations => {
+                if !self.config.ingest.text_annotations {
+                    return None;
+                }
+                self.handle_text_annotation(envelope)
             }
         }
     }
@@ -257,12 +291,16 @@ impl StreamingProcessor {
         mut frame: PoseFrame,
         metadata: HashMap<String, Value>,
     ) -> Option<TokenBatch> {
+        if let Some(runtime) = &mut self.ocr_runtime {
+            runtime.maybe_enrich(&mut frame, &metadata);
+        }
         let behavior_frame = frame.clone();
         let tracking = self.pose_tracker.assign(&frame);
         if frame.entity_id.trim().is_empty() || frame.entity_id.trim().eq_ignore_ascii_case("unknown")
         {
             frame.entity_id = tracking.track_id.clone();
         }
+        let frame_bbox = frame.bbox.clone();
         let output = self.motor_extractor.extract(frame)?;
         let meta_quality = sample_quality_from_meta(&metadata);
         let signal_quality = (meta_quality
@@ -395,11 +433,17 @@ impl StreamingProcessor {
         if let Some(area) = output.bbox_area {
             attributes.insert("bbox_area".to_string(), Value::from(area));
         }
+        if let Some(bbox) = frame_bbox {
+            attributes.insert("bbox".to_string(), bbox_to_value(&bbox));
+        }
         if !output.metadata.is_empty() {
             attributes.insert(
                 "metadata".to_string(),
                 Value::Object(map_from_metadata(&output.metadata)),
             );
+        }
+        if let Some(frame_id) = frame_ref_from_metadata(&output.metadata) {
+            attributes.insert("frame_id".to_string(), Value::String(frame_id));
         }
         let behavior_input = BehaviorInput {
             entity_id: output.entity_id.clone(),
@@ -425,14 +469,32 @@ impl StreamingProcessor {
             source: Some(StreamSource::PeopleVideo),
         }];
         self.append_behavior_tokens(behavior_input, &mut tokens, StreamSource::PeopleVideo);
+        let text_tokens = extract_text_overlay_tokens(
+            &output.metadata,
+            &output.entity_id,
+            output.timestamp,
+            confidence_from_meta(&metadata),
+        );
+        if !text_tokens.is_empty() {
+            tokens.extend(text_tokens.clone());
+        }
+        let mut source_confidence = HashMap::from([(
+            StreamSource::PeopleVideo,
+            confidence_from_meta(&metadata),
+        )]);
+        if !text_tokens.is_empty() {
+            let avg = text_tokens
+                .iter()
+                .map(|token| token.confidence)
+                .sum::<f64>()
+                / text_tokens.len() as f64;
+            source_confidence.insert(StreamSource::TextAnnotations, avg.clamp(0.0, 1.0));
+        }
         Some(TokenBatch {
             timestamp: output.timestamp,
             tokens,
             layers,
-            source_confidence: HashMap::from([(
-                StreamSource::PeopleVideo,
-                confidence_from_meta(&metadata),
-            )]),
+            source_confidence,
         })
     }
 
@@ -475,6 +537,71 @@ impl StreamingProcessor {
             tokens: extraction.tokens,
             layers: extraction.layers,
             source_confidence: HashMap::from([(StreamSource::PublicTopics, confidence_from_meta(&envelope.metadata))]),
+        })
+    }
+
+    fn handle_text_annotation(&mut self, envelope: StreamEnvelope) -> Option<TokenBatch> {
+        let payload = envelope.payload;
+        let mut annotation = match payload {
+            StreamPayload::Json { value } => serde_json::from_value::<TextAnnotationPayload>(value).ok()?,
+            StreamPayload::Text { value } => TextAnnotationPayload {
+                text: value,
+                entity_id: None,
+                frame_id: None,
+                annotation_id: None,
+                labels: Vec::new(),
+                attributes: HashMap::new(),
+                confidence: None,
+            },
+            _ => return None,
+        };
+        if annotation.text.trim().is_empty() {
+            return None;
+        }
+        let mut attributes = HashMap::new();
+        let text_hash = compute_payload_hash(annotation.text.as_bytes());
+        attributes.insert("text".to_string(), Value::String(annotation.text.clone()));
+        attributes.insert("text_hash".to_string(), Value::String(text_hash));
+        attributes.insert("text_len".to_string(), Value::from(annotation.text.len() as u64));
+        if let Some(entity_id) = annotation.entity_id.take() {
+            attributes.insert("entity_id".to_string(), Value::String(entity_id));
+        }
+        if let Some(frame_id) = annotation.frame_id.take() {
+            attributes.insert("frame_id".to_string(), Value::String(frame_id));
+        }
+        if let Some(annotation_id) = annotation.annotation_id.take() {
+            attributes.insert("annotation_id".to_string(), Value::String(annotation_id));
+        }
+        if !annotation.labels.is_empty() {
+            attributes.insert(
+                "labels".to_string(),
+                Value::Array(annotation.labels.into_iter().map(Value::String).collect()),
+            );
+        }
+        if !annotation.attributes.is_empty() {
+            attributes.insert(
+                "metadata".to_string(),
+                Value::Object(map_from_metadata(&annotation.attributes)),
+            );
+        }
+        let confidence = annotation
+            .confidence
+            .unwrap_or_else(|| confidence_from_meta(&envelope.metadata))
+            .clamp(0.0, 1.0);
+        let token = EventToken {
+            id: String::new(),
+            kind: EventKind::TextAnnotation,
+            onset: envelope.timestamp,
+            duration_secs: 1.0,
+            confidence,
+            attributes,
+            source: Some(StreamSource::TextAnnotations),
+        };
+        Some(TokenBatch {
+            timestamp: envelope.timestamp,
+            tokens: vec![token],
+            layers: Vec::new(),
+            source_confidence: HashMap::from([(StreamSource::TextAnnotations, confidence)]),
         })
     }
 
@@ -555,12 +682,14 @@ pub struct StreamingInference {
     analysis: StreamingAnalysisRuntime,
     dimensions: DimensionTracker,
     labels: LabelQueue,
+    visual_labels: VisualLabelQueue,
     motif_playback: MotifPlaybackQueue,
     metacognition: MetacognitionRuntime,
     narrative: NarrativeRuntime,
     health_overlay: HealthOverlayRuntime,
     survival: SurvivalRuntime,
     knowledge: KnowledgeRuntime,
+    cross_modal: CrossModalRuntime,
     network_fabric: NetworkPatternRuntime,
     spike_runtime: Option<StreamingSpikeRuntime>,
     neuro_bridge: Option<NeuroStreamBridge>,
@@ -612,12 +741,14 @@ impl StreamingInference {
         let analysis = StreamingAnalysisRuntime::new(run_config.streaming.analysis.clone());
         let dimensions = DimensionTracker::default();
         let labels = LabelQueue::default();
+        let visual_labels = VisualLabelQueue::new(run_config.streaming.visual_label.clone());
         let motif_playback = MotifPlaybackQueue::default();
         let metacognition = MetacognitionRuntime::new(run_config.streaming.metacognition.clone());
         let narrative = NarrativeRuntime::new(run_config.streaming.narrative.clone());
         let health_overlay = HealthOverlayRuntime::default();
         let survival = SurvivalRuntime::default();
         let knowledge = KnowledgeRuntime::default();
+        let cross_modal = CrossModalRuntime::new(run_config.streaming.cross_modal.clone());
         let network_fabric = NetworkPatternRuntime::new(run_config.streaming.network_fabric.clone());
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
@@ -645,12 +776,14 @@ impl StreamingInference {
             analysis,
             dimensions,
             labels,
+            visual_labels,
             motif_playback,
             metacognition,
             narrative,
             health_overlay,
             survival,
             knowledge,
+            cross_modal,
             network_fabric,
             spike_runtime,
             neuro_bridge,
@@ -694,6 +827,11 @@ impl StreamingInference {
         if let Some(report) = share.metacognition.as_ref() {
             let weight = peer_weight_from_metadata(&share.metadata);
             self.metacognition.ingest_peer_share(report, weight);
+        }
+        if let Some(value) = share.metadata.get("cross_modal_report") {
+            if let Ok(report) = serde_json::from_value::<CrossModalReport>(value.clone()) {
+                self.cross_modal.ingest_report(&report);
+            }
         }
         let batch = match self.processor.ingest_fabric_share(share) {
             Some(batch) => batch,
@@ -756,6 +894,7 @@ impl StreamingInference {
             self.quality.apply_neuro_feedback(feedback);
             self.substreams.update_from_neuro(snapshot, batch.timestamp);
         }
+        self.substreams.update_from_batch(&batch);
         let substream_output = self.substreams.ingest(&batch);
         if !substream_output.tokens.is_empty() {
             batch.tokens.extend(substream_output.tokens);
@@ -763,6 +902,7 @@ impl StreamingInference {
         if !substream_output.layers.is_empty() {
             batch.layers.extend(substream_output.layers);
         }
+        let cross_modal_report = self.cross_modal.update(&batch);
         self.last_batch = Some(batch.clone());
         self.last_motifs = self.processor.take_last_motifs();
         let behavior_frame = self.processor.take_last_behavior_frame();
@@ -776,6 +916,7 @@ impl StreamingInference {
             .physiology
             .update(&batch, Some(self.knowledge.store()));
         let label_report = self.labels.update(&batch, dimension_report.as_ref());
+        let visual_label_report = self.visual_labels.update(&batch);
         let motif_playback_report = self
             .motif_playback
             .update(&motif_replays, batch.timestamp);
@@ -845,6 +986,25 @@ impl StreamingInference {
                 serde_json::to_value(report)?,
             );
         }
+        if let Some(report) = &cross_modal_report {
+            report_metadata.insert(
+                "cross_modal_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "cross_modal_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        let substream_report = self.substreams.report(batch.timestamp);
+        report_metadata.insert(
+            "substream_report".to_string(),
+            serde_json::to_value(&substream_report)?,
+        );
+        snapshot.metadata.insert(
+            "substream_report".to_string(),
+            serde_json::to_value(substream_report)?,
+        );
         if let Some(report) = temporal_report {
             report_metadata.insert(
                 "temporal_inference".to_string(),
@@ -912,6 +1072,16 @@ impl StreamingInference {
             );
             snapshot.metadata.insert(
                 "label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &visual_label_report {
+            report_metadata.insert(
+                "visual_label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "visual_label_queue".to_string(),
                 serde_json::to_value(report)?,
             );
         }
@@ -1069,6 +1239,178 @@ fn map_from_metadata(input: &HashMap<String, Value>) -> Map<String, Value> {
     map
 }
 
+fn bbox_to_value(bbox: &crate::streaming::motor::BoundingBox) -> Value {
+    let mut obj = Map::new();
+    obj.insert("x".to_string(), Value::from(bbox.x));
+    obj.insert("y".to_string(), Value::from(bbox.y));
+    obj.insert("width".to_string(), Value::from(bbox.width));
+    obj.insert("height".to_string(), Value::from(bbox.height));
+    Value::Object(obj)
+}
+
+fn extract_text_overlay_tokens(
+    metadata: &HashMap<String, Value>,
+    entity_id: &str,
+    timestamp: crate::schema::Timestamp,
+    default_confidence: f64,
+) -> Vec<EventToken> {
+    let blocks = collect_text_blocks(metadata);
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let frame_ref = frame_ref_from_metadata(metadata);
+    let origin = metadata
+        .get("ocr_engine")
+        .and_then(|value| value.as_str())
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or("video_ocr");
+    let mut tokens = Vec::new();
+    for (idx, block) in blocks.into_iter().enumerate() {
+        let text = block.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let text_hash = compute_payload_hash(text.as_bytes());
+        let annotation_id = compute_payload_hash(
+            format!("ocr|{}|{}|{}", text_hash, timestamp.unix, idx).as_bytes(),
+        );
+        let mut attributes = HashMap::new();
+        attributes.insert("text".to_string(), Value::String(text.to_string()));
+        attributes.insert("text_hash".to_string(), Value::String(text_hash));
+        attributes.insert("text_len".to_string(), Value::from(text.len() as u64));
+        attributes.insert("entity_id".to_string(), Value::String(entity_id.to_string()));
+        attributes.insert("annotation_id".to_string(), Value::String(annotation_id));
+        attributes.insert("text_origin".to_string(), Value::String(origin.to_string()));
+        if let Some(frame_id) = frame_ref.as_ref() {
+            attributes.insert("frame_id".to_string(), Value::String(frame_id.clone()));
+        }
+        if let Some(conf) = block.confidence {
+            attributes.insert("text_confidence".to_string(), Value::from(conf));
+        }
+        if let Some(bbox) = block.bbox {
+            attributes.insert("text_bbox".to_string(), bbox);
+        }
+        let confidence = block
+            .confidence
+            .unwrap_or(default_confidence)
+            .clamp(0.0, 1.0);
+        tokens.push(EventToken {
+            id: String::new(),
+            kind: EventKind::TextAnnotation,
+            onset: timestamp,
+            duration_secs: 1.0,
+            confidence,
+            attributes,
+            source: Some(StreamSource::TextAnnotations),
+        });
+    }
+    tokens
+}
+
+struct TextOverlayBlock {
+    text: String,
+    confidence: Option<f64>,
+    bbox: Option<Value>,
+}
+
+fn collect_text_blocks(metadata: &HashMap<String, Value>) -> Vec<TextOverlayBlock> {
+    let mut blocks = Vec::new();
+    let default_conf = metadata
+        .get("ocr_confidence")
+        .or_else(|| metadata.get("text_confidence"))
+        .and_then(|value| value.as_f64())
+        .filter(|val| val.is_finite())
+        .map(|val| val.clamp(0.0, 1.0));
+    if let Some(text) = metadata.get("ocr_text").and_then(|value| value.as_str()) {
+        if !text.trim().is_empty() {
+            blocks.push(TextOverlayBlock {
+                text: text.to_string(),
+                confidence: default_conf,
+                bbox: None,
+            });
+        }
+    }
+    if let Some(value) = metadata.get("detected_text") {
+        match value {
+            Value::String(text) => {
+                if !text.trim().is_empty() {
+                    blocks.push(TextOverlayBlock {
+                        text: text.to_string(),
+                        confidence: default_conf,
+                        bbox: None,
+                    });
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(text) = item.as_str() {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        blocks.push(TextOverlayBlock {
+                            text: text.to_string(),
+                            confidence: default_conf,
+                            bbox: None,
+                        });
+                        continue;
+                    }
+                    if let Some(obj) = item.as_object() {
+                        let text = obj.get("text").and_then(|val| val.as_str());
+                        if let Some(text) = text {
+                            if text.trim().is_empty() {
+                                continue;
+                            }
+                            let conf = obj.get("confidence").and_then(|val| val.as_f64());
+                            let bbox = obj
+                                .get("bbox")
+                                .or_else(|| obj.get("box"))
+                                .cloned();
+                            blocks.push(TextOverlayBlock {
+                                text: text.to_string(),
+                                confidence: conf.or(default_conf),
+                                bbox,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(Value::Array(items)) = metadata.get("text_blocks") {
+        for item in items {
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
+            let Some(text) = obj.get("text").and_then(|val| val.as_str()) else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let conf = obj.get("confidence").and_then(|val| val.as_f64());
+            let bbox = obj.get("bbox").or_else(|| obj.get("box")).cloned();
+            blocks.push(TextOverlayBlock {
+                text: text.to_string(),
+                confidence: conf.or(default_conf),
+                bbox,
+            });
+        }
+    }
+    blocks
+}
+
+fn frame_ref_from_metadata(metadata: &HashMap<String, Value>) -> Option<String> {
+    for key in ["frame_id", "frame_ref", "frame_path", "image_ref"] {
+        if let Some(text) = metadata.get(key).and_then(|value| value.as_str()) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn empty_snapshot() -> EnvironmentSnapshot {
     EnvironmentSnapshot {
         timestamp: crate::schema::Timestamp { unix: 0 },
@@ -1174,7 +1516,7 @@ fn mean_map_values(map: &HashMap<String, f64>) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::schema::Timestamp;
-    use crate::streaming::schema::{StreamEnvelope, StreamPayload};
+    use crate::streaming::schema::{EventKind, EventToken, StreamEnvelope, StreamPayload};
     use std::f64::consts::PI;
 
     #[test]
@@ -1245,6 +1587,51 @@ mod tests {
         assert!(!batch.tokens.is_empty());
         let token = &batch.tokens[0];
         assert!(token.attributes.contains_key("motion_energy"));
+    }
+
+    #[test]
+    fn processor_extracts_text_overlay_tokens() {
+        let mut config = StreamingConfig::default();
+        config.enabled = true;
+        config.ingest.people_video = true;
+        let mut processor = StreamingProcessor::new(config);
+        let envelope = StreamEnvelope {
+            source: StreamSource::PeopleVideo,
+            timestamp: Timestamp { unix: 100 },
+            payload: StreamPayload::Json {
+                value: serde_json::json!({
+                    "entity_id": "e1",
+                    "timestamp": { "unix": 100 },
+                    "keypoints": [
+                        { "name": "head", "x": 0.0, "y": 0.0, "confidence": 1.0 },
+                        { "name": "hand", "x": 0.2, "y": 0.1, "confidence": 0.9 },
+                        { "name": "foot", "x": -0.1, "y": -0.2, "confidence": 0.8 }
+                    ],
+                    "metadata": {
+                        "ocr_text": "STOP SIGN",
+                        "frame_id": "frame-1",
+                        "ocr_confidence": 0.92
+                    }
+                }),
+            },
+            metadata: HashMap::new(),
+        };
+        let batch = processor.ingest(envelope).expect("batch");
+        let text_tokens: Vec<&EventToken> = batch
+            .tokens
+            .iter()
+            .filter(|token| token.kind == EventKind::TextAnnotation)
+            .collect();
+        assert!(!text_tokens.is_empty());
+        let attrs = &text_tokens[0].attributes;
+        assert_eq!(
+            attrs.get("text").and_then(|val| val.as_str()),
+            Some("STOP SIGN")
+        );
+        assert_eq!(
+            attrs.get("frame_id").and_then(|val| val.as_str()),
+            Some("frame-1")
+        );
     }
 
     #[test]

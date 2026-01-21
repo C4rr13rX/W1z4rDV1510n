@@ -41,6 +41,8 @@ Designed to run on modest desktops and scale across many nodes.
 - Extracts ultradian micro-arousal, BRAC, and meso layers as phase/amplitude/coherence.
 - Aligns across modalities with tolerance windows and per-source confidence gating.
 - Emits tokens (Behavioral Atoms/Tokens, Crowd/Traffic Tokens, Topic Event Tokens) and layer states.
+- Optional OCR adapter enriches video frames with text blocks that become TextAnnotation tokens.
+- Visual label queue emits bbox/region tasks so humans can annotate regions and wire labels into the neural fabric.
 
 ### 3) Behavior substrate and motifs
 - Body-schema adapters map multimodal sensors into a shared latent state + action vector.
@@ -174,7 +176,13 @@ cargo run --bin streaming_service -- --config run_config.json --input stream.jso
 Pipe RTSP/video pose output into the service:
 
 ```powershell
-python scripts/rtsp_pose_bridge.py --source rtsp://camera | cargo run --bin streaming_service -- --config run_config.json --input -
+python scripts/rtsp_pose_bridge.py --source rtsp://camera --emit-image ref --image-dir data/frames | cargo run --bin streaming_service -- --config run_config_streaming_ocr.json --input -
+```
+
+Enable OCR with a ready config:
+
+```powershell
+cargo run --bin streaming_service -- --config run_config_streaming_ocr.json --input stream.jsonl
 ```
 
 ---
@@ -214,9 +222,17 @@ Service API:
 ## Tools and utilities
 
 - `scripts/rtsp_pose_bridge.py` - RTSP/video to pose JSONL bridge.
+- `run_config_streaming_ocr.json` - streaming profile with OCR enabled (Tesseract command).
 - `scripts/live_viz_server.py` + `scripts/run_with_viz.py` - local visualization loop.
 - Dataset fetchers/preprocessors (USPTO, Tox21, ETH/UCY, exoplanets, genomics, OWID).
 - `calibrate_energy` - tune energy weights from trajectories.
+- `scripts/prepare_textbook_qa_dataset.py` - render textbook PDFs into page images + OCR text, emit review queues, and build QA candidate datasets (requires `pdftoppm` or `mutool`, plus `pdftotext` or `tesseract`).
+
+Example (auto-detects `../StateOfLoci/textbooks` if present):
+
+```powershell
+python scripts/prepare_textbook_qa_dataset.py --max-books 3 --max-pages 25 --skip-existing
+```
 
 ---
 

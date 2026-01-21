@@ -263,6 +263,34 @@ impl RunConfig {
                     "streaming.quality.snr_cap must be > 0"
                 );
             }
+            if self.streaming.ocr.enabled {
+                anyhow::ensure!(
+                    self.streaming.ocr.max_blocks > 0,
+                    "streaming.ocr.max_blocks must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.ocr.max_text_len > 0,
+                    "streaming.ocr.max_text_len must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.ocr.min_frame_confidence),
+                    "streaming.ocr.min_frame_confidence must be in [0,1]"
+                );
+            }
+            if self.streaming.visual_label.enabled {
+                anyhow::ensure!(
+                    self.streaming.visual_label.max_pending > 0,
+                    "streaming.visual_label.max_pending must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.visual_label.max_per_batch > 0,
+                    "streaming.visual_label.max_per_batch must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.visual_label.min_priority),
+                    "streaming.visual_label.min_priority must be in [0,1]"
+                );
+            }
             anyhow::ensure!(
                 self.streaming.ingest.enabled_source_count() > 0,
                 "streaming ingest must enable at least one source"
@@ -365,6 +393,39 @@ impl RunConfig {
                     self.streaming.spike.hypergraph_edge_norm > 0.0,
                     "streaming.spike.hypergraph_edge_norm must be > 0"
                 );
+            }
+            if self.streaming.cross_modal.enabled {
+                let spike = &self.streaming.cross_modal.spike;
+                if spike.enabled {
+                    anyhow::ensure!(
+                        spike.max_neurons > 0,
+                        "streaming.cross_modal.spike.max_neurons must be > 0"
+                    );
+                    anyhow::ensure!(
+                        spike.max_inputs_per_modality > 0,
+                        "streaming.cross_modal.spike.max_inputs_per_modality must be > 0"
+                    );
+                    anyhow::ensure!(
+                        spike.input_gain > 0.0,
+                        "streaming.cross_modal.spike.input_gain must be > 0"
+                    );
+                    anyhow::ensure!(
+                        spike.threshold > 0.0,
+                        "streaming.cross_modal.spike.threshold must be > 0"
+                    );
+                    anyhow::ensure!(
+                        (0.0..=1.0).contains(&spike.membrane_decay),
+                        "streaming.cross_modal.spike.membrane_decay must be in [0,1]"
+                    );
+                    anyhow::ensure!(
+                        spike.composite_excitatory_weight > 0.0,
+                        "streaming.cross_modal.spike.composite_excitatory_weight must be > 0"
+                    );
+                    anyhow::ensure!(
+                        spike.composite_inhibitory_weight > 0.0,
+                        "streaming.cross_modal.spike.composite_inhibitory_weight must be > 0"
+                    );
+                }
             }
             if self.streaming.branching.enabled {
                 anyhow::ensure!(
@@ -509,6 +570,44 @@ impl RunConfig {
                 anyhow::ensure!(
                     self.streaming.analysis.max_layers > 0,
                     "streaming.analysis.max_layers must be > 0"
+                );
+            }
+            if self.streaming.cross_modal.enabled {
+                anyhow::ensure!(
+                    self.streaming.cross_modal.temporal_tolerance_secs >= 0.0,
+                    "streaming.cross_modal.temporal_tolerance_secs must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.cross_modal.min_support > 0,
+                    "streaming.cross_modal.min_support must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.cross_modal.max_links > 0,
+                    "streaming.cross_modal.max_links must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.cross_modal.max_recent > 0,
+                    "streaming.cross_modal.max_recent must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.cross_modal.min_confidence),
+                    "streaming.cross_modal.min_confidence must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.cross_modal.max_text_len > 0,
+                    "streaming.cross_modal.max_text_len must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.cross_modal.max_age_secs >= 0,
+                    "streaming.cross_modal.max_age_secs must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.cross_modal.max_matches_per_item > 0,
+                    "streaming.cross_modal.max_matches_per_item must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.cross_modal.max_report_links > 0,
+                    "streaming.cross_modal.max_report_links must be > 0"
                 );
             }
             if self.streaming.network_fabric.enabled {
@@ -1215,6 +1314,10 @@ pub struct StreamingConfig {
     #[serde(default)]
     pub quality: StreamingQualityConfig,
     #[serde(default)]
+    pub ocr: StreamingOcrConfig,
+    #[serde(default)]
+    pub visual_label: VisualLabelConfig,
+    #[serde(default)]
     pub hypergraph: StreamingHypergraphConfig,
     #[serde(default)]
     pub temporal: TemporalInferenceConfig,
@@ -1235,6 +1338,8 @@ pub struct StreamingConfig {
     #[serde(default)]
     pub analysis: StreamingAnalysisConfig,
     #[serde(default)]
+    pub cross_modal: CrossModalConfig,
+    #[serde(default)]
     pub network_fabric: NetworkFabricConfig,
     #[serde(default)]
     pub narrative: NarrativeConfig,
@@ -1251,6 +1356,8 @@ impl Default for StreamingConfig {
             confidence_gate: 0.5,
             layer_flags: StreamingLayerFlags::default(),
             quality: StreamingQualityConfig::default(),
+            ocr: StreamingOcrConfig::default(),
+            visual_label: VisualLabelConfig::default(),
             hypergraph: StreamingHypergraphConfig::default(),
             temporal: TemporalInferenceConfig::default(),
             spike: StreamingSpikeConfig::default(),
@@ -1261,6 +1368,7 @@ impl Default for StreamingConfig {
             ontology: OntologyConfig::default(),
             physiology: PhysiologyConfig::default(),
             analysis: StreamingAnalysisConfig::default(),
+            cross_modal: CrossModalConfig::default(),
             network_fabric: NetworkFabricConfig::default(),
             narrative: NarrativeConfig::default(),
             metacognition: MetacognitionConfig::default(),
@@ -1345,6 +1453,119 @@ pub struct StreamingAnalysisConfig {
     pub max_layers: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OcrOutputFormat {
+    Plain,
+    Json,
+}
+
+impl Default for OcrOutputFormat {
+    fn default() -> Self {
+        OcrOutputFormat::Plain
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingOcrConfig {
+    pub enabled: bool,
+    pub command: Vec<String>,
+    pub output_format: OcrOutputFormat,
+    pub max_blocks: usize,
+    pub max_text_len: usize,
+    pub cache_ttl_secs: i64,
+    pub allow_image_ref: bool,
+    pub allow_base64: bool,
+    pub min_frame_confidence: f64,
+    pub engine_label: Option<String>,
+}
+
+impl Default for StreamingOcrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: Vec::new(),
+            output_format: OcrOutputFormat::Plain,
+            max_blocks: 16,
+            max_text_len: 2048,
+            cache_ttl_secs: 600,
+            allow_image_ref: true,
+            allow_base64: true,
+            min_frame_confidence: 0.2,
+            engine_label: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisualLabelConfig {
+    pub enabled: bool,
+    pub max_pending: usize,
+    pub max_per_batch: usize,
+    pub min_priority: f64,
+    pub require_frame_ref: bool,
+}
+
+impl Default for VisualLabelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_pending: 256,
+            max_per_batch: 32,
+            min_priority: 0.15,
+            require_frame_ref: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossModalSpikeConfig {
+    pub enabled: bool,
+    pub max_neurons: usize,
+    pub max_inputs_per_modality: usize,
+    pub input_gain: f32,
+    pub threshold: f32,
+    pub membrane_decay: f32,
+    pub refractory_steps: u32,
+    pub composite_excitatory_weight: f32,
+    pub composite_inhibitory_weight: f32,
+}
+
+impl Default for CrossModalSpikeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_neurons: 4096,
+            max_inputs_per_modality: 128,
+            input_gain: 1.1,
+            threshold: 0.8,
+            membrane_decay: 0.95,
+            refractory_steps: 2,
+            composite_excitatory_weight: 0.6,
+            composite_inhibitory_weight: 0.8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossModalConfig {
+    pub enabled: bool,
+    pub temporal_tolerance_secs: f64,
+    pub min_support: usize,
+    pub max_links: usize,
+    pub max_recent: usize,
+    pub min_confidence: f64,
+    pub max_text_len: usize,
+    pub max_age_secs: i64,
+    pub max_matches_per_item: usize,
+    pub max_report_links: usize,
+    pub spike: CrossModalSpikeConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamingQualityConfig {
@@ -1386,6 +1607,24 @@ impl Default for StreamingAnalysisConfig {
             interval_batches: 3,
             max_tokens: 256,
             max_layers: 128,
+        }
+    }
+}
+
+impl Default for CrossModalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            temporal_tolerance_secs: 2.0,
+            min_support: 2,
+            max_links: 2048,
+            max_recent: 512,
+            min_confidence: 0.25,
+            max_text_len: 240,
+            max_age_secs: 90,
+            max_matches_per_item: 6,
+            max_report_links: 24,
+            spike: CrossModalSpikeConfig::default(),
         }
     }
 }
@@ -1478,11 +1717,15 @@ pub struct StreamingIngestConfig {
     pub people_video: bool,
     pub crowd_traffic: bool,
     pub public_topics: bool,
+    pub text_annotations: bool,
 }
 
 impl StreamingIngestConfig {
     pub fn enabled_source_count(&self) -> usize {
-        self.people_video as usize + self.crowd_traffic as usize + self.public_topics as usize
+        self.people_video as usize
+            + self.crowd_traffic as usize
+            + self.public_topics as usize
+            + self.text_annotations as usize
     }
 }
 
@@ -1492,6 +1735,7 @@ impl Default for StreamingIngestConfig {
             people_video: false,
             crowd_traffic: false,
             public_topics: false,
+            text_annotations: false,
         }
     }
 }

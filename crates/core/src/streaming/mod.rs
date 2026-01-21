@@ -19,6 +19,7 @@ pub mod plasticity_runtime;
 pub mod ontology_runtime;
 pub mod physiology_runtime;
 pub mod analysis_runtime;
+pub mod cross_modal;
 pub mod behavior;
 pub mod fabric;
 pub mod network_fabric;
@@ -26,6 +27,8 @@ pub mod spatial;
 pub mod dimensions;
 pub mod labeling;
 pub mod quality;
+pub mod ocr_runtime;
+pub mod visual_labeling;
 pub mod health_overlay;
 pub mod survival;
 pub mod knowledge;
@@ -60,7 +63,10 @@ pub use plasticity_runtime::{PlasticityReport, StreamingPlasticityRuntime};
 pub use ontology_runtime::{OntologyReport, OntologyRuntime};
 pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};
 pub use analysis_runtime::{AnalysisReport, StreamingAnalysisRuntime};
+pub use cross_modal::{CrossModalLink, CrossModalQuery, CrossModalReport, CrossModalRuntime};
 pub use quality::{QualityReport, SourceQuality, StreamingQualityRuntime};
+pub use ocr_runtime::{FrameOcrRuntime, OcrBlock, OcrResult};
+pub use visual_labeling::{VisualLabelQueue, VisualLabelReport, VisualLabelTask};
 pub use crate::config::{StreamingAnalysisConfig, StreamingQualityConfig};
 pub use dimensions::{DimensionConfig, DimensionInfo, DimensionReport, DimensionTracker};
 pub use labeling::{LabelCandidate, LabelQueue, LabelQueueConfig, LabelQueueReport};
@@ -84,7 +90,10 @@ pub use fabric::NeuralFabricShare;
 pub use network_fabric::{NetworkMatch, NetworkPatternReport, NetworkPatternRuntime, NetworkPatternSummary};
 pub use spatial::{SpatialConfig, SpatialEstimate, SpatialEstimator, insert_spatial_attrs};
 pub use tracking::{PoseTracker, PoseTrackerConfig, TrackingResult};
-pub use neuro_bridge::{NeuroStreamBridge, SubstreamOutput, SubstreamRuntime};
+pub use neuro_bridge::{
+    NeuroStreamBridge, SubstreamOrigin, SubstreamOutput, SubstreamReport, SubstreamReportItem,
+    SubstreamRuntime,
+};
 pub use motif_playback::{MotifPlaybackQueue, MotifPlaybackReport, MotifPlaybackTask, MotifReplay, MotifReplayFrame, build_motif_replays};
 pub use narrative_runtime::{NarrativeEntitySummary, NarrativeReport, NarrativeRuntime, NarrativeStep, NarrativeZoomSummary};
 pub use metacognition_runtime::{

@@ -191,6 +191,7 @@ fn kind_probs(counts: &HashMap<String, usize>) -> Vec<f64> {
         event_kind_label(EventKind::CrowdToken),
         event_kind_label(EventKind::TrafficToken),
         event_kind_label(EventKind::TopicEventToken),
+        event_kind_label(EventKind::TextAnnotation),
     ];
     let mut values = Vec::with_capacity(order.len());
     for key in order {
@@ -204,6 +205,7 @@ fn source_confidence_vector(map: &HashMap<StreamSource, f64>) -> Vec<f64> {
         StreamSource::PeopleVideo,
         StreamSource::CrowdTraffic,
         StreamSource::PublicTopics,
+        StreamSource::TextAnnotations,
     ];
     let mut values = Vec::with_capacity(order.len());
     for source in order {
@@ -232,6 +234,7 @@ fn event_kind_label(kind: EventKind) -> &'static str {
         EventKind::CrowdToken => "CROWD_TOKEN",
         EventKind::TrafficToken => "TRAFFIC_TOKEN",
         EventKind::TopicEventToken => "TOPIC_EVENT_TOKEN",
+        EventKind::TextAnnotation => "TEXT_ANNOTATION",
     }
 }
 

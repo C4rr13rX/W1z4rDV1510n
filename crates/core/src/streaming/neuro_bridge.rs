@@ -3,12 +3,16 @@ use crate::schema::Timestamp;
 use crate::streaming::schema::{EventKind, EventToken, LayerState, StreamSource, TokenBatch};
 use crate::streaming::symbolize::{token_batch_to_snapshot, SymbolizeConfig};
 use crate::streaming::ultradian::{SignalSample, UltradianLayerExtractor};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 const DEFAULT_MAX_SYMBOLS: usize = 256;
 const DEFAULT_SAMPLE_STRIDE: usize = 1;
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.1;
+const DEFAULT_AUTO_MIN_SUPPORT: usize = 6;
+const DEFAULT_AUTO_TTL_SECS: i64 = 900;
+const DEFAULT_AUTO_ATTR_LIMIT: usize = 4;
 
 pub struct NeuroStreamBridge {
     neuro: NeuroRuntimeHandle,
@@ -53,9 +57,52 @@ pub struct SubstreamOutput {
     pub layers: Vec<LayerState>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SubstreamOrigin {
+    Neuro,
+    Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstreamReportItem {
+    pub key: String,
+    pub origin: SubstreamOrigin,
+    pub stability: f32,
+    #[serde(default)]
+    pub attrs: HashMap<String, String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    pub last_seen: Timestamp,
+    pub last_signal: f64,
+    pub last_quality: f64,
+    pub last_matches: u64,
+    pub signal_ema: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstreamReport {
+    pub timestamp: Timestamp,
+    pub total_substreams: usize,
+    #[serde(default)]
+    pub items: Vec<SubstreamReportItem>,
+}
+
+#[derive(Debug, Clone)]
+struct SignatureSupport {
+    count: usize,
+    last_seen: Timestamp,
+}
+
 pub struct SubstreamRuntime {
     max_substreams: usize,
     min_stability: f32,
+    auto_enabled: bool,
+    auto_min_support: usize,
+    auto_ttl_secs: i64,
+    auto_support: HashMap<String, SignatureSupport>,
+    auto_filters: HashMap<String, SubstreamFilter>,
+    neuro_filters: HashMap<String, SubstreamFilter>,
     filters: Vec<SubstreamFilter>,
     substreams: HashMap<String, SubstreamState>,
 }
@@ -65,6 +112,12 @@ impl Default for SubstreamRuntime {
         Self {
             max_substreams: 64,
             min_stability: 0.65,
+            auto_enabled: true,
+            auto_min_support: DEFAULT_AUTO_MIN_SUPPORT,
+            auto_ttl_secs: DEFAULT_AUTO_TTL_SECS,
+            auto_support: HashMap::new(),
+            auto_filters: HashMap::new(),
+            neuro_filters: HashMap::new(),
             filters: Vec::new(),
             substreams: HashMap::new(),
         }
@@ -78,32 +131,90 @@ impl SubstreamRuntime {
             .iter()
             .filter(|m| !m.collapsed && m.stability >= self.min_stability)
             .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            self.filters.clear();
-            self.substreams.clear();
-            return;
-        }
         candidates.sort_by(|a, b| {
             b.stability
                 .partial_cmp(&a.stability)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let mut filters = Vec::new();
-        let mut keep = HashSet::new();
+        let mut updated: HashMap<String, SubstreamFilter> = HashMap::new();
         for entry in candidates.into_iter().take(self.max_substreams.max(1)) {
             if let Some(filter) = SubstreamFilter::from_minicolumn(entry) {
-                keep.insert(filter.label.clone());
-                filters.push(filter);
+                updated.insert(filter.label.clone(), filter);
             }
         }
-        self.substreams
-            .retain(|label, _| keep.contains(label));
-        for filter in &filters {
-            self.substreams
-                .entry(filter.label.clone())
-                .or_insert_with(|| SubstreamState::new(now));
+        self.neuro_filters = updated;
+        self.refresh_filters(now);
+    }
+
+    pub fn update_from_batch(&mut self, batch: &TokenBatch) {
+        if !self.auto_enabled {
+            return;
         }
-        self.filters = filters;
+        let now = batch.timestamp;
+        let mut signatures = Vec::new();
+        for token in &batch.tokens {
+            if let Some(signature) = signature_from_token(token) {
+                signatures.push(signature);
+            }
+        }
+        if signatures.is_empty() {
+            self.prune_auto(now);
+            self.refresh_filters(now);
+            return;
+        }
+        for signature in signatures {
+            let entry = self
+                .auto_support
+                .entry(signature.label.clone())
+                .or_insert(SignatureSupport {
+                    count: 0,
+                    last_seen: now,
+                });
+            entry.count = entry.count.saturating_add(1);
+            entry.last_seen = now;
+            if entry.count >= self.auto_min_support {
+                self.auto_filters
+                    .entry(signature.label.clone())
+                    .or_insert_with(|| SubstreamFilter {
+                        label: signature.label.clone(),
+                        stability: (entry.count as f32 / self.auto_min_support as f32)
+                            .min(1.0),
+                        attrs: signature.attrs.clone(),
+                        roles: signature.roles.clone(),
+                        origin: SubstreamOrigin::Auto,
+                    });
+            }
+        }
+        self.prune_auto(now);
+        self.refresh_filters(now);
+    }
+
+    pub fn report(&self, timestamp: Timestamp) -> SubstreamReport {
+        let mut items = Vec::new();
+        for filter in &self.filters {
+            let state = match self.substreams.get(&filter.label) {
+                Some(state) => state,
+                None => continue,
+            };
+            let roles = filter.roles.iter().cloned().collect::<Vec<_>>();
+            items.push(SubstreamReportItem {
+                key: filter.label.clone(),
+                origin: filter.origin.clone(),
+                stability: filter.stability,
+                attrs: filter.attrs.clone(),
+                roles,
+                last_seen: state.last_seen,
+                last_signal: state.last_signal,
+                last_quality: state.last_quality,
+                last_matches: state.last_matches,
+                signal_ema: state.signal_ema,
+            });
+        }
+        SubstreamReport {
+            timestamp,
+            total_substreams: items.len(),
+            items,
+        }
     }
 
     pub fn ingest(&mut self, batch: &TokenBatch) -> SubstreamOutput {
@@ -146,7 +257,7 @@ impl SubstreamRuntime {
             } else {
                 0.0
             };
-            state.update(batch.timestamp, mean_signal);
+            state.update(batch.timestamp, mean_signal, mean_quality, matches as u64);
             state.extractor.push_sample(SignalSample {
                 timestamp: batch.timestamp,
                 value: mean_signal,
@@ -198,12 +309,62 @@ impl SubstreamRuntime {
         }
         output
     }
+
+    fn refresh_filters(&mut self, now: Timestamp) {
+        let mut combined: HashMap<String, SubstreamFilter> = HashMap::new();
+        for (label, filter) in &self.neuro_filters {
+            combined.insert(label.clone(), filter.clone());
+        }
+        for (label, filter) in &self.auto_filters {
+            combined.entry(label.clone()).or_insert_with(|| filter.clone());
+        }
+        if combined.is_empty() {
+            self.filters.clear();
+            self.substreams.clear();
+            return;
+        }
+        let mut filters = combined.into_values().collect::<Vec<_>>();
+        filters.sort_by(|a, b| {
+            b.stability
+                .partial_cmp(&a.stability)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        filters.truncate(self.max_substreams.max(1));
+        let mut keep = HashSet::new();
+        for filter in &filters {
+            keep.insert(filter.label.clone());
+        }
+        self.substreams.retain(|label, _| keep.contains(label));
+        for filter in &filters {
+            self.substreams
+                .entry(filter.label.clone())
+                .or_insert_with(|| SubstreamState::new(now));
+        }
+        self.filters = filters;
+    }
+
+    fn prune_auto(&mut self, now: Timestamp) {
+        let ttl = self.auto_ttl_secs.max(1) as i64;
+        let mut expired = Vec::new();
+        for (label, support) in &self.auto_support {
+            if now.unix.saturating_sub(support.last_seen.unix) > ttl {
+                expired.push(label.clone());
+            }
+        }
+        for label in expired {
+            self.auto_support.remove(&label);
+            self.auto_filters.remove(&label);
+        }
+    }
 }
 
 struct SubstreamState {
     extractor: UltradianLayerExtractor,
     last_seen: Timestamp,
     signal_ema: f64,
+    last_signal: f64,
+    last_quality: f64,
+    last_matches: u64,
 }
 
 impl SubstreamState {
@@ -212,13 +373,19 @@ impl SubstreamState {
             extractor: UltradianLayerExtractor::new(),
             last_seen: now,
             signal_ema: 0.0,
+            last_signal: 0.0,
+            last_quality: 0.0,
+            last_matches: 0,
         }
     }
 
-    fn update(&mut self, now: Timestamp, signal: f64) {
+    fn update(&mut self, now: Timestamp, signal: f64, quality: f64, matches: u64) {
         let alpha = 0.4;
         self.signal_ema = alpha * signal + (1.0 - alpha) * self.signal_ema;
         self.last_seen = now;
+        self.last_signal = signal;
+        self.last_quality = quality;
+        self.last_matches = matches;
     }
 }
 
@@ -228,6 +395,7 @@ struct SubstreamFilter {
     stability: f32,
     attrs: HashMap<String, String>,
     roles: HashSet<String>,
+    origin: SubstreamOrigin,
 }
 
 impl SubstreamFilter {
@@ -259,8 +427,101 @@ impl SubstreamFilter {
             stability: entry.stability,
             attrs,
             roles,
+            origin: SubstreamOrigin::Neuro,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct SubstreamSignature {
+    label: String,
+    attrs: HashMap<String, String>,
+    roles: HashSet<String>,
+}
+
+fn signature_from_token(token: &EventToken) -> Option<SubstreamSignature> {
+    let mut attrs = HashMap::new();
+    let mut roles = HashSet::new();
+    for (key, value) in &token.attributes {
+        let key_norm = normalize_token(key);
+        if key_norm.is_empty() || should_skip_attr(&key_norm) {
+            continue;
+        }
+        if key_norm == "role" {
+            if let Some(text) = value.as_str() {
+                let role = normalize_token(text);
+                if !role.is_empty() {
+                    roles.insert(role);
+                }
+            }
+            continue;
+        }
+        if let Some(text) = value.as_str() {
+            let value_norm = normalize_token(text);
+            if !value_norm.is_empty() {
+                attrs.insert(key_norm, value_norm);
+            }
+        }
+    }
+    if let Some(source) = token.source {
+        attrs.insert("source".to_string(), normalize_token(&source_label(source)));
+    }
+    attrs.insert(
+        "kind".to_string(),
+        normalize_token(&event_kind_label(token.kind)),
+    );
+    if attrs.is_empty() && roles.is_empty() {
+        return None;
+    }
+    let mut keys = attrs.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys.truncate(DEFAULT_AUTO_ATTR_LIMIT.max(1));
+    let mut trimmed = HashMap::new();
+    for key in keys {
+        if let Some(value) = attrs.get(&key) {
+            trimmed.insert(key, value.clone());
+        }
+    }
+    let label = build_auto_label(&roles, &trimmed);
+    if trimmed.len() < 2 && roles.is_empty() {
+        return None;
+    }
+    Some(SubstreamSignature {
+        label,
+        attrs: trimmed,
+        roles,
+    })
+}
+
+fn build_auto_label(roles: &HashSet<String>, attrs: &HashMap<String, String>) -> String {
+    let mut parts = Vec::new();
+    for role in roles.iter() {
+        parts.push(format!("role::{}", role));
+    }
+    let mut keys = attrs.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = attrs.get(&key) {
+            parts.push(format!("attr::{}::{}", key, value));
+        }
+    }
+    format!("auto::{}", parts.join("|"))
+}
+
+fn should_skip_attr(key: &str) -> bool {
+    matches!(
+        key,
+        "entity_id"
+            | "track_id"
+            | "origin_node_id"
+            | "origin_timestamp"
+            | "timestamp"
+            | "pos_x"
+            | "pos_y"
+            | "pos_z"
+            | "camera_shift_source"
+            | "metadata"
+    )
 }
 
 fn select_for_neuro(
@@ -402,6 +663,18 @@ fn source_label(source: StreamSource) -> String {
         StreamSource::PeopleVideo => "PEOPLE_VIDEO".to_string(),
         StreamSource::CrowdTraffic => "CROWD_TRAFFIC".to_string(),
         StreamSource::PublicTopics => "PUBLIC_TOPICS".to_string(),
+        StreamSource::TextAnnotations => "TEXT_ANNOTATIONS".to_string(),
+    }
+}
+
+fn event_kind_label(kind: EventKind) -> String {
+    match kind {
+        EventKind::BehavioralAtom => "BEHAVIORAL_ATOM".to_string(),
+        EventKind::BehavioralToken => "BEHAVIORAL_TOKEN".to_string(),
+        EventKind::CrowdToken => "CROWD_TOKEN".to_string(),
+        EventKind::TrafficToken => "TRAFFIC_TOKEN".to_string(),
+        EventKind::TopicEventToken => "TOPIC_EVENT_TOKEN".to_string(),
+        EventKind::TextAnnotation => "TEXT_ANNOTATION".to_string(),
     }
 }
 

@@ -11,6 +11,7 @@ pub enum DomainKind {
     People,
     Crowd,
     Topics,
+    Text,
     Unknown,
 }
 
@@ -246,6 +247,7 @@ fn domain_for_event(kind: EventKind) -> DomainKind {
         EventKind::BehavioralAtom | EventKind::BehavioralToken => DomainKind::People,
         EventKind::CrowdToken | EventKind::TrafficToken => DomainKind::Crowd,
         EventKind::TopicEventToken => DomainKind::Topics,
+        EventKind::TextAnnotation => DomainKind::Text,
     }
 }
 
@@ -276,6 +278,7 @@ fn domain_confidence(batch: &TokenBatch) -> HashMap<DomainKind, f64> {
             StreamSource::PeopleVideo => DomainKind::People,
             StreamSource::CrowdTraffic => DomainKind::Crowd,
             StreamSource::PublicTopics => DomainKind::Topics,
+            StreamSource::TextAnnotations => DomainKind::Text,
         };
         map.insert(domain, confidence.clamp(0.0, 1.0));
     }

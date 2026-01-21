@@ -1,0 +1,20 @@
+{
+  "mode": "STREAMING",
+  "t_end": { "unix": 0 },
+  "streaming": {
+    "enabled": true,
+    "ingest": {
+      "people_video": true
+    },
+    "layer_flags": {
+      "ultradian_enabled": true,
+      "behavior_enabled": true
+    },
+    "ocr": {
+      "enabled": true,
+      "command": ["tesseract", "{image}", "stdout", "--psm", "6"],
+      "output_format": "PLAIN",
+      "engine_label": "tesseract"
+    }
+  }
+}

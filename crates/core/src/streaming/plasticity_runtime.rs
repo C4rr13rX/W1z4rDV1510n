@@ -208,7 +208,12 @@ fn collect_domain_metrics(
     physiology_boost: Option<f64>,
 ) -> HashMap<DomainKind, DomainMetrics> {
     let mut metrics = HashMap::new();
-    for domain in [DomainKind::People, DomainKind::Crowd, DomainKind::Topics] {
+    for domain in [
+        DomainKind::People,
+        DomainKind::Crowd,
+        DomainKind::Topics,
+        DomainKind::Text,
+    ] {
         let drift = layer_drift(report, domain);
         let uncertainty = domain_uncertainty(report, domain);
         let surge = domain_surge(report, domain);
@@ -311,6 +316,7 @@ fn context_for_domain(domain: DomainKind, batch: &TokenBatch) -> String {
         DomainKind::People => attribute_context(batch, &["entity_id", "person_id"]).unwrap_or_else(|| "people".to_string()),
         DomainKind::Crowd => attribute_context(batch, &["zone_id", "sensor_id", "segment_id"]).unwrap_or_else(|| "crowd".to_string()),
         DomainKind::Topics => attribute_context(batch, &["topic", "topic_id"]).unwrap_or_else(|| "topics".to_string()),
+        DomainKind::Text => attribute_context(batch, &["annotation_id", "text_hash", "frame_id", "frame_ref"]).unwrap_or_else(|| "text".to_string()),
         DomainKind::Unknown => "unknown".to_string(),
     }
 }
@@ -342,6 +348,7 @@ fn domain_label(domain: DomainKind) -> &'static str {
         DomainKind::People => "people",
         DomainKind::Crowd => "crowd",
         DomainKind::Topics => "topics",
+        DomainKind::Text => "text",
         DomainKind::Unknown => "unknown",
     }
 }
@@ -351,6 +358,7 @@ fn domain_for_event(kind: EventKind) -> DomainKind {
         EventKind::BehavioralAtom | EventKind::BehavioralToken => DomainKind::People,
         EventKind::CrowdToken | EventKind::TrafficToken => DomainKind::Crowd,
         EventKind::TopicEventToken => DomainKind::Topics,
+        EventKind::TextAnnotation => DomainKind::Text,
     }
 }
 

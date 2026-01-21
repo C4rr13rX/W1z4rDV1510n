@@ -332,7 +332,12 @@ impl TemporalInferenceCore {
                 .or_insert(0.0) += intensity.intensity;
         }
 
-        for domain in [DomainKind::People, DomainKind::Crowd, DomainKind::Topics] {
+        for domain in [
+            DomainKind::People,
+            DomainKind::Crowd,
+            DomainKind::Topics,
+            DomainKind::Text,
+        ] {
             let total = *domain_intensity.get(&domain).unwrap_or(&0.0);
             let regime = classify_regime(total, self.config.calm_threshold, self.config.surge_threshold);
             let entry = self.regime_dirichlet.entry(domain).or_insert([
@@ -405,13 +410,14 @@ fn classify_regime(total: f64, calm: f64, surge: f64) -> String {
     }
 }
 
-fn all_event_kinds() -> [EventKind; 5] {
+fn all_event_kinds() -> [EventKind; 6] {
     [
         EventKind::BehavioralAtom,
         EventKind::BehavioralToken,
         EventKind::CrowdToken,
         EventKind::TrafficToken,
         EventKind::TopicEventToken,
+        EventKind::TextAnnotation,
     ]
 }
 
@@ -420,6 +426,7 @@ fn domain_for_event(kind: EventKind) -> DomainKind {
         EventKind::BehavioralAtom | EventKind::BehavioralToken => DomainKind::People,
         EventKind::CrowdToken | EventKind::TrafficToken => DomainKind::Crowd,
         EventKind::TopicEventToken => DomainKind::Topics,
+        EventKind::TextAnnotation => DomainKind::Text,
     }
 }
 
