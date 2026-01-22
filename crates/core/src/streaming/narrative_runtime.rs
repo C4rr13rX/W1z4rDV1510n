@@ -42,6 +42,8 @@ pub struct NarrativeEntitySummary {
     pub health_color: Option<String>,
     pub summary: String,
     #[serde(default)]
+    pub severity_color: Option<String>,
+    #[serde(default)]
     pub empathy_label: Option<String>,
     #[serde(default)]
     pub empathy_confidence: Option<f64>,
@@ -60,6 +62,8 @@ pub struct NarrativeReport {
     pub timestamp: Timestamp,
     pub overall_risk: f64,
     pub overall_severity: String,
+    #[serde(default)]
+    pub overall_color: Option<String>,
     pub summary: String,
     #[serde(default)]
     pub entities: Vec<NarrativeEntitySummary>,
@@ -72,6 +76,7 @@ struct NarrativePoint {
     timestamp: Timestamp,
     health_score: Option<f64>,
     survival_score: Option<f64>,
+    risk_score: f64,
     conflict: Option<f64>,
     cooperation: Option<f64>,
     play_index: Option<f64>,
@@ -118,10 +123,12 @@ impl NarrativeRuntime {
         for entity_id in &entity_ids {
             let overlay = health_map.get(entity_id).copied();
             let survival_entry = survival_map.get(entity_id).copied();
+            let risk = risk_score(overlay.map(|entry| entry.score), survival_entry);
             let point = NarrativePoint {
                 timestamp,
                 health_score: overlay.map(|entry| entry.score),
                 survival_score: survival_entry.map(|entry| entry.survival_score),
+                risk_score: risk,
                 conflict: survival_entry.map(|entry| entry.conflict_in),
                 cooperation: survival_entry.map(|entry| entry.cooperation_in),
                 play_index: survival_entry.map(|entry| entry.play_index),
@@ -173,6 +180,7 @@ impl NarrativeRuntime {
             0.0
         };
         let overall_severity = severity_label(overall_risk).to_string();
+        let overall_color = Some(grayscale_color((1.0 - overall_risk).clamp(0.0, 1.0)));
         let summary = if let Some(top) = summaries.first() {
             format!(
                 "Overall risk is {} (score {:.2}). Highest risk entity {} at {:.2}.",
@@ -189,6 +197,7 @@ impl NarrativeRuntime {
             timestamp,
             overall_risk,
             overall_severity,
+            overall_color,
             summary,
             entities: summaries,
             steps,
@@ -296,6 +305,7 @@ fn build_entity_summary(
     let severity = severity_label(risk).to_string();
     let health_label = overlay.map(|entry| entry.label.clone());
     let health_color = overlay.map(|entry| entry.color.clone());
+    let severity_color = severity_color(risk, health_color.as_deref());
     let position = overlay.and_then(|entry| entry.position);
     let empathy_label = metacognition.and_then(|entry| entry.empathy_label.clone());
     let empathy_confidence = metacognition.and_then(|entry| entry.empathy_confidence);
@@ -305,8 +315,14 @@ fn build_entity_summary(
         let label = health_label.clone().unwrap_or_else(|| health_label_from_score(score).to_string());
         summary_parts.push(format!("Health {} (score {:.2})", label, score));
     }
+    summary_parts.push(format!("risk {} ({:.2})", severity, risk));
     if let Some(survival_score) = survival_score {
         summary_parts.push(format!("survival {:.2}", survival_score));
+    }
+    if let Some(delta) = history
+        .and_then(|points| risk_window_delta(points, now, config.recent_window_secs))
+    {
+        summary_parts.push(format!("risk {} ({:+.2})", trend_label(Some(delta)), delta));
     }
     if let Some(entry) = survival {
         if entry.conflict_in >= 0.5 {
@@ -400,6 +416,11 @@ fn build_entity_summary(
         evidence.insert("conflict".to_string(), Value::from(entry.conflict_in));
         evidence.insert("cooperation".to_string(), Value::from(entry.cooperation_in));
     }
+    if let Some(delta) = history
+        .and_then(|points| risk_window_delta(points, now, config.recent_window_secs))
+    {
+        evidence.insert("risk_delta_recent".to_string(), Value::from(delta));
+    }
 
     Some(NarrativeEntitySummary {
         entity_id: entity_id.to_string(),
@@ -411,6 +432,7 @@ fn build_entity_summary(
         health_label,
         health_color,
         summary,
+        severity_color,
         empathy_label,
         empathy_confidence,
         reflection_depth,
@@ -435,6 +457,7 @@ fn summarize_window(history: &VecDeque<NarrativePoint>, now: Timestamp, window_s
     let last = window.last().unwrap();
     let health_delta = delta_optional(first.health_score, last.health_score);
     let survival_delta = delta_optional(first.survival_score, last.survival_score);
+    let risk_delta = last.risk_score - first.risk_score;
     let conflict_avg = avg_optional(window.iter().filter_map(|p| p.conflict));
     let coop_avg = avg_optional(window.iter().filter_map(|p| p.cooperation));
     let play_avg = avg_optional(window.iter().filter_map(|p| p.play_index));
@@ -452,6 +475,7 @@ fn summarize_window(history: &VecDeque<NarrativePoint>, now: Timestamp, window_s
     if let Some(delta) = survival_delta {
         parts.push(format!("survival {} ({:+.2})", trend_survival, delta));
     }
+    parts.push(format!("risk {} ({:+.2})", trend_label(Some(risk_delta)), risk_delta));
     if let Some(conflict) = conflict_avg {
         parts.push(format!("conflict {:.2}", conflict));
     }
@@ -518,6 +542,22 @@ fn position_distance(a: Option<[f64; 3]>, b: Option<[f64; 3]>) -> Option<f64> {
     Some((dx * dx + dy * dy + dz * dz).sqrt())
 }
 
+fn risk_window_delta(
+    history: &VecDeque<NarrativePoint>,
+    now: Timestamp,
+    window_secs: i64,
+) -> Option<f64> {
+    let start = Timestamp {
+        unix: now.unix.saturating_sub(window_secs.max(1)),
+    };
+    let mut iter = history
+        .iter()
+        .filter(|point| point.timestamp.unix >= start.unix);
+    let first = iter.next()?;
+    let last = iter.last().unwrap_or(first);
+    Some(last.risk_score - first.risk_score)
+}
+
 fn risk_score(health: Option<f64>, survival: Option<&SurvivalEntityMetrics>) -> f64 {
     let health_risk = health.map(|score| (1.0 - score).clamp(0.0, 1.0)).unwrap_or(0.5);
     let mut risk = health_risk;
@@ -552,6 +592,18 @@ fn health_label_from_score(score: f64) -> &'static str {
     } else {
         "critical"
     }
+}
+
+fn severity_color(risk: f64, health_color: Option<&str>) -> Option<String> {
+    if let Some(color) = health_color {
+        return Some(color.to_string());
+    }
+    Some(grayscale_color((1.0 - risk).clamp(0.0, 1.0)))
+}
+
+fn grayscale_color(score: f64) -> String {
+    let value = (score.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{value:02X}{value:02X}{value:02X}")
 }
 
 fn build_global_steps(
@@ -681,5 +733,6 @@ mod tests {
         let report = report.unwrap();
         assert_eq!(report.entities.len(), 1);
         assert!(!report.summary.is_empty());
+        assert!(report.entities[0].severity_color.is_some());
     }
 }
