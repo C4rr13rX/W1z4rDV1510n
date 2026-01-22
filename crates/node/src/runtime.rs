@@ -5,7 +5,9 @@ use crate::ledger::LocalLedger;
 use crate::openstack::OpenStackControlPlane;
 use crate::paths::node_data_dir;
 use crate::wallet::{WalletSigner, WalletStore, node_id_from_wallet};
-use crate::performance::{LocalPerformanceSample, NodePerformanceTracker, OffloadReason};
+use crate::performance::{
+    LocalPerformanceSample, NodeMetricsReport, NodePerformanceTracker, OffloadReason,
+};
 use crate::p2p::NodeNetwork;
 use anyhow::{Result, anyhow};
 use std::fs;
@@ -327,7 +329,8 @@ impl NodeRuntime {
                                     should_process = tracker.should_process_streams(now, true);
                                     if !should_process {
                                         offload_reason = tracker.offload_reason(now);
-                                        offload_candidate = tracker.select_offload_peer(now);
+                                        offload_candidate =
+                                            tracker.select_offload_peer(now, offload_reason);
                                     }
                                 }
                                 Err(_) => {
@@ -372,6 +375,11 @@ impl NodeRuntime {
                             continue;
                         }
                         let offload_metrics = extract_offload_metrics(&envelope.metadata);
+                        let offload_origin = envelope
+                            .metadata
+                            .get("offload_origin_node_id")
+                            .and_then(|val| val.as_str())
+                            .map(|val| val.to_string());
                         let start = Instant::now();
                         let outcome = match inference.handle_envelope(envelope) {
                             Ok(outcome) => outcome,
@@ -479,11 +487,26 @@ impl NodeRuntime {
                                 }
                                 Err(_) => None,
                             };
-                            if let Some(report) = report {
+                            if let Some(mut report) = report {
+                                augment_node_metrics_tags(
+                                    &mut report,
+                                    &profile,
+                                    &compute_router,
+                                    &workload,
+                                );
                                 let _ = mesh.publish_node_metrics(report);
                             }
                         }
-                        let score = compute_reward_score(energy_joules, payload_bytes);
+                        let accuracy_factor = reward_accuracy_factor(accuracy);
+                        let offload_penalty = reward_offload_penalty(offload_hops);
+                        let offload_bonus = reward_offload_bonus(offload_origin.as_deref(), &node_id);
+                        let score = compute_reward_score(
+                            energy_joules,
+                            payload_bytes,
+                            accuracy_factor,
+                            offload_penalty,
+                            offload_bonus,
+                        );
                         let completed_at = now_timestamp();
                         let work_id = work_id_for(
                             &node_id,
@@ -543,6 +566,25 @@ impl NodeRuntime {
                             "energy_estimated".to_string(),
                             Value::from(true),
                         );
+                        metrics.insert(
+                            "reward_accuracy_factor".to_string(),
+                            Value::from(accuracy_factor),
+                        );
+                        metrics.insert(
+                            "reward_offload_penalty".to_string(),
+                            Value::from(offload_penalty),
+                        );
+                        metrics.insert(
+                            "reward_offload_bonus".to_string(),
+                            Value::from(offload_bonus),
+                        );
+                        metrics.insert(
+                            "reward_base_score".to_string(),
+                            Value::from(reward_score_base(energy_joules, payload_bytes)),
+                        );
+                        if let Some(accuracy) = accuracy {
+                            metrics.insert("accuracy_score".to_string(), Value::from(accuracy));
+                        }
                         metrics.insert(
                             "hardware_cpu_cores".to_string(),
                             Value::from(profile.cpu_cores as u64),
@@ -770,10 +812,43 @@ fn estimate_watts(profile: &HardwareProfile, target: ComputeTarget) -> f64 {
     watts.clamp(5.0, 500.0)
 }
 
-fn compute_reward_score(energy_joules: f64, payload_bytes: usize) -> f64 {
+fn reward_score_base(energy_joules: f64, payload_bytes: usize) -> f64 {
     let size_factor = ((payload_bytes as f64) / 65_536.0).clamp(0.5, 4.0);
     let base = (energy_joules / 150.0) * size_factor;
     base.clamp(0.05, 100.0)
+}
+
+fn reward_accuracy_factor(accuracy: Option<f64>) -> f64 {
+    match accuracy {
+        Some(value) => (0.5 + 0.5 * value.clamp(0.0, 1.0)).clamp(0.5, 1.0),
+        None => 1.0,
+    }
+}
+
+fn reward_offload_penalty(hops: u64) -> f64 {
+    let penalty = 1.0 - 0.05 * hops.min(6) as f64;
+    penalty.clamp(0.7, 1.0)
+}
+
+fn reward_offload_bonus(offload_origin: Option<&str>, node_id: &str) -> f64 {
+    if let Some(origin) = offload_origin {
+        if !origin.trim().is_empty() && origin != node_id {
+            return 1.05;
+        }
+    }
+    1.0
+}
+
+fn compute_reward_score(
+    energy_joules: f64,
+    payload_bytes: usize,
+    accuracy_factor: f64,
+    offload_penalty: f64,
+    offload_bonus: f64,
+) -> f64 {
+    let base = reward_score_base(energy_joules, payload_bytes);
+    let score = base * accuracy_factor * offload_penalty * offload_bonus;
+    score.clamp(0.05, 100.0)
 }
 
 fn accuracy_from_metadata(metadata: &HashMap<String, Value>) -> Option<f64> {
@@ -927,6 +1002,36 @@ fn work_id_for(
         completed_at.unix
     );
     compute_payload_hash(marker.as_bytes())
+}
+
+fn augment_node_metrics_tags(
+    report: &mut NodeMetricsReport,
+    profile: &HardwareProfile,
+    compute_router: &ComputeRouter,
+    workload: &crate::config::WorkloadProfileConfig,
+) {
+    let tags = &mut report.tags;
+    tags.insert("cpu_cores".to_string(), profile.cpu_cores.to_string());
+    tags.insert(
+        "memory_gb".to_string(),
+        format!("{:.1}", profile.total_memory_gb),
+    );
+    tags.insert("has_gpu".to_string(), profile.has_gpu.to_string());
+    let supports_gpu = compute_router.route(ComputeJobKind::TensorHeavy) == ComputeTarget::Gpu;
+    let supports_quantum =
+        compute_router.route(ComputeJobKind::QuantumAnneal) == ComputeTarget::Quantum;
+    let supports_cluster = compute_router.route(ComputeJobKind::Graph) == ComputeTarget::Cluster;
+    tags.insert("supports_gpu".to_string(), supports_gpu.to_string());
+    tags.insert("supports_quantum".to_string(), supports_quantum.to_string());
+    tags.insert("supports_cluster".to_string(), supports_cluster.to_string());
+    tags.insert(
+        "workload_streams".to_string(),
+        workload.enable_stream_processing.to_string(),
+    );
+    tags.insert(
+        "workload_storage".to_string(),
+        workload.enable_storage.to_string(),
+    );
 }
 
 fn now_timestamp() -> Timestamp {

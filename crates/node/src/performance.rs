@@ -241,7 +241,11 @@ impl NodePerformanceTracker {
         None
     }
 
-    pub fn select_offload_peer(&mut self, now: Timestamp) -> Option<OffloadCandidate> {
+    pub fn select_offload_peer(
+        &mut self,
+        now: Timestamp,
+        reason: Option<OffloadReason>,
+    ) -> Option<OffloadCandidate> {
         if !self.config.enabled {
             return None;
         }
@@ -255,6 +259,7 @@ impl NodePerformanceTracker {
             max_eff = max_eff.max(report.efficiency);
         }
         let max_eff = if max_eff <= 0.0 { 1.0 } else { max_eff };
+        let (w_acc, w_eff, w_cap) = offload_weights(reason);
         let mut best: Option<OffloadCandidate> = None;
         for entry in self.peers.values() {
             let report = &entry.report;
@@ -271,8 +276,9 @@ impl NodePerformanceTracker {
                 continue;
             }
             let eff_norm = (report.efficiency / max_eff).clamp(0.0, 1.0);
-            let score =
-                0.45 * report.accuracy + 0.35 * eff_norm + 0.2 * report.capacity_ratio;
+            let score = w_acc * report.accuracy
+                + w_eff * eff_norm
+                + w_cap * report.capacity_ratio.clamp(0.0, 1.0);
             match &best {
                 Some(candidate) if score <= candidate.score => {}
                 _ => {
@@ -300,6 +306,17 @@ impl NodePerformanceTracker {
         let accuracy_ratio = ratio(self.metrics.accuracy, avg_acc);
         let capacity_ratio = self.metrics.capacity_ratio.clamp(0.0, 1.0);
         let available_capacity = capacity_ratio >= self.config.capacity_threshold;
+        let routing_score = routing_score(
+            efficiency_ratio,
+            accuracy_ratio,
+            capacity_ratio,
+        );
+        let mut tags = HashMap::new();
+        tags.insert("routing_score".to_string(), format!("{routing_score:.3}"));
+        tags.insert(
+            "capacity_class".to_string(),
+            capacity_class(capacity_ratio).to_string(),
+        );
         let report = NodeMetricsReport {
             node_id: self.node_id.clone(),
             timestamp: now,
@@ -312,7 +329,7 @@ impl NodePerformanceTracker {
             efficiency_ratio,
             accuracy_ratio,
             work_profile: WorkProfileSnapshot::from(&self.workload),
-            tags: HashMap::new(),
+            tags,
         };
         self.last_publish = now;
         Some(report)
@@ -393,6 +410,32 @@ fn ratio(value: f64, mean: f64) -> f64 {
     (value / mean).clamp(0.0, 10.0)
 }
 
+fn offload_weights(reason: Option<OffloadReason>) -> (f64, f64, f64) {
+    match reason {
+        Some(OffloadReason::LowAccuracy) => (0.6, 0.2, 0.2),
+        Some(OffloadReason::LowEfficiency) => (0.2, 0.6, 0.2),
+        Some(OffloadReason::Overloaded) => (0.2, 0.2, 0.6),
+        None => (0.45, 0.35, 0.2),
+    }
+}
+
+fn routing_score(eff_ratio: f64, acc_ratio: f64, capacity_ratio: f64) -> f64 {
+    let eff_norm = (eff_ratio / 2.0).clamp(0.0, 1.0);
+    let acc_norm = (acc_ratio / 2.0).clamp(0.0, 1.0);
+    let cap = capacity_ratio.clamp(0.0, 1.0);
+    (0.45 * acc_norm + 0.35 * eff_norm + 0.2 * cap).clamp(0.0, 1.0)
+}
+
+fn capacity_class(capacity_ratio: f64) -> &'static str {
+    if capacity_ratio >= 0.85 {
+        "high"
+    } else if capacity_ratio >= 0.6 {
+        "mid"
+    } else {
+        "low"
+    }
+}
+
 fn average_metric<F>(
     now: Timestamp,
     self_samples: u64,
@@ -468,5 +511,46 @@ mod tests {
         };
         tracker.ingest_peer_report(peer, Timestamp { unix: 11 });
         assert!(!tracker.should_process_streams(Timestamp { unix: 12 }, true));
+    }
+
+    #[test]
+    fn prefers_high_accuracy_when_offloading_for_accuracy() {
+        let config = PeerScoringConfig::default();
+        let workload = WorkloadProfileConfig::default();
+        let mut tracker = NodePerformanceTracker::new("n1".to_string(), config, workload);
+        let peer_fast = NodeMetricsReport {
+            node_id: "n2".to_string(),
+            timestamp: Timestamp { unix: 10 },
+            efficiency: 20.0,
+            accuracy: 0.5,
+            throughput_bps: 1000.0,
+            latency_ms: 50.0,
+            capacity_ratio: 0.9,
+            available_capacity: true,
+            efficiency_ratio: 1.0,
+            accuracy_ratio: 1.0,
+            work_profile: WorkProfileSnapshot::from(&WorkloadProfileConfig::default()),
+            tags: HashMap::new(),
+        };
+        let peer_accurate = NodeMetricsReport {
+            node_id: "n3".to_string(),
+            timestamp: Timestamp { unix: 10 },
+            efficiency: 5.0,
+            accuracy: 0.95,
+            throughput_bps: 500.0,
+            latency_ms: 90.0,
+            capacity_ratio: 0.8,
+            available_capacity: true,
+            efficiency_ratio: 1.0,
+            accuracy_ratio: 1.0,
+            work_profile: WorkProfileSnapshot::from(&WorkloadProfileConfig::default()),
+            tags: HashMap::new(),
+        };
+        tracker.ingest_peer_report(peer_fast, Timestamp { unix: 11 });
+        tracker.ingest_peer_report(peer_accurate, Timestamp { unix: 11 });
+        let picked = tracker
+            .select_offload_peer(Timestamp { unix: 12 }, Some(OffloadReason::LowAccuracy))
+            .expect("candidate");
+        assert_eq!(picked.node_id, "n3");
     }
 }
