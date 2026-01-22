@@ -1,5 +1,7 @@
 use crate::config::{KnowledgeConfig, NodeConfig};
-use crate::data_mesh::{DataIngestRequest, DataMeshEvent, DataMeshHandle, start_data_mesh};
+use crate::data_mesh::{
+    DataIngestRequest, DataMeshEvent, DataMeshHandle, PatternQuery, start_data_mesh,
+};
 use crate::identity::{
     IdentityChallengeRequest, IdentityChallengeResponse, IdentityRuntime, IdentityStatusResponse,
     IdentityVerifyRequest, IdentityVerifyResponse,
@@ -16,13 +18,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use tokio::time::{timeout, Duration};
 use tracing::warn;
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, BridgeIntent, NoopLedger, RewardBalance, bridge_intent_id,
@@ -34,7 +37,7 @@ use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
     HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
     KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
-    NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
+    NetworkPatternSummary, NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
 };
 
 #[derive(Clone)]
@@ -115,6 +118,37 @@ struct MetacognitionTuneRequest {
     min_depth_samples: Option<u64>,
     #[serde(default)]
     depth_improvement_margin: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct PatternQueryRequest {
+    #[serde(default)]
+    phenotype_hash: Option<String>,
+    #[serde(default)]
+    phenotype_tokens: Option<Vec<String>>,
+    #[serde(default)]
+    behavior_signature: Vec<f64>,
+    #[serde(default)]
+    species: Option<String>,
+    #[serde(default)]
+    max_results: Option<usize>,
+    #[serde(default)]
+    min_similarity: Option<f64>,
+    #[serde(default)]
+    broadcast: Option<bool>,
+    #[serde(default)]
+    wait_for_responses_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct PatternQueryResponse {
+    status: String,
+    #[serde(default)]
+    query_id: Option<String>,
+    #[serde(default)]
+    local_matches: Vec<NetworkPatternSummary>,
+    #[serde(default)]
+    responses: Vec<crate::data_mesh::PatternResponse>,
 }
 
 #[derive(Serialize)]
@@ -647,6 +681,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/streaming/labels", get(get_label_queue))
         .route("/streaming/visual-labels", get(get_visual_label_queue))
         .route("/streaming/subnets", get(get_subnet_report))
+        .route("/network/patterns/query", post(query_pattern_index))
         .route("/identity/challenge", post(submit_identity_challenge))
         .route("/identity/verify", post(submit_identity_verify))
         .route("/identity/:thread_id", get(get_identity_status))
@@ -1956,6 +1991,120 @@ async fn get_subnet_report(
     )
 }
 
+async fn query_pattern_index(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<PatternQueryRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "pattern_query") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let Some(mesh) = state.data_mesh.as_ref() else {
+        let response = ErrorResponse {
+            error: "data mesh not enabled".to_string(),
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    };
+    let query = PatternQuery {
+        query_id: String::new(),
+        requester_node_id: state.node_id.clone(),
+        timestamp: now_timestamp(),
+        phenotype_hash: request.phenotype_hash.unwrap_or_default(),
+        phenotype_tokens: request.phenotype_tokens.unwrap_or_default(),
+        behavior_signature: request.behavior_signature,
+        species: request.species,
+        max_results: request.max_results.unwrap_or(8),
+        min_similarity: request.min_similarity,
+        public_key: String::new(),
+        signature: String::new(),
+    };
+    let local = match mesh.search_pattern_index(query.clone()).await {
+        Ok(response) => response,
+        Err(err) => {
+            let response = ErrorResponse {
+                error: err.to_string(),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::to_value(response).unwrap_or_default()),
+            );
+        }
+    };
+    let broadcast = request.broadcast.unwrap_or(true);
+    let mut query_id = Some(local.query_id.clone());
+    if broadcast {
+        match mesh.publish_pattern_query(query) {
+            Ok(id) => query_id = Some(id),
+            Err(err) => {
+                let response = ErrorResponse {
+                    error: err.to_string(),
+                };
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::to_value(response).unwrap_or_default()),
+                );
+            }
+        }
+    }
+    let mut responses = Vec::new();
+    if broadcast {
+        let wait_ms = request.wait_for_responses_ms.unwrap_or(0).min(5_000);
+        if wait_ms > 0 {
+            let mut events = mesh.subscribe();
+            let deadline = Instant::now() + Duration::from_millis(wait_ms);
+            let mut responders = HashSet::new();
+            while Instant::now() < deadline && responses.len() < 16 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let Ok(event) = timeout(remaining, events.recv()).await else {
+                    break;
+                };
+                let Ok(event) = event else {
+                    continue;
+                };
+                let DataMeshEvent::PatternResponse { response } = event else {
+                    continue;
+                };
+                if Some(&response.query_id) != query_id.as_ref() {
+                    continue;
+                }
+                if responders.insert(response.responder_node_id.clone()) {
+                    responses.push(response);
+                }
+            }
+        }
+    }
+    let response = PatternQueryResponse {
+        status: "OK".to_string(),
+        query_id,
+        local_matches: local.matches,
+        responses,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
 async fn identity_pattern_sync(
     mesh: DataMeshHandle,
     identity: Arc<Mutex<IdentityRuntime>>,
@@ -1979,6 +2128,7 @@ async fn identity_pattern_sync(
                 data_id
             }
             DataMeshEvent::NodeMetrics { .. } => continue,
+            DataMeshEvent::PatternResponse { .. } => continue,
         };
         let payload = match mesh.load_payload(data_id).await {
             Ok(payload) => payload,
@@ -2019,6 +2169,7 @@ async fn label_queue_sync(
                 data_id
             }
             DataMeshEvent::NodeMetrics { .. } => continue,
+            DataMeshEvent::PatternResponse { .. } => continue,
         };
         let payload = match mesh.load_payload(data_id).await {
             Ok(payload) => payload,

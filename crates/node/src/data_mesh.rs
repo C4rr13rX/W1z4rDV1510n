@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use w1z4rdv1510n::blockchain::{BlockchainLedger, SensorCommitment, WorkKind, WorkProof};
 use w1z4rdv1510n::network::{NetworkEnvelope, compute_payload_hash};
 use w1z4rdv1510n::schema::Timestamp;
-use w1z4rdv1510n::streaming::{NeuralFabricShare, StreamEnvelope};
+use w1z4rdv1510n::streaming::{NeuralFabricShare, NetworkPatternSummary, StreamEnvelope};
 
 const DATA_MESSAGE_KIND: &str = "data.message";
 const DATA_EVENT_BUFFER: usize = 1024;
@@ -66,6 +66,45 @@ pub struct DataRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatternQuery {
+    pub query_id: String,
+    pub requester_node_id: String,
+    pub timestamp: Timestamp,
+    #[serde(default)]
+    pub phenotype_hash: String,
+    #[serde(default)]
+    pub phenotype_tokens: Vec<String>,
+    #[serde(default)]
+    pub behavior_signature: Vec<f64>,
+    #[serde(default)]
+    pub species: Option<String>,
+    #[serde(default)]
+    pub max_results: usize,
+    #[serde(default)]
+    pub min_similarity: Option<f64>,
+    pub public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatternResponse {
+    pub query_id: String,
+    pub responder_node_id: String,
+    pub timestamp: Timestamp,
+    #[serde(default)]
+    pub matches: Vec<NetworkPatternSummary>,
+    pub public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatternSearchResponse {
+    pub query_id: String,
+    #[serde(default)]
+    pub matches: Vec<NetworkPatternSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DataMessage {
     Manifest(DataManifest),
@@ -73,6 +112,8 @@ pub enum DataMessage {
     Receipt(ReplicationReceipt),
     Request(DataRequest),
     NodeMetrics(NodeMetricsReport),
+    PatternQuery(PatternQuery),
+    PatternResponse(PatternResponse),
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +128,9 @@ pub enum DataMeshEvent {
     },
     NodeMetrics {
         report: NodeMetricsReport,
+    },
+    PatternResponse {
+        response: PatternResponse,
     },
 }
 
@@ -243,6 +287,7 @@ impl DataMeshHandle {
                     data_id
                 }
                 DataMeshEvent::NodeMetrics { .. } => continue,
+                DataMeshEvent::PatternResponse { .. } => continue,
             };
             let payload = self.load_payload(data_id).await.ok()?;
             if let Ok(share) = serde_json::from_slice::<NeuralFabricShare>(&payload) {
@@ -273,6 +318,7 @@ impl DataMeshHandle {
                     data_id
                 }
                 DataMeshEvent::NodeMetrics { .. } => continue,
+                DataMeshEvent::PatternResponse { .. } => continue,
             };
             let payload = self.load_payload(data_id).await.ok()?;
             if let Ok(envelope) = serde_json::from_slice::<StreamEnvelope>(&payload) {
@@ -289,6 +335,42 @@ impl DataMeshHandle {
         self.command_tx
             .send(DataMeshCommand::PublishMetrics { report })
             .map_err(|_| anyhow!("data mesh command channel closed"))
+    }
+
+    pub fn update_pattern_index(
+        &self,
+        patterns: Vec<NetworkPatternSummary>,
+    ) -> Result<()> {
+        self.command_tx
+            .send(DataMeshCommand::UpdatePatternIndex { patterns })
+            .map_err(|_| anyhow!("data mesh command channel closed"))
+    }
+
+    pub fn publish_pattern_query(&self, mut query: PatternQuery) -> Result<String> {
+        if query.query_id.trim().is_empty() {
+            query.query_id = pattern_query_id(&query);
+        }
+        let query_id = query.query_id.clone();
+        self.command_tx
+            .send(DataMeshCommand::PublishPatternQuery { query })
+            .map_err(|_| anyhow!("data mesh command channel closed"))?;
+        Ok(query_id)
+    }
+
+    pub async fn search_pattern_index(
+        &self,
+        query: PatternQuery,
+    ) -> Result<PatternSearchResponse> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.command_tx
+            .send(DataMeshCommand::SearchPatternIndex {
+                query,
+                respond_to: resp_tx,
+            })
+            .map_err(|_| anyhow!("data mesh command channel closed"))?;
+        resp_rx
+            .await
+            .map_err(|_| anyhow!("pattern index response dropped"))?
     }
 }
 
@@ -308,6 +390,16 @@ enum DataMeshCommand {
     NetworkEnvelope(NetworkEnvelope),
     PublishMetrics {
         report: NodeMetricsReport,
+    },
+    UpdatePatternIndex {
+        patterns: Vec<NetworkPatternSummary>,
+    },
+    PublishPatternQuery {
+        query: PatternQuery,
+    },
+    SearchPatternIndex {
+        query: PatternQuery,
+        respond_to: oneshot::Sender<Result<PatternSearchResponse>>,
     },
 }
 
@@ -445,6 +537,39 @@ fn handle_command(
             }
             let _ = publisher.publish(signed_envelope(DataMessage::NodeMetrics(report), wallet));
         }
+        DataMeshCommand::UpdatePatternIndex { patterns } => {
+            if !config.enabled {
+                return;
+            }
+            let now = Timestamp { unix: now_unix() };
+            store.pattern_index.ingest(&patterns, config, now);
+        }
+        DataMeshCommand::PublishPatternQuery { query } => {
+            if !config.enabled || !config.pattern_index_enabled {
+                return;
+            }
+            let signed = sign_pattern_query(query, wallet);
+            let _ = publisher.publish(signed_envelope(DataMessage::PatternQuery(signed), wallet));
+        }
+        DataMeshCommand::SearchPatternIndex { query, respond_to } => {
+            if !config.enabled || !config.pattern_index_enabled {
+                let _ = respond_to.send(Ok(PatternSearchResponse {
+                    query_id: query.query_id.clone(),
+                    matches: Vec::new(),
+                }));
+                return;
+            }
+            let now = Timestamp { unix: now_unix() };
+            let mut query = query;
+            if query.query_id.trim().is_empty() {
+                query.query_id = pattern_query_id(&query);
+            }
+            let matches = store.pattern_index.query(&query, config, now);
+            let _ = respond_to.send(Ok(PatternSearchResponse {
+                query_id: query.query_id,
+                matches,
+            }));
+        }
     }
 }
 
@@ -458,6 +583,9 @@ fn run_maintenance(
     if !config.maintenance_enabled {
         return;
     }
+    store
+        .pattern_index
+        .prune(config, Timestamp { unix: now_unix() });
     if !config.host_storage {
         return;
     }
@@ -712,6 +840,35 @@ fn handle_network_message(
             }
             emit_node_metrics(event_tx, report);
         }
+        DataMessage::PatternQuery(query) => {
+            if !config.pattern_index_enabled {
+                return;
+            }
+            if verify_pattern_query(&query).is_err() {
+                return;
+            }
+            let now = Timestamp { unix: now_unix() };
+            let matches = store.pattern_index.query(&query, config, now);
+            if matches.is_empty() {
+                return;
+            }
+            let response = PatternResponse {
+                query_id: query.query_id.clone(),
+                responder_node_id: node_id.to_string(),
+                timestamp: now,
+                matches,
+                public_key: String::new(),
+                signature: String::new(),
+            };
+            let signed = sign_pattern_response(response, wallet);
+            let _ = publisher.publish(signed_envelope(DataMessage::PatternResponse(signed), wallet));
+        }
+        DataMessage::PatternResponse(response) => {
+            if verify_pattern_response(&response).is_err() {
+                return;
+            }
+            emit_pattern_response(event_tx, response);
+        }
     }
 }
 
@@ -840,6 +997,10 @@ fn emit_node_metrics(event_tx: &broadcast::Sender<DataMeshEvent>, report: NodeMe
     let _ = event_tx.send(DataMeshEvent::NodeMetrics { report });
 }
 
+fn emit_pattern_response(event_tx: &broadcast::Sender<DataMeshEvent>, response: PatternResponse) {
+    let _ = event_tx.send(DataMeshEvent::PatternResponse { response });
+}
+
 fn verify_manifest(manifest: &DataManifest) -> Result<()> {
     let public_key = decode_public_key(&manifest.public_key)?;
     let signature = decode_signature(&manifest.signature)?;
@@ -892,6 +1053,205 @@ fn verify_node_metrics(report: &NodeMetricsReport, public_key_hex: &str) -> Resu
         anyhow::bail!("metrics node_id mismatch");
     }
     Ok(())
+}
+
+fn pattern_query_id(query: &PatternQuery) -> String {
+    compute_payload_hash(pattern_query_payload(query).as_bytes())
+}
+
+fn pattern_query_payload(query: &PatternQuery) -> String {
+    let signature_hash = hash_signature(&query.behavior_signature);
+    let token_hash = hash_tokens(&query.phenotype_tokens);
+    let species = query.species.clone().unwrap_or_default();
+    format!(
+        "pattern_query|{}|{}|{}|{}|{}|{}|{}",
+        query.requester_node_id,
+        query.timestamp.unix,
+        query.phenotype_hash,
+        token_hash,
+        signature_hash,
+        species,
+        query.max_results
+    )
+}
+
+fn pattern_response_payload(response: &PatternResponse) -> String {
+    let mut match_bits = String::new();
+    for entry in &response.matches {
+        match_bits.push_str(&entry.thread_id);
+        match_bits.push('|');
+        match_bits.push_str(&entry.last_seen.unix.to_string());
+        match_bits.push('|');
+    }
+    let matches_hash = compute_payload_hash(match_bits.as_bytes());
+    format!(
+        "pattern_response|{}|{}|{}|{}",
+        response.query_id,
+        response.responder_node_id,
+        response.timestamp.unix,
+        matches_hash
+    )
+}
+
+fn sign_pattern_query(mut query: PatternQuery, wallet: &WalletSigner) -> PatternQuery {
+    query.public_key = wallet.wallet().public_key.clone();
+    if query.query_id.trim().is_empty() {
+        query.query_id = pattern_query_id(&query);
+    }
+    let payload = pattern_query_payload(&query);
+    query.signature = wallet.sign_payload(payload.as_bytes());
+    query
+}
+
+fn sign_pattern_response(mut response: PatternResponse, wallet: &WalletSigner) -> PatternResponse {
+    response.public_key = wallet.wallet().public_key.clone();
+    let payload = pattern_response_payload(&response);
+    response.signature = wallet.sign_payload(payload.as_bytes());
+    response
+}
+
+fn verify_pattern_query(query: &PatternQuery) -> Result<()> {
+    let public_key = decode_public_key(&query.public_key)?;
+    let signature = decode_signature(&query.signature)?;
+    let payload = pattern_query_payload(query);
+    public_key
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|err| anyhow!("pattern query signature invalid: {err}"))?;
+    let expected_node_id = node_id_from_public_key(&public_key)?;
+    if query.requester_node_id != expected_node_id {
+        anyhow::bail!("pattern query node_id mismatch");
+    }
+    Ok(())
+}
+
+fn verify_pattern_response(response: &PatternResponse) -> Result<()> {
+    let public_key = decode_public_key(&response.public_key)?;
+    let signature = decode_signature(&response.signature)?;
+    let payload = pattern_response_payload(response);
+    public_key
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|err| anyhow!("pattern response signature invalid: {err}"))?;
+    let expected_node_id = node_id_from_public_key(&public_key)?;
+    if response.responder_node_id != expected_node_id {
+        anyhow::bail!("pattern response node_id mismatch");
+    }
+    Ok(())
+}
+
+fn pattern_bucket(
+    phenotype_hash: &str,
+    phenotype_tokens: &[String],
+    behavior_signature: &[f64],
+    species: Option<&str>,
+) -> String {
+    let mut payload = String::new();
+    payload.push_str(phenotype_hash);
+    payload.push('|');
+    if !phenotype_tokens.is_empty() {
+        payload.push_str(&hash_tokens(phenotype_tokens));
+    }
+    payload.push('|');
+    payload.push_str(&hash_signature(behavior_signature));
+    if let Some(species) = species {
+        payload.push('|');
+        payload.push_str(species);
+    }
+    compute_payload_hash(payload.as_bytes())
+}
+
+fn pattern_similarity(query: &PatternQuery, candidate: &NetworkPatternSummary) -> f64 {
+    let behavior = behavior_similarity(&query.behavior_signature, &candidate.behavior_signature);
+    let phenotype = phenotype_similarity(&query.phenotype_tokens, &candidate.phenotype_tokens);
+    let mut score = 0.55 * behavior + 0.3 * phenotype + 0.15 * candidate.confidence;
+    if !query.phenotype_hash.trim().is_empty()
+        && query.phenotype_hash == candidate.phenotype_hash
+    {
+        score += 0.05;
+    }
+    if let (Some(a), Some(b)) = (query.species.as_ref(), candidate.species.as_ref()) {
+        if a == b {
+            score += 0.05;
+        }
+    }
+    score.clamp(0.0, 1.0)
+}
+
+fn phenotype_similarity(a: &[String], b: &[String]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let set_a: HashSet<&String> = a.iter().collect();
+    let set_b: HashSet<&String> = b.iter().collect();
+    let mut intersection = 0usize;
+    for token in &set_a {
+        if set_b.contains(token) {
+            intersection += 1;
+        }
+    }
+    let union = set_a.len() + set_b.len() - intersection;
+    if union == 0 {
+        0.0
+    } else {
+        (intersection as f64 / union as f64).clamp(0.0, 1.0)
+    }
+}
+
+fn behavior_similarity(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() || b.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut norm_a = 0.0;
+    let mut norm_b = 0.0;
+    for (av, bv) in a.iter().zip(b.iter()) {
+        let av = if av.is_finite() { *av } else { 0.0 };
+        let bv = if bv.is_finite() { *bv } else { 0.0 };
+        dot += av * bv;
+        norm_a += av * av;
+        norm_b += bv * bv;
+    }
+    if norm_a <= 1e-6 || norm_b <= 1e-6 {
+        return 0.0;
+    }
+    let sim = dot / (norm_a.sqrt() * norm_b.sqrt());
+    ((sim + 1.0) * 0.5).clamp(0.0, 1.0)
+}
+
+fn hash_signature(signature: &[f64]) -> String {
+    if signature.is_empty() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity(signature.len() * 2);
+    for value in signature {
+        let value = if value.is_finite() { *value } else { 0.0 };
+        let quant = ((value.tanh() + 1.0) * 7.5).round().clamp(0.0, 15.0) as u8;
+        bytes.push(quant);
+    }
+    compute_payload_hash(&bytes)
+}
+
+fn hash_tokens(tokens: &[String]) -> String {
+    if tokens.is_empty() {
+        return String::new();
+    }
+    let mut joined = String::new();
+    for token in tokens {
+        joined.push_str(token);
+        joined.push('|');
+    }
+    compute_payload_hash(joined.as_bytes())
+}
+
+fn should_replace_pattern(existing: &NetworkPatternSummary, incoming: &NetworkPatternSummary) -> bool {
+    if incoming.last_seen.unix > existing.last_seen.unix {
+        return true;
+    }
+    if incoming.last_seen.unix < existing.last_seen.unix {
+        return false;
+    }
+    let incoming_score = incoming.confidence + (incoming.support as f64).ln_1p();
+    let existing_score = existing.confidence + (existing.support as f64).ln_1p();
+    incoming_score > existing_score
 }
 
 fn node_id_from_public_key(public_key: &VerifyingKey) -> Result<String> {
@@ -998,6 +1358,195 @@ struct PendingAssembly {
     received: HashSet<u32>,
 }
 
+#[derive(Clone)]
+struct PatternIndexEntry {
+    summary: NetworkPatternSummary,
+    bucket: String,
+    last_seen: Timestamp,
+}
+
+struct PatternIndex {
+    entries: HashMap<String, PatternIndexEntry>,
+    buckets: HashMap<String, HashSet<String>>,
+}
+
+impl PatternIndex {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            buckets: HashMap::new(),
+        }
+    }
+
+    fn ingest(&mut self, patterns: &[NetworkPatternSummary], config: &DataMeshConfig, now: Timestamp) {
+        if !config.pattern_index_enabled {
+            return;
+        }
+        for pattern in patterns {
+            if pattern.thread_id.trim().is_empty() {
+                continue;
+            }
+            if pattern.confidence < config.pattern_index_min_confidence {
+                continue;
+            }
+            let bucket = pattern_bucket(
+                &pattern.phenotype_hash,
+                &pattern.phenotype_tokens,
+                &pattern.behavior_signature,
+                pattern.species.as_deref(),
+            );
+            let mut bucket_update: Option<String> = None;
+            let entry = self.entries.get_mut(&pattern.thread_id);
+            match entry {
+                Some(existing) => {
+                    if should_replace_pattern(&existing.summary, pattern) {
+                        let old_bucket = existing.bucket.clone();
+                        existing.summary = pattern.clone();
+                        existing.last_seen = pattern.last_seen;
+                        if old_bucket != bucket {
+                            existing.bucket = bucket.clone();
+                            bucket_update = Some(old_bucket);
+                        }
+                    }
+                }
+                None => {
+                    self.entries.insert(
+                        pattern.thread_id.clone(),
+                        PatternIndexEntry {
+                            summary: pattern.clone(),
+                            bucket: bucket.clone(),
+                            last_seen: pattern.last_seen,
+                        },
+                    );
+                    self.buckets
+                        .entry(bucket.clone())
+                        .or_insert_with(HashSet::new)
+                        .insert(pattern.thread_id.clone());
+                }
+            }
+            if let Some(old_bucket) = bucket_update {
+                self.remove_bucket(&old_bucket, &pattern.thread_id);
+                self.buckets
+                    .entry(bucket.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(pattern.thread_id.clone());
+            }
+        }
+        self.prune(config, now);
+    }
+
+    fn query(
+        &mut self,
+        query: &PatternQuery,
+        config: &DataMeshConfig,
+        now: Timestamp,
+    ) -> Vec<NetworkPatternSummary> {
+        if !config.pattern_index_enabled {
+            return Vec::new();
+        }
+        self.prune(config, now);
+        let bucket = pattern_bucket(
+            &query.phenotype_hash,
+            &query.phenotype_tokens,
+            &query.behavior_signature,
+            query.species.as_deref(),
+        );
+        let mut candidate_ids: HashSet<String> = HashSet::new();
+        if !query.phenotype_hash.trim().is_empty() {
+            for entry in self.entries.values() {
+                if entry.summary.phenotype_hash == query.phenotype_hash {
+                    candidate_ids.insert(entry.summary.thread_id.clone());
+                }
+            }
+        }
+        if let Some(bucket_entries) = self.buckets.get(&bucket) {
+            for id in bucket_entries {
+                candidate_ids.insert(id.clone());
+            }
+        }
+        let mut scored = Vec::new();
+        for id in candidate_ids {
+            let Some(entry) = self.entries.get(&id) else {
+                continue;
+            };
+            let score = pattern_similarity(query, &entry.summary);
+            scored.push((score, entry.summary.clone()));
+        }
+        let min_similarity = query
+            .min_similarity
+            .unwrap_or(config.pattern_index_min_similarity)
+            .clamp(0.0, 1.0);
+        scored.retain(|(score, _)| *score >= min_similarity);
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let limit = query
+            .max_results
+            .max(1)
+            .min(config.pattern_index_max_results.max(1));
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, summary)| summary)
+            .collect()
+    }
+
+    fn prune(&mut self, config: &DataMeshConfig, now: Timestamp) {
+        if !config.pattern_index_enabled {
+            self.entries.clear();
+            self.buckets.clear();
+            return;
+        }
+        let ttl = config.pattern_index_ttl_secs as i64;
+        if ttl > 0 {
+            let cutoff = now.unix.saturating_sub(ttl);
+            let mut expired = Vec::new();
+            for (id, entry) in &self.entries {
+                if entry.last_seen.unix <= cutoff {
+                    expired.push(id.clone());
+                }
+            }
+            for id in expired {
+                self.remove_entry(&id);
+            }
+        }
+        let max_entries = config.pattern_index_max_entries.max(1);
+        if self.entries.len() <= max_entries {
+            return;
+        }
+        let mut ordered: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.last_seen.unix))
+            .collect();
+        ordered.sort_by(|a, b| b.1.cmp(&a.1));
+        ordered.truncate(max_entries);
+        let keep: HashSet<String> = ordered.into_iter().map(|(id, _)| id).collect();
+        let mut remove = Vec::new();
+        for id in self.entries.keys() {
+            if !keep.contains(id) {
+                remove.push(id.clone());
+            }
+        }
+        for id in remove {
+            self.remove_entry(&id);
+        }
+    }
+
+    fn remove_entry(&mut self, id: &str) {
+        if let Some(entry) = self.entries.remove(id) {
+            self.remove_bucket(&entry.bucket, id);
+        }
+    }
+
+    fn remove_bucket(&mut self, bucket: &str, id: &str) {
+        if let Some(entries) = self.buckets.get_mut(bucket) {
+            entries.remove(id);
+            if entries.is_empty() {
+                self.buckets.remove(bucket);
+            }
+        }
+    }
+}
+
 struct DataStore {
     config: DataMeshConfig,
     root: PathBuf,
@@ -1007,6 +1556,7 @@ struct DataStore {
     staging_dir: PathBuf,
     pending: HashMap<String, PendingAssembly>,
     pending_order: VecDeque<String>,
+    pattern_index: PatternIndex,
 }
 
 impl DataStore {
@@ -1029,6 +1579,7 @@ impl DataStore {
             staging_dir,
             pending: HashMap::new(),
             pending_order: VecDeque::new(),
+            pattern_index: PatternIndex::new(),
         })
     }
 
@@ -1692,6 +2243,9 @@ mod tests {
             DataMeshEvent::NodeMetrics { .. } => {
                 panic!("unexpected node metrics event in test")
             }
+            DataMeshEvent::PatternResponse { .. } => {
+                panic!("unexpected pattern response event in test")
+            }
         };
         let payload = handle.load_payload(data_id).await.expect("payload");
         assert_eq!(payload, b"hello");
@@ -1789,5 +2343,44 @@ mod tests {
         assert_eq!(received.timestamp.unix, 40);
         assert_eq!(response.chunk_count, 1);
         drop(dir);
+    }
+
+    #[test]
+    fn pattern_index_matches_similar_signature() {
+        let config = DataMeshConfig::default();
+        let mut index = PatternIndex::new();
+        let now = Timestamp { unix: 100 };
+        let pattern = NetworkPatternSummary {
+            thread_id: "thread-1".to_string(),
+            last_seen: now,
+            position: None,
+            phenotype_hash: "ph-1".to_string(),
+            phenotype_tokens: vec!["ph=1".to_string()],
+            behavior_signature: vec![0.1; 8],
+            support: 2,
+            confidence: 0.9,
+            novelty_score: 0.2,
+            revision_id: String::new(),
+            origin_nodes: Vec::new(),
+            opt_in_claim: None,
+            species: Some("HUMAN".to_string()),
+            peer_weight: 1.0,
+        };
+        index.ingest(&[pattern], &config, now);
+        let query = PatternQuery {
+            query_id: String::new(),
+            requester_node_id: "node-a".to_string(),
+            timestamp: now,
+            phenotype_hash: "ph-1".to_string(),
+            phenotype_tokens: vec!["ph=1".to_string()],
+            behavior_signature: vec![0.1; 8],
+            species: Some("HUMAN".to_string()),
+            max_results: 4,
+            min_similarity: None,
+            public_key: String::new(),
+            signature: String::new(),
+        };
+        let matches = index.query(&query, &config, now);
+        assert_eq!(matches.len(), 1);
     }
 }

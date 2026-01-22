@@ -82,7 +82,13 @@
     "max_repair_requests_per_tick": 64,
     "storage_reward_enabled": true,
     "storage_reward_base": 0.15,
-    "storage_reward_per_mb": 0.05
+    "storage_reward_per_mb": 0.05,
+    "pattern_index_enabled": true,
+    "pattern_index_max_entries": 10000,
+    "pattern_index_ttl_secs": 86400,
+    "pattern_index_max_results": 8,
+    "pattern_index_min_similarity": 0.55,
+    "pattern_index_min_confidence": 0.2
   },
   "streaming": {
     "enabled": false,

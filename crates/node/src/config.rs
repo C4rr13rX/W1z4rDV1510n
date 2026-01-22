@@ -327,6 +327,26 @@ impl NodeConfig {
                 self.data.storage_reward_per_mb.is_finite() && self.data.storage_reward_per_mb >= 0.0,
                 "data.storage_reward_per_mb must be >= 0 and finite"
             );
+            anyhow::ensure!(
+                self.data.pattern_index_max_entries > 0,
+                "data.pattern_index_max_entries must be > 0"
+            );
+            anyhow::ensure!(
+                self.data.pattern_index_ttl_secs > 0,
+                "data.pattern_index_ttl_secs must be > 0"
+            );
+            anyhow::ensure!(
+                self.data.pattern_index_max_results > 0,
+                "data.pattern_index_max_results must be > 0"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.data.pattern_index_min_similarity),
+                "data.pattern_index_min_similarity must be in [0,1]"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&self.data.pattern_index_min_confidence),
+                "data.pattern_index_min_confidence must be in [0,1]"
+            );
         }
         if self.streaming.enabled {
             anyhow::ensure!(
@@ -639,6 +659,12 @@ pub struct DataMeshConfig {
     pub storage_reward_enabled: bool,
     pub storage_reward_base: f64,
     pub storage_reward_per_mb: f64,
+    pub pattern_index_enabled: bool,
+    pub pattern_index_max_entries: usize,
+    pub pattern_index_ttl_secs: u64,
+    pub pattern_index_max_results: usize,
+    pub pattern_index_min_similarity: f64,
+    pub pattern_index_min_confidence: f64,
 }
 
 impl Default for DataMeshConfig {
@@ -662,6 +688,12 @@ impl Default for DataMeshConfig {
             storage_reward_enabled: true,
             storage_reward_base: 0.15,
             storage_reward_per_mb: 0.05,
+            pattern_index_enabled: true,
+            pattern_index_max_entries: 10_000,
+            pattern_index_ttl_secs: 86_400,
+            pattern_index_max_results: 8,
+            pattern_index_min_similarity: 0.55,
+            pattern_index_min_confidence: 0.2,
         }
     }
 }

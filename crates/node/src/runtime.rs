@@ -285,6 +285,7 @@ impl NodeRuntime {
                             }
                             continue;
                         }
+                        DataMeshEvent::PatternResponse { .. } => continue,
                     };
                     if payload_kind == stream_kind && consume_streams {
                         if processed_set.contains(&data_id) {
@@ -412,6 +413,9 @@ impl NodeRuntime {
                         let mut accuracy = None;
                         if let Some(mut share) = inference.take_last_fabric_share(node_id.clone()) {
                             accuracy = accuracy_from_metadata(&share.metadata);
+                            if !share.network_patterns.is_empty() {
+                                let _ = mesh.update_pattern_index(share.network_patterns.clone());
+                            }
                             share.metadata.insert(
                                 "source_data_id".to_string(),
                                 Value::String(data_id.clone()),
@@ -623,6 +627,9 @@ impl NodeRuntime {
                             if let Ok(share) = serde_json::from_slice::<NeuralFabricShare>(&payload) {
                                 if share.node_id == node_id {
                                     continue;
+                                }
+                                if !share.network_patterns.is_empty() {
+                                    let _ = mesh.update_pattern_index(share.network_patterns.clone());
                                 }
                                 let _ = inference.handle_fabric_share(share);
                             }
