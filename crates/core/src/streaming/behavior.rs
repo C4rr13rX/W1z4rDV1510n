@@ -1817,6 +1817,8 @@ fn write_action(field_map: &FieldMap, key: &str, value: f64, action: &mut [f64])
 fn apply_metadata_attributes(attrs: &mut HashMap<String, Value>, metadata: &HashMap<String, Value>) {
     for key in [
         "phenotype",
+        "phenotype_signature",
+        "phenotype_confidence",
         "size_class",
         "age_bucket",
         "cohort_id",

@@ -217,6 +217,7 @@ Node API (auth optional, see `node_config_example.json`):
 - /data/ingest, /data/:data_id
 - /knowledge/ingest, /knowledge/queue, /knowledge/vote
 - /streaming/labels, /streaming/visual-labels
+- /streaming/subnets
 - /bridge/chains, /bridge/intent, /bridge/proof, /balance/:node_id
 - /identity/challenge, /identity/verify, /identity/:thread_id
 

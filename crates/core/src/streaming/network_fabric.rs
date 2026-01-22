@@ -540,6 +540,7 @@ fn entity_id_from_token(token: &crate::streaming::schema::EventToken) -> Option<
 fn phenotype_tokens_from_attrs(attrs: &HashMap<String, Value>, species: Option<&str>) -> Vec<String> {
     let keys = [
         "phenotype",
+        "phenotype_signature",
         "size_class",
         "age_bucket",
         "cohort_id",
@@ -566,6 +567,7 @@ fn phenotype_tokens_from_attrs(attrs: &HashMap<String, Value>, species: Option<&
 fn phenotype_tokens_from_token(attrs: &HashMap<String, Value>) -> Vec<String> {
     let keys = [
         "phenotype",
+        "phenotype_signature",
         "size_class",
         "age_bucket",
         "cohort_id",

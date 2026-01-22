@@ -8,6 +8,9 @@ pub struct PoseTrackerConfig {
     pub max_idle_secs: f64,
     pub match_distance: f64,
     pub iou_weight: f64,
+    pub appearance_weight: f64,
+    pub appearance_decay: f64,
+    pub appearance_confidence_floor: f64,
 }
 
 impl Default for PoseTrackerConfig {
@@ -17,6 +20,9 @@ impl Default for PoseTrackerConfig {
             max_idle_secs: 5.0,
             match_distance: 1.5,
             iou_weight: 0.4,
+            appearance_weight: 0.35,
+            appearance_decay: 0.4,
+            appearance_confidence_floor: 0.3,
         }
     }
 }
@@ -38,6 +44,8 @@ struct TrackState {
     centroid: (f64, f64),
     bbox: Option<BoundingBox>,
     hits: usize,
+    appearance: Option<Vec<f64>>,
+    appearance_confidence: f64,
 }
 
 pub struct PoseTracker {
@@ -58,6 +66,8 @@ impl PoseTracker {
     pub fn assign(&mut self, frame: &PoseFrame) -> TrackingResult {
         let timestamp = frame.timestamp.unwrap_or(Timestamp { unix: 0 });
         self.prune(timestamp);
+        let appearance = appearance_vector(frame);
+        let appearance_confidence = appearance_confidence(frame);
         let fixed_id = normalize_entity_id(&frame.entity_id);
         if let Some(id) = fixed_id {
             let centroid = pose_centroid(frame).unwrap_or((0.0, 0.0));
@@ -72,10 +82,13 @@ impl PoseTracker {
                     centroid,
                     bbox: bbox.clone(),
                     hits: 0,
+                    appearance: appearance.clone(),
+                    appearance_confidence,
                 });
             state.last_seen = timestamp;
             state.centroid = centroid;
             state.bbox = bbox;
+            update_appearance(state, &appearance, appearance_confidence, &self.config);
             state.hits = state.hits.saturating_add(1);
             let age_secs = (timestamp.unix - state.first_seen.unix).abs() as f64;
             return TrackingResult {
@@ -88,7 +101,15 @@ impl PoseTracker {
         }
 
         let Some(centroid) = pose_centroid(frame) else {
-            return self.create_track(timestamp, (0.0, 0.0), None, 0.0, false);
+            return self.create_track(
+                timestamp,
+                (0.0, 0.0),
+                None,
+                0.0,
+                false,
+                appearance,
+                appearance_confidence,
+            );
         };
         let bbox = frame.bbox.clone();
         let mut best_id = None;
@@ -102,7 +123,15 @@ impl PoseTracker {
             }
             let distance = distance_norm(centroid, state.centroid, &bbox, &state.bbox);
             let iou = bbox_iou(&bbox, &state.bbox);
-            let score = distance / (1.0 + self.config.iou_weight * iou);
+            let appearance_score = appearance_distance(
+                &appearance,
+                appearance_confidence,
+                &state.appearance,
+                state.appearance_confidence,
+                &self.config,
+            );
+            let score = distance / (1.0 + self.config.iou_weight * iou)
+                + self.config.appearance_weight * appearance_score;
             if score < best_score {
                 best_score = score;
                 best_distance = distance;
@@ -116,6 +145,7 @@ impl PoseTracker {
                 state.last_seen = timestamp;
                 state.centroid = centroid;
                 state.bbox = bbox.clone();
+                update_appearance(state, &appearance, appearance_confidence, &self.config);
                 state.hits = state.hits.saturating_add(1);
                 let age_secs = (timestamp.unix - state.first_seen.unix).abs() as f64;
                 let confidence =
@@ -129,7 +159,15 @@ impl PoseTracker {
                 };
             }
         }
-        self.create_track(timestamp, centroid, bbox, best_distance, false)
+        self.create_track(
+            timestamp,
+            centroid,
+            bbox,
+            best_distance,
+            false,
+            appearance,
+            appearance_confidence,
+        )
     }
 
     fn create_track(
@@ -139,6 +177,8 @@ impl PoseTracker {
         bbox: Option<BoundingBox>,
         distance: f64,
         reused: bool,
+        appearance: Option<Vec<f64>>,
+        appearance_confidence: f64,
     ) -> TrackingResult {
         let track_id = format!("track-{}", self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -149,6 +189,8 @@ impl PoseTracker {
             centroid,
             bbox: bbox.clone(),
             hits: 1,
+            appearance,
+            appearance_confidence,
         };
         self.tracks.insert(track_id.clone(), state);
         self.enforce_limit();
@@ -272,6 +314,96 @@ fn bbox_iou(a: &Option<BoundingBox>, b: &Option<BoundingBox>) -> f64 {
     (inter / union).clamp(0.0, 1.0)
 }
 
+fn appearance_vector(frame: &PoseFrame) -> Option<Vec<f64>> {
+    let value = frame.metadata.get("phenotype_vector")?;
+    let Some(values) = value.as_array() else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for entry in values {
+        if let Some(val) = entry.as_f64() {
+            out.push(val);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn appearance_confidence(frame: &PoseFrame) -> f64 {
+    frame
+        .metadata
+        .get("phenotype_confidence")
+        .and_then(|val| val.as_f64())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0)
+}
+
+fn appearance_distance(
+    current: &Option<Vec<f64>>,
+    current_conf: f64,
+    stored: &Option<Vec<f64>>,
+    stored_conf: f64,
+    config: &PoseTrackerConfig,
+) -> f64 {
+    let Some(curr) = current.as_ref() else {
+        return 0.0;
+    };
+    let Some(prev) = stored.as_ref() else {
+        return 0.0;
+    };
+    if current_conf < config.appearance_confidence_floor
+        || stored_conf < config.appearance_confidence_floor
+    {
+        return 0.0;
+    }
+    let len = curr.len().min(prev.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut norm_a = 0.0;
+    let mut norm_b = 0.0;
+    for idx in 0..len {
+        dot += curr[idx] * prev[idx];
+        norm_a += curr[idx] * curr[idx];
+        norm_b += prev[idx] * prev[idx];
+    }
+    if norm_a <= 1e-6 || norm_b <= 1e-6 {
+        return 0.0;
+    }
+    let cosine = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+    (1.0 - cosine).clamp(0.0, 1.0)
+}
+
+fn update_appearance(
+    state: &mut TrackState,
+    appearance: &Option<Vec<f64>>,
+    confidence: f64,
+    config: &PoseTrackerConfig,
+) {
+    let Some(vector) = appearance.as_ref() else {
+        return;
+    };
+    if state.appearance.is_none() {
+        state.appearance = Some(vector.clone());
+        state.appearance_confidence = confidence;
+        return;
+    }
+    let Some(existing) = state.appearance.as_mut() else {
+        return;
+    };
+    let alpha = config.appearance_decay.clamp(0.0, 1.0);
+    let len = existing.len().min(vector.len());
+    for idx in 0..len {
+        existing[idx] = existing[idx] * (1.0 - alpha) + vector[idx] * alpha;
+    }
+    state.appearance_confidence =
+        (state.appearance_confidence * (1.0 - alpha) + confidence * alpha).clamp(0.0, 1.0);
+}
+
 fn track_confidence(score: f64, hits: usize) -> f64 {
     let hit_factor = hits as f64 / (hits as f64 + 2.0);
     (1.0 / (1.0 + score)).clamp(0.0, 1.0) * hit_factor
@@ -282,6 +414,7 @@ mod tests {
     use super::*;
     use crate::schema::Timestamp;
     use crate::streaming::motor::{Keypoint, PoseFrame};
+    use serde_json::Value;
     use std::collections::HashMap;
 
     #[test]
@@ -317,5 +450,55 @@ mod tests {
         let b = tracker.assign(&frame_b);
         assert_eq!(a.track_id, b.track_id);
         assert!(b.reused);
+    }
+
+    #[test]
+    fn appearance_distance_prefers_similar_vectors() {
+        let config = PoseTrackerConfig::default();
+        let frame_a = PoseFrame {
+            entity_id: "a".to_string(),
+            timestamp: Some(Timestamp { unix: 1 }),
+            keypoints: Vec::new(),
+            bbox: None,
+            metadata: HashMap::from([
+                ("phenotype_vector".to_string(), Value::Array(vec![Value::from(0.2), Value::from(0.4)])),
+                ("phenotype_confidence".to_string(), Value::from(0.8)),
+            ]),
+        };
+        let frame_b = PoseFrame {
+            entity_id: "b".to_string(),
+            timestamp: Some(Timestamp { unix: 2 }),
+            keypoints: Vec::new(),
+            bbox: None,
+            metadata: HashMap::from([
+                ("phenotype_vector".to_string(), Value::Array(vec![Value::from(0.2), Value::from(0.42)])),
+                ("phenotype_confidence".to_string(), Value::from(0.8)),
+            ]),
+        };
+        let frame_c = PoseFrame {
+            entity_id: "c".to_string(),
+            timestamp: Some(Timestamp { unix: 2 }),
+            keypoints: Vec::new(),
+            bbox: None,
+            metadata: HashMap::from([
+                ("phenotype_vector".to_string(), Value::Array(vec![Value::from(1.0), Value::from(0.0)])),
+                ("phenotype_confidence".to_string(), Value::from(0.8)),
+            ]),
+        };
+        let dist_ab = appearance_distance(
+            &appearance_vector(&frame_b),
+            appearance_confidence(&frame_b),
+            &appearance_vector(&frame_a),
+            appearance_confidence(&frame_a),
+            &config,
+        );
+        let dist_ac = appearance_distance(
+            &appearance_vector(&frame_c),
+            appearance_confidence(&frame_c),
+            &appearance_vector(&frame_a),
+            appearance_confidence(&frame_a),
+            &config,
+        );
+        assert!(dist_ab < dist_ac);
     }
 }

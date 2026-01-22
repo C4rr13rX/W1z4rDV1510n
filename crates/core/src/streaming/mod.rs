@@ -22,6 +22,7 @@ pub mod analysis_runtime;
 pub mod cross_modal;
 pub mod behavior;
 pub mod fabric;
+pub mod appearance;
 pub mod network_fabric;
 pub mod spatial;
 pub mod dimensions;
@@ -34,6 +35,8 @@ pub mod survival;
 pub mod knowledge;
 pub mod knowledge_ingest;
 pub mod tracking;
+pub mod scene_runtime;
+pub mod subnet_registry;
 pub mod neuro_bridge;
 pub mod motif_playback;
 pub mod narrative_runtime;
@@ -64,6 +67,7 @@ pub use ontology_runtime::{OntologyReport, OntologyRuntime};
 pub use physiology_runtime::{PhysiologyReport, PhysiologyRuntime};
 pub use analysis_runtime::{AnalysisReport, StreamingAnalysisRuntime};
 pub use cross_modal::{CrossModalLink, CrossModalQuery, CrossModalReport, CrossModalRuntime};
+pub use appearance::{AppearanceExtractor, AppearanceFeatures};
 pub use quality::{QualityReport, SourceQuality, StreamingQualityRuntime};
 pub use ocr_runtime::{FrameOcrRuntime, OcrBlock, OcrResult};
 pub use visual_labeling::{VisualLabelQueue, VisualLabelReport, VisualLabelTask};
@@ -72,6 +76,7 @@ pub use dimensions::{DimensionConfig, DimensionInfo, DimensionReport, DimensionT
 pub use labeling::{LabelCandidate, LabelQueue, LabelQueueConfig, LabelQueueReport};
 pub use health_overlay::{HealthDimensionPalette, HealthDimensionScore, HealthEntityOverlay, HealthOverlayConfig, HealthOverlayReport, HealthOverlayRuntime};
 pub use survival::{SurvivalConfig, SurvivalEntityMetrics, SurvivalInteraction, SurvivalReport, SurvivalRuntime};
+pub use scene_runtime::{SceneAnomaly, SceneEntityReport, ScenePrediction, SceneReport, SceneRuntime};
 pub use knowledge::{
     AssociationStatus, AssociationVote, FigureAsset, FigureAssociationTask, HealthKnowledgeStore,
     KnowledgeAssociation, KnowledgeDocument, KnowledgeIngestReport, KnowledgeQueue,
@@ -90,6 +95,7 @@ pub use fabric::NeuralFabricShare;
 pub use network_fabric::{NetworkMatch, NetworkPatternReport, NetworkPatternRuntime, NetworkPatternSummary};
 pub use spatial::{SpatialConfig, SpatialEstimate, SpatialEstimator, insert_spatial_attrs};
 pub use tracking::{PoseTracker, PoseTrackerConfig, TrackingResult};
+pub use subnet_registry::{SubnetworkRegistry, SubnetworkReport, SubnetworkSnapshot};
 pub use neuro_bridge::{
     NeuroStreamBridge, SubstreamOrigin, SubstreamOutput, SubstreamReport, SubstreamReportItem,
     SubstreamRuntime,

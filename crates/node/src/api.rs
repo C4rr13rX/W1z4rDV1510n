@@ -4,7 +4,7 @@ use crate::identity::{
     IdentityChallengeRequest, IdentityChallengeResponse, IdentityRuntime, IdentityStatusResponse,
     IdentityVerifyRequest, IdentityVerifyResponse,
 };
-use crate::label_queue::{parse_label_queue, parse_visual_label_queue};
+use crate::label_queue::{parse_label_queue, parse_subnet_report, parse_visual_label_queue};
 use crate::ledger::LocalLedger;
 use crate::p2p::NodeNetwork;
 use crate::paths::node_data_dir;
@@ -34,7 +34,7 @@ use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
     HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
     KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
-    NlmJatsIngestor, VisualLabelReport,
+    NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
 };
 
 #[derive(Clone)]
@@ -76,6 +76,7 @@ struct KnowledgePersist {
 struct LabelQueueState {
     label_queue: Option<LabelQueueReport>,
     visual_label_queue: Option<VisualLabelReport>,
+    subnet_report: Option<SubnetworkReport>,
     updated_at: Option<Timestamp>,
 }
 
@@ -223,6 +224,13 @@ struct VisualLabelQueueSnapshot {
 }
 
 #[derive(Serialize)]
+struct SubnetworkSnapshot {
+    status: &'static str,
+    updated_at: Option<Timestamp>,
+    report: Option<SubnetworkReport>,
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     error: String,
 }
@@ -255,6 +263,7 @@ struct ApiMetricsSnapshot {
     knowledge_vote_requests: u64,
     label_queue_requests: u64,
     visual_label_queue_requests: u64,
+    subnet_requests: u64,
     identity_challenge_requests: u64,
     identity_verify_requests: u64,
     bridge_success: u64,
@@ -268,6 +277,7 @@ struct ApiMetricsSnapshot {
     knowledge_vote_success: u64,
     label_queue_success: u64,
     visual_label_queue_success: u64,
+    subnet_success: u64,
     identity_challenge_success: u64,
     identity_verify_success: u64,
     rate_limit_hits: u64,
@@ -291,6 +301,7 @@ struct ApiMetrics {
     knowledge_vote_requests: AtomicU64,
     label_queue_requests: AtomicU64,
     visual_label_queue_requests: AtomicU64,
+    subnet_requests: AtomicU64,
     identity_challenge_requests: AtomicU64,
     identity_verify_requests: AtomicU64,
     bridge_success: AtomicU64,
@@ -304,6 +315,7 @@ struct ApiMetrics {
     knowledge_vote_success: AtomicU64,
     label_queue_success: AtomicU64,
     visual_label_queue_success: AtomicU64,
+    subnet_success: AtomicU64,
     identity_challenge_success: AtomicU64,
     identity_verify_success: AtomicU64,
     rate_limit_hits: AtomicU64,
@@ -382,6 +394,11 @@ impl ApiMetrics {
         self.visual_label_queue_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_subnet_request(&self) {
+        self.inc_request();
+        self.subnet_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_identity_challenge_request(&self) {
         self.inc_request();
         self.identity_challenge_requests.fetch_add(1, Ordering::Relaxed);
@@ -441,6 +458,10 @@ impl ApiMetrics {
         self.visual_label_queue_success.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn inc_subnet_success(&self) {
+        self.subnet_success.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn inc_identity_challenge_success(&self) {
         self.identity_challenge_success
             .fetch_add(1, Ordering::Relaxed);
@@ -476,6 +497,7 @@ impl ApiMetrics {
             knowledge_vote_requests: self.knowledge_vote_requests.load(Ordering::Relaxed),
             label_queue_requests: self.label_queue_requests.load(Ordering::Relaxed),
             visual_label_queue_requests: self.visual_label_queue_requests.load(Ordering::Relaxed),
+            subnet_requests: self.subnet_requests.load(Ordering::Relaxed),
             identity_challenge_requests: self
                 .identity_challenge_requests
                 .load(Ordering::Relaxed),
@@ -491,6 +513,7 @@ impl ApiMetrics {
             knowledge_vote_success: self.knowledge_vote_success.load(Ordering::Relaxed),
             label_queue_success: self.label_queue_success.load(Ordering::Relaxed),
             visual_label_queue_success: self.visual_label_queue_success.load(Ordering::Relaxed),
+            subnet_success: self.subnet_success.load(Ordering::Relaxed),
             identity_challenge_success: self
                 .identity_challenge_success
                 .load(Ordering::Relaxed),
@@ -623,6 +646,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/streaming/metacognition", post(tune_metacognition))
         .route("/streaming/labels", get(get_label_queue))
         .route("/streaming/visual-labels", get(get_visual_label_queue))
+        .route("/streaming/subnets", get(get_subnet_report))
         .route("/identity/challenge", post(submit_identity_challenge))
         .route("/identity/verify", post(submit_identity_verify))
         .route("/identity/:thread_id", get(get_identity_status))
@@ -1888,6 +1912,50 @@ async fn get_visual_label_queue(
     )
 }
 
+async fn get_subnet_report(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.metrics.inc_subnet_request();
+    if let Err(err) = rate_limit(&state, &headers, "subnets") {
+        state.metrics.inc_rate_limit_hit();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        let response = ErrorResponse {
+            error: err.to_string(),
+        };
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(response).unwrap_or_default()),
+        );
+    }
+    let (report, updated_at) = match state.label_state.lock() {
+        Ok(state) => (state.subnet_report.clone(), state.updated_at),
+        Err(_) => (None, None),
+    };
+    let status = if report.is_some() { "OK" } else { "EMPTY" };
+    if report.is_some() {
+        state.metrics.inc_subnet_success();
+    }
+    let snapshot = SubnetworkSnapshot {
+        status,
+        updated_at,
+        report,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(snapshot).unwrap_or_default()),
+    )
+}
+
 async fn identity_pattern_sync(
     mesh: DataMeshHandle,
     identity: Arc<Mutex<IdentityRuntime>>,
@@ -1961,7 +2029,8 @@ async fn label_queue_sync(
         };
         let label_queue = parse_label_queue(&share);
         let visual_label_queue = parse_visual_label_queue(&share);
-        if label_queue.is_none() && visual_label_queue.is_none() {
+        let subnet_report = parse_subnet_report(&share);
+        if label_queue.is_none() && visual_label_queue.is_none() && subnet_report.is_none() {
             continue;
         }
         if let Ok(mut state) = label_state.lock() {
@@ -1972,6 +2041,10 @@ async fn label_queue_sync(
             }
             if let Some(queue) = visual_label_queue {
                 state.visual_label_queue = Some(queue);
+                updated = true;
+            }
+            if let Some(report) = subnet_report {
+                state.subnet_report = Some(report);
                 updated = true;
             }
             if updated {

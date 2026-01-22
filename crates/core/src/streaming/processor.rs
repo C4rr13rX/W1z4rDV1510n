@@ -13,12 +13,14 @@ use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::compute::QuantumExecutor;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
 use crate::streaming::cross_modal::{CrossModalReport, CrossModalRuntime};
+use crate::streaming::appearance::AppearanceExtractor;
 use crate::streaming::ocr_runtime::FrameOcrRuntime;
 use crate::streaming::dimensions::DimensionTracker;
 use crate::streaming::health_overlay::HealthOverlayRuntime;
 use crate::streaming::quality::StreamingQualityRuntime;
 use crate::streaming::knowledge::{AssociationVote, KnowledgeDocument, KnowledgeIngestReport, KnowledgeRuntime};
 use crate::streaming::survival::SurvivalRuntime;
+use crate::streaming::scene_runtime::SceneRuntime;
 use crate::streaming::network_fabric::{NetworkPatternRuntime, NetworkPatternSummary};
 use crate::streaming::ontology_runtime::OntologyRuntime;
 use crate::streaming::physiology_runtime::PhysiologyRuntime;
@@ -36,6 +38,7 @@ use crate::streaming::visual_labeling::VisualLabelQueue;
 use crate::streaming::symbolize::{SymbolizeConfig, token_batch_to_snapshot};
 use crate::streaming::topic::{TopicEventExtractor, TopicSample, TopicConfig};
 use crate::streaming::spike_runtime::StreamingSpikeRuntime;
+use crate::streaming::subnet_registry::{SubnetworkRegistry, SubnetworkReport};
 use crate::streaming::temporal::TemporalInferenceCore;
 use crate::streaming::ultradian::{SignalSample, UltradianLayerExtractor};
 use crate::streaming::spatial::insert_spatial_attrs;
@@ -93,6 +96,7 @@ pub struct StreamingProcessor {
     motor_extractor: MotorFeatureExtractor,
     pose_tracker: PoseTracker,
     ocr_runtime: Option<FrameOcrRuntime>,
+    appearance: AppearanceExtractor,
     behavior_substrate: BehaviorSubstrate,
     flow_extractor: FlowLayerExtractor,
     topic_extractor: TopicEventExtractor,
@@ -108,12 +112,14 @@ impl StreamingProcessor {
         } else {
             None
         };
+        let appearance = AppearanceExtractor::new(config.appearance.clone());
         Self {
             config,
             people_extractors: HashMap::new(),
             motor_extractor: MotorFeatureExtractor::new(crate::streaming::motor::MotorConfig::default()),
             pose_tracker: PoseTracker::default(),
             ocr_runtime,
+            appearance,
             behavior_substrate: BehaviorSubstrate::new(BehaviorSubstrateConfig::default()),
             flow_extractor: FlowLayerExtractor::new(FlowConfig::default()),
             topic_extractor: TopicEventExtractor::new(TopicConfig::default()),
@@ -294,6 +300,35 @@ impl StreamingProcessor {
         if let Some(runtime) = &mut self.ocr_runtime {
             runtime.maybe_enrich(&mut frame, &metadata);
         }
+        if self.appearance.enabled() {
+            if let Some(features) = self.appearance.extract(&frame) {
+                frame.metadata.insert(
+                    "phenotype_signature".to_string(),
+                    Value::String(features.signature.clone()),
+                );
+                frame.metadata.insert(
+                    "phenotype_confidence".to_string(),
+                    Value::from(features.confidence),
+                );
+                let vector = features
+                    .vector
+                    .iter()
+                    .map(|value| Value::from(*value))
+                    .collect::<Vec<_>>();
+                frame
+                    .metadata
+                    .insert("phenotype_vector".to_string(), Value::Array(vector));
+                if !features.components.is_empty() {
+                    let mut components = Map::new();
+                    for (key, value) in features.components {
+                        components.insert(key, Value::from(value));
+                    }
+                    frame
+                        .metadata
+                        .insert("phenotype_components".to_string(), Value::Object(components));
+                }
+            }
+        }
         let behavior_frame = frame.clone();
         let tracking = self.pose_tracker.assign(&frame);
         if frame.entity_id.trim().is_empty() || frame.entity_id.trim().eq_ignore_ascii_case("unknown")
@@ -442,8 +477,13 @@ impl StreamingProcessor {
                 Value::Object(map_from_metadata(&output.metadata)),
             );
         }
+        apply_phenotype_attrs(&mut attributes, &output.metadata);
         if let Some(frame_id) = frame_ref_from_metadata(&output.metadata) {
             attributes.insert("frame_id".to_string(), Value::String(frame_id));
+        }
+        let mut behavior_metadata = metadata.clone();
+        for (key, value) in &output.metadata {
+            behavior_metadata.insert(key.clone(), value.clone());
         }
         let behavior_input = BehaviorInput {
             entity_id: output.entity_id.clone(),
@@ -452,7 +492,7 @@ impl StreamingProcessor {
             sensors: Vec::new(),
             actions: Vec::new(),
             pose: Some(behavior_frame),
-            metadata: metadata.clone(),
+            metadata: behavior_metadata,
         };
         let spatial = self.behavior_substrate.estimate_spatial(&behavior_input);
         for layer in &mut layers {
@@ -688,9 +728,11 @@ pub struct StreamingInference {
     narrative: NarrativeRuntime,
     health_overlay: HealthOverlayRuntime,
     survival: SurvivalRuntime,
+    scene: SceneRuntime,
     knowledge: KnowledgeRuntime,
     cross_modal: CrossModalRuntime,
     network_fabric: NetworkPatternRuntime,
+    subnet_registry: SubnetworkRegistry,
     spike_runtime: Option<StreamingSpikeRuntime>,
     neuro_bridge: Option<NeuroStreamBridge>,
     substreams: SubstreamRuntime,
@@ -747,9 +789,12 @@ impl StreamingInference {
         let narrative = NarrativeRuntime::new(run_config.streaming.narrative.clone());
         let health_overlay = HealthOverlayRuntime::default();
         let survival = SurvivalRuntime::default();
+        let scene = SceneRuntime::new(run_config.streaming.scene.clone());
         let knowledge = KnowledgeRuntime::default();
         let cross_modal = CrossModalRuntime::new(run_config.streaming.cross_modal.clone());
         let network_fabric = NetworkPatternRuntime::new(run_config.streaming.network_fabric.clone());
+        let mut subnet_registry = SubnetworkRegistry::new(run_config.streaming.subnet_registry.clone());
+        subnet_registry.load_state();
         let spike_runtime = if run_config.streaming.spike.enabled {
             Some(StreamingSpikeRuntime::new(run_config.streaming.spike.clone()))
         } else {
@@ -782,9 +827,11 @@ impl StreamingInference {
             narrative,
             health_overlay,
             survival,
+            scene,
             knowledge,
             cross_modal,
             network_fabric,
+            subnet_registry,
             spike_runtime,
             neuro_bridge,
             substreams,
@@ -827,6 +874,11 @@ impl StreamingInference {
         if let Some(report) = share.metacognition.as_ref() {
             let weight = peer_weight_from_metadata(&share.metadata);
             self.metacognition.ingest_peer_share(report, weight);
+        }
+        if let Some(value) = share.metadata.get("subnet_registry") {
+            if let Ok(report) = serde_json::from_value::<SubnetworkReport>(value.clone()) {
+                self.subnet_registry.ingest_shared(&report);
+            }
         }
         if let Some(value) = share.metadata.get("cross_modal_report") {
             if let Ok(report) = serde_json::from_value::<CrossModalReport>(value.clone()) {
@@ -912,6 +964,7 @@ impl StreamingInference {
             .quality
             .report_for(batch.timestamp, batch.source_confidence.keys().copied());
         let dimension_report = self.dimensions.update(&batch);
+        let scene_report = self.scene.update(&batch);
         let physiology_report = self
             .physiology
             .update(&batch, Some(self.knowledge.store()));
@@ -997,6 +1050,7 @@ impl StreamingInference {
             );
         }
         let substream_report = self.substreams.report(batch.timestamp);
+        let subnet_report = self.subnet_registry.update(&batch, &substream_report);
         report_metadata.insert(
             "substream_report".to_string(),
             serde_json::to_value(&substream_report)?,
@@ -1005,6 +1059,16 @@ impl StreamingInference {
             "substream_report".to_string(),
             serde_json::to_value(substream_report)?,
         );
+        if let Some(report) = &subnet_report {
+            report_metadata.insert(
+                "subnet_registry".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "subnet_registry".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
         if let Some(report) = temporal_report {
             report_metadata.insert(
                 "temporal_inference".to_string(),
@@ -1052,6 +1116,16 @@ impl StreamingInference {
             );
             snapshot.metadata.insert(
                 "dimension_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &scene_report {
+            report_metadata.insert(
+                "scene_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "scene_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }
@@ -1237,6 +1311,14 @@ fn map_from_metadata(input: &HashMap<String, Value>) -> Map<String, Value> {
         map.insert(key.clone(), value.clone());
     }
     map
+}
+
+fn apply_phenotype_attrs(attrs: &mut HashMap<String, Value>, metadata: &HashMap<String, Value>) {
+    for key in ["phenotype_signature", "phenotype_vector", "phenotype_confidence"] {
+        if let Some(value) = metadata.get(key) {
+            attrs.insert(key.to_string(), value.clone());
+        }
+    }
 }
 
 fn bbox_to_value(bbox: &crate::streaming::motor::BoundingBox) -> Value {

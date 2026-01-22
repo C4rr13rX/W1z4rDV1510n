@@ -733,6 +733,82 @@ impl RunConfig {
                     "streaming.metacognition.depth_improvement_margin must be in [0,1]"
                 );
             }
+            if self.streaming.subnet_registry.enabled {
+                anyhow::ensure!(
+                    self.streaming.subnet_registry.max_subnets > 0,
+                    "streaming.subnet_registry.max_subnets must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.subnet_registry.min_stability),
+                    "streaming.subnet_registry.min_stability must be in [0,1]"
+                );
+                anyhow::ensure!(
+                    self.streaming.subnet_registry.idle_ttl_secs > 0,
+                    "streaming.subnet_registry.idle_ttl_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.subnet_registry.max_inputs_per_subnet > 0,
+                    "streaming.subnet_registry.max_inputs_per_subnet must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.subnet_registry.coactivity_ttl_secs > 0,
+                    "streaming.subnet_registry.coactivity_ttl_secs must be > 0"
+                );
+                if self.streaming.subnet_registry.persist_state {
+                    anyhow::ensure!(
+                        !self.streaming.subnet_registry.state_path.trim().is_empty(),
+                        "streaming.subnet_registry.state_path must be set when persistence is enabled"
+                    );
+                    anyhow::ensure!(
+                        self.streaming.subnet_registry.persist_interval_secs > 0,
+                        "streaming.subnet_registry.persist_interval_secs must be > 0"
+                    );
+                }
+            }
+            if self.streaming.appearance.enabled {
+                anyhow::ensure!(
+                    self.streaming.appearance.min_keypoints > 0,
+                    "streaming.appearance.min_keypoints must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.appearance.signature_precision > 0.0,
+                    "streaming.appearance.signature_precision must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.appearance.max_features > 0,
+                    "streaming.appearance.max_features must be > 0"
+                );
+                anyhow::ensure!(
+                    (0.0..=1.0).contains(&self.streaming.appearance.confidence_floor),
+                    "streaming.appearance.confidence_floor must be in [0,1]"
+                );
+            }
+            if self.streaming.scene.enabled {
+                anyhow::ensure!(
+                    self.streaming.scene.max_entities > 0,
+                    "streaming.scene.max_entities must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.scene.history_len > 0,
+                    "streaming.scene.history_len must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.scene.prediction_horizon_secs > 0.0,
+                    "streaming.scene.prediction_horizon_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.scene.anomaly_threshold >= 0.0,
+                    "streaming.scene.anomaly_threshold must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.scene.static_speed_threshold >= 0.0,
+                    "streaming.scene.static_speed_threshold must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.scene.static_min_age_secs >= 0.0,
+                    "streaming.scene.static_min_age_secs must be >= 0"
+                );
+            }
         }
         if self.compute.allow_quantum {
             for endpoint in &self.compute.quantum_endpoints {
@@ -1318,6 +1394,12 @@ pub struct StreamingConfig {
     #[serde(default)]
     pub visual_label: VisualLabelConfig,
     #[serde(default)]
+    pub subnet_registry: SubnetworkRegistryConfig,
+    #[serde(default)]
+    pub appearance: AppearanceConfig,
+    #[serde(default)]
+    pub scene: SceneConfig,
+    #[serde(default)]
     pub hypergraph: StreamingHypergraphConfig,
     #[serde(default)]
     pub temporal: TemporalInferenceConfig,
@@ -1358,6 +1440,9 @@ impl Default for StreamingConfig {
             quality: StreamingQualityConfig::default(),
             ocr: StreamingOcrConfig::default(),
             visual_label: VisualLabelConfig::default(),
+            subnet_registry: SubnetworkRegistryConfig::default(),
+            appearance: AppearanceConfig::default(),
+            scene: SceneConfig::default(),
             hypergraph: StreamingHypergraphConfig::default(),
             temporal: TemporalInferenceConfig::default(),
             spike: StreamingSpikeConfig::default(),
@@ -1516,6 +1601,92 @@ impl Default for VisualLabelConfig {
             max_per_batch: 32,
             min_priority: 0.15,
             require_frame_ref: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubnetworkRegistryConfig {
+    pub enabled: bool,
+    pub max_subnets: usize,
+    pub min_stability: f64,
+    pub idle_ttl_secs: i64,
+    pub max_inputs_per_subnet: usize,
+    pub embed_in_snapshot: bool,
+    pub spike_threshold: f32,
+    pub membrane_decay: f32,
+    pub refractory_steps: u32,
+    pub coactivity_ttl_secs: i64,
+    pub persist_state: bool,
+    pub state_path: String,
+    pub persist_interval_secs: i64,
+}
+
+impl Default for SubnetworkRegistryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_subnets: 64,
+            min_stability: 0.6,
+            idle_ttl_secs: 900,
+            max_inputs_per_subnet: 64,
+            embed_in_snapshot: true,
+            spike_threshold: 1.0,
+            membrane_decay: 0.95,
+            refractory_steps: 2,
+            coactivity_ttl_secs: 1800,
+            persist_state: false,
+            state_path: "subnet_registry_state.json".to_string(),
+            persist_interval_secs: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceConfig {
+    pub enabled: bool,
+    pub min_keypoints: usize,
+    pub signature_precision: f64,
+    pub max_features: usize,
+    pub confidence_floor: f64,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_keypoints: 4,
+            signature_precision: 0.05,
+            max_features: 12,
+            confidence_floor: 0.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SceneConfig {
+    pub enabled: bool,
+    pub max_entities: usize,
+    pub history_len: usize,
+    pub prediction_horizon_secs: f64,
+    pub anomaly_threshold: f64,
+    pub static_speed_threshold: f64,
+    pub static_min_age_secs: f64,
+}
+
+impl Default for SceneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entities: 512,
+            history_len: 32,
+            prediction_horizon_secs: 5.0,
+            anomaly_threshold: 2.0,
+            static_speed_threshold: 0.05,
+            static_min_age_secs: 30.0,
         }
     }
 }

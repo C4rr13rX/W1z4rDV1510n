@@ -3,7 +3,7 @@ use crate::data_mesh::DataManifest;
 use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
-use w1z4rdv1510n::streaming::{LabelQueueReport, NeuralFabricShare, VisualLabelReport};
+use w1z4rdv1510n::streaming::{LabelQueueReport, NeuralFabricShare, SubnetworkReport, VisualLabelReport};
 
 pub fn parse_label_queue(share: &NeuralFabricShare) -> Option<LabelQueueReport> {
     let value = share.metadata.get("label_queue")?;
@@ -12,6 +12,11 @@ pub fn parse_label_queue(share: &NeuralFabricShare) -> Option<LabelQueueReport> 
 
 pub fn parse_visual_label_queue(share: &NeuralFabricShare) -> Option<VisualLabelReport> {
     let value = share.metadata.get("visual_label_queue")?;
+    serde_json::from_value(value.clone()).ok()
+}
+
+pub fn parse_subnet_report(share: &NeuralFabricShare) -> Option<SubnetworkReport> {
+    let value = share.metadata.get("subnet_registry")?;
     serde_json::from_value(value.clone()).ok()
 }
 
@@ -30,6 +35,11 @@ pub fn load_latest_fabric_share(config: &NodeConfig) -> Result<Option<NeuralFabr
         &blob_dir,
         &config.streaming.share_payload_kind,
     )
+}
+
+pub fn load_latest_subnet_report(config: &NodeConfig) -> Result<Option<SubnetworkReport>> {
+    let share = load_latest_fabric_share(config)?;
+    Ok(share.as_ref().and_then(parse_subnet_report))
 }
 
 fn load_latest_fabric_share_from_dirs(
@@ -175,6 +185,33 @@ mod tests {
             .insert("visual_label_queue".to_string(), serde_json::to_value(&report).unwrap());
         let parsed = parse_visual_label_queue(&share).expect("parsed");
         assert_eq!(parsed.pending.len(), 1);
+    }
+
+    #[test]
+    fn parse_subnet_report_from_metadata() {
+        let report = w1z4rdv1510n::streaming::SubnetworkReport {
+            timestamp: Timestamp { unix: 1 },
+            total_subnets: 1,
+            active_subnets: 1,
+            snapshots: Vec::new(),
+            coactivity: HashMap::new(),
+        };
+        let mut share = NeuralFabricShare {
+            node_id: "node-c".to_string(),
+            timestamp: Timestamp { unix: 1 },
+            tokens: Vec::new(),
+            layers: Vec::new(),
+            motifs: Vec::new(),
+            motif_transitions: Vec::new(),
+            network_patterns: Vec::new(),
+            metacognition: None,
+            metadata: HashMap::new(),
+        };
+        share
+            .metadata
+            .insert("subnet_registry".to_string(), serde_json::to_value(&report).unwrap());
+        let parsed = parse_subnet_report(&share).expect("parsed");
+        assert_eq!(parsed.total_subnets, 1);
     }
 
     #[test]

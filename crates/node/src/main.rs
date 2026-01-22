@@ -24,7 +24,10 @@ mod wallet;
 use config::NodeConfig;
 use runtime::NodeRuntime;
 use api::run_api;
-use label_queue::{load_latest_fabric_share, parse_label_queue, parse_visual_label_queue};
+use label_queue::{
+    load_latest_fabric_share, load_latest_subnet_report, parse_label_queue,
+    parse_visual_label_queue,
+};
 use wallet::{WalletStore, node_id_from_wallet};
 use w1z4rdv1510n::hardware::HardwareProfile;
 use w1z4rdv1510n::config::RunConfig;
@@ -156,6 +159,10 @@ enum Command {
     VisualLabelQueue {
         #[arg(long)]
         limit: Option<usize>,
+        #[arg(long)]
+        out: Option<String>,
+    },
+    SubnetReport {
         #[arg(long)]
         out: Option<String>,
     },
@@ -294,6 +301,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::VisualLabelQueue { limit, out }) => {
             visual_label_queue_report(&config_path, limit, out)
         }
+        Some(Command::SubnetReport { out }) => subnet_report(&config_path, out),
         Some(Command::HashApiKey { key }) => {
             println!("{}", api::hash_api_key_hex(&key));
             Ok(())
@@ -630,6 +638,12 @@ struct VisualLabelQueueOutput {
     queue: Option<VisualLabelReport>,
 }
 
+#[derive(Debug, Serialize)]
+struct SubnetReportOutput {
+    status: &'static str,
+    report: Option<w1z4rdv1510n::streaming::SubnetworkReport>,
+}
+
 fn knowledge_ingest(
     xml_file: Option<String>,
     xml: Option<String>,
@@ -761,6 +775,24 @@ fn visual_label_queue_report(
         status: if report.is_some() { "OK" } else { "EMPTY" },
         updated_at,
         queue: report,
+    };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    if let Some(path) = out {
+        fs::write(path, json)?;
+    }
+    Ok(())
+}
+
+fn subnet_report(
+    config_path: &Path,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let config = load_config(config_path)?;
+    let report = load_latest_subnet_report(&config)?;
+    let output = SubnetReportOutput {
+        status: if report.is_some() { "OK" } else { "EMPTY" },
+        report,
     };
     let json = serde_json::to_string_pretty(&output)?;
     println!("{json}");
