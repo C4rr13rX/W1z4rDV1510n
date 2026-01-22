@@ -868,6 +868,20 @@ impl StreamingInference {
             }
         }
         if !share.network_patterns.is_empty() {
+            let weight = peer_weight_from_metadata(&share.metadata);
+            for pattern in &mut share.network_patterns {
+                let incoming_weight = if pattern.peer_weight.is_finite() && pattern.peer_weight > 0.0 {
+                    pattern.peer_weight
+                } else {
+                    weight
+                };
+                pattern.peer_weight = incoming_weight.min(weight);
+                if !share.node_id.trim().is_empty()
+                    && !pattern.origin_nodes.iter().any(|id| id == &share.node_id)
+                {
+                    pattern.origin_nodes.push(share.node_id.clone());
+                }
+            }
             self.network_fabric
                 .ingest_shared_patterns(&share.network_patterns);
         }
@@ -919,6 +933,17 @@ impl StreamingInference {
             let node_id = share.node_id.clone();
             for motif in &mut share.motifs {
                 motif.apply_share_provenance(&node_id, share.timestamp, weight);
+            }
+        }
+        if !share.network_patterns.is_empty() {
+            let weight = peer_weight_from_metadata(&share.metadata);
+            for pattern in &mut share.network_patterns {
+                let incoming_weight = if pattern.peer_weight.is_finite() && pattern.peer_weight > 0.0 {
+                    pattern.peer_weight
+                } else {
+                    weight
+                };
+                pattern.peer_weight = incoming_weight.min(weight);
             }
         }
         Some(share)

@@ -5,7 +5,7 @@ use crate::streaming::behavior::{BehaviorFrame, BehaviorGraph, BehaviorState, Sp
 use crate::streaming::schema::TokenBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const SIGNATURE_LEN: usize = 8;
 const BEHAVIOR_EMA_ALPHA: f64 = 0.2;
@@ -13,6 +13,7 @@ const CONFIDENCE_EMA_ALPHA: f64 = 0.3;
 const PHENOTYPE_WEIGHT: f64 = 0.45;
 const BEHAVIOR_WEIGHT: f64 = 0.35;
 const SPATIAL_WEIGHT: f64 = 0.2;
+const MAX_PATTERN_REVISIONS: usize = 96;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkPatternSummary {
@@ -29,11 +30,15 @@ pub struct NetworkPatternSummary {
     pub confidence: f64,
     pub novelty_score: f64,
     #[serde(default)]
+    pub revision_id: String,
+    #[serde(default)]
     pub origin_nodes: Vec<String>,
     #[serde(default)]
     pub opt_in_claim: Option<String>,
     #[serde(default)]
     pub species: Option<String>,
+    #[serde(default)]
+    pub peer_weight: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +64,7 @@ pub struct NetworkPatternReport {
 pub struct NetworkPatternRuntime {
     config: NetworkFabricConfig,
     threads: HashMap<String, EntityThread>,
+    seen_revisions: HashMap<String, VecDeque<String>>,
 }
 
 impl NetworkPatternRuntime {
@@ -66,6 +72,7 @@ impl NetworkPatternRuntime {
         Self {
             config,
             threads: HashMap::new(),
+            seen_revisions: HashMap::new(),
         }
     }
 
@@ -126,22 +133,28 @@ impl NetworkPatternRuntime {
             return;
         }
         for pattern in patterns {
-            if let Some(thread) = self.threads.get_mut(&pattern.thread_id) {
-                thread.merge_summary(pattern, &self.config);
+            let mut incoming = pattern.clone();
+            ensure_revision_id(&mut incoming);
+            normalize_peer_weight(&mut incoming);
+            if !self.record_revision(&incoming) {
                 continue;
             }
-            let observation = EntityObservation::from_summary(pattern);
+            if let Some(thread) = self.threads.get_mut(&incoming.thread_id) {
+                thread.merge_summary(&incoming, &self.config);
+                continue;
+            }
+            let observation = EntityObservation::from_summary(&incoming);
             if let Some((thread_id, score, _)) = self.best_match(&observation) {
                 if score >= self.config.match_threshold {
                     if let Some(thread) = self.threads.get_mut(&thread_id) {
-                        thread.merge_summary(pattern, &self.config);
+                        thread.merge_summary(&incoming, &self.config);
                     }
                     continue;
                 }
             }
-            let mut thread = EntityThread::from_summary(pattern);
-            thread.thread_id = pattern.thread_id.clone();
-            self.threads.insert(pattern.thread_id.clone(), thread);
+            let mut thread = EntityThread::from_summary(&incoming);
+            thread.thread_id = incoming.thread_id.clone();
+            self.threads.insert(incoming.thread_id.clone(), thread);
         }
         self.prune_threads();
     }
@@ -205,6 +218,26 @@ impl NetworkPatternRuntime {
         entries.truncate(max_threads);
         let keep: HashSet<String> = entries.into_iter().map(|(id, _)| id).collect();
         self.threads.retain(|id, _| keep.contains(id));
+    }
+
+    fn record_revision(&mut self, summary: &NetworkPatternSummary) -> bool {
+        let thread_id = summary.thread_id.trim();
+        let revision = summary.revision_id.trim();
+        if thread_id.is_empty() || revision.is_empty() {
+            return true;
+        }
+        let entry = self
+            .seen_revisions
+            .entry(thread_id.to_string())
+            .or_insert_with(VecDeque::new);
+        if entry.iter().any(|value| value == revision) {
+            return false;
+        }
+        entry.push_back(revision.to_string());
+        while entry.len() > MAX_PATTERN_REVISIONS {
+            entry.pop_front();
+        }
+        true
     }
 }
 
@@ -287,10 +320,13 @@ impl EntityThread {
         if summary.position.is_some() {
             self.position = summary.position;
         }
-        self.support = self.support.saturating_add(summary.support.max(1));
-        self.confidence = (1.0 - CONFIDENCE_EMA_ALPHA) * self.confidence
-            + CONFIDENCE_EMA_ALPHA * summary.confidence;
-        blend_signature(&mut self.behavior_signature, &summary.behavior_signature);
+        let peer_weight = peer_weight_value(summary.peer_weight);
+        let weighted_support =
+            ((summary.support.max(1) as f64) * peer_weight).max(1.0) as u64;
+        self.support = self.support.saturating_add(weighted_support);
+        let alpha = (CONFIDENCE_EMA_ALPHA * peer_weight).clamp(0.05, 0.9);
+        self.confidence = (1.0 - alpha) * self.confidence + alpha * summary.confidence;
+        blend_signature_weighted(&mut self.behavior_signature, &summary.behavior_signature, alpha);
         merge_tokens(&mut self.phenotype_tokens, &summary.phenotype_tokens, config);
         self.phenotype_hash = phenotype_hash(&self.phenotype_tokens);
         if self.opt_in_claim.is_none() {
@@ -315,9 +351,17 @@ impl EntityThread {
             support: self.support,
             confidence: self.confidence.clamp(0.0, 1.0),
             novelty_score: novelty_score(self.support),
+            revision_id: pattern_revision_id(
+                &self.thread_id,
+                self.last_seen,
+                &self.phenotype_hash,
+                &self.behavior_signature,
+                self.support,
+            ),
             origin_nodes: self.origin_nodes.iter().cloned().collect(),
             opt_in_claim: self.opt_in_claim.clone(),
             species: self.species.clone(),
+            peer_weight: 1.0,
         }
     }
 }
@@ -754,6 +798,18 @@ fn blend_signature(existing: &mut Vec<f64>, incoming: &[f64]) {
     }
 }
 
+fn blend_signature_weighted(existing: &mut Vec<f64>, incoming: &[f64], alpha: f64) {
+    if existing.len() != incoming.len() {
+        *existing = incoming.to_vec();
+        return;
+    }
+    let alpha = alpha.clamp(0.0, 1.0);
+    let beta = 1.0 - alpha;
+    for (val, inc) in existing.iter_mut().zip(incoming.iter()) {
+        *val = beta * *val + alpha * inc;
+    }
+}
+
 fn phenotype_similarity(a: &[String], b: &[String]) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -782,6 +838,62 @@ fn behavior_similarity(a: &[f64], b: &[f64]) -> f64 {
         Some(score) => ((score + 1.0) * 0.5).clamp(0.0, 1.0),
         None => 0.0,
     }
+}
+
+fn ensure_revision_id(summary: &mut NetworkPatternSummary) {
+    if !summary.revision_id.trim().is_empty() {
+        return;
+    }
+    summary.revision_id = pattern_revision_id(
+        &summary.thread_id,
+        summary.last_seen,
+        &summary.phenotype_hash,
+        &summary.behavior_signature,
+        summary.support,
+    );
+}
+
+fn normalize_peer_weight(summary: &mut NetworkPatternSummary) {
+    summary.peer_weight = peer_weight_value(summary.peer_weight);
+}
+
+fn peer_weight_value(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value.clamp(0.1, 2.0)
+    } else {
+        1.0
+    }
+}
+
+fn pattern_revision_id(
+    thread_id: &str,
+    last_seen: Timestamp,
+    phenotype_hash: &str,
+    signature: &[f64],
+    support: u64,
+) -> String {
+    let signature_hash = hash_to_hex(signature_fingerprint(signature));
+    let payload = format!(
+        "pattern|{}|{}|{}|{}|{}",
+        thread_id.trim(),
+        last_seen.unix,
+        phenotype_hash.trim(),
+        support,
+        signature_hash
+    );
+    hash_to_hex(fnv1a_hash(payload.as_bytes()))
+}
+
+fn signature_fingerprint(signature: &[f64]) -> u64 {
+    if signature.is_empty() {
+        return 0;
+    }
+    let mut bytes = Vec::with_capacity(signature.len() * 8);
+    for value in signature {
+        let normalized = if value.is_finite() { *value } else { 0.0 };
+        bytes.extend_from_slice(&normalized.to_le_bytes());
+    }
+    fnv1a_hash(&bytes)
 }
 
 fn spatial_similarity(
@@ -958,5 +1070,74 @@ mod tests {
         let report_b = runtime.update(&batch, Some(&frame_b)).expect("report");
         assert_eq!(report_b.new_threads, 0);
         assert!(!report_b.matches.is_empty());
+    }
+
+    #[test]
+    fn network_fabric_dedupes_shared_revisions() {
+        let mut runtime = NetworkPatternRuntime::new(NetworkFabricConfig {
+            enabled: true,
+            max_threads: 64,
+            max_shared_threads: 16,
+            min_support: 1,
+            match_threshold: 0.5,
+            max_speed_units_per_sec: 5.0,
+            max_phenotype_tokens: 16,
+        });
+        let mut pattern = NetworkPatternSummary {
+            thread_id: "thread-a".to_string(),
+            last_seen: Timestamp { unix: 10 },
+            position: Some([0.0, 0.0, 0.0]),
+            phenotype_hash: "ph1".to_string(),
+            phenotype_tokens: vec!["p1".to_string()],
+            behavior_signature: vec![0.1; SIGNATURE_LEN],
+            support: 2,
+            confidence: 0.6,
+            novelty_score: 0.3,
+            revision_id: String::new(),
+            origin_nodes: vec!["node-a".to_string()],
+            opt_in_claim: None,
+            species: Some("HUMAN".to_string()),
+            peer_weight: 1.0,
+        };
+        ensure_revision_id(&mut pattern);
+        runtime.ingest_shared_patterns(&[pattern.clone()]);
+        runtime.ingest_shared_patterns(&[pattern]);
+        assert_eq!(runtime.threads.len(), 1);
+        let thread = runtime.threads.values().next().expect("thread");
+        assert!(thread.support <= 4);
+    }
+
+    #[test]
+    fn peer_weight_influences_merge_confidence() {
+        let config = NetworkFabricConfig::default();
+        let base = NetworkPatternSummary {
+            thread_id: "thread-w".to_string(),
+            last_seen: Timestamp { unix: 10 },
+            position: None,
+            phenotype_hash: "ph".to_string(),
+            phenotype_tokens: vec!["p1".to_string()],
+            behavior_signature: vec![0.2; SIGNATURE_LEN],
+            support: 2,
+            confidence: 0.4,
+            novelty_score: 0.3,
+            revision_id: "rev-1".to_string(),
+            origin_nodes: Vec::new(),
+            opt_in_claim: None,
+            species: Some("HUMAN".to_string()),
+            peer_weight: 1.0,
+        };
+        let mut thread_low = EntityThread::from_summary(&base);
+        let mut low = base.clone();
+        low.confidence = 1.0;
+        low.peer_weight = 0.2;
+        thread_low.merge_summary(&low, &config);
+        let low_conf = thread_low.confidence;
+
+        let mut thread_high = EntityThread::from_summary(&base);
+        let mut high = base;
+        high.confidence = 1.0;
+        high.peer_weight = 1.8;
+        thread_high.merge_summary(&high, &config);
+        assert!(thread_high.confidence > low_conf);
     }
 }

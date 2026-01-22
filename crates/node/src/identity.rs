@@ -133,8 +133,17 @@ impl IdentityRuntime {
             if pattern.thread_id.trim().is_empty() {
                 continue;
             }
-            self.patterns
-                .insert(pattern.thread_id.clone(), pattern.clone());
+            match self.patterns.get_mut(&pattern.thread_id) {
+                Some(existing) => {
+                    if should_replace_pattern(existing, pattern) {
+                        *existing = pattern.clone();
+                    }
+                }
+                None => {
+                    self.patterns
+                        .insert(pattern.thread_id.clone(), pattern.clone());
+                }
+            }
         }
         self.prune_patterns();
     }
@@ -350,6 +359,33 @@ pub struct IdentityVerificationOutcome {
     pub binding: IdentityBinding,
     pub evidence_hash: String,
     pub updated_pattern: Option<NetworkPatternSummary>,
+}
+
+fn should_replace_pattern(
+    existing: &NetworkPatternSummary,
+    incoming: &NetworkPatternSummary,
+) -> bool {
+    if incoming.last_seen.unix > existing.last_seen.unix {
+        return true;
+    }
+    if incoming.last_seen.unix < existing.last_seen.unix {
+        return false;
+    }
+    let incoming_weight = if incoming.peer_weight.is_finite() && incoming.peer_weight > 0.0 {
+        incoming.peer_weight
+    } else {
+        1.0
+    };
+    let existing_weight = if existing.peer_weight.is_finite() && existing.peer_weight > 0.0 {
+        existing.peer_weight
+    } else {
+        1.0
+    };
+    let incoming_score =
+        incoming.confidence * incoming_weight + (incoming.support as f64).ln_1p();
+    let existing_score =
+        existing.confidence * existing_weight + (existing.support as f64).ln_1p();
+    incoming_score > existing_score
 }
 
 fn generate_code(length: usize) -> String {
