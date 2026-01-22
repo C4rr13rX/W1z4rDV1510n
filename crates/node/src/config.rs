@@ -347,6 +347,16 @@ impl NodeConfig {
                 (0.0..=1.0).contains(&self.data.pattern_index_min_confidence),
                 "data.pattern_index_min_confidence must be in [0,1]"
             );
+            if self.data.pattern_index_persist {
+                anyhow::ensure!(
+                    !self.data.pattern_index_persist_path.trim().is_empty(),
+                    "data.pattern_index_persist_path must be non-empty when pattern index persistence is enabled"
+                );
+                anyhow::ensure!(
+                    self.data.pattern_index_persist_interval_secs > 0,
+                    "data.pattern_index_persist_interval_secs must be > 0 when pattern index persistence is enabled"
+                );
+            }
         }
         if self.streaming.enabled {
             anyhow::ensure!(
@@ -665,6 +675,9 @@ pub struct DataMeshConfig {
     pub pattern_index_max_results: usize,
     pub pattern_index_min_similarity: f64,
     pub pattern_index_min_confidence: f64,
+    pub pattern_index_persist: bool,
+    pub pattern_index_persist_path: String,
+    pub pattern_index_persist_interval_secs: u64,
 }
 
 impl Default for DataMeshConfig {
@@ -694,6 +707,9 @@ impl Default for DataMeshConfig {
             pattern_index_max_results: 8,
             pattern_index_min_similarity: 0.55,
             pattern_index_min_confidence: 0.2,
+            pattern_index_persist: true,
+            pattern_index_persist_path: "pattern_index.json".to_string(),
+            pattern_index_persist_interval_secs: 300,
         }
     }
 }

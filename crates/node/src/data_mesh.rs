@@ -543,6 +543,10 @@ fn handle_command(
             }
             let now = Timestamp { unix: now_unix() };
             store.pattern_index.ingest(&patterns, config, now);
+            if !patterns.is_empty() {
+                store.mark_pattern_dirty();
+            }
+            store.maybe_persist_pattern_index(now, false);
         }
         DataMeshCommand::PublishPatternQuery { query } => {
             if !config.enabled || !config.pattern_index_enabled {
@@ -586,6 +590,7 @@ fn run_maintenance(
     store
         .pattern_index
         .prune(config, Timestamp { unix: now_unix() });
+    store.maybe_persist_pattern_index(now_timestamp(), false);
     if !config.host_storage {
         return;
     }
@@ -1282,6 +1287,10 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+fn now_timestamp() -> Timestamp {
+    Timestamp { unix: now_unix() }
+}
+
 fn maybe_submit_storage_reward(
     config: &DataMeshConfig,
     ledger: &Arc<dyn BlockchainLedger>,
@@ -1365,6 +1374,12 @@ struct PatternIndexEntry {
     last_seen: Timestamp,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PatternIndexSnapshot {
+    saved_at: Timestamp,
+    entries: Vec<NetworkPatternSummary>,
+}
+
 struct PatternIndex {
     entries: HashMap<String, PatternIndexEntry>,
     buckets: HashMap<String, HashSet<String>>,
@@ -1433,6 +1448,37 @@ impl PatternIndex {
             }
         }
         self.prune(config, now);
+    }
+
+    fn restore_snapshot(&mut self, patterns: &[NetworkPatternSummary], config: &DataMeshConfig) {
+        self.entries.clear();
+        self.buckets.clear();
+        for pattern in patterns {
+            if pattern.thread_id.trim().is_empty() {
+                continue;
+            }
+            if pattern.confidence < config.pattern_index_min_confidence {
+                continue;
+            }
+            let bucket = pattern_bucket(
+                &pattern.phenotype_hash,
+                &pattern.phenotype_tokens,
+                &pattern.behavior_signature,
+                pattern.species.as_deref(),
+            );
+            self.entries.insert(
+                pattern.thread_id.clone(),
+                PatternIndexEntry {
+                    summary: pattern.clone(),
+                    bucket: bucket.clone(),
+                    last_seen: pattern.last_seen,
+                },
+            );
+            self.buckets
+                .entry(bucket)
+                .or_insert_with(HashSet::new)
+                .insert(pattern.thread_id.clone());
+        }
     }
 
     fn query(
@@ -1554,9 +1600,12 @@ struct DataStore {
     manifest_dir: PathBuf,
     receipt_dir: PathBuf,
     staging_dir: PathBuf,
+    pattern_index_path: PathBuf,
     pending: HashMap<String, PendingAssembly>,
     pending_order: VecDeque<String>,
     pattern_index: PatternIndex,
+    pattern_index_dirty: bool,
+    pattern_index_last_save: Option<Timestamp>,
 }
 
 impl DataStore {
@@ -1570,17 +1619,98 @@ impl DataStore {
         fs::create_dir_all(&manifest_dir)?;
         fs::create_dir_all(&receipt_dir)?;
         fs::create_dir_all(&staging_dir)?;
-        Ok(Self {
+        let pattern_index_path = resolve_pattern_index_path(&root, &config.pattern_index_persist_path);
+        let mut store = Self {
             config,
             root,
             blob_dir,
             manifest_dir,
             receipt_dir,
             staging_dir,
+            pattern_index_path,
             pending: HashMap::new(),
             pending_order: VecDeque::new(),
             pattern_index: PatternIndex::new(),
-        })
+            pattern_index_dirty: false,
+            pattern_index_last_save: None,
+        };
+        if let Err(err) = store.load_pattern_index() {
+            warn!(
+                target: "w1z4rdv1510n::node",
+                error = %err,
+                "failed to load pattern index snapshot"
+            );
+        }
+        Ok(store)
+    }
+
+    fn mark_pattern_dirty(&mut self) {
+        self.pattern_index_dirty = true;
+    }
+
+    fn maybe_persist_pattern_index(&mut self, now: Timestamp, force: bool) {
+        if !self.config.pattern_index_persist {
+            return;
+        }
+        if !force && !self.pattern_index_dirty {
+            return;
+        }
+        let interval = self.config.pattern_index_persist_interval_secs.max(1) as i64;
+        if !force {
+            if let Some(last_save) = self.pattern_index_last_save {
+                if now.unix.saturating_sub(last_save.unix) < interval {
+                    return;
+                }
+            }
+        }
+        if let Err(err) = self.persist_pattern_index(now) {
+            warn!(
+                target: "w1z4rdv1510n::node",
+                error = %err,
+                "failed to persist pattern index snapshot"
+            );
+        }
+    }
+
+    fn load_pattern_index(&mut self) -> Result<()> {
+        if !self.config.pattern_index_persist {
+            return Ok(());
+        }
+        if !self.pattern_index_path.exists() {
+            return Ok(());
+        }
+        let raw = fs::read_to_string(&self.pattern_index_path)
+            .with_context(|| format!("read pattern index {}", self.pattern_index_path.display()))?;
+        let snapshot: PatternIndexSnapshot = serde_json::from_str(&raw)?;
+        let now = now_timestamp();
+        self.pattern_index.restore_snapshot(&snapshot.entries, &self.config);
+        self.pattern_index.prune(&self.config, now);
+        self.pattern_index_last_save = Some(now);
+        self.pattern_index_dirty = false;
+        Ok(())
+    }
+
+    fn persist_pattern_index(&mut self, now: Timestamp) -> Result<()> {
+        if !self.config.pattern_index_persist {
+            return Ok(());
+        }
+        let entries = self
+            .pattern_index
+            .entries
+            .values()
+            .map(|entry| entry.summary.clone())
+            .collect();
+        let snapshot = PatternIndexSnapshot { saved_at: now, entries };
+        if let Some(parent) = self.pattern_index_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let payload = serde_json::to_string_pretty(&snapshot)?;
+        fs::write(&self.pattern_index_path, payload)?;
+        self.pattern_index_last_save = Some(now);
+        self.pattern_index_dirty = false;
+        Ok(())
     }
 
     fn store_manifest(&mut self, manifest: &DataManifest) -> Result<()> {
@@ -1998,6 +2128,19 @@ impl DataStore {
     }
 }
 
+fn resolve_pattern_index_path(root: &Path, candidate: &str) -> PathBuf {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return root.join("pattern_index.json");
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ReceiptFile {
     #[serde(default)]
@@ -2349,7 +2492,7 @@ mod tests {
     fn pattern_index_matches_similar_signature() {
         let config = DataMeshConfig::default();
         let mut index = PatternIndex::new();
-        let now = Timestamp { unix: 100 };
+        let now = now_timestamp();
         let pattern = NetworkPatternSummary {
             thread_id: "thread-1".to_string(),
             last_seen: now,
@@ -2382,5 +2525,65 @@ mod tests {
         };
         let matches = index.query(&query, &config, now);
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn pattern_index_persists_to_disk() {
+        let dir = tempdir().expect("tmp dir");
+        let mut config = DataMeshConfig::default();
+        config.storage_path = dir.path().to_string_lossy().into_owned();
+        config.pattern_index_persist = true;
+        config.pattern_index_persist_path = dir
+            .path()
+            .join("pattern_index.json")
+            .to_string_lossy()
+            .into_owned();
+        config.pattern_index_persist_interval_secs = 1;
+        config.pattern_index_enabled = true;
+        let now = now_timestamp();
+        let pattern = NetworkPatternSummary {
+            thread_id: "thread-1".to_string(),
+            last_seen: now,
+            position: None,
+            phenotype_hash: "ph-1".to_string(),
+            phenotype_tokens: vec!["ph=1".to_string()],
+            behavior_signature: vec![0.1; 8],
+            support: 2,
+            confidence: 0.9,
+            novelty_score: 0.2,
+            revision_id: String::new(),
+            origin_nodes: Vec::new(),
+            opt_in_claim: None,
+            species: Some("HUMAN".to_string()),
+            peer_weight: 1.0,
+        };
+        let mut store = DataStore::new(config.clone()).expect("store");
+        store.pattern_index.ingest(&[pattern.clone()], &config, now);
+        store.mark_pattern_dirty();
+        store.maybe_persist_pattern_index(now, true);
+        assert!(store.pattern_index_path.exists());
+        let raw = fs::read_to_string(&store.pattern_index_path).expect("snapshot");
+        let snapshot: PatternIndexSnapshot = serde_json::from_str(&raw).expect("snapshot json");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].thread_id, pattern.thread_id);
+        assert_eq!(snapshot.entries[0].confidence, pattern.confidence);
+        assert!(snapshot.entries[0].last_seen.unix > 0);
+        let pattern_path = store.pattern_index_path.clone();
+        let store = DataStore::new(config).expect("reload store");
+        assert_eq!(store.pattern_index_path, pattern_path);
+        assert!(store.pattern_index_last_save.is_some());
+        assert!(store.config.pattern_index_persist);
+        assert!(store.config.pattern_index_enabled);
+        assert!(store.config.pattern_index_min_confidence <= pattern.confidence);
+        assert!(store.pattern_index_path.exists());
+        assert_eq!(store.pattern_index.entries.len(), 1);
+        let restored_id = store
+            .pattern_index
+            .entries
+            .keys()
+            .next()
+            .cloned()
+            .expect("restored entry");
+        assert_eq!(restored_id, pattern.thread_id);
     }
 }
