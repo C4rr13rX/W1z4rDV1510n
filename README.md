@@ -81,7 +81,7 @@ Designed to run on modest desktops and scale across many nodes.
 ### 9) Network-wide neural fabric
 - Shares motifs, transitions, and network pattern summaries across nodes.
 - Entity threads track phenotype tokens, behavior signatures, and plausible travel-time continuity.
-- Patterns propagate through data mesh to keep nodes aligned.
+- Patterns propagate through data mesh to keep nodes aligned, with queryable distributed pattern indices.
 
 ### 10) Node stack and incentives
 - P2P networking (libp2p gossipsub + Kademlia + mDNS) with rate limits and peer scoring.
@@ -170,6 +170,12 @@ cargo run --bin w1z4rdv1510n-node -- visual-label-queue --limit 25
 cargo run --bin w1z4rdv1510n-node -- sim --nodes 10000 --ticks 100
 ```
 
+6. Query the distributed pattern index:
+
+```powershell
+cargo run --bin w1z4rdv1510n-node -- pattern-query --behavior-signature 0.12,0.3,0.98 --broadcast true --wait-for-responses-ms 1500
+```
+
 ---
 
 ## Quickstart (streaming service)
@@ -218,6 +224,7 @@ Node API (auth optional, see `node_config_example.json`):
 - /knowledge/ingest, /knowledge/queue, /knowledge/vote
 - /streaming/labels, /streaming/visual-labels
 - /streaming/subnets
+- /network/patterns/query
 - /bridge/chains, /bridge/intent, /bridge/proof, /balance/:node_id
 - /identity/challenge, /identity/verify, /identity/:thread_id
 
