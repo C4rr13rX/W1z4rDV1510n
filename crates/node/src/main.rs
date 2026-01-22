@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ use label_queue::{
     parse_visual_label_queue,
 };
 use wallet::{WalletStore, node_id_from_wallet};
+use reqwest::blocking::Client;
 use w1z4rdv1510n::hardware::HardwareProfile;
 use w1z4rdv1510n::config::RunConfig;
 use w1z4rdv1510n::blockchain::{BridgeIntent, bridge_intent_id, bridge_intent_payload};
@@ -38,8 +40,9 @@ use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{
     AssociationVote, FigureAssociationTask, KnowledgeAssociation, KnowledgeDocument,
     KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue, LabelQueueReport,
-    NlmJatsIngestor, VisualLabelReport,
+    NetworkPatternSummary, NlmJatsIngestor, VisualLabelReport,
 };
+use crate::data_mesh::PatternResponse;
 
 #[derive(Parser, Debug)]
 #[command(name = "w1z4rdv1510n-node")]
@@ -190,6 +193,34 @@ enum Command {
         #[arg(long)]
         out: Option<String>,
     },
+    PatternQuery {
+        #[arg(long, default_value = "http://127.0.0.1:8090")]
+        api_url: String,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        api_key_env: Option<String>,
+        #[arg(long)]
+        phenotype_hash: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        phenotype_tokens: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        behavior_signature: Vec<f64>,
+        #[arg(long)]
+        behavior_signature_file: Option<String>,
+        #[arg(long)]
+        species: Option<String>,
+        #[arg(long)]
+        max_results: Option<usize>,
+        #[arg(long)]
+        min_similarity: Option<f64>,
+        #[arg(long)]
+        broadcast: Option<bool>,
+        #[arg(long)]
+        wait_for_responses_ms: Option<u64>,
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -326,6 +357,36 @@ fn main() -> anyhow::Result<()> {
             novelty_depth_boost,
             min_depth_samples,
             depth_improvement_margin,
+            out,
+        ),
+        Some(Command::PatternQuery {
+            api_url,
+            api_key,
+            api_key_env,
+            phenotype_hash,
+            phenotype_tokens,
+            behavior_signature,
+            behavior_signature_file,
+            species,
+            max_results,
+            min_similarity,
+            broadcast,
+            wait_for_responses_ms,
+            out,
+        }) => pattern_query(
+            &config_path,
+            api_url,
+            api_key,
+            api_key_env,
+            phenotype_hash,
+            phenotype_tokens,
+            behavior_signature,
+            behavior_signature_file,
+            species,
+            max_results,
+            min_similarity,
+            broadcast,
+            wait_for_responses_ms,
             out,
         ),
         None => run_node(&config_path),
@@ -480,6 +541,106 @@ fn load_config(config_path: &Path) -> anyhow::Result<NodeConfig> {
     Ok(config)
 }
 
+fn pattern_query(
+    config_path: &Path,
+    api_url: String,
+    api_key: Option<String>,
+    api_key_env: Option<String>,
+    phenotype_hash: Option<String>,
+    phenotype_tokens: Vec<String>,
+    behavior_signature: Vec<f64>,
+    behavior_signature_file: Option<String>,
+    species: Option<String>,
+    max_results: Option<usize>,
+    min_similarity: Option<f64>,
+    broadcast: Option<bool>,
+    wait_for_responses_ms: Option<u64>,
+    out: Option<String>,
+) -> anyhow::Result<()> {
+    let config = if config_path.exists() {
+        load_config(config_path)?
+    } else {
+        NodeConfig::default()
+    };
+    let mut signature = behavior_signature;
+    if let Some(path) = behavior_signature_file {
+        let raw = fs::read_to_string(path)?;
+        let mut from_file: Vec<f64> = serde_json::from_str(&raw)?;
+        signature.append(&mut from_file);
+    }
+    if signature.is_empty() {
+        anyhow::bail!("behavior_signature is required (use --behavior-signature or --behavior-signature-file)");
+    }
+    let request = PatternQueryRequest {
+        phenotype_hash,
+        phenotype_tokens: if phenotype_tokens.is_empty() {
+            None
+        } else {
+            Some(phenotype_tokens)
+        },
+        behavior_signature: signature,
+        species,
+        max_results,
+        min_similarity,
+        broadcast,
+        wait_for_responses_ms,
+    };
+    let api_key = resolve_api_key(&config, api_key, api_key_env);
+    if config.api.require_api_key && api_key.is_none() {
+        anyhow::bail!("api key required (set --api-key or --api-key-env)");
+    }
+    let url = normalize_pattern_query_url(&api_url);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let mut builder = client.post(url).json(&request);
+    if let Some(key) = api_key {
+        builder = builder.header(&config.api.api_key_header, key);
+    }
+    let response = builder.send()?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        anyhow::bail!("pattern query failed ({}): {}", status, body);
+    }
+    let parsed: PatternQueryResponse = serde_json::from_str(&body)?;
+    let payload = serde_json::to_string_pretty(&parsed)?;
+    println!("{payload}");
+    if let Some(path) = out {
+        fs::write(path, payload.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn resolve_api_key(
+    config: &NodeConfig,
+    api_key: Option<String>,
+    api_key_env: Option<String>,
+) -> Option<String> {
+    if let Some(key) = api_key {
+        return Some(key);
+    }
+    let env_key = api_key_env.unwrap_or_else(|| config.api.api_key_env.clone());
+    if env_key.trim().is_empty() {
+        return None;
+    }
+    std::env::var(env_key).ok()
+}
+
+fn normalize_pattern_query_url(api_url: &str) -> String {
+    let trimmed = api_url.trim();
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    if with_scheme.ends_with("/network/patterns/query") {
+        with_scheme
+    } else {
+        format!("{}/network/patterns/query", with_scheme.trim_end_matches('/'))
+    }
+}
+
 fn effective_bootstrap_peers(config: &NodeConfig) -> Vec<String> {
     if !config.network.bootstrap_peers.is_empty() {
         return config.network.bootstrap_peers.clone();
@@ -511,6 +672,36 @@ struct BridgeIntentOutput {
     intent: BridgeIntent,
     payload: String,
     payload_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PatternQueryRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phenotype_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phenotype_tokens: Option<Vec<String>>,
+    behavior_signature: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    species: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_results: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_similarity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    broadcast: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait_for_responses_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PatternQueryResponse {
+    status: String,
+    #[serde(default)]
+    query_id: Option<String>,
+    #[serde(default)]
+    local_matches: Vec<NetworkPatternSummary>,
+    #[serde(default)]
+    responses: Vec<PatternResponse>,
 }
 
 #[derive(Debug, serde::Serialize)]

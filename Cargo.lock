@@ -4743,6 +4743,7 @@ dependencies = [
  "futures",
  "libp2p",
  "rand 0.8.5",
+ "reqwest",
  "rpassword",
  "serde",
  "serde_json",
