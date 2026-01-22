@@ -46,6 +46,7 @@ use crate::streaming::tracking::PoseTracker;
 use crate::neuro::{NeuroRuntime, NeuroSnapshot};
 use crate::schema::EnvironmentSnapshot;
 use crate::config::{MetacognitionConfig, RunConfig};
+use crate::quantum_calibration::QuantumCalibrationState;
 use crate::quantum_executor::QuantumHttpExecutor;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -755,6 +756,14 @@ impl StreamingInference {
             run_config.streaming.hypergraph.clone(),
         );
         let causal = StreamingCausalRuntime::new(run_config.streaming.causal.clone());
+        let mut quantum_config = run_config.quantum.clone();
+        if run_config.streaming.branching.quantum_enabled {
+            if let Some(path) = quantum_config.calibration_path.as_ref() {
+                if let Ok(state) = QuantumCalibrationState::load(path) {
+                    quantum_config = state.apply(&quantum_config);
+                }
+            }
+        }
         let quantum_executor: Option<Box<dyn QuantumExecutor>> =
             if run_config.streaming.branching.quantum_enabled
                 && run_config.quantum.remote_enabled
@@ -770,7 +779,7 @@ impl StreamingInference {
             };
         let branching = StreamingBranchingRuntime::new(
             run_config.streaming.branching.clone(),
-            run_config.quantum.clone(),
+            quantum_config,
             quantum_executor,
         );
         let plasticity = StreamingPlasticityRuntime::new(run_config.streaming.plasticity.clone());
