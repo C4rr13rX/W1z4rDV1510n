@@ -2127,8 +2127,15 @@ async fn identity_pattern_sync(
                 }
                 data_id
             }
+            DataMeshEvent::PatternResponse { response } => {
+                if !response.matches.is_empty() {
+                    if let Ok(mut runtime) = identity.lock() {
+                        runtime.update_patterns(&response.matches);
+                    }
+                }
+                continue;
+            }
             DataMeshEvent::NodeMetrics { .. } => continue,
-            DataMeshEvent::PatternResponse { .. } => continue,
         };
         let payload = match mesh.load_payload(data_id).await {
             Ok(payload) => payload,
