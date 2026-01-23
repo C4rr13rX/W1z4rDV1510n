@@ -105,6 +105,9 @@ impl StreamIngestor for PoseCommandIngestor {
                 "ingestor".to_string(),
                 Value::String("pose_command".to_string()),
             );
+            for (key, value) in &frame.metadata {
+                metadata.insert(key.clone(), value.clone());
+            }
             let envelope = StreamEnvelope {
                 source: StreamSource::PeopleVideo,
                 timestamp,

@@ -21,6 +21,8 @@ def parse_args():
     parser.add_argument("--fps", type=float, default=8.0, help="Target sampling FPS")
     parser.add_argument("--entity-id", default="person-0", help="Entity id label")
     parser.add_argument("--confidence", type=float, default=0.3, help="Min keypoint confidence")
+    parser.add_argument("--max-failures", type=int, default=30, help="Max read failures before reconnect")
+    parser.add_argument("--reconnect-delay", type=float, default=5.0, help="Seconds to wait before reconnect")
     parser.add_argument(
         "--emit-image",
         choices=["none", "ref", "b64"],
@@ -32,6 +34,7 @@ def parse_args():
     parser.add_argument("--image-quality", type=int, default=80, help="JPEG quality 1-100")
     parser.add_argument("--max-width", type=int, default=0, help="Optional resize width")
     parser.add_argument("--max-height", type=int, default=0, help="Optional resize height")
+    parser.add_argument("--quality-floor", type=float, default=0.05, help="Minimum quality floor")
     return parser.parse_args()
 
 
@@ -50,15 +53,27 @@ def main():
     )
 
     last_emit = 0.0
+    last_frame_time = None
     frame_idx = 0
+    failures = 0
     while True:
         ok, frame = cap.read()
         if not ok:
-            time.sleep(0.1)
+            failures += 1
+            if failures >= args.max_failures:
+                cap.release()
+                time.sleep(max(args.reconnect_delay, 0.5))
+                cap = cv2.VideoCapture(args.source)
+                failures = 0
+            else:
+                time.sleep(0.1)
             continue
+        failures = 0
         now = time.time()
         if now - last_emit < 1.0 / max(args.fps, 1.0):
             continue
+        frame_dt = None if last_frame_time is None else max(0.0, now - last_frame_time)
+        last_frame_time = now
         last_emit = now
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -71,11 +86,15 @@ def main():
         min_y = None
         max_x = None
         max_y = None
+        confidence_sum = 0.0
+        confidence_count = 0
         for idx, landmark in enumerate(result.pose_landmarks.landmark):
             if landmark.visibility < args.confidence:
                 continue
             x = float(landmark.x)
             y = float(landmark.y)
+            confidence_sum += float(landmark.visibility)
+            confidence_count += 1
             keypoints.append({
                 "name": f"kp_{idx}",
                 "x": x,
@@ -89,10 +108,27 @@ def main():
 
         frame_id = f"frame-{int(now * 1000)}-{frame_idx}"
         frame_idx += 1
+        expected_dt = 1.0 / max(args.fps, 1.0)
+        jitter_ratio = 0.0
+        drop_ratio = 0.0
+        frame_dt_ms = None
+        if frame_dt is not None:
+            frame_dt_ms = frame_dt * 1000.0
+            jitter_ratio = abs(frame_dt - expected_dt) / expected_dt if expected_dt > 0 else 0.0
+            drop_ratio = max(0.0, frame_dt / expected_dt - 1.0) if expected_dt > 0 else 0.0
+        keypoint_conf_avg = confidence_sum / confidence_count if confidence_count else 0.0
+        quality = keypoint_conf_avg * (1.0 - min(jitter_ratio, 1.0))
+        quality = min(1.0, max(args.quality_floor, quality))
         metadata = {
             "source": args.source,
             "fps": args.fps,
             "frame_id": frame_id,
+            "keypoint_confidence_avg": keypoint_conf_avg,
+            "frame_dt_ms": frame_dt_ms,
+            "jitter_ratio": jitter_ratio,
+            "drop_ratio": drop_ratio,
+            "quality": quality,
+            "confidence": quality,
         }
 
         frame_for_export = frame
