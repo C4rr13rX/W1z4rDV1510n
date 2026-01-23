@@ -238,6 +238,8 @@ Service API:
 ## Tools and utilities
 
 - `scripts/rtsp_pose_bridge.py` - RTSP/video to pose JSONL bridge.
+- `scripts/rss_topic_bridge.py` - RSS/Atom to PublicTopics StreamEnvelope JSONL bridge.
+- `scripts/traffic_sensor_bridge.py` - traffic sensor JSON/CSV to CrowdTraffic StreamEnvelope JSONL bridge.
 - `run_config_streaming_ocr.json` - streaming profile with OCR enabled (Tesseract command).
 - `scripts/live_viz_server.py` + `scripts/run_with_viz.py` - local visualization loop.
 - Dataset fetchers/preprocessors (USPTO, Tox21, ETH/UCY, exoplanets, genomics, OWID).
