@@ -1,0 +1,129 @@
+{
+  "node_id": "node-cd4c5a9a7225",
+  "node_role": "WORKER",
+  "network": {
+    "listen_addr": "0.0.0.0:8088",
+    "bootstrap_peers": [],
+    "max_peers": 128,
+    "gossip_protocol": "w1z4rdv1510n-gossip",
+    "security": {
+      "max_message_bytes": 262144,
+      "max_messages_per_rpc": 128,
+      "max_pending_incoming": 64,
+      "max_pending_outgoing": 64,
+      "max_established_incoming": 256,
+      "max_established_outgoing": 256,
+      "max_established_total": 512,
+      "max_established_per_peer": 8
+    }
+  },
+  "openstack": {
+    "enabled": false,
+    "mode": "LOCAL_CONTROL_PLANE",
+    "region": "RegionOne",
+    "interface": "public"
+  },
+  "wallet": {
+    "enabled": true,
+    "path": "C:\\Users\\Adam\\AppData\\Roaming\\w1z4rdv1510n\\wallet.json",
+    "auto_create": true,
+    "encrypted": true,
+    "passphrase_env": "W1Z4RDV1510N_WALLET_PASSPHRASE",
+    "prompt_on_load": true
+  },
+  "data": {
+    "enabled": true,
+    "storage_path": "data",
+    "host_storage": true,
+    "max_payload_bytes": 524288,
+    "chunk_size_bytes": 32768,
+    "replication_factor": 3,
+    "receipt_quorum": 2,
+    "require_manifest_signature": true,
+    "require_receipt_signature": true,
+    "max_pending_chunks": 1024,
+    "maintenance_enabled": true,
+    "maintenance_interval_secs": 300,
+    "retention_days": 30,
+    "max_storage_bytes": 0,
+    "max_repair_requests_per_tick": 64,
+    "storage_reward_enabled": true,
+    "storage_reward_base": 0.15,
+    "storage_reward_per_mb": 0.05
+  },
+  "streaming": {
+    "enabled": true,
+    "ultradian_node": true,
+    "run_config_path": "run_config.json",
+    "publish_streams": true,
+    "publish_shares": true,
+    "consume_streams": true,
+    "consume_shares": true,
+    "stream_payload_kind": "stream.envelope.v1",
+    "share_payload_kind": "neural.fabric.v1",
+    "min_cpu_cores": 2,
+    "min_memory_gb": 4.0
+  },
+  "knowledge": {
+    "enabled": true,
+    "persist_state": true,
+    "state_path": "data/knowledge_state.json",
+    "queue": {
+      "min_votes": 2,
+      "min_confidence": 0.85,
+      "max_pending": 256,
+      "candidate_limit": 6,
+      "reward_base": 0.8,
+      "reward_per_candidate": 0.1
+    }
+  },
+  "blockchain": {
+    "enabled": true,
+    "chain_id": "w1z4rdv1510n",
+    "consensus": "poa",
+    "bootstrap_peers": [],
+    "node_role": "WORKER",
+    "reward_policy": {
+      "sensor_reward_weight": 1.0,
+      "compute_reward_weight": 1.0,
+      "energy_efficiency_weight": 1.0,
+      "uptime_reward_weight": 1.0
+    },
+    "energy_efficiency": {
+      "target_watts": 150.0,
+      "efficiency_baseline": 1.0
+    },
+    "attestation": {
+      "endpoint": "",
+      "required": false
+    },
+    "require_sensor_attestation": false
+  },
+  "compute": {
+    "allow_gpu": true,
+    "allow_quantum": false,
+    "quantum_endpoints": []
+  },
+  "cluster": {
+    "enabled": false,
+    "mode": "local",
+    "min_nodes": 1,
+    "openstack_minimal": false
+  },
+  "ledger": {
+    "enabled": true,
+    "backend": "local",
+    "endpoint": ""
+  },
+  "sensors": [],
+  "chain_spec": {
+    "genesis_path": "chain/genesis.json",
+    "reward_contract_path": "chain/reward_contract.json",
+    "bridge_contract_path": "chain/bridge_contract.json",
+    "token_standard_path": "chain/token_standard.json"
+  },
+  "energy_reporting": {
+    "enabled": true,
+    "sample_interval_secs": 30
+  }
+}
