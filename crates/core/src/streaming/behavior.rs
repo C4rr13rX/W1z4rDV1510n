@@ -1,4 +1,4 @@
-
+﻿
 use crate::network::compute_payload_hash;
 use crate::schema::Timestamp;
 use crate::streaming::motor::{MotorConfig, MotorFeatureExtractor, PoseFrame};
@@ -556,6 +556,25 @@ pub struct BehaviorMotif {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotifAssignmentCandidate {
+    pub motif_id: String,
+    /// Lower is better (DTW + graph distance cost).
+    pub cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotifAssignmentAmbiguity {
+    pub assignment_id: String,
+    pub entity_id: String,
+    pub timestamp: Timestamp,
+    pub dtw_threshold: f64,
+    pub best_cost: f64,
+    #[serde(default)]
+    pub candidates: Vec<MotifAssignmentCandidate>,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MotifTransition {
     pub from: String,
     pub to: String,
@@ -582,6 +601,11 @@ pub struct BehaviorFrame {
     pub states: Vec<BehaviorState>,
     pub graph: BehaviorGraph,
     pub motifs: Vec<BehaviorMotif>,
+
+    #[serde(default)]
+
+    pub motif_assignment_ambiguities: Vec<MotifAssignmentAmbiguity>,
+
     pub prediction: Option<BehaviorPrediction>,
     pub backpressure: BackpressureStatus,
 }
@@ -800,9 +824,11 @@ impl BehaviorSubstrate {
         let graph = self.build_graph(&states);
 
         let mut motifs = Vec::new();
+        let mut ambiguities = Vec::new();
         let mut prediction = None;
         if matches!(backpressure, BackpressureStatus::Ok) {
             motifs = self.motifs.update(&self.history, &graph);
+            ambiguities = self.motifs.take_last_ambiguities();
             prediction = self.motifs.predict_next();
         }
 
@@ -811,6 +837,7 @@ impl BehaviorSubstrate {
             states,
             graph,
             motifs,
+            motif_assignment_ambiguities: ambiguities,
             prediction,
             backpressure,
         }
@@ -938,6 +965,11 @@ struct MotifExtractor {
     transitions: HashMap<(String, String), usize>,
     last_motif: HashMap<String, String>,
     seen_revisions: HashMap<String, VecDeque<String>>,
+
+    last_ambiguities: Vec<MotifAssignmentAmbiguity>,
+
+    ambiguity_counter: u64,
+
 }
 
 impl MotifExtractor {
@@ -948,6 +980,8 @@ impl MotifExtractor {
             transitions: HashMap::new(),
             last_motif: HashMap::new(),
             seen_revisions: HashMap::new(),
+            last_ambiguities: Vec::new(),
+            ambiguity_counter: 0,
         }
     }
 
@@ -956,6 +990,7 @@ impl MotifExtractor {
         history: &HashMap<String, VecDeque<BehaviorState>>,
         graph: &BehaviorGraph,
     ) -> Vec<BehaviorMotif> {
+        self.last_ambiguities.clear();
         let mut latest_motifs = Vec::new();
         for (entity_id, sequence) in history {
             let segments = segment_sequence(
@@ -1010,6 +1045,16 @@ impl MotifExtractor {
         })
     }
 
+
+
+    fn take_last_ambiguities(&mut self) -> Vec<MotifAssignmentAmbiguity> {
+
+        std::mem::take(&mut self.last_ambiguities)
+
+    }
+
+
+
     fn assign_motif(
         &mut self,
         entity_id: &str,
@@ -1024,15 +1069,45 @@ impl MotifExtractor {
             self.config.stft_hop,
             self.config.stft_bins,
         );
-        let mut best_idx = None;
-        let mut best_score = f64::MAX;
+
+        let mut scored: Vec<(usize, String, f64)> = Vec::new();
         for (idx, motif) in self.motifs.iter().enumerate() {
             let dtw = soft_dtw_distance(&segment.sequence, &motif.prototype, 0.5);
             let graph_score = graph_distance(&signature, &motif.graph_signature);
             let score = dtw + graph_score;
-            if score < best_score {
-                best_score = score;
-                best_idx = Some(idx);
+            scored.push((idx, motif.id.clone(), score));
+        }
+        scored.sort_by(|a, b| {
+            a.2.partial_cmp(&b.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let best_idx = scored.first().map(|entry| entry.0);
+        let best_score = scored.first().map(|entry| entry.2).unwrap_or(f64::MAX);
+        let second_score = scored.get(1).map(|entry| entry.2).unwrap_or(f64::MAX);
+
+        if !scored.is_empty() {
+            // Capture ambiguous assignments for experiment/governor orchestration.
+            let threshold = self.config.dtw_threshold.max(1e-6);
+            let near_threshold = best_score >= threshold * 0.75 && best_score <= threshold * 1.25;
+            let close_second = (second_score - best_score).abs() <= threshold * 0.1;
+            if near_threshold || close_second {
+                self.ambiguity_counter = self.ambiguity_counter.wrapping_add(1);
+                let assignment_id = format!("amb-{}-{}", timestamp.unix, self.ambiguity_counter);
+                let mut candidates = Vec::new();
+                for (_, motif_id, cost) in scored.iter().take(6) {
+                    candidates.push(MotifAssignmentCandidate {
+                        motif_id: motif_id.clone(),
+                        cost: *cost,
+                    });
+                }
+                self.last_ambiguities.push(MotifAssignmentAmbiguity {
+                    assignment_id,
+                    entity_id: entity_id.to_string(),
+                    timestamp,
+                    dtw_threshold: self.config.dtw_threshold,
+                    best_cost: best_score,
+                    candidates,
+                });
             }
         }
 
@@ -2026,3 +2101,9 @@ mod tests {
         assert!(frame.motifs.iter().any(|motif| motif.entity_id == "e2"));
     }
 }
+
+
+
+
+
+

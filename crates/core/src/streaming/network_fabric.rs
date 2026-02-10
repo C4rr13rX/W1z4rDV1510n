@@ -1,4 +1,4 @@
-use crate::config::NetworkFabricConfig;
+﻿use crate::config::NetworkFabricConfig;
 use crate::math_toolbox as math;
 use crate::schema::Timestamp;
 use crate::streaming::behavior::{BehaviorFrame, BehaviorGraph, BehaviorState, SpeciesKind};
@@ -1041,6 +1041,7 @@ mod tests {
             states: vec![state_a],
             graph,
             motifs: Vec::new(),
+            motif_assignment_ambiguities: Vec::new(),
             prediction: None,
             backpressure: BackpressureStatus::Ok,
         };
@@ -1064,6 +1065,7 @@ mod tests {
             states: vec![state_b],
             graph: graph_b,
             motifs: Vec::new(),
+            motif_assignment_ambiguities: Vec::new(),
             prediction: None,
             backpressure: BackpressureStatus::Ok,
         };
@@ -1141,3 +1143,6 @@ mod tests {
         assert!(thread_high.confidence > low_conf);
     }
 }
+
+
+

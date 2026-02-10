@@ -1,4 +1,4 @@
-use crate::hardware::HardwareBackendType;
+﻿use crate::hardware::HardwareBackendType;
 use crate::bridge::{BridgeVerificationMode, ChainKind};
 use crate::ml::MLBackendType;
 use crate::neuro::NeuroRuntimeConfig;
@@ -522,6 +522,36 @@ impl RunConfig {
                     "streaming.plasticity.horizon_improvement_steps must be > 0"
                 );
             }
+            if self.streaming.outcome_feedback.enabled {
+                anyhow::ensure!(
+                    self.streaming.outcome_feedback.max_pending > 0,
+                    "streaming.outcome_feedback.max_pending must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.outcome_feedback.horizon_secs > 0,
+                    "streaming.outcome_feedback.horizon_secs must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.outcome_feedback.min_prob > 0.0
+                        && self.streaming.outcome_feedback.min_prob <= 1.0,
+                    "streaming.outcome_feedback.min_prob must be in (0,1]"
+                );
+            }
+            if self.streaming.experiments.enabled {
+                anyhow::ensure!(
+                    self.streaming.experiments.cooldown_secs >= 0,
+                    "streaming.experiments.cooldown_secs must be >= 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.experiments.max_jobs_per_minute > 0,
+                    "streaming.experiments.max_jobs_per_minute must be > 0"
+                );
+                anyhow::ensure!(
+                    self.streaming.experiments.motif_ambiguity_min > 0,
+                    "streaming.experiments.motif_ambiguity_min must be > 0"
+                );
+            }
+
             if self.streaming.ontology.enabled {
                 anyhow::ensure!(
                     self.streaming.ontology.window_minutes > 0,
@@ -1427,6 +1457,10 @@ pub struct StreamingConfig {
     pub narrative: NarrativeConfig,
     #[serde(default)]
     pub metacognition: MetacognitionConfig,
+    #[serde(default)]
+    pub outcome_feedback: OutcomeFeedbackConfig,
+    #[serde(default)]
+    pub experiments: ExperimentGovernorConfig,
 }
 
 impl Default for StreamingConfig {
@@ -1457,6 +1491,8 @@ impl Default for StreamingConfig {
             network_fabric: NetworkFabricConfig::default(),
             narrative: NarrativeConfig::default(),
             metacognition: MetacognitionConfig::default(),
+            outcome_feedback: OutcomeFeedbackConfig::default(),
+            experiments: ExperimentGovernorConfig::default(),
         }
     }
 }
@@ -2081,6 +2117,69 @@ impl Default for OnlinePlasticityConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ExperimentMode {
+    Off,
+    Shadow,
+    Active,
+}
+
+impl Default for ExperimentMode {
+    fn default() -> Self {
+        ExperimentMode::Shadow
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutcomeFeedbackConfig {
+    pub enabled: bool,
+    pub max_pending: usize,
+    /// Default scoring horizon for predictions in seconds.
+    pub horizon_secs: i64,
+    /// Minimum probability used in log loss to avoid -inf.
+    pub min_prob: f64,
+}
+
+impl Default for OutcomeFeedbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_pending: 4096,
+            horizon_secs: 60,
+            min_prob: 1e-6,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentGovernorConfig {
+    pub enabled: bool,
+    pub mode: ExperimentMode,
+    pub cooldown_secs: i64,
+    pub max_jobs_per_minute: u32,
+    pub motif_assignment_enabled: bool,
+    pub motif_ambiguity_min: usize,
+    /// Trigger quantum experiments if model reward (baseline_loss - model_loss) is below this.
+    pub reward_trigger: f64,
+}
+
+impl Default for ExperimentGovernorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: ExperimentMode::Shadow,
+            cooldown_secs: 30,
+            max_jobs_per_minute: 12,
+            motif_assignment_enabled: true,
+            motif_ambiguity_min: 8,
+            reward_trigger: -0.05,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OntologyConfig {
@@ -2530,3 +2629,4 @@ mod tests {
         config.validate().expect("valid config");
     }
 }
+

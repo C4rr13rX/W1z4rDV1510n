@@ -1,4 +1,4 @@
-use crate::schema::Timestamp;
+﻿use crate::schema::Timestamp;
 use crate::streaming::behavior::{BehaviorFrame, BehaviorState, SpeciesKind};
 use crate::streaming::knowledge::HealthKnowledgeStore;
 use crate::streaming::physiology_runtime::PhysiologyReport;
@@ -396,6 +396,7 @@ mod tests {
             states: vec![state_a, state_b],
             graph,
             motifs: Vec::new(),
+            motif_assignment_ambiguities: Vec::new(),
             prediction: None,
             backpressure: crate::streaming::behavior::BackpressureStatus::Ok,
         };
@@ -411,3 +412,6 @@ mod tests {
         assert!(coop > 0.0);
     }
 }
+
+
+

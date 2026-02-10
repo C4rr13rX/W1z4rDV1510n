@@ -1,4 +1,4 @@
-pub mod ingest;
+﻿pub mod ingest;
 pub mod schema;
 pub mod symbolize;
 pub mod ultradian;
@@ -41,6 +41,8 @@ pub mod neuro_bridge;
 pub mod motif_playback;
 pub mod narrative_runtime;
 pub mod metacognition_runtime;
+pub mod outcome_feedback;
+pub mod experiment_governor;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -88,7 +90,7 @@ pub use behavior::{
     ActionChannel, ActionConstraint, ActionKind, ActionSample, BackpressureStatus, BehaviorConstraints,
     BehaviorFrame, BehaviorGraph, BehaviorInput, BehaviorMotif, BehaviorPrediction, BehaviorState,
     BehaviorSubstrate, BehaviorSubstrateConfig, BodySchema, BodySchemaAdapter, CouplingMetrics,
-    GraphSignature, MotifTransition, SensorChannel, SensorKind, SensorSample, SoftObjective,
+    GraphSignature, MotifAssignmentAmbiguity, MotifAssignmentCandidate, MotifTransition, SensorChannel, SensorKind, SensorSample, SoftObjective,
     SpeciesKind, TimeFrequencySummary,
 };
 pub use fabric::NeuralFabricShare;
@@ -106,3 +108,9 @@ pub use metacognition_runtime::{
     DepthAccuracyShare, EmpathyNote, MetacognitionEntity, MetacognitionExperiment,
     MetacognitionReport, MetacognitionRuntime, MetacognitionShare,
 };
+
+pub use outcome_feedback::{OutcomeFeedbackReport, OutcomeFeedbackSlice, PredictionTarget, StreamingOutcomeFeedbackRuntime};
+
+pub use experiment_governor::{ExperimentGovernorReport, ExperimentGovernorRuntime};
+
+

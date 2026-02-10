@@ -1,4 +1,4 @@
-use crate::config::StreamingConfig;
+﻿use crate::config::StreamingConfig;
 use crate::orchestrator::{RunOutcome, run_with_snapshot};
 use crate::streaming::behavior::{
     BehaviorInput, BehaviorMotif, BehaviorState, BehaviorSubstrate, BehaviorSubstrateConfig,
@@ -29,6 +29,8 @@ use crate::streaming::neuro_bridge::{NeuroStreamBridge, SubstreamRuntime};
 use crate::streaming::motif_playback::{MotifPlaybackQueue, MotifReplay, build_motif_replays};
 use crate::streaming::narrative_runtime::NarrativeRuntime;
 use crate::streaming::metacognition_runtime::{MetacognitionRuntime, MetacognitionShare};
+use crate::streaming::outcome_feedback::StreamingOutcomeFeedbackRuntime;
+use crate::streaming::experiment_governor::ExperimentGovernorRuntime;
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -726,6 +728,9 @@ pub struct StreamingInference {
     visual_labels: VisualLabelQueue,
     motif_playback: MotifPlaybackQueue,
     metacognition: MetacognitionRuntime,
+    outcome_feedback: StreamingOutcomeFeedbackRuntime,
+    experiment_governor: ExperimentGovernorRuntime,
+    experiment_executor: Option<Box<dyn QuantumExecutor>>,
     narrative: NarrativeRuntime,
     health_overlay: HealthOverlayRuntime,
     survival: SurvivalRuntime,
@@ -795,6 +800,19 @@ impl StreamingInference {
         let visual_labels = VisualLabelQueue::new(run_config.streaming.visual_label.clone());
         let motif_playback = MotifPlaybackQueue::default();
         let metacognition = MetacognitionRuntime::new(run_config.streaming.metacognition.clone());
+        let outcome_feedback = StreamingOutcomeFeedbackRuntime::new(run_config.streaming.outcome_feedback.clone());
+        let experiment_governor = ExperimentGovernorRuntime::new(run_config.streaming.experiments.clone());
+        let experiment_executor: Option<Box<dyn QuantumExecutor>> = if run_config.streaming.experiments.enabled
+            && run_config.quantum.remote_enabled
+            && run_config.compute.allow_quantum
+            && !run_config.compute.quantum_endpoints.is_empty()
+        {
+            QuantumHttpExecutor::new(run_config.compute.quantum_endpoints.clone())
+                .ok()
+                .map(|executor| Box::new(executor) as Box<dyn QuantumExecutor>)
+        } else {
+            None
+        };
         let narrative = NarrativeRuntime::new(run_config.streaming.narrative.clone());
         let health_overlay = HealthOverlayRuntime::default();
         let survival = SurvivalRuntime::default();
@@ -833,6 +851,9 @@ impl StreamingInference {
             visual_labels,
             motif_playback,
             metacognition,
+            outcome_feedback,
+            experiment_governor,
+            experiment_executor,
             narrative,
             health_overlay,
             survival,
@@ -1023,9 +1044,19 @@ impl StreamingInference {
                 );
         let analysis_report = self.analysis.update(&batch);
         let temporal_report = self.temporal.update(&batch);
+        let outcome_feedback_report = self.outcome_feedback.update(
+            &batch,
+            behavior_frame.as_ref(),
+            temporal_report.as_ref(),
+        );
         let plasticity_report = temporal_report
             .as_ref()
-            .and_then(|report| self.plasticity.update(&batch, report, physiology_report.as_ref()));
+            .and_then(|report| self.plasticity.update(
+                &batch,
+                report,
+                physiology_report.as_ref(),
+                outcome_feedback_report.as_ref(),
+            ));
         let ontology_report = self.ontology.update(&batch);
         let causal_report = temporal_report
             .as_ref()
@@ -1044,6 +1075,16 @@ impl StreamingInference {
         self.last_metacognition_share = metacognition_report
             .as_ref()
             .map(|report| self.metacognition.share_snapshot(report));
+        let experiment_report = self.experiment_governor.update(
+            batch.timestamp,
+            behavior_frame
+                .as_ref()
+                .map(|frame| frame.motif_assignment_ambiguities.as_slice())
+                .unwrap_or(&[]),
+            outcome_feedback_report.as_ref(),
+            self.experiment_executor.as_deref(),
+            self.run_config.quantum.remote_timeout_secs.max(1),
+        );
         let narrative_report = self.narrative.update(
             batch.timestamp,
             behavior_frame.as_ref(),
@@ -1123,6 +1164,27 @@ impl StreamingInference {
                 serde_json::to_value(report)?,
             );
         }
+        if let Some(report) = outcome_feedback_report {
+            report_metadata.insert(
+                "outcome_feedback_report".to_string(),
+                serde_json::to_value(&report)?,
+            );
+            snapshot.metadata.insert(
+                "outcome_feedback_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = experiment_report {
+            report_metadata.insert(
+                "experiment_report".to_string(),
+                serde_json::to_value(&report)?,
+            );
+            snapshot.metadata.insert(
+                "experiment_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+
         if let Some(report) = ontology_report {
             report_metadata.insert(
                 "ontology_report".to_string(),
@@ -1798,3 +1860,4 @@ mod tests {
         assert!(!batch.layers.is_empty());
     }
 }
+

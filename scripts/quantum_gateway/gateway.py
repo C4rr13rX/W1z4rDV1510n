@@ -237,6 +237,15 @@ def handle_quantum_submit(state: GatewayState, body: dict) -> Tuple[Optional[Qua
         meta.setdefault("gateway_ms", str(_now_ms() - started))
         return QuantumEndpointResponse(payload_b64=_b64e(out_payload), metadata=meta), None
 
+    if req.kind == "MOTIF_ASSIGNMENT":
+        out_payload, meta, err = run_motif_assignment(state, payload, req.timeout_secs)
+        if err:
+            return None, err
+        meta = dict(meta)
+        meta.setdefault("job_hash", job_hash)
+        meta.setdefault("gateway_ms", str(_now_ms() - started))
+        return QuantumEndpointResponse(payload_b64=_b64e(out_payload), metadata=meta), None
+
     return None, f"unsupported kind {req.kind}"
 
 
@@ -370,6 +379,109 @@ def run_quantum_calibration(state: GatewayState, payload: bytes) -> Tuple[bytes,
         "calibration_trace_n": str(len(trace)),
     }
     resp = {"adjustments": adjust, "metadata": meta}
+    return _json_bytes(resp), meta, None
+
+
+def run_motif_assignment(state: GatewayState, payload: bytes, timeout_secs: int) -> Tuple[bytes, Dict[str, str], Optional[str]]:
+    try:
+        req = json.loads(payload.decode("utf-8"))
+        assignments = list(req.get("assignments") or [])
+    except Exception:
+        return b"", {}, "invalid MOTIF_ASSIGNMENT payload"
+
+    if not assignments:
+        resp = {"assignments": [], "metadata": {"used_remote": "false", "reason": "no_assignments"}}
+        return _json_bytes(resp), resp["metadata"], None
+
+    temperature = float(os.environ.get("W1Z4RDV1510N_QUANTUM_GATEWAY_MOTIF_TEMP", "0.7") or 0.7)
+
+    def local_solution() -> Tuple[list, Dict[str, str]]:
+        out_items = []
+        for item in assignments:
+            cands = list((item or {}).get("candidates") or [])
+            costs = [float((c or {}).get("cost", 0.0)) for c in cands]
+            scores = [-c for c in costs]
+            probs = safe_softmax(scores, temperature=temperature)
+            probs = normalize_probabilities([float(p) for p in probs])
+            out_items.append({"assignment_id": str(item.get("assignment_id", "")), "probabilities": probs})
+        return out_items, {"used_remote": "false", "solver": "local_softmax"}
+
+    use_ocean = os.environ.get("W1Z4RDV1510N_QUANTUM_GATEWAY_DWAVE_OCEAN", "").strip().lower() in ("1", "true", "yes")
+    if use_ocean:
+        try:
+            import dimod  # type: ignore
+            from dwave.system import DWaveSampler, EmbeddingComposite  # type: ignore
+
+            linear = {}
+            quadratic = {}
+            offset = 0.0
+            all_costs = []
+            for item in assignments:
+                for c in list((item or {}).get("candidates") or []):
+                    try:
+                        all_costs.append(abs(float((c or {}).get("cost", 0.0))))
+                    except Exception:
+                        pass
+            base = max(all_costs) if all_costs else 1.0
+            penalty = float(os.environ.get("W1Z4RDV1510N_QUANTUM_GATEWAY_ONEHOT_PENALTY", "0") or 0.0) or (2.0 * base + 1.0)
+
+            for i, item in enumerate(assignments):
+                cands = list((item or {}).get("candidates") or [])
+                for j, c in enumerate(cands):
+                    var = f"x_{i}_{j}"
+                    cost = float((c or {}).get("cost", 0.0))
+                    linear[var] = linear.get(var, 0.0) + cost
+
+                for j in range(len(cands)):
+                    vj = f"x_{i}_{j}"
+                    linear[vj] = linear.get(vj, 0.0) + penalty * (1.0 - 2.0)
+                for j in range(len(cands)):
+                    for k in range(j + 1, len(cands)):
+                        vj = f"x_{i}_{j}"
+                        vk = f"x_{i}_{k}"
+                        quadratic[(vj, vk)] = quadratic.get((vj, vk), 0.0) + 2.0 * penalty
+                offset += penalty
+
+            bqm = dimod.BinaryQuadraticModel(linear, quadratic, offset, dimod.BINARY)
+            sampler = EmbeddingComposite(DWaveSampler())
+            num_reads = int(os.environ.get("W1Z4RDV1510N_QUANTUM_GATEWAY_NUM_READS", "200") or 200)
+            sampleset = sampler.sample(bqm, num_reads=max(num_reads, 10))
+
+            counts = []
+            for item in assignments:
+                cands = list((item or {}).get("candidates") or [])
+                counts.append([0.0 for _ in range(len(cands))])
+            total = 0.0
+            for sample in sampleset.samples():
+                total += 1.0
+                for i, item in enumerate(assignments):
+                    cands = list((item or {}).get("candidates") or [])
+                    chosen = None
+                    for j in range(len(cands)):
+                        if int(sample.get(f"x_{i}_{j}", 0)) == 1:
+                            chosen = j
+                            break
+                    if chosen is not None:
+                        counts[i][chosen] += 1.0
+
+            out_items = []
+            for i, item in enumerate(assignments):
+                probs = normalize_probabilities([c / max(total, 1.0) for c in counts[i]])
+                out_items.append({"assignment_id": str(item.get("assignment_id", "")), "probabilities": probs})
+
+            meta = {
+                "used_remote": "true",
+                "solver": "dwave_ocean",
+                "num_reads": str(num_reads),
+                "onehot_penalty": f"{penalty:.6g}",
+            }
+            resp = {"assignments": out_items, "metadata": meta}
+            return _json_bytes(resp), meta, None
+        except Exception:
+            pass
+
+    out_items, meta = local_solution()
+    resp = {"assignments": out_items, "metadata": meta}
     return _json_bytes(resp), meta, None
 
 

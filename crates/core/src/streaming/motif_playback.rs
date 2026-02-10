@@ -1,4 +1,4 @@
-use crate::blockchain::WorkKind;
+﻿use crate::blockchain::WorkKind;
 use crate::network::compute_payload_hash;
 use crate::schema::Timestamp;
 use crate::streaming::behavior::{BehaviorFrame, BehaviorMotif, BehaviorState};
@@ -361,6 +361,7 @@ mod tests {
                 edges: Vec::new(),
             },
             motifs: vec![motif],
+            motif_assignment_ambiguities: Vec::new(),
             prediction: None,
             backpressure: crate::streaming::behavior::BackpressureStatus::Ok,
         };
@@ -397,3 +398,7 @@ mod tests {
             .any(|frame| frame.position == Some([2.0, 1.5, 0.0])));
     }
 }
+
+
+
+

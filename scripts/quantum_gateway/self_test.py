@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import json
@@ -49,6 +49,36 @@ def test_branch_scoring_local() -> None:
     assert abs(sum(probs) - 1.0) < 1e-6
 
 
+def test_motif_assignment_local() -> None:
+    state = gateway.GatewayState(config_path="__missing__.json")
+    payload = {
+        "timestamp": {"unix": 123},
+        "assignments": [
+            {
+                "assignment_id": "a1",
+                "entity_id": "e1",
+                "dtw_threshold": 2.0,
+                "best_cost": 1.0,
+                "candidates": [
+                    {"motif_id": "m1", "cost": 0.2},
+                    {"motif_id": "m2", "cost": 0.5},
+                ],
+            }
+        ],
+    }
+    req = {
+        "kind": "MOTIF_ASSIGNMENT",
+        "payload_b64": _b64e(json.dumps(payload).encode("utf-8")),
+        "timeout_secs": 3,
+    }
+    resp, err = gateway.handle_quantum_submit(state, req)
+    assert err is None
+    out = json.loads(base64.b64decode(resp.payload_b64).decode("utf-8"))
+    assert "assignments" in out
+    probs = out["assignments"][0]["probabilities"]
+    assert abs(sum(probs) - 1.0) < 1e-6
+
+
 def test_quantum_calibration_local() -> None:
     state = gateway.GatewayState(config_path="__missing__.json")
     payload = {
@@ -75,7 +105,9 @@ def test_quantum_calibration_local() -> None:
     assert "adjustments" in out
 
 
+
 if __name__ == "__main__":
     test_branch_scoring_local()
+    test_motif_assignment_local()
     test_quantum_calibration_local()
     print("ok")

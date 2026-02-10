@@ -1,4 +1,4 @@
-use crate::config::{ClusterConfig, ComputeRoutingConfig, QuantumEndpointConfig};
+﻿use crate::config::{ClusterConfig, ComputeRoutingConfig, QuantumEndpointConfig};
 use crate::hardware::HardwareProfile;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,8 @@ pub enum ComputeJobKind {
     CausalDiscovery,
     QuantumAnneal,
     QuantumCalibration,
-    BranchScoring,
+    BranchScoring,
+    MotifAssignment,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +116,7 @@ impl ComputeRouter {
             ComputeJobKind::QuantumAnneal
                 | ComputeJobKind::QuantumCalibration
                 | ComputeJobKind::BranchScoring
+                | ComputeJobKind::MotifAssignment
         )
     }
 
@@ -132,3 +134,5 @@ impl ComputeRouter {
         matches!(job, ComputeJobKind::Graph | ComputeJobKind::CausalDiscovery)
     }
 }
+
+

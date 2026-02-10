@@ -1,10 +1,11 @@
-use crate::config::OnlinePlasticityConfig;
+﻿use crate::config::OnlinePlasticityConfig;
 use crate::plasticity::{OnlinePlasticity, OutcomeSignal, PlasticityDecision};
 use crate::schema::Timestamp;
 use crate::streaming::hypergraph::DomainKind;
 use crate::streaming::physiology_runtime::PhysiologyReport;
 use crate::streaming::schema::{EventKind, TokenBatch};
 use crate::streaming::temporal::{DirichletPosterior, TemporalInferenceReport};
+use crate::streaming::outcome_feedback::OutcomeFeedbackReport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -27,6 +28,14 @@ pub struct PlasticityReport {
     pub calibration_score: f64,
     pub drift_score: f64,
     pub surprise_score: f64,
+    #[serde(default)]
+    pub prediction_samples: usize,
+    #[serde(default)]
+    pub prediction_reward: f64,
+    #[serde(default)]
+    pub prediction_log_loss: f64,
+    #[serde(default)]
+    pub prediction_baseline_log_loss: f64,
     pub updates: Vec<PlasticityUpdate>,
     pub reservoir_buckets: usize,
 }
@@ -93,6 +102,7 @@ impl StreamingPlasticityRuntime {
         batch: &TokenBatch,
         report: &TemporalInferenceReport,
         physiology: Option<&PhysiologyReport>,
+        feedback: Option<&OutcomeFeedbackReport>,
     ) -> Option<PlasticityReport> {
         if !self.config.enabled {
             return None;
@@ -170,6 +180,57 @@ impl StreamingPlasticityRuntime {
         } else {
             0.0
         };
+
+        let (prediction_samples, prediction_reward, prediction_log_loss, prediction_baseline_log_loss) =
+            if let Some(feedback) = feedback {
+                (
+                    feedback.resolved,
+                    feedback.reward,
+                    feedback.avg_log_loss,
+                    feedback.avg_baseline_log_loss,
+                )
+            } else {
+                (0, 0.0, 0.0, 0.0)
+            };
+
+        if prediction_samples > 0 {
+            // If the model is worse than baseline, treat the delta as a "surprise" signal.
+            let delta = (prediction_log_loss - prediction_baseline_log_loss).max(0.0);
+            let pred_surprise = (1.0 - (-delta).exp()).clamp(0.0, 1.0);
+            let pred_calibration = (1.0 / (1.0 + prediction_log_loss.max(0.0))).clamp(0.0, 1.0);
+            let bucket = "prediction|global".to_string();
+            let teacher_ema = self.update_teacher(&bucket, pred_calibration);
+            let signal = OutcomeSignal {
+                domain: "prediction".to_string(),
+                context: "global".to_string(),
+                surprise: pred_surprise,
+                timestamp: report.timestamp,
+            };
+            let decision = if pred_surprise > 0.0 {
+                self.plasticity.observe_outcome(signal)
+            } else {
+                PlasticityDecision::NoUpdate {
+                    reason: "prediction_stable".to_string(),
+                }
+            };
+            let (reason, queued_replay, update_weight) = match decision {
+                PlasticityDecision::NoUpdate { reason } => (reason, false, 0.0),
+                PlasticityDecision::QueueReplay { bucket: _ } => (
+                    "prediction_replay_queued".to_string(),
+                    true,
+                    pred_surprise.min(self.config.trust_region.max(0.0)),
+                ),
+            };
+            updates.push(PlasticityUpdate {
+                bucket,
+                surprise: pred_surprise,
+                update_weight,
+                teacher_ema,
+                rollback: false,
+                queued_replay,
+                reason,
+            });
+        }
         let horizon_secs = self.horizon.update(calibration_score, &self.config);
 
         Some(PlasticityReport {
@@ -178,6 +239,10 @@ impl StreamingPlasticityRuntime {
             calibration_score,
             drift_score,
             surprise_score,
+            prediction_samples,
+            prediction_reward,
+            prediction_log_loss,
+            prediction_baseline_log_loss,
             updates,
             reservoir_buckets: self.plasticity.bucket_count(),
         })
@@ -404,7 +469,18 @@ mod tests {
             next_event: None,
             hypergraph: None,
         };
-        let output = runtime.update(&batch, &report, None).expect("report");
+        let output = runtime.update(&batch, &report, None, None).expect("report");
         assert_eq!(output.timestamp.unix, 100);
     }
 }
+
+
+
+
+
+
+
+
+
+
+
