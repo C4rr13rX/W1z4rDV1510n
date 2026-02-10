@@ -101,7 +101,7 @@ Designed to run on modest desktops and scale across many nodes.
 - CPU RAM-optimized backend with NUMA/large-page hints.
 - Optional GPU backend (build with `--features gpu`) for bulk bit operations.
 - Distributed backend is local-only (thread segmentation) today; remote workers are planned.
-- Quantum endpoints via HTTP executor with auth headers and timeout control.
+- Quantum endpoints via HTTP executor with auth headers and timeout control (see `scripts/quantum_gateway/` for a local multi-provider gateway).
 
 ---
 

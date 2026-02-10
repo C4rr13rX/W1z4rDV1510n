@@ -242,7 +242,18 @@
   "compute": {
     "allow_gpu": true,
     "allow_quantum": false,
-    "quantum_endpoints": []
+    "quantum_endpoints": [
+      {
+        "name": "local-quantum-gateway",
+        "url": "http://127.0.0.1:5050/quantum/submit",
+        "timeout_secs": 30,
+        "provider": "gateway",
+        "priority": 10,
+        "auth_env": "W1Z4RDV1510N_QUANTUM_GATEWAY_TOKEN",
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer "
+      }
+    ]
   },
   "cluster": {
     "enabled": false,

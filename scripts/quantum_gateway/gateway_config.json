@@ -1,0 +1,113 @@
+{
+  "auth": {
+    "env": "W1Z4RDV1510N_QUANTUM_GATEWAY_TOKEN",
+    "header": "Authorization",
+    "prefix": "Bearer "
+  },
+  "providers": [
+    {
+      "name": "braket",
+      "enabled": false,
+      "priority": 10,
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "azure_quantum",
+      "enabled": false,
+      "priority": 20,
+      "base_url": "https://quantum.azure.com",
+      "token_env": "AZURE_QUANTUM_TOKEN",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "ibm_runtime",
+      "enabled": false,
+      "priority": 30,
+      "base_url": "https://quantum.cloud.ibm.com/api/v1",
+      "token_env": "IBM_QUANTUM_TOKEN",
+      "service_crn_env": "IBM_QUANTUM_SERVICE_CRN",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "ionq",
+      "enabled": false,
+      "priority": 40,
+      "base_url": "https://api.ionq.co/v0.4",
+      "token_env": "IONQ_API_KEY",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "dwave",
+      "enabled": false,
+      "priority": 50,
+      "base_url": "https://na-west-1.cloud.dwavesys.com/sapi/v2",
+      "token_env": "DWAVE_API_TOKEN",
+      "auth_header": "X-Auth-Token",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "google_engine",
+      "enabled": false,
+      "priority": 60,
+      "base_url": "https://quantumengine.googleapis.com/v1",
+      "token_env": "GOOGLE_OAUTH_TOKEN",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "pasqal",
+      "enabled": false,
+      "priority": 70,
+      "base_url": "https://cloud.pasqal.com",
+      "token_env": "PASQAL_TOKEN",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "xanadu_xcc",
+      "enabled": false,
+      "priority": 80,
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "aqt",
+      "enabled": false,
+      "priority": 90,
+      "base_url": "https://arnica.aqt.eu/api/v1",
+      "token_env": "AQT_API_TOKEN",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "quandela",
+      "enabled": false,
+      "priority": 100,
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "scaleway_quandela",
+      "enabled": false,
+      "priority": 110,
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "quantum_inspire",
+      "enabled": false,
+      "priority": 120,
+      "base_url": "https://api.quantum-inspire.com",
+      "token_env": "QUANTUM_INSPIRE_TOKEN",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "qbraid",
+      "enabled": false,
+      "priority": 130,
+      "base_url": "https://api.qbraid.com",
+      "token_env": "QBRAID_API_KEY",
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    },
+    {
+      "name": "strangeworks_azure",
+      "enabled": false,
+      "priority": 140,
+      "capabilities": { "experiment": true, "branch_scoring": false }
+    }
+  ]
+}
