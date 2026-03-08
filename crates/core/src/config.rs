@@ -8,6 +8,11 @@ use crate::random::RandomConfig;
 use crate::schema::Timestamp;
 use crate::search::SearchConfig;
 use crate::state_population::InitStrategyConfig;
+use crate::streaming::dynamic_pools::DynamicPoolConfig;
+use crate::streaming::hierarchical_motifs::HierarchicalMotifConfig;
+use crate::streaming::motif_label_bridge::MotifLabelBridgeConfig;
+use crate::streaming::organic_encoder::OrganicEncoderConfig;
+use crate::streaming::sensor_registry::SensorRegistryConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1461,6 +1466,16 @@ pub struct StreamingConfig {
     pub outcome_feedback: OutcomeFeedbackConfig,
     #[serde(default)]
     pub experiments: ExperimentGovernorConfig,
+    #[serde(default)]
+    pub hierarchical_motifs: HierarchicalMotifConfig,
+    #[serde(default)]
+    pub organic_encoder: OrganicEncoderConfig,
+    #[serde(default)]
+    pub dynamic_pools: DynamicPoolConfig,
+    #[serde(default)]
+    pub sensor_registry: SensorRegistryConfig,
+    #[serde(default)]
+    pub motif_label_bridge: MotifLabelBridgeConfig,
 }
 
 impl Default for StreamingConfig {
@@ -1493,6 +1508,11 @@ impl Default for StreamingConfig {
             metacognition: MetacognitionConfig::default(),
             outcome_feedback: OutcomeFeedbackConfig::default(),
             experiments: ExperimentGovernorConfig::default(),
+            hierarchical_motifs: HierarchicalMotifConfig::default(),
+            organic_encoder: OrganicEncoderConfig::default(),
+            dynamic_pools: DynamicPoolConfig::default(),
+            sensor_registry: SensorRegistryConfig::default(),
+            motif_label_bridge: MotifLabelBridgeConfig::default(),
         }
     }
 }

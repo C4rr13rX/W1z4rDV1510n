@@ -31,6 +31,11 @@ use crate::streaming::narrative_runtime::NarrativeRuntime;
 use crate::streaming::metacognition_runtime::{MetacognitionRuntime, MetacognitionShare};
 use crate::streaming::outcome_feedback::StreamingOutcomeFeedbackRuntime;
 use crate::streaming::experiment_governor::ExperimentGovernorRuntime;
+use crate::streaming::hierarchical_motifs::HierarchicalMotifRuntime;
+use crate::streaming::motif_label_bridge::MotifLabelBridge;
+use crate::streaming::dynamic_pools::DynamicPoolRegistry;
+use crate::streaming::organic_encoder::OrganicEncoder;
+use crate::streaming::sensor_registry::SensorRegistry;
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -742,6 +747,11 @@ pub struct StreamingInference {
     spike_runtime: Option<StreamingSpikeRuntime>,
     neuro_bridge: Option<NeuroStreamBridge>,
     substreams: SubstreamRuntime,
+    hierarchical_motifs: HierarchicalMotifRuntime,
+    motif_label_bridge: MotifLabelBridge,
+    dynamic_pools: DynamicPoolRegistry,
+    organic_encoder: OrganicEncoder,
+    sensor_registry: SensorRegistry,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
     last_batch: Option<TokenBatch>,
@@ -835,6 +845,11 @@ impl StreamingInference {
             None
         };
         let substreams = SubstreamRuntime::default();
+        let hierarchical_motifs = HierarchicalMotifRuntime::new(run_config.streaming.hierarchical_motifs.clone());
+        let motif_label_bridge = MotifLabelBridge::new(run_config.streaming.motif_label_bridge.clone());
+        let dynamic_pools = DynamicPoolRegistry::new(run_config.streaming.dynamic_pools.clone());
+        let organic_encoder = OrganicEncoder::new(run_config.streaming.organic_encoder.clone());
+        let sensor_registry = SensorRegistry::new(run_config.streaming.sensor_registry.clone());
         Self {
             processor,
             aligner,
@@ -865,6 +880,11 @@ impl StreamingInference {
             spike_runtime,
             neuro_bridge,
             substreams,
+            hierarchical_motifs,
+            motif_label_bridge,
+            dynamic_pools,
+            organic_encoder,
+            sensor_registry,
             run_config,
             symbolizer: SymbolizeConfig::default(),
             last_batch: None,
@@ -1028,6 +1048,57 @@ impl StreamingInference {
         let motif_playback_report = self
             .motif_playback
             .update(&motif_replays, batch.timestamp);
+        // Hierarchical motif discovery: feed atomic motifs, discover meta-motifs
+        let hierarchical_report = if !self.last_motifs.is_empty() {
+            self.hierarchical_motifs.observe(&self.last_motifs, batch.timestamp)
+        } else {
+            None
+        };
+        // Queue every discovered motif for human labeling with context snapshot
+        let motif_label_report = if let Some(frame) = behavior_frame.as_ref() {
+            let label_report = self.motif_label_bridge.queue_motifs(
+                frame,
+                &batch.tokens,
+                &batch.layers,
+                batch.timestamp,
+            );
+            // Also queue any newly promoted meta-motifs
+            if let Some(hr) = hierarchical_report.as_ref() {
+                if !hr.newly_promoted.is_empty() {
+                    let _ = self.motif_label_bridge.queue_meta_motifs(
+                        &hr.newly_promoted,
+                        batch.timestamp,
+                    );
+                }
+            }
+            label_report
+        } else {
+            None
+        };
+        // Dynamic pool spawning: observe discovered motif categories
+        if let Some(frame) = behavior_frame.as_ref() {
+            for motif in &frame.motifs {
+                let features: Vec<f64> = motif.prototype.iter()
+                    .flat_map(|v| v.iter().copied())
+                    .take(16)
+                    .collect();
+                if !features.is_empty() {
+                    self.dynamic_pools.observe_category(&motif.id, &features, batch.timestamp);
+                }
+            }
+        }
+        // Also observe meta-motif categories for dynamic pool spawning
+        if let Some(hr) = hierarchical_report.as_ref() {
+            for meta in &hr.newly_promoted {
+                if !meta.signature.is_empty() {
+                    self.dynamic_pools.observe_category(&meta.id, &meta.signature, batch.timestamp);
+                }
+            }
+        }
+        // Prune idle dynamic pools
+        let _ = self.dynamic_pools.prune_idle(batch.timestamp);
+        // Sensor registry: prune stale sensors
+        let _ = self.sensor_registry.prune_stale(batch.timestamp);
         let network_report = self
             .network_fabric
             .update(&batch, behavior_frame.as_ref());
@@ -1366,6 +1437,52 @@ impl StreamingInference {
                 "branching_futures".to_string(),
                 serde_json::to_value(report)?,
             );
+        }
+        if let Some(report) = &hierarchical_report {
+            report_metadata.insert(
+                "hierarchical_motifs".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "hierarchical_motifs".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &motif_label_report {
+            report_metadata.insert(
+                "motif_label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "motif_label_queue".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        {
+            let pool_report = self.dynamic_pools.report(batch.timestamp);
+            if pool_report.total_pools > 0 {
+                report_metadata.insert(
+                    "dynamic_pools".to_string(),
+                    serde_json::to_value(&pool_report)?,
+                );
+                snapshot.metadata.insert(
+                    "dynamic_pools".to_string(),
+                    serde_json::to_value(pool_report)?,
+                );
+            }
+        }
+        {
+            let sensor_report = self.sensor_registry.report(batch.timestamp);
+            if sensor_report.total_sensors > 0 {
+                report_metadata.insert(
+                    "sensor_registry".to_string(),
+                    serde_json::to_value(&sensor_report)?,
+                );
+                snapshot.metadata.insert(
+                    "sensor_registry".to_string(),
+                    serde_json::to_value(sensor_report)?,
+                );
+            }
         }
         if let Some(mut messages) = spike_messages {
             if let Some(runtime) = &self.spike_runtime {

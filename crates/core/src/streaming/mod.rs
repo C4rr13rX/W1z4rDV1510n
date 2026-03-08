@@ -43,6 +43,11 @@ pub mod narrative_runtime;
 pub mod metacognition_runtime;
 pub mod outcome_feedback;
 pub mod experiment_governor;
+pub mod hierarchical_motifs;
+pub mod organic_encoder;
+pub mod dynamic_pools;
+pub mod sensor_registry;
+pub mod motif_label_bridge;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -113,4 +118,12 @@ pub use outcome_feedback::{OutcomeFeedbackReport, OutcomeFeedbackSlice, Predicti
 
 pub use experiment_governor::{ExperimentGovernorReport, ExperimentGovernorRuntime};
 
+pub use hierarchical_motifs::{
+    HierarchicalMotifConfig, HierarchicalMotifReport, HierarchicalMotifRuntime, LevelReport,
+    MetaMotif,
+};
 
+pub use dynamic_pools::{DynamicPoolConfig, DynamicPoolRegistry, DynamicPoolReport, PoolSummary};
+
+pub use sensor_registry::{SensorCapability, SensorRegistry, SensorRegistryConfig, SensorRegistryReport};
+pub use motif_label_bridge::{MotifLabelBridge, MotifLabelBridgeConfig, MotifLabelReport, MotifLabelTask, MotifSnapshot};
