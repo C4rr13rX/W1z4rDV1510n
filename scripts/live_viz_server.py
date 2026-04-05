@@ -591,9 +591,9 @@ async function poll() {
   tick++;
   tickEl.textContent = `tick ${tick}`;
 
-  // Chess board mode
+  // Chess board mode (guard: must have real board data, not just empty {})
   const bd = await fetchJson(BOARD_URL);
-  if (bd) {
+  if (bd && bd.pieces && bd.pieces.length > 0) {
     const isNewPly    = bd.ply !== prevPly;
     const isReveal    = bd.reveal_phase;
     const wasPredict  = prevReveal === false;
