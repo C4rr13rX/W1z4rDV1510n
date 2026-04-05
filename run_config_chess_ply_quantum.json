@@ -45,7 +45,8 @@
     "driver_final_strength": 0.08,
     "worldline_mix_prob": 0.05,
     "slice_temperature_scale": 1.0,
-    "remote_enabled": false
+    "remote_enabled": false,
+    "calibration_path": "logs/chess_quantum_calibration.json"
   },
   "logging": {
     "log_level": "WARN",
