@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/Adam/.claude/projects/c--Users-Adam-Projects-W1z4rDV1510n/b19b1aa9-e870-4b3a-98d5-61f299e9f4be/tool-results/**)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\Adam\\.claude\\projects\\c--Users-Adam-Projects-W1z4rDV1510n\\memory"
+    ]
+  }
+}

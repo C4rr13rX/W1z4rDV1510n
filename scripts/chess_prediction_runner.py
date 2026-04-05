@@ -71,6 +71,12 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
+
+# Ensure UTF-8 output on Windows (box-drawing chars etc.)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field

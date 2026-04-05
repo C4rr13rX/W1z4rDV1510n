@@ -49,6 +49,6 @@
     "live_neuro_every": 5
   },
   "output": { "save_best_state": true, "save_population_summary": false, "output_path": "logs/chess_ply_neuro_result.json", "format": "Json" },
-  "random": { "provider": "PROBABILISTIC" },
+  "random": { "provider": "OS_ENTROPY" },
   "experimental_hardware": { "enabled": false }
 }

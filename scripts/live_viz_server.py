@@ -732,8 +732,8 @@ def serve(
             neuro_file=neuro_file.resolve() if neuro_file else None,
             **kwargs,
         )
+    socketserver.TCPServer.allow_reuse_address = True
     httpd = socketserver.TCPServer(("", port), MakeHandler)
-    httpd.allow_reuse_address = True
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     return httpd, t
