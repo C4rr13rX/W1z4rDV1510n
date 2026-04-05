@@ -1231,6 +1231,46 @@ impl StreamingInference {
             self.branching
                 .update(&batch, report, causal_report.as_ref(), physiology_report.as_ref())
         });
+        // Wire quantum branching results back into the neural fabric as training signals.
+        // When the quantum scorer ran a remote job, the blended branch probabilities become
+        // state_probabilities so the fabric learns which event kinds the quantum circuit
+        // associated with high probability.
+        if let Some(br) = &branching_report {
+            if let Some(qr) = &br.quantum {
+                if qr.used_remote {
+                    let state_probs: Vec<(String, f64)> = br
+                        .branches
+                        .iter()
+                        .map(|node| {
+                            let kind = node
+                                .payload
+                                .get("event_kind")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            (kind, node.probability)
+                        })
+                        .collect();
+                    let context_labels: Vec<String> = br
+                        .branches
+                        .iter()
+                        .take(4)
+                        .filter_map(|node| {
+                            node.payload
+                                .get("event_kind")
+                                .and_then(|v| v.as_str())
+                                .map(|s| format!("branch::{s}"))
+                        })
+                        .collect();
+                    self.fabric_trainer.record_quantum_result(
+                        format!("branching::{}", br.timestamp.unix),
+                        state_probs,
+                        context_labels,
+                        br.timestamp,
+                    );
+                }
+            }
+        }
         let metacognition_report = self.metacognition.update(
             &batch,
             behavior_frame.as_ref(),
