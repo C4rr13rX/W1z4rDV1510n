@@ -113,6 +113,22 @@ def load_cfg(path: Path) -> dict:
 def make_ply_cfg(base: dict, n_iters: int, seed_offset: int = 0) -> dict:
     cfg = json.loads(json.dumps(base))
     cfg["schedule"]["n_iterations"] = n_iters
+    # Debug builds are ~15–50x slower than release; aggressively cap so each ply
+    # completes in <10 seconds even with 32 chess pieces on the board.
+    _is_debug = "debug" in str(PREDICT_EXE) and "release" not in str(PREDICT_EXE)
+    if _is_debug:
+        cfg["n_particles"] = 8
+        cfg["schedule"]["n_iterations"] = min(n_iters, 20)
+        cfg["hardware_overrides"]["max_threads"] = 2
+        # Neuro is prohibitively slow in debug (JSON logging overhead); disable.
+        cfg["neuro"] = {"enabled": False}
+        cfg["energy"]["w_neuro_alignment"] = 0.0
+        # Quantum Trotter: cap slices and disable live logging
+        if cfg.get("quantum", {}).get("enabled"):
+            cfg["quantum"]["trotter_slices"] = 2
+        # Silence live logging (serialising 256 networks to JSON per-iter is the bottleneck)
+        cfg["logging"]["live_neuro_every"] = 999999
+        cfg["logging"]["live_frame_every"] = 999999
     # Vary seed each call so repeated queries don't collapse to same path
     if cfg.get("random", {}).get("provider") == "DETERMINISTIC":
         cfg["random"]["seed"] = (cfg["random"].get("seed", 42) + seed_offset) % 2**31
@@ -411,9 +427,19 @@ def pieces_list(board: chess.Board) -> List[dict]:
 
 def write_board(data: dict) -> None:
     BOARD_JSON.parent.mkdir(parents=True, exist_ok=True)
-    tmp = BOARD_JSON.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(BOARD_JSON)
+    payload = json.dumps(data)
+    # Windows doesn't allow atomic rename over an open file; write directly.
+    try:
+        tmp = BOARD_JSON.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        try:
+            tmp.replace(BOARD_JSON)
+        except PermissionError:
+            # Fallback: overwrite in place (viz may read a partial frame — acceptable)
+            BOARD_JSON.write_text(payload, encoding="utf-8")
+            tmp.unlink(missing_ok=True)
+    except Exception:
+        BOARD_JSON.write_text(payload, encoding="utf-8")
 
 
 def board_frame(
@@ -426,41 +452,46 @@ def board_frame(
     game_meta: dict,
     reveal: bool,
     acc_global: "ModelLedger",
+    precomputed_preds_viz: Optional[List[dict]] = None,
 ) -> dict:
-    preds_for_viz = []
-    for mp in model_preds:
-        san = mp.get("san")
-        if san:
+    # Use pre-computed viz list (avoids re-parsing SAN on post-move board)
+    if precomputed_preds_viz is not None:
+        preds_for_viz = precomputed_preds_viz
+    else:
+        preds_for_viz = []
+        for mp in model_preds:
+            san = mp.get("san")
+            if san:
+                try:
+                    mv = board.parse_san(san)
+                    preds_for_viz.append({
+                        "san":        san,
+                        "model":      mp["model"],
+                        "probability": round(mp["weight"], 3),
+                        "correct":    mp.get("correct", False),
+                        "from_file":  chess.square_file(mv.from_square),
+                        "from_rank":  chess.square_rank(mv.from_square),
+                        "to_file":    chess.square_file(mv.to_square),
+                        "to_rank":    chess.square_rank(mv.to_square),
+                        "energy":     mp.get("energy"),
+                    })
+                except Exception:
+                    pass
+        if collective_san:
             try:
-                mv = board.parse_san(san)
-                preds_for_viz.append({
-                    "san":        san,
-                    "model":      mp["model"],
-                    "probability": round(mp["weight"], 3),
-                    "correct":    mp.get("correct", False),
+                mv = board.parse_san(collective_san)
+                preds_for_viz.insert(0, {
+                    "san":        collective_san,
+                    "model":      "collective",
+                    "probability": 1.0,
+                    "correct":    any(p.get("correct") for p in preds_for_viz if p["san"] == collective_san),
                     "from_file":  chess.square_file(mv.from_square),
                     "from_rank":  chess.square_rank(mv.from_square),
                     "to_file":    chess.square_file(mv.to_square),
                     "to_rank":    chess.square_rank(mv.to_square),
-                    "energy":     mp.get("energy"),
                 })
             except Exception:
                 pass
-    if collective_san:
-        try:
-            mv = board.parse_san(collective_san)
-            preds_for_viz.insert(0, {
-                "san":        collective_san,
-                "model":      "collective",
-                "probability": 1.0,
-                "correct":    any(p.get("correct") for p in preds_for_viz if p["san"] == collective_san),
-                "from_file":  chess.square_file(mv.from_square),
-                "from_rank":  chess.square_rank(mv.from_square),
-                "to_file":    chess.square_file(mv.to_square),
-                "to_rank":    chess.square_rank(mv.to_square),
-            })
-        except Exception:
-            pass
     return {
         "game_count":  game_meta["game_count"],
         "game_id":     game_meta["game_id"],
@@ -506,7 +537,12 @@ class HourlyMonitor:
         self.checkpoints: List[dict] = []
         self.prev_acc = 0.0
         # per-model iteration adjustments tracked separately via ledgers
-        self.base_iters = {"classical": 120, "quantum": 180, "neuro": 150}
+        # Debug builds are ~15x slower than release; scale down so plies don't take minutes.
+        _is_debug = "debug" in str(find_predict_exe()) and "release" not in str(find_predict_exe())
+        if _is_debug:
+            self.base_iters = {"classical": 40, "quantum": 50, "neuro": 40}
+        else:
+            self.base_iters = {"classical": 120, "quantum": 180, "neuro": 150}
 
     def maybe_checkpoint(self, ledgers: List[ModelLedger], log_handle) -> None:
         now = time.time()
@@ -773,6 +809,45 @@ def main() -> None:
                     for name in ("classical", "quantum", "neuro")
                 ]
 
+                # Pre-compute move coords NOW (board is pre-move) so reveal phase can reuse them
+                def _precompute_preds_viz(preds_list, col_san, brd):
+                    """Build preds_for_viz while board is still in pre-move state."""
+                    out = []
+                    for mp in preds_list:
+                        san = mp.get("san")
+                        if san:
+                            try:
+                                mv = brd.parse_san(san)
+                                out.append({
+                                    "san": san, "model": mp["model"],
+                                    "probability": round(mp["weight"], 3),
+                                    "correct": mp.get("correct", False),
+                                    "from_file": chess.square_file(mv.from_square),
+                                    "from_rank": chess.square_rank(mv.from_square),
+                                    "to_file":   chess.square_file(mv.to_square),
+                                    "to_rank":   chess.square_rank(mv.to_square),
+                                    "energy":    mp.get("energy"),
+                                })
+                            except Exception:
+                                pass
+                    if col_san:
+                        try:
+                            mv = brd.parse_san(col_san)
+                            out.insert(0, {
+                                "san": col_san, "model": "collective",
+                                "probability": 1.0,
+                                "correct": any(p.get("correct") for p in out if p["san"] == col_san),
+                                "from_file": chess.square_file(mv.from_square),
+                                "from_rank": chess.square_rank(mv.from_square),
+                                "to_file":   chess.square_file(mv.to_square),
+                                "to_rank":   chess.square_rank(mv.to_square),
+                            })
+                        except Exception:
+                            pass
+                    return out
+
+                precomputed_preds_viz = _precompute_preds_viz(model_preds_list, collective_san, board)
+
                 game_meta = {
                     "game_count": game_count, "game_id": game_id,
                     "result": result, "ply": ply_idx, "total_plies": len(moves),
@@ -782,6 +857,7 @@ def main() -> None:
                 write_board(board_frame(
                     board, ledgers, model_preds_list, collective_san,
                     None, merged_heat, game_meta, False, acc_global,
+                    precomputed_preds_viz=precomputed_preds_viz,
                 ))
 
                 if args.ply_delay > 0:
@@ -794,10 +870,11 @@ def main() -> None:
                 except Exception:
                     break
 
-                # Reveal phase
+                # Reveal phase (board is now post-move; reuse pre-computed preds_viz)
                 write_board(board_frame(
                     board, ledgers, model_preds_list, collective_san,
                     lm, merged_heat, game_meta, True, acc_global,
+                    precomputed_preds_viz=precomputed_preds_viz,
                 ))
 
                 # Console

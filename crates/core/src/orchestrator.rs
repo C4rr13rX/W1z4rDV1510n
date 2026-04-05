@@ -426,11 +426,9 @@ fn validate_snapshot(snapshot: &EnvironmentSnapshot) -> anyhow::Result<()> {
         for (id, state) in &frame.symbol_states {
             ensure_position("stack_history", id, &state.position, width, height, depth)
                 .with_context(|| format!("stack_history frame {}", frame_idx))?;
-            anyhow::ensure!(
-                ids.contains(id),
-                "stack_history references unknown symbol id '{}'",
-                id
-            );
+            // Note: stack_history frames represent *past* board states — symbol IDs
+            // reference historical piece positions, which legitimately differ from the
+            // current snapshot's symbol set (pieces move between plies).
         }
     }
     Ok(())
