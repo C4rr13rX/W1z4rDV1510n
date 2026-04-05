@@ -1,11 +1,18 @@
 # W1z4rDV1510n
 
-**Ultradian Rhythm Dynamic Stability Analysis System** - flag-driven mode for layered ultradian phase/amplitude/coherence tracking, stability baselines, and cross-entity motif discovery with human-first governance.
+**Chaos World Model + Neural Fabric Intelligence System** — a CPU-first, RAM-first distributed intelligence stack that learns to represent and predict the physical environment through organic Hebbian neurogenesis, recursive motif discovery, and multi-sensor data fusion. No GPUs required.
 
-W1z4rDV1510n is a Rust-first, CPU-first intelligence stack that combines:
+The core thesis: start with every incoming sensor stream as a 3D representation of the environment. Things that appear consistently across time and space grow neural connections — mini-columns form, abstract to single concept neurons, then branch into finer distinctions. The computations live in the architecture. Inference is a reaction in state, not a runtime calculation.
+
+W1z4rDV1510n combines:
+- **Organic neural fabric** — CPU+RAM neuron pools with neurogenesis, Hebbian/STDP learning, winner-take-all sparsification, and mini-columns that collapse to concept neurons over time.
+- **Multi-sensor streaming** — plug in video, audio, LiDAR, radio, biological sensors, or any consistent data source; the fabric discovers entities, features, and invisible forces (e.g. wind) through pattern consistency alone.
+- **Chaos world model** — uses known chaos-theory algorithms as mathematical starting points, then lets the neural architecture discover new mathematical relationships through Hebbian learning. A physics explainer that starts in 3D and extends organically.
+- **Recursive motif discovery** — motifs of motifs of motifs, up to 8 hierarchy levels, with Shannon entropy attractor detection.
+- **Hebbian Q&A fabric** — textbook knowledge encoded as grown synaptic state; querying fires input neurons and reads the output network — no matrix multiplication at inference.
+- **Decentralized node mesh** — nodes share motifs, patterns, and knowledge across a P2P network so data encountered anywhere is calculated into predictions everywhere.
 - Symbol matrix inference (annealer + neural priors).
 - Streaming ultradian analysis (people, crowd/traffic, public topics).
-- A distributed node runtime with P2P mesh, ledger incentives, and multi-chain deposits.
 
 Designed to run on modest desktops and scale across many nodes.
 
@@ -13,7 +20,14 @@ Designed to run on modest desktops and scale across many nodes.
 
 ## Core innovations
 
-- CPU+RAM neural fabric: neuron pools, neurogenesis, and spiking signal routing without GPUs.
+- **CPU+RAM neural fabric** — neuron pools with neurogenesis, Hebbian/STDP learning, winner-take-all sparsification, mini-columns, and spiking signal routing. No GPU required.
+- **Organic feature encoding** — V1-style Gabor-like oriented gradient filters; basis vectors grow from data variability, not predefined categories. New inputs spawn new neurons automatically.
+- **Recursive motif discovery** — hierarchical motif-of-motifs composition up to 8 levels deep; Shannon entropy attractor detection at each level; every motif queued for human labeling with visual snapshots.
+- **Dynamic neural pool spawning** — new categories discovered organically trigger new spike pools; Hebbian cross-associations between pools; idle pools pruned automatically.
+- **Plug-and-play sensor discovery** — register any sensor (video, audio, IMU, LiDAR, bio-signals) at runtime; TTL-based stale pruning; heuristic stream-source inference.
+- **Hebbian Q&A fabric** — textbook Q&A pairs encoded as grown synaptic weights; query fires input neurons and reads the output network; reaction in state, not runtime computation.
+- **OpenStax textbook pipeline** — downloads CC-licensed textbooks from openstax.org, renders to page images, segments with a lightweight perceptron classifier, extracts Q&A pairs, queues all pages for human annotation.
+- **Microcortex JS runtime** — lightweight typed-array perceptron builder (`buildPerceptron`, `softmax`, `hebbianUpdate`, `winnerTakeAll`) for the Node.js segmentation pipeline; same Hebbian rules as the Rust fabric.
 - Multimodal stream conversion into layered dynamics and discrete event tokens, aligned with temporal tolerance and confidence gating.
 - Species-agnostic behavior substrate with body-schema adapters, time-frequency motifs, DTW/soft-DTW similarity, and MDL-based compression.
 - Multi-domain hypergraph + temporal inference with phase/amplitude prediction, cross-layer coherence, event intensities, and Dirichlet evidential uncertainty.
@@ -68,10 +82,13 @@ Designed to run on modest desktops and scale across many nodes.
 - Consistency chunking builds reusable templates (codebook) from stable motifs.
 - Ontology runtime versions labels across minute/hour/day/week windows.
 
-### 7) Knowledge ingestion and labeling queues
+### 7) Knowledge ingestion, labeling queues, and textbook Q&A
 - JATS/NLM ingestion with text blocks, figure assets, and OCR hooks.
 - Figure-to-text association tasks with voting and confidence thresholds.
 - Label queue for emergent dimensions and novel token/layer attributes.
+- **Textbook pipeline** (`textbook_scripts/`): downloads CC-licensed OpenStax PDFs, segments pages into labeled bounding boxes (title/heading/paragraph/list/callout/footer) using a microcortex perceptron classifier, extracts Q&A candidate pairs, and emits review queues for human annotation.
+- **Hebbian Q&A fabric** (`qa_runtime`): every verified Q&A pair is encoded into synaptic state via Hebb's rule. At query time, question tokens fire input neurons; the output network's learned activations surface ranked answers. No matrix math at inference — the answer is a reaction in the fabric's state.
+- API endpoints: `POST /qa/ingest` (bulk load from `qa_candidates.jsonl`), `POST /qa/query` (natural language question → ranked answers).
 
 ### 8) Health, survival, and overlays
 - Physiology template bank with covariance-aware deviation scoring.
@@ -245,6 +262,34 @@ Service API:
 - Dataset fetchers/preprocessors (USPTO, Tox21, ETH/UCY, exoplanets, genomics, OWID).
 - `calibrate_energy` - tune energy weights from trajectories.
 - `scripts/prepare_textbook_qa_dataset.py` - render textbook PDFs into page images + OCR text, emit review queues, and build QA candidate datasets (requires `pdftoppm` or `mutool`, plus `pdftotext` or `tesseract`).
+- `textbook_scripts/download_and_process.mjs` - downloads CC-licensed OpenStax textbooks, follows redirects, fetches live catalog from the OpenStax API with curated fallback (22 books across science/math/social sciences/CS).
+- `textbook_scripts/segment-textbook.mjs` - segments downloaded PDFs into labeled page images using the microcortex perceptron classifier.
+- `packages/microcortex/` - lightweight JS neural fabric primitive: `buildPerceptron`, `softmax`, `hebbianUpdate`, `winnerTakeAll`. Same Hebbian learning rules as the Rust `NeuronPool`, no dependencies.
+
+### Textbook Q&A pipeline (end to end)
+
+```powershell
+# 1. Download OpenStax textbooks (test mode — no actual download)
+node textbook_scripts/download_and_process.mjs
+
+# 2. Download for real (set subject filter and book limit as needed)
+$env:TEXTBOOK_TEST_MODE="false"; $env:TEXTBOOK_MAX_BOOKS="5"; $env:TEXTBOOK_SUBJECTS="science,math"
+node textbook_scripts/download_and_process.mjs
+
+# 3. Extract Q&A pairs from downloaded PDFs
+python scripts/prepare_textbook_qa_dataset.py --max-books 3 --max-pages 25 --skip-existing
+
+# 4. Ingest Q&A pairs into the Hebbian fabric via the node API
+#    (node must be running: cargo run --bin w1z4rdv1510n-node -- api)
+curl -X POST http://127.0.0.1:8090/qa/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"candidates": [{"qa_id":"q1","question":"What is photosynthesis?","answer":"The process by which plants convert light into energy.","book_id":"biology-2e","page_index":42,"confidence":0.85,"evidence":"","review_status":"PENDING"}]}'
+
+# 5. Query the fabric
+curl -X POST http://127.0.0.1:8090/qa/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is photosynthesis?"}'
+```
 
 Example (auto-detects `../StateOfLoci/textbooks` if present):
 
@@ -257,11 +302,19 @@ python scripts/prepare_textbook_qa_dataset.py --max-books 3 --max-pages 25 --ski
 ## Repository layout
 
 - `crates/core` - annealer, streaming inference, neuro/spike runtimes, math toolbox.
+  - `src/streaming/qa_runtime.rs` — Hebbian Q&A associative memory (question neurons → answer neurons).
+  - `src/streaming/hierarchical_motifs.rs` — recursive motif-of-motifs discovery (8 levels, Shannon entropy attractors).
+  - `src/streaming/organic_encoder.rs` — V1-style feature encoding with Gabor filters and EMA basis adaptation.
+  - `src/streaming/dynamic_pools.rs` — organic neural pool spawning with Hebbian cross-associations.
+  - `src/streaming/sensor_registry.rs` — plug-and-play sensor auto-discovery with TTL.
+  - `src/streaming/motif_label_bridge.rs` — every motif queued for human labeling with visual snapshots.
 - `crates/node` - P2P, data mesh, ledger, wallet, API, identity, simulation.
 - `crates/experimental-hw` - experimental hardware backends.
+- `packages/microcortex/` - lightweight JS neural fabric primitive (perceptron, Hebbian update, WTA).
 - `chain/` - genesis + reward/bridge/token specs.
 - `schemas/` - JSON schemas for bridge intents.
 - `scripts/` - data ingest + visualization utilities.
+- `textbook_scripts/` - OpenStax PDF download, segmentation, and Q&A extraction pipeline.
 
 ---
 
