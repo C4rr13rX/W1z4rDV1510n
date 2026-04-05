@@ -35,6 +35,12 @@ impl NeuroStreamBridge {
         }
     }
 
+    /// Forward a training signal into the NeuronPool.
+    /// Called by the FabricTrainer drain loop — see `fabric_trainer.rs`.
+    pub fn train_weighted(&self, symbols: &[String], lr_scale: f32, inhibitory: bool) {
+        self.neuro.train_weighted(symbols, lr_scale, inhibitory);
+    }
+
     pub fn observe_batch(&mut self, batch: &TokenBatch) -> Option<NeuroSnapshot> {
         if self.sample_stride > 1 {
             self.step = self.step.wrapping_add(1);

@@ -280,6 +280,33 @@ impl NeuronPool {
         }
     }
 
+    /// Reward-weighted Hebbian training.
+    ///
+    /// `lr_scale > 1.0` strengthens the update (correct prediction, positive reward).
+    /// `inhibitory = true` applies an inhibitory delta (wrong prediction, negative reward).
+    /// This is the primary entry point for the `FabricTrainer` feedback loop.
+    pub fn train_weighted(&mut self, symbols: &[String], lr_scale: f32, inhibitory: bool) {
+        if symbols.is_empty() || lr_scale <= 0.0 {
+            return;
+        }
+        let mut ids = Vec::with_capacity(symbols.len());
+        for label in symbols {
+            let id = self.get_or_create(label);
+            if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                neuron.activation = (1.0 - neuron.fatigue).max(0.0);
+                neuron.use_count += 1;
+                neuron.trace += 0.1 * lr_scale;
+            }
+            ids.push(id);
+        }
+        let scale = self.config.excitatory_scale * lr_scale.clamp(0.01, 8.0);
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                self.hebbian_pair(ids[i], ids[j], scale, inhibitory);
+            }
+        }
+    }
+
     pub fn active_ids(&self, min_activation: f32) -> HashSet<u32> {
         let mut set = HashSet::new();
         for neuron in &self.neurons {
@@ -1183,6 +1210,19 @@ impl NeuroRuntime {
             self.config.curiosity_strength,
             self.config.working_memory,
         );
+    }
+
+    /// Apply a reward-weighted Hebbian training signal directly to the pool.
+    ///
+    /// Called by the `FabricTrainer` at the end of each batch to close the
+    /// feedback loop: every outcome, quantum result, and human label becomes
+    /// a weight update in the NeuronPool.
+    pub fn train_weighted(&self, symbols: &[String], lr_scale: f32, inhibitory: bool) {
+        if !self.config.enabled || symbols.is_empty() {
+            return;
+        }
+        let mut guard = self.inner.lock();
+        guard.pool.train_weighted(symbols, lr_scale, inhibitory);
     }
 
     pub fn snapshot(&self) -> NeuroSnapshot {

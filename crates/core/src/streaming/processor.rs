@@ -36,6 +36,7 @@ use crate::streaming::motif_label_bridge::MotifLabelBridge;
 use crate::streaming::dynamic_pools::DynamicPoolRegistry;
 use crate::streaming::organic_encoder::OrganicEncoder;
 use crate::streaming::sensor_registry::SensorRegistry;
+use crate::streaming::fabric_trainer::{FabricTrainer, TrainingSignal};
 use crate::streaming::schema::{
     EventKind, EventToken, StreamEnvelope, StreamPayload, StreamSource, TokenBatch,
 };
@@ -753,6 +754,7 @@ pub struct StreamingInference {
     organic_encoder: OrganicEncoder,
     sensor_registry: SensorRegistry,
     qa_runtime: crate::streaming::qa_runtime::QaRuntime,
+    fabric_trainer: FabricTrainer,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
     last_batch: Option<TokenBatch>,
@@ -854,6 +856,7 @@ impl StreamingInference {
         let qa_runtime = crate::streaming::qa_runtime::QaRuntime::new(
             run_config.streaming.qa_runtime.clone(),
         );
+        let fabric_trainer = FabricTrainer::new(run_config.streaming.fabric_trainer.clone());
         Self {
             processor,
             aligner,
@@ -890,6 +893,7 @@ impl StreamingInference {
             organic_encoder,
             sensor_registry,
             qa_runtime,
+            fabric_trainer,
             run_config,
             symbolizer: SymbolizeConfig::default(),
             last_batch: None,
@@ -1140,6 +1144,30 @@ impl StreamingInference {
         let _ = self.dynamic_pools.prune_idle(batch.timestamp);
         // Sensor registry: prune stale sensors
         let _ = self.sensor_registry.prune_stale(batch.timestamp);
+        // ── Fabric trainer: motif / token observations ─────────────────────
+        // Every discovered motif and every active token label becomes an
+        // Observation signal so the NeuronPool learns their co-occurrences.
+        if !self.last_motifs.is_empty() {
+            let motif_labels: Vec<String> = self.last_motifs.iter()
+                .map(|m| format!("motif::{}", m.id))
+                .collect();
+            if motif_labels.len() >= 2 {
+                self.fabric_trainer.emit(TrainingSignal::Observation {
+                    labels: motif_labels,
+                    timestamp: batch.timestamp,
+                });
+            }
+        }
+        // Token co-occurrence observation (EventKind labels).
+        if batch.tokens.len() >= 2 {
+            let token_labels: Vec<String> = batch.tokens.iter()
+                .map(|t| format!("event::{:?}", t.kind))
+                .collect();
+            self.fabric_trainer.emit(TrainingSignal::Observation {
+                labels: token_labels,
+                timestamp: batch.timestamp,
+            });
+        }
         let network_report = self
             .network_fabric
             .update(&batch, behavior_frame.as_ref());
@@ -1161,6 +1189,32 @@ impl StreamingInference {
             behavior_frame.as_ref(),
             temporal_report.as_ref(),
         );
+        // ── Fabric trainer: outcome feedback reward ─────────────────────────
+        // Convert log-loss reward into a Hebbian update. Context = active token
+        // labels from this batch; predicted/actual come from the feedback slices.
+        if let Some(fb_report) = &outcome_feedback_report {
+            if fb_report.reward.abs() > 0.01 {
+                let context: Vec<String> = batch.tokens.iter()
+                    .map(|t| format!("event::{:?}", t.kind))
+                    .collect();
+                // Use the per-target slice reward for finer-grained credit.
+                for slice in &fb_report.slices {
+                    let predicted_label = format!("target::{:?}", slice.target);
+                    let actual_label = if slice.reward > 0.0 {
+                        format!("correct::{:?}", slice.target)
+                    } else {
+                        format!("incorrect::{:?}", slice.target)
+                    };
+                    self.fabric_trainer.record_prediction_outcome(
+                        context.clone(),
+                        predicted_label,
+                        actual_label,
+                        slice.reward as f32,
+                        batch.timestamp,
+                    );
+                }
+            }
+        }
         let plasticity_report = temporal_report
             .as_ref()
             .and_then(|report| self.plasticity.update(
@@ -1522,6 +1576,45 @@ impl StreamingInference {
                 snapshot.metadata.insert(
                     "sensor_registry".to_string(),
                     serde_json::to_value(sensor_report)?,
+                );
+            }
+        }
+        // ── Fabric trainer: human label confirmations ───────────────────────
+        // When the motif label bridge has queued tasks, treat each queued label
+        // as a human-in-the-loop confirmation signal — these are the highest-
+        // confidence training signals in the entire system.
+        if let Some(label_rep) = &motif_label_report {
+            for task in &label_rep.pending {
+                let associated: Vec<String> = task.snapshot.context_tokens.iter()
+                    .map(|t| format!("event::{:?}", t.kind))
+                    .collect();
+                self.fabric_trainer.emit(TrainingSignal::HumanConfirmed {
+                    label: format!("motif::{}", task.motif_id),
+                    associated_labels: associated,
+                    timestamp: batch.timestamp,
+                });
+            }
+        }
+        // ── Fabric trainer: drain all signals into the NeuronPool ───────────
+        // This is the convergence point: every signal queued this batch is
+        // converted to Hebbian weight updates right before the run snapshot.
+        // When neuro_bridge is disabled the trainer still drains (keeping
+        // stats accurate) but the updates go nowhere — the pool is a no-op.
+        {
+            let trainer_report = if let Some(bridge) = &self.neuro_bridge {
+                self.fabric_trainer.drain_into_bridge(bridge, batch.timestamp)
+            } else {
+                // No bridge active — still drain the queue so it doesn't grow.
+                self.fabric_trainer.drop_queued(batch.timestamp)
+            };
+            if trainer_report.signals_drained > 0 {
+                report_metadata.insert(
+                    "fabric_trainer".to_string(),
+                    serde_json::to_value(&trainer_report)?,
+                );
+                snapshot.metadata.insert(
+                    "fabric_trainer".to_string(),
+                    serde_json::to_value(trainer_report)?,
                 );
             }
         }
