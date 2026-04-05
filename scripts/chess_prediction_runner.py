@@ -97,6 +97,10 @@ HOURLY_LOG  = ROOT / "logs" / "chess_hourly_checkpoints.jsonl"
 METRICS_LOG = ROOT / "logs" / "chess_training_metrics.log"
 GAMES_FILE  = ROOT / "data" / "chess" / "processed_games.jsonl"
 
+# Node service URL — if the persistent w1z4rd_api node is running, use it.
+# Falls back to predict_state.exe subprocess automatically.
+NODE_URL    = "http://localhost:8080"
+
 CFG_CLASSICAL = ROOT / "run_config_chess_ply_classical.json"
 CFG_QUANTUM   = ROOT / "run_config_chess_ply_quantum.json"
 CFG_NEURO     = ROOT / "run_config_chess_ply_neuro.json"
@@ -259,6 +263,79 @@ def subprocess_predict(
     except Exception as e:
         print(f"    [{model_name}] error: {e}", flush=True)
         return None
+
+
+# ── Node HTTP client ─────────────────────────────────────────────────────────
+
+_node_available: Optional[bool] = None  # None = not yet probed
+
+def _probe_node() -> bool:
+    """Check once whether the w1z4rd_api node is reachable."""
+    global _node_available
+    if _node_available is not None:
+        return _node_available
+    try:
+        req = urllib.request.urlopen(f"{NODE_URL}/healthz", timeout=2)
+        _node_available = req.status == 200
+    except Exception:
+        _node_available = False
+    if _node_available:
+        print(f"  [node] W1z4rDV1510n node active at {NODE_URL} — routing predictions through node", flush=True)
+    else:
+        print(f"  [node] Node not reachable at {NODE_URL} — using subprocess fallback", flush=True)
+    return _node_available
+
+
+def node_predict(
+    snapshot: dict,
+    cfg: dict,
+    model_name: str,
+    timeout_s: float = 90.0,
+) -> Optional[dict]:
+    """POST snapshot + config to the persistent node; return result or None."""
+    try:
+        payload = json.dumps({"snapshot": snapshot, "config": cfg}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{NODE_URL}/predict",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            job = json.loads(resp.read())
+        job_id = job.get("job_id")
+        if not job_id:
+            return None
+        # Poll for completion
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            with urllib.request.urlopen(f"{NODE_URL}/jobs/{job_id}", timeout=5) as resp:
+                status = json.loads(resp.read())
+            if status.get("status") == "completed":
+                return {"result": status.get("result", {})}
+            if status.get("status") in ("failed", "error"):
+                return None
+            time.sleep(0.2)
+        return None
+    except Exception as e:
+        global _node_available
+        _node_available = False  # Mark unavailable; revert to subprocess
+        return None
+
+
+def predict(
+    snapshot: dict,
+    cfg: dict,
+    model_name: str,
+    timeout_s: float = 90.0,
+    exe: Optional[Path] = None,
+) -> Optional[dict]:
+    """Try node first, fall back to subprocess."""
+    if _probe_node():
+        result = node_predict(snapshot, cfg, model_name, timeout_s)
+        if result is not None:
+            return result
+    return subprocess_predict(snapshot, cfg, model_name, timeout_s, exe)
 
 
 # ── Decode best_state → chess move ───────────────────────────────────────────
@@ -687,7 +764,7 @@ def main() -> None:
                 def call_model(name, cfg, n_iters, seed_off):
                     c = make_ply_cfg(cfg, n_iters, seed_off)
                     t0 = time.time()
-                    resp = subprocess_predict(snapshot, c, name, timeout_s=120.0, exe=exe)
+                    resp = predict(snapshot, c, name, timeout_s=120.0, exe=exe)
                     elapsed = time.time() - t0
                     if resp and resp.get("result"):
                         res = resp["result"]
