@@ -1,0 +1,11 @@
+{
+  "name": "@w1z4rdv1510n/microcortex",
+  "version": "0.1.0",
+  "description": "Lightweight perceptron runtime for the W1z4rDV1510n neural fabric - no GPU, no framework, pure state.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

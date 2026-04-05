@@ -48,6 +48,7 @@ pub mod organic_encoder;
 pub mod dynamic_pools;
 pub mod sensor_registry;
 pub mod motif_label_bridge;
+pub mod qa_runtime;
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{
@@ -127,3 +128,7 @@ pub use dynamic_pools::{DynamicPoolConfig, DynamicPoolRegistry, DynamicPoolRepor
 
 pub use sensor_registry::{SensorCapability, SensorRegistry, SensorRegistryConfig, SensorRegistryReport};
 pub use motif_label_bridge::{MotifLabelBridge, MotifLabelBridgeConfig, MotifLabelReport, MotifLabelTask, MotifSnapshot};
+pub use qa_runtime::{
+    QaCandidateRecord, QaIngestReport, QaPair, QaQueryReport, QaQueryResult,
+    QaRuntime, QaRuntimeConfig, QaRuntimeReport,
+};

@@ -38,6 +38,7 @@ use w1z4rdv1510n::streaming::{
     HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
     KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
     NetworkPatternSummary, NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
+    QaCandidateRecord, QaQueryReport, QaRuntime, QaRuntimeConfig,
 };
 
 #[derive(Clone)]
@@ -63,6 +64,7 @@ struct ApiState {
     metrics: Arc<ApiMetrics>,
     knowledge: Arc<Mutex<KnowledgeRuntime>>,
     knowledge_persist: KnowledgePersist,
+    qa_runtime: Arc<Mutex<QaRuntime>>,
     identity: Arc<Mutex<IdentityRuntime>>,
     label_state: Arc<Mutex<LabelQueueState>>,
     fabric_share_kind: String,
@@ -614,6 +616,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         config.api.rate_limit_window_secs,
     )));
     let (knowledge_runtime, knowledge_persist) = build_knowledge_runtime(&config.knowledge);
+    let qa_runtime = QaRuntime::new(QaRuntimeConfig::default());
     let identity_runtime = IdentityRuntime::new(config.identity.clone());
     let share_kind = config.streaming.share_payload_kind.clone();
     let ledger_backend = if config.ledger.enabled {
@@ -643,6 +646,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         metrics: Arc::new(ApiMetrics::default()),
         knowledge: Arc::new(Mutex::new(knowledge_runtime)),
         knowledge_persist,
+        qa_runtime: Arc::new(Mutex::new(qa_runtime)),
         identity: Arc::new(Mutex::new(identity_runtime)),
         label_state: Arc::new(Mutex::new(LabelQueueState::default())),
         fabric_share_kind: share_kind.clone(),
@@ -677,6 +681,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/knowledge/ingest", post(submit_knowledge_ingest))
         .route("/knowledge/queue", get(get_knowledge_queue))
         .route("/knowledge/vote", post(submit_knowledge_vote))
+        .route("/qa/ingest", post(submit_qa_ingest))
+        .route("/qa/query", post(submit_qa_query))
         .route("/streaming/metacognition", post(tune_metacognition))
         .route("/streaming/labels", get(get_label_queue))
         .route("/streaming/visual-labels", get(get_visual_label_queue))
@@ -1359,6 +1365,120 @@ async fn submit_knowledge_vote(
     (
         StatusCode::OK,
         Json(serde_json::to_value(response).unwrap_or_default()),
+    )
+}
+
+// ─── Q&A fabric endpoints ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct QaIngestRequest {
+    /// One or more Q&A candidate records (same schema as qa_candidates.jsonl).
+    candidates: Vec<QaCandidateRecord>,
+}
+
+#[derive(Serialize)]
+struct QaIngestResponse {
+    status: &'static str,
+    ingested: usize,
+    total_pairs: u64,
+    question_neurons: usize,
+    answer_entries: usize,
+}
+
+#[derive(Deserialize)]
+struct QaQueryRequest {
+    question: String,
+}
+
+#[derive(Serialize)]
+struct QaQueryResponse {
+    status: &'static str,
+    report: QaQueryReport,
+}
+
+async fn submit_qa_ingest(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<QaIngestRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    if request.candidates.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(ErrorResponse { error: "candidates must not be empty".into() }).unwrap_or_default()),
+        );
+    }
+    let now = now_timestamp();
+    let (ingested, total_pairs, question_neurons, answer_entries) = {
+        let mut qa = state.qa_runtime.lock().expect("qa mutex");
+        let before = qa.pairs_ingested();
+        qa.ingest_candidates(&request.candidates, now);
+        let after = qa.pairs_ingested();
+        (
+            (after - before) as usize,
+            after,
+            qa.question_neuron_count(),
+            qa.answer_count(),
+        )
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(QaIngestResponse {
+            status: "OK",
+            ingested,
+            total_pairs,
+            question_neurons,
+            answer_entries,
+        }).unwrap_or_default()),
+    )
+}
+
+async fn submit_qa_query(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<QaQueryRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    if let Err(err) = authorize(&state, &headers) {
+        state.metrics.inc_auth_failure();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    if request.question.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::to_value(ErrorResponse { error: "question must not be empty".into() }).unwrap_or_default()),
+        );
+    }
+    let now = now_timestamp();
+    let report = {
+        let mut qa = state.qa_runtime.lock().expect("qa mutex");
+        qa.query(&request.question, now)
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(QaQueryResponse { status: "OK", report }).unwrap_or_default()),
     )
 }
 
