@@ -16,7 +16,7 @@ name = "calibrate_energy"
 path = "src/bin/calibrate_energy.rs"
 
 [[bin]]
-name = "service"
+name = "w1z4rd_api"
 path = "src/bin/service.rs"
 
 [features]
