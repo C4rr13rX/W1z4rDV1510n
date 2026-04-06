@@ -152,18 +152,108 @@ def make_fig(frames: List[Dict[str, Any]]) -> go.Figure:
     return fig
 
 
+def board_json_to_snapshot(board: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert chess_live_board.json into a minimal EnvironmentSnapshot-like dict."""
+    frame_states = {}
+    for piece in board.get("pieces", []):
+        sid = piece.get("id", "")
+        x = float(piece.get("x", 0.0))
+        y = float(piece.get("y", 0.0))
+        frame_states[sid] = {
+            "position": {"x": x, "y": y, "z": 0.0},
+            "internal_state": {
+                "piece": piece.get("piece", ""),
+                "color": piece.get("color", ""),
+                "square": piece.get("square", ""),
+            },
+        }
+    frame = {
+        "timestamp": {"unix": board.get("ply", 0)},
+        "symbol_states": frame_states,
+    }
+    return {"stack_history": [frame]}
+
+
+def make_live_html(output: Path) -> str:
+    """Return an HTML wrapper that auto-refreshes every 3 seconds."""
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>W1z4rDV1510n Live Board</title>
+  <meta http-equiv="refresh" content="3">
+  <style>body{{background:#000;margin:0;padding:0}}</style>
+</head>
+<body>
+  <iframe src="{output.name}" style="width:100%;height:100vh;border:none;"></iframe>
+</body>
+</html>
+"""
+
+
 def main() -> None:
+    import time
+    import webbrowser
+
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--snapshot", type=Path, required=True)
+    ap.add_argument("--snapshot", type=Path,
+                    help="Snapshot JSON file (EnvironmentSnapshot format). "
+                         "Omit with --live to use logs/chess_live_board.json.")
     ap.add_argument("--output", type=Path, default=Path("logs/visualization.html"))
+    ap.add_argument("--live", action="store_true",
+                    help="Poll the snapshot/board file every --interval seconds and regenerate.")
+    ap.add_argument("--interval", type=float, default=3.0,
+                    help="Refresh interval in seconds when --live is set (default: 3).")
+    ap.add_argument("--open", action="store_true",
+                    help="Open the output in a browser on first render.")
     args = ap.parse_args()
 
-    snapshot = json.loads(args.snapshot.read_text())
-    frames = load_frames(snapshot)
-    fig = make_fig(frames)
+    # Resolve source file
+    if args.snapshot:
+        src = args.snapshot
+    elif args.live:
+        src = Path("logs/chess_live_board.json")
+    else:
+        ap.error("--snapshot is required unless --live is used")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(args.output, include_plotlyjs="cdn", auto_play=False)
-    print(f"Wrote visualization to {args.output}")
+
+    def render_once() -> bool:
+        if not src.exists():
+            print(f"  waiting for {src} …", flush=True)
+            return False
+        raw = src.read_text(encoding="utf-8", errors="replace")
+        data = json.loads(raw)
+        # Accept both EnvironmentSnapshot and chess_live_board.json
+        if "stack_history" in data or "symbols" in data:
+            snapshot = data
+        else:
+            snapshot = board_json_to_snapshot(data)
+        frames = load_frames(snapshot)
+        fig = make_fig(frames)
+        fig.write_html(str(args.output), include_plotlyjs="cdn", auto_play=False)
+        return True
+
+    if not args.live:
+        render_once()
+        print(f"Wrote visualization to {args.output}")
+        return
+
+    # Live polling mode — write a wrapper HTML with auto-refresh pointing at the
+    # inner visualization file, then keep regenerating the inner file.
+    wrapper = args.output.parent / ("live_" + args.output.name)
+    wrapper.write_text(make_live_html(args.output), encoding="utf-8")
+    print(f"Live wrapper: {wrapper}  (inner: {args.output}, refresh every {args.interval}s)")
+    if args.open:
+        webbrowser.open(wrapper.as_uri())
+    while True:
+        try:
+            ok = render_once()
+            if ok:
+                print(f"  [{time.strftime('%H:%M:%S')}] updated {args.output}", flush=True)
+        except Exception as exc:
+            print(f"  render error: {exc}", flush=True)
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":

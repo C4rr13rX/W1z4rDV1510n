@@ -390,6 +390,7 @@ PREDICT_EXE = ROOT / "target" / "debug" / "predict_state.exe"
 def find_predict_exe() -> Path:
     """Find the predict_state binary."""
     candidates = [
+        ROOT / "bin" / "predict_state.exe",
         ROOT / "target" / "debug" / "predict_state.exe",
         ROOT / "target" / "release" / "predict_state.exe",
         ROOT / "target" / "debug" / "predict_state",

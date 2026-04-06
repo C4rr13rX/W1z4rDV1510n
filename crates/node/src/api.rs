@@ -30,6 +30,8 @@ use tracing::warn;
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, BridgeIntent, NoopLedger, RewardBalance, bridge_intent_id,
 };
+use w1z4rdv1510n::neuro::{NeuroRuntime, NeuroRuntimeConfig, NeuroRuntimeHandle, NeuroSnapshot};
+use w1z4rdv1510n::schema::EnvironmentSnapshot;
 use w1z4rdv1510n::bridge::{BridgeProof, BridgeVerificationMode, ChainKind, bridge_deposit_id};
 use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy, RunConfig};
 use w1z4rdv1510n::schema::Timestamp;
@@ -69,6 +71,7 @@ struct ApiState {
     label_state: Arc<Mutex<LabelQueueState>>,
     fabric_share_kind: String,
     run_config_path: PathBuf,
+    neuro: NeuroRuntimeHandle,
 }
 
 #[derive(Clone)]
@@ -619,6 +622,16 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let qa_runtime = QaRuntime::new(QaRuntimeConfig::default());
     let identity_runtime = IdentityRuntime::new(config.identity.clone());
     let share_kind = config.streaming.share_payload_kind.clone();
+    let neuro_handle: NeuroRuntimeHandle = std::sync::Arc::new(NeuroRuntime::new(
+        &EnvironmentSnapshot {
+            timestamp: w1z4rdv1510n::schema::Timestamp { unix: 0 },
+            bounds: std::collections::HashMap::new(),
+            symbols: Vec::new(),
+            metadata: std::collections::HashMap::new(),
+            stack_history: Vec::new(),
+        },
+        NeuroRuntimeConfig { enabled: true, ..Default::default() },
+    ));
     let ledger_backend = if config.ledger.enabled {
         config.ledger.backend.clone()
     } else {
@@ -651,6 +664,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         label_state: Arc::new(Mutex::new(LabelQueueState::default())),
         fabric_share_kind: share_kind.clone(),
         run_config_path: PathBuf::from(&config.streaming.run_config_path),
+        neuro: neuro_handle,
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -670,6 +684,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let label_state = Arc::clone(&state.label_state);
     let label_mesh = state.data_mesh.clone();
     let label_share_kind = state.fabric_share_kind.clone();
+    let label_neuro = Arc::clone(&state.neuro);
     let app = Router::new()
         .route("/health", get(get_health))
         .route("/ready", get(get_ready))
@@ -712,8 +727,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         if let Some(mesh) = label_mesh {
             let label_state = label_state;
             let share_kind = label_share_kind;
+            let neuro = label_neuro;
             tokio::spawn(async move {
-                label_queue_sync(mesh, label_state, share_kind).await;
+                label_queue_sync(mesh, label_state, share_kind, neuro).await;
             });
         }
         let listener = tokio::net::TcpListener::bind(addr)
@@ -1346,8 +1362,16 @@ async fn submit_knowledge_vote(
         let mut knowledge = state.knowledge.lock().expect("knowledge mutex");
         knowledge.submit_vote(vote)
     };
-    if association.is_some() {
+    if let Some(ref assoc) = association {
         state.metrics.inc_knowledge_vote_success();
+        // Back-propagate verified association into the Hebbian fabric so the
+        // neuro pool learns which knowledge concepts co-occur.
+        let labels = vec![
+            format!("knowledge::doc::{}", assoc.doc_id),
+            format!("knowledge::figure::{}", assoc.figure_id),
+            format!("knowledge::text::{}", assoc.text_block_id),
+        ];
+        state.neuro.train_weighted(&labels, 4.0, false);
     }
     let response = KnowledgeVoteResponse {
         status: if association.is_some() { "VERIFIED" } else { "PENDING" },
@@ -2277,6 +2301,7 @@ async fn label_queue_sync(
     mesh: DataMeshHandle,
     label_state: Arc<Mutex<LabelQueueState>>,
     share_kind: String,
+    neuro: NeuroRuntimeHandle,
 ) {
     let mut events = mesh.subscribe();
     loop {
@@ -2308,6 +2333,16 @@ async fn label_queue_sync(
         let label_queue = parse_label_queue(&share);
         let visual_label_queue = parse_visual_label_queue(&share);
         let subnet_report = parse_subnet_report(&share);
+        // Apply peer neuro snapshot: activate what fired on the peer so local
+        // Hebbian weights learn cross-node co-occurrences at low learning rate.
+        if let Some(raw) = share.metadata.get("neuro_snapshot") {
+            if let Ok(peer_snap) = serde_json::from_value::<NeuroSnapshot>(raw.clone()) {
+                let active: Vec<String> = peer_snap.active_labels.into_iter().collect();
+                if !active.is_empty() {
+                    neuro.train_weighted(&active, 0.3, false);
+                }
+            }
+        }
         if label_queue.is_none() && visual_label_queue.is_none() && subnet_report.is_none() {
             continue;
         }

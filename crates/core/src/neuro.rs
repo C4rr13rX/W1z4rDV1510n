@@ -643,7 +643,7 @@ pub struct NeuralNetwork {
     pub inhibits: HashMap<u32, f32>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NeuralNetworkSnapshot {
     pub label: String,
     pub members: Vec<String>,
@@ -651,7 +651,7 @@ pub struct NeuralNetworkSnapshot {
     pub level: u8,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MinicolumnSnapshot {
     pub label: String,
     pub stability: f32,
@@ -661,7 +661,7 @@ pub struct MinicolumnSnapshot {
     pub born_at: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NeuroSnapshot {
     pub active_labels: HashSet<String>,
     pub active_composites: HashSet<String>,
