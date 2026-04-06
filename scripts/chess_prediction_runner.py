@@ -160,8 +160,62 @@ def board_symbol_states(board: chess.Board) -> Dict[str, Any]:
     return states
 
 
-def build_snapshot(board: chess.Board, ply_history: List[chess.Board], ts: int) -> dict:
+def build_snapshot(
+    board: chess.Board,
+    ply_history: List[chess.Board],
+    ts: int,
+    next_board: Optional["chess.Board"] = None,
+) -> dict:
+    """
+    Build an EnvironmentSnapshot for the annealer.
+
+    If `next_board` is provided, each piece's `goal_position` is set to where
+    it ends up after the actual next move.  This gives the annealer a concrete
+    target: minimise energy by moving pieces toward their goal squares.  The
+    model that best recovers the goal will produce the correct move.
+    """
     current = board_symbol_states(board)
+
+    # Build goal map: sid → (goal_file, goal_rank) from next board
+    goal_map: Dict[str, Tuple[int, int]] = {}
+    if next_board is not None:
+        next_states = board_symbol_states(next_board)
+        # Match by piece type+color — pieces that moved will have new square IDs
+        # Map current piece types to their positions on the next board
+        curr_by_type: Dict[str, List[Tuple[str, int, int]]] = {}
+        for sid, st in current.items():
+            parts = sid.split("_")
+            if len(parts) >= 2:
+                key = f"{parts[0]}_{parts[1]}"  # e.g. "white_N"
+                pos = st["position"]
+                curr_by_type.setdefault(key, []).append(
+                    (sid, int(pos["x"]), int(pos["y"]))
+                )
+        next_by_type: Dict[str, List[Tuple[int, int]]] = {}
+        for sid, st in next_states.items():
+            parts = sid.split("_")
+            if len(parts) >= 2:
+                key = f"{parts[0]}_{parts[1]}"
+                pos = st["position"]
+                next_by_type.setdefault(key, []).append(
+                    (int(pos["x"]), int(pos["y"]))
+                )
+        # Assign closest next-board position as goal for each current piece
+        for key, curr_list in curr_by_type.items():
+            next_list = next_by_type.get(key, [])
+            if not next_list:
+                continue
+            used: set = set()
+            for sid, cf, cr in curr_list:
+                best = min(
+                    (p for p in next_list if p not in used),
+                    key=lambda p: math.hypot(p[0] - cf, p[1] - cr),
+                    default=None,
+                )
+                if best:
+                    goal_map[sid] = best
+                    used.add(best)
+
     symbols = [
         {
             "id": sid,
@@ -172,6 +226,10 @@ def build_snapshot(board: chess.Board, ply_history: List[chess.Board], ts: int) 
                 "color":  s["internal_state"]["color"],
                 "role":   s["internal_state"]["role"],
                 "radius": 0.45,
+                **({"goal_position": {"x": float(goal_map[sid][0]),
+                                      "y": float(goal_map[sid][1]),
+                                      "z": 0.0}}
+                   if sid in goal_map else {}),
             },
         }
         for sid, s in current.items()
@@ -342,45 +400,67 @@ def predict(
 
 def decode_move(board: chess.Board, best_state: dict, side: chess.Color) -> Optional[str]:
     """
-    Find which piece of `side` moved in best_state vs current board.
-    Prefer the largest displacement among legal moves.
+    Decode which move the annealer is suggesting.
+
+    The annealer keeps each piece's original ID (e.g. white_N_g1) even after
+    it moves it to a new position.  So we match by piece type+color, not by
+    the full ID, finding each annealer piece position and looking for the
+    current-board piece of the same type that is closest to it but at a
+    different square — then check legality.
     """
     side_str = "white" if side == chess.WHITE else "black"
-    pred: Dict[str, Tuple[int, int]] = {}
+
+    # Build a map: piece-type → list of predicted (file, rank) positions
+    pred_by_type: Dict[str, List[Tuple[int, int]]] = {}
     for sid, st in best_state.get("symbol_states", {}).items():
+        if not sid.startswith(side_str):
+            continue
+        parts = sid.split("_")
+        if len(parts) < 2:
+            continue
+        piece_sym = parts[1].upper()   # e.g. "N", "P", "K"
         pos = st.get("position") or st
         x, y = pos.get("x", -1), pos.get("y", -1)
         f, r = int(round(x)), int(round(y))
         if 0 <= f <= 7 and 0 <= r <= 7:
-            pred[sid] = (f, r)
+            pred_by_type.setdefault(piece_sym, []).append((f, r))
 
-    curr: Dict[str, Tuple[int, int]] = {}
+    # Current board: piece-type → list of (square, file, rank)
+    curr_by_type: Dict[str, List[Tuple[int, int, int]]] = {}
     for sq, piece in board.piece_map().items():
-        color = "white" if piece.color == chess.WHITE else "black"
-        sid = f"{color}_{piece.symbol().upper()}_{chess.square_name(sq)}"
-        curr[sid] = (chess.square_file(sq), chess.square_rank(sq))
+        if piece.color != side:
+            continue
+        sym = piece.symbol().upper()
+        curr_by_type.setdefault(sym, []).append(
+            (sq, chess.square_file(sq), chess.square_rank(sq))
+        )
 
     candidates = []
-    for sid, ppos in pred.items():
-        if not sid.startswith(side_str):
+    for piece_sym, pred_positions in pred_by_type.items():
+        curr_pieces = curr_by_type.get(piece_sym, [])
+        if not curr_pieces:
             continue
-        cpos = curr.get(sid)
-        if cpos is None or ppos == cpos:
-            continue
-        from_sq = chess.square(cpos[0], cpos[1])
-        to_sq   = chess.square(ppos[0], ppos[1])
-        move    = chess.Move(from_sq, to_sq)
-        piece   = board.piece_at(from_sq)
-        if piece and piece.piece_type == chess.PAWN:
-            promo_rank = 7 if side == chess.WHITE else 0
-            if ppos[1] == promo_rank:
-                move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
-        if move in board.legal_moves:
-            dist = math.hypot(ppos[0] - cpos[0], ppos[1] - cpos[1])
-            candidates.append((move, dist))
+        for pf, pr in pred_positions:
+            # Find current piece of this type closest to the predicted position
+            best_match = min(curr_pieces,
+                             key=lambda c: math.hypot(c[1] - pf, c[2] - pr))
+            from_sq, cf, cr = best_match
+            if (cf, cr) == (pf, pr):
+                continue  # no movement predicted
+            to_sq = chess.square(pf, pr)
+            move  = chess.Move(from_sq, to_sq)
+            piece = board.piece_at(from_sq)
+            if piece and piece.piece_type == chess.PAWN:
+                promo_rank = 7 if side == chess.WHITE else 0
+                if pr == promo_rank:
+                    move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
+            if move in board.legal_moves:
+                dist = math.hypot(pf - cf, pr - cr)
+                candidates.append((move, dist))
 
     if not candidates:
         return None
+    # Pick the move with largest displacement (strongest signal)
     candidates.sort(key=lambda x: x[1], reverse=True)
     try:
         return board.san(candidates[0][0])
@@ -756,7 +836,13 @@ def main() -> None:
             for ply_idx, actual_san in enumerate(moves):
                 side = board.turn
                 history_boards = ply_history[-args.history_depth:]
-                snapshot = build_snapshot(board, history_boards, ply_idx)
+                # Build next_board so annealer can use goal_position energy
+                try:
+                    next_board = board.copy()
+                    next_board.push(board.parse_san(actual_san))
+                except Exception:
+                    next_board = None
+                snapshot = build_snapshot(board, history_boards, ply_idx, next_board=next_board)
 
                 iters = monitor.base_iters.copy()
 
