@@ -1,9 +1,66 @@
-/target
-/data/**
-/.genomic_benchmarks/
-/data/logging_snapshot.json
+# ── Rust build output ─────────────────────────────────────────────────────────
+/target/
+# Keep Cargo.lock for binary crates (predict_state, w1z4rd_api)
+# Cargo.lock is intentionally tracked
+
+# ── Compiled binaries (built locally or copied from build) ────────────────────
+/bin/
+*.exe
+*.pdb
+
+# ── Machine-specific launcher scripts ─────────────────────────────────────────
+*.bat
+*.ps1
+
+# ── Node / runtime config (generated per machine) ─────────────────────────────
+/node_config.json
+# node_config_example.json is intentionally tracked as a reference template
+
+# ── Run configs (tracked — they define domain experiments) ────────────────────
+# run_config*.json are intentionally tracked
+
+# ── Runtime output and logs ───────────────────────────────────────────────────
+/runtime/
 /logs/
-/run_config.json
-/scripts/__pycache__/
+*.log
+*.tmp
+
+# ── Data directories (large datasets, fetched at runtime) ─────────────────────
+/data/
+/.genomic_benchmarks/
+
+# ── Compressed archives ───────────────────────────────────────────────────────
 *.zip
+*.tar.gz
+*.tgz
+
+# ── Python generated ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# ── JavaScript / Node.js ──────────────────────────────────────────────────────
+node_modules/
+
+# ── JSONL streaming/log files (large, runtime-generated) ─────────────────────
 *.jsonl
+
+# ── IDE and editor ────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── Claude Code local settings (machine-specific) ─────────────────────────────
+.claude/settings.local.json
+
+# ── Wallet and key material ───────────────────────────────────────────────────
+*.wallet
+*.key
+*.pem
+*.p12
