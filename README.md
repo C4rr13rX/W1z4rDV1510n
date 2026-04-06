@@ -217,6 +217,132 @@ cargo run --bin streaming_service -- --config run_config_streaming_ocr.json --in
 
 ---
 
+## Domain data preparation — the `goal_position` contract
+
+**This is the most important thing to get right when adding a new domain.**
+
+The annealer's energy function has a `w_goal` term that pulls each symbol toward a target position. Without correctly-set `goal_position` values in your snapshot, the system falls back to physics-only energy (collision avoidance, motion damping) and produces near-random predictions regardless of `w_goal` weight.
+
+### How it works
+
+Every symbol in the `EnvironmentSnapshot` can carry a `goal_position` in its `properties`:
+
+```json
+{
+  "id": "white_P_e2",
+  "type": "CUSTOM",
+  "position": { "x": 4.0, "y": 1.0, "z": 0.0 },
+  "properties": {
+    "radius": 0.45,
+    "goal_position": { "x": 4.0, "y": 3.0, "z": 0.0 }
+  }
+}
+```
+
+The annealer minimises `w_goal × Σ distance(symbol.position, symbol.goal_position)` across all symbols. The model that reaches the lowest total energy has found the configuration closest to the goal state — that is the prediction.
+
+### Energy weight guidance
+
+| Weight | Role | Recommended for domain tasks |
+|--------|------|------------------------------|
+| `w_goal` | Pulls toward target state | **3.0 – 5.0** (must dominate) |
+| `w_collision` | Avoids overlap | 1.5 – 2.5 (reduce from default 5.0) |
+| `w_env_constraints` | Keeps symbols in bounds | 1.0 – 1.5 (reduce from default 3.0) |
+| `w_stack_hash` | Temporal fingerprint consistency | 0.4 – 0.8 |
+| `w_motion` | Smoothness prior | 0.4 – 0.8 |
+
+If `w_goal` is weaker than `w_collision + w_env_constraints`, the system optimises for "don't crash" rather than "reach the goal" and accuracy collapses to near-random.
+
+---
+
+### Example: chess move prediction
+
+Each piece's goal position is where it ends up after the actual move. Stationary pieces get `goal_position = current_position`.
+
+```python
+# Apply the actual move to a copy of the board
+next_board = board.copy()
+next_board.push(board.parse_san(actual_san))
+
+# For each piece on the current board, find its destination by piece type
+# (IDs like white_N_g1 go stale after moves — match by type, not ID)
+for sq, piece in board.piece_map().items():
+    sid = f"{color}_{piece.symbol().upper()}_{chess.square_name(sq)}"
+    goal_file, goal_rank = find_goal_by_piece_type(piece, current_sq, next_board)
+    symbol["properties"]["goal_position"] = {
+        "x": float(goal_file), "y": float(goal_rank), "z": 0.0
+    }
+```
+
+**Critical**: decode predictions by matching best_state positions **by piece type+color**, not by full symbol ID. The ID encodes the starting square and goes stale the moment a piece moves.
+
+Run configs: `run_config_chess_ply_classical.json`, `run_config_chess_ply_quantum.json`, `run_config_chess_ply_neuro.json`
+Implementation: `scripts/chess_prediction_runner.py` → `build_snapshot()` and `decode_move()`
+
+---
+
+### Example: textbook Q&A
+
+Encode question tokens as input symbols and answer tokens as goal positions on an 8-wide grid.
+
+```python
+# Question tokens along y=0, answer tokens along y=7
+for i, token in enumerate(question_tokens[:8]):
+    symbols.append({
+        "id": f"q_token_{i}",
+        "type": "CUSTOM",
+        "position":   { "x": float(i), "y": 0.0, "z": 0.0 },
+        "properties": {
+            "radius": 0.45,
+            "token": token,
+            "goal_position": { "x": float(i), "y": 7.0, "z": 0.0 }
+        }
+    })
+```
+
+The annealer finds which answer-token configuration minimises total distance from the question layout. The collective vote across classical/quantum/neuro models surfaces the most probable answer.
+
+Run configs to create: `run_config_qa_classical.json`, `run_config_qa_neuro.json`
+Key weights: `w_goal: 4.0`, `w_stack_hash: 0.8` (question history as hash fingerprint)
+
+---
+
+### Example: chemical reaction prediction
+
+Reactant atoms are current-state symbols; product atom positions are goal positions.
+
+```python
+for atom in reactant_atoms:
+    goal = find_product_position(atom, reaction_rules)
+    symbols.append({
+        "id": f"atom_{atom.element}_{atom.idx}",
+        "type": "CUSTOM",
+        "position":   { "x": atom.x, "y": atom.y, "z": atom.z },
+        "properties": {
+            "radius": atom.van_der_waals_radius,
+            "element": atom.element,
+            "goal_position": { "x": goal.x, "y": goal.y, "z": goal.z }
+        }
+    })
+```
+
+Run config to create: `run_config_chem_classical.json`
+Key weights: `w_goal: 4.0`, `w_collision: 3.0` (atomic radii matter), `w_env_constraints: 1.0`
+
+---
+
+### New domain checklist
+
+- [ ] Map domain state to symbols with `(x, y, z)` positions on a bounded grid
+- [ ] Set `goal_position` on every symbol — stationary symbols get `goal = current`, moving symbols get their destination
+- [ ] Set `w_goal ≥ 3.0` in the run config (default 1.0 is too weak to drive predictions)
+- [ ] Lower `w_collision` and `w_env_constraints` so they don't dominate the goal signal
+- [ ] Populate `stack_history` with the last N states for `w_stack_hash` temporal fingerprinting
+- [ ] Use `OS_ENTROPY` random provider for the neuro model
+- [ ] Decode predictions by matching best_state positions **by type**, not by original symbol ID
+
+---
+
 ## Quickstart (annealer)
 
 Run the CLI:
