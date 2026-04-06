@@ -104,6 +104,22 @@ HTML = r"""<!doctype html>
     .pred-san  { font-weight: bold; min-width: 48px; }
     .pred-prob { color: #7dd3fc; font-size: 11px; }
 
+    /* Model breakdown */
+    .model-row {
+      display: grid; grid-template-columns: 52px 42px 1fr 46px;
+      align-items: center; gap: 4px;
+      padding: 3px 4px; border-radius: 3px; font-size: 11px;
+      margin: 2px 0; transition: background 0.3s;
+    }
+    .model-row.correct { background: rgba(74,222,128,0.14); color: #4ade80; }
+    .model-row.wrong   { background: rgba(248,113,113,0.08); color: #aaa; }
+    .model-name  { font-size: 10px; text-transform: uppercase; color: #a78bfa; }
+    .model-move  { font-weight: bold; }
+    .energy-bar-bg  { height: 6px; background: #1a0a30; border-radius: 3px; overflow: hidden; }
+    .energy-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease;
+                       background: linear-gradient(90deg, #7c3aed, #e879f9); }
+    .model-pct   { text-align: right; color: #e879f9; font-size: 10px; }
+
     /* Accuracy metrics */
     .metric-row { display: flex; justify-content: space-between; font-size: 12px; margin: 2px 0; }
     .metric-val { color: #4ade80; }
@@ -179,6 +195,12 @@ HTML = r"""<!doctype html>
     <div class="panel-section">
       <div class="panel-label">Top Predicted Moves</div>
       <div id="pred-list"></div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-label">Model Breakdown</div>
+      <div id="model-breakdown"></div>
+      <div id="neuro-stats" style="font-size:10px;color:#6b21a8;margin-top:4px"></div>
     </div>
 
     <div class="panel-section">
@@ -535,11 +557,42 @@ function updateSidePanel(data) {
   const listEl = document.getElementById('pred-list');
   listEl.innerHTML = preds.slice(0, 5).map((p, i) => {
     const cls = p.correct ? 'correct' : 'wrong';
+    const probStr = p.energy_prob != null
+      ? (p.energy_prob * 100).toFixed(1) + '%'
+      : (p.probability * 100).toFixed(1) + '%';
     return `<div class="pred-row ${cls}">
       <span class="pred-san">${p.san}</span>
-      <span class="pred-prob">${(p.probability * 100).toFixed(1)}%</span>
+      <span class="pred-prob">${probStr}</span>
     </div>`;
   }).join('');
+
+  // Model breakdown
+  const breakdown = data.model_breakdown || [];
+  const breakdownEl = document.getElementById('model-breakdown');
+  if (breakdown.length > 0) {
+    breakdownEl.innerHTML = breakdown.map(m => {
+      const cls    = m.correct ? 'correct' : 'wrong';
+      const pct    = m.energy_prob != null ? (m.energy_prob * 100).toFixed(1) + '%' : '—';
+      const eStr   = m.energy != null ? m.energy.toFixed(2) : '—';
+      const barW   = m.energy_prob != null ? Math.round(m.energy_prob * 100) : 0;
+      const moveStr = m.move || '—';
+      const shortName = m.model === 'classical' ? 'CLASS' : m.model === 'quantum' ? 'QUANT' : 'NEURO';
+      return `<div class="model-row ${cls}">
+        <span class="model-name">${shortName}</span>
+        <span class="model-move">${moveStr}</span>
+        <div class="energy-bar-bg"><div class="energy-bar-fill" style="width:${barW}%"></div></div>
+        <span class="model-pct">${pct}<br><span style="color:#555;font-size:9px">E:${eStr}</span></span>
+      </div>`;
+    }).join('');
+  }
+
+  // Neuro network stats from model_ledgers
+  const ledgers = data.model_ledgers || {};
+  const neuroEl = document.getElementById('neuro-stats');
+  if (ledgers.neuro) {
+    const n = ledgers.neuro;
+    neuroEl.textContent = `neuro: acc=${(n.recent_acc * 100).toFixed(1)}% | vote=${(n.weight * 100).toFixed(1)}% | n=${n.total}`;
+  }
 
   // Running metrics
   const run = data.running || {};
@@ -556,7 +609,10 @@ function updateSidePanel(data) {
 
   // HUD
   const top1 = run.move_top1 != null ? (run.move_top1 * 100).toFixed(1) + '%' : '—';
-  hudEl.textContent = `move-top1: ${top1}  |  game: ${data.game_id || '—'}  |  ply: ${(data.ply ?? '?') + 1}/${data.total_plies || '?'}`;
+  const op2   = data.outcome_probs || {};
+  const wPct2 = op2['1-0']     != null ? (op2['1-0']     * 100).toFixed(0) : '?';
+  const bPct2 = op2['0-1']     != null ? (op2['0-1']     * 100).toFixed(0) : '?';
+  hudEl.textContent = `top1: ${top1}  |  W:${wPct2}% B:${bPct2}%  |  ply ${(data.ply ?? '?') + 1}/${data.total_plies || '?'}`;
   accBarEl.textContent = `top-3: ${fmtPct(run.move_top3)}  outcome: ${fmtPct(run.outcome_acc)}`;
 
   // Hourly checkpoints (last 5)

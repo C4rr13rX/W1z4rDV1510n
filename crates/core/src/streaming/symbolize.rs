@@ -59,6 +59,7 @@ pub fn token_batch_to_snapshot(batch: &TokenBatch, config: &SymbolizeConfig) -> 
             id,
             symbol_type: SymbolType::Custom,
             position,
+            velocity: None,
             properties,
         });
     }
@@ -85,6 +86,7 @@ pub fn token_batch_to_snapshot(batch: &TokenBatch, config: &SymbolizeConfig) -> 
             id,
             symbol_type: SymbolType::Custom,
             position,
+            velocity: None,
             properties,
         });
     }

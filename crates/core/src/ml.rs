@@ -252,6 +252,7 @@ mod tests {
                 id: "p1".into(),
                 symbol_type: SymbolType::Person,
                 position,
+                velocity: None,
                 properties: Properties::new(),
             }],
             metadata: Properties::new(),

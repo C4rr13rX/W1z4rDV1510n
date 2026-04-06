@@ -94,6 +94,7 @@ fn board_to_symbols(board: &Board) -> Vec<Symbol> {
                     id,
                     symbol_type: SymbolType::Custom,
                     position: Position { x, y, z: 0.0 },
+                    velocity: None,
                     properties: props,
                 });
             }

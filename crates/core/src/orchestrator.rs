@@ -486,6 +486,7 @@ mod tests {
                     y: 1.0,
                     z: 0.0,
                 },
+                velocity: None,
                 properties: Properties::new(),
             }],
             metadata: Properties::new(),
@@ -504,6 +505,7 @@ mod tests {
                 y: 2.0,
                 z: 0.0,
             },
+            velocity: None,
             properties: Properties::new(),
         });
         assert!(validate_snapshot(&snap).is_err());

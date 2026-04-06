@@ -115,6 +115,28 @@ impl Default for NeuroRuntimeConfig {
     }
 }
 
+/// Maximum number of influence records retained per neuron.
+/// Older/weaker records are evicted when the buffer is full.
+const MAX_INFLUENCE_HISTORY: usize = 16;
+
+/// A snapshot of the metadata context that was active when a neuron was
+/// meaningfully activated during training.  Over time a neuron accumulates
+/// these records, giving a compact provenance chain:
+///   "this neuron fired most strongly during Sicilian opening games
+///    played by Tal, and during jazz tracks in the key of F minor."
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InfluenceRecord {
+    /// Data stream identifier (e.g. "chess", "audio", "text").
+    pub stream: String,
+    /// Significant metadata key-value pairs active during this training step.
+    /// e.g. [("artist", "Radiohead"), ("album", "OK Computer"), ("year", "1997")]
+    pub labels: Vec<(String, String)>,
+    /// Cumulative Hebbian weight contribution from this context.
+    pub strength: f32,
+    /// Training step at which this record was last updated.
+    pub step: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Synapse {
     pub target: u32,
@@ -148,6 +170,9 @@ pub struct Neuron {
     pub fatigue: f32,
     /// Eligibility trace for STDP-lite updates.
     pub trace: f32,
+    /// Rolling provenance: which metadata contexts shaped this neuron.
+    /// Bounded to MAX_INFLUENCE_HISTORY; weakest evicted when full.
+    pub influence_history: Vec<InfluenceRecord>,
 }
 
 impl Neuron {
@@ -165,7 +190,39 @@ impl Neuron {
             use_count: 0,
             fatigue: 0.0,
             trace: 0.0,
+            influence_history: Vec::new(),
         }
+    }
+
+    /// Record a metadata context that contributed to this neuron's activation.
+    /// Merges with an existing record for the same stream if present;
+    /// evicts the weakest record when the buffer is full.
+    pub fn record_influence(&mut self, record: InfluenceRecord) {
+        if record.stream.is_empty() {
+            return;
+        }
+        // Merge with an existing record for the same stream context
+        let key_match = |existing: &InfluenceRecord| {
+            existing.stream == record.stream && existing.labels == record.labels
+        };
+        if let Some(existing) = self.influence_history.iter_mut().find(|r| key_match(r)) {
+            existing.strength += record.strength;
+            existing.step = record.step;
+            return;
+        }
+        if self.influence_history.len() >= MAX_INFLUENCE_HISTORY {
+            // Evict the weakest record
+            if let Some(min_pos) = self
+                .influence_history
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.strength.partial_cmp(&b.strength).unwrap())
+                .map(|(i, _)| i)
+            {
+                self.influence_history.remove(min_pos);
+            }
+        }
+        self.influence_history.push(record);
     }
 }
 
@@ -249,6 +306,21 @@ impl NeuronPool {
     }
 
     pub fn record_symbols(&mut self, symbols: &[String]) {
+        self.record_symbols_with_meta(symbols, None);
+    }
+
+    /// Record symbols and optionally attach a metadata context to each activated neuron.
+    ///
+    /// The `meta_context` is a list of (key, value) pairs representing the
+    /// training context — e.g. `[("stream", "chess"), ("opening", "Sicilian"),
+    /// ("artist", "Radiohead"), ("album", "OK Computer")]`.  Each activated
+    /// neuron accumulates these as `InfluenceRecord`s, building a provenance chain
+    /// that can later be queried: "what influenced this neuron?".
+    pub fn record_symbols_with_meta(
+        &mut self,
+        symbols: &[String],
+        meta_context: Option<&Vec<(String, String)>>,
+    ) {
         // activate neurons for symbols
         let mut ids = Vec::with_capacity(symbols.len());
         for label in symbols {
@@ -260,6 +332,30 @@ impl NeuronPool {
                 neuron.fatigue = (neuron.fatigue + self.config.fatigue_increment).min(0.6);
             }
             ids.push(id);
+        }
+        // Record metadata influence on each activated neuron
+        if let Some(meta) = meta_context {
+            if !meta.is_empty() {
+                let stream = meta
+                    .iter()
+                    .find(|(k, _)| k == "stream")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let step = self.step;
+                let influence = InfluenceRecord {
+                    stream,
+                    labels: meta.clone(),
+                    strength: 0.1,
+                    step,
+                };
+                for &id in &ids {
+                    if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                        if neuron.activation > 0.05 {
+                            neuron.record_influence(influence.clone());
+                        }
+                    }
+                }
+            }
         }
         // co-occurrence tracking
         let mut uniq: Vec<String> = symbols.iter().cloned().collect();
@@ -286,6 +382,22 @@ impl NeuronPool {
     /// `inhibitory = true` applies an inhibitory delta (wrong prediction, negative reward).
     /// This is the primary entry point for the `FabricTrainer` feedback loop.
     pub fn train_weighted(&mut self, symbols: &[String], lr_scale: f32, inhibitory: bool) {
+        self.train_weighted_with_meta(symbols, lr_scale, inhibitory, None);
+    }
+
+    /// Reward-weighted Hebbian training with metadata provenance.
+    ///
+    /// Same as `train_weighted` but attaches a metadata context to each
+    /// activated neuron.  Use this when training from labeled data streams
+    /// (audio tracks, text descriptions) so neurons accumulate a record of
+    /// which training examples shaped them.
+    pub fn train_weighted_with_meta(
+        &mut self,
+        symbols: &[String],
+        lr_scale: f32,
+        inhibitory: bool,
+        meta_context: Option<&Vec<(String, String)>>,
+    ) {
         if symbols.is_empty() || lr_scale <= 0.0 {
             return;
         }
@@ -298,6 +410,30 @@ impl NeuronPool {
                 neuron.trace += 0.1 * lr_scale;
             }
             ids.push(id);
+        }
+        // Record metadata influence weighted by lr_scale
+        if let Some(meta) = meta_context {
+            if !meta.is_empty() {
+                let stream = meta
+                    .iter()
+                    .find(|(k, _)| k == "stream")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let step = self.step;
+                let influence = InfluenceRecord {
+                    stream,
+                    labels: meta.clone(),
+                    strength: 0.1 * lr_scale.clamp(0.01, 8.0),
+                    step,
+                };
+                for &id in &ids {
+                    if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                        if neuron.activation > 0.05 {
+                            neuron.record_influence(influence.clone());
+                        }
+                    }
+                }
+            }
         }
         let scale = self.config.excitatory_scale * lr_scale.clamp(0.01, 8.0);
         for i in 0..ids.len() {
@@ -464,6 +600,15 @@ pub struct NeuroSnapshot {
     pub surprise: HashMap<String, f64>,
     pub working_memory: Vec<String>,
     pub temporal_motif_priors: HashMap<String, f64>,
+    /// Which data streams are currently active (derived from `stream::*` labels).
+    pub active_streams: HashSet<String>,
+    /// Flattened key→value pairs from active `meta::key::value` labels.
+    /// Represents the metadata context currently influencing the fabric.
+    pub active_meta_labels: HashMap<String, String>,
+    /// Aggregated influence provenance from the most active neurons.
+    /// Each record describes a training context that shaped the current activation.
+    /// Use this to answer: "what data influenced this output?"
+    pub top_influences: Vec<InfluenceRecord>,
 }
 
 impl NeuroSnapshot {
@@ -479,6 +624,7 @@ impl NeuroSnapshot {
             && self.surprise.is_empty()
             && self.working_memory.is_empty()
             && self.temporal_motif_priors.is_empty()
+            && self.top_influences.is_empty()
     }
 }
 
@@ -560,6 +706,7 @@ impl NeuroState {
         prediction_horizon: usize,
         curiosity_strength: f32,
         working_capacity: usize,
+        snapshot_meta: Option<&HashMap<String, Value>>,
     ) {
         let mut observed: HashSet<String> = HashSet::with_capacity(state.symbol_states.len());
         let mut labels: Vec<String> = Vec::with_capacity(state.symbol_states.len() * 5 + 2);
@@ -630,9 +777,47 @@ impl NeuroState {
                 labels.push(format!("motif::{}", motif.join("|")));
             }
         }
+        // ── Snapshot-level metadata → labels + influence context ──────────────
+        // Every string-valued key in the snapshot metadata becomes:
+        //   - a `meta::key::value` label in the fabric
+        //   - a `stream::value` label if key == "source" or "stream"
+        // These labels cross-wire with symbol labels through Hebbian learning,
+        // so the fabric naturally discovers associations between positions,
+        // motifs, and metadata contexts (openings, artists, players, etc.).
+        let mut meta_context: Vec<(String, String)> = Vec::new();
+        if let Some(meta) = snapshot_meta {
+            for (key, value) in meta {
+                let str_val = match value {
+                    Value::String(s) => Some(s.as_str().to_string()),
+                    Value::Number(n) => Some(n.to_string()),
+                    Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                };
+                if let Some(v) = str_val {
+                    if v.is_empty() {
+                        continue;
+                    }
+                    let clean_val = normalize_label_token(&v);
+                    let clean_key = normalize_label_token(key);
+                    if clean_key.is_empty() || clean_val.is_empty() {
+                        continue;
+                    }
+                    // Stream label (source identifier)
+                    if clean_key == "source" || clean_key == "stream" {
+                        labels.push(format!("stream::{clean_val}"));
+                        meta_context.push(("stream".to_string(), clean_val.clone()));
+                    }
+                    // Universal meta label — searchable without knowing the key
+                    labels.push(format!("meta::{clean_key}::{clean_val}"));
+                    meta_context.push((clean_key, clean_val));
+                }
+            }
+        }
+
         labels.sort();
         labels.dedup();
-        self.pool.record_symbols(&labels);
+        let meta_opt = if meta_context.is_empty() { None } else { Some(&meta_context) };
+        self.pool.record_symbols_with_meta(&labels, meta_opt);
         self.update_minicolumns(&minicolumn_signatures);
         self.apply_zone_wta(&zone_map);
         self.apply_stdp();
@@ -911,6 +1096,50 @@ impl NeuroState {
         } else {
             HashMap::new()
         };
+        // Extract active streams and meta labels from active label set
+        let mut active_streams: HashSet<String> = HashSet::new();
+        let mut active_meta_labels: HashMap<String, String> = HashMap::new();
+        for label in &active_labels {
+            if let Some(stream) = label.strip_prefix("stream::") {
+                active_streams.insert(stream.to_string());
+            } else if let Some(rest) = label.strip_prefix("meta::") {
+                // meta::key::value
+                if let Some((key, value)) = rest.split_once("::") {
+                    active_meta_labels.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+
+        // Collect top influences from most active neurons (top 20 by activation)
+        let mut neuron_activations: Vec<(f32, &Neuron)> = self
+            .pool
+            .neurons
+            .iter()
+            .filter(|n| n.activation >= min_activation && !n.influence_history.is_empty())
+            .map(|n| (n.activation, n))
+            .collect();
+        neuron_activations
+            .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Aggregate influence records across top neurons, merging by stream+labels
+        let mut influence_map: HashMap<String, InfluenceRecord> = HashMap::new();
+        for (activation, neuron) in neuron_activations.iter().take(20) {
+            for rec in &neuron.influence_history {
+                let key = format!("{}::{}", rec.stream, rec.labels.iter().map(|(k,v)| format!("{k}={v}")).collect::<Vec<_>>().join(","));
+                let entry = influence_map.entry(key).or_insert_with(|| InfluenceRecord {
+                    stream: rec.stream.clone(),
+                    labels: rec.labels.clone(),
+                    strength: 0.0,
+                    step: rec.step,
+                });
+                entry.strength += rec.strength * activation;
+                entry.step = entry.step.max(rec.step);
+            }
+        }
+        let mut top_influences: Vec<InfluenceRecord> = influence_map.into_values().collect();
+        top_influences
+            .sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+        top_influences.truncate(16);
+
         NeuroSnapshot {
             active_labels,
             active_composites,
@@ -924,6 +1153,9 @@ impl NeuroState {
             surprise,
             working_memory: self.working_memory.clone(),
             temporal_motif_priors,
+            active_streams,
+            active_meta_labels,
+            top_influences,
         }
     }
 
@@ -1181,6 +1413,7 @@ impl NeuroRuntime {
                 self.config.prediction_horizon,
                 self.config.curiosity_strength,
                 self.config.working_memory,
+                None,
             );
         }
     }
@@ -1198,6 +1431,11 @@ impl NeuroRuntime {
         let state = dynamic_state_from_snapshot(snapshot);
         let mut guard = self.inner.lock();
         guard.pool.step();
+        let meta = if snapshot.metadata.is_empty() {
+            None
+        } else {
+            Some(&snapshot.metadata)
+        };
         guard.record_state(
             &state,
             &symbol_lookup,
@@ -1209,6 +1447,7 @@ impl NeuroRuntime {
             self.config.prediction_horizon,
             self.config.curiosity_strength,
             self.config.working_memory,
+            meta,
         );
     }
 
@@ -1244,11 +1483,24 @@ pub fn zone_label(position: &Position) -> String {
 fn dynamic_state_from_snapshot(snapshot: &EnvironmentSnapshot) -> DynamicState {
     let mut symbol_states = HashMap::new();
     for symbol in &snapshot.symbols {
+        // Pass through the velocity vector if the data-stream preparer supplied it.
+        // Also fall back to extracting (velocity_dx, velocity_dy) from properties
+        // for streams that embed velocity inside the properties map.
+        let velocity = symbol.velocity.or_else(|| {
+            let dx = symbol.properties.get("velocity_dx").and_then(|v| v.as_f64());
+            let dy = symbol.properties.get("velocity_dy").and_then(|v| v.as_f64());
+            match (dx, dy) {
+                (Some(x), Some(y)) if x != 0.0 || y != 0.0 => {
+                    Some(Position { x, y, z: 0.0 })
+                }
+                _ => None,
+            }
+        });
         symbol_states.insert(
             symbol.id.clone(),
             SymbolState {
                 position: symbol.position,
-                velocity: None,
+                velocity,
                 internal_state: symbol.properties.clone(),
             },
         );
@@ -1498,11 +1750,13 @@ fn is_phenotype_key(raw: &str) -> bool {
         || key.starts_with("bio_")
         || key.starts_with("vehicle_")
         || key.starts_with("anatomy_")
+        || key.starts_with("meta_")
     {
         return true;
     }
     matches!(
         key.as_str(),
+        // Generic object phenotypes
         "color"
             | "make"
             | "model"
@@ -1519,6 +1773,28 @@ fn is_phenotype_key(raw: &str) -> bool {
             | "vehicle_make"
             | "vehicle_model"
             | "vehicle_type"
+            // Chess / board-game motion motifs
+            | "piece"
+            | "role"
+            | "move_geometry"   // "diagonal", "orthogonal", "L_shape", "none"
+            | "side"
+            | "side_to_move"
+            | "opening"
+            | "eco"
+            // Music / audio stream metadata
+            | "artist"
+            | "title"
+            | "album"
+            | "genre"
+            | "year"
+            | "instrument"
+            | "key"
+            | "mode"
+            | "tempo"
+            | "time_signature"
+            // Generic multi-modal stream identifier
+            | "stream"
+            | "data_source"
     )
 }
 
@@ -1537,6 +1813,7 @@ mod tests {
             id: id.to_string(),
             symbol_type: SymbolType::Object,
             position: Position::default(),
+            velocity: None,
             properties,
         }
     }
@@ -1568,9 +1845,9 @@ mod tests {
 
         let step = state_for("car1", 1.0);
         state.pool.step();
-        state.record_state(&step, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+        state.record_state(&step, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4, None);
         state.pool.step();
-        state.record_state(&step, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+        state.record_state(&step, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4, None);
 
         assert_eq!(state.minicolumns.len(), 1);
         let column = &state.minicolumns[0];
@@ -1591,11 +1868,11 @@ mod tests {
 
         let hyundai = state_for("car1", 1.0);
         state.pool.step();
-        state.record_state(&hyundai, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+        state.record_state(&hyundai, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4, None);
 
         let chrysler = state_for("car2", 2.0);
         state.pool.step();
-        state.record_state(&chrysler, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4);
+        state.record_state(&chrysler, &symbols, 0.1, 10, 8, 0.99, 0.3, 2, 0.0, 4, None);
 
         let column = state
             .minicolumns

@@ -38,6 +38,10 @@ pub struct Symbol {
     #[serde(rename = "type")]
     pub symbol_type: SymbolType,
     pub position: Position,
+    /// Optional velocity vector — (dx, dy, dz) displacement from previous frame.
+    /// Populated by data-stream preparers (e.g. chess_prediction_runner).
+    #[serde(default)]
+    pub velocity: Option<Position>,
     #[serde(default)]
     pub properties: Properties,
 }

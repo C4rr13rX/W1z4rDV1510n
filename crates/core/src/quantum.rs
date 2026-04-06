@@ -456,6 +456,7 @@ mod tests {
                     y: 0.0,
                     z: 0.0,
                 },
+                velocity: None,
                 properties: Properties::new(),
             }],
             metadata: Properties::new(),

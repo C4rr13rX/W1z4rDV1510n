@@ -1061,6 +1061,7 @@ mod tests {
             id: id.into(),
             symbol_type: SymbolType::Person,
             position,
+            velocity: None,
             properties: Properties::new(),
         }
     }
@@ -1073,6 +1074,7 @@ mod tests {
             id: id.into(),
             symbol_type: SymbolType::Wall,
             position,
+            velocity: None,
             properties: props,
         }
     }

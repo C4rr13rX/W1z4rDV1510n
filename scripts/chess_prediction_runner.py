@@ -160,35 +160,133 @@ def board_symbol_states(board: chess.Board) -> Dict[str, Any]:
     return states
 
 
+def _classify_move_vector(dx: int, dy: int) -> str:
+    """
+    Classify a (dx, dy) displacement into a canonical move geometry.
+    This is the label-free motif signal — the same geometry will always
+    cluster together regardless of which piece or square it came from.
+    """
+    ax, ay = abs(dx), abs(dy)
+    if ax == 0 and ay == 0:
+        return "none"
+    if ax == 0 or ay == 0:
+        return "orthogonal"
+    if ax == ay:
+        return "diagonal"
+    if (ax == 1 and ay == 2) or (ax == 2 and ay == 1):
+        return "L_shape"
+    return "oblique"
+
+
+def _piece_position_map(board: chess.Board) -> Dict[str, Tuple[int, int]]:
+    """Map piece_type_key (e.g. 'white_N') → list of (file, rank) positions."""
+    result: Dict[str, List[Tuple[int, int]]] = {}
+    for sq, piece in board.piece_map().items():
+        color = "white" if piece.color == chess.WHITE else "black"
+        key = f"{color}_{piece.symbol().upper()}"
+        result.setdefault(key, []).append((chess.square_file(sq), chess.square_rank(sq)))
+    return result
+
+
 def build_snapshot(
     board: chess.Board,
     ply_history: List[chess.Board],
     ts: int,
     next_board: Optional["chess.Board"] = None,
+    game_meta: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     Build an EnvironmentSnapshot for the annealer.
 
-    If `next_board` is provided, each piece's `goal_position` is set to where
-    it ends up after the actual next move.  This gives the annealer a concrete
-    target: minimise energy by moving pieces toward their goal squares.  The
-    model that best recovers the goal will produce the correct move.
+    Each symbol now carries full motion data:
+      - velocity: (dx, dy) from the previous board state — the primary motif signal
+      - trajectory: last N (x, y) positions for this piece
+      - move_geometry: classified move type ("diagonal", "orthogonal", "L_shape", ...)
+
+    These vectors are what the neuro fabric should cluster into motifs.
+    A Bishop will always have velocity vectors where |dx|==|dy|; a Rook will always
+    have dx==0 or dy==0.  The fabric can discover this without being told.
+
+    game_meta (optional): {game_id, white, black, eco, opening, result,
+                           side_to_move, ply, total_plies}
     """
     current = board_symbol_states(board)
 
-    # Build goal map: sid → (goal_file, goal_rank) from next board
-    goal_map: Dict[str, Tuple[int, int]] = {}
-    if next_board is not None:
-        next_states = board_symbol_states(next_board)
-        # Match by piece type+color — pieces that moved will have new square IDs
-        # Map current piece types to their positions on the next board
+    # ── Compute velocity vectors from previous board state ────────────────────
+    # For each piece in current board, find where it was one ply ago.
+    # We match by piece type+color (same as goal matching) since the square ID
+    # changes when a piece moves.
+    vel_map: Dict[str, Tuple[int, int]] = {}  # sid → (dx, dy)
+    traj_map: Dict[str, List[Tuple[int, int]]] = {}  # sid → [(x,y), ...]
+
+    if ply_history:
+        prev_board = ply_history[-1]
+        prev_pos_by_type = _piece_position_map(prev_board)
+
         curr_by_type: Dict[str, List[Tuple[str, int, int]]] = {}
         for sid, st in current.items():
             parts = sid.split("_")
             if len(parts) >= 2:
-                key = f"{parts[0]}_{parts[1]}"  # e.g. "white_N"
+                key = f"{parts[0]}_{parts[1]}"
                 pos = st["position"]
                 curr_by_type.setdefault(key, []).append(
+                    (sid, int(pos["x"]), int(pos["y"]))
+                )
+
+        for key, curr_list in curr_by_type.items():
+            prev_list = prev_pos_by_type.get(key, [])
+            used: set = set()
+            for sid, cf, cr in curr_list:
+                if not prev_list:
+                    vel_map[sid] = (0, 0)
+                    continue
+                best = min(
+                    (p for p in prev_list if p not in used),
+                    key=lambda p: math.hypot(p[0] - cf, p[1] - cr),
+                    default=None,
+                )
+                if best:
+                    used.add(best)
+                    vel_map[sid] = (cf - best[0], cr - best[1])
+                else:
+                    vel_map[sid] = (0, 0)
+
+    # Build trajectory per symbol across full ply_history (up to last 8 positions)
+    # We accumulate position snapshots per piece-type-key across history boards.
+    if ply_history:
+        # Collect positions across history for each piece type group
+        type_traj: Dict[str, List[Tuple[int, int]]] = {}
+        for hist_board in ply_history:
+            for key, positions in _piece_position_map(hist_board).items():
+                type_traj.setdefault(key, []).extend(positions)
+
+        curr_by_type2: Dict[str, List[Tuple[str, int, int]]] = {}
+        for sid, st in current.items():
+            parts = sid.split("_")
+            if len(parts) >= 2:
+                key = f"{parts[0]}_{parts[1]}"
+                pos = st["position"]
+                curr_by_type2.setdefault(key, []).append(
+                    (sid, int(pos["x"]), int(pos["y"]))
+                )
+        for key, curr_list in curr_by_type2.items():
+            hist_positions = type_traj.get(key, [])
+            # Last 8 history positions for this piece type (shared; best effort)
+            traj_tail = hist_positions[-8:] if hist_positions else []
+            for sid, cf, cr in curr_list:
+                traj_map[sid] = traj_tail + [(cf, cr)]
+
+    # ── Build goal map from next_board ────────────────────────────────────────
+    goal_map: Dict[str, Tuple[int, int]] = {}
+    if next_board is not None:
+        next_states = board_symbol_states(next_board)
+        curr_by_type3: Dict[str, List[Tuple[str, int, int]]] = {}
+        for sid, st in current.items():
+            parts = sid.split("_")
+            if len(parts) >= 2:
+                key = f"{parts[0]}_{parts[1]}"
+                pos = st["position"]
+                curr_by_type3.setdefault(key, []).append(
                     (sid, int(pos["x"]), int(pos["y"]))
                 )
         next_by_type: Dict[str, List[Tuple[int, int]]] = {}
@@ -200,49 +298,83 @@ def build_snapshot(
                 next_by_type.setdefault(key, []).append(
                     (int(pos["x"]), int(pos["y"]))
                 )
-        # Assign closest next-board position as goal for each current piece
-        for key, curr_list in curr_by_type.items():
+        for key, curr_list in curr_by_type3.items():
             next_list = next_by_type.get(key, [])
             if not next_list:
                 continue
-            used: set = set()
+            used2: set = set()
             for sid, cf, cr in curr_list:
                 best = min(
-                    (p for p in next_list if p not in used),
+                    (p for p in next_list if p not in used2),
                     key=lambda p: math.hypot(p[0] - cf, p[1] - cr),
                     default=None,
                 )
                 if best:
                     goal_map[sid] = best
-                    used.add(best)
+                    used2.add(best)
 
-    symbols = [
-        {
-            "id": sid,
-            "type": "CUSTOM",
-            "position": s["position"],
-            "properties": {
-                "piece":  s["internal_state"]["piece"],
-                "color":  s["internal_state"]["color"],
-                "role":   s["internal_state"]["role"],
-                "radius": 0.45,
-                **({"goal_position": {"x": float(goal_map[sid][0]),
-                                      "y": float(goal_map[sid][1]),
-                                      "z": 0.0}}
-                   if sid in goal_map else {}),
-            },
+    # ── Assemble symbol list ──────────────────────────────────────────────────
+    symbols = []
+    for sid, s in current.items():
+        dx, dy = vel_map.get(sid, (0, 0))
+        traj   = traj_map.get(sid, [])
+        props: Dict[str, Any] = {
+            "piece":         s["internal_state"]["piece"],
+            "color":         s["internal_state"]["color"],
+            "role":          s["internal_state"]["role"],
+            "radius":        0.45,
+            # Motion vectors — the primary motif signal for the neuro fabric
+            "velocity_dx":   float(dx),
+            "velocity_dy":   float(dy),
+            "move_geometry": _classify_move_vector(dx, dy),
+            "trajectory":    [{"x": float(p[0]), "y": float(p[1])} for p in traj],
+            # Context
+            "side_to_move":  "white" if board.turn == chess.WHITE else "black",
         }
-        for sid, s in current.items()
-    ]
+        if sid in goal_map:
+            props["goal_position"] = {
+                "x": float(goal_map[sid][0]),
+                "y": float(goal_map[sid][1]),
+                "z": 0.0,
+            }
+        symbols.append({
+            "id":       sid,
+            "type":     "CUSTOM",
+            "position": s["position"],
+            "velocity": {"x": float(dx), "y": float(dy), "z": 0.0},
+            "properties": props,
+        })
+
     stack_history = [
         {"timestamp": {"unix": i}, "symbol_states": board_symbol_states(b)}
         for i, b in enumerate(ply_history)
     ]
+
+    # ── Rich metadata — labels that travel with every frame ───────────────────
+    meta: Dict[str, Any] = {
+        "source":       "chess_prediction_runner",
+        "side_to_move": "white" if board.turn == chess.WHITE else "black",
+        "turn_number":  board.fullmove_number,
+        "ply_count":    len(ply_history),
+        "in_check":     board.is_check(),
+    }
+    if game_meta:
+        meta.update({
+            "game_id":    game_meta.get("game_id", ""),
+            "white":      game_meta.get("white", ""),
+            "black":      game_meta.get("black", ""),
+            "eco":        game_meta.get("eco", ""),
+            "opening":    game_meta.get("opening", ""),
+            "result":     game_meta.get("result", ""),
+            "ply":        game_meta.get("ply", 0),
+            "total_plies": game_meta.get("total_plies", 0),
+        })
+
     return {
-        "timestamp": {"unix": ts},
-        "bounds": {"width": 8.0, "height": 8.0, "depth": 1.0},
-        "symbols": symbols,
-        "metadata": {"source": "chess_prediction_runner"},
+        "timestamp":   {"unix": ts},
+        "bounds":      {"width": 8.0, "height": 8.0, "depth": 1.0},
+        "symbols":     symbols,
+        "metadata":    meta,
         "stack_history": stack_history,
     }
 
@@ -566,6 +698,61 @@ def merge_heats(heats: List[Tuple[List[List[float]], float]]) -> List[List[float
     return result
 
 
+# ── Live probability helpers ──────────────────────────────────────────────────
+
+_PIECE_CP = {
+    chess.PAWN: 100, chess.KNIGHT: 325, chess.BISHOP: 325,
+    chess.ROOK: 500, chess.QUEEN: 975, chess.KING: 0,
+}
+
+def _logistic(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-max(-20.0, min(20.0, x))))
+
+
+def outcome_probs_from_board(board: chess.Board) -> Dict[str, float]:
+    """
+    Estimate win/draw/loss probabilities from material balance.
+
+    Uses a logistic (sigmoid) curve on centipawn advantage.  Draw probability
+    peaks at zero advantage and shrinks as material diverges.
+    """
+    white_mat = sum(_PIECE_CP[p.piece_type] for p in board.piece_map().values() if p.color == chess.WHITE)
+    black_mat = sum(_PIECE_CP[p.piece_type] for p in board.piece_map().values() if p.color == chess.BLACK)
+    balance = white_mat - black_mat  # positive = white ahead
+
+    # Win probabilities via Elo-style logistic (400-cp = ~50% swing)
+    p_white = _logistic(balance / 400.0)
+    p_black = 1.0 - _logistic((balance + 50) / 400.0)  # slight draw bias
+    p_draw  = max(0.02, 1.0 - p_white - p_black)
+
+    total = p_white + p_draw + p_black
+    return {
+        "1-0":     round(p_white / total, 4),
+        "1/2-1/2": round(p_draw  / total, 4),
+        "0-1":     round(p_black / total, 4),
+    }
+
+
+def energy_to_prob(energies: Dict[str, float]) -> Dict[str, float]:
+    """
+    Convert model best-energies to Boltzmann (softmax) probabilities.
+
+    Lower energy = better solution = higher probability.
+    """
+    names = list(energies.keys())
+    vals  = [energies[n] for n in names]
+    finite = [v for v in vals if math.isfinite(v)]
+    fallback = (max(finite) + 1.0) if finite else 1.0
+    vals = [v if math.isfinite(v) else fallback for v in vals]
+
+    # Negate (lower = better) then stable softmax
+    neg  = [-v for v in vals]
+    peak = max(neg)
+    exps = [math.exp(v - peak) for v in neg]
+    total = sum(exps) or 1.0
+    return {n: round(e / total, 4) for n, e in zip(names, exps)}
+
+
 # ── Board JSON ────────────────────────────────────────────────────────────────
 
 def pieces_list(board: chess.Board) -> List[dict]:
@@ -599,6 +786,26 @@ def write_board(data: dict) -> None:
         BOARD_JSON.write_text(payload, encoding="utf-8")
 
 
+def _build_model_breakdown(model_preds: List[dict]) -> List[dict]:
+    """
+    Build per-model breakdown with Boltzmann probabilities derived from
+    best_energy.  Lower energy → higher probability.
+    """
+    raw_energies = {mp["model"]: mp.get("energy", float("inf")) for mp in model_preds}
+    probs = energy_to_prob(raw_energies)
+    return [
+        {
+            "model":   mp["model"],
+            "move":    mp.get("san"),
+            "correct": mp.get("correct", False),
+            "energy":  mp.get("energy"),
+            "energy_prob": probs.get(mp["model"], 0.0),
+            "vote_weight": round(mp.get("weight", 0.0), 4),
+        }
+        for mp in model_preds
+    ]
+
+
 def board_frame(
     board: chess.Board,
     ledgers: List[ModelLedger],
@@ -609,6 +816,8 @@ def board_frame(
     game_meta: dict,
     reveal: bool,
     acc_global: "ModelLedger",
+    acc_top3: "ModelLedger",
+    acc_outcome: "ModelLedger",
     precomputed_preds_viz: Optional[List[dict]] = None,
 ) -> dict:
     # Use pre-computed viz list (avoids re-parsing SAN on post-move board)
@@ -663,9 +872,10 @@ def board_frame(
         "prediction_correct_top1": any(p.get("correct") for p in preds_for_viz if p["model"] == "collective"),
         "prediction_correct_top3": any(p.get("correct") for p in preds_for_viz),
         "square_heat": heat,
-        "outcome_probs": {"1-0": 0.33, "1/2-1/2": 0.33, "0-1": 0.33},
+        "outcome_probs": outcome_probs_from_board(board),
         "predicted_outcome": "?",
         "actual_outcome": game_meta["result"],
+        "model_breakdown": _build_model_breakdown(model_preds),
         "model_ledgers": {
             ld.name: {
                 "recent_acc": round(ld.recent_acc(), 4),
@@ -677,8 +887,8 @@ def board_frame(
         },
         "running": {
             "move_top1":   round(acc_global.global_acc(), 4),
-            "move_top3":   round(acc_global.global_acc(), 4),
-            "outcome_acc": 0.0,
+            "move_top3":   round(acc_top3.global_acc(), 4),
+            "outcome_acc": round(acc_outcome.global_acc(), 4),
             "total_plies": acc_global.total,
             "game_count":  game_meta["game_count"],
         },
@@ -798,7 +1008,9 @@ def main() -> None:
     ldg_quantum   = ModelLedger("quantum")
     ldg_neuro     = ModelLedger("neuro")
     ledgers       = [ldg_classical, ldg_quantum, ldg_neuro]
-    acc_global    = ModelLedger("collective")
+    acc_global    = ModelLedger("collective")   # top-1 move accuracy
+    acc_top3      = ModelLedger("top3")         # top-3 move accuracy (any model correct)
+    acc_outcome   = ModelLedger("outcome")      # outcome prediction accuracy
 
     monitor = HourlyMonitor()
 
@@ -826,6 +1038,10 @@ def main() -> None:
             moves       = game_rec.get("moves", [])
             game_id     = game_rec.get("id", f"game-{game_count}")
             result      = game_rec.get("result", "?")
+            white_name  = game_rec.get("white", "")
+            black_name  = game_rec.get("black", "")
+            eco         = game_rec.get("eco", "")
+            opening     = game_rec.get("opening", "")
 
             board        = chess.Board()
             ply_history: List[chess.Board] = []
@@ -842,7 +1058,21 @@ def main() -> None:
                     next_board.push(board.parse_san(actual_san))
                 except Exception:
                     next_board = None
-                snapshot = build_snapshot(board, history_boards, ply_idx, next_board=next_board)
+                snap_game_meta = {
+                    "game_id":    game_id,
+                    "white":      white_name,
+                    "black":      black_name,
+                    "eco":        eco,
+                    "opening":    opening,
+                    "result":     result,
+                    "ply":        ply_idx,
+                    "total_plies": len(moves),
+                }
+                snapshot = build_snapshot(
+                    board, history_boards, ply_idx,
+                    next_board=next_board,
+                    game_meta=snap_game_meta,
+                )
 
                 iters = monitor.base_iters.copy()
 
@@ -935,7 +1165,15 @@ def main() -> None:
                 for ld in ledgers:
                     ld.update_weight(ledgers)
 
+                top3_correct = any(correct_by.values())
+                # Outcome accuracy: predicted winner matches actual result
+                outcome_probs = outcome_probs_from_board(board)
+                predicted_winner = max(outcome_probs, key=outcome_probs.get)
+                outcome_correct = (predicted_winner == result)
+
                 acc_global.record(collective_correct, 0.0)
+                acc_top3.record(top3_correct, 0.0)
+                acc_outcome.record(outcome_correct, 0.0)
 
                 game_correct += int(collective_correct)
                 game_total   += 1
@@ -1019,7 +1257,7 @@ def main() -> None:
                 # Prediction phase
                 write_board(board_frame(
                     board, ledgers, model_preds_list, collective_san,
-                    None, merged_heat, game_meta, False, acc_global,
+                    None, merged_heat, game_meta, False, acc_global, acc_top3, acc_outcome,
                     precomputed_preds_viz=precomputed_preds_viz,
                 ))
 
@@ -1036,7 +1274,7 @@ def main() -> None:
                 # Reveal phase (board is now post-move; reuse pre-computed preds_viz)
                 write_board(board_frame(
                     board, ledgers, model_preds_list, collective_san,
-                    lm, merged_heat, game_meta, True, acc_global,
+                    lm, merged_heat, game_meta, True, acc_global, acc_top3, acc_outcome,
                     precomputed_preds_viz=precomputed_preds_viz,
                 ))
 

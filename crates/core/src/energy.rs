@@ -1451,6 +1451,7 @@ mod tests {
             id: id.into(),
             symbol_type: SymbolType::Person,
             position,
+            velocity: None,
             properties: Properties::new(),
         }
     }
