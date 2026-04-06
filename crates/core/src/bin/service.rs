@@ -4,14 +4,18 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Component, Path as FsPath};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::{Duration, sleep, timeout};
 use w1z4rdv1510n::hardware::HardwareBackendType;
+use w1z4rdv1510n::neuro::{
+    CrossStreamActivation, NeuroRuntimeConfig, NeuroRuntimeHandle, SequenceReconstruction,
+};
 use w1z4rdv1510n::orchestrator::{RunOutcome, run_with_snapshot};
+use w1z4rdv1510n::schema::EnvironmentSnapshot;
 use w1z4rdv1510n::service_api::{
     ErrorResponse, JobDetailResponse, JobStatus, JobStatusResponse, PredictJobResponse,
     PredictRequest, PredictResponse, Telemetry,
@@ -29,19 +33,87 @@ const MAX_JOB_ATTEMPTS: u32 = 3;
 const INLINE_WAIT_SECS: u64 = 2;
 const MAX_RUN_DURATION_SECS: u64 = 600;
 
+// ── Cross-stream inference request/response types ────────────────────────────
+
+/// Activate labels from one stream and read out what fires in another.
+/// POST /neuro/activate
+#[derive(Deserialize)]
+struct CrossStreamRequest {
+    /// Labels from the input modality (e.g. visual labels for a single frame).
+    input_labels: Vec<String>,
+    /// Which stream to read out (e.g. "audio", "lidar", "video").
+    target_stream: String,
+    /// How many synapse-hops to walk (default 3).
+    #[serde(default = "default_hops")]
+    hops: usize,
+}
+
+/// Reconstruct a sequence of target-stream frames from input-stream frames.
+/// POST /neuro/reconstruct
+#[derive(Deserialize)]
+struct ReconstructRequest {
+    /// One Vec<String> of labels per input frame, in temporal order.
+    frames: Vec<Vec<String>>,
+    /// Which stream to reconstruct (e.g. "audio").
+    target_stream: String,
+    /// Synapse hops per frame (default 3).
+    #[serde(default = "default_hops")]
+    hops: usize,
+    /// Temporal carry factor 0.0–0.9 (default 0.25).
+    #[serde(default = "default_carry")]
+    carry: f32,
+}
+
+/// Train the shared neuro fabric from labelled stream data.
+/// POST /neuro/train
+#[derive(Deserialize)]
+struct NeuroTrainRequest {
+    /// The snapshot to observe (all symbols, all streams, same timestamp).
+    snapshot: EnvironmentSnapshot,
+}
+
+#[derive(Serialize)]
+struct CrossStreamResponse {
+    activations: Vec<CrossStreamActivation>,
+}
+
+fn default_hops() -> usize { 3 }
+fn default_carry() -> f32  { 0.25 }
+
 #[derive(Clone)]
 struct AppState {
     metrics: ServiceMetrics,
     storage: Arc<ServiceStorage>,
     limiter: Arc<Semaphore>,
+    /// Shared neuro fabric — persists across all requests, accumulates Hebbian
+    /// weights from every training call and is the engine for cross-stream inference.
+    neuro: NeuroRuntimeHandle,
 }
 
 impl AppState {
     fn new(storage: ServiceStorage) -> Self {
+        // Bootstrap the fabric with an empty snapshot so NeuroRuntime exists.
+        // All real learning happens through /neuro/train POSTs.
+        let empty_snap = EnvironmentSnapshot {
+            timestamp: w1z4rdv1510n::schema::Timestamp { unix: 0 },
+            bounds: std::collections::HashMap::new(),
+            symbols: Vec::new(),
+            metadata: std::collections::HashMap::new(),
+            stack_history: Vec::new(),
+        };
+        let neuro_cfg = NeuroRuntimeConfig {
+            enabled: true,
+            min_activation: 0.05,  // low threshold — we want broad propagation in inference
+            ..Default::default()
+        };
+        let neuro = std::sync::Arc::new(
+            w1z4rdv1510n::neuro::NeuroRuntime::new(&empty_snap, neuro_cfg)
+        );
         Self {
             metrics: ServiceMetrics::new(),
             storage: Arc::new(storage),
             limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_RUNS)),
+            neuro,
         }
     }
 }
@@ -81,6 +153,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs/:run_id", get(get_run_handler))
         .route("/healthz", get(health_handler))
         .route("/readyz", get(ready_handler))
+        // ── Neuro fabric endpoints ──────────────────────────────────────────
+        // Train: observe a multi-stream snapshot → update Hebbian weights
+        .route("/neuro/train", post(neuro_train_handler))
+        // Single-frame cross-stream activation: input labels → target stream labels
+        .route("/neuro/activate", post(neuro_activate_handler))
+        // Temporal sequence reconstruction: sequence of input frames → target stream frames
+        .route("/neuro/reconstruct", post(neuro_reconstruct_handler))
+        // Read current neuro snapshot (active networks, centroids, influences, etc.)
+        .route("/neuro/snapshot", get(neuro_snapshot_handler))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(app_state);
 
@@ -475,6 +556,66 @@ fn check_paths(cfg: &w1z4rdv1510n::config::RunConfig) -> anyhow::Result<()> {
         ensure_safe_path("output.summary_path", path)?;
     }
     Ok(())
+}
+
+// ── Neuro fabric HTTP handlers ────────────────────────────────────────────────
+
+/// POST /neuro/train
+/// Observe a multi-stream snapshot and update Hebbian weights.
+/// Call this once per time-step (or per frame) with all concurrent stream data.
+async fn neuro_train_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<NeuroTrainRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.neuro.observe_snapshot(&req.snapshot);
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
+/// POST /neuro/activate
+/// Single-frame cross-modal inference.
+/// Feed labels from one stream → get back activated labels in target stream.
+async fn neuro_activate_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CrossStreamRequest>,
+) -> (StatusCode, Json<CrossStreamResponse>) {
+    let activations = state.neuro.cross_stream_activate(
+        &req.input_labels,
+        &req.target_stream,
+        req.hops,
+    );
+    (StatusCode::OK, Json(CrossStreamResponse { activations }))
+}
+
+/// POST /neuro/reconstruct
+/// Temporal sequence reconstruction: sequence of input-stream frames
+/// → matching sequence of target-stream frames.
+async fn neuro_reconstruct_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ReconstructRequest>,
+) -> (StatusCode, Json<SequenceReconstruction>) {
+    let result = state.neuro.reconstruct_sequence(
+        &req.frames,
+        &req.target_stream,
+        req.hops,
+        req.carry,
+    );
+    (StatusCode::OK, Json(result))
+}
+
+/// GET /neuro/snapshot
+/// Read the current neuro fabric state: active networks, centroids,
+/// temporal predictions, top influences, active streams, etc.
+async fn neuro_snapshot_handler(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let snap = state.neuro.snapshot();
+    match serde_json::to_value(&snap) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 fn ensure_safe_path(label: &str, path: &FsPath) -> anyhow::Result<()> {

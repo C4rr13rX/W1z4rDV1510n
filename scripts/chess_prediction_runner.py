@@ -770,20 +770,53 @@ def pieces_list(board: chess.Board) -> List[dict]:
 
 
 def write_board(data: dict) -> None:
+    """
+    Write the live board JSON.  Never raises — a failed write is logged and
+    skipped so the training loop continues uninterrupted.
+
+    Windows-specific strategy: write to a sibling temp file in the SAME
+    directory (so rename is on the same volume), then attempt os.replace.
+    If the viz server holds a transient read lock, retry up to 5 times with
+    a short sleep before falling back to a direct truncating write.
+    """
     BOARD_JSON.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(data)
-    # Windows doesn't allow atomic rename over an open file; write directly.
     try:
-        tmp = BOARD_JSON.with_suffix(".tmp")
-        tmp.write_text(payload, encoding="utf-8")
+        payload = json.dumps(data)
+    except Exception as e:
+        print(f"  [write_board] serialisation error: {e}", flush=True)
+        return
+
+    tmp = BOARD_JSON.with_suffix(".tmp")
+    # Step 1 — write the new content to temp
+    for attempt in range(3):
         try:
-            tmp.replace(BOARD_JSON)
-        except PermissionError:
-            # Fallback: overwrite in place (viz may read a partial frame — acceptable)
-            BOARD_JSON.write_text(payload, encoding="utf-8")
+            tmp.write_text(payload, encoding="utf-8")
+            break
+        except Exception as e:
+            if attempt == 2:
+                print(f"  [write_board] tmp write failed: {e}", flush=True)
+                return
+            time.sleep(0.05)
+
+    # Step 2 — atomically rename into place (retry on transient lock)
+    for attempt in range(5):
+        try:
+            os.replace(str(tmp), str(BOARD_JSON))
+            return
+        except (PermissionError, OSError):
+            time.sleep(0.04)
+
+    # Step 3 — last resort: truncating write in place
+    try:
+        with open(str(BOARD_JSON), "w", encoding="utf-8") as fh:
+            fh.write(payload)
+    except Exception as e:
+        print(f"  [write_board] direct write failed: {e}", flush=True)
+    finally:
+        try:
             tmp.unlink(missing_ok=True)
-    except Exception:
-        BOARD_JSON.write_text(payload, encoding="utf-8")
+        except Exception:
+            pass
 
 
 def _build_model_breakdown(model_preds: List[dict]) -> List[dict]:

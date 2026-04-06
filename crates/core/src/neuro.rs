@@ -457,6 +457,81 @@ impl NeuronPool {
         self.neurons.get(id as usize).and_then(|n| n.label.clone())
     }
 
+    /// Propagate activation forward through excitatory synapses.
+    ///
+    /// Seeds the pool with `seed_labels` at full activation, then walks
+    /// excitatory synapses for `hops` rounds, accumulating weighted activation
+    /// at each reachable neuron.  Inhibitory synapses suppress their targets.
+    ///
+    /// Returns a map of `label → activation_strength` for every neuron that
+    /// exceeded `min_activation` at any point during propagation.  This is the
+    /// read-out of what the network "thinks" given the seed input — without
+    /// modifying any weights or the pool's live state.
+    pub fn propagate(
+        &self,
+        seed_labels: &[String],
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        // Current activation state — keyed by neuron ID to avoid label lookups in the hot path.
+        // We work on a scratch copy so we never mutate the live pool state.
+        let n = self.neurons.len();
+        let mut activation: Vec<f32> = vec![0.0; n];
+
+        // Seed
+        for label in seed_labels {
+            if let Some(&id) = self.label_to_id.get(label) {
+                if (id as usize) < n {
+                    activation[id as usize] = 1.0;
+                }
+            }
+        }
+
+        // Hop-by-hop propagation
+        for _ in 0..hops {
+            let mut next = activation.clone();
+            for (src_idx, &src_act) in activation.iter().enumerate() {
+                if src_act < 0.001 {
+                    continue;
+                }
+                let neuron = match self.neurons.get(src_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                // Excitatory: add weighted activation
+                for syn in &neuron.excitatory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] + src_act * syn.weight * 0.5).min(1.0);
+                    }
+                }
+                // Inhibitory: suppress target
+                for syn in &neuron.inhibitory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                    }
+                }
+            }
+            // Decay so distant hops carry less weight
+            for v in next.iter_mut() {
+                *v *= 0.85;
+            }
+            activation = next;
+        }
+
+        // Collect results above threshold
+        let mut result = HashMap::new();
+        for (idx, act) in activation.iter().enumerate() {
+            if *act >= min_activation {
+                if let Some(label) = self.neurons.get(idx).and_then(|n| n.label.as_ref()) {
+                    result.insert(label.clone(), *act);
+                }
+            }
+        }
+        result
+    }
+
     pub fn cooccurrences_above(&self, threshold: u64) -> Vec<((String, String), u64)> {
         self.cooccur
             .iter()
@@ -1471,6 +1546,224 @@ impl NeuroRuntime {
         let guard = self.inner.lock();
         guard.snapshot(self.config.min_activation, self.config.prediction_horizon)
     }
+
+    /// Propagate activation from `input_labels` through the learned Hebbian
+    /// weight graph and return only the labels belonging to `target_stream`.
+    ///
+    /// This is the single-frame cross-modal inference call.
+    ///
+    /// Example: feed a set of visual labels for a frame showing a mouth opening
+    /// → receive audio labels that were Hebbianly linked during training.
+    ///
+    /// `hops` controls how many synapse-hops to walk (2–4 is typical; higher
+    /// reaches more abstract associations at the cost of specificity).
+    pub fn cross_stream_activate(
+        &self,
+        input_labels: &[String],
+        target_stream: &str,
+        hops: usize,
+    ) -> Vec<CrossStreamActivation> {
+        if !self.config.enabled || input_labels.is_empty() {
+            return Vec::new();
+        }
+        let guard = self.inner.lock();
+        let propagated = guard.pool.propagate(input_labels, hops, self.config.min_activation);
+
+        // Filter to labels that belong to the target stream.
+        // Stream membership is encoded in two ways:
+        //   1. Label literally starts with "stream::<target_stream>"
+        //   2. Label starts with "meta::stream::<target_stream>"
+        //   3. The neuron's influence_history has a record with stream == target_stream
+        let stream_prefix_a = format!("stream::{target_stream}");
+        let stream_prefix_b = format!("meta::stream::{target_stream}");
+
+        let mut results: Vec<CrossStreamActivation> = propagated
+            .into_iter()
+            .filter(|(label, _)| {
+                label.starts_with(&stream_prefix_a)
+                    || label.starts_with(&stream_prefix_b)
+                    || guard.pool.label_to_id.get(label).and_then(|&id| {
+                        guard.pool.neurons.get(id as usize)
+                    }).map(|n| {
+                        n.influence_history.iter().any(|r| r.stream == target_stream)
+                    }).unwrap_or(false)
+            })
+            .map(|(label, strength)| {
+                // Collect top influences for this label from its neuron's history
+                let influences = guard.pool.label_to_id.get(&label)
+                    .and_then(|&id| guard.pool.neurons.get(id as usize))
+                    .map(|n| {
+                        let mut inf = n.influence_history.clone();
+                        inf.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+                        inf.truncate(4);
+                        inf
+                    })
+                    .unwrap_or_default();
+                CrossStreamActivation {
+                    label,
+                    strength,
+                    influences,
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+
+    /// Run cross-stream reconstruction over a sequence of input frames.
+    ///
+    /// This is the temporal version of `cross_stream_activate`.  Each element
+    /// of `input_frames` is a set of labels from one time-step of the input
+    /// stream (e.g. visual labels for frame 0, frame 1, …).  The method walks
+    /// them in order and for each frame propagates through the weight graph to
+    /// produce the corresponding target-stream activations.
+    ///
+    /// Temporal coherence: a fraction (`carry`) of the previous frame's output
+    /// activations is added as context for the next frame.  This causes the
+    /// output sequence to flow smoothly — if mouth-open activates a growl sound
+    /// pattern at frame 5, that pattern persists into frame 6 rather than
+    /// snapping off instantly, mirroring how real sound and motion are linked
+    /// across time.
+    ///
+    /// # Example
+    /// ```
+    /// let frames: Vec<Vec<String>> = video_frames   // each = list of visual labels
+    ///     .iter().map(|f| f.visual_labels.clone()).collect();
+    /// let audio_sequence = runtime.reconstruct_sequence(&frames, "audio", 3, 0.25);
+    /// // audio_sequence[i] = the audio labels the network predicts for video frame i
+    /// ```
+    pub fn reconstruct_sequence(
+        &self,
+        input_frames: &[Vec<String>],
+        target_stream: &str,
+        hops: usize,
+        carry: f32,           // 0.0 = no temporal bleed, 1.0 = pure carry-forward
+    ) -> SequenceReconstruction {
+        if !self.config.enabled || input_frames.is_empty() {
+            return SequenceReconstruction::default();
+        }
+
+        let carry = carry.clamp(0.0, 0.9);
+        let guard = self.inner.lock();
+        let min_act = self.config.min_activation;
+
+        // Previous frame's propagated activations, re-injected as context
+        let mut prev_output: HashMap<String, f32> = HashMap::new();
+
+        let mut frames: Vec<CrossStreamFrame> = Vec::with_capacity(input_frames.len());
+
+        for (frame_idx, input_labels) in input_frames.iter().enumerate() {
+            // Build seed: current frame labels + carried-over context from prev frame output
+            let mut seed_labels: Vec<String> = input_labels.clone();
+            // Add carry context — inject prev output labels back as additional seeds
+            // scaled by carry factor (they'll start at `carry` activation not 1.0)
+            let carry_seed: Vec<String> = prev_output
+                .iter()
+                .filter(|&(_, &v)| v * carry >= min_act)
+                .map(|(k, _)| k.clone())
+                .collect();
+            seed_labels.extend(carry_seed);
+            seed_labels.sort();
+            seed_labels.dedup();
+
+            // Propagate
+            let propagated = guard.pool.propagate(&seed_labels, hops, min_act);
+
+            // Filter and build output for this frame (same logic as cross_stream_activate)
+            let stream_prefix_a = format!("stream::{target_stream}");
+            let stream_prefix_b = format!("meta::stream::{target_stream}");
+
+            let mut output: Vec<CrossStreamActivation> = propagated
+                .iter()
+                .filter(|(label, _)| {
+                    label.starts_with(&stream_prefix_a)
+                        || label.starts_with(&stream_prefix_b)
+                        || guard.pool.label_to_id.get(*label).and_then(|&id| {
+                            guard.pool.neurons.get(id as usize)
+                        }).map(|n| {
+                            n.influence_history.iter().any(|r| r.stream == target_stream)
+                        }).unwrap_or(false)
+                })
+                .map(|(label, &strength)| CrossStreamActivation {
+                    label: label.clone(),
+                    strength,
+                    influences: guard.pool.label_to_id.get(label)
+                        .and_then(|&id| guard.pool.neurons.get(id as usize))
+                        .map(|n| {
+                            let mut inf = n.influence_history.clone();
+                            inf.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+                            inf.truncate(4);
+                            inf
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect();
+
+            output.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Build next frame's carry context
+            prev_output = propagated
+                .into_iter()
+                .filter(|(label, _)| {
+                    label.starts_with(&stream_prefix_a) || label.starts_with(&stream_prefix_b)
+                        || guard.pool.label_to_id.get(label).and_then(|&id| {
+                            guard.pool.neurons.get(id as usize)
+                        }).map(|n| {
+                            n.influence_history.iter().any(|r| r.stream == target_stream)
+                        }).unwrap_or(false)
+                })
+                .collect();
+
+            frames.push(CrossStreamFrame {
+                frame_index: frame_idx,
+                input_labels: input_labels.clone(),
+                output: output,
+            });
+        }
+
+        SequenceReconstruction {
+            target_stream: target_stream.to_string(),
+            hops,
+            carry,
+            frames,
+        }
+    }
+}
+
+/// A single activated label in the target stream, with its propagated
+/// strength and the training influences that shaped the neuron.
+#[derive(Debug, Clone, Serialize)]
+pub struct CrossStreamActivation {
+    /// The label that was activated (e.g. "attr::frequency::low",
+    /// "meta::artist::radiohead", "stream::audio").
+    pub label: String,
+    /// Propagated activation strength — higher = more strongly connected to input.
+    pub strength: f32,
+    /// The training contexts that most shaped this neuron.
+    /// Use these to answer "why did this sound come up?" or "what influenced this?"
+    pub influences: Vec<InfluenceRecord>,
+}
+
+/// One frame's worth of cross-stream reconstruction output.
+#[derive(Debug, Clone, Serialize)]
+pub struct CrossStreamFrame {
+    pub frame_index: usize,
+    /// The input labels that seeded this frame.
+    pub input_labels: Vec<String>,
+    /// The activated labels in the target stream for this frame,
+    /// sorted strongest-first.
+    pub output: Vec<CrossStreamActivation>,
+}
+
+/// The full output of `reconstruct_sequence` — one `CrossStreamFrame` per
+/// input frame, in temporal order.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SequenceReconstruction {
+    pub target_stream: String,
+    pub hops: usize,
+    pub carry: f32,
+    pub frames: Vec<CrossStreamFrame>,
 }
 
 pub fn zone_label(position: &Position) -> String {
