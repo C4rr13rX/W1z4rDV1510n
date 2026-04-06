@@ -1,12 +1,19 @@
 {
   "mode": "PRODUCTION",
-  "t_end": { "unix": 1732003600 },
+  "t_end": {
+    "unix": 1732003600
+  },
   "n_particles": 64,
-  "schedule": { "t_start": 4.0, "t_end": 0.25, "n_iterations": 180, "schedule_type": "Linear" },
+  "schedule": {
+    "t_start": 4.0,
+    "t_end": 0.25,
+    "n_iterations": 180,
+    "schedule_type": "Linear"
+  },
   "energy": {
     "w_motion": 0.8,
-    "w_collision": 5.0,
-    "w_goal": 1.0,
+    "w_collision": 2.0,
+    "w_goal": 3.0,
     "w_group_cohesion": 0.4,
     "w_ml_prior": 0.0,
     "w_relational_prior": 0.5,
@@ -17,7 +24,7 @@
     "stack_future_horizon": 1,
     "stack_future_weight": 0.3,
     "w_path_feasibility": 1.0,
-    "w_env_constraints": 3.0
+    "w_env_constraints": 1.5
   },
   "proposal": {
     "local_move_prob": 0.45,
@@ -30,14 +37,38 @@
     "use_parallel_updates": true,
     "adaptive_move_mixing": true
   },
-  "init_strategy": { "use_ml_priors": false, "noise_level": 0.3, "random_fraction": 0.15, "copy_snapshot_fraction": 0.2 },
-  "resample": { "enabled": true, "effective_sample_size_threshold": 0.35, "mutation_rate": 0.05 },
-  "search": { "cell_size": 0.75, "teleport_on_no_path": true },
+  "init_strategy": {
+    "use_ml_priors": false,
+    "noise_level": 0.3,
+    "random_fraction": 0.15,
+    "copy_snapshot_fraction": 0.2
+  },
+  "resample": {
+    "enabled": true,
+    "effective_sample_size_threshold": 0.35,
+    "mutation_rate": 0.05
+  },
+  "search": {
+    "cell_size": 0.75,
+    "teleport_on_no_path": true
+  },
   "ml_backend": "None",
   "hardware_backend": "Auto",
-  "hardware_overrides": { "allow_gpu": false, "allow_distributed": false, "max_threads": 8 },
-  "neuro": { "enabled": false },
-  "homeostasis": { "enabled": true, "energy_plateau_tolerance": 0.001, "patience": 5, "mutation_boost": 0.4, "reheat_scale": 0.15 },
+  "hardware_overrides": {
+    "allow_gpu": false,
+    "allow_distributed": false,
+    "max_threads": 8
+  },
+  "neuro": {
+    "enabled": false
+  },
+  "homeostasis": {
+    "enabled": true,
+    "energy_plateau_tolerance": 0.001,
+    "patience": 5,
+    "mutation_boost": 0.4,
+    "reheat_scale": 0.15
+  },
   "quantum": {
     "enabled": true,
     "trotter_slices": 4,
@@ -57,7 +88,17 @@
     "live_neuro_path": "logs/chess_ply_quantum_neuro.json",
     "live_neuro_every": 30
   },
-  "output": { "save_best_state": true, "save_population_summary": false, "output_path": "logs/chess_ply_quantum_result.json", "format": "Json" },
-  "random": { "provider": "DETERMINISTIC", "seed": 2222 },
-  "experimental_hardware": { "enabled": false }
+  "output": {
+    "save_best_state": true,
+    "save_population_summary": false,
+    "output_path": "logs/chess_ply_quantum_result.json",
+    "format": "Json"
+  },
+  "random": {
+    "provider": "DETERMINISTIC",
+    "seed": 2222
+  },
+  "experimental_hardware": {
+    "enabled": false
+  }
 }
