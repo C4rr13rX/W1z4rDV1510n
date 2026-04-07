@@ -1,10 +1,34 @@
 # W1z4rDV1510n
 
-**Chaos World Model + Neural Fabric Intelligence System** — a CPU-first, RAM-first distributed intelligence stack that learns to represent and predict the physical environment through organic Hebbian neurogenesis, recursive motif discovery, multi-sensor data fusion, and physics-grounded equation discovery. No GPUs required.
+A distributed intelligence node that learns to physically describe its environment — not by classification, but by growing structure from what it observes. CPU and RAM native. No GPUs required.
 
-The core thesis: start with every incoming sensor stream as a dimensional representation of the environment. Things that appear consistently across time and space grow neural connections — mini-columns form, abstract to single concept neurons, then branch into finer distinctions. The computations live in the architecture. Inference is a reaction in state, not a runtime calculation.
+The node is an **instrument, not an agent**. It observes every incoming sensor stream, builds a living representation of the environment inside itself, and reports what it sees in the language of physics. It does not act on that data. Whatever acts on its outputs — a script, a decision system, a human — does so with full transparency into how the node arrived at its conclusions. The node is the measurement device. Everything else is up to you.
 
-W1z4rDV1510n is a **node architecture**. It knows nothing about specific domains. Apps and scripts connect to the node, translate their domain data into generic `EnvironmentSnapshot` format, and simultaneously train the node's neural networks from that data. The node gets smarter from everything every app feeds it.
+Every sensor stream — a chess board, a video camera, a news feed, a social graph, a chemical state — arrives in the same generic format. The node has no knowledge of any specific domain. It sees positions, labels, and co-occurrences. What it learns from a chess game transfers to what it knows about crowd dynamics, and vice versa. The neural fabric that grows from one domain is the same fabric another domain trains.
+
+The Environmental Equation Matrix sits at the center of this. As the neural fabric fires labels from sensor data, the EEM continuously asks: *which physical laws govern what I'm currently observing?* It works across 282 equations and 24 disciplines simultaneously — because the environment doesn't respect disciplinary boundaries. A crowd tipping toward panic obeys the same Kuramoto coupling equations as synchronized chemical oscillators. A viral narrative spreading through a social network follows the same Bass diffusion curve as a product launch. A coordinated information campaign has a measurable Lyapunov exponent. The EEM names these processes from raw observation, without being told what to look for.
+
+When the EEM can't explain a label cluster — when something is happening that doesn't match any known equation — it opens a hypothesis gap and records which nodes are seeing it. A gap observed independently across many nodes in a distributed deployment is the system's way of saying: *something real is happening here that we don't have a name for yet.* That is a more useful signal than a classification.
+
+---
+
+**What this does that isn't done elsewhere:**
+
+- **Physics as the common language across domains.** Most multi-modal systems learn domain-specific representations and build bridges between them. This system skips that entirely — everything is expressed in the same dimensional sensor format from the start, and the physics equations are the shared vocabulary across all of it.
+
+- **The node is an observer, not a decision-maker.** Intelligence architectures almost universally couple observation to action. Here they are explicitly separated. The node reports; agents built on top decide. This means the node's outputs are auditable, neutral, and composable — you can put any decision layer on top without changing the instrument.
+
+- **Hypothesis gaps as first-class output.** The node tracks what it *cannot* explain with equal rigor to what it can. The gap leaderboard — ordered by how many independent nodes corroborate the same unexplained pattern — is often more actionable than the list of identified equations.
+
+- **Cross-node source tracing without coordination.** Each node independently records which node first reported each pattern and how many subsequently corroborated it. No central coordinator, no shared state beyond the gossip layer. The origin of a propagating signal emerges from timestamp ordering across independent observers.
+
+- **Equations gain and lose confidence from sensor evidence.** The EEM is not a static lookup table. Equations that consistently match what sensors are reporting grow stronger. Those that don't, decay. The system learns which physics are actually present in its deployment environment, not just which physics exist in textbooks.
+
+- **Hardware-adaptive from first principles.** No batch sizes, thread counts, or memory limits are hard-coded anywhere. Every parameter is derived from live hardware measurement at startup. The same binary runs on a Raspberry Pi and a workstation and adapts its behavior to each.
+
+- **Game theory and marketing science as physics.** Social, strategic, and market dynamics are expressed as equations with the same status as thermodynamics or quantum mechanics. A Nash equilibrium is detected the same way a Boltzmann distribution is — by matching sensor label clusters to equation keywords. The system doesn't know it's looking at a market; it just knows what the math says.
+
+---
 
 ---
 
