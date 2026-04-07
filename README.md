@@ -44,8 +44,29 @@ W1z4rDV1510n is a **node architecture**. It knows nothing about specific domains
 
 ### Environmental Equation Matrix (`EquationMatrixRuntime`)
 - A self-growing directed graph of physics equations spanning all domains from Newtonian mechanics to topological quantum phenomena
-- **43 seed equations across 16 disciplines**: Classical → Lagrangian → Hamiltonian → Thermodynamics → Statistical Mechanics → Electromagnetism (Maxwell) → Quantum Mechanics → Quantum Field Theory → Special + General Relativity → Fluid Dynamics → Chaos / Nonlinear Dynamics → Topological Physics → Condensed Matter → Cosmology → Information Theory
-- **22 semantic links** between equations: `derives_from`, `bridges`, `special_case`, `unifies`, `approximates`, `generalizes`, `contradicts`
+- **214 seed equations across 21 disciplines**:
+  - Classical Mechanics (F=ma through SHO, impulse, center of mass, torque, rotational dynamics)
+  - Waves & Oscillations (wave equation, Doppler, decibel scale, intensity)
+  - Lagrangian / Hamiltonian mechanics (action principle, Poisson brackets, adiabatic invariants)
+  - Thermodynamics (all four laws, Gibbs / Helmholtz / Carnot, van der Waals, Stefan-Boltzmann, Planck blackbody)
+  - Statistical Mechanics (Boltzmann / Fermi-Dirac / Bose-Einstein, partition functions, Jarzynski equality, grand canonical)
+  - Electromagnetism & Optics (full Maxwell set, Lorentz force, Poynting vector, Snell's law, diffraction grating, Malus's law)
+  - Quantum Mechanics (Schrödinger TDSE/TISE, hydrogen levels, QHO, tunneling, spin commutation, density matrix, Bell state, de Broglie)
+  - Quantum Field Theory (Dirac equation, Klein-Gordon, QED Lagrangian, Standard Model Lagrangian, Higgs potential, renormalization group)
+  - Special Relativity (full Lorentz transform, 4-momentum, velocity addition, Minkowski metric)
+  - General Relativity (Einstein field equations, geodesic, Christoffel symbols, Riemann tensor, Schwarzschild metric, Hawking temperature, gravitational waves)
+  - Nuclear & Particle Physics (binding energy, radioactive decay, half-life, Q-value)
+  - Condensed Matter (BCS ground state, tight-binding, Drude, cyclotron frequency, flux quantum, Fermi energy)
+  - Fluid Dynamics (Navier-Stokes, Bernoulli, vorticity transport, Mach/Froude numbers)
+  - Chaos / Nonlinear Dynamics (Lyapunov exponent, Fokker-Planck, Langevin, fractal dimension, Kuramoto coupled oscillators, KAM theorem)
+  - Topological Physics (Chern number, Berry curvature, Z₂ invariant, Kitaev chain, fractional charge e*=e/3)
+  - Cosmology (Friedmann equations, redshift, luminosity distance, critical density, CMB temperature scaling)
+  - Information Theory (Shannon entropy, channel capacity, KL divergence, Fisher information, Cramér-Rao bound, Kolmogorov complexity)
+  - Mathematical Physics PDEs (heat equation, Laplace, Poisson, Burgers, Ginzburg-Landau, KdV, nonlinear Schrödinger)
+  - Biophysics & Complex Systems (logistic growth, Lotka-Volterra, Hodgkin-Huxley neuron, Einstein diffusion, Stokes-Einstein)
+  - Plasma Physics (plasma frequency, Debye length)
+  - Mathematical Tools (Bayes' theorem, Hebbian learning, sigmoid/softmax, cosine similarity, Pearson correlation, DTW, EMA)
+- **23 semantic links** between equations: `derives_from`, `bridges`, `special_case`, `unifies`, `approximates`, `generalizes`, `contradicts`
 - **Dimension-aware**: equations tagged with spatial applicability. Anyons (`ψ → e^{iθ}ψ`) are strictly 2D — they will not surface in a 3D sensor context. Maxwell's equations are 3D. Thermodynamic identities are dimension-agnostic
 - **Sensor-driven**: `apply_to_context(labels, dims)` takes active neuro-fabric labels + sensor dimensionality and returns candidate equations explaining the current observation
 - **Confidence evolution**: grows from sensor evidence, decays without corroboration — equations compete for relevance against what the node is actually experiencing
@@ -175,14 +196,24 @@ A chess piece, a LiDAR point, a stock tick, a chemical state, a crowd zone — a
 
 ### 3) Environmental Equation Matrix
 
-The EEM bridges the gap between raw sensor patterns and physical interpretation. As the neuro fabric fires labels, the EEM surfaces candidate equations governing the observed phenomenon.
+The EEM bridges the gap between raw sensor patterns and physical interpretation. As the neuro fabric fires labels, the EEM surfaces candidate equations governing the observed phenomenon. It is a complete map of modern physics — 214 equations across 21 disciplines — compiled into the node so that any sensor stream can be interpreted through the lens of physical law.
 
 - Equations accumulate sensor-driven evidence; those that consistently explain observations gain confidence; those that don't, decay
 - When the fabric fires labels that match no equation, a `HypothesisSlot` is opened — the node records it as an unexplained phenomenon awaiting discovery
-- Peer nodes share their equation discoveries; merged equations must be corroborated by local sensor data before gaining full confidence
+- Peer nodes share their equation discoveries via `EemPeerPayload`; merged equations must be corroborated by local sensor data before gaining full confidence
 - The system is self-researching: new sensor patterns drive new hypotheses; peer knowledge fills gaps
 
-**Anyon note**: anyons are quasiparticles that exist only in 2D topological systems. Their exchange statistics (`ψ → e^{iθ}ψ`) are neither bosonic (θ=0) nor fermionic (θ=π) but can be any angle — this is a fundamental consequence of 2D topology. The EEM correctly enforces this: the anyon equation and Chern-Simons action only surface when the active sensor context is flagged as 2D. A 3D sensor stream will never see them.
+**Coverage highlights**:
+- From F=ma through the Standard Model Lagrangian and Higgs potential
+- Thermodynamic identities from all four laws to Jarzynski's fluctuation theorem
+- Quantum mechanics through QFT: Dirac equation, renormalization group, Bell states
+- GR: Einstein field equations, Schwarzschild metric, Hawking temperature, gravitational waves
+- Topological physics: Chern numbers, Berry curvature, Z₂ invariants, Kitaev chain
+- Chaos and complexity: Lyapunov exponents, Fokker-Planck, Kuramoto oscillators, KAM theorem
+- Biophysics: Hodgkin-Huxley neuron model, Lotka-Volterra, Einstein/Stokes-Einstein diffusion
+- Information theory: Shannon, KL divergence, Fisher information, Cramér-Rao bound
+
+**Anyon note**: anyons are quasiparticles that exist only in 2D topological systems. Their exchange statistics (`ψ → e^{iθ}ψ`) are neither bosonic (θ=0) nor fermionic (θ=π) but can be any angle — this is a fundamental consequence of 2D topology. The EEM correctly enforces this: the anyon equation, Chern-Simons action, and fractional charge equations only surface when the active sensor context is flagged as 2D. A 3D sensor stream will never see them.
 
 ### 4) Streaming ultradian analysis pipeline
 - People video / pose frames → motor features + behavioral atoms
