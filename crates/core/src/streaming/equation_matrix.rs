@@ -92,7 +92,12 @@ impl Discipline {
             Self::CondensedMatter => &["phonon","magnon","crystal","lattice","band","fermi","surface","superconductor","cooper","pair","bcs"],
             Self::Cosmology => &["hubble","redshift","inflation","dark","matter","dark","energy","cmb","cosmic","expansion","friedmann"],
             Self::InformationTheory => &["entropy","shannon","information","mutual","channel","capacity","kolmogorov","bit","nats","compression"],
-            Self::Custom(_) => &[],
+            Self::Custom(s) => match s.as_str() {
+                "GameTheory" => &["nash","equilibrium","strategy","payoff","game","minimax","player","dominant","cooperation","defection","prisoner","dilemma","auction","mechanism","coalition","shapley","replicator","evolutionary","stable","bayesian","hotelling","focal","schelling","zero-sum"],
+                "MarketingScience" => &["diffusion","adoption","viral","spread","bass","imitation","word","mouth","contagion","cascade","influence","persuasion","advertising","brand","market","share","elasticity","network","effect","preference","metcalfe","zipf","pareto","clv","retention","churn","adstock","lanchester","gompertz","threshold","logistic","sigmoid","growth"],
+                "CrossDisciplinary" => &["emergence","self-organization","complexity","power","law","scale","free","percolation","ising","mean","field","opinion","tipping","point","critical","phase","transition","fitness","landscape","coevolution","arms","race","cascade","failure","segregation","free","energy","maximum","entropy","jaynes","universal"],
+                _ => &[],
+            },
         }
     }
 
@@ -2049,6 +2054,363 @@ fn build_seed_equations() -> Vec<PhysicsEquation> {
             Discipline::InformationTheory,
             vec![v("s","sequence 1","",""), v("t","sequence 2","","")],
             vec![], &["time-series alignment","elastic matching"], 0.90),
+    ]);
+
+    // ── Game Theory ──────────────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("Nash equilibrium: no player benefits by unilateral deviation (u_i(s*) ≥ u_i(s_i, s*_{-i}))", r"u_i(s^*)\geq u_i(s_i,s^*_{-i})\;\forall i,s_i",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("u_i","utility of player i","",""), v("s*","Nash equilibrium strategy profile","","")],
+            vec![], &["equilibrium","strategy","rationality","self-reinforcing"], 0.98),
+
+        PhysicsEquation::new("Mixed strategy Nash equilibrium: E[u_i|σ_i] = E[u_i|σ_i'] for all strategies in support", r"\sum_{s}u_i(s)\sigma_i(s)=\sum_{s}u_i(s)\sigma_i'(s)",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("σ_i","mixed strategy distribution","","")],
+            vec![], &["mixed strategy","indifference","probability","randomization"], 0.95),
+
+        PhysicsEquation::new("Minimax theorem: max_x min_y f(x,y) = min_y max_x f(x,y) (von Neumann)", r"\max_x\min_y f(x,y)=\min_y\max_x f(x,y)",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("f","payoff function","","")],
+            vec![], &["zero-sum","adversarial","minimax","optimal strategy"], 0.97),
+
+        PhysicsEquation::new("Replicator dynamics: dx_i/dt = x_i * (f_i - φ) (evolutionary game theory)", r"\dot x_i=x_i(f_i-\bar\phi)",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("x_i","population share of strategy i","",""), v("f_i","fitness of strategy i","",""), v("φ","mean population fitness","","")],
+            vec![], &["evolution","population dynamics","strategy selection","natural selection","replicator"], 0.95),
+
+        PhysicsEquation::new("Evolutionary stable strategy (ESS): u(ESS, ESS) > u(mutant, ESS)", r"u(s^*,s^*)>u(s',s^*)\;\forall s'\neq s^*",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("u","payoff","",""), v("s*","ESS strategy","","")],
+            vec![], &["evolutionary stable","invasion barrier","population","stable equilibrium"], 0.94),
+
+        PhysicsEquation::new("Prisoner's dilemma: T > R > P > S and 2R > T+S", r"T>R>P>S,\quad 2R>T+S",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("T","temptation payoff","",""), v("R","reward payoff","",""), v("P","punishment payoff","",""), v("S","sucker payoff","","")],
+            vec![], &["cooperation","defection","coordination failure","social dilemma"], 0.97),
+
+        PhysicsEquation::new("Folk theorem: any payoff vector above minmax is achievable by repeated game equilibrium", r"v_i\geq\underline{v}_i\Rightarrow v\text{ sustained by subgame perfect eq.}",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("v_i","achievable payoff","",""), v("v̲_i","minmax value","","")],
+            vec![], &["repeated game","cooperation","reputation","long-run equilibrium","sustained"], 0.92),
+
+        PhysicsEquation::new("Shapley value: φ_i = Σ_{S} [|S|!(n-|S|-1)!/n!] * [v(S∪{i}) - v(S)]", r"\phi_i=\sum_{S\subseteq N\setminus\{i\}}\frac{|S|!(n-|S|-1)!}{n!}[v(S\cup\{i\})-v(S)]",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("φ_i","fair value share of player i","",""), v("v","coalition value function","","")],
+            vec![], &["coalition","fair division","cooperative game","contribution","attribution"], 0.93),
+
+        PhysicsEquation::new("Price of anarchy ρ = worst_eq_cost / optimal_cost", r"\rho=\frac{\max_{\text{eq}}C(\text{eq})}{C(\text{opt})}",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("ρ","price of anarchy","",""), v("C","social cost","","")],
+            vec![], &["efficiency loss","decentralization","social optimum","coordination cost"], 0.91),
+
+        PhysicsEquation::new("Hotelling's spatial competition: firms locate at median voter/consumer", r"x^*=\text{median}(F)",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("x*","optimal position","",""), v("F","consumer distribution","","")],
+            vec![], &["spatial competition","positioning","median voter","product differentiation"], 0.89),
+
+        PhysicsEquation::new("Bayesian Nash equilibrium: s_i* maximizes E[u_i | type θ_i]", r"s_i^*(\theta_i)=\arg\max_{s_i}\mathbb{E}_{\theta_{-i}}[u_i(s_i,s_{-i}^*,\theta)]",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("θ_i","private type/information of player i","","")],
+            vec![], &["incomplete information","beliefs","private information","signaling"], 0.93),
+
+        PhysicsEquation::new("Auction revenue equivalence: E[revenue] equal across auction formats", r"\mathbb{E}[R_{\text{first}}]=\mathbb{E}[R_{\text{second}}]=\mathbb{E}[R_{\text{Dutch}}]",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("R","auction revenue","","")],
+            vec![], &["auction","mechanism design","revenue","bidding strategy"], 0.90),
+
+        PhysicsEquation::new("Schelling coordination: equilibrium at salient focal points (Schelling points)", r"s^*=\arg\max_{s}\Pr(\text{others choose }s)",
+            Discipline::Custom("GameTheory".into()),
+            vec![v("s*","focal point / Schelling point","","")],
+            vec![], &["coordination","focal point","salience","convention","social norm"], 0.88),
+    ]);
+
+    // ── Marketing Science ─────────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("Bass diffusion model: dN/dt = (p + q*N/M) * (M - N)", r"\frac{dN}{dt}=\left(p+\frac{q}{M}N\right)(M-N)",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("N","cumulative adopters","",""), v("M","total market potential","",""), v("p","coefficient of innovation","",""), v("q","coefficient of imitation","","")],
+            vec![], &["diffusion","adoption","innovation","word of mouth","market penetration","spread"], 0.97),
+
+        PhysicsEquation::new("Viral coefficient k = invites_sent * conversion_rate (k>1 exponential growth)", r"k=i\cdot c,\quad N_t=N_0\cdot k^t",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("k","viral coefficient","",""), v("i","invites per user","",""), v("c","conversion rate","","")],
+            vec![], &["viral","exponential growth","referral","word of mouth","network effect","spreading"], 0.96),
+
+        PhysicsEquation::new("Customer lifetime value: CLV = M * (r/(1+d-r))", r"CLV=M\cdot\frac{r}{1+d-r}",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("M","margin per period","",""), v("r","retention rate","",""), v("d","discount rate","","")],
+            vec![], &["customer value","retention","loyalty","lifetime value","churn"], 0.94),
+
+        PhysicsEquation::new("Lanchester's square law: dB/dt = -α*R² (resource attrition)", r"\frac{dB}{dt}=-\alpha R^2",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("B","remaining force B","",""), v("R","force R strength","",""), v("α","attrition rate","","")],
+            vec![], &["market share","competitive attrition","advertising war","brand competition","dominance"], 0.90),
+
+        PhysicsEquation::new("Advertising adstock: A_t = spend_t + λ * A_{t-1} (carryover effect)", r"A_t=x_t+\lambda A_{t-1}",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("A_t","adstock at time t","",""), v("x_t","ad spend","",""), v("λ","decay / carryover rate","","")],
+            vec![], &["advertising","carryover","memory","brand recall","media effect"], 0.93),
+
+        PhysicsEquation::new("Price elasticity of demand: ε = (ΔQ/Q) / (ΔP/P)", r"\varepsilon=\frac{\partial Q/Q}{\partial P/P}",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("ε","price elasticity","",""), v("Q","quantity demanded","",""), v("P","price","","")],
+            vec![], &["price sensitivity","demand","elasticity","pricing strategy"], 0.97),
+
+        PhysicsEquation::new("Metcalfe's law: network value V ∝ n²", r"V\propto n^2",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("V","network value","",""), v("n","number of users","","")],
+            vec![], &["network effect","platform","viral","social network","connections"], 0.95),
+
+        PhysicsEquation::new("Reed's law: group-forming network value V ∝ 2^n", r"V\propto 2^n",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("V","group-network value","",""), v("n","number of users","","")],
+            vec![], &["group formation","community","network effect","exponential value"], 0.88),
+
+        PhysicsEquation::new("Independent cascade model: node v activates u with probability p_uv", r"P(\text{activate }u)=1-\prod_{v\in\text{active neighbors}}(1-p_{uv})",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("p_uv","edge influence probability","","")],
+            vec![], &["influence propagation","cascade","social contagion","viral spread","seeding"], 0.94),
+
+        PhysicsEquation::new("Linear threshold model: node activates when Σ w_uv ≥ threshold θ_v", r"\sum_{u\in N(v)}w_{uv}\geq\theta_v\Rightarrow v\text{ activates}",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("w_uv","influence weight","",""), v("θ_v","activation threshold","","")],
+            vec![], &["threshold","social influence","tipping point","collective behavior","norm adoption"], 0.93),
+
+        PhysicsEquation::new("Gompertz adoption curve: N(t) = M * exp(-exp(-k(t-t0)))", r"N(t)=M\exp(-\exp(-k(t-t_0)))",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("N","cumulative adopters","",""), v("M","market ceiling","",""), v("k","growth rate","",""), v("t0","inflection time","","")],
+            vec![], &["adoption","S-curve","market saturation","diffusion","growth"], 0.91),
+
+        PhysicsEquation::new("Marketing mix effectiveness: Sales = f(price, place, product, promotion)", r"S=\alpha\cdot P^{\beta_1}\cdot D^{\beta_2}\cdot A^{\beta_3}",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("S","sales","",""), v("α","baseline","",""), v("P","price","",""), v("D","distribution","",""), v("A","advertising","","")],
+            vec![], &["marketing mix","4Ps","attribution","spend optimization"], 0.90),
+
+        PhysicsEquation::new("Persuasion / attitude change: ΔA = E * R * I (elaboration likelihood)", r"\Delta A=E\cdot R\cdot I",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("E","elaboration likelihood","",""), v("R","route strength","",""), v("I","involvement","","")],
+            vec![], &["persuasion","attitude","messaging","framing","central route","peripheral route"], 0.87),
+
+        PhysicsEquation::new("Preferential attachment: P(link to node k) = k_degree / Σ degrees (Barabási-Albert)", r"P_k=\frac{k}{\sum_j k_j}",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("P_k","probability of new link","",""), v("k","node degree","","")],
+            vec![], &["rich get richer","power law","network growth","influence","hub formation"], 0.95),
+
+        PhysicsEquation::new("Zipf's law: frequency ∝ 1/rank (power law in language and markets)", r"f(r)\propto r^{-\alpha},\;\alpha\approx 1",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("f","frequency","",""), v("r","rank","","")],
+            vec![], &["power law","word frequency","market share","brand ranking","Pareto"], 0.93),
+
+        PhysicsEquation::new("Pareto principle: 80% of effects from 20% of causes", r"F(x)=1-\left(\frac{x_m}{x}\right)^\alpha",
+            Discipline::Custom("MarketingScience".into()),
+            vec![v("x_m","minimum value","",""), v("α","Pareto shape","","")],
+            vec![], &["80/20","Pareto","power law","customer concentration","revenue concentration"], 0.94),
+    ]);
+
+    // ── Chaos Theory (extended) ───────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("Lorenz attractor: dx/dt=σ(y-x), dy/dt=x(ρ-z)-y, dz/dt=xy-βz", r"\dot x=\sigma(y-x),\;\dot y=x(\rho-z)-y,\;\dot z=xy-\beta z",
+            Discipline::ChaosDynamics,
+            vec![v("σ","Prandtl number","",""), v("ρ","Rayleigh number","",""), v("β","geometric factor","","")],
+            vec![], &["Lorenz","strange attractor","chaos","butterfly effect","sensitive dependence"], 0.97),
+
+        PhysicsEquation::new("Logistic map: x_{n+1} = r * x_n * (1 - x_n) (period doubling to chaos)", r"x_{n+1}=rx_n(1-x_n)",
+            Discipline::ChaosDynamics,
+            vec![v("r","growth parameter","",""), v("x_n","population fraction","","")],
+            vec![], &["bifurcation","period doubling","chaos","logistic","discrete map"], 0.98),
+
+        PhysicsEquation::new("Feigenbaum constant δ ≈ 4.669 (universal period-doubling ratio)", r"\delta=\lim_{n\to\infty}\frac{r_{n}-r_{n-1}}{r_{n+1}-r_n}\approx 4.669",
+            Discipline::ChaosDynamics,
+            vec![v("δ","Feigenbaum constant","",""), v("r_n","n-th bifurcation parameter","","")],
+            vec![], &["universality","bifurcation","period doubling","Feigenbaum","renormalization"], 0.95),
+
+        PhysicsEquation::new("Rössler attractor: dx/dt=-(y+z), dy/dt=x+ay, dz/dt=b+z(x-c)", r"\dot x=-(y+z),\;\dot y=x+ay,\;\dot z=b+z(x-c)",
+            Discipline::ChaosDynamics,
+            vec![v("a","parameter a","",""), v("b","parameter b","",""), v("c","parameter c","","")],
+            vec![], &["Rossler","attractor","chaos","spiral","strange attractor"], 0.90),
+
+        PhysicsEquation::new("Liouville theorem: dρ/dt = 0 (phase space volume conserved in Hamiltonian systems)", r"\frac{d\rho}{dt}=\frac{\partial\rho}{\partial t}+\{H,\rho\}=0",
+            Discipline::ChaosDynamics,
+            vec![v("ρ","phase space density","","")],
+            vec![], &["phase space","incompressible","Hamiltonian","conservation","ergodic"], 0.95),
+
+        PhysicsEquation::new("Correlation dimension D_2 = lim_{ε→0} log C(ε) / log ε", r"D_2=\lim_{\varepsilon\to 0}\frac{\log C(\varepsilon)}{\log\varepsilon}",
+            Discipline::ChaosDynamics,
+            vec![v("D_2","correlation dimension","",""), v("C(ε)","correlation integral","","")],
+            vec![], &["attractor dimension","fractal","chaos","embedding","Grassberger-Procaccia"], 0.91),
+
+        PhysicsEquation::new("Poincaré recurrence: almost all phase space trajectories return arbitrarily close to initial state", r"\mu(\{x:\exists T>0,\phi^T(x)\in U\})=\mu(U)",
+            Discipline::ChaosDynamics,
+            vec![v("μ","invariant measure","",""), v("φ^T","flow map","","")],
+            vec![], &["recurrence","ergodic","return","quasi-periodic","long-term behavior"], 0.88),
+
+        PhysicsEquation::new("Tent map: x_{n+1} = μ*min(x_n, 1-x_n) (exact chaos for μ=2)", r"x_{n+1}=\mu\min(x_n,1-x_n)",
+            Discipline::ChaosDynamics,
+            vec![v("μ","tent parameter","","")],
+            vec![], &["tent map","exact solution","chaos","topological conjugacy","binary shift"], 0.88),
+
+        PhysicsEquation::new("KAM theorem: most invariant tori survive small perturbations if ω is Diophantine", r"|k\cdot\omega|\geq\frac{\gamma}{|k|^\tau}\;\forall k\neq 0",
+            Discipline::ChaosDynamics,
+            vec![v("ω","frequency vector","",""), v("γ","KAM constant","",""), v("τ","Diophantine exponent","","")],
+            vec![], &["KAM","invariant tori","integrability","perturbation","nearly integrable"], 0.90),
+
+        PhysicsEquation::new("Entropy production rate σ = dS/dt > 0 (irreversible processes)", r"\sigma=\frac{dS}{dt}=\sum_k J_k X_k\geq 0",
+            Discipline::ChaosDynamics,
+            vec![v("σ","entropy production rate","",""), v("J_k","thermodynamic flux","",""), v("X_k","thermodynamic force","","")],
+            vec![], &["irreversibility","entropy production","dissipation","nonequilibrium","arrow of time"], 0.93),
+
+        PhysicsEquation::new("Sensitivity to initial conditions: |δx(t)| = |δx(0)| * exp(λ_max * t)", r"|\delta x(t)|=|\delta x(0)|\,e^{\lambda_{\max}t}",
+            Discipline::ChaosDynamics,
+            vec![v("λ_max","maximum Lyapunov exponent","","")],
+            vec![], &["butterfly effect","sensitive dependence","chaos","prediction horizon","unpredictability"], 0.98),
+    ]);
+
+    // ── Quantum Mechanics and Quantum Information (extended) ──────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("Lindblad master equation: dρ/dt = -i[H,ρ] + Σ_k (L_k ρ L_k† - ½{L_k†L_k, ρ})", r"\frac{d\rho}{dt}=-i[H,\rho]+\sum_k\left(L_k\rho L_k^\dagger-\tfrac{1}{2}\{L_k^\dagger L_k,\rho\}\right)",
+            Discipline::QuantumMechanics,
+            vec![v("ρ","density matrix","",""), v("H","Hamiltonian","",""), v("L_k","Lindblad jump operators","","")],
+            vec![], &["open quantum system","decoherence","dissipation","quantum noise","Markovian"], 0.95),
+
+        PhysicsEquation::new("Quantum Zeno effect: P(no decay in t) = |<ψ|e^{-iHt/ħ}|ψ>|^{2N} → 1 as N→∞", r"P_{\text{survival}}=\left|\langle\psi|e^{-iHt/(N\hbar)}|\psi\rangle\right|^{2N}\to 1",
+            Discipline::QuantumMechanics,
+            vec![v("N","number of measurements","","")],
+            vec![], &["quantum Zeno","measurement","freezing","frequent observation","watched pot"], 0.90),
+
+        PhysicsEquation::new("Wigner function: W(x,p) = (1/πħ) ∫ ψ*(x+y)ψ(x-y) e^{2ipy/ħ} dy", r"W(x,p)=\frac{1}{\pi\hbar}\int\psi^*(x+y)\psi(x-y)e^{2ipy/\hbar}dy",
+            Discipline::QuantumMechanics,
+            vec![v("W","Wigner quasi-probability distribution","","")],
+            vec![], &["phase space","quasi-probability","quantum optics","negativity","non-classical"], 0.90),
+
+        PhysicsEquation::new("Rabi oscillation: P_↑(t) = sin²(Ωt/2) (two-level system driven)", r"P_\uparrow(t)=\sin^2\!\left(\frac{\Omega t}{2}\right)",
+            Discipline::QuantumMechanics,
+            vec![v("Ω","Rabi frequency","","")],
+            vec![], &["two-level system","driven qubit","oscillation","resonance","quantum control"], 0.94),
+
+        PhysicsEquation::new("Bloch sphere: |ψ⟩ = cos(θ/2)|0⟩ + e^{iφ}sin(θ/2)|1⟩", r"|\psi\rangle=\cos\tfrac{\theta}{2}|0\rangle+e^{i\phi}\sin\tfrac{\theta}{2}|1\rangle",
+            Discipline::QuantumMechanics,
+            vec![v("θ","polar angle on Bloch sphere","",""), v("φ","azimuthal angle","","")],
+            vec![], &["qubit","Bloch sphere","superposition","state representation","quantum bit"], 0.97),
+
+        PhysicsEquation::new("Quantum mutual information: I(A:B) = S(A) + S(B) - S(AB)", r"I(A:B)=S(A)+S(B)-S(AB)",
+            Discipline::QuantumMechanics,
+            vec![v("S(A)","von Neumann entropy of A","","")],
+            vec![], &["quantum correlation","entanglement","mutual information","subsystem"], 0.94),
+
+        PhysicsEquation::new("Quantum discord: D(A|B) = I(A:B) - C(A:B) (beyond-entanglement correlations)", r"D(A|B)=I(A:B)-\mathcal{C}(A:B)",
+            Discipline::QuantumMechanics,
+            vec![v("D","quantum discord","",""), v("C","classical correlations","","")],
+            vec![], &["quantum correlation","discord","beyond entanglement","non-classical","measurement"], 0.88),
+
+        PhysicsEquation::new("Grover search speedup: O(√N) queries vs O(N) classical", r"T_{\text{Grover}}=O(\sqrt{N})",
+            Discipline::QuantumMechanics,
+            vec![v("N","search space size","","")],
+            vec![], &["quantum speedup","search","Grover","quadratic speedup","quantum algorithm"], 0.95),
+
+        PhysicsEquation::new("Shor's algorithm: period-finding in O((log N)^3) — exponential speedup for factoring", r"T_{\text{Shor}}=O((\log N)^3)",
+            Discipline::QuantumMechanics,
+            vec![v("N","integer to factor","","")],
+            vec![], &["quantum algorithm","factoring","cryptography","exponential speedup","period finding"], 0.95),
+
+        PhysicsEquation::new("Quantum error correction: 3-qubit bit flip code encodes 1 logical qubit", r"|0_L\rangle=|000\rangle,\;|1_L\rangle=|111\rangle",
+            Discipline::QuantumMechanics,
+            vec![v("|0_L⟩","logical zero","",""), v("|1_L⟩","logical one","","")],
+            vec![], &["error correction","fault tolerance","logical qubit","redundancy","quantum code"], 0.92),
+
+        PhysicsEquation::new("Quantum Fisher information: F_Q[ρ,H] = 2 Σ_{m,n} |<m|H|n>|² (p_m-p_n)² / (p_m+p_n)", r"F_Q[\rho,H]=2\sum_{m\neq n}\frac{(p_m-p_n)^2}{p_m+p_n}|\langle m|H|n\rangle|^2",
+            Discipline::QuantumMechanics,
+            vec![v("F_Q","quantum Fisher information","","")],
+            vec![], &["quantum metrology","parameter estimation","Heisenberg limit","precision","sensing"], 0.91),
+
+        PhysicsEquation::new("Decoherence time: τ_D ~ τ_relax / (Δx/λ_dB)² (larger/hotter = faster decoherence)", r"\tau_D\sim\tau_{\text{relax}}\left(\frac{\lambda_{dB}}{\Delta x}\right)^2",
+            Discipline::QuantumMechanics,
+            vec![v("τ_D","decoherence time","",""), v("Δx","spatial superposition size","",""), v("λ_dB","thermal de Broglie wavelength","","")],
+            vec![], &["decoherence","quantum to classical","measurement","environment","macroscopic"], 0.92),
+
+        PhysicsEquation::new("Quantum teleportation: fidelity F = 1 for perfect Bell state (F > 2/3 beats classical)", r"F=\langle\psi_{\text{out}}|\psi_{\text{in}}\rangle=1\text{ (ideal)}",
+            Discipline::QuantumMechanics,
+            vec![v("F","teleportation fidelity","","")],
+            vec![], &["quantum teleportation","Bell state","classical limit","fidelity","entanglement"], 0.93),
+    ]);
+
+    // ── Cross-Disciplinary Bridges ─────────────────────────────────────────────
+    // These equations link disciplines where canonical connections don't exist —
+    // the core purpose of the EEM: surfacing the physics of unbounded problems.
+    eqs.extend(vec![
+        PhysicsEquation::new("Free energy principle: F = E_q[log q - log p] = KL[q||p] - log p(y) (Friston)", r"F=\mathbb{E}_q[\log q(\phi)-\log p(\phi,y)]\geq -\log p(y)",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("F","variational free energy","",""), v("q","recognition density","",""), v("p","generative model","","")],
+            vec![], &["free energy","active inference","prediction error","perception","action","self-organization","belief updating"], 0.92),
+
+        PhysicsEquation::new("Maximum entropy principle: p* = argmax H(p) subject to constraints E_p[f_k] = c_k (Jaynes)", r"p^*=\arg\max_p\left[-\sum_x p(x)\log p(x)\right]\;\text{s.t. }\mathbb{E}_p[f_k]=c_k",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("p*","maximum entropy distribution","",""), v("f_k","constraint functions","","")],
+            vec![], &["maximum entropy","Jaynes","unbiased inference","least assumption","statistical mechanics","information theory"], 0.95),
+
+        PhysicsEquation::new("Power law: P(x) ∝ x^{-α} (scale-free, self-similar)", r"P(x)\propto x^{-\alpha}",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("α","power law exponent","","")],
+            vec![], &["power law","scale-free","heavy tail","self-similarity","critical phenomena","scale invariance"], 0.97),
+
+        PhysicsEquation::new("Percolation threshold: giant component emerges at p_c (network phase transition)", r"p_c=\frac{1}{\langle k\rangle}\text{ (random graph)}",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("p_c","percolation threshold","",""), v("⟨k⟩","mean degree","","")],
+            vec![], &["percolation","phase transition","network","connectivity","cascade","contagion"], 0.93),
+
+        PhysicsEquation::new("Small-world network: L ~ log N / log k, C >> C_random (Watts-Strogatz)", r"L\sim\frac{\log N}{\log k},\quad C\gg C_{\text{rand}}",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("L","average path length","",""), v("C","clustering coefficient","",""), v("N","nodes","","")],
+            vec![], &["small world","six degrees","network","clustering","social network","information spread"], 0.94),
+
+        PhysicsEquation::new("Ising model: H = -J Σ s_i s_j - h Σ s_i (collective opinion dynamics)", r"H=-J\sum_{\langle i,j\rangle}s_is_j-h\sum_i s_i",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("J","coupling strength","",""), v("h","external field","",""), v("s_i","spin / opinion ±1","","")],
+            vec![], &["opinion dynamics","social physics","collective behavior","phase transition","ferromagnetism","majority rule"], 0.94),
+
+        PhysicsEquation::new("Mean field theory: m = tanh(βJzm + βh) (self-consistent opinion)", r"m=\tanh(\beta Jzm+\beta h)",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("m","mean field / average opinion","",""), v("z","coordination number","",""), v("β","inverse temperature","","")],
+            vec![], &["mean field","self-consistent","opinion","social influence","critical point"], 0.92),
+
+        PhysicsEquation::new("Renormalization group fixed point: β(g*) = 0, universality class determined by RG flow", r"\beta(g^*)=\mu\frac{dg}{d\mu}\bigg|_{g=g^*}=0",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("g*","fixed point coupling","",""), v("β","beta function","","")],
+            vec![], &["universality","fixed point","scale invariance","critical phenomena","RG","cross-scale"], 0.93),
+
+        PhysicsEquation::new("Complexity: K(x) = shortest program length (Kolmogorov) — limits compression", r"K(x)=\min_{p:\mathcal{U}(p)=x}|p|",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("K(x)","Kolmogorov complexity","","")],
+            vec![], &["complexity","incompressibility","randomness","minimum description","algorithmic information"], 0.90),
+
+        PhysicsEquation::new("Integrated information Φ: consciousness = irreducible causal structure (Tononi)", r"\Phi=\min_{\text{partition}}I(M_0;M_t)",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("Φ","integrated information","","")],
+            vec![], &["consciousness","integrated information","irreducibility","causation","whole vs parts"], 0.82),
+
+        PhysicsEquation::new("Fitness landscape: W(genotype) evolves by gradient ascent on W — applies to ideas/products", r"\frac{dp_i}{dt}=p_i(W_i-\bar W)",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("W_i","fitness of type i","",""), v("p_i","frequency","","")],
+            vec![], &["fitness landscape","selection","adaptation","memetics","innovation","strategy evolution"], 0.91),
+
+        PhysicsEquation::new("Cascade failure: σ²_load > σ²_capacity → systemic collapse (hidden cross-dependency)", r"P(\text{cascade})\to 1\text{ when }\frac{\sigma_\ell^2}{\sigma_c^2}>1",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("σ_ℓ","load variance","",""), v("σ_c","capacity variance","","")],
+            vec![], &["cascade","systemic risk","contagion","fragility","interdependency","network failure"], 0.90),
+
+        PhysicsEquation::new("Red Queen hypothesis: dx/dt = x*(f(x,y)-φ), dy/dt = y*(g(x,y)-φ) — coevolution arms race", r"\dot x=x(f(x,y)-\bar\phi),\quad\dot y=y(g(x,y)-\bar\phi)",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("f","fitness of x given y","",""), v("g","fitness of y given x","","")],
+            vec![], &["coevolution","arms race","Red Queen","competitive escalation","technology race","market dynamics"], 0.89),
+
+        PhysicsEquation::new("Schelling segregation: local preference → global segregation (emergent macro from micro)", r"u_i=1\text{ if }f_{\text{same}}\geq\theta,\;0\text{ otherwise}",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("θ","tolerance threshold","",""), v("f_same","fraction of similar neighbors","","")],
+            vec![], &["emergence","segregation","tipping point","local preference","global pattern","self-organization"], 0.91),
+
+        PhysicsEquation::new("NK complexity model: W(σ) = (1/N) Σ f_i(σ_i, neighbors) — rugged fitness landscape", r"W(\sigma)=\frac{1}{N}\sum_{i=1}^N f_i(\sigma_i,\sigma_{j_1},\ldots,\sigma_{j_K})",
+            Discipline::Custom("CrossDisciplinary".into()),
+            vec![v("N","elements","",""), v("K","interdependencies per element","",""), v("f_i","local fitness contribution","","")],
+            vec![], &["rugged landscape","complexity","interdependency","adaptation","local optima","search"], 0.88),
     ]);
 
     eqs

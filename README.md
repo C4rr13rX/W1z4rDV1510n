@@ -44,7 +44,7 @@ W1z4rDV1510n is a **node architecture**. It knows nothing about specific domains
 
 ### Environmental Equation Matrix (`EquationMatrixRuntime`)
 - A self-growing directed graph of physics equations spanning all domains from Newtonian mechanics to topological quantum phenomena
-- **214 seed equations across 21 disciplines**:
+- **282 seed equations across 24 disciplines**:
   - Classical Mechanics (F=ma through SHO, impulse, center of mass, torque, rotational dynamics)
   - Waves & Oscillations (wave equation, Doppler, decibel scale, intensity)
   - Lagrangian / Hamiltonian mechanics (action principle, Poisson brackets, adiabatic invariants)
@@ -66,6 +66,11 @@ W1z4rDV1510n is a **node architecture**. It knows nothing about specific domains
   - Biophysics & Complex Systems (logistic growth, Lotka-Volterra, Hodgkin-Huxley neuron, Einstein diffusion, Stokes-Einstein)
   - Plasma Physics (plasma frequency, Debye length)
   - Mathematical Tools (Bayes' theorem, Hebbian learning, sigmoid/softmax, cosine similarity, Pearson correlation, DTW, EMA)
+  - **Game Theory** (Nash equilibrium, minimax, replicator dynamics, ESS, prisoner's dilemma, folk theorem, Shapley value, price of anarchy, Bayesian Nash, Hotelling spatial competition, Schelling focal points, auction revenue equivalence)
+  - **Marketing Science** (Bass diffusion, viral coefficient k, CLV, Lanchester's square law, adstock carryover, price elasticity, Metcalfe's law, Reed's law, independent cascade, linear threshold, Gompertz adoption, marketing mix, persuasion/ELM, preferential attachment, Zipf's law, Pareto 80/20)
+  - **Chaos Theory extended** (Lorenz attractor, logistic map, Feigenbaum constant, Rössler attractor, Liouville theorem, correlation dimension, Poincaré recurrence, tent map, KAM theorem, entropy production rate, sensitive dependence)
+  - **Quantum extended** (Lindblad master equation, quantum Zeno effect, Wigner function, Rabi oscillations, Bloch sphere, quantum mutual information, quantum discord, Grover search, Shor's algorithm, quantum error correction, quantum Fisher information, decoherence time, teleportation fidelity)
+  - **Cross-Disciplinary Bridges** (Friston free energy principle, Jaynes maximum entropy, power laws, percolation threshold, small-world networks, Ising opinion dynamics, mean field theory, RG fixed points, Kolmogorov complexity, integrated information Φ, fitness landscapes, cascade failure, Red Queen coevolution, Schelling segregation, NK complexity model)
 - **23 semantic links** between equations: `derives_from`, `bridges`, `special_case`, `unifies`, `approximates`, `generalizes`, `contradicts`
 - **Dimension-aware**: equations tagged with spatial applicability. Anyons (`ψ → e^{iθ}ψ`) are strictly 2D — they will not surface in a 3D sensor context. Maxwell's equations are 3D. Thermodynamic identities are dimension-agnostic
 - **Sensor-driven**: `apply_to_context(labels, dims)` takes active neuro-fabric labels + sensor dimensionality and returns candidate equations explaining the current observation
