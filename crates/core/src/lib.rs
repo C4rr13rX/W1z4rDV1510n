@@ -34,5 +34,6 @@ pub mod system;
 pub mod telemetry;
 pub mod tensor;
 pub mod streaming;
+pub mod threat;
 
 pub use orchestrator::{RunOutcome, run_with_config, run_with_snapshot};

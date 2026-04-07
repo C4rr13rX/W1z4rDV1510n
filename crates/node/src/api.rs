@@ -32,6 +32,7 @@ use w1z4rdv1510n::blockchain::{
 };
 use w1z4rdv1510n::neuro::{NeuroRuntime, NeuroRuntimeConfig, NeuroRuntimeHandle, NeuroSnapshot};
 use w1z4rdv1510n::schema::EnvironmentSnapshot;
+use w1z4rdv1510n::threat::{ThreatOverlay, ThreatScene};
 use w1z4rdv1510n::bridge::{BridgeProof, BridgeVerificationMode, ChainKind, bridge_deposit_id};
 use w1z4rdv1510n::config::{BridgeConfig, BridgeChainPolicy, RunConfig};
 use w1z4rdv1510n::schema::Timestamp;
@@ -72,6 +73,7 @@ struct ApiState {
     fabric_share_kind: String,
     run_config_path: PathBuf,
     neuro: NeuroRuntimeHandle,
+    threat: Arc<Mutex<ThreatScene>>,
 }
 
 #[derive(Clone)]
@@ -665,6 +667,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         fabric_share_kind: share_kind.clone(),
         run_config_path: PathBuf::from(&config.streaming.run_config_path),
         neuro: neuro_handle,
+        threat: Arc::new(Mutex::new(ThreatScene::new())),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -708,6 +711,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/identity/:thread_id", get(get_identity_status))
         .route("/balance/:node_id", get(get_balance))
         .route("/metrics", get(get_metrics))
+        .route("/threat/ingest", post(threat_ingest))
+        .route("/threat/overlay", get(threat_overlay))
+        .route("/threat/predict", post(threat_predict))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -2697,6 +2703,113 @@ fn build_ledger(config: &NodeConfig) -> Result<Arc<dyn BlockchainLedger>> {
             Ok(Arc::new(NoopLedger::default()))
         }
     }
+}
+
+// ─── Threat endpoints ─────────────────────────────────────────────────────────
+
+/// Request body for `POST /threat/ingest` and `POST /threat/predict`.
+///
+/// `frame` maps entity_id → attribute key/value pairs from sensor streams.
+/// Attributes mirror what the streaming processor extracts — see
+/// `ThreatFieldEngine::ingest_from_attributes` for the full key list.
+#[derive(Debug, Deserialize)]
+struct ThreatIngestRequest {
+    /// Unix timestamp for this observation frame.
+    #[serde(default)]
+    timestamp_unix: i64,
+    /// Per-entity sensor attributes.
+    frame: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
+}
+
+/// Ingest sensor attributes into the threat scene (fire-and-forget).
+///
+/// Returns 204 No Content on success.
+async fn threat_ingest(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<ThreatIngestRequest>,
+) -> StatusCode {
+    if authorize(&state, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let ts = Timestamp { unix: req.timestamp_unix };
+    if let Ok(mut scene) = state.threat.lock() {
+        scene.ingest_frame(&req.frame, ts);
+    }
+    StatusCode::NO_CONTENT
+}
+
+/// Return the current threat overlay for the scene.
+///
+/// Computes a fresh overlay snapshot from the most recently ingested frame.
+async fn threat_overlay(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(e) = authorize(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        );
+    }
+    let ts = unix_now();
+    let overlay = {
+        match state.threat.lock() {
+            Ok(mut scene) => scene.overlay(ts),
+            Err(_) => return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "threat scene lock poisoned" })),
+            ),
+        }
+    };
+    match serde_json::to_value(&overlay) {
+        Ok(v)  => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+    }
+}
+
+/// Ingest a frame of sensor attributes and immediately return the resulting overlay.
+async fn threat_predict(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<ThreatIngestRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(e) = authorize(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        );
+    }
+    let ts = if req.timestamp_unix != 0 {
+        Timestamp { unix: req.timestamp_unix }
+    } else {
+        unix_now()
+    };
+    let overlay: ThreatOverlay = {
+        match state.threat.lock() {
+            Ok(mut scene) => {
+                scene.ingest_frame(&req.frame, ts);
+                scene.overlay(ts)
+            }
+            Err(_) => return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "threat scene lock poisoned" })),
+            ),
+        }
+    };
+    match serde_json::to_value(&overlay) {
+        Ok(v)  => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+    }
+}
+
+fn unix_now() -> Timestamp {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Timestamp { unix: secs }
 }
 
 #[cfg(test)]

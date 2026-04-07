@@ -755,6 +755,7 @@ pub struct StreamingInference {
     sensor_registry: SensorRegistry,
     qa_runtime: crate::streaming::qa_runtime::QaRuntime,
     fabric_trainer: FabricTrainer,
+    threat_scene: crate::threat::ThreatScene,
     run_config: RunConfig,
     symbolizer: SymbolizeConfig,
     last_batch: Option<TokenBatch>,
@@ -894,6 +895,7 @@ impl StreamingInference {
             sensor_registry,
             qa_runtime,
             fabric_trainer,
+            threat_scene: crate::threat::ThreatScene::new(),
             run_config,
             symbolizer: SymbolizeConfig::default(),
             last_batch: None,
@@ -1042,6 +1044,12 @@ impl StreamingInference {
             }
         }
         Some(share)
+    }
+
+    /// Access the threat scene directly — useful for registering entities and
+    /// querying the current overlay from outside the processing loop.
+    pub fn threat_scene(&mut self) -> &mut crate::threat::ThreatScene {
+        &mut self.threat_scene
     }
 
     pub fn update_metacognition_config(&mut self, config: MetacognitionConfig) {
@@ -1666,6 +1674,26 @@ impl StreamingInference {
                         "spike_messages".to_string(),
                         serde_json::to_value(messages)?,
                     );
+                }
+            }
+        }
+        // ── Threat scene: extract per-entity attributes from BehavioralToken events ─
+        {
+            use crate::streaming::schema::EventKind;
+            let mut frame: HashMap<String, HashMap<String, serde_json::Value>> = HashMap::new();
+            for token in &batch.tokens {
+                if matches!(token.kind, EventKind::BehavioralAtom | EventKind::BehavioralToken) {
+                    if let Some(eid) = token.attributes.get("entity_id").and_then(|v| v.as_str()) {
+                        frame.entry(eid.to_string()).or_default().extend(token.attributes.clone());
+                    }
+                }
+            }
+            if !frame.is_empty() {
+                self.threat_scene.ingest_frame(&frame, batch.timestamp);
+                let overlay = self.threat_scene.overlay(batch.timestamp);
+                if let Ok(v) = serde_json::to_value(&overlay) {
+                    report_metadata.insert("threat_overlay".to_string(), v.clone());
+                    snapshot.metadata.insert("threat_overlay".to_string(), v);
                 }
             }
         }
