@@ -48,9 +48,32 @@ pub fn anneal(
     if let Some(neuro_runtime) = neuro.as_ref() {
         neuro_runtime.observe_states(population.particles.iter().map(|p| &p.current_state));
     }
+    // Track last neuro coherence for fabric-modulated temperature.
+    let mut fabric_coherence: f64 = 0.5; // neutral until first snapshot
+
     for iteration in 0..schedule.n_iterations {
         let base_temperature = temperature(iteration, schedule);
-        let (temperature, boosted) = homeo_state.effective_temperature(base_temperature);
+        let (mut temperature, boosted) = homeo_state.effective_temperature(base_temperature);
+
+        // Coherence-modulated temperature: when the neural fabric has high
+        // confidence about what comes next (tight motif alignment, low
+        // prediction error), let the annealer converge faster by reducing
+        // temperature. When the fabric is uncertain, keep temperature high
+        // so the annealer explores. This replaces a blind cooling schedule
+        // with the fabric's own epistemic state as the thermostat.
+        //
+        //   T_eff = T_schedule * (1 / (coherence + 0.1))   [coherence in 0..1]
+        //
+        // coherence=1 → T_eff = T/1.1  (nearly unchanged, already confident)
+        // coherence=0 → T_eff = T/0.1 = 10×T (push to explore)
+        // coherence=0.5 → T_eff = T/0.6 ≈ 1.7×T (mild exploration boost)
+        //
+        // Combined with homeostasis: if both fire the result is multiplicative,
+        // which is intentional — confused + stagnant = maximum exploration.
+        if schedule.n_iterations > 1 {
+            let coherence_scale = 1.0 / (fabric_coherence + 0.1).min(2.0);
+            temperature *= coherence_scale;
+        }
         population.temperature = temperature;
         population.iteration = iteration;
         let enforce_constraints = search_module
@@ -106,6 +129,14 @@ pub fn anneal(
 
         if let Some(neuro_runtime) = neuro.as_ref() {
             neuro_runtime.observe_states(population.particles.iter().map(|p| &p.current_state));
+            // Update fabric coherence for the next iteration's temperature modulation.
+            // Coherence = mean prediction confidence across all tracked symbols.
+            // When no predictions exist yet, stay at 0.5 (neutral).
+            let snap = neuro_runtime.snapshot();
+            if !snap.prediction_confidence.is_empty() {
+                let sum: f64 = snap.prediction_confidence.values().sum();
+                fabric_coherence = (sum / snap.prediction_confidence.len() as f64).clamp(0.0, 1.0);
+            }
         }
 
         let min_energy = population

@@ -1076,48 +1076,87 @@ impl EnergyModel {
             return contribution;
         };
         let snapshot: NeuroSnapshot = runtime.snapshot();
-        if snapshot.active_networks.is_empty() || self.stack_history.is_empty() {
-            return contribution;
-        }
-        let curr_hash = motif_hash_from_state(state, &self.symbol_meta);
-        let history_window = self
-            .stack_motif_hashes
-            .iter()
-            .rev()
-            .take(3)
-            .collect::<Vec<_>>();
-        if let Some(curr) = curr_hash.as_ref() {
-            if !history_window.iter().any(|h| *h == curr) {
-                for symbol_id in state.symbol_states.keys() {
-                    contribution.add_symbol(symbol_id, 0.02);
+
+        // ── Motif prior alignment ────────────────────────────────────────────
+        // `temporal_motif_priors` encodes what the fabric expects to see next
+        // based on the current working-memory sequence — the motif transition
+        // distribution learned from observation. States that match high-prior
+        // labels get lower energy; states that match no priors get penalized.
+        //
+        // This is the core change: the annealer's energy landscape is now
+        // shaped by the fabric's learned sequence expectations, not just by
+        // physics constraints. The motif prior IS the experiential energy term.
+        if !snapshot.temporal_motif_priors.is_empty() {
+            for (symbol_id, symbol_state) in state.symbol_states.iter() {
+                let zone = zone_label(&symbol_state.position);
+                let role_label = self
+                    .symbol_meta
+                    .get(symbol_id)
+                    .map(|m| format!("wm::{}|{}", m.role.as_str(), zone))
+                    .unwrap_or_else(|| format!("wm::{zone}"));
+
+                // How well does this symbol's current position match the
+                // fabric's expectation for that role+zone combination?
+                let prior = snapshot
+                    .temporal_motif_priors
+                    .get(&role_label)
+                    .copied()
+                    .or_else(|| {
+                        // Fall back to any wm:: label matching this role.
+                        let role = self
+                            .symbol_meta
+                            .get(symbol_id)
+                            .map(|m| m.role.as_str())
+                            .unwrap_or("unknown");
+                        snapshot
+                            .temporal_motif_priors
+                            .iter()
+                            .filter(|(k, _)| k.contains(role))
+                            .map(|(_, &v)| v)
+                            .fold(None, |acc, v| Some(acc.unwrap_or(0.0_f64).max(v)))
+                    })
+                    .unwrap_or(0.0);
+
+                if prior > 0.05 {
+                    // High prior → low energy penalty (this state is expected).
+                    // Penalty is inverted: 1-prior, scaled down to keep it
+                    // commensurate with other energy terms.
+                    let reward = (1.0 - prior) * 0.015;
+                    contribution.add_symbol(symbol_id, reward);
+                } else {
+                    // This symbol's position matches no learned motif expectation —
+                    // add a small novelty penalty proportional to how far it is
+                    // from any known centroid.
+                    let min_centroid_dist = snapshot
+                        .centroids
+                        .values()
+                        .map(|c| distance(&symbol_state.position, c))
+                        .fold(f64::INFINITY, f64::min);
+                    let novelty_penalty = (min_centroid_dist * 0.02).min(0.05);
+                    contribution.add_symbol(symbol_id, novelty_penalty);
                 }
             }
-            if let Some(prev) = history_window.get(0) {
-                if *prev != curr {
-                    for symbol_id in state.symbol_states.keys() {
-                        contribution.add_symbol(symbol_id, 0.01);
+        }
+
+        // ── Network continuity (retained from original) ──────────────────────
+        // Penalize proposals where members of strong active networks disappear.
+        if !self.stack_history.is_empty() {
+            let prev_labels: std::collections::HashSet<String> =
+                self.stack_history.last().unwrap().symbol_states.keys().cloned().collect();
+            for net in &snapshot.active_networks {
+                let normalized = (net.strength as f64).min(10.0) / 10.0;
+                if normalized < 0.2 { continue; }
+                for member in &net.members {
+                    if let Some(symbol_id) = member.strip_prefix("id::") {
+                        if !prev_labels.contains(symbol_id) {
+                            let penalty = (1.0 - normalized) * 0.02 * (net.level as f64 + 1.0);
+                            contribution.add_symbol(symbol_id, penalty);
+                        }
                     }
                 }
             }
         }
-        let prev_frame = self.stack_history.last().unwrap();
-        let prev_labels: std::collections::HashSet<String> =
-            prev_frame.symbol_states.keys().cloned().collect();
-        for net in &snapshot.active_networks {
-            let normalized = (net.strength as f64).min(10.0) / 10.0;
-            if normalized < 0.2 {
-                continue;
-            }
-            // Reward carryover of members that persist; penalize if a member vanished.
-            for member in &net.members {
-                if let Some(symbol_id) = member.strip_prefix("id::") {
-                    if !prev_labels.contains(symbol_id) {
-                        let penalty = (1.0 - normalized) * 0.02 * (net.level as f64 + 1.0);
-                        contribution.add_symbol(symbol_id, penalty);
-                    }
-                }
-            }
-        }
+
         contribution
     }
 

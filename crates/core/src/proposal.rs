@@ -43,6 +43,14 @@ pub struct ProposalConfig {
     /// Weight for factor priors when biasing proposals (role/zone/group).
     #[serde(default = "ProposalConfig::default_factor_weight")]
     pub factor_prior_weight: f64,
+    /// Pull strength toward temporal predictions from the neuro fabric (0..1).
+    /// High = proposal strongly follows fabric's positional predictions.
+    #[serde(default = "ProposalConfig::default_prediction_pull")]
+    pub prediction_pull: f64,
+    /// Pull strength toward working-memory motif priors (0..1).
+    /// High = proposal biased toward positions consistent with recent motifs.
+    #[serde(default = "ProposalConfig::default_working_memory_pull")]
+    pub working_memory_pull: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,14 +77,16 @@ impl Default for ProposalConfig {
             adaptive_move_mixing: true,
             relational_priors_path: None,
             factor_prior_weight: ProposalConfig::default_factor_weight(),
+            prediction_pull: ProposalConfig::default_prediction_pull(),
+            working_memory_pull: ProposalConfig::default_working_memory_pull(),
         }
     }
 }
 
 impl ProposalConfig {
-    fn default_factor_weight() -> f64 {
-        1.0
-    }
+    fn default_factor_weight() -> f64 { 1.0 }
+    fn default_prediction_pull() -> f64 { 0.18 }
+    fn default_working_memory_pull() -> f64 { 0.08 }
 }
 
 fn zone_bin(position: &Position) -> (i32, i32) {
@@ -729,9 +739,10 @@ impl DefaultProposalKernel {
                     let dx = center.x - symbol_state.position.x;
                     let dy = center.y - symbol_state.position.y;
                     let dz = center.z - symbol_state.position.z;
-                    symbol_state.position.x += dx * 0.12 * rng.gen_range(0.5..1.0);
-                    symbol_state.position.y += dy * 0.12 * rng.gen_range(0.5..1.0);
-                    symbol_state.position.z += dz * 0.05 * rng.gen_range(0.5..1.0);
+                    let pull = self.config.prediction_pull;
+                    symbol_state.position.x += dx * pull * rng.gen_range(0.5..1.0);
+                    symbol_state.position.y += dy * pull * rng.gen_range(0.5..1.0);
+                    symbol_state.position.z += dz * (pull * 0.4) * rng.gen_range(0.5..1.0);
                 } else if !neuro.active_labels.contains(label) {
                     let jitter = 0.02;
                     symbol_state.position.x += rng.gen_range(-jitter..jitter);
@@ -771,7 +782,8 @@ impl DefaultProposalKernel {
                     .unwrap_or(0.5)
                     .clamp(0.0, 1.0);
                 let surprise = neuro.surprise.get(symbol_id).copied().unwrap_or(0.0);
-                let weight = (1.0 / (1.0 + err)) * confidence as f64 * 0.4;
+                // Use configured prediction_pull, scaled by per-symbol confidence.
+                let weight = (1.0 / (1.0 + err)) * confidence * self.config.prediction_pull;
                 symbol_state.position.x += (pred.x - symbol_state.position.x) * weight;
                 symbol_state.position.y += (pred.y - symbol_state.position.y) * weight;
                 symbol_state.position.z += (pred.z - symbol_state.position.z) * weight * 0.5;
@@ -781,13 +793,34 @@ impl DefaultProposalKernel {
                     symbol_state.position.y += rng.gen_range(-jitter..jitter);
                 }
             }
-            if let Some(motif) = neuro.working_memory.last() {
-                // Treat working-memory motif as a soft relational hint.
-                let jitter = self.config.max_step_size.min(0.1);
-                let hash = blake2::Blake2s256::digest(motif.as_bytes());
-                let scale = (hash[0] as f64 / 255.0) * self.config.max_step_size * 0.2;
-                symbol_state.position.x += rng.gen_range(-jitter..jitter) * scale;
-                symbol_state.position.y += rng.gen_range(-jitter..jitter) * scale;
+            // Working-memory motif priors — these are the fabric's learned
+            // expectations about what should appear next given the current
+            // motif sequence. High-prior motif labels pull proposals toward
+            // positions in the spatial distribution of that motif class.
+            let wm_pull = self.config.working_memory_pull;
+            if wm_pull > 0.0 && !neuro.temporal_motif_priors.is_empty() {
+                // Find the highest-prior motif label matching this symbol.
+                let role = self.symbol_role(cache, symbol_id);
+                let best_prior = neuro
+                    .temporal_motif_priors
+                    .iter()
+                    .filter(|(lbl, _)| lbl.contains(&role))
+                    .map(|(_, &p)| p)
+                    .fold(0.0_f64, f64::max);
+                if best_prior > 0.1 {
+                    // Pull toward the centroid of this motif label if known.
+                    let motif_label = format!("wm::{role}");
+                    if let Some(center) = neuro.centroids.get(&motif_label) {
+                        let pull = wm_pull * best_prior.min(1.0);
+                        symbol_state.position.x += (center.x - symbol_state.position.x) * pull;
+                        symbol_state.position.y += (center.y - symbol_state.position.y) * pull;
+                    } else {
+                        // Motif expected but no centroid yet — small stabilizing jitter.
+                        let jitter = wm_pull * 0.1;
+                        symbol_state.position.x += rng.gen_range(-jitter..jitter);
+                        symbol_state.position.y += rng.gen_range(-jitter..jitter);
+                    }
+                }
             }
         }
     }

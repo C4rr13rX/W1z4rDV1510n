@@ -272,6 +272,68 @@ impl HierarchicalMotifRuntime {
         out
     }
 
+    /// Given the most recent motif id seen (`last_id`), return the learned
+    /// transition probabilities to successor motifs at every level, sorted by
+    /// probability descending. This is the core sequence-completion primitive
+    /// that the annealer uses to bias proposals toward fabric-predicted states.
+    ///
+    /// Returns `(next_motif_id, probability)` pairs. Probabilities are
+    /// normalized within each level; results across levels are merged by
+    /// taking the max probability for each successor.
+    pub fn next_predictions(&self, last_id: &str) -> Vec<(String, f64)> {
+        let mut acc: HashMap<String, f64> = HashMap::new();
+        for level in &self.levels {
+            let total_from: usize = level
+                .transitions
+                .iter()
+                .filter(|((from, _), _)| from == last_id)
+                .map(|(_, &count)| count)
+                .sum();
+            if total_from == 0 {
+                continue;
+            }
+            let total_f = total_from as f64;
+            for ((from, to), &count) in &level.transitions {
+                if from != last_id {
+                    continue;
+                }
+                let prob = count as f64 / total_f;
+                let entry = acc.entry(to.clone()).or_insert(0.0);
+                if prob > *entry {
+                    *entry = prob;
+                }
+            }
+        }
+        let mut predictions: Vec<(String, f64)> = acc.into_iter().collect();
+        predictions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        predictions
+    }
+
+    /// The current tail of the level-0 window — the most recently observed
+    /// motif id sequence. Used by the annealer to seed next_predictions().
+    pub fn window_tail(&self, n: usize) -> Vec<String> {
+        self.levels
+            .first()
+            .map(|lvl| lvl.window.iter().rev().take(n).cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    }
+
+    /// Combined transition entropy across all active levels — a scalar
+    /// measure of how certain the fabric is about what comes next.
+    /// 0.0 = completely certain (attractor), high = unpredictable.
+    pub fn mean_transition_entropy(&self) -> f64 {
+        let entropies: Vec<f64> = self
+            .levels
+            .iter()
+            .filter(|l| !l.transitions.is_empty())
+            .map(|l| l.transition_entropy())
+            .collect();
+        if entropies.is_empty() {
+            return 1.0; // unknown → treat as uncertain
+        }
+        entropies.iter().sum::<f64>() / entropies.len() as f64
+    }
+
     // ------------------------------------------------------------------
     // Internal
     // ------------------------------------------------------------------
