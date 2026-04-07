@@ -234,6 +234,12 @@ pub struct HypothesisSlot {
     pub created_at: u64,
     /// How many times this gap has been observed.
     pub observation_count: u32,
+    /// Node ID that first reported this gap (None = locally originated).
+    #[serde(default)]
+    pub first_node_id: Option<String>,
+    /// All node IDs that have reported this gap (for corroboration scoring).
+    #[serde(default)]
+    pub reporting_nodes: Vec<String>,
 }
 
 // ─── Search ───────────────────────────────────────────────────────────────────
@@ -536,15 +542,30 @@ impl EquationMatrixRuntime {
     }
 
     /// Record a novel pattern that has no current equation explanation.
-    pub fn open_gap(&self, trigger_labels: Vec<String>, sensor_dims: u8, description: &str) {
-        let id_src = format!("gap::{}::{}", sensor_dims, trigger_labels.join(","));
+    /// `reporter_node_id` is the node that observed this gap (None = this node).
+    pub fn open_gap(
+        &self,
+        trigger_labels: Vec<String>,
+        sensor_dims: u8,
+        description: &str,
+        reporter_node_id: Option<&str>,
+    ) {
+        let mut sorted = trigger_labels.clone();
+        sorted.sort_unstable();
+        let id_src = format!("gap::{}::{}", sensor_dims, sorted.join(","));
         let id = compute_payload_hash(id_src.as_bytes());
         let mut st = self.state.lock();
         if let Some(existing) = st.open_gaps.iter_mut().find(|g| g.id == id) {
             existing.observation_count += 1;
+            if let Some(node) = reporter_node_id {
+                if !existing.reporting_nodes.iter().any(|n| n == node) {
+                    existing.reporting_nodes.push(node.to_string());
+                }
+            }
             return;
         }
         if st.open_gaps.len() < self.config.max_open_gaps {
+            let reporting_nodes = reporter_node_id.map(|n| vec![n.to_string()]).unwrap_or_default();
             st.open_gaps.push(HypothesisSlot {
                 id,
                 description: description.to_string(),
@@ -552,8 +573,21 @@ impl EquationMatrixRuntime {
                 sensor_dims,
                 created_at: now_unix(),
                 observation_count: 1,
+                first_node_id: reporter_node_id.map(|n| n.to_string()),
+                reporting_nodes,
             });
         }
+    }
+
+    /// Returns all open hypothesis slots, sorted by corroboration (most-reported first).
+    pub fn open_gaps(&self) -> Vec<HypothesisSlot> {
+        let mut st = self.state.lock();
+        st.open_gaps.sort_by(|a, b| {
+            let a_score = a.observation_count + a.reporting_nodes.len() as u32;
+            let b_score = b.observation_count + b.reporting_nodes.len() as u32;
+            b_score.cmp(&a_score)
+        });
+        st.open_gaps.clone()
     }
 
     // ── P2P exchange ─────────────────────────────────────────────────────────
@@ -591,9 +625,28 @@ impl EquationMatrixRuntime {
             }
         }
         for gap in payload.open_gaps {
-            let already = st.open_gaps.iter().any(|g| g.id == gap.id);
-            if !already && st.open_gaps.len() < self.config.max_open_gaps {
-                st.open_gaps.push(gap);
+            if let Some(existing) = st.open_gaps.iter_mut().find(|g| g.id == gap.id) {
+                existing.observation_count = existing.observation_count.saturating_add(gap.observation_count);
+                for node in &gap.reporting_nodes {
+                    if !existing.reporting_nodes.iter().any(|n| n == node) {
+                        existing.reporting_nodes.push(node.clone());
+                    }
+                }
+                // Propagate source node attribution
+                if existing.first_node_id.is_none() {
+                    existing.first_node_id = gap.first_node_id.clone()
+                        .or_else(|| Some(payload.source_node_id.clone()));
+                }
+            } else if st.open_gaps.len() < self.config.max_open_gaps {
+                let mut incoming = gap;
+                // Mark the peer as an additional reporter
+                if !incoming.reporting_nodes.iter().any(|n| n == &payload.source_node_id) {
+                    incoming.reporting_nodes.push(payload.source_node_id.clone());
+                }
+                if incoming.first_node_id.is_none() {
+                    incoming.first_node_id = Some(payload.source_node_id.clone());
+                }
+                st.open_gaps.push(incoming);
             }
         }
         drop(st);

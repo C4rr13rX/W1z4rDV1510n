@@ -42,8 +42,9 @@ use w1z4rdv1510n::streaming::{
     KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
     NetworkPatternSummary, NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
     QaCandidateRecord, QaQueryReport, QaRuntime, QaRuntimeConfig,
-    EquationMatrixRuntime, EquationMatrixConfig, Discipline,
+    EquationMatrixRuntime, EquationMatrixConfig, Discipline, EemPeerPayload,
 };
+use w1z4rdv1510n::causal::{CausalEdge, CausalRuntime};
 
 #[derive(Clone)]
 struct ApiState {
@@ -76,6 +77,11 @@ struct ApiState {
     neuro: NeuroRuntimeHandle,
     threat: Arc<Mutex<ThreatScene>>,
     equation_matrix: Arc<EquationMatrixRuntime>,
+    /// Named-process causal graph: sensor label clusters → identified physics
+    /// processes. Edges are written by equations_apply; read via /causal/graph.
+    causal: Arc<Mutex<CausalRuntime>>,
+    /// First-reporter index for cross-node pattern source tracing.
+    origin_index: Arc<Mutex<HashMap<String, PatternOrigin>>>,
 }
 
 #[derive(Clone)]
@@ -90,6 +96,17 @@ struct LabelQueueState {
     visual_label_queue: Option<VisualLabelReport>,
     subnet_report: Option<SubnetworkReport>,
     updated_at: Option<Timestamp>,
+}
+
+/// Records which node first reported a pattern and how many nodes have since
+/// corroborated it — the primitive for cross-node source tracing.
+#[derive(Debug, Clone, Serialize)]
+struct PatternOrigin {
+    thread_id: String,
+    first_seen_unix: u64,
+    first_reporter_node_id: String,
+    report_count: u32,
+    reporting_nodes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -678,6 +695,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
                 ..Default::default()
             }))
         },
+        causal: Arc::new(Mutex::new(CausalRuntime::new(
+            w1z4rdv1510n::config::CausalDiscoveryConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        ))),
+        origin_index: Arc::new(Mutex::new(HashMap::new())),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -715,6 +739,16 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/equations/ingest", post(equations_ingest))
         .route("/equations/apply", post(equations_apply))
         .route("/equations/report", get(equations_report))
+        // Open hypothesis gaps — patterns the node can't yet explain.
+        // GET returns all gaps sorted by cross-node corroboration count.
+        // POST /peer_sync accepts an EemPeerPayload from a peer node.
+        .route("/equations/gaps", get(equations_gaps))
+        .route("/equations/peer_sync", post(equations_peer_sync))
+        // Named-process causal graph built from EEM identifications.
+        // Source tracing: walk edges backward to find origin of a pattern.
+        .route("/causal/graph", get(causal_graph))
+        // First-reporter index: which node first saw each pattern thread.
+        .route("/network/patterns/sources", get(network_pattern_sources))
         .route("/bridge/proof", post(submit_bridge_proof))
         .route("/bridge/chains", get(get_bridge_chains))
         .route("/bridge/intent", post(submit_bridge_intent))
@@ -1456,6 +1490,46 @@ async fn neuro_train(
     // observe_snapshot handles all label extraction, Hebbian updates, and
     // temporal pattern accumulation internally.
     state.neuro.observe_snapshot(&request.snapshot);
+
+    // Also feed the sensor labels directly into the EEM so equations gain
+    // evidence from every training frame — not just explicit /equations/apply calls.
+    // Extract labels from symbol properties (type + property values).
+    let sensor_labels: Vec<String> = {
+        let mut labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for sym in &request.snapshot.symbols {
+            labels.insert(format!("{:?}", sym.symbol_type).to_lowercase());
+            for (k, v) in &sym.properties {
+                if let Some(s) = v.as_str() {
+                    labels.insert(format!("{}::{}", k.to_lowercase(), s.to_lowercase()));
+                    labels.insert(s.to_lowercase());
+                }
+            }
+        }
+        for (k, v) in &request.snapshot.metadata {
+            if let Some(s) = v.as_str() {
+                labels.insert(format!("meta::{}::{}", k.to_lowercase(), s.to_lowercase()));
+            }
+        }
+        labels.into_iter().collect()
+    };
+    if !sensor_labels.is_empty() {
+        let dims = if request.snapshot.bounds.get("z").copied().unwrap_or(0.0) > 0.0 { 3u8 } else { 2u8 };
+        let ctx = state.equation_matrix.apply_to_context(&sensor_labels, dims);
+        // Reinforce every matched equation with evidence from this sensor frame.
+        for candidate in &ctx.candidates {
+            state.equation_matrix.reinforce(&candidate.equation.id);
+        }
+        // Open hypothesis gaps for label clusters with no equation match.
+        if !ctx.unexplained_labels.is_empty() {
+            state.equation_matrix.open_gap(
+                ctx.unexplained_labels,
+                dims,
+                "auto: sensor labels with no equation match",
+                Some(&state.node_id),
+            );
+        }
+    }
+
     (
         StatusCode::OK,
         Json(serde_json::to_value(NeuroTrainResponse {
@@ -1610,8 +1684,44 @@ async fn equations_apply(
             result.unexplained_labels.clone(),
             request.dims,
             "sensor labels with no matching equation",
+            Some(&state.node_id),
         );
     }
+
+    // Feed identified equations into the named-process causal graph.
+    // Each identification creates edges: "sensor::{label_hash}" → "process::{eq_id}"
+    // so the causal graph accumulates a record of what physical processes were
+    // active and which sensor contexts produced them. Walking these edges
+    // backward from a process node traces the signal to its origin.
+    if !result.candidates.is_empty() {
+        let label_key: String = {
+            let mut sorted = request.labels.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let joined = sorted.join(",");
+            // Use blake2 to produce a short stable key for this label cluster.
+            let hash_bytes: [u8; 32] = {
+                use blake2::Digest;
+                let mut h = Blake2s256::new();
+                h.update(joined.as_bytes());
+                h.finalize().into()
+            };
+            // Encode first 8 bytes as hex manually (no hex crate needed).
+            let hex: String = hash_bytes[..8].iter().map(|b| format!("{:02x}", b)).collect();
+            format!("sensor::{hex}")
+        };
+        if let Ok(mut causal) = state.causal.lock() {
+            for candidate in &result.candidates {
+                causal.observe_edge(CausalEdge {
+                    source: label_key.clone(),
+                    target: format!("process::{}", candidate.equation.id),
+                    lag_secs: 0.0,
+                    weight: candidate.relevance as f64,
+                });
+            }
+        }
+    }
+
     (StatusCode::OK, Json(serde_json::json!({
         "dims": request.dims,
         "candidates": result.candidates.iter().map(|r| serde_json::json!({
@@ -1638,6 +1748,133 @@ async fn equations_report(
     }
     let report = state.equation_matrix.report();
     (StatusCode::OK, Json(serde_json::to_value(report).unwrap_or_default()))
+}
+
+/// GET /equations/gaps
+/// Returns all open hypothesis slots — sensor label clusters that fired
+/// repeatedly but matched no equation. Sorted by cross-node corroboration
+/// count (most-observed first). Slots with multiple reporting nodes are the
+/// strongest signal that something real and currently unexplained is moving
+/// through the network.
+async fn equations_gaps(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    let gaps = state.equation_matrix.open_gaps();
+    (StatusCode::OK, Json(serde_json::json!({
+        "count": gaps.len(),
+        "gaps": gaps.iter().map(|g| serde_json::json!({
+            "id": g.id,
+            "description": g.description,
+            "trigger_labels": g.trigger_labels,
+            "sensor_dims": g.sensor_dims,
+            "created_at": g.created_at,
+            "observation_count": g.observation_count,
+            "first_node_id": g.first_node_id,
+            "corroborating_nodes": g.reporting_nodes.len(),
+            "reporting_nodes": g.reporting_nodes,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// POST /equations/peer_sync
+/// Body: `EemPeerPayload` JSON — receives a peer node's equation discoveries
+/// and open gaps. Equations get lower confidence until corroborated locally.
+/// Gaps from peers that match local gaps increment their corroboration count.
+#[derive(Deserialize)]
+struct PeerSyncRequest {
+    payload: EemPeerPayload,
+}
+
+async fn equations_peer_sync(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<PeerSyncRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    let source = request.payload.source_node_id.clone();
+    let eq_count = request.payload.equations.len();
+    let gap_count = request.payload.open_gaps.len();
+    state.equation_matrix.merge_peer_payload(request.payload);
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "ok",
+        "source_node_id": source,
+        "equations_merged": eq_count,
+        "gaps_merged": gap_count,
+    })))
+}
+
+/// GET /causal/graph
+/// Returns the named-process causal graph: directed edges from sensor label
+/// cluster hashes to identified physics process nodes. Walking backward from
+/// any "process::{id}" node to its "sensor::{hash}" sources — and then across
+/// nodes via /network/patterns/sources — traces a propagating signal back to
+/// its origin. Edge weight reflects how consistently a sensor context produces
+/// that physical process identification.
+async fn causal_graph(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    let edges = if let Ok(causal) = state.causal.lock() {
+        causal.graph().edges()
+    } else {
+        vec![]
+    };
+    (StatusCode::OK, Json(serde_json::json!({
+        "edge_count": edges.len(),
+        "edges": edges.iter().map(|e| serde_json::json!({
+            "source": e.source,
+            "target": e.target,
+            "weight": e.weight,
+            "lag_secs": e.lag_secs,
+        })).collect::<Vec<_>>(),
+        "note": "source=sensor::{label_hash}, target=process::{eq_id}. Walk backward to trace signal origin.",
+    })))
+}
+
+/// GET /network/patterns/sources
+/// Returns the first-reporter origin index: for each pattern thread that has
+/// been seen across nodes, records which node first reported it and how many
+/// nodes have since corroborated it. The node that appears first with the
+/// highest subsequent corroboration is the statistical origin of that pattern.
+async fn network_pattern_sources(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    let mut entries: Vec<serde_json::Value> = if let Ok(idx) = state.origin_index.lock() {
+        let mut v: Vec<_> = idx.values().collect::<Vec<_>>().into_iter().cloned().collect();
+        // Sort by report_count descending — most-corroborated patterns first.
+        v.sort_by(|a, b| b.report_count.cmp(&a.report_count));
+        v.into_iter().map(|o| serde_json::json!({
+            "thread_id": o.thread_id,
+            "first_seen_unix": o.first_seen_unix,
+            "first_reporter_node_id": o.first_reporter_node_id,
+            "report_count": o.report_count,
+            "corroborating_node_count": o.reporting_nodes.len(),
+            "reporting_nodes": o.reporting_nodes,
+        })).collect()
+    } else {
+        vec![]
+    };
+    (StatusCode::OK, Json(serde_json::json!({
+        "count": entries.len(),
+        "patterns": entries,
+    })))
 }
 
 // ─── Q&A fabric endpoints ─────────────────────────────────────────────────────
@@ -2485,6 +2722,49 @@ async fn query_pattern_index(
             }
         }
     }
+    // Update the first-reporter origin index from peer responses.
+    // For each pattern returned by a peer, record the earliest-seen timestamp
+    // and which node reported it — the primitive for source tracing.
+    {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Ok(mut idx) = state.origin_index.lock() {
+            for peer_resp in &responses {
+                for pattern in &peer_resp.matches {
+                    let entry = idx.entry(pattern.thread_id.clone()).or_insert_with(|| PatternOrigin {
+                        thread_id: pattern.thread_id.clone(),
+                        first_seen_unix: pattern.last_seen.unix as u64,
+                        first_reporter_node_id: peer_resp.responder_node_id.clone(),
+                        report_count: 0,
+                        reporting_nodes: Vec::new(),
+                    });
+                    entry.report_count += 1;
+                    let ts = pattern.last_seen.unix as u64;
+                    if ts < entry.first_seen_unix {
+                        entry.first_seen_unix = ts;
+                        entry.first_reporter_node_id = peer_resp.responder_node_id.clone();
+                    }
+                    if !entry.reporting_nodes.iter().any(|n| n == &peer_resp.responder_node_id) {
+                        entry.reporting_nodes.push(peer_resp.responder_node_id.clone());
+                    }
+                }
+            }
+            // Record local matches under this node's own ID
+            for m in &local.matches {
+                let entry = idx.entry(m.thread_id.clone()).or_insert_with(|| PatternOrigin {
+                    thread_id: m.thread_id.clone(),
+                    first_seen_unix: now_unix,
+                    first_reporter_node_id: state.node_id.clone(),
+                    report_count: 0,
+                    reporting_nodes: vec![state.node_id.clone()],
+                });
+                entry.report_count += 1;
+            }
+        }
+    }
+
     let response = PatternQueryResponse {
         status: "OK".to_string(),
         query_id,

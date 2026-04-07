@@ -116,6 +116,10 @@ The node API (`/health`, `/neuro/train`, `/equations/search`, `/qa/ingest`, etc.
 | `/equations/apply` | POST | Find equations that explain active sensor labels + dims |
 | `/equations/ingest` | POST | Add equations from free text |
 | `/equations/report` | GET | Full EEM report: counts by discipline, top equations |
+| `/equations/gaps` | GET | Open hypothesis slots sorted by cross-node corroboration |
+| `/equations/peer_sync` | POST | Receive `EemPeerPayload` from a peer node |
+| `/causal/graph` | GET | Named-process causal graph: sensor clusters → physics processes |
+| `/network/patterns/sources` | GET | First-reporter origin index for cross-node source tracing |
 | `/qa/ingest` | POST | Ingest Q&A pairs into the Hebbian fabric |
 | `/qa/query` | POST | Query the Q&A fabric |
 | `/knowledge/ingest` | POST | Ingest documents into the knowledge graph |
@@ -212,6 +216,16 @@ The EEM bridges the gap between raw sensor patterns and physical interpretation.
 - Chaos and complexity: Lyapunov exponents, Fokker-Planck, Kuramoto oscillators, KAM theorem
 - Biophysics: Hodgkin-Huxley neuron model, Lotka-Volterra, Einstein/Stokes-Einstein diffusion
 - Information theory: Shannon, KL divergence, Fisher information, Cramér-Rao bound
+
+**Pattern source detection** works through three interlocked mechanisms — no domain-specific detector needed:
+
+1. **EEM auto-apply on every training frame** — `POST /neuro/train` now automatically runs `apply_to_context` on the snapshot's sensor labels. Every equation that matches gains evidence; unmatched label clusters open or increment a `HypothesisSlot`. The EEM accumulates a continuous record of which physics processes are active in the sensor stream.
+
+2. **Named-process causal graph** (`/causal/graph`) — each `equations_apply` call writes directed edges `sensor::{label_cluster_hash} → process::{equation_id}` into a causal graph. Over time, coordinated signals appear as high-weight edges from a single sensor cluster to a specific process node (e.g. `process::kuramoto_coupling`). Walking those edges backward across time-stamps traces the wave front to its origin.
+
+3. **Cross-node first-reporter index** (`/network/patterns/sources`) — every pattern thread returned by peer nodes is recorded with the node ID and timestamp of first sighting. The node that appears earliest with the highest subsequent corroboration is the statistical source of that pattern — this is how a coordinated campaign propagating through the network can be traced back to its injection point without any application-specific logic.
+
+Gap escalation: `HypothesisSlot` entries now carry `first_node_id` and `reporting_nodes`. Slots observed across multiple independent nodes are ranked highest in `/equations/gaps` and included in `EemPeerPayload` for network-wide escalation via `POST /equations/peer_sync`. A gap that multiple nodes see but nobody can explain is the strongest possible signal of a genuinely novel phenomenon in the environment.
 
 **Anyon note**: anyons are quasiparticles that exist only in 2D topological systems. Their exchange statistics (`ψ → e^{iθ}ψ`) are neither bosonic (θ=0) nor fermionic (θ=π) but can be any angle — this is a fundamental consequence of 2D topology. The EEM correctly enforces this: the anyon equation, Chern-Simons action, and fractional charge equations only surface when the active sensor context is flagged as 2D. A 3D sensor stream will never see them.
 
