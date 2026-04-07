@@ -7,10 +7,27 @@ use w1z4rdv1510n::config::{
 };
 use w1z4rdv1510n::streaming::KnowledgeQueueConfig;
 
+/// Operating mode for this node instance.
+///
+/// `Sensor` — local AI/streaming-only mode.  The wallet is optional; the
+///            data mesh and blockchain participation are disabled by default.
+///            Designed for training loops, sensor ingestion, and development.
+///
+/// `Production` — full Web3 hybrid mode.  Wallet is required.  All subsystems
+///                (data mesh, blockchain, rewards) are available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NodeMode {
+    Sensor,
+    #[default]
+    Production,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NodeConfig {
     pub node_id: String,
+    pub node_mode: NodeMode,
     pub node_role: NodeRole,
     pub network: NodeNetworkConfig,
     pub api: NodeApiConfig,
@@ -35,6 +52,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             node_id: "node-001".to_string(),
+            node_mode: NodeMode::default(),
             node_role: NodeRole::default(),
             network: NodeNetworkConfig::default(),
             api: NodeApiConfig::default(),
@@ -127,10 +145,12 @@ impl NodeConfig {
             self.network.routing.dial_backoff_max_secs >= self.network.routing.dial_backoff_base_secs,
             "network.routing.dial_backoff_max_secs must be >= dial_backoff_base_secs"
         );
-        anyhow::ensure!(
-            self.wallet.enabled,
-            "wallet must be enabled for production nodes"
-        );
+        if self.node_mode == NodeMode::Production {
+            anyhow::ensure!(
+                self.wallet.enabled,
+                "wallet must be enabled for production nodes (set node_mode to SENSOR for local/training use)"
+            );
+        }
         if self.ledger.enabled {
             anyhow::ensure!(
                 !self.ledger.backend.trim().is_empty(),

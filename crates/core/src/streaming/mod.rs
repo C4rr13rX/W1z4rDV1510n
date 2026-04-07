@@ -50,6 +50,13 @@ pub mod sensor_registry;
 pub mod motif_label_bridge;
 pub mod qa_runtime;
 pub mod fabric_trainer;
+pub mod equation_matrix;
+
+pub use equation_matrix::{
+    ContextApplicationResult, Discipline, EquationLink, EquationMatrixConfig,
+    EquationMatrixReport, EquationMatrixRuntime, EquationSearchResult, EquationSummary,
+    EquationVariable, EemPeerPayload, HypothesisSlot, LinkType, PhysicsEquation,
+};
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};
 pub use schema::{

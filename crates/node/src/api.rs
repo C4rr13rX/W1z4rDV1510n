@@ -42,6 +42,7 @@ use w1z4rdv1510n::streaming::{
     KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
     NetworkPatternSummary, NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
     QaCandidateRecord, QaQueryReport, QaRuntime, QaRuntimeConfig,
+    EquationMatrixRuntime, EquationMatrixConfig, Discipline,
 };
 
 #[derive(Clone)]
@@ -74,6 +75,7 @@ struct ApiState {
     run_config_path: PathBuf,
     neuro: NeuroRuntimeHandle,
     threat: Arc<Mutex<ThreatScene>>,
+    equation_matrix: Arc<EquationMatrixRuntime>,
 }
 
 #[derive(Clone)]
@@ -668,6 +670,14 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         run_config_path: PathBuf::from(&config.streaming.run_config_path),
         neuro: neuro_handle,
         threat: Arc::new(Mutex::new(ThreatScene::new())),
+        equation_matrix: {
+            let eem_path = node_data_dir().join("equation_matrix.json");
+            Arc::new(EquationMatrixRuntime::new(EquationMatrixConfig {
+                persist_path: Some(eem_path.to_string_lossy().into_owned()),
+                seed_on_init: true,
+                ..Default::default()
+            }))
+        },
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -691,6 +701,20 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let app = Router::new()
         .route("/health", get(get_health))
         .route("/ready", get(get_ready))
+        // ── Neuro sensor stream endpoints ──────────────────────────────────
+        // POST /neuro/train  — feed an EnvironmentSnapshot; the neural fabric
+        //                      observes symbol positions and updates Hebbian
+        //                      weights, connecting sensor patterns across time.
+        // GET  /neuro/snapshot — current activation, predictions, and motifs.
+        .route("/neuro/train", post(neuro_train))
+        .route("/neuro/snapshot", get(neuro_snapshot))
+        // ── Environmental Equation Matrix endpoints ────────────────────────
+        // The EEM maps sensor observations → physics equations, grows as data
+        // arrives, and shares discoveries with peer nodes.
+        .route("/equations/search", get(equations_search))
+        .route("/equations/ingest", post(equations_ingest))
+        .route("/equations/apply", post(equations_apply))
+        .route("/equations/report", get(equations_report))
         .route("/bridge/proof", post(submit_bridge_proof))
         .route("/bridge/chains", get(get_bridge_chains))
         .route("/bridge/intent", post(submit_bridge_intent))
@@ -1396,6 +1420,224 @@ async fn submit_knowledge_vote(
         StatusCode::OK,
         Json(serde_json::to_value(response).unwrap_or_default()),
     )
+}
+
+// ─── Neuro sensor stream endpoints ────────────────────────────────────────────
+
+/// POST /neuro/train
+/// Body: `{ "snapshot": <EnvironmentSnapshot> }`
+/// Observes the snapshot through the neural fabric — updates Hebbian weights
+/// for every symbol co-occurrence in this sensor frame, connects spatial and
+/// temporal context, and accumulates motif patterns over time.
+#[derive(Deserialize)]
+struct NeuroTrainRequest {
+    snapshot: EnvironmentSnapshot,
+}
+
+#[derive(Serialize)]
+struct NeuroTrainResponse {
+    status: &'static str,
+    symbols_observed: usize,
+}
+
+async fn neuro_train(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<NeuroTrainRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "neuro") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    let n_symbols = request.snapshot.symbols.len();
+    // observe_snapshot handles all label extraction, Hebbian updates, and
+    // temporal pattern accumulation internally.
+    state.neuro.observe_snapshot(&request.snapshot);
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(NeuroTrainResponse {
+            status: "ok",
+            symbols_observed: n_symbols,
+        }).unwrap_or_default()),
+    )
+}
+
+/// GET /neuro/snapshot
+/// Returns the current activation state of the neural fabric: active labels,
+/// composite neurons, temporal predictions, top influence records, and working
+/// memory — exactly what the streaming side produces after each sensor frame.
+async fn neuro_snapshot(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "neuro") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    let snap = state.neuro.snapshot();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(snap).unwrap_or_default()),
+    )
+}
+
+// ─── Environmental Equation Matrix endpoints ───────────────────────────────────
+
+/// GET /equations/search?q=<text>&limit=<n>
+async fn equations_search(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    let query = params.get("q").map(|s| s.trim().to_string()).unwrap_or_default();
+    if query.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "q is required" })));
+    }
+    let limit: Option<usize> = params.get("limit").and_then(|s| s.parse().ok());
+    let results = state.equation_matrix.search(&query, limit);
+    (StatusCode::OK, Json(serde_json::json!({
+        "query": query,
+        "count": results.len(),
+        "results": results.iter().map(|r| serde_json::json!({
+            "id": r.equation.id,
+            "text": r.equation.text,
+            "latex": r.equation.latex,
+            "discipline": r.equation.discipline.as_str(),
+            "applicable_dims": r.equation.applicable_dims,
+            "confidence": r.equation.confidence,
+            "evidence_count": r.equation.evidence_count,
+            "relevance": r.relevance,
+            "related_ids": r.related_ids,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// POST /equations/ingest
+/// Body: `{ "text": "...", "discipline": "classical_mechanics", "source": "..." }`
+/// Parses equations from free text and adds them to the matrix.
+#[derive(Deserialize)]
+struct EquationsIngestRequest {
+    text: String,
+    #[serde(default)]
+    discipline: Option<String>,
+    #[serde(default)]
+    source_node_id: Option<String>,
+    #[serde(default)]
+    confidence: Option<f32>,
+}
+
+async fn equations_ingest(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<EquationsIngestRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    let discipline = match request.discipline.as_deref() {
+        Some("lagrangian_mechanics") => Discipline::LagrangianMechanics,
+        Some("hamiltonian_mechanics") => Discipline::HamiltonianMechanics,
+        Some("thermodynamics") => Discipline::Thermodynamics,
+        Some("statistical_mechanics") => Discipline::StatisticalMechanics,
+        Some("electromagnetism") => Discipline::Electromagnetism,
+        Some("quantum_mechanics") => Discipline::QuantumMechanics,
+        Some("quantum_field_theory") => Discipline::QuantumFieldTheory,
+        Some("special_relativity") => Discipline::SpecialRelativity,
+        Some("general_relativity") => Discipline::GeneralRelativity,
+        Some("fluid_dynamics") => Discipline::FluidDynamics,
+        Some("chaos_dynamics") => Discipline::ChaosDynamics,
+        Some("topological_physics") => Discipline::TopologicalPhysics,
+        Some("condensed_matter") => Discipline::CondensedMatter,
+        Some("cosmology") => Discipline::Cosmology,
+        Some("information_theory") => Discipline::InformationTheory,
+        Some(other) => Discipline::Custom(other.to_string()),
+        None => Discipline::Custom("unknown".into()),
+    };
+    let confidence = request.confidence.unwrap_or(0.6).clamp(0.0, 1.0);
+    let ids = state.equation_matrix.ingest_text(
+        &request.text,
+        discipline,
+        request.source_node_id,
+        confidence,
+    );
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "ok",
+        "ingested": ids.len(),
+        "ids": ids,
+    })))
+}
+
+/// POST /equations/apply
+/// Body: `{ "labels": ["force", "mass", ...], "dims": 3 }`
+/// Returns equations that explain the current sensor context.
+#[derive(Deserialize)]
+struct EquationsApplyRequest {
+    labels: Vec<String>,
+    #[serde(default = "default_dims")]
+    dims: u8,
+}
+fn default_dims() -> u8 { 3 }
+
+async fn equations_apply(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<EquationsApplyRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    // Also activate the neuro fabric with these labels so both systems
+    // learn from the same sensor context simultaneously.
+    if !request.labels.is_empty() {
+        state.neuro.train_weighted(&request.labels, 0.5, false);
+    }
+    let result = state.equation_matrix.apply_to_context(&request.labels, request.dims);
+    // Record unexplained labels as hypothesis gaps
+    if !result.unexplained_labels.is_empty() {
+        state.equation_matrix.open_gap(
+            result.unexplained_labels.clone(),
+            request.dims,
+            "sensor labels with no matching equation",
+        );
+    }
+    (StatusCode::OK, Json(serde_json::json!({
+        "dims": request.dims,
+        "candidates": result.candidates.iter().map(|r| serde_json::json!({
+            "id": r.equation.id,
+            "text": r.equation.text,
+            "discipline": r.equation.discipline.as_str(),
+            "confidence": r.equation.confidence,
+            "relevance": r.relevance,
+            "applicable_dims": r.equation.applicable_dims,
+        })).collect::<Vec<_>>(),
+        "open_gaps": result.open_gaps.len(),
+        "unexplained_labels": result.unexplained_labels,
+    })))
+}
+
+/// GET /equations/report
+async fn equations_report(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
+        state.metrics.inc_rate_limit_hit();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": err.to_string() })));
+    }
+    let report = state.equation_matrix.report();
+    (StatusCode::OK, Json(serde_json::to_value(report).unwrap_or_default()))
 }
 
 // ─── Q&A fabric endpoints ─────────────────────────────────────────────────────

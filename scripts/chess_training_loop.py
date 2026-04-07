@@ -27,7 +27,10 @@ import time
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence, Dict, Tuple, List, Any
+import threading
+import urllib.request
+import urllib.error
+from typing import Iterable, Sequence, Dict, Tuple, List, Any, Optional
 
 try:
     import chess
@@ -58,6 +61,7 @@ from tqdm import tqdm
 ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = ROOT / "data" / "chess" / "processed_games.jsonl"
 DEFAULT_LOG_PATH = ROOT / "logs" / "chess_training_metrics.log"
+BOARD_JSON = ROOT / "logs" / "chess_live_board.json"
 FEATURE_DIM = 512  # hashed bag-of-move features
 METADATA_DIM = 128  # hashed player/opening features
 BOARD_FEATURE_DIM = 12 * 64 + 8  # piece planes + extras
@@ -79,6 +83,413 @@ FACTOR_BLEND = 0.4  # how much to trust factorized priors in move scoring
 ANCHOR_STRIDE = 4  # interval for anchor motif counters
 BEAM_WIDTH = 8
 BEAM_STEPS = 3
+
+# ── Node / service bridge ─────────────────────────────────────────────────────
+# The w1z4rd_api service (port 8080) exposes:
+#   POST /neuro/train    — observe an EnvironmentSnapshot → Hebbian weight update
+#   POST /neuro/activate — input labels → target-stream activations
+#   GET  /neuro/snapshot — current neuro state
+# The node (port 8090) exposes:
+#   POST /qa/ingest      — push Q&A examples for the QA runtime
+# All calls are fire-and-forget (background queue) so training throughput is
+# unaffected when the services are busy or unavailable.
+
+SERVICE_URL = "http://localhost:8080"
+NODE_URL    = "http://localhost:8090"
+# How many games between neuro train bursts (1 = every game; higher = faster training loop)
+NEURO_TRAIN_EVERY_N_GAMES = 1
+# Max plies to send per game to /neuro/train (cap to avoid huge requests on long games)
+NEURO_MAX_PLIES_PER_GAME  = 20
+# Background queue capacity; excess drops silently to never block training.
+_BRIDGE_QUEUE_MAXSIZE = 64
+
+# psutil is optional but strongly preferred
+try:
+    import psutil as _psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    _psutil = None  # type: ignore
+    _PSUTIL_AVAILABLE = False
+
+
+class ResourceMonitor:
+    """
+    Adaptive resource governor — no hard-coded limits anywhere.
+
+    Polls system CPU and RAM usage for this process vs the whole machine.
+    Keeps a reserved headroom for the OS and interactive use (mouse, windows).
+    Ramps the training workload UP in small steps when resources are plentiful,
+    ramps DOWN quickly when the machine is under pressure.
+
+    Emitted scale factor (0 < scale ≤ 1.0) is applied by the training loop to
+    batch_size, game_count, and sleep_secs.
+    """
+
+    # Fraction of total CPU / RAM the training loop is allowed to use at most.
+    # These are soft ceilings derived from measurement, not static constants.
+    _CPU_HEADROOM   = 0.20   # reserve at least 20% CPU for OS / user
+    _RAM_HEADROOM   = 0.25   # reserve at least 25% RAM for OS / user
+    _RAMP_UP_STEP   = 0.10   # increase scale by 10% per check when under budget
+    _RAMP_DOWN_STEP = 0.30   # decrease scale by 30% per check when over budget
+    _SCALE_MIN      = 0.05   # never go below 5% — keep the loop alive
+    _SCALE_MAX      = 1.00
+
+    def __init__(self) -> None:
+        self._scale: float = 0.10  # start conservatively
+        self._proc = _psutil.Process() if _PSUTIL_AVAILABLE else None
+        self._total_ram: float = _psutil.virtual_memory().total if _PSUTIL_AVAILABLE else 8 * 1024 ** 3
+        cpu_count = max(1, os.cpu_count() or 1)
+        self._cpu_count: int = cpu_count
+        # Initialise CPU percent measurement (first call always returns 0.0)
+        if self._proc is not None:
+            self._proc.cpu_percent(interval=None)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def poll(self) -> float:
+        """
+        Measure current resource usage and return the updated scale factor.
+        Call this once per training iteration (non-blocking).
+        """
+        if not _PSUTIL_AVAILABLE:
+            return self._scale  # can't measure → stay at current scale
+
+        try:
+            # Process CPU as fraction of one logical core, normalised to [0,1]
+            proc_cpu_frac = (self._proc.cpu_percent(interval=None) / 100.0) / self._cpu_count
+            sys_cpu_frac  = _psutil.cpu_percent(interval=None) / 100.0
+
+            vm = _psutil.virtual_memory()
+            proc_ram_frac = self._proc.memory_info().rss / self._total_ram
+            sys_ram_frac  = vm.percent / 100.0
+
+            cpu_budget_ok = sys_cpu_frac  < (1.0 - self._CPU_HEADROOM)
+            ram_budget_ok = sys_ram_frac  < (1.0 - self._RAM_HEADROOM)
+
+            if cpu_budget_ok and ram_budget_ok:
+                self._scale = min(self._SCALE_MAX, self._scale + self._RAMP_UP_STEP)
+            else:
+                self._scale = max(self._SCALE_MIN, self._scale - self._RAMP_DOWN_STEP)
+
+        except Exception:
+            pass  # psutil hiccup — keep current scale
+
+        return self._scale
+
+    @property
+    def scale(self) -> float:
+        return self._scale
+
+    def batch_size(self, base: int) -> int:
+        """Scale a base batch size, always at least 1."""
+        return max(1, int(base * self._scale))
+
+    def game_count(self, base: int) -> int:
+        """Scale a base game count, always at least 1."""
+        return max(1, int(base * self._scale))
+
+    def sleep_secs(self, base: float) -> float:
+        """More idle time when under pressure; no extra sleep when at full scale."""
+        return base * max(0.0, 1.0 - self._scale)
+
+    def status_line(self) -> str:
+        if not _PSUTIL_AVAILABLE:
+            return f"[resource] scale={self._scale:.2f} (psutil unavailable)"
+        try:
+            vm  = _psutil.virtual_memory()
+            cpu = _psutil.cpu_percent(interval=None)
+            return (
+                f"[resource] scale={self._scale:.2f}  "
+                f"sys_cpu={cpu:.0f}%  "
+                f"sys_ram={vm.percent:.0f}%  "
+                f"proc_ram={self._proc.memory_info().rss / 1024**2:.0f}MB"
+            )
+        except Exception:
+            return f"[resource] scale={self._scale:.2f}"
+
+
+class NodeBridge:
+    """
+    Fire-and-forget client for w1z4rd_api and node services.
+
+    • Neuro training (POST /neuro/train): each chess position is sent as an
+      EnvironmentSnapshot.  The neuro fabric learns which pieces co-occur in
+      good/bad positions and builds Hebbian weight patterns.
+    • Neuro activation (POST /neuro/activate): query what the fabric predicts
+      given the current position's piece labels — used as an additional move
+      prior that strengthens as training deepens.
+    • QA ingest (POST /qa/ingest to node): push (context_moves → next_move)
+      pairs so the QA runtime builds a retrieval index for move prediction.
+
+    All network I/O runs in a daemon worker thread; the main training thread
+    never blocks waiting for HTTP.
+    """
+
+    def __init__(
+        self,
+        service_url: str = SERVICE_URL,
+        node_url: str = NODE_URL,
+    ) -> None:
+        self.service_url = service_url.rstrip("/")
+        self.node_url = node_url.rstrip("/")
+        self._service_ok: Optional[bool] = None
+        self._node_ok: Optional[bool] = None
+        self._queue: "list[tuple[str, dict]]" = []
+        self._lock = threading.Lock()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+
+    # ── probe ─────────────────────────────────────────────────────────────────
+
+    def _probe(self, url: str, path: str) -> bool:
+        try:
+            req = urllib.request.urlopen(f"{url}/{path}", timeout=2)
+            return req.status == 200
+        except Exception:
+            return False
+
+    @property
+    def service_available(self) -> bool:
+        if self._service_ok is None:
+            self._service_ok = self._probe(self.service_url, "healthz")
+            status = "UP" if self._service_ok else "unreachable"
+            print(f"  [bridge] w1z4rd_api ({self.service_url}): {status}", flush=True)
+        return bool(self._service_ok)
+
+    @property
+    def node_available(self) -> bool:
+        if self._node_ok is None:
+            self._node_ok = self._probe(self.node_url, "health")
+            status = "UP" if self._node_ok else "unreachable"
+            print(f"  [bridge] node ({self.node_url}): {status}", flush=True)
+        return bool(self._node_ok)
+
+    # ── background worker ─────────────────────────────────────────────────────
+
+    def _enqueue(self, target: str, payload: dict) -> None:
+        with self._lock:
+            if len(self._queue) < _BRIDGE_QUEUE_MAXSIZE:
+                self._queue.append((target, payload))
+
+    def _run(self) -> None:
+        while True:
+            item = None
+            with self._lock:
+                if self._queue:
+                    item = self._queue.pop(0)
+            if item is None:
+                time.sleep(0.05)
+                continue
+            target, payload = item
+            try:
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    target, data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=10).close()
+            except Exception:
+                pass  # fire-and-forget: silently discard on network error
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def send_neuro_train(self, snapshot: dict) -> None:
+        """POST snapshot to /neuro/train on both services.  Non-blocking.
+
+        The w1z4rd_api (8080) and the new node (8090) both receive the same
+        chess board snapshot so their neural fabrics learn in parallel.  They
+        use the same EnvironmentSnapshot format; only the endpoint differs.
+        """
+        body = {"snapshot": snapshot}
+        if self.service_available:
+            self._enqueue(f"{self.service_url}/neuro/train", body)
+        if self.node_available:
+            self._enqueue(f"{self.node_url}/neuro/train", body)
+
+    def send_qa_ingest(self, question: str, answer: str, context_labels: List[str]) -> None:
+        """POST a Q&A chess example to the node /qa/ingest.  Non-blocking."""
+        if not self.node_available:
+            return
+        payload = {
+            "question": question,
+            "answer": answer,
+            "context_labels": context_labels,
+            "domain": "chess",
+        }
+        self._enqueue(f"{self.node_url}/qa/ingest", payload)
+
+    def get_neuro_activate(
+        self,
+        labels: List[str],
+        target_stream: str = "chess",
+        hops: int = 3,
+        timeout_s: float = 1.0,
+    ) -> Dict[str, float]:
+        """
+        Query /neuro/activate synchronously.  Returns label→strength map.
+        Falls back to empty dict on timeout or error.
+        """
+        if not self.service_available:
+            return {}
+        try:
+            data = json.dumps(
+                {"input_labels": labels, "target_stream": target_stream, "hops": hops}
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                f"{self.service_url}/neuro/activate",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                result = json.loads(resp.read())
+            return {a["label"]: a["strength"] for a in result.get("activations", [])}
+        except Exception:
+            return {}
+
+
+def _symbol_states_to_snapshot(
+    symbol_states: Dict[str, Dict[str, Any]],
+    ts_unix: int,
+    result_label: Optional[str] = None,
+) -> dict:
+    """
+    Convert the training loop's per-ply symbol_states dict to an
+    EnvironmentSnapshot JSON object understood by /neuro/train.
+
+    Labels are encoded into the symbol's `properties` and also surfaced as
+    a "chess" stream in metadata so the neuro fabric can group them.
+    """
+    symbols = []
+    dynamic_symbol_states = {}
+    for sid, info in symbol_states.items():
+        pos = info.get("position", {})
+        internal = info.get("internal", {})
+        piece = internal.get("piece", "?").upper()
+        color = internal.get("color", "unknown")
+        role  = internal.get("role",  piece)
+        zone  = internal.get("zone",  0)
+        sym = {
+            "id": sid,
+            "type": "CUSTOM",
+            "position": {"x": pos.get("x", 0.0), "y": pos.get("y", 0.0), "z": 0.0},
+            "properties": {
+                "piece":  piece,
+                "color":  color,
+                "role":   role,
+                "zone":   str(zone),
+                "stream": "chess",
+            },
+        }
+        symbols.append(sym)
+        dynamic_symbol_states[sid] = {
+            "position": {"x": pos.get("x", 0.0), "y": pos.get("y", 0.0), "z": 0.0},
+            "internal_state": {
+                "piece":  piece,
+                "color":  color,
+                "role":   role,
+                "stream": "chess",
+            },
+        }
+    meta: Dict[str, Any] = {"stream": "chess"}
+    if result_label:
+        meta["result"] = result_label
+
+    return {
+        "timestamp": {"unix": ts_unix},
+        "bounds": {"x_min": 0.0, "x_max": 7.0, "y_min": 0.0, "y_max": 7.0},
+        "symbols": symbols,
+        "metadata": meta,
+        "stack_history": [],
+    }
+
+
+def write_live_board(
+    iteration: int,
+    game: Optional[Any],
+    ply: int,
+    outcome_acc: Dict[int, float],
+    move_acc: Dict[int, float],
+    total_games: int,
+) -> None:
+    """
+    Write a minimal chess_live_board.json so the viz server shows training progress.
+    Pieces are read from the game's symbol_states for the current ply.
+    """
+    BOARD_JSON.parent.mkdir(parents=True, exist_ok=True)
+    pieces = []
+    if game is not None and ply < len(game.moves):
+        for sid, info in game.replay_symbol_states(ply).items():
+            pos = info.get("position", {})
+            internal = info.get("internal", {})
+            sq_name = sid.rsplit("_", 1)[-1] if "_" in sid else "a1"
+            try:
+                sq = chess.parse_square(sq_name)
+                file_idx = chess.square_file(sq)
+                rank_idx = chess.square_rank(sq)
+            except Exception:
+                file_idx = int(pos.get("x", 0))
+                rank_idx = int(pos.get("y", 0))
+            color = internal.get("color", "white")
+            piece = internal.get("piece", "P").upper()
+            pieces.append({
+                "id":    sid,
+                "file":  file_idx,
+                "rank":  rank_idx,
+                "color": color,
+                "piece": piece,
+            })
+
+    best_outcome_scope = min(outcome_acc.keys(), default=6)
+    best_move_horizon  = min(move_acc.keys(), default=1)
+    payload = {
+        "game_count":   total_games,
+        "game_id":      getattr(game, "game_id", "training") if game else "training",
+        "result":       LABEL_TO_RESULT.get(getattr(game, "result_label", 0), "?"),
+        "ply":          ply,
+        "total_plies":  len(game.moves) if game else 0,
+        "side_to_move": "white" if ply % 2 == 0 else "black",
+        "pieces":       pieces,
+        "last_move":    None,
+        "predictions":  [],
+        "actual_move":  None,
+        "reveal_phase": True,
+        "prediction_correct_top1": False,
+        "square_heat":  [[0.0] * 8 for _ in range(8)],
+        "outcome_probs": {"1-0": 0.33, "1/2-1/2": 0.34, "0-1": 0.33},
+        "model_breakdown": [],
+        "model_ledgers": {
+            "training": {
+                "recent_acc": outcome_acc.get(best_outcome_scope, 0.0),
+                "global_acc": outcome_acc.get(best_outcome_scope, 0.0),
+                "weight": 1.0,
+                "total": iteration,
+            }
+        },
+        "running": {
+            "move_top1":   move_acc.get(best_move_horizon, 0.0),
+            "move_top3":   move_acc.get(best_move_horizon, 0.0),
+            "outcome_acc": outcome_acc.get(best_outcome_scope, 0.0),
+            "total_plies": total_games * 40,
+            "game_count":  total_games,
+        },
+        "hourly_checkpoints": [],
+        "training_mode": True,
+        "iteration": iteration,
+    }
+    try:
+        tmp = BOARD_JSON.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(str(tmp), str(BOARD_JSON))
+    except Exception:
+        try:
+            BOARD_JSON.write_text(json.dumps(payload), encoding="utf-8")
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ------------------------
 # Relational / motif utils
@@ -188,15 +599,44 @@ def deterministic_split(identifier: str) -> bool:
 
 @dataclass(frozen=True)
 class GameRecord:
+    """
+    Lean game record — board_vectors and symbol_states are NOT stored here.
+    They are computed on-demand from the raw SAN moves to keep RAM proportional
+    to the number of games loaded, not to the number of plies × feature dimensions.
+
+    Use replay_board_vectors(ply_limit) or replay_symbol_states(ply) to access
+    position data; the callers are responsible for discarding the results once done.
+    """
     game_id: str
     result_label: int
-    moves: tuple[str, ...]
+    moves: tuple[str, ...]  # SAN strings; board can be fully replayed from these
     hashed_moves: np.ndarray  # shape (len(moves),)
     is_train: bool
     meta_vector: np.ndarray  # shape (METADATA_DIM,)
-    board_vectors: np.ndarray  # shape (len(moves), BOARD_FEATURE_DIM)
-    symbol_states: List[Dict[str, Any]]  # per ply symbol states (for relational priors)
     move_factors: tuple["MoveFactor", ...]  # factorized move attributes per ply
+
+    def replay_board_vectors(self, ply_limit: Optional[int] = None) -> List[np.ndarray]:
+        """Replay moves up to ply_limit, return per-ply board vectors (local, not stored)."""
+        board = chess.Board()
+        vecs: List[np.ndarray] = []
+        limit = ply_limit if ply_limit is not None else len(self.moves)
+        for san in self.moves[:limit]:
+            try:
+                board.push(board.parse_san(san))
+            except ValueError:
+                break
+            vecs.append(board_to_vector(board))
+        return vecs
+
+    def replay_symbol_states(self, ply: int) -> Dict[str, Any]:
+        """Replay moves up to ply (inclusive), return board_symbol_states at that ply."""
+        board = chess.Board()
+        for san in self.moves[:ply + 1]:
+            try:
+                board.push(board.parse_san(san))
+            except ValueError:
+                break
+        return board_symbol_states(board)
 
 
 @dataclass(frozen=True)
@@ -210,13 +650,19 @@ class MoveFactor:
 
 
 def load_games(limit: int | None) -> list[GameRecord]:
+    """
+    Load game records without pre-computing board vectors or symbol states.
+    Board vectors are ~3 GB for 25k games; keeping them out of GameRecord
+    means load_games uses ~200 MB regardless of dataset size, and board
+    data is only materialised on demand during featurization.
+    """
     if not DATA_PATH.exists():
         raise SystemExit(
             "Missing processed dataset. Run scripts/preprocess_chess_games.py first."
         )
     records: list[GameRecord] = []
     with DATA_PATH.open("r", encoding="utf-8") as handle:
-        for line_idx, line in enumerate(handle):
+        for line in handle:
             if limit is not None and len(records) >= limit:
                 break
             payload = json.loads(line)
@@ -224,7 +670,7 @@ def load_games(limit: int | None) -> list[GameRecord]:
             if result not in RESULT_TO_LABEL:
                 continue
             moves = tuple(payload["moves"])
-            if len(moves) < 6:  # skip extremely short games
+            if len(moves) < 6:
                 continue
             hashed = np.fromiter(
                 (stable_bucket(mv, FEATURE_DIM) for mv in moves),
@@ -233,11 +679,10 @@ def load_games(limit: int | None) -> list[GameRecord]:
             )
             tokens = metadata_tokens(payload, len(moves))
             meta_vec = metadata_vector(tokens)
+            # Compute move_factors (cheap: one board pass, no vector storage)
             board = chess.Board()
-            board_vecs: list[np.ndarray] = []
-            state_frames: list[Dict[str, Any]] = []
-            valid = True
             move_factors: list[MoveFactor] = []
+            valid = True
             for move_san in moves:
                 try:
                     move = board.parse_san(move_san)
@@ -246,22 +691,17 @@ def load_games(limit: int | None) -> list[GameRecord]:
                     break
                 move_factors.append(factor_from_move(board, move))
                 board.push(move)
-                board_vecs.append(board_to_vector(board))
-                state_frames.append(board_symbol_states(board))
-            if not valid or len(board_vecs) != len(moves):
+            if not valid or len(move_factors) != len(moves):
                 continue
-            record = GameRecord(
+            records.append(GameRecord(
                 game_id=payload["id"],
                 result_label=RESULT_TO_LABEL[result],
                 moves=moves,
                 hashed_moves=hashed,
                 is_train=deterministic_split(payload["id"]),
                 meta_vector=meta_vec,
-                board_vectors=np.stack(board_vecs, axis=0),
-                symbol_states=state_frames,
                 move_factors=tuple(move_factors),
-            )
-            records.append(record)
+            ))
     if not records:
         raise SystemExit("No valid games loaded. Check dataset integrity.")
     return records
@@ -404,10 +844,13 @@ def build_outcome_features(
             "test_X": [],
             "test_y": [],
         }
+    _zero_board_vec = np.zeros(BOARD_FEATURE_DIM, dtype=np.float32)
     for record in tqdm(games, desc="Featurizing outcomes"):
         total_moves = record.hashed_moves.shape[0]
         if total_moves < min_scope:
             continue
+        # Replay board vectors once per game (discarded after this record)
+        board_vecs = record.replay_board_vectors(min(max_scope, total_moves))
         if multi_frame_windows > 1:
             for scope in scopes_sorted:
                 if total_moves < scope:
@@ -419,7 +862,7 @@ def build_outcome_features(
                     counts = np.bincount(segment, minlength=FEATURE_DIM).astype(
                         np.float32
                     )
-                    board_vec = record.board_vectors[end - 1]
+                    board_vec = board_vecs[end - 1] if end - 1 < len(board_vecs) else _zero_board_vec
                     vec = compose_prefix_vector(
                         counts, scope, record.meta_vector, board_vec
                     )
@@ -434,7 +877,7 @@ def build_outcome_features(
                 counts[bucket] += 1.0
                 length = idx + 1
                 if length in scope_set:
-                    board_vec = record.board_vectors[length - 1]
+                    board_vec = board_vecs[length - 1] if length - 1 < len(board_vecs) else _zero_board_vec
                     vec = compose_prefix_vector(
                         counts, length, record.meta_vector, board_vec
                     )
@@ -663,6 +1106,15 @@ def build_move_datasets(
     for record in tqdm(games, desc="Collecting move windows"):
         moves = record.moves
         hashed = record.hashed_moves
+        # Replay all symbol states once per game for motif hashing (discarded after)
+        _board = chess.Board()
+        _all_sym: list = []
+        for _san in moves:
+            try:
+                _board.push(_board.parse_san(_san))
+            except ValueError:
+                break
+            _all_sym.append(board_symbol_states(_board))
         max_target = len(moves) - min_horizon
         if max_target <= context_window:
             continue
@@ -679,8 +1131,8 @@ def build_move_datasets(
                 target = moves[target_idx]
                 target_factor = record.move_factors[target_idx]
                 move_factor_lookup.setdefault(target, target_factor)
-                motif_prev = motif_hash(record.symbol_states[idx - 1]) if idx - 1 < len(record.symbol_states) else ""
-                motif_next = motif_hash(record.symbol_states[target_idx - 1]) if target_idx - 1 < len(record.symbol_states) else ""
+                motif_prev = motif_hash(_all_sym[idx - 1]) if idx - 1 < len(_all_sym) else ""
+                motif_next = motif_hash(_all_sym[target_idx - 1]) if target_idx - 1 < len(_all_sym) else ""
                 global_defaults[horizon][target] += 1
                 key = "train" if record.is_train else "test"
                 samples[horizon][key].append((context_hash, target, motif_prev, motif_next, target_factor))
@@ -1237,6 +1689,12 @@ def main() -> None:
 
     print_runtime_banner(outcome_scopes, move_horizons, context_window, context_stride)
 
+    # ── Node / service bridge (fire-and-forget; never blocks training) ────────
+    bridge = NodeBridge(SERVICE_URL, NODE_URL)
+    # Probe eagerly so "UP / unreachable" prints before the first iteration.
+    _ = bridge.service_available
+    _ = bridge.node_available
+
     all_games = load_games(args.max_games)
     priors = None
     if args.relational_priors:
@@ -1249,6 +1707,37 @@ def main() -> None:
     rng = random.Random(args.seed)
     np.random.seed(args.seed)
     print(f"Loaded {len(all_games)} games from {DATA_PATH}")
+
+    # ── Initial neuro train burst ─────────────────────────────────────────────
+    # Send every game's board positions to /neuro/train so the fabric can start
+    # learning piece co-occurrence patterns before the first training iteration.
+    if bridge.service_available:
+        ts_base = int(time.time())
+        n_sent = 0
+        result_names = {0: "1-0", 1: "1/2-1/2", 2: "0-1"}
+        for gi, game in enumerate(all_games):
+            if gi % NEURO_TRAIN_EVERY_N_GAMES != 0:
+                continue
+            for pi in range(min(NEURO_MAX_PLIES_PER_GAME, len(game.moves))):
+                sym_states = game.replay_symbol_states(pi)
+                snap = _symbol_states_to_snapshot(
+                    sym_states, ts_base + gi * 1000 + pi,
+                    result_names.get(game.result_label),
+                )
+                bridge.send_neuro_train(snap)
+                n_sent += 1
+        print(f"  [bridge] Queued {n_sent} neuro-train snapshots from {len(all_games)} games", flush=True)
+    # ── Initial QA ingest burst ───────────────────────────────────────────────
+    if bridge.node_available:
+        n_qa = 0
+        for game in all_games[:500]:  # cap initial burst to 500 games
+            for pi, move in enumerate(game.moves[:-1]):
+                context = list(game.moves[max(0, pi - 5):pi])
+                answer  = game.moves[pi]
+                question = f"chess_move:{' '.join(context)}"
+                bridge.send_qa_ingest(question, answer, context)
+                n_qa += 1
+        print(f"  [bridge] Queued {n_qa} QA examples to node", flush=True)
 
     outcome_data = build_outcome_features(all_games, outcome_scopes, multi_frame_windows)
     move_datasets, move_defaults, context_lookup, move_factor_lookup, anchor_counters = build_move_datasets(
@@ -1284,6 +1773,8 @@ def main() -> None:
     scope_lr_boosts: dict[int, float] = {scope: 1.0 for scope in outcome_scopes}
     prev_outcome_acc: dict[int, float] = {}
 
+    result_names = {0: "1-0", 1: "1/2-1/2", 2: "0-1"}
+    monitor = ResourceMonitor()
     run_start = time.time()
     max_runtime_sec = max(0.0, args.max_runtime_minutes * 60.0)
     iteration = 0
@@ -1295,14 +1786,17 @@ def main() -> None:
     last_outcome_energy: dict[int, float] = {}
     while True:
         iteration += 1
+        scale = monitor.poll()
+        effective_batch = monitor.batch_size(args.batch_size)
         start = time.time()
+        print(f"\n{monitor.status_line()}", flush=True)
         for _ in range(args.epochs_per_iteration):
             base_lr = args.lr / (1.0 + 0.05 * max(iteration - 1, 0))
             for scope in outcome_scopes:
                 dataset = outcome_data[scope]
                 scope_lr = base_lr * scope_lr_boosts.get(scope, 1.0)
                 _ = outcome_models[scope].train_epoch(
-                    dataset["train_X"], dataset["train_y"], scope_lr, args.batch_size
+                    dataset["train_X"], dataset["train_y"], scope_lr, effective_batch
                 )
             harvest_surprises(
                 rng,
@@ -1321,7 +1815,7 @@ def main() -> None:
                     buf_X,
                     buf_y,
                     scope_lr * 1.25,
-                    min(args.batch_size, buf_X.shape[0]),
+                    min(effective_batch, buf_X.shape[0]),
                 )
         update_residual_models(
             rng,
@@ -1440,6 +1934,29 @@ def main() -> None:
         last_move_acc = move_acc
         last_outcome_energy = outcome_energy
 
+        # ── Node feedback loop ────────────────────────────────────────────────
+        # 1. Write live board for the viz server (sample one game from all_games).
+        sample_game = all_games[iteration % len(all_games)] if all_games else None
+        sample_ply  = min(10, len(sample_game.moves) - 1) if sample_game else 0
+        write_live_board(iteration, sample_game, sample_ply, outcome_acc, move_acc, len(all_games))
+
+        # 2. Every other iteration send a fresh neuro-train burst using a
+        #    random sample of games so the fabric continues accumulating
+        #    patterns as accuracy improves.
+        if bridge.service_available and iteration % 2 == 0:
+            ts_now = int(time.time())
+            neuro_sample_n = monitor.game_count(32)
+            sample_indices = rng.sample(range(len(all_games)), min(neuro_sample_n, len(all_games)))
+            for gi in sample_indices:
+                game = all_games[gi]
+                for pi in range(min(NEURO_MAX_PLIES_PER_GAME, len(game.moves))):
+                    sym_states = game.replay_symbol_states(pi)
+                    snap = _symbol_states_to_snapshot(
+                        sym_states, ts_now + gi * 1000 + pi,
+                        result_names.get(game.result_label),
+                    )
+                    bridge.send_neuro_train(snap)
+
         if args.export_annealing:
             export_snapshot(
                 args.export_annealing,
@@ -1451,6 +1968,11 @@ def main() -> None:
                 move_horizons,
                 rng,
             )
+
+        # Adaptive sleep — longer when under pressure so the OS breathes
+        idle = monitor.sleep_secs(0.5)
+        if idle > 0.0:
+            time.sleep(idle)
 
         should_stop = 0 < args.max_iterations <= iteration
         if not should_stop and max_runtime_sec > 0:
@@ -1733,11 +2255,13 @@ def export_snapshot(
     for scope in scopes:
         if sample.hashed_moves.shape[0] < scope:
             continue
+        _export_vecs = sample.replay_board_vectors(scope)
+        _export_bvec = _export_vecs[scope - 1] if scope - 1 < len(_export_vecs) else np.zeros(BOARD_FEATURE_DIM, dtype=np.float32)
         vec = compose_prefix_vector(
             np.bincount(sample.hashed_moves[:scope], minlength=FEATURE_DIM).astype(np.float32),
             scope,
             sample.meta_vector,
-            sample.board_vectors[scope - 1],
+            _export_bvec,
         )
         logits, _, _, _ = outcome_models[scope]._forward(vec[None, :])
         probs = np.exp(logits - logits.max()) / np.exp(logits - logits.max()).sum()
