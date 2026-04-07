@@ -206,11 +206,19 @@ A chess piece, a LiDAR point, a stock tick, a chemical state, a crowd zone — a
 ## What it does (full stack)
 
 ### 1) Symbol matrix inference engine
-- Population-based state proposals with energy models, MCMC-style acceptance, and annealing schedules
+
+The annealer predicts environment states by searching over candidate configurations, accepting or rejecting them by energy. It is not a standalone optimizer — it runs inside the neural motif architecture.
+
+**Motif-driven proposals.** Instead of perturbing from the current state randomly, the proposal kernel reads `temporal_motif_priors` from the neural fabric's snapshot and pulls proposed symbol positions toward the centroids of motif classes the fabric expects to see next. `prediction_pull` and `working_memory_pull` are configurable per-deployment; no values are hard-coded.
+
+**Coherence-modulated temperature.** The cooling schedule is not a fixed curve. After each iteration the annealer reads `mean_prediction_confidence` from the neuro snapshot and sets `T_eff = T_schedule / (confidence + 0.1)`. When the fabric is confident — tight motif alignment, low prediction error — temperature drops and the annealer converges fast. When the fabric is uncertain — novel patterns, conflicting motifs — temperature stays high and the annealer explores. The fabric's epistemic state is the thermostat.
+
+**Motif-prior energy term.** The `motif_transition` energy term penalizes proposed states that contradict the fabric's learned sequence expectations. States where symbols sit in positions consistent with high-prior motif classes get lower energy. States matching no learned motif expectation receive a novelty penalty proportional to distance from all known centroids. The energy landscape is shaped by experience, not only physics constraints.
+
+- Homeostasis: if min-energy stagnates across `patience` iterations, temperature is reheated and mutation rate boosted — prevents premature convergence
+- Population resampling with ESS threshold: when particle diversity collapses, resample and mutate
 - Classical and quantum-inspired annealing; calibration hooks for remote quantum hardware
-- Neural priors and temporal motif signals integrated into proposal scoring
-- Runs as CLI (`predict_state`) or REST service for batch and live jobs
-- AtomicU64 lock-free acceptance counters; hardware-adaptive annealing
+- AtomicU64 lock-free acceptance counters; hardware-adaptive parallelism
 
 ### 2) Neural fabric and cross-stream inference
 
@@ -229,7 +237,7 @@ A chess piece, a LiDAR point, a stock tick, a chemical state, a crowd zone — a
 
 ### 3) Environmental Equation Matrix
 
-The EEM bridges the gap between raw sensor patterns and physical interpretation. As the neuro fabric fires labels, the EEM surfaces candidate equations governing the observed phenomenon. It is a complete map of modern physics — 214 equations across 21 disciplines — compiled into the node so that any sensor stream can be interpreted through the lens of physical law.
+The EEM bridges the gap between raw sensor patterns and physical interpretation. As the neuro fabric fires labels, the EEM surfaces candidate equations governing the observed phenomenon. It is a complete map of modern physics — 282 equations across 24 disciplines — compiled into the node so that any sensor stream can be interpreted through the lens of physical law.
 
 - Equations accumulate sensor-driven evidence; those that consistently explain observations gain confidence; those that don't, decay
 - When the fabric fires labels that match no equation, a `HypothesisSlot` is opened — the node records it as an unexplained phenomenon awaiting discovery
@@ -267,11 +275,18 @@ Gap escalation: `HypothesisSlot` entries now carry `first_node_id` and `reportin
 - Optional OCR adapter enriches video frames with text blocks
 
 ### 5) Behavior substrate and motifs
+
+Motifs are the currency the annealer and the EEM both trade in. The hierarchical motif runtime mines recurring temporal sequences from the behavior substrate, promotes them through levels, and exposes predictions that everything else builds on.
+
 - Body-schema adapters map multimodal sensors into shared latent state + action vector
 - Change-point segmentation plus fixed windows for stable coverage
-- Motif discovery using DTW/soft-DTW similarity, graph signatures, and MDL costs
+- Motif discovery using normalized edit distance (Levenshtein), graph signatures, and MDL costs
+- Attractor detection: when transition entropy drops below threshold, the sequence is flagged as an attractor — a stable regime the environment is locked into
+- `next_predictions(last_id)` — given the most recent motif, returns learned transition probabilities to successors across all levels; this is what the proposal kernel samples from
+- `mean_transition_entropy()` — fabric certainty scalar used by the annealer as coherence signal for temperature modulation
+- `window_tail(n)` — current observation window tail for seeding predictions
+- Meta-motifs promoted through unbounded levels: level-0 sequences become level-1 meta-motifs, which become level-2 meta-motifs, until the signal exhausts
 - Behavior graph coupling metrics: proximity, coherence, phase-locking, transfer-entropy proxies
-- Attractor detection via next-state entropy with optional constraints and soft objectives
 
 ### 6) Multi-domain fusion and temporal inference
 - Learned multi-domain hypergraph links tokens and layers with decay, TTL, and gating
@@ -382,15 +397,29 @@ curl http://localhost:8090/health
 # Check what the equation matrix knows
 curl http://localhost:8090/equations/report
 
+# See open hypothesis gaps (sorted by cross-node corroboration)
+curl http://localhost:8090/equations/gaps
+
+# See the named-process causal graph
+curl http://localhost:8090/causal/graph
+
 # Find equations for a 2D topological sensor context
 curl -X POST http://localhost:8090/equations/apply \
   -H "Content-Type: application/json" \
   -d '{"labels": ["anyon", "topological", "braid", "hall"], "dims": 2}'
 
-# Start a domain script (chess example)
-python scripts/chess_training_loop.py --max-games 2000
+# --- Run chess training + live visualizer together ---
 
-# Start the live visualizer
+# Terminal 1: node
+./target/debug/w1z4rdv1510n-node api --addr 127.0.0.1:8090
+
+# Terminal 2: chess sensor script (feeds board states to the node as EnvironmentSnapshots)
+python scripts/chess_training_loop.py --max-games 8000
+
+# Terminal 3: live visualizer (opens browser automatically)
+python scripts/live_viz_server.py --board-file logs/chess_live_board.json --port 8765 --open
+
+# Start the live visualizer (standalone)
 python scripts/live_viz_server.py --open
 ```
 
