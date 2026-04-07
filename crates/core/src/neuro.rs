@@ -1,3 +1,4 @@
+use crate::hardware::HardwareProfile;
 use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -245,6 +246,13 @@ struct MiniColumn {
     born_at: u64,
     last_seen: u64,
     collapsed: bool,
+    /// True when member activations changed since last signature match.
+    /// Dirty columns skip the expensive best_signature_match computation.
+    activation_dirty: bool,
+    /// Cached evidence from last best_signature_match call.
+    cached_evidence: f32,
+    /// Cached conflict from last best_signature_match call.
+    cached_conflict: f32,
 }
 
 /// Simple object-pool style neuron store with on-the-fly composite creation from co-occurring symbols.
@@ -253,10 +261,16 @@ pub struct NeuronPool {
     neurons: Vec<Neuron>,
     free: Vec<u32>,
     label_to_id: HashMap<String, u32>,
-    cooccur: HashMap<(String, String), u64>,
+    /// EMA co-occurrence rate per label pair.  Incremented with decay:
+    /// `rate = rate * EMA_ALPHA + 1.0` on co-occurrence; equilibrium ≈ 33 at alpha=0.97.
+    cooccur: HashMap<(String, String), f32>,
     config: NeuroConfig,
     step: u64,
+    /// Maximum cooccur entries before pruning low-rate entries.  `usize::MAX` = unlimited.
+    cooccur_cap: usize,
 }
+
+const COOCCUR_EMA_ALPHA: f32 = 0.97;
 
 impl NeuronPool {
     pub fn new(config: NeuroConfig) -> Self {
@@ -267,6 +281,7 @@ impl NeuronPool {
             cooccur: HashMap::new(),
             config,
             step: 0,
+            cooccur_cap: usize::MAX,
         }
     }
 
@@ -364,15 +379,28 @@ impl NeuronPool {
         for i in 0..uniq.len() {
             for j in (i + 1)..uniq.len() {
                 let key = (uniq[i].clone(), uniq[j].clone());
-                *self.cooccur.entry(key).or_insert(0) += 1;
+                // EMA-based co-occurrence rate: converges to ~33 if seen every frame.
+                let entry = self.cooccur.entry(key).or_insert(0.0);
+                *entry = *entry * COOCCUR_EMA_ALPHA + 1.0;
             }
         }
+        // On constrained hardware, prune low-rate cooccur entries to bound memory.
+        if self.cooccur.len() > self.cooccur_cap {
+            self.cooccur.retain(|_, v| *v > 1.5);
+        }
         self.maybe_spawn_composites();
-        // simple Hebbian strengthening between active pairs
+        // Hebbian strengthening between active pairs — scale delta by within-batch pair count.
+        // If the same two IDs appear together multiple times in this call, the delta is proportionally larger.
+        let mut pair_counts: HashMap<(u32, u32), u32> = HashMap::new();
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
-                self.hebbian_pair(ids[i], ids[j], self.config.excitatory_scale, false);
+                let (a, b) = if ids[i] <= ids[j] { (ids[i], ids[j]) } else { (ids[j], ids[i]) };
+                *pair_counts.entry((a, b)).or_insert(0) += 1;
             }
+        }
+        for ((a, b), cnt) in pair_counts {
+            let scale = self.config.excitatory_scale * cnt as f32;
+            self.hebbian_pair(a, b, scale, false);
         }
     }
 
@@ -487,9 +515,10 @@ impl NeuronPool {
             }
         }
 
-        // Hop-by-hop propagation
+        // Hop-by-hop propagation — scratch buffer pre-allocated to avoid per-hop alloc.
+        let mut next: Vec<f32> = vec![0.0; n];
         for _ in 0..hops {
-            let mut next = activation.clone();
+            next.copy_from_slice(&activation);
             for (src_idx, &src_act) in activation.iter().enumerate() {
                 if src_act < 0.001 {
                     continue;
@@ -517,7 +546,7 @@ impl NeuronPool {
             for v in next.iter_mut() {
                 *v *= 0.85;
             }
-            activation = next;
+            std::mem::swap(&mut activation, &mut next);
         }
 
         // Collect results above threshold
@@ -532,12 +561,13 @@ impl NeuronPool {
         result
     }
 
-    pub fn cooccurrences_above(&self, threshold: u64) -> Vec<((String, String), u64)> {
+    pub fn cooccurrences_above(&self, threshold: u64) -> Vec<((String, String), f32)> {
+        let t = threshold as f32;
         self.cooccur
             .iter()
-            .filter_map(|((a, b), count)| {
-                if *count >= threshold {
-                    Some(((a.clone(), b.clone()), *count))
+            .filter_map(|((a, b), rate)| {
+                if *rate >= t {
+                    Some(((a.clone(), b.clone()), *rate))
                 } else {
                     None
                 }
@@ -565,31 +595,23 @@ impl NeuronPool {
             } else {
                 &mut neuron.excitatory
             };
-            if let Some(existing) = list.iter_mut().find(|s| s.target == to) {
-                existing.weight += delta;
-            } else {
-                list.push(Synapse {
-                    target: to,
-                    weight: delta,
-                    inhibitory,
-                });
+            // Lists are kept sorted by target for O(log n) lookup.
+            match list.binary_search_by_key(&to, |s| s.target) {
+                Ok(idx) => list[idx].weight += delta,
+                Err(idx) => list.insert(idx, Synapse { target: to, weight: delta, inhibitory }),
             }
         }
-        // add dendrite on target side
+        // add dendrite on target side (sorted by source)
         if let Some(target) = self.neurons.get_mut(to as usize) {
-            if let Some(existing) = target.dendrites.iter_mut().find(|d| d.source == from) {
-                existing.weight += delta;
-            } else {
-                target.dendrites.push(Dendrite {
-                    source: from,
-                    weight: delta,
-                });
+            match target.dendrites.binary_search_by_key(&from, |d| d.source) {
+                Ok(idx) => target.dendrites[idx].weight += delta,
+                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: delta }),
             }
         }
     }
 
     fn maybe_spawn_composites(&mut self) {
-        let threshold = self.config.composite_threshold;
+        let threshold = self.config.composite_threshold as f32;
         let mut new_labels = Vec::new();
         for ((a, b), count) in self.cooccur.iter() {
             if *count >= threshold {
@@ -933,7 +955,7 @@ impl NeuroState {
                 label: label.clone(),
                 members: vec![a_id, b_id],
                 born_at: self.pool.step_counter(),
-                strength: (count as f32).sqrt().max(1.0),
+                strength: count.sqrt().max(1.0),
                 use_count: 0,
                 level: 0,
                 excites: HashMap::new(),
@@ -1026,6 +1048,9 @@ impl NeuroState {
                 born_at: step,
                 last_seen: step,
                 collapsed: false,
+                activation_dirty: true,
+                cached_evidence: 0.0,
+                cached_conflict: 0.0,
             };
             self.minicolumn_index
                 .insert(column.label.clone(), self.minicolumns.len());
@@ -1038,8 +1063,26 @@ impl NeuroState {
         let collapse_threshold = config.minicolumn_collapse_threshold.clamp(0.0, 1.0);
         let inhibit_scale = config.minicolumn_inhibit_scale.clamp(0.0, 1.0);
 
+        // Build a flat set of all labels in the current signature batch for fast membership test.
+        let sig_label_set: HashSet<&str> = signatures
+            .iter()
+            .flat_map(|s| s.labels.iter().map(|l| l.as_str()))
+            .collect();
+
         for column in &mut self.minicolumns {
-            let (evidence, conflict) = best_signature_match(column, signatures);
+            // Fast-path: if no label in this column appears in the current signatures,
+            // the column is unaffected this frame — skip the expensive match and let
+            // stability/inhibition decay naturally.  Mark not-dirty so we use the cached zeros.
+            let any_label_present = column.labels.iter().any(|l| sig_label_set.contains(l.as_str()));
+            let (evidence, conflict) = if any_label_present || column.activation_dirty {
+                let result = best_signature_match(column, signatures);
+                column.cached_evidence = result.0;
+                column.cached_conflict = result.1;
+                column.activation_dirty = false;
+                result
+            } else {
+                (column.cached_evidence, column.cached_conflict)
+            };
             column.stability =
                 column.stability * stability_decay + evidence * (1.0 - stability_decay);
             column.inhibition =
@@ -1058,6 +1101,8 @@ impl NeuroState {
                         neuron.activation *= inhibit_scale;
                     }
                 }
+                // Members changed; recompute on next frame.
+                column.activation_dirty = true;
             }
         }
     }
@@ -1460,10 +1505,13 @@ impl NeuroRuntime {
             .cloned()
             .map(|s| (s.id.clone(), s))
             .collect::<HashMap<_, _>>();
+        let hw = HardwareProfile::detect();
+        let mut state = NeuroState::new(config.neuro.clone());
+        state.pool.cooccur_cap = hw.cooccur_cap();
         Self {
-            config: config.clone(),
+            config,
             symbol_lookup,
-            inner: Arc::new(Mutex::new(NeuroState::new(config.neuro))),
+            inner: Arc::new(Mutex::new(state)),
         }
     }
 
@@ -1638,13 +1686,13 @@ impl NeuroRuntime {
         input_frames: &[Vec<String>],
         target_stream: &str,
         hops: usize,
-        carry: f32,           // 0.0 = no temporal bleed, 1.0 = pure carry-forward
+        carry: f32,           // 0.0 = no temporal bleed; ignored when dynamic carry is computed
     ) -> SequenceReconstruction {
         if !self.config.enabled || input_frames.is_empty() {
             return SequenceReconstruction::default();
         }
 
-        let carry = carry.clamp(0.0, 0.9);
+        let _carry_hint = carry.clamp(0.0, 0.9); // kept for API compat; dynamic carry used below
         let guard = self.inner.lock();
         let min_act = self.config.min_activation;
 
@@ -1654,13 +1702,33 @@ impl NeuroRuntime {
         let mut frames: Vec<CrossStreamFrame> = Vec::with_capacity(input_frames.len());
 
         for (frame_idx, input_labels) in input_frames.iter().enumerate() {
+            // Dynamic carry: cosine similarity between this frame's labels and the previous
+            // frame's labels.  High similarity → persistent context; low similarity → fresh start.
+            let dynamic_carry = if frame_idx == 0 {
+                0.0f32
+            } else {
+                let prev_labels = &input_frames[frame_idx - 1];
+                let a_set: std::collections::HashSet<&str> =
+                    prev_labels.iter().map(|s| s.as_str()).collect();
+                let b_set: std::collections::HashSet<&str> =
+                    input_labels.iter().map(|s| s.as_str()).collect();
+                let intersection = a_set.intersection(&b_set).count() as f32;
+                let denom = (a_set.len() as f32 * b_set.len() as f32).sqrt();
+                if denom > 0.0 {
+                    (intersection / denom).clamp(0.0, 0.95)
+                } else {
+                    0.0
+                }
+            };
+            let effective_carry = dynamic_carry;
+
             // Build seed: current frame labels + carried-over context from prev frame output
             let mut seed_labels: Vec<String> = input_labels.clone();
             // Add carry context — inject prev output labels back as additional seeds
             // scaled by carry factor (they'll start at `carry` activation not 1.0)
             let carry_seed: Vec<String> = prev_output
                 .iter()
-                .filter(|&(_, &v)| v * carry >= min_act)
+                .filter(|&(_, &v)| v * effective_carry >= min_act)
                 .map(|(k, _)| k.clone())
                 .collect();
             seed_labels.extend(carry_seed);

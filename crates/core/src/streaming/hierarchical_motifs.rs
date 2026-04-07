@@ -1,3 +1,4 @@
+use crate::hardware::HardwareProfile;
 use crate::network::compute_payload_hash;
 use crate::schema::Timestamp;
 use crate::streaming::behavior::BehaviorMotif;
@@ -11,8 +12,6 @@ use std::collections::{HashMap, VecDeque};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HierarchicalMotifConfig {
     pub enabled: bool,
-    /// Maximum hierarchy depth (level 0 = atomic motifs).
-    pub max_levels: usize,
     /// Minimum number of child motifs in a meta-motif.
     pub min_sequence_len: usize,
     /// Maximum number of child motifs in a meta-motif.
@@ -21,8 +20,6 @@ pub struct HierarchicalMotifConfig {
     pub similarity_threshold: f64,
     /// Minimum repetitions of a sequence before it is promoted.
     pub min_support: usize,
-    /// Maximum number of motifs tracked per level (prevents unbounded growth).
-    pub max_motifs_per_level: usize,
     /// Transition entropy below which we flag as attractor.
     pub promote_entropy_threshold: f64,
 }
@@ -31,12 +28,10 @@ impl Default for HierarchicalMotifConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_levels: 8,
             min_sequence_len: 2,
             max_sequence_len: 16,
             similarity_threshold: 0.6,
             min_support: 3,
-            max_motifs_per_level: 512,
             promote_entropy_threshold: 1.0,
         }
     }
@@ -184,18 +179,24 @@ pub struct HierarchicalMotifRuntime {
     config: HierarchicalMotifConfig,
     levels: Vec<MotifLevel>,
     tick: u64,
+    /// Window size cap per level.  `None` = unlimited (high-spec machines).
+    /// On constrained hardware this is set to `config.max_sequence_len * 4`.
+    window_cap: Option<usize>,
 }
 
 impl HierarchicalMotifRuntime {
     pub fn new(config: HierarchicalMotifConfig) -> Self {
-        let mut levels = Vec::with_capacity(config.max_levels);
-        for _ in 0..config.max_levels {
-            levels.push(MotifLevel::new());
-        }
+        let hw = HardwareProfile::detect();
+        let window_cap = if hw.motif_window_cap().is_some() {
+            Some(config.max_sequence_len * 4)
+        } else {
+            None
+        };
         Self {
             config,
-            levels,
+            levels: Vec::new(),
             tick: 0,
+            window_cap,
         }
     }
 
@@ -221,18 +222,21 @@ impl HierarchicalMotifRuntime {
 
         let mut newly_promoted: Vec<MetaMotif> = Vec::new();
 
-        for lvl in 0..self.config.max_levels {
+        let mut lvl = 0;
+        loop {
             if level_ids.is_empty() {
                 break;
             }
-
+            // Grow the levels vec on demand — no ceiling.
+            if lvl >= self.levels.len() {
+                self.levels.push(MotifLevel::new());
+            }
             let promoted = self.ingest_level(lvl, &level_ids, &level_durations, timestamp.unix);
 
-            // Ids produced at this level become the input for the next.
             level_ids = promoted.iter().map(|m| m.id.clone()).collect();
             level_durations = promoted.iter().map(|m| m.duration_secs).collect();
-
             newly_promoted.extend(promoted);
+            lvl += 1;
         }
 
         let levels: Vec<LevelReport> = self
@@ -282,20 +286,21 @@ impl HierarchicalMotifRuntime {
         unix: i64,
     ) -> Vec<MetaMotif> {
         let level = &mut self.levels[lvl];
-        let max_window = self.config.max_motifs_per_level * 2;
 
         // Record transitions and extend the window.
+        // On constrained hardware the window is capped to avoid unbounded growth.
+        let cap = self.window_cap;
         for (i, id) in ids.iter().enumerate() {
             if let Some(prev) = level.window.back() {
                 let key = (prev.clone(), id.clone());
                 *level.transitions.entry(key).or_insert(0) += 1;
             }
             level.window.push_back(id.clone());
-            if level.window.len() > max_window {
-                level.window.pop_front();
+            if let Some(max_win) = cap {
+                if level.window.len() > max_win {
+                    level.window.pop_front();
+                }
             }
-            // Also store duration for signature building — we piggyback on
-            // the candidate step below rather than a separate structure.
             let _ = i; // durations used below
         }
 
@@ -401,20 +406,6 @@ impl HierarchicalMotifRuntime {
             .candidates
             .retain(|_, occ| occ.last_seen >= stale_horizon);
 
-        // Cap promoted map per level.
-        if level.promoted.len() > self.config.max_motifs_per_level {
-            let excess = level.promoted.len() - self.config.max_motifs_per_level;
-            let mut entries: Vec<(String, usize)> = level
-                .promoted
-                .iter()
-                .map(|(k, m)| (k.clone(), m.support))
-                .collect();
-            entries.sort_by_key(|(_, s)| *s);
-            for (k, _) in entries.into_iter().take(excess) {
-                level.promoted.remove(&k);
-            }
-        }
-
         promoted
     }
 
@@ -422,7 +413,18 @@ impl HierarchicalMotifRuntime {
     /// enough (normalized edit distance below threshold) to `subseq`.
     fn find_similar_candidate(&self, lvl: usize, subseq: &[String]) -> Option<String> {
         let level = &self.levels[lvl];
+        let query_len = subseq.len();
         for (key, occ) in &level.candidates {
+            let cand_len = occ.ids.len();
+            // Length filter: if the length ratio already exceeds the threshold, edit distance
+            // can't possibly be within the threshold — skip the O(n*m) computation.
+            let max_len = query_len.max(cand_len);
+            if max_len > 0 {
+                let len_diff = (query_len as f64 - cand_len as f64).abs() / max_len as f64;
+                if len_diff > self.config.similarity_threshold {
+                    continue;
+                }
+            }
             let dist = normalized_edit_distance(&occ.ids, subseq);
             if dist <= self.config.similarity_threshold {
                 return Some(key.clone());
@@ -482,12 +484,10 @@ mod tests {
     fn promotes_recurring_sequence_to_meta_motif() {
         let config = HierarchicalMotifConfig {
             enabled: true,
-            max_levels: 4,
             min_sequence_len: 3,
             max_sequence_len: 3,
             similarity_threshold: 0.0, // exact match only
             min_support: 3,
-            max_motifs_per_level: 512,
             promote_entropy_threshold: 1.0,
         };
 

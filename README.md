@@ -8,7 +8,7 @@ W1z4rDV1510n combines:
 - **Organic neural fabric** — CPU+RAM neuron pools with neurogenesis, Hebbian/STDP learning, winner-take-all sparsification, and mini-columns that collapse to concept neurons over time.
 - **Multi-sensor streaming** — plug in video, audio, LiDAR, radio, biological sensors, or any consistent data source; the fabric discovers entities, features, and invisible forces (e.g. wind) through pattern consistency alone.
 - **Chaos world model** — uses known chaos-theory algorithms as mathematical starting points, then lets the neural architecture discover new mathematical relationships through Hebbian learning. A physics explainer that starts in 3D and extends organically.
-- **Recursive motif discovery** — motifs of motifs of motifs, up to 8 hierarchy levels, with Shannon entropy attractor detection.
+- **Recursive motif discovery** — motifs of motifs of motifs with no cap on hierarchy depth; each level's promotions seed the next until the signal exhausts itself. Shannon entropy attractor detection at every level.
 - **Hebbian Q&A fabric** — textbook knowledge encoded as grown synaptic state; querying fires input neurons and reads the output network — no matrix multiplication at inference.
 - **Cross-stream inference** — activate labels from one stream (e.g. video) and read out what fires in another (e.g. audio) through propagated Hebbian connections; reconstruct full temporal sequences across modalities.
 - **Decentralized node mesh** — nodes share motifs, patterns, and knowledge across a P2P network so data encountered anywhere is calculated into predictions everywhere.
@@ -23,7 +23,7 @@ Designed to run on modest desktops and scale across many nodes.
 
 - **CPU+RAM neural fabric** — neuron pools with neurogenesis, Hebbian/STDP learning, winner-take-all sparsification, mini-columns, and spiking signal routing. No GPU required.
 - **Organic feature encoding** — V1-style Gabor-like oriented gradient filters; basis vectors grow from data variability, not predefined categories. New inputs spawn new neurons automatically.
-- **Recursive motif discovery** — hierarchical motif-of-motifs composition up to 8 levels deep; Shannon entropy attractor detection at each level; every motif queued for human labeling with visual snapshots.
+- **Recursive motif discovery** — hierarchical motif-of-motifs composition with no depth ceiling; each promoted level's output becomes the input for the next level, continuing until no new patterns emerge. Shannon entropy attractor detection at each level; every motif queued for human labeling with visual snapshots.
 - **Dynamic neural pool spawning** — new categories discovered organically trigger new spike pools; Hebbian cross-associations between pools; idle pools pruned automatically.
 - **Plug-and-play sensor discovery** — register any sensor (video, audio, IMU, LiDAR, bio-signals) at runtime; TTL-based stale pruning; heuristic stream-source inference.
 - **Hebbian Q&A fabric** — textbook Q&A pairs encoded as grown synaptic weights; query fires input neurons and reads the output network; reaction in state, not runtime computation.
@@ -34,6 +34,7 @@ Designed to run on modest desktops and scale across many nodes.
 - **Live probability metrics** — real outcome probabilities via logistic sigmoid on material balance; per-model energy probabilities via Boltzmann softmax; model breakdown panel with energy bars; three independent accuracy ledgers (top-1 move, top-3 move, material outcome).
 - **OpenStax textbook pipeline** — downloads CC-licensed textbooks from openstax.org, renders to page images, segments with a lightweight perceptron classifier, extracts Q&A pairs, queues all pages for human annotation.
 - **Microcortex JS runtime** — lightweight typed-array perceptron builder (`buildPerceptron`, `softmax`, `hebbianUpdate`, `winnerTakeAll`) for the Node.js segmentation pipeline; same Hebbian rules as the Rust fabric.
+- **Universal threat and health model** — 6D `HealthVector` (StructuralIntegrity, EnergeticFlux, RegulatoryControl, FunctionalOutput, AdaptiveReserve, TemporalCoherence) applies uniformly to humans, animals, machines, and plants at any scope level (body part → organ → organism → group). HSV color encoding maps health to a perceptual color space: black = dead, white = optimal, hue driven by worst-performing dimension. Sub-ultradian arousal bands, spatial proxemics threat field, Bayesian intent inference, multi-entity wave-function collapse consensus, and Hebbian propagation graphs complete the pipeline — all without biosensors.
 - Multimodal stream conversion into layered dynamics and discrete event tokens, aligned with temporal tolerance and confidence gating.
 - Species-agnostic behavior substrate with body-schema adapters, time-frequency motifs, DTW/soft-DTW similarity, and MDL-based compression.
 - Multi-domain hypergraph + temporal inference with phase/amplitude prediction, cross-layer coherence, event intensities, and Dirichlet evidential uncertainty.
@@ -141,13 +142,14 @@ Viz: `scripts/live_viz_server.py` → [localhost:8765](http://localhost:8765)
 - Physiology template bank with covariance-aware deviation scoring.
 - Survival metrics from behavior graphs: cooperation, conflict, play, intent magnitude.
 - Health overlay output with per-entity palette and dimension scores.
+- See also **section 15** for the full 6D threat-and-health model that supersedes and extends this layer.
 
-### 11) Network-wide neural fabric
+### 12) Network-wide neural fabric
 - Shares motifs, transitions, and network pattern summaries across nodes.
 - Entity threads track phenotype tokens, behavior signatures, and plausible travel-time continuity.
 - Patterns propagate through data mesh to keep nodes aligned, with queryable distributed pattern indices.
 
-### 12) Node stack and incentives
+### 13) Node stack and incentives
 - P2P networking (libp2p gossipsub + Kademlia + mDNS) with rate limits and peer scoring.
 - Data mesh: manifests, chunking, replication receipts, integrity audits, and repair requests.
 - Local ledger: validator heartbeats, fee-market scaffolding, audit chain, and reward events.
@@ -155,12 +157,100 @@ Viz: `scripts/live_viz_server.py` → [localhost:8765](http://localhost:8765)
 - Encrypted wallet for node identity and rewards.
 - Large-scale simulation with hardware-aware caps to avoid overload.
 
-### 13) Opt-in identity verification
+### 14) Opt-in identity verification
 - Behavior-derived challenges (position + motion signature + code) bound to wallets on-chain.
 - Supports re-issuing bindings to a new wallet via API.
 - No face ID, no biometric identity resolution.
 
-### 14) Compute and hardware awareness
+### 15) Universal threat and health analysis
+
+A physics-grounded multi-dimensional health model that applies to any entity — human, animal, machine, plant — observable through sensor streams, without biosensors.
+
+#### 6D health vector
+
+Every entity carries a `HealthVector` with six orthogonal dimensions, each with a hue anchor for HSV color encoding:
+
+| Dimension | Short | Hue | Meaning |
+|-----------|-------|-----|---------|
+| StructuralIntegrity | SI | 0° red | Physical substrate integrity |
+| EnergeticFlux | EF | 30° orange | Energy acquisition and distribution |
+| RegulatoryControl | RC | 210° blue | Homeostasis and coordination |
+| FunctionalOutput | FO | 120° green | Characteristic operation capacity |
+| AdaptiveReserve | AR | 270° violet | Reserve capacity to absorb further stress |
+| TemporalCoherence | TC | 60° yellow | Biological/operational rhythms intact |
+
+**Color encoding (HSV):**
+- Value = overall scalar (0 = dead/black, 1 = optimal/white)
+- Hue = weighted circular mean of dimension anchors; worst dimensions dominate the color — what is wrong drives what color you see
+- Saturation = deviation from the established rolling baseline for this entity type
+
+#### Sub-ultradian arousal bands
+
+Infers physiological arousal state from pure video/sensor proxies — no biosensors required:
+
+| Band | Window | Proxies |
+|------|--------|---------|
+| Startle | 0–10 s | micro-freeze, gaze velocity spike |
+| AcuteArousal | 10–60 s | postural rigidity, scanning rate |
+| ThreatVigilance | 1–5 min | sustained scan, proxemics monitoring |
+| SustainedArousal | 5–20 min | breathing rate, voice pitch delta |
+
+Each band runs its own EMA over a circular buffer. Combined arousal drives `TemporalCoherence` damage; sustained arousal drains `AdaptiveReserve`.
+
+#### Spatial threat field
+
+A sparse 2D grid over the scene, updated each frame:
+- **Proxemics zones** (Hall 1966): Intimate (<0.45 m), Personal (<1.2 m), Social (<3.7 m), Public (>3.7 m)
+- **Orientation convergence**: are entities facing each other?
+- **Intent modifier**: from the behavioral intent engine
+- **Concealment bonus**: object concealment or behavior concealment
+- **Temporal EMA** (40% new / 60% retained): threat field is sticky — a single-frame spike doesn't dominate
+
+Each threat cell carries `dimension_weights[6]` so you can read which health dimensions are being pressured in which regions of the scene.
+
+#### Behavioral intent inference
+
+Bayesian-style softmax over 9 intent classes ordered by threat severity:
+
+`Normal → Survey → Approach → Conceal → ControlEnvironment → ApproachDemand → Flee → DirectThreat → ArmedThreat`
+
+Observable signal types (gaze, posture, concealment, exit monitoring, etc.) each carry prior weight vectors over the 9 classes. Signal decay of 0.85× per frame without new observations prevents stale locks. `build_health_impacts()` converts dominant intent into forward-projected health deltas on target entities with a time horizon.
+
+#### Wave function collapse consensus
+
+Multi-entity consensus using the complementary probability rule:
+
+```
+consensus = 1 - ∏(1 - estimate_i)
+```
+
+Three independent entities each at 50% → consensus of 87.5%. Shannon entropy of the threat distribution is tracked over a 16-frame history; linear regression on entropy history gives a `collapse_rate`. When entropy drops below 0.35 **and** is falling faster than 5%/frame, the wave function is declared collapsed — the threat is about to materialise. Alarm levels: none / low / medium / high / critical.
+
+#### Health propagation graph
+
+Each entity is a symbol graph (body parts, organs, subsystems) with typed edges:
+
+| Edge type | Speed | Primary dimensions |
+|-----------|-------|--------------------|
+| Structural | 0.5× | SI, FO |
+| Vascular | 0.7× | EF, FO |
+| Neural | 1.0× | RC, TC |
+| Proximity | 0.1× | AR |
+
+Damage propagates (not recovery) through the graph each frame. **Hebbian edge learning**: co-occurring degradation on both ends of an edge strengthens that edge's weight (+0.02 per co-occurrence), so the system learns real anatomical coupling from observation. `human_body_graph()` provides a ready-made human anatomy topology (head, torso, limbs, cardiovascular, nervous system).
+
+#### Threat overlay API
+
+`ThreatOverlayEngine::assemble()` merges all sub-systems into a single `ThreatOverlay` per frame:
+- Scene-level alarm + color
+- Per-entity: composite threat score, threat color, health state, intent, arousal bands, ranked health predictions
+- All predictions sorted by magnitude — worst expected impacts first
+
+The streaming processor automatically feeds `BehavioralToken` events into the threat scene each batch and embeds the overlay in `report_metadata["threat_overlay"]`.
+
+**`ThreatScene`** is the convenience wrapper — call `ingest_frame(frame, ts)` + `overlay(ts)` from any context.
+
+### 16) Compute and hardware awareness
 - Auto-detects CPU/GPU/cluster hints to select optimized backends.
 - CPU RAM-optimized backend with NUMA/large-page hints.
 - Optional GPU backend (build with `--features gpu`) for bulk bit operations.
@@ -194,6 +284,8 @@ Viz: `scripts/live_viz_server.py` → [localhost:8765](http://localhost:8765)
 - **P2P neuro fabric sync** — when a `NeuralFabricShare` arrives from a peer, `label_queue_sync` parses the embedded `neuro_snapshot` and calls `train_weighted` with the peer's active labels at a low learning rate (0.3×), distributing Hebbian co-occurrence learning across nodes
 - **Label queue → Hebbian feedback** — `submit_knowledge_vote` back-propagates verified figure/text associations into the node's `NeuroRuntime` at 4× learning rate (human-label strength), closing the annotation → fabric loop
 - `visualize_snapshot.py` — static snapshot viewer + `--live` polling mode that watches `chess_live_board.json` (or any snapshot file) and auto-refreshes a browser-friendly HTML wrapper every N seconds
+- **Threat and health analysis module** — `crates/core/src/threat/`: 6D HealthVector with HSV encoding, sub-ultradian arousal band detection (no biosensors), spatial threat field with proxemics, behavioral intent inference, multi-entity wave-function collapse consensus, Hebbian health propagation graph, `ThreatOverlay` unified API output; wired into the streaming processor and exposed at `/threat/ingest`, `/threat/overlay`, `/threat/predict`
+- **Unbounded hierarchical motif recursion** — removed the 8-level cap; motif hierarchies now grow until signal exhausts naturally
 
 ### Stubs and placeholders (not yet implemented)
 - Bridge verification: optimistic, light-client, and ZK modes are placeholders; only relayer-quorum is active
@@ -313,7 +405,7 @@ for i, token in enumerate(question_tokens[:8]):
 
 The annealer finds which answer-token configuration minimises total distance from the question layout. The collective vote across classical/quantum/neuro models surfaces the most probable answer.
 
-Run configs to create: `run_config_qa_classical.json`, `run_config_qa_neuro.json`
+Run configs: `run_config_qa_classical.json`, `run_config_qa_neuro.json`
 Key weights: `w_goal: 4.0`, `w_stack_hash: 0.8` (question history as hash fingerprint)
 
 ---
@@ -337,7 +429,7 @@ for atom in reactant_atoms:
     })
 ```
 
-Run config to create: `run_config_chem_classical.json`
+Run config: `run_config_chem_classical.json`
 Key weights: `w_goal: 4.0`, `w_collision: 3.0` (atomic radii matter), `w_env_constraints: 1.0`
 
 ---
@@ -484,6 +576,33 @@ Set storage path with env var: `W1Z4RDV1510N_SERVICE_STORAGE=logs/service_runs`
 }
 ```
 
+#### Threat analysis
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/threat/ingest` | Ingest per-entity sensor attributes for the current frame (fire-and-forget, returns 204) |
+| GET | `/threat/overlay` | Return the current `ThreatOverlay` — scene alarm, per-entity health + intent + arousal + predictions |
+| POST | `/threat/predict` | Ingest a frame of attributes and immediately return the resulting overlay in one round trip |
+
+**`POST /threat/ingest` and `POST /threat/predict` body:**
+```json
+{
+  "timestamp_unix": 1732003600,
+  "frame": {
+    "person_1": {
+      "pos_x": 2.5, "pos_y": 1.0, "pos_z": 0.0,
+      "orient_x": 0.0, "orient_y": 1.0,
+      "gaze_velocity": 0.8,
+      "postural_rigidity": 0.6,
+      "concealed_object": false,
+      "exit_monitoring": 0.7,
+      "hand_conceal": 0.5
+    }
+  }
+}
+```
+
+The overlay response includes `scene_alarm`, `scene_color`, `threat_entity_count`, and per-entity summaries with `composite_threat`, `threat_color`, `health`, `intent`, `arousal`, and ranked `predictions`.
+
 ### Node API (`w1z4rdv1510n-node`, port 8090 by default)
 - `/health`, `/ready`, `/metrics`
 - `/data/ingest`, `/data/:data_id`
@@ -506,7 +625,7 @@ Set storage path with env var: `W1Z4RDV1510N_SERVICE_STORAGE=logs/service_runs`
 | `scripts/rss_topic_bridge.py` | RSS/Atom to PublicTopics StreamEnvelope JSONL bridge |
 | `scripts/traffic_sensor_bridge.py` | Traffic sensor JSON/CSV to CrowdTraffic StreamEnvelope JSONL bridge |
 | `scripts/run_with_viz.py` | Legacy viz runner (superseded by direct viz server + chess runner pair) |
-| `scripts/visualize_snapshot.py` | Standalone snapshot viewer (not yet wired to live board data) |
+| `scripts/visualize_snapshot.py` | Snapshot viewer + `--live` polling mode; watches `chess_live_board.json` or any snapshot file and auto-refreshes a browser HTML wrapper every N seconds; accepts `--interval`, `--open` flags |
 | `scripts/preprocess_chess_games.py` | Preprocess PGN files into training sequences |
 | `scripts/build_relational_priors.py` | Build relational priors from training data |
 | `scripts/export_chess_stack_snapshot.py` | Export chess stack snapshots for analysis |
@@ -560,7 +679,7 @@ crates/core/
       pgn_to_snapshot.rs             — PGN → EnvironmentSnapshot converter
     streaming/
       qa_runtime.rs                  — Hebbian Q&A associative memory
-      hierarchical_motifs.rs         — recursive motif-of-motifs (8 levels, Shannon entropy)
+      hierarchical_motifs.rs         — recursive motif-of-motifs (unbounded depth, Shannon entropy)
       organic_encoder.rs             — V1-style feature encoding with Gabor filters + EMA basis
       dynamic_pools.rs               — organic neural pool spawning with Hebbian cross-associations
       sensor_registry.rs             — plug-and-play sensor auto-discovery with TTL
@@ -577,6 +696,15 @@ crates/core/
     orchestrator.rs                  — run coordinator
     ml.rs                            — ML prior integration
     spike.rs                         — spike pool and routing
+    threat/
+      health.rs                      — 6D HealthVector, HSV color encoding, scope stacking, baseline tracker
+      subradian.rs                   — sub-ultradian arousal bands (Startle/AcuteArousal/ThreatVigilance/SustainedArousal)
+      field.rs                       — sparse 2D spatial threat field with proxemics + orientation convergence
+      intent.rs                      — behavioral intent inference (Normal → ArmedThreat), health impact prediction
+      consensus.rs                   — multi-entity wave-function collapse, Shannon entropy, alarm levels
+      propagation.rs                 — Hebbian health propagation graph, human_body_graph() factory
+      overlay.rs                     — ThreatOverlay + HealthPrediction unified API output
+      mod.rs                         — ThreatScene convenience wrapper (ingest_frame + overlay)
 
 crates/node/
   src/

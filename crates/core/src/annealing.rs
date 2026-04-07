@@ -7,11 +7,11 @@ use crate::proposal::ProposalKernel;
 use crate::schema::{EnvironmentSnapshot, Population};
 use crate::search::SearchModule;
 use crate::state_population::{clone_and_mutate, normalize_weights, resample_population};
-use parking_lot::Mutex;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AO};
 use tracing::{debug, info};
 
 #[tracing::instrument(
@@ -59,7 +59,7 @@ pub fn anneal(
         let particle_seeds: Vec<u64> = (0..population.particles.len())
             .map(|_| rng.r#gen())
             .collect();
-        let accepted_counter = Arc::new(Mutex::new(0usize));
+        let accepted_counter = Arc::new(AtomicU64::new(0));
         let update_particle = {
             let accepted_counter = Arc::clone(&accepted_counter);
             move |particle: &mut crate::schema::ParticleState| {
@@ -79,8 +79,7 @@ pub fn anneal(
                 if local_rng.r#gen::<f64>() < accept_prob {
                     particle.current_state = proposal;
                     particle.energy = new_energy;
-                    let mut guard = accepted_counter.lock();
-                    *guard += 1;
+                    accepted_counter.fetch_add(1, AO::Relaxed);
                 }
                 particle.weight = (-particle.energy / temperature.max(1e-3)).exp();
             }
@@ -128,7 +127,7 @@ pub fn anneal(
             neuro_sink.write_snapshot(iteration, &snapshot);
         }
         energy_trace.push(min_energy);
-        let accepted_count = *accepted_counter.lock();
+        let accepted_count = accepted_counter.load(AO::Relaxed) as usize;
         let acceptance_ratio = if population.particles.is_empty() {
             0.0
         } else {

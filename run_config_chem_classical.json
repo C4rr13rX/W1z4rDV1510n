@@ -1,0 +1,98 @@
+{
+  "mode": "PRODUCTION",
+  "t_end": {
+    "unix": 1732003600
+  },
+  "n_particles": 64,
+  "schedule": {
+    "t_start": 5.0,
+    "t_end": 0.4,
+    "n_iterations": 150,
+    "schedule_type": "Linear"
+  },
+  "energy": {
+    "w_motion": 0.5,
+    "w_collision": 3.0,
+    "w_goal": 4.0,
+    "w_group_cohesion": 0.2,
+    "w_ml_prior": 0.0,
+    "w_relational_prior": 0.4,
+    "w_neuro_alignment": 0.0,
+    "w_stack_hash": 0.5,
+    "stack_alignment_topk": 3,
+    "stack_alignment_weight": 0.4,
+    "stack_future_horizon": 1,
+    "stack_future_weight": 0.2,
+    "w_path_feasibility": 0.8,
+    "w_env_constraints": 1.0
+  },
+  "proposal": {
+    "local_move_prob": 0.5,
+    "group_move_prob": 0.2,
+    "swap_move_prob": 0.15,
+    "path_based_move_prob": 0.05,
+    "global_move_prob": 0.1,
+    "ml_guided_move_prob": 0.0,
+    "max_step_size": 0.5,
+    "use_parallel_updates": true,
+    "adaptive_move_mixing": true
+  },
+  "init_strategy": {
+    "use_ml_priors": false,
+    "noise_level": 0.15,
+    "random_fraction": 0.15,
+    "copy_snapshot_fraction": 0.25
+  },
+  "resample": {
+    "enabled": true,
+    "effective_sample_size_threshold": 0.35,
+    "mutation_rate": 0.04
+  },
+  "search": {
+    "cell_size": 0.5,
+    "teleport_on_no_path": true
+  },
+  "ml_backend": "None",
+  "hardware_backend": "Auto",
+  "hardware_overrides": {
+    "allow_gpu": false,
+    "allow_distributed": false,
+    "max_threads": 8
+  },
+  "neuro": {
+    "enabled": false
+  },
+  "homeostasis": {
+    "enabled": true,
+    "energy_plateau_tolerance": 0.0005,
+    "patience": 6,
+    "mutation_boost": 0.3,
+    "reheat_scale": 0.1
+  },
+  "quantum": {
+    "enabled": false,
+    "driver_final_strength": 0.0
+  },
+  "logging": {
+    "log_level": "WARN",
+    "json": true,
+    "log_path": "logs/chem_classical.jsonl",
+    "live_frame_path": "logs/chem_classical_frame.json",
+    "live_frame_every": 30,
+    "live_neuro_path": "logs/chem_classical_neuro.json",
+    "live_neuro_every": 30
+  },
+  "output": {
+    "save_best_state": true,
+    "save_population_summary": false,
+    "output_path": "logs/chem_classical_result.json",
+    "format": "Json"
+  },
+  "random": {
+    "provider": "DETERMINISTIC",
+    "seed": 3333
+  },
+  "experimental_hardware": {
+    "enabled": false
+  }
+}

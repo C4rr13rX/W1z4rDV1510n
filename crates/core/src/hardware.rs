@@ -1060,6 +1060,35 @@ impl HardwareProfile {
     }
 }
 
+impl HardwareProfile {
+    /// True when the machine is RAM- or cache-constrained relative to the
+    /// unbounded growth that full-accuracy mode would produce.
+    /// Threshold: < 16 GB RAM and no GPU and no cluster.
+    /// On machines above this threshold every cap is lifted and full
+    /// combinatorial/historical accuracy is used instead.
+    pub fn is_constrained(&self) -> bool {
+        !self.cluster_hint && !self.has_gpu && self.total_memory_gb < 16.0
+    }
+
+    /// Maximum number of co-occurrence pairs to retain in the NeuronPool.
+    /// On constrained machines keeps the cooccur map inside L3 cache (~8 MB).
+    /// Unlimited (usize::MAX) on high-spec machines.
+    pub fn cooccur_cap(&self) -> usize {
+        if self.is_constrained() { 50_000 } else { usize::MAX }
+    }
+
+    /// Maximum entries to keep in the hierarchical-motif window per level.
+    /// Constrained machines cap at max_sequence_len to avoid ever-growing
+    /// VecDeque clones; powerful machines retain the full history.
+    /// Returns `Some(true)` on constrained hardware to indicate that the motif
+    /// history window should be capped.  Callers determine the actual cap size
+    /// (typically `max_sequence_len * 4`).  Returns `None` on high-spec machines
+    /// (unlimited history).
+    pub fn motif_window_cap(&self) -> Option<bool> {
+        if self.is_constrained() { Some(true) } else { None }
+    }
+}
+
 fn recommend_backend(profile: &HardwareProfile) -> HardwareBackendType {
     if profile.cluster_hint {
         HardwareBackendType::Distributed
