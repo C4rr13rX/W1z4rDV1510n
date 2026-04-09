@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import os
 import socketserver
 import threading
 import webbrowser
@@ -802,7 +803,28 @@ def serve(
     return httpd, t
 
 
+def _kill_stale_instances() -> None:
+    """Kill any other live_viz_server.py processes before binding the port."""
+    my_pid = os.getpid()
+    my_script = Path(__file__).name
+    try:
+        import psutil
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.pid == my_pid:
+                    continue
+                cmdline = " ".join(proc.info.get("cmdline") or [])
+                if "python" in proc.info.get("name", "").lower() and my_script in cmdline:
+                    print(f"  [single-instance] Killing stale {my_script} (PID {proc.pid})", flush=True)
+                    proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except ImportError:
+        pass
+
+
 def main() -> None:
+    _kill_stale_instances()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--board-file",  type=Path, default=Path("logs/chess_live_board.json"))
     ap.add_argument("--frame-file",  type=Path, default=Path("logs/live_frame.json"))

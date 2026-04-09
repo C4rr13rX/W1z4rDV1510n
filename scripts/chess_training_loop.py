@@ -1698,7 +1698,26 @@ class PlyAnimator:
                 pass  # never crash the animator; stale viz beats no viz
 
 
+def _kill_stale_instances() -> None:
+    """Kill any other chess_training_loop.py processes before starting."""
+    if not _PSUTIL_AVAILABLE:
+        return
+    my_pid = os.getpid()
+    my_script = Path(__file__).name
+    for proc in _psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.pid == my_pid:
+                continue
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if "python" in proc.info.get("name", "").lower() and my_script in cmdline:
+                print(f"  [single-instance] Killing stale {my_script} (PID {proc.pid})", flush=True)
+                proc.kill()
+        except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+            pass
+
+
 def main() -> None:
+    _kill_stale_instances()
     parser = argparse.ArgumentParser(description="Chess outcome + move training loop")
     parser.add_argument("--max-games", type=int, default=8000, help="Game cap")
     parser.add_argument(
