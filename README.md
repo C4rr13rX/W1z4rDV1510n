@@ -35,23 +35,70 @@ When the EEM can't explain a label cluster — when something is happening that 
 ## Architecture overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Node (Rust)                              │
-│                                                                 │
-│  NeuroRuntime  ──  EquationMatrix  ──  QaRuntime               │
-│       │                  │                  │                   │
-│  KnowledgeRuntime  ──  HierarchicalMotifs  ──  FabricTrainer   │
-│       │                                         │               │
-│  P2P Gossip / Data Mesh / Blockchain Layer                      │
-└─────────────────────────────────────────────────────────────────┘
-          ▲                ▲                 ▲
-          │                │                 │
-   chess_training    rtsp_pose_bridge   rss_topic_bridge
-   _loop.py          .py                .py
-   (app / script)    (app / script)     (app / script)
+┌──────────────────────────────────────────────────────────────────────┐
+│                     w1z4rd_node  (one binary)                        │
+│                                                                      │
+│  :8080  Neuro API ── NeuroRuntime ── EquationMatrix ── QaRuntime    │
+│  :8090  Node  API ── ClusterNode  ── HashRing ── OtpRegistry        │
+│                                                                      │
+│  KnowledgeRuntime ── HierarchicalMotifs ── FabricTrainer            │
+│  P2P Gossip / Data Mesh / Blockchain Layer                           │
+└──────────────────────────────────────────────────────────────────────┘
+          ▲                 ▲                  ▲           ▲
+          │                 │                  │           │
+   chess_training     rtsp_pose_bridge   rss_topic_bridge  w1z4rd-dashboard
+   _loop.py           .py                .py               (GUI client binary)
+   (app / script)     (app / script)     (app / script)
 ```
 
+Both APIs start automatically when the node binary launches — no separate service process. The dashboard is a lightweight GUI binary that polls the node APIs; it does not need to run on the same machine.
+
 **Apps send generic `EnvironmentSnapshot` objects. The node has no knowledge of chess, poses, or topics — it sees symbols with positions, labels, and metadata. Every app trains the same neural fabric.**
+
+---
+
+## Cluster
+
+Multiple nodes join into a single virtual node that partitions the neural fabric across all available hardware. From the fabric's perspective there is one brain; from the hardware's perspective each machine holds a slice of it.
+
+```
+Machine A (coordinator)            Machine B                 Machine C
+┌─────────────────────┐           ┌───────────────┐         ┌───────────────┐
+│  w1z4rd_node        │  SIGIL    │  w1z4rd_node  │  SIGIL  │  w1z4rd_node  │
+│  :8080 :8090        │ ◄────────►│  :8080 :8090  │◄───────►│  :8080 :8090  │
+│  ring owner 0–42    │  :51611   │  ring 43–85   │ :51611  │  ring 86–127  │
+└─────────────────────┘           └───────────────┘         └───────────────┘
+```
+
+**How it works:**
+
+| Concern | Mechanism |
+|---------|-----------|
+| Node discovery & pairing | One-time OTP (`WORD-NNNN` format, argon2id, TTL-bounded, single-use) |
+| Label partitioning | Consistent hash ring — 150 virtual nodes per machine (Blake2b512); labels routed to their owner without replication |
+| Coordinator election | Bully algorithm — highest-priority (oldest) surviving node wins; coordinator is a full participant, not a dedicated master |
+| Failure detection | Heartbeat every 5 s; node declared lost after 15 s; election triggered when coordinator silent for 20 s |
+| Transport | Length-prefixed JSON frames over raw TCP; `DashMap` connection pool per node |
+| Default port | **51611** — SIGIL in leet speak (5=S, 1=I, 6=G, 1=I, 1=L) |
+| Scale | Unbounded — 2 to N nodes; the ring rebalances on every join/leave |
+
+**Cluster commands:**
+
+```bash
+# Machine A — start the cluster, prints a join OTP
+w1z4rd_node cluster-init
+
+# Machine B — join using the OTP from machine A
+w1z4rd_node cluster-join --coordinator 192.168.1.10:51611 --otp EMBER-4821
+
+# Any node — print cluster topology and ring status
+w1z4rd_node cluster-status
+
+# Coordinator — generate a fresh OTP for a new joiner
+w1z4rd_node cluster-otp
+```
+
+The neural fabric scales horizontally without changing the API. A script POSTing to `/neuro/train` on any node trains the distributed fabric; `/neuro/snapshot` on any node returns the global view.
 
 ---
 
@@ -130,7 +177,7 @@ Two operating modes — no code changes required, controlled by `node_config.jso
 | `SENSOR` | Optional | Off | Off | Local AI, training loops, development |
 | `PRODUCTION` | Required | On | On | Full Web3 hybrid, cluster computing |
 
-The node API (`/health`, `/neuro/train`, `/equations/search`, `/qa/ingest`, etc.) runs in both modes.
+Both APIs (`:8080` neuro, `:8090` node) run in either mode. Cluster commands are always available regardless of mode.
 
 ---
 
@@ -388,11 +435,22 @@ These scripts use the node architecture — the node has no knowledge of their d
 # Build everything
 cargo build --release
 
-# Start the node in SENSOR mode (no wallet prompt)
-./target/release/w1z4rdv1510n-node api --addr 127.0.0.1:8090
+# Copy to bin/
+cp target/release/w1z4rdv1510n-node  bin/w1z4rd_node      # Linux/macOS
+cp target/release/w1z4rd-dashboard   bin/w1z4rd-dashboard
+# (Windows: .exe extension)
+
+# Start the node — both APIs come up together (:8080 neuro, :8090 node)
+./bin/w1z4rd_node
+
+# Optional: override addresses
+./bin/w1z4rd_node --api-addr 0.0.0.0:8080
 
 # Check node health
 curl http://localhost:8090/health
+
+# Check the neuro API
+curl http://localhost:8080/healthz
 
 # Check what the equation matrix knows
 curl http://localhost:8090/equations/report
@@ -408,19 +466,20 @@ curl -X POST http://localhost:8090/equations/apply \
   -H "Content-Type: application/json" \
   -d '{"labels": ["anyon", "topological", "braid", "hall"], "dims": 2}'
 
+# --- Dashboard GUI (separate binary, connects to the node APIs) ---
+./bin/w1z4rd-dashboard                                   # localhost defaults
+./bin/w1z4rd-dashboard --node http://10.0.0.5:8090 --api http://10.0.0.5:8080
+
 # --- Run chess training + live visualizer together ---
 
 # Terminal 1: node
-./target/debug/w1z4rdv1510n-node api --addr 127.0.0.1:8090
+./bin/w1z4rd_node
 
 # Terminal 2: chess sensor script (feeds board states to the node as EnvironmentSnapshots)
 python scripts/chess_training_loop.py --max-games 8000
 
 # Terminal 3: live visualizer (opens browser automatically)
 python scripts/live_viz_server.py --board-file logs/chess_live_board.json --port 8765 --open
-
-# Start the live visualizer (standalone)
-python scripts/live_viz_server.py --open
 ```
 
 ---
