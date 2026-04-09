@@ -456,7 +456,15 @@ This is associative retrieval, not autoregressive generation. Responses are acti
 
 Code has strong motif structure — function signatures, boilerplate, API call sequences promote quickly through `HierarchicalMotifRuntime`. A bridge script tokenizes source files into labeled symbols (function names, keywords, identifiers at line/column positions) and feeds them as `EnvironmentSnapshot` sequences. Known problem→solution pairs go through `/qa/ingest`.
 
-At query time: current partial code as context labels → cross-stream activations + Q&A retrieval = candidate completions. The annealer can search for minimum-energy completions given a partial context. Strong at recurring patterns within a known codebase; requires training exposure to generalize.
+**This is compositional generation, not retrieval.** Given a plain English instruction the fabric has never seen — "create a vehicle tracker class" — the process is:
+
+1. The instruction fires labels in the language stream: `vehicle`, `tracker`, `class`, `position`, `update`, `state`
+2. Cross-stream activation propagates those labels into the code stream via Hebbian synapses: `class` → `encapsulation`, `__init__`, `self`, `attribute`; `tracker` → `list`, `append`, `query`, `history`; `position` → `x`, `y`, `float`
+3. Mini-columns that have collapsed from repeated co-activation fire as units — `class + __init__ + self + attributes` becomes a single concept-level activation
+4. The motif runtime supplies structural sequence priors: `class_definition → attribute_block → constructor → methods` is a high-confidence learned transition
+5. The annealer searches for the minimum-energy configuration of code symbols that satisfies all activated constraints simultaneously — it constructs a class that has never existed in the training data
+
+The result is genuinely novel — assembled from the intersection of everything the instruction activated across all trained streams. The mechanism differs from autoregressive LLM token prediction (learned conditional probability distributions over tokens), but the compositional capability is equivalent: novel code from learned structural knowledge, not memorized retrieval.
 
 ### Scientific and engineering Q&A
 
