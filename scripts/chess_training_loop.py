@@ -1588,6 +1588,105 @@ def try_open_summary(summary_path: Path) -> None:
         print(f"Could not auto-open summary file: {exc}")
 
 
+class PlyAnimator:
+    """
+    Background thread that advances through chess game plies at a fixed rate
+    (~0.8 s/ply) and writes chess_live_board.json so the viz server shows a
+    smoothly animated board regardless of how fast the training loop runs.
+
+    The main training loop updates this object's shared state each iteration;
+    the animator thread continuously cycles through plies of the current game.
+    """
+
+    PLY_INTERVAL = 0.8  # seconds between ply writes
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._game: Optional[Any] = None
+        self._games: List[Any] = []
+        self._ply: int = 0
+        self._outcome_acc: Dict[int, float] = {}
+        self._move_acc: Dict[int, float] = {}
+        self._total_games: int = 0
+        self._total_plies: int = 0
+        self._iteration: int = 0
+        self._outcome_models: Optional[Any] = None
+        self._move_counters: Optional[Any] = None
+        self._move_defaults: Optional[Any] = None
+        self._context_window: int = DEFAULT_CONTEXT_WINDOW
+        self._stopped: bool = False
+        self._thread = threading.Thread(target=self._run, daemon=True, name="PlyAnimator")
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    def update(
+        self,
+        games: List[Any],
+        game: Optional[Any],
+        outcome_acc: Dict[int, float],
+        move_acc: Dict[int, float],
+        total_games: int,
+        total_plies: int,
+        iteration: int,
+        outcome_models: Optional[Any] = None,
+        move_counters: Optional[Any] = None,
+        move_defaults: Optional[Any] = None,
+        context_window: int = DEFAULT_CONTEXT_WINDOW,
+    ) -> None:
+        """Called by the main loop each iteration to push updated state."""
+        with self._lock:
+            new_game = game is not self._game
+            self._games = games
+            self._game = game
+            if new_game:
+                self._ply = 0          # reset ply when game changes
+            self._outcome_acc = outcome_acc
+            self._move_acc = move_acc
+            self._total_games = total_games
+            self._total_plies = total_plies
+            self._iteration = iteration
+            self._outcome_models = outcome_models
+            self._move_counters = move_counters
+            self._move_defaults = move_defaults
+            self._context_window = context_window
+
+    def _run(self) -> None:
+        while not self._stopped:
+            time.sleep(self.PLY_INTERVAL)
+            with self._lock:
+                game = self._game
+                if game is None:
+                    continue
+                n_moves = max(1, len(game.moves))
+                self._ply = (self._ply + 1) % n_moves
+                ply = self._ply
+                outcome_acc   = self._outcome_acc
+                move_acc      = self._move_acc
+                total_games   = self._total_games
+                total_plies   = self._total_plies
+                iteration     = self._iteration
+                outcome_models = self._outcome_models
+                move_counters  = self._move_counters
+                move_defaults  = self._move_defaults
+                context_window = self._context_window
+            try:
+                write_live_board(
+                    iteration, game, ply,
+                    outcome_acc, move_acc, total_games,
+                    total_plies_actual=total_plies,
+                    outcome_models=outcome_models,
+                    move_counters=move_counters,
+                    move_defaults=move_defaults,
+                    context_window=context_window,
+                )
+            except Exception:
+                pass  # never crash the animator; stale viz beats no viz
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Chess outcome + move training loop")
     parser.add_argument("--max-games", type=int, default=8000, help="Game cap")
@@ -1812,6 +1911,16 @@ def main() -> None:
     _ = bridge.node_available
 
     all_games = load_games(args.max_games)
+
+    # ── Ply animator (starts immediately so board shows something right away) ──
+    animator = PlyAnimator()
+    if all_games:
+        animator.update(
+            all_games, all_games[0], {}, {}, len(all_games), 0, 0
+        )
+    animator.start()
+    print("  [animator] Background ply animator started", flush=True)
+
     priors = None
     if args.relational_priors:
         if args.relational_priors.exists():
@@ -2052,10 +2161,21 @@ def main() -> None:
         last_outcome_energy = outcome_energy
 
         # ── Node feedback loop ────────────────────────────────────────────────
-        # 1. Write live board for the viz server (sample one game from all_games).
-        # Cycle game and ply each iteration so the board actually animates.
+        # 1. Update the ply animator with latest stats.  The animator runs in a
+        #    background thread and writes chess_live_board.json every 0.8 s,
+        #    cycling through plies independently of training speed.
         sample_game = all_games[iteration % len(all_games)] if all_games else None
-        sample_ply = (iteration * 7) % max(1, len(sample_game.moves)) if sample_game else 0
+        animator.update(
+            all_games, sample_game,
+            outcome_acc, move_acc, len(all_games), total_plies_actual, iteration,
+            outcome_models=outcome_models,
+            move_counters=move_counters,
+            move_defaults=move_defaults,
+            context_window=context_window,
+        )
+        # Also write immediately so stats are visible right after the iteration
+        # (the animator will advance the ply from here on its own schedule).
+        sample_ply = 0 if sample_game is None else (iteration * 7) % max(1, len(sample_game.moves))
         write_live_board(
             iteration, sample_game, sample_ply, outcome_acc, move_acc, len(all_games),
             total_plies_actual=total_plies_actual,

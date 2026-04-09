@@ -647,23 +647,30 @@ async function poll() {
   tick++;
   tickEl.textContent = `tick ${tick}`;
 
-  // Chess board mode (guard: must have real board data, not just empty {})
+  // Chess board mode — accept board data as long as it has a game_id field,
+  // even if pieces is temporarily empty (e.g. during the write window).
   const bd = await fetchJson(BOARD_URL);
-  if (bd && bd.pieces && bd.pieces.length > 0) {
+  if (bd && (bd.game_id || bd.iteration)) {
     const isNewPly    = bd.ply !== prevPly;
     const isReveal    = bd.reveal_phase;
     const wasPredict  = prevReveal === false;
+    const hasPieces   = bd.pieces && bd.pieces.length > 0;
 
     boardData = bd;
 
-    if (isNewPly || isReveal !== prevReveal) {
-      syncPieces(bd.pieces, bd.last_move, isReveal);
+    // Always sync pieces + redraw when ply changes or when reveal phase flips.
+    // Also force a redraw every ~2 s even without ply change so the side panel
+    // and outcome bars stay live (tick % 7 ≈ every 2.1 s at POLL_MS=300).
+    if (isNewPly || isReveal !== prevReveal || tick % 7 === 0) {
+      if (hasPieces) {
+        syncPieces(bd.pieces, bd.last_move, isReveal);
+      }
       renderAll();
 
-      if (isReveal && wasPredict && isNewPly !== false) {
+      if (isReveal && wasPredict && isNewPly) {
         flash(bd.prediction_correct_top1);
         const correctStr = bd.prediction_correct_top1 ? '✓ correct' : '✗ miss';
-        logLine(`ply ${bd.ply + 1}  predicted=${(bd.predictions || [])[0]?.san || '?'}  actual=${bd.actual_move?.san || '?'}  ${correctStr}`);
+        logLine(`ply ${(bd.ply ?? 0) + 1}  predicted=${(bd.predictions || [])[0]?.san || '?'}  actual=${bd.actual_move?.san || '?'}  ${correctStr}`);
       }
 
       prevReveal = isReveal;
