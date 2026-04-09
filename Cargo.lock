@@ -5925,6 +5925,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "egui",
+ "image",
  "reqwest",
  "serde",
  "serde_json",
