@@ -212,14 +212,32 @@ fn spawn_poller(state: Arc<Mutex<NodeState>>) {
 #[derive(PartialEq, Clone, Copy)]
 enum Tab { Overview, Cluster, Neural, Log }
 
+/// Mutable control state for the Cluster tab (held on Dashboard, not polled state).
+struct ClusterControls {
+    coord_input: String,
+    otp_input:   String,
+    status_msg:  String,
+}
+
+impl Default for ClusterControls {
+    fn default() -> Self {
+        Self {
+            coord_input: "192.168.1.84:51611".to_string(),
+            otp_input:   String::new(),
+            status_msg:  String::new(),
+        }
+    }
+}
+
 struct Dashboard {
-    state: Arc<Mutex<NodeState>>,
-    tab:   Tab,
+    state:   Arc<Mutex<NodeState>>,
+    tab:     Tab,
+    cluster: ClusterControls,
 }
 
 impl Dashboard {
     fn new(state: Arc<Mutex<NodeState>>) -> Self {
-        Self { state, tab: Tab::Overview }
+        Self { state, tab: Tab::Overview, cluster: ClusterControls::default() }
     }
 }
 
@@ -260,10 +278,12 @@ impl eframe::App for Dashboard {
         });
 
         // ── Central panel ─────────────────────────────────────────────────────
+        let node_url = snap.node_url.clone();
+        let state_arc = self.state.clone();
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.tab {
                 Tab::Overview => tab_overview(ui, &snap),
-                Tab::Cluster  => tab_cluster(ui, &snap),
+                Tab::Cluster  => tab_cluster(ui, &snap, &mut self.cluster, &node_url, state_arc),
                 Tab::Neural   => tab_neural(ui, &snap),
                 Tab::Log      => tab_log(ui, &snap),
             }
@@ -288,38 +308,155 @@ fn tab_overview(ui: &mut Ui, s: &NodeState) {
     });
 }
 
-fn tab_cluster(ui: &mut Ui, s: &NodeState) {
-    if s.cluster_nodes.is_empty() {
-        ui.label(RichText::new("Node is running standalone (no cluster).").color(Color32::GRAY));
-        ui.add_space(8.0);
-        ui.label("To start a cluster:");
-        ui.code("w1z4rd cluster-init");
-        return;
-    }
-    ui.horizontal(|ui| {
-        ui.strong("Peers");
-        ui.label(RichText::new(format!("({} nodes, {} ring slots)", s.cluster_nodes.len(), s.ring_slots)).small().color(Color32::GRAY));
-    });
-    ui.separator();
-    egui::Grid::new("cl").num_columns(4).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
-        ui.label(RichText::new("ID").strong());
-        ui.label(RichText::new("Address").strong());
-        ui.label(RichText::new("CPU").strong());
-        ui.label(RichText::new("OS").strong());
-        ui.end_row();
-        for p in &s.cluster_nodes {
-            let id_text = if p.is_coord {
-                RichText::new(&p.short_id).color(Color32::from_rgb(100, 220, 100))
-            } else {
-                RichText::new(&p.short_id)
-            };
-            ui.label(id_text);
-            ui.label(&p.addr);
-            ui.label(format!("{} cores", p.cores));
-            ui.label(&p.os);
-            ui.end_row();
+fn tab_cluster(
+    ui: &mut Ui,
+    s: &NodeState,
+    ctrl: &mut ClusterControls,
+    node_url: &str,
+    state_arc: Arc<Mutex<NodeState>>,
+) {
+    // ── Control panel ─────────────────────────────────────────────────────────
+    let is_standalone = s.cluster_nodes.is_empty();
+    let is_coordinator = s.cluster_role == "coordinator";
+
+    if is_standalone {
+        ui.strong("Cluster");
+        ui.label(RichText::new("This node is running standalone.").color(Color32::GRAY));
+        ui.add_space(6.0);
+
+        ui.collapsing("Init new cluster (this machine becomes coordinator)", |ui| {
+            if ui.button("  Init Cluster  ").clicked() {
+                let url = format!("{node_url}/cluster/init");
+                let state2 = state_arc.clone();
+                ctrl.status_msg = "Initialising…".to_string();
+                std::thread::spawn(move || {
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build().unwrap();
+                    match client.post(&url).json(&serde_json::json!({})).send()
+                        .and_then(|r| r.json::<serde_json::Value>())
+                    {
+                        Ok(v) => {
+                            let msg = if let Some(otp) = v["otp"].as_str() {
+                                format!("Cluster started. OTP: {}  (cluster {})", otp, &v["cluster_id"].as_str().unwrap_or("?")[..8])
+                            } else {
+                                format!("Error: {}", v["error"].as_str().unwrap_or("unknown"))
+                            };
+                            state2.lock().unwrap().push_log(msg);
+                        }
+                        Err(e) => { state2.lock().unwrap().push_log(format!("Init failed: {e}")); }
+                    }
+                });
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.collapsing("Join existing cluster", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Coordinator:");
+                ui.text_edit_singleline(&mut ctrl.coord_input);
+            });
+            ui.horizontal(|ui| {
+                ui.label("OTP:        ");
+                ui.text_edit_singleline(&mut ctrl.otp_input);
+            });
+            ui.add_space(4.0);
+            let can_join = !ctrl.coord_input.is_empty() && !ctrl.otp_input.is_empty();
+            ui.add_enabled_ui(can_join, |ui| {
+                if ui.button("  Join Cluster  ").clicked() {
+                    let url = format!("{node_url}/cluster/join");
+                    let body = serde_json::json!({
+                        "coordinator": ctrl.coord_input,
+                        "otp": ctrl.otp_input,
+                    });
+                    let state2 = state_arc.clone();
+                    ctrl.status_msg = "Joining…".to_string();
+                    ctrl.otp_input.clear();
+                    std::thread::spawn(move || {
+                        let client = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(15))
+                            .build().unwrap();
+                        match client.post(&url).json(&body).send()
+                            .and_then(|r| r.json::<serde_json::Value>())
+                        {
+                            Ok(v) => {
+                                let msg = if v["status"].as_str() == Some("ok") {
+                                    format!("Joined cluster {} ({} nodes)",
+                                        &v["cluster_id"].as_str().unwrap_or("?")[..8],
+                                        v["node_count"].as_u64().unwrap_or(0))
+                                } else {
+                                    format!("Join failed: {}", v["error"].as_str().unwrap_or("unknown"))
+                                };
+                                state2.lock().unwrap().push_log(msg);
+                            }
+                            Err(e) => { state2.lock().unwrap().push_log(format!("Join failed: {e}")); }
+                        }
+                    });
+                }
+            });
+        });
+    } else if is_coordinator {
+        // ── Coordinator controls ──────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            ui.strong("Cluster Coordinator");
+            ui.label(RichText::new(format!("({} nodes, {} ring slots)", s.cluster_nodes.len(), s.ring_slots)).small().color(Color32::GRAY));
+        });
+        ui.add_space(4.0);
+        if ui.button("Generate new OTP (for next joiner)").clicked() {
+            let url = format!("{node_url}/cluster/otp");
+            let state2 = state_arc.clone();
+            std::thread::spawn(move || {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build().unwrap();
+                match client.post(&url).send()
+                    .and_then(|r| r.json::<serde_json::Value>())
+                {
+                    Ok(v) => {
+                        let msg = if let Some(otp) = v["otp"].as_str() {
+                            format!("New OTP: {otp}  (share with joining node, single-use)")
+                        } else {
+                            format!("OTP error: {}", v["error"].as_str().unwrap_or("unknown"))
+                        };
+                        state2.lock().unwrap().push_log(msg);
+                    }
+                    Err(e) => { state2.lock().unwrap().push_log(format!("OTP request failed: {e}")); }
+                }
+            });
         }
-    });
+        ui.add_space(4.0);
+        ui.separator();
+    }
+
+    // ── Peer table (always shown when in cluster) ─────────────────────────────
+    if !is_standalone {
+        if !is_coordinator { // title already shown above for coordinator
+            ui.horizontal(|ui| {
+                ui.strong("Cluster Worker");
+                ui.label(RichText::new(format!("({} nodes, {} ring slots)", s.cluster_nodes.len(), s.ring_slots)).small().color(Color32::GRAY));
+            });
+            ui.separator();
+        }
+        egui::Grid::new("cl").num_columns(4).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
+            ui.label(RichText::new("ID").strong());
+            ui.label(RichText::new("Address").strong());
+            ui.label(RichText::new("CPU").strong());
+            ui.label(RichText::new("OS").strong());
+            ui.end_row();
+            for p in &s.cluster_nodes {
+                let id_text = if p.is_coord {
+                    RichText::new(&p.short_id).color(Color32::from_rgb(100, 220, 100))
+                } else {
+                    RichText::new(&p.short_id)
+                };
+                ui.label(id_text);
+                ui.label(&p.addr);
+                ui.label(format!("{} cores", p.cores));
+                ui.label(&p.os);
+                ui.end_row();
+            }
+        });
+    }
 }
 
 fn tab_neural(ui: &mut Ui, s: &NodeState) {

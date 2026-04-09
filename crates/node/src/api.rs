@@ -45,6 +45,7 @@ use w1z4rdv1510n::streaming::{
     EquationMatrixRuntime, EquationMatrixConfig, Discipline, EemPeerPayload,
 };
 use w1z4rdv1510n::causal::{CausalEdge, CausalRuntime};
+use w1z4rdv1510n_cluster::{ClusterConfig, ClusterNode};
 
 #[derive(Clone)]
 struct ApiState {
@@ -82,6 +83,9 @@ struct ApiState {
     causal: Arc<Mutex<CausalRuntime>>,
     /// First-reporter index for cross-node pattern source tracing.
     origin_index: Arc<Mutex<HashMap<String, PatternOrigin>>>,
+    /// Live cluster node — None until cluster-init or cluster-join is called
+    /// via POST /cluster/init or POST /cluster/join.
+    cluster: Arc<tokio::sync::Mutex<Option<ClusterNode>>>,
 }
 
 #[derive(Clone)]
@@ -702,6 +706,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             },
         ))),
         origin_index: Arc::new(Mutex::new(HashMap::new())),
+        cluster: Arc::new(tokio::sync::Mutex::new(None)),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -779,6 +784,15 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/threat/ingest", post(threat_ingest))
         .route("/threat/overlay", get(threat_overlay))
         .route("/threat/predict", post(threat_predict))
+        // ── Cluster management (GUI + CLI-free join) ───────────────────────
+        // GET  /cluster/status  — current cluster membership + ring size
+        // POST /cluster/init    — start a new cluster on this machine
+        // POST /cluster/join    — join an existing cluster with coordinator + OTP
+        // POST /cluster/otp     — generate a new OTP (coordinator only)
+        .route("/cluster/status", get(cluster_status))
+        .route("/cluster/init",   post(cluster_init))
+        .route("/cluster/join",   post(cluster_join))
+        .route("/cluster/otp",    post(cluster_otp))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -3431,6 +3445,160 @@ fn unix_now() -> Timestamp {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     Timestamp { unix: secs }
+}
+
+// ── Cluster HTTP handlers ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ClusterInitReq {
+    #[serde(default)]
+    bind: Option<String>,
+    #[serde(default)]
+    otp_ttl_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ClusterJoinReq {
+    coordinator: String,
+    otp: String,
+    #[serde(default)]
+    bind: Option<String>,
+}
+
+/// GET /cluster/status
+async fn cluster_status(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let guard = state.cluster.lock().await;
+    match guard.as_ref() {
+        None => {
+            let saved = ClusterNode::saved_state();
+            (StatusCode::OK, Json(serde_json::json!({
+                "status": "standalone",
+                "saved_cluster_id": saved.map(|(id, _)| id.to_string()),
+            })))
+        }
+        Some(node) => {
+            let s = node.status().await;
+            let coord_str = s.coordinator.as_ref().map(|id| id.to_string()).unwrap_or_default();
+            let local_is_coord = s.coordinator.as_ref().map(|c| c == &s.local_id).unwrap_or(false);
+            (StatusCode::OK, Json(serde_json::json!({
+                "status": "joined",
+                "cluster_id": s.cluster_id.to_string(),
+                "local_id": s.local_id.to_string(),
+                "coordinator": coord_str,
+                "role": if local_is_coord { "coordinator" } else { "worker" },
+                "ring_size": s.ring_slots,
+                "nodes": s.nodes.iter().map(|n| serde_json::json!({
+                    "id": n.id.to_string(),
+                    "addr": n.addr,
+                    "is_coordinator": n.is_coordinator,
+                    "capabilities": {
+                        "cpu_cores": n.capabilities.cpu_cores,
+                        "os": n.capabilities.os,
+                    }
+                })).collect::<Vec<_>>(),
+            })))
+        }
+    }
+}
+
+/// POST /cluster/init
+/// Body: `{ "bind": "0.0.0.0:51611", "otp_ttl_secs": 600 }`  (all optional)
+/// Returns `{ "cluster_id": "...", "otp": "WORD-NNNN" }`
+async fn cluster_init(
+    State(state): State<ApiState>,
+    Json(req): Json<ClusterInitReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Reject if already in a cluster.
+    {
+        let guard = state.cluster.lock().await;
+        if guard.is_some() {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "already in a cluster — call /cluster/status to inspect or restart node to reset"
+            })));
+        }
+    }
+    let bind_str = req.bind.unwrap_or_else(|| "0.0.0.0:51611".to_string());
+    let bind_addr: SocketAddr = match bind_str.parse() {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid bind address: {e}") }))),
+    };
+    let config = ClusterConfig {
+        bind_addr,
+        otp_ttl_secs: req.otp_ttl_secs.unwrap_or(600),
+        ..Default::default()
+    };
+    match ClusterNode::init(config).await {
+        Ok((node, otp)) => {
+            let cluster_id = node.cluster_id.to_string();
+            *state.cluster.lock().await = Some(node);
+            tracing::info!("cluster initialised via HTTP API: {cluster_id}");
+            (StatusCode::OK, Json(serde_json::json!({
+                "status": "ok",
+                "cluster_id": cluster_id,
+                "otp": otp,
+                "bind": bind_str,
+            })))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+    }
+}
+
+/// POST /cluster/join
+/// Body: `{ "coordinator": "192.168.1.84:51611", "otp": "WORD-NNNN", "bind": "0.0.0.0:51611" }`
+async fn cluster_join(
+    State(state): State<ApiState>,
+    Json(req): Json<ClusterJoinReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    {
+        let guard = state.cluster.lock().await;
+        if guard.is_some() {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "already in a cluster"
+            })));
+        }
+    }
+    let coord_addr: SocketAddr = match req.coordinator.parse() {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid coordinator address: {e}") }))),
+    };
+    let bind_str = req.bind.unwrap_or_else(|| "0.0.0.0:51611".to_string());
+    let bind_addr: SocketAddr = match bind_str.parse() {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid bind address: {e}") }))),
+    };
+    let config = ClusterConfig { bind_addr, ..Default::default() };
+    match ClusterNode::join(config, coord_addr, &req.otp).await {
+        Ok(node) => {
+            let s = node.status().await;
+            let cluster_id = s.cluster_id.to_string();
+            let node_count = s.nodes.len();
+            *state.cluster.lock().await = Some(node);
+            tracing::info!("joined cluster {cluster_id} via HTTP API ({node_count} nodes)");
+            (StatusCode::OK, Json(serde_json::json!({
+                "status": "ok",
+                "cluster_id": cluster_id,
+                "node_count": node_count,
+            })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
+    }
+}
+
+/// POST /cluster/otp
+/// Generates a fresh join OTP.  Only works if this node is coordinator.
+async fn cluster_otp(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let guard = state.cluster.lock().await;
+    match guard.as_ref() {
+        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "not in a cluster" }))),
+        Some(node) => match node.new_otp().await {
+            Ok(otp) => (StatusCode::OK, Json(serde_json::json!({ "otp": otp }))),
+            Err(e)  => (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": e.to_string() }))),
+        }
+    }
 }
 
 #[cfg(test)]

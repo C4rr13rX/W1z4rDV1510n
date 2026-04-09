@@ -15,8 +15,10 @@ use crate::{
     transport::{accept_loop, ConnectionPool},
 };
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -26,6 +28,42 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use uuid::Uuid;
+
+// ── Persistence ───────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct PersistedState {
+    cluster_id:     String,
+    bind_addr:      String,
+    is_coordinator: bool,
+}
+
+fn state_path() -> PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::Path::new(&home).join(".w1z4rd");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("cluster_state.json")
+}
+
+fn save_state(cluster_id: Uuid, bind_addr: SocketAddr, is_coordinator: bool) {
+    let ps = PersistedState {
+        cluster_id:     cluster_id.to_string(),
+        bind_addr:      bind_addr.to_string(),
+        is_coordinator,
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&ps) {
+        std::fs::write(state_path(), json).ok();
+    }
+}
+
+fn load_saved_cluster_id() -> Option<(Uuid, bool)> {
+    let data = std::fs::read_to_string(state_path()).ok()?;
+    let ps: PersistedState = serde_json::from_str(&data).ok()?;
+    let id = ps.cluster_id.parse().ok()?;
+    Some((id, ps.is_coordinator))
+}
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -63,10 +101,17 @@ pub struct ClusterNode {
 impl ClusterNode {
     // ── Initialise as coordinator ─────────────────────────────────────────────
 
-    /// Start a brand-new cluster.  Returns `(node, otp_string)`.
+    /// Start a cluster.  Reuses a saved cluster_id if one exists on disk so
+    /// the coordinator can restart without orphaning its workers.
+    /// Returns `(node, otp_string)`.
     pub async fn init(config: ClusterConfig) -> anyhow::Result<(Self, String)> {
         let local_id   = NodeId::new();
-        let cluster_id = Uuid::new_v4();
+        // Reuse the persisted cluster_id if this machine was previously coordinator,
+        // so workers that were already joined don't see a foreign cluster.
+        let cluster_id = load_saved_cluster_id()
+            .filter(|(_, was_coord)| *was_coord)
+            .map(|(id, _)| id)
+            .unwrap_or_else(Uuid::new_v4);
         let caps       = local_capabilities();
         let join_ts    = unix_now();
 
@@ -96,6 +141,7 @@ impl ClusterNode {
         };
 
         let otp = node.generate_otp().await?;
+        save_state(cluster_id, node.config.bind_addr, true);
         node.clone().run_background().await;
         Ok((node, otp))
     }
@@ -174,6 +220,7 @@ impl ClusterNode {
                     config:      Arc::new(config),
                     rep_factor:  replication_factor,
                 };
+                save_state(cluster_id, node.config.bind_addr, false);
                 node.clone().run_background().await;
                 Ok(node)
             }
@@ -192,6 +239,21 @@ impl ClusterNode {
     pub async fn generate_otp(&self) -> anyhow::Result<String> {
         let mut reg = self.otp_registry.lock().await;
         reg.generate(Duration::from_secs(self.config.otp_ttl_secs))
+    }
+
+    /// Generate a fresh OTP on an already-running coordinator node.
+    /// Returns `Err` if this node is not currently the coordinator.
+    pub async fn new_otp(&self) -> anyhow::Result<String> {
+        if !self.is_coordinator().await {
+            anyhow::bail!("only the coordinator can generate OTPs");
+        }
+        self.generate_otp().await
+    }
+
+    /// Returns the persisted cluster_id and coordinator flag for the local machine,
+    /// or None if this machine has never been in a cluster.
+    pub fn saved_state() -> Option<(Uuid, bool)> {
+        load_saved_cluster_id()
     }
 
     // ── Label routing (the core distributed-fabric API) ───────────────────────
