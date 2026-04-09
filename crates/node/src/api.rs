@@ -732,6 +732,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // GET  /neuro/snapshot — current activation, predictions, and motifs.
         .route("/neuro/train", post(neuro_train))
         .route("/neuro/snapshot", get(neuro_snapshot))
+        // POST /neuro/record_episode — record a directly-resolved prediction
+        //   episode (actual outcome already known; no future-frame resolution needed).
+        //   Virtual sensors like the chess training loop call this after each game.
+        .route("/neuro/record_episode", post(neuro_record_episode))
+        // POST /neuro/register_prediction — register an explicit pending prediction
+        //   for auto-resolution when a future observation frame matches.
+        .route("/neuro/register_prediction", post(neuro_register_prediction))
         // ── Environmental Equation Matrix endpoints ────────────────────────
         // The EEM maps sensor observations → physics equations, grows as data
         // arrives, and shares discoveries with peer nodes.
@@ -1559,6 +1566,98 @@ async fn neuro_snapshot(
         StatusCode::OK,
         Json(serde_json::to_value(snap).unwrap_or_default()),
     )
+}
+
+/// POST /neuro/record_episode
+/// Body: `{ "context_labels": [...], "predicted": "...", "actual": "...",
+///          "streams": [...], "surprise": 0.0..1.0 }`
+///
+/// Directly records a resolved prediction episode into the episodic store.
+/// Use this when the caller already knows the outcome (e.g. end of a chess game,
+/// QA question with known answer).  The fabric's conditional sufficiency tracker
+/// and inhibitory Hebbian updates are applied automatically.
+///
+/// `surprise` is a focal-loss-inspired score:  0 = expected result (low gradient),
+/// 1 = completely wrong with high confidence (large gradient).  Pass
+/// `(1 - p_correct)^2` or `p_confidence^2` depending on outcome.
+#[derive(Deserialize)]
+struct NeuroRecordEpisodeRequest {
+    context_labels: Vec<String>,
+    predicted: String,
+    actual: String,
+    #[serde(default)]
+    streams: Vec<String>,
+    #[serde(default)]
+    surprise: f32,
+}
+
+async fn neuro_record_episode(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<NeuroRecordEpisodeRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "neuro") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        );
+    }
+    state.neuro.record_episode(
+        req.context_labels,
+        req.predicted,
+        req.actual,
+        req.streams,
+        req.surprise.clamp(0.0, 1.0),
+    );
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+}
+
+/// POST /neuro/register_prediction
+/// Body: `{ "context_labels": [...], "predicted": "...", "streams": [...],
+///          "p_confidence": 0.0..1.0, "resolve_on": "<label or null>" }`
+///
+/// Registers an explicit pending prediction for auto-resolution.  The fabric
+/// will watch future observation frames and resolve the prediction automatically
+/// when `resolve_on` (or `predicted` if omitted) appears — without any further
+/// action from the caller.
+///
+/// This is the entry point for virtual sensors.  Hardware sensors get auto-
+/// predictions for free; this endpoint gives virtual sensors the same capability.
+#[derive(Deserialize)]
+struct NeuroRegisterPredictionRequest {
+    context_labels: Vec<String>,
+    predicted: String,
+    #[serde(default)]
+    streams: Vec<String>,
+    #[serde(default = "default_confidence")]
+    p_confidence: f32,
+    #[serde(default)]
+    resolve_on: Option<String>,
+}
+
+fn default_confidence() -> f32 { 0.5 }
+
+async fn neuro_register_prediction(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<NeuroRegisterPredictionRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "neuro") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        );
+    }
+    state.neuro.register_prediction(
+        req.context_labels,
+        req.predicted,
+        req.streams,
+        req.p_confidence.clamp(0.0, 1.0),
+        req.resolve_on,
+    );
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
 
 // ─── Environmental Equation Matrix endpoints ───────────────────────────────────

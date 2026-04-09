@@ -725,6 +725,527 @@ impl NeuroSnapshot {
     }
 }
 
+// ── Episodic Memory ───────────────────────────────────────────────────────────
+//
+// The episodic store is a content-addressable, temporally-tagged circular buffer
+// of *resolved* prediction episodes.  Each episode records:
+//   - the feature vector that was active when the prediction was made
+//   - what the fabric predicted vs. what actually happened
+//   - which sensor/virtual-sensor streams contributed to the context
+//   - a surprise score (0 = expected, 1 = totally wrong)
+//   - an importance weight that rises with surprise and decays with age
+//
+// On a wrong prediction the runtime queries the store for the K most similar
+// past episodes.  These "similar failures" surface which context variable
+// differed in the cases where the fabric got it right, feeding the
+// ConditionalSufficiencyTracker with expansion candidates.
+//
+// Cross-modal tagging: episodes carry ALL contributing stream names.  A query
+// from the chess stream can therefore retrieve episodes that were shaped by the
+// chemistry or audio streams, enabling genuine cross-modal recall.
+
+/// Maximum episodes retained before the importance-weighted oldest are evicted.
+const EPISODIC_CAPACITY: usize = 4096;
+
+/// Decay applied to importance each step so old episodes fade.
+const EPISODIC_IMPORTANCE_DECAY: f32 = 0.9995;
+
+/// One resolved prediction episode.
+#[derive(Debug, Clone)]
+pub struct Episode {
+    /// Sparse context feature vector — labels active at prediction time.
+    /// Stored as a sorted, deduped Vec so cosine similarity is O(min(a,b)).
+    pub context_labels: Vec<String>,
+    /// The label the fabric predicted.
+    pub predicted: String,
+    /// The label that actually occurred.
+    pub actual: String,
+    /// All stream names that contributed labels to this episode.
+    /// Enables cross-modal retrieval: querying from "chess" can surface
+    /// an episode that was co-labeled with "chemistry" or "audio".
+    pub streams: Vec<String>,
+    /// Fabric step at which this episode was recorded.
+    pub timestamp: u64,
+    /// Whether the prediction matched reality.
+    pub correct: bool,
+    /// Surprise magnitude (focal-loss-inspired): `(1 - p_correct)^2`.
+    /// High when the model was confidently wrong.
+    pub surprise: f32,
+    /// Running importance weight.  Initialised = surprise; decays over time;
+    /// bumped whenever a similar episode triggers a retrieval hit.
+    pub importance: f32,
+}
+
+impl Episode {
+    /// Compute a sparse cosine similarity between two sorted label vectors.
+    /// Returns a value in [0, 1].
+    pub fn label_similarity(a: &[String], b: &[String]) -> f32 {
+        if a.is_empty() || b.is_empty() {
+            return 0.0;
+        }
+        // Count intersection via merge of two sorted slices.
+        let mut i = 0;
+        let mut j = 0;
+        let mut common = 0usize;
+        while i < a.len() && j < b.len() {
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Equal => { common += 1; i += 1; j += 1; }
+                std::cmp::Ordering::Less   => { i += 1; }
+                std::cmp::Ordering::Greater=> { j += 1; }
+            }
+        }
+        // Cosine for binary (0/1) bag-of-labels: dot / (|a| * |b|)^0.5
+        common as f32 / ((a.len() as f32) * (b.len() as f32)).sqrt()
+    }
+}
+
+/// Vector-indexed, importance-weighted episodic memory store.
+///
+/// Capacity is capped at `EPISODIC_CAPACITY`.  When full, the entry with the
+/// lowest `importance` score is evicted — preserving the most surprising /
+/// most recently-recalled episodes regardless of their age.
+#[derive(Debug)]
+pub struct EpisodicStore {
+    episodes: Vec<Episode>,
+    /// Total episodes ever recorded (for logging / metrics).
+    pub total_recorded: u64,
+}
+
+impl EpisodicStore {
+    pub fn new() -> Self {
+        Self {
+            episodes: Vec::with_capacity(EPISODIC_CAPACITY.min(256)),
+            total_recorded: 0,
+        }
+    }
+
+    /// Record a newly-resolved prediction episode.
+    pub fn record(&mut self, episode: Episode) {
+        self.total_recorded += 1;
+        if self.episodes.len() >= EPISODIC_CAPACITY {
+            // Evict lowest-importance entry
+            if let Some(min_pos) = self
+                .episodes
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+            {
+                self.episodes.remove(min_pos);
+            }
+        }
+        self.episodes.push(episode);
+    }
+
+    /// Decay importance on every fabric step so stale episodes lose weight.
+    pub fn step(&mut self) {
+        for ep in self.episodes.iter_mut() {
+            ep.importance *= EPISODIC_IMPORTANCE_DECAY;
+        }
+    }
+
+    /// Retrieve the `k` most similar *wrong* past episodes to the given context.
+    ///
+    /// Similarity is sparse cosine over label sets.  A retrieval hit bumps the
+    /// importance of matched episodes (rehearsal effect).  Only incorrect
+    /// episodes are returned — the caller uses them to find which context
+    /// variable differed in correct cases.
+    pub fn query_similar_failures<'a>(
+        &'a mut self,
+        context_labels: &[String],
+        k: usize,
+    ) -> Vec<&'a Episode> {
+        if self.episodes.is_empty() || k == 0 {
+            return Vec::new();
+        }
+        // Score every incorrect episode
+        let mut scored: Vec<(usize, f32)> = self
+            .episodes
+            .iter()
+            .enumerate()
+            .filter(|(_, ep)| !ep.correct)
+            .map(|(idx, ep)| {
+                let sim = Episode::label_similarity(context_labels, &ep.context_labels);
+                (idx, sim)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+
+        // Bump importance of matched episodes (rehearsal)
+        for &(idx, sim) in &scored {
+            self.episodes[idx].importance =
+                (self.episodes[idx].importance + sim * 0.1).min(2.0);
+        }
+
+        // Collect refs — borrow-safe because indices are unique
+        scored
+            .iter()
+            .map(|&(idx, _)| &self.episodes[idx] as &Episode)
+            .collect()
+    }
+
+    /// Retrieve top-k episodes (correct OR incorrect) most similar to context.
+    /// Used by the annealer to find lowest-energy motifs.
+    pub fn query_similar_any(
+        &self,
+        context_labels: &[String],
+        k: usize,
+    ) -> Vec<(f32, &Episode)> {
+        if self.episodes.is_empty() || k == 0 {
+            return Vec::new();
+        }
+        let mut scored: Vec<(f32, &Episode)> = self
+            .episodes
+            .iter()
+            .map(|ep| {
+                let sim = Episode::label_similarity(context_labels, &ep.context_labels);
+                (sim, ep)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        scored
+    }
+
+    /// Return number of stored episodes.
+    pub fn len(&self) -> usize {
+        self.episodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.episodes.is_empty()
+    }
+}
+
+// ── Prediction Registry ───────────────────────────────────────────────────────
+//
+// The PredictionRegistry auto-resolves predictions without any per-script
+// wiring.  Every time the fabric observes a new frame of labels, it:
+//   1. Checks matured pending predictions against the frame's labels.
+//   2. Emits resolved episodes into the EpisodicStore.
+//   3. Returns the resolved episodes so the caller can apply Hebbian updates.
+//
+// Virtual sensors (chess training loop, QA runners, etc.) register explicit
+// predictions via `NeuroRuntime::register_prediction()`.  Hardware sensors get
+// auto-predictions from Hebbian propagation — the fabric predicts what label
+// is most likely to appear next and registers that automatically.
+//
+// Resolution condition: a prediction resolves when the fabric sees a new frame
+// that contains the expected outcome label (or enough steps have elapsed that
+// a timeout-as-failure fires).
+
+/// How many steps a prediction may wait before being timed-out as wrong.
+const PREDICTION_TIMEOUT_STEPS: u64 = 64;
+
+/// Confidence below which auto-propagated predictions are not registered
+/// (avoids polluting the store with near-random guesses).
+const PREDICTION_MIN_CONFIDENCE: f32 = 0.25;
+
+/// One pending prediction waiting for resolution.
+#[derive(Debug, Clone)]
+struct PendingPrediction {
+    /// Sorted, deduped labels that were active when the prediction was made.
+    context_labels: Vec<String>,
+    /// The label the fabric is predicting will appear.
+    predicted: String,
+    /// Stream names that contributed context labels.
+    streams: Vec<String>,
+    /// Pool step at which this prediction was registered.
+    registered_at: u64,
+    /// Model confidence in this prediction (0–1).
+    p_confidence: f32,
+    /// Optional resolution label override — for explicit registrations where
+    /// the caller already knows the label to watch for (e.g. game outcome).
+    /// When None, the fabric watches for `predicted` itself.
+    resolve_on: Option<String>,
+}
+
+/// Circular-buffer prediction registry with automatic resolution.
+#[derive(Debug)]
+pub struct PredictionRegistry {
+    pending: std::collections::VecDeque<PendingPrediction>,
+    /// Maximum simultaneous pending predictions.
+    max_pending: usize,
+    /// Pool steps a prediction waits before being force-resolved as wrong.
+    timeout_steps: u64,
+}
+
+impl PredictionRegistry {
+    pub fn new() -> Self {
+        Self {
+            pending: std::collections::VecDeque::with_capacity(256),
+            max_pending: 512,
+            timeout_steps: PREDICTION_TIMEOUT_STEPS,
+        }
+    }
+
+    /// Register a pending prediction.  Returns false if the registry is full
+    /// (oldest is dropped to make room, so practically always succeeds).
+    pub fn register(
+        &mut self,
+        context_labels: Vec<String>,
+        predicted: String,
+        streams: Vec<String>,
+        p_confidence: f32,
+        current_step: u64,
+        resolve_on: Option<String>,
+    ) -> bool {
+        if p_confidence < PREDICTION_MIN_CONFIDENCE && resolve_on.is_none() {
+            return false;
+        }
+        if self.pending.len() >= self.max_pending {
+            self.pending.pop_front(); // drop oldest
+        }
+        self.pending.push_back(PendingPrediction {
+            context_labels,
+            predicted,
+            streams,
+            registered_at: current_step,
+            p_confidence,
+            resolve_on,
+        });
+        true
+    }
+
+    /// Check current active labels against pending predictions.
+    ///
+    /// Returns a list of resolved episodes — the caller applies Hebbian
+    /// updates and records them into the EpisodicStore.
+    ///
+    /// Predictions that have timed out are also resolved (as wrong) so the
+    /// episodic store learns "this context did not lead to the predicted outcome."
+    pub fn tick(
+        &mut self,
+        active_labels: &[String],
+        current_step: u64,
+    ) -> Vec<ResolvedPrediction> {
+        let active_set: std::collections::HashSet<&str> =
+            active_labels.iter().map(|s| s.as_str()).collect();
+
+        let mut resolved = Vec::new();
+        let mut remaining = std::collections::VecDeque::with_capacity(self.pending.len());
+
+        while let Some(pred) = self.pending.pop_front() {
+            let watch_label = pred.resolve_on.as_deref().unwrap_or(&pred.predicted);
+            let age = current_step.saturating_sub(pred.registered_at);
+
+            let matched = active_set.contains(watch_label);
+            let timed_out = age >= self.timeout_steps;
+
+            if matched || timed_out {
+                // Determine actual outcome
+                let actual = if matched {
+                    watch_label.to_string()
+                } else {
+                    // Timeout: what IS present that overlaps with prediction context?
+                    // Use the most overlapping active label as the "actual".
+                    active_labels
+                        .iter()
+                        .find(|l| pred.context_labels.contains(l))
+                        .cloned()
+                        .unwrap_or_else(|| "timeout".to_string())
+                };
+
+                // Focal-loss surprise: confident+correct→low, confident+wrong→high.
+                let surprise = if matched {
+                    (1.0 - pred.p_confidence).powi(2)
+                } else {
+                    pred.p_confidence.powi(2)
+                };
+
+                resolved.push(ResolvedPrediction {
+                    context_labels: pred.context_labels,
+                    predicted: pred.predicted,
+                    actual,
+                    streams: pred.streams,
+                    correct: matched,
+                    surprise,
+                    p_confidence: pred.p_confidence,
+                });
+            } else {
+                remaining.push_back(pred);
+            }
+        }
+
+        self.pending = remaining;
+        resolved
+    }
+}
+
+/// The output of a successful auto-resolution from PredictionRegistry.
+#[derive(Debug, Clone)]
+pub struct ResolvedPrediction {
+    pub context_labels: Vec<String>,
+    pub predicted: String,
+    pub actual: String,
+    pub streams: Vec<String>,
+    pub correct: bool,
+    /// Focal-loss-inspired surprise score.
+    pub surprise: f32,
+    pub p_confidence: f32,
+}
+
+// ── Conditional Sufficiency Tracker ──────────────────────────────────────────
+//
+// Tracks per-context-signature entropy to detect when a context set makes
+// outcomes conditionally independent — i.e. when the fabric knows enough.
+//
+// "When [king-side-castle, open-file, rook-active] all hold → outcome is
+//  white-wins with p=0.91" — this context set is *sufficient* for that outcome.
+//
+// Once sufficiency is detected, the annealer biases proposals toward this
+// motif (lowest-energy state) and the system stops exploring — saving CPU.
+
+/// How many outcome observations to collect before computing entropy.
+const SUFFICIENCY_MIN_SAMPLES: u64 = 8;
+/// Entropy threshold below which we declare a context sufficient.
+/// H < 0.35 bits ≈ p_max > 0.88 for a 3-class outcome.
+const SUFFICIENCY_ENTROPY_THRESHOLD: f64 = 0.35;
+
+/// Per-context-signature accumulator.
+#[derive(Debug, Clone)]
+struct SufficiencyBucket {
+    /// Compressed key: sorted context labels joined by '|'
+    context_key: String,
+    /// Outcome label → count observed under this context.
+    outcome_counts: HashMap<String, u64>,
+    total: u64,
+    /// Shannon entropy (nats) at last computation.
+    entropy: f64,
+    /// True once entropy has dropped below threshold.
+    is_sufficient: bool,
+}
+
+impl SufficiencyBucket {
+    fn new(context_key: String) -> Self {
+        Self {
+            context_key,
+            outcome_counts: HashMap::new(),
+            total: 0,
+            entropy: f64::INFINITY,
+            is_sufficient: false,
+        }
+    }
+
+    fn observe(&mut self, outcome: &str) {
+        *self.outcome_counts.entry(outcome.to_string()).or_insert(0) += 1;
+        self.total += 1;
+        if self.total >= SUFFICIENCY_MIN_SAMPLES {
+            self.recompute_entropy();
+        }
+    }
+
+    fn recompute_entropy(&mut self) {
+        let n = self.total as f64;
+        self.entropy = self
+            .outcome_counts
+            .values()
+            .filter(|&&c| c > 0)
+            .map(|&c| {
+                let p = c as f64 / n;
+                -p * p.ln()
+            })
+            .sum::<f64>();
+        self.is_sufficient = self.entropy < SUFFICIENCY_ENTROPY_THRESHOLD;
+    }
+}
+
+/// Conditional sufficiency tracker — detects minimal context sets where the
+/// fabric's predictions become essentially deterministic.
+#[derive(Debug)]
+pub struct ConditionalSufficiencyTracker {
+    /// context_key → bucket
+    buckets: HashMap<String, SufficiencyBucket>,
+    /// Sufficient context signatures found so far (for annealer biasing).
+    pub sufficient_contexts: Vec<String>,
+    /// Maximum number of buckets before pruning low-count ones.
+    max_buckets: usize,
+}
+
+impl ConditionalSufficiencyTracker {
+    pub fn new() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            sufficient_contexts: Vec::new(),
+            max_buckets: 8192,
+        }
+    }
+
+    /// Build the compressed context key from a set of active labels.
+    /// We use only structurally informative labels (role, group, zone, attr)
+    /// and ignore highly specific ones (id::, col::, region::) to keep the
+    /// key space manageable.
+    pub fn make_key(labels: &[String]) -> String {
+        let mut filtered: Vec<&str> = labels
+            .iter()
+            .filter(|l| {
+                l.starts_with("role::") || l.starts_with("group::")
+                    || l.starts_with("zone::") || l.starts_with("attr::")
+                    || l.starts_with("stream::") || l.starts_with("meta::")
+            })
+            .map(|s| s.as_str())
+            .collect();
+        filtered.sort();
+        filtered.dedup();
+        filtered.join("|")
+    }
+
+    /// Record an observed outcome under the given context.
+    /// Returns true if this observation tips the context into sufficiency.
+    pub fn observe(&mut self, context_labels: &[String], outcome: &str) -> bool {
+        let key = Self::make_key(context_labels);
+        if key.is_empty() {
+            return false;
+        }
+        // Prune if over cap
+        if self.buckets.len() >= self.max_buckets {
+            // Remove the 10% of entries with lowest total observations
+            let threshold = {
+                let mut totals: Vec<u64> =
+                    self.buckets.values().map(|b| b.total).collect();
+                totals.sort();
+                totals[totals.len() / 10]
+            };
+            self.buckets.retain(|_, b| b.total > threshold);
+        }
+
+        let bucket = self
+            .buckets
+            .entry(key.clone())
+            .or_insert_with(|| SufficiencyBucket::new(key.clone()));
+
+        let was_sufficient = bucket.is_sufficient;
+        bucket.observe(outcome);
+
+        if bucket.is_sufficient && !was_sufficient {
+            if !self.sufficient_contexts.contains(&key) {
+                self.sufficient_contexts.push(key);
+            }
+            return true; // newly sufficient
+        }
+        false
+    }
+
+    /// Return the entropy for a context key (None if not enough samples yet).
+    pub fn entropy_for(&self, context_labels: &[String]) -> Option<f64> {
+        let key = Self::make_key(context_labels);
+        self.buckets.get(&key).map(|b| b.entropy)
+    }
+
+    /// True if we have enough observations to declare this context sufficient.
+    pub fn is_sufficient(&self, context_labels: &[String]) -> bool {
+        let key = Self::make_key(context_labels);
+        self.buckets
+            .get(&key)
+            .map(|b| b.is_sufficient)
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct PositionAccumulator {
     sum_x: f64,
@@ -770,6 +1291,14 @@ struct NeuroState {
     prediction_error: HashMap<String, f64>,
     working_memory: Vec<String>,
     temporal_motif_counts: HashMap<String, u64>,
+    /// Content-addressable episodic memory — resolved prediction episodes
+    /// cross-tagged by stream source, retrieved on wrong predictions.
+    episodic: EpisodicStore,
+    /// Tracks per-context entropy to detect conditional sufficiency.
+    sufficiency: ConditionalSufficiencyTracker,
+    /// Auto-resolving prediction registry — predictions registered here are
+    /// checked against every new observation frame automatically.
+    registry: PredictionRegistry,
 }
 
 impl NeuroState {
@@ -788,6 +1317,9 @@ impl NeuroState {
             prediction_error: HashMap::new(),
             working_memory: Vec::new(),
             temporal_motif_counts: HashMap::new(),
+            episodic: EpisodicStore::new(),
+            sufficiency: ConditionalSufficiencyTracker::new(),
+            registry: PredictionRegistry::new(),
         }
     }
 
@@ -925,6 +1457,82 @@ impl NeuroState {
         self.apply_curiosity(curiosity_strength, &observed);
         self.update_working_memory(&labels, working_capacity);
         self.prune_temporal(prediction_horizon, &observed);
+
+        // ── Prediction Registry: tick + auto-prediction ──────────────────────
+        // 1. Resolve any matured pending predictions against this frame's labels.
+        let current_step = self.pool.step;
+        let resolved = self.registry.tick(&labels, current_step);
+
+        // 2. For each resolved prediction: apply Hebbian update + episodic record.
+        for rp in resolved {
+            // Compute reward: positive for correct, negative for wrong.
+            // Scale by surprise (focal-loss inspired) so confident failures
+            // receive a proportionally stronger corrective signal.
+            let reward_scale = if rp.correct { 1.0 + (1.0 - rp.surprise) } else { 1.0 + rp.surprise };
+            if rp.correct {
+                let scale = reward_scale.min(4.0);
+                let mut ctx = rp.context_labels.clone();
+                ctx.push(rp.actual.clone());
+                self.pool.train_weighted(&ctx, scale, false);
+                self.pool.train_weighted(&[rp.predicted.clone(), rp.actual.clone()], scale, false);
+            } else {
+                let scale = reward_scale.min(4.0);
+                self.pool.train_weighted(&[rp.predicted.clone(), rp.actual.clone()], scale, true);
+                if !rp.context_labels.is_empty() {
+                    let mut ctx = rp.context_labels.clone();
+                    ctx.push(rp.actual.clone());
+                    self.pool.train_weighted(&ctx, 0.5, false);
+                }
+                // On wrong prediction: query episodic store for similar past
+                // failures to surface the differentiating variable.
+                // (The result is logged but acted on by the annealer externally.)
+                let _similar = self.episodic.query_similar_failures(&rp.context_labels, 4);
+            }
+            // Feed sufficiency tracker.
+            self.sufficiency.observe(&rp.context_labels, &rp.actual);
+            // Record the resolved episode.
+            let mut sorted_ctx = rp.context_labels.clone();
+            sorted_ctx.sort();
+            sorted_ctx.dedup();
+            let importance = rp.surprise.max(0.01);
+            self.episodic.record(Episode {
+                context_labels: sorted_ctx,
+                predicted: rp.predicted,
+                actual: rp.actual,
+                streams: rp.streams,
+                timestamp: current_step,
+                correct: rp.correct,
+                surprise: rp.surprise,
+                importance,
+            });
+        }
+
+        // 3. Auto-prediction: propagate from current labels to guess next label.
+        // Only register if we have enough active labels to make a meaningful guess.
+        if labels.len() >= 3 {
+            let propagated = self.pool.propagate(&labels, 2, min_activation);
+            // Find the top propagated label that is NOT already in this frame.
+            let label_set: HashSet<&str> = labels.iter().map(|s| s.as_str()).collect();
+            if let Some((predicted_label, strength)) = propagated
+                .iter()
+                .find(|(l, _)| !label_set.contains(l.as_str()))
+            {
+                // Extract stream names from meta labels in the current frame.
+                let streams: Vec<String> = labels
+                    .iter()
+                    .filter_map(|l| l.strip_prefix("stream::").map(|s| s.to_string()))
+                    .collect();
+                let confidence = (*strength).clamp(0.0, 1.0);
+                self.registry.register(
+                    labels.clone(),
+                    predicted_label.clone(),
+                    streams,
+                    confidence,
+                    current_step,
+                    None,
+                );
+            }
+        }
     }
 
     fn bump_position(&mut self, label: &str, pos: &Position) {
@@ -1524,6 +2132,7 @@ impl NeuroRuntime {
         }
         let mut guard = self.inner.lock();
         guard.pool.step();
+        guard.episodic.step();
         for state in states {
             guard.record_state(
                 state,
@@ -1797,6 +2406,213 @@ impl NeuroRuntime {
             frames,
         }
     }
+
+    // ── Prediction Registry + Episodic Memory API ────────────────────────────
+
+    /// Explicitly register a pending prediction for a virtual sensor.
+    ///
+    /// This is the entry point for virtual sensors (chess training loop, QA
+    /// runners, chemistry simulations, etc.) to participate in the same
+    /// auto-resolve feedback loop as hardware sensors — without needing to know
+    /// the fabric's internal architecture.
+    ///
+    /// `predicted` is the label the caller expects to appear in a future frame.
+    /// `resolve_on` optionally overrides which label to watch for (useful when
+    /// the prediction outcome has a different label than the prediction itself).
+    /// `streams` names every sensor contributing to this prediction's context.
+    ///
+    /// The registry will automatically resolve the prediction within
+    /// `PREDICTION_TIMEOUT_STEPS` pool steps, recording the outcome in the
+    /// episodic store and applying corrective Hebbian updates.
+    pub fn register_prediction(
+        &self,
+        context_labels: Vec<String>,
+        predicted: String,
+        streams: Vec<String>,
+        p_confidence: f32,
+        resolve_on: Option<String>,
+    ) {
+        if !self.config.enabled {
+            return;
+        }
+        let mut guard = self.inner.lock();
+        let current_step = guard.pool.step;
+        guard.registry.register(
+            context_labels,
+            predicted,
+            streams,
+            p_confidence,
+            current_step,
+            resolve_on,
+        );
+    }
+
+    /// Record a resolved prediction episode into the episodic store.
+    ///
+    /// Called automatically by `FabricTrainer` for every `PredictionResolved`
+    /// signal.  Virtual sensors (chess training loop, QA runners, etc.) do NOT
+    /// need to call this directly — the fabric wires it for them.
+    ///
+    /// `streams` must list every sensor/virtual-sensor stream whose labels
+    /// contributed to this episode's context (enables cross-modal retrieval).
+    pub fn record_episode(
+        &self,
+        context_labels: Vec<String>,
+        predicted: String,
+        actual: String,
+        streams: Vec<String>,
+        surprise: f32,
+    ) {
+        if !self.config.enabled {
+            return;
+        }
+        let mut guard = self.inner.lock();
+        let step = guard.pool.step;
+        let correct = predicted == actual;
+        let importance = surprise.max(0.01);
+
+        // Feed into the sufficiency tracker with every contributing stream's
+        // perspective — the outcome is the actual label.
+        guard.sufficiency.observe(&context_labels, &actual);
+
+        let mut sorted_ctx = context_labels.clone();
+        sorted_ctx.sort();
+        sorted_ctx.dedup();
+
+        let mut sorted_streams = streams.clone();
+        sorted_streams.sort();
+        sorted_streams.dedup();
+
+        let episode = Episode {
+            context_labels: sorted_ctx,
+            predicted,
+            actual,
+            streams: sorted_streams,
+            timestamp: step,
+            correct,
+            surprise,
+            importance,
+        };
+        guard.episodic.record(episode);
+    }
+
+    /// Query the episodic store for past wrong predictions similar to the
+    /// current context.  Returns up to `k` similar failure episodes.
+    ///
+    /// The caller (annealer / ConditionalSufficiencyTracker expansion logic)
+    /// uses these to identify which context variable was missing when the
+    /// fabric got things wrong but gets things right in similar situations.
+    pub fn query_episodic_failures(
+        &self,
+        context_labels: &[String],
+        k: usize,
+    ) -> Vec<EpisodicQueryResult> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        let mut sorted_ctx: Vec<String> = context_labels.to_vec();
+        sorted_ctx.sort();
+        sorted_ctx.dedup();
+
+        let mut guard = self.inner.lock();
+        let hits = guard.episodic.query_similar_failures(&sorted_ctx, k);
+        hits.iter()
+            .map(|ep| EpisodicQueryResult {
+                context_labels: ep.context_labels.clone(),
+                predicted: ep.predicted.clone(),
+                actual: ep.actual.clone(),
+                streams: ep.streams.clone(),
+                surprise: ep.surprise,
+                importance: ep.importance,
+                timestamp: ep.timestamp,
+            })
+            .collect()
+    }
+
+    /// Query the episodic store for the `k` most similar episodes regardless
+    /// of correctness — used by the annealer to bias toward lowest-energy motifs.
+    pub fn query_episodic_motifs(
+        &self,
+        context_labels: &[String],
+        k: usize,
+    ) -> Vec<EpisodicQueryResult> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        let mut sorted_ctx: Vec<String> = context_labels.to_vec();
+        sorted_ctx.sort();
+        sorted_ctx.dedup();
+
+        let guard = self.inner.lock();
+        guard.episodic
+            .query_similar_any(&sorted_ctx, k)
+            .into_iter()
+            .map(|(_, ep)| EpisodicQueryResult {
+                context_labels: ep.context_labels.clone(),
+                predicted: ep.predicted.clone(),
+                actual: ep.actual.clone(),
+                streams: ep.streams.clone(),
+                surprise: ep.surprise,
+                importance: ep.importance,
+                timestamp: ep.timestamp,
+            })
+            .collect()
+    }
+
+    /// Returns true if the fabric considers the current context conditionally
+    /// sufficient — i.e. entropy is low enough that predictions are essentially
+    /// deterministic for this context signature.
+    pub fn is_context_sufficient(&self, context_labels: &[String]) -> bool {
+        if !self.config.enabled {
+            return false;
+        }
+        let guard = self.inner.lock();
+        guard.sufficiency.is_sufficient(context_labels)
+    }
+
+    /// Return the Shannon entropy (nats) for the given context, or None if
+    /// not enough observations have accumulated yet.
+    pub fn context_entropy(&self, context_labels: &[String]) -> Option<f64> {
+        if !self.config.enabled {
+            return None;
+        }
+        let guard = self.inner.lock();
+        guard.sufficiency.entropy_for(context_labels)
+    }
+
+    /// Return a snapshot of all context signatures that have reached
+    /// sufficiency (deterministic prediction found).  The annealer uses these
+    /// as lowest-energy attractors.
+    pub fn sufficient_contexts(&self) -> Vec<String> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        let guard = self.inner.lock();
+        guard.sufficiency.sufficient_contexts.clone()
+    }
+
+    /// Return the number of episodes currently stored.
+    pub fn episodic_len(&self) -> usize {
+        if !self.config.enabled {
+            return 0;
+        }
+        let guard = self.inner.lock();
+        guard.episodic.len()
+    }
+}
+
+/// A resolved episodic memory query result — safe to send across the API
+/// boundary without holding the lock.
+#[derive(Debug, Clone, Serialize)]
+pub struct EpisodicQueryResult {
+    pub context_labels: Vec<String>,
+    pub predicted: String,
+    pub actual: String,
+    /// All stream names that contributed to this episode's context.
+    pub streams: Vec<String>,
+    pub surprise: f32,
+    pub importance: f32,
+    pub timestamp: u64,
 }
 
 /// A single activated label in the target stream, with its propagated

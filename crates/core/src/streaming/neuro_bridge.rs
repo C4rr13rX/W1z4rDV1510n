@@ -1,4 +1,4 @@
-use crate::neuro::{MinicolumnSnapshot, NeuroRuntimeHandle, NeuroSnapshot};
+use crate::neuro::{EpisodicQueryResult, MinicolumnSnapshot, NeuroRuntimeHandle, NeuroSnapshot};
 use crate::schema::Timestamp;
 use crate::streaming::schema::{EventKind, EventToken, LayerState, StreamSource, TokenBatch};
 use crate::streaming::symbolize::{token_batch_to_snapshot, SymbolizeConfig};
@@ -39,6 +39,61 @@ impl NeuroStreamBridge {
     /// Called by the FabricTrainer drain loop — see `fabric_trainer.rs`.
     pub fn train_weighted(&self, symbols: &[String], lr_scale: f32, inhibitory: bool) {
         self.neuro.train_weighted(symbols, lr_scale, inhibitory);
+    }
+
+    /// Register an explicit prediction for auto-resolution by the fabric.
+    ///
+    /// Virtual sensors (chess training loop, QA runners, etc.) call this to
+    /// participate in the fabric's prediction-resolution feedback loop without
+    /// needing any per-domain neuroscience knowledge.
+    pub fn register_prediction(
+        &self,
+        context_labels: Vec<String>,
+        predicted: String,
+        streams: Vec<String>,
+        p_confidence: f32,
+        resolve_on: Option<String>,
+    ) {
+        self.neuro.register_prediction(
+            context_labels,
+            predicted,
+            streams,
+            p_confidence,
+            resolve_on,
+        );
+    }
+
+    /// Record a directly-resolved episode (when the caller already knows the
+    /// actual outcome without waiting for a future frame).
+    pub fn record_episode(
+        &self,
+        context_labels: Vec<String>,
+        predicted: String,
+        actual: String,
+        streams: Vec<String>,
+        surprise: f32,
+    ) {
+        self.neuro.record_episode(
+            context_labels,
+            predicted,
+            actual,
+            streams,
+            surprise,
+        );
+    }
+
+    /// Query similar past failures from the episodic store.
+    pub fn query_episodic_failures(
+        &self,
+        context_labels: &[String],
+        k: usize,
+    ) -> Vec<EpisodicQueryResult> {
+        self.neuro.query_episodic_failures(context_labels, k)
+    }
+
+    /// Returns true if this context is conditionally sufficient.
+    pub fn is_context_sufficient(&self, context_labels: &[String]) -> bool {
+        self.neuro.is_context_sufficient(context_labels)
     }
 
     pub fn observe_batch(&mut self, batch: &TokenBatch) -> Option<NeuroSnapshot> {

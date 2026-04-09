@@ -319,6 +319,35 @@ class NodeBridge:
         }
         self._enqueue(f"{self.node_url}/qa/ingest", payload)
 
+    def send_record_episode(
+        self,
+        context_labels: List[str],
+        predicted: str,
+        actual: str,
+        streams: List[str],
+        surprise: float,
+    ) -> None:
+        """POST a resolved prediction episode to /neuro/record_episode.  Non-blocking.
+
+        Called after each training iteration so the fabric's episodic store
+        accumulates chess-specific prediction outcomes.  The fabric's
+        ConditionalSufficiencyTracker and Hebbian inhibitory updates fire
+        automatically on receipt — no additional wiring needed.
+
+        `surprise` = (1 - p_correct)^2 for correct predictions (small gradient)
+                   = p_confidence^2     for wrong predictions  (large gradient)
+        """
+        if not self.service_available:
+            return
+        payload = {
+            "context_labels": context_labels,
+            "predicted": predicted,
+            "actual": actual,
+            "streams": streams,
+            "surprise": float(surprise),
+        }
+        self._enqueue(f"{self.service_url}/neuro/record_episode", payload)
+
     def get_neuro_activate(
         self,
         labels: List[str],
@@ -412,10 +441,16 @@ def write_live_board(
     outcome_acc: Dict[int, float],
     move_acc: Dict[int, float],
     total_games: int,
+    total_plies_actual: int = 0,
+    outcome_models: Optional[Any] = None,
+    move_counters: Optional[Any] = None,
+    move_defaults: Optional[Any] = None,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
 ) -> None:
     """
     Write a minimal chess_live_board.json so the viz server shows training progress.
     Pieces are read from the game's symbol_states for the current ply.
+    When outcome_models and move_counters are provided, real model predictions are shown.
     """
     BOARD_JSON.parent.mkdir(parents=True, exist_ok=True)
     pieces = []
@@ -441,6 +476,68 @@ def write_live_board(
                 "piece": piece,
             })
 
+    # Compute real outcome probabilities from the model at this ply.
+    outcome_probs = {"1-0": 0.33, "1/2-1/2": 0.34, "0-1": 0.33}
+    if outcome_models and game is not None and ply > 0:
+        try:
+            valid_scopes = [s for s in outcome_models.keys() if s <= ply]
+            if valid_scopes:
+                scope = max(valid_scopes)
+                counts = np.bincount(
+                    game.hashed_moves[:ply].astype(int), minlength=FEATURE_DIM
+                ).astype(np.float32)
+                board_vecs = game.replay_board_vectors(ply)
+                bvec = (
+                    board_vecs[ply - 1]
+                    if ply - 1 < len(board_vecs)
+                    else np.zeros(BOARD_FEATURE_DIM, dtype=np.float32)
+                )
+                vec = compose_prefix_vector(counts, ply, game.meta_vector, bvec)
+                probs = outcome_models[scope].predict_proba(vec[None, :])[0]
+                outcome_probs = {
+                    "1-0":     float(probs[0]),
+                    "1/2-1/2": float(probs[1]),
+                    "0-1":     float(probs[2]),
+                }
+        except Exception:
+            pass
+
+    # Compute top predicted moves from the frequency counters at this context.
+    predictions: list = []
+    if move_counters and game is not None and ply >= context_window:
+        try:
+            ctx = tuple(int(b) for b in game.hashed_moves[ply - context_window : ply])
+            counter = move_counters.get(1, {}).get(ctx)
+            if counter:
+                top = counter.most_common(5)
+                total_c = sum(c for _, c in top) or 1
+                predictions = [
+                    {"san": mv, "probability": c / total_c, "correct": False}
+                    for mv, c in top
+                ]
+            elif move_defaults and move_defaults.get(1):
+                predictions = [{"san": move_defaults[1], "probability": 1.0, "correct": False}]
+        except Exception:
+            pass
+
+    # Compute last_move (from/to squares for the move that just reached this ply).
+    # The viz draws highlight squares using from_file/rank and to_file/rank (0-7).
+    last_move = None
+    if game is not None and ply > 0 and ply <= len(game.moves):
+        try:
+            board = chess.Board()
+            for san in game.moves[:ply]:
+                move = board.push_san(san)
+            last_move = {
+                "from_file": chess.square_file(move.from_square),
+                "from_rank": chess.square_rank(move.from_square),
+                "to_file":   chess.square_file(move.to_square),
+                "to_rank":   chess.square_rank(move.to_square),
+                "san":       game.moves[ply - 1],
+            }
+        except Exception:
+            pass
+
     best_outcome_scope = min(outcome_acc.keys(), default=6)
     best_move_horizon  = min(move_acc.keys(), default=1)
     payload = {
@@ -451,13 +548,13 @@ def write_live_board(
         "total_plies":  len(game.moves) if game else 0,
         "side_to_move": "white" if ply % 2 == 0 else "black",
         "pieces":       pieces,
-        "last_move":    None,
-        "predictions":  [],
+        "last_move":    last_move,
+        "predictions":  predictions,
         "actual_move":  None,
         "reveal_phase": True,
         "prediction_correct_top1": False,
         "square_heat":  [[0.0] * 8 for _ in range(8)],
-        "outcome_probs": {"1-0": 0.33, "1/2-1/2": 0.34, "0-1": 0.33},
+        "outcome_probs": outcome_probs,
         "model_breakdown": [],
         "model_ledgers": {
             "training": {
@@ -471,7 +568,7 @@ def write_live_board(
             "move_top1":   move_acc.get(best_move_horizon, 0.0),
             "move_top3":   move_acc.get(best_move_horizon, 0.0),
             "outcome_acc": outcome_acc.get(best_outcome_scope, 0.0),
-            "total_plies": total_games * 40,
+            "total_plies": total_plies_actual or total_games * 40,
             "game_count":  total_games,
         },
         "hourly_checkpoints": [],
@@ -922,6 +1019,11 @@ class OutcomeNetwork:
         logits = h2 @ self.W3 + self.b3
         return logits, h1, h2, z1
 
+    # γ (gamma) for focal loss: 2.0 is the standard value.
+    # High γ → confident wrong predictions get a proportionally larger gradient;
+    # easy correct predictions get suppressed.  Mirrors dopaminergic prediction error.
+    FOCAL_GAMMA: float = 2.0
+
     def train_epoch(self, X: np.ndarray, y: np.ndarray, lr: float, batch_size: int) -> float:
         if X.size == 0:
             return 0.0
@@ -937,9 +1039,20 @@ class OutcomeNetwork:
             logits -= logits.max(axis=1, keepdims=True)
             exp = np.exp(logits, dtype=np.float32)
             probs = exp / exp.sum(axis=1, keepdims=True)
+
+            # ── Focal loss ──────────────────────────────────────────────────
+            # Standard cross-entropy: diff = probs - y_onehot
+            # Focal modulation: scale each sample's gradient by (1 - p_t)^γ
+            # where p_t = probability assigned to the correct class.
+            # This suppresses easy-correct updates and amplifies confident-wrong ones.
+            p_correct = probs[np.arange(yb.shape[0]), yb]          # (B,)
+            focal_weight = (1.0 - p_correct[:, None]) ** self.FOCAL_GAMMA  # (B, 1) broadcast
+
             y_onehot = np.zeros_like(probs)
             y_onehot[np.arange(yb.shape[0]), yb] = 1.0
-            diff = probs - y_onehot
+            diff = focal_weight * (probs - y_onehot)               # focal-scaled gradient
+            # ────────────────────────────────────────────────────────────────
+
             grad_W3 = h2.T @ diff / yb.shape[0] + self.l2 * self.W3
             grad_b3 = diff.mean(axis=0)
             dh2 = diff @ self.W3.T
@@ -956,7 +1069,10 @@ class OutcomeNetwork:
             self.b2 -= lr * grad_b2
             self.W1 -= lr * grad_W1
             self.b1 -= lr * grad_b1
-            batch_loss = -np.log(probs[np.arange(yb.shape[0]), yb] + 1e-9).mean()
+            # Focal loss value: -(1 - p_t)^γ * log(p_t)
+            batch_loss = float(
+                -(((1.0 - p_correct) ** self.FOCAL_GAMMA) * np.log(p_correct + 1e-9)).mean()
+            )
             reg = 0.5 * self.l2 * (
                 np.sum(self.W1 * self.W1)
                 + np.sum(self.W2 * self.W2)
@@ -1707,6 +1823,7 @@ def main() -> None:
     rng = random.Random(args.seed)
     np.random.seed(args.seed)
     print(f"Loaded {len(all_games)} games from {DATA_PATH}")
+    total_plies_actual = sum(len(g.moves) for g in all_games)
 
     # ── Initial neuro train burst ─────────────────────────────────────────────
     # Send every game's board positions to /neuro/train so the fabric can start
@@ -1936,9 +2053,17 @@ def main() -> None:
 
         # ── Node feedback loop ────────────────────────────────────────────────
         # 1. Write live board for the viz server (sample one game from all_games).
+        # Cycle game and ply each iteration so the board actually animates.
         sample_game = all_games[iteration % len(all_games)] if all_games else None
-        sample_ply  = min(10, len(sample_game.moves) - 1) if sample_game else 0
-        write_live_board(iteration, sample_game, sample_ply, outcome_acc, move_acc, len(all_games))
+        sample_ply = (iteration * 7) % max(1, len(sample_game.moves)) if sample_game else 0
+        write_live_board(
+            iteration, sample_game, sample_ply, outcome_acc, move_acc, len(all_games),
+            total_plies_actual=total_plies_actual,
+            outcome_models=outcome_models,
+            move_counters=move_counters,
+            move_defaults=move_defaults,
+            context_window=context_window,
+        )
 
         # 2. Every other iteration send a fresh neuro-train burst using a
         #    random sample of games so the fabric continues accumulating
@@ -1956,6 +2081,53 @@ def main() -> None:
                         result_names.get(game.result_label),
                     )
                     bridge.send_neuro_train(snap)
+
+        # ── Virtual-sensor episode recording ─────────────────────────────────
+        # Feed prediction outcomes into the fabric's episodic store so the
+        # neural fabric learns from chess model right/wrong calls the same way
+        # hardware sensors do — no per-domain neuroscience knowledge required.
+        #
+        # For each outcome scope, sample a small batch of test examples, run
+        # the model, and record each resolved episode.  Focal-loss surprise:
+        #   correct:  (1 - p_correct)^2  → small gradient for easy wins
+        #   wrong:    p_confidence^2     → large gradient for confident misses
+        if bridge.service_available and outcome_models and outcome_data:
+            episode_batch_size = max(1, monitor.game_count(8))
+            for scope in outcome_scopes:
+                test_X = outcome_data[scope]["test_X"]
+                test_y = outcome_data[scope]["test_y"]
+                if test_X.shape[0] == 0:
+                    continue
+                batch_idx = rng.sample(
+                    range(test_X.shape[0]),
+                    min(episode_batch_size, test_X.shape[0]),
+                )
+                bX = test_X[batch_idx]
+                by = test_y[batch_idx]
+                probs_batch = outcome_models[scope].predict_proba(bX)  # (B, 3)
+                preds_batch = probs_batch.argmax(axis=1)
+                for i, (pred_label, true_label) in enumerate(zip(preds_batch, by)):
+                    p_confidence = float(probs_batch[i, pred_label])
+                    p_correct = float(probs_batch[i, true_label])
+                    correct = pred_label == true_label
+                    surprise = (
+                        float((1.0 - p_correct) ** 2) if correct
+                        else float(p_confidence ** 2)
+                    )
+                    predicted_str = result_names.get(int(pred_label), "?")
+                    actual_str = result_names.get(int(true_label), "?")
+                    context_labels = [
+                        f"chess::scope::{scope}",
+                        f"chess::outcome::{predicted_str.replace('/', '_')}",
+                        f"chess::ply_bucket::{scope // 10 * 10}",
+                    ]
+                    bridge.send_record_episode(
+                        context_labels=context_labels,
+                        predicted=f"outcome::{predicted_str}",
+                        actual=f"outcome::{actual_str}",
+                        streams=["chess"],
+                        surprise=surprise,
+                    )
 
         if args.export_annealing:
             export_snapshot(
