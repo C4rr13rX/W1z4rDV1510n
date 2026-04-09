@@ -455,22 +455,45 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Default mode: start the node API + neuro API and block until Ctrl-C.
+/// Default mode: start neuro API (8080) + node API (8090) then block until Ctrl-C.
 fn run_node_server(config_path: &Path, api_addr: &str, storage: &str) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let api_sock: std::net::SocketAddr = api_addr.parse()?;
-    let storage_s = storage.to_string();
+    let node_cfg    = load_or_create_config(config_path)?;
+    let node_addr: std::net::SocketAddr = args_node_addr();
+    let api_sock:  std::net::SocketAddr = api_addr.parse()?;
+    let storage_s  = storage.to_string();
 
+    // Node API (8090) runs its own internal tokio runtime — spawn on a thread.
+    let node_cfg_clone = node_cfg.clone();
+    std::thread::Builder::new()
+        .name("node-api".into())
+        .spawn(move || {
+            info!(target: "w1z4rdv1510n::node", %node_addr, "node API starting");
+            if let Err(e) = run_api(node_cfg_clone, node_addr) {
+                tracing::error!("node API error: {e}");
+            }
+        })?;
+
+    // Neuro API (8080) + shutdown watcher run on the shared tokio runtime.
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
-        // Start neuro API in background.
         match w1z4rdv1510n::service::run(api_sock, &storage_s).await {
-            Ok(_)  => tracing::info!("Neuro API up on {api_sock}"),
-            Err(e) => tracing::warn!("Neuro API failed: {e}"),
+            Ok(_)  => tracing::info!("neuro API up on {api_sock}"),
+            Err(e) => tracing::warn!("neuro API failed to start: {e}"),
         }
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("shutting down");
     });
     Ok(())
+}
+
+/// Pull --node-addr from the raw Args (already parsed).  Falls back to the
+/// default so callers don't need to thread the value through manually.
+fn args_node_addr() -> std::net::SocketAddr {
+    std::env::args()
+        .skip_while(|a| a != "--node-addr")
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| "0.0.0.0:8090".parse().unwrap())
 }
 
 fn run_node(config_path: &Path) -> anyhow::Result<()> {
