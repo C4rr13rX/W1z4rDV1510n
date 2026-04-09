@@ -26,6 +26,7 @@ pub mod random;
 pub mod results;
 pub mod schema;
 pub mod search;
+pub mod service;
 pub mod service_api;
 pub mod service_storage;
 pub mod spike;

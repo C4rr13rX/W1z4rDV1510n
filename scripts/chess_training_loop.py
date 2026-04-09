@@ -234,6 +234,9 @@ class NodeBridge:
         self.node_url = node_url.rstrip("/")
         self._service_ok: Optional[bool] = None
         self._node_ok: Optional[bool] = None
+        self._service_last_probe: float = 0.0   # epoch seconds of last probe
+        self._node_last_probe: float = 0.0
+        self._RETRY_INTERVAL: float = 30.0       # re-probe failed services every 30 s
         self._queue: "list[tuple[str, dict]]" = []
         self._lock = threading.Lock()
         self._worker = threading.Thread(target=self._run, daemon=True)
@@ -250,18 +253,26 @@ class NodeBridge:
 
     @property
     def service_available(self) -> bool:
-        if self._service_ok is None:
-            self._service_ok = self._probe(self.service_url, "healthz")
-            status = "UP" if self._service_ok else "unreachable"
-            print(f"  [bridge] w1z4rd_api ({self.service_url}): {status}", flush=True)
+        now = time.monotonic()
+        if self._service_ok is None or (not self._service_ok and now - self._service_last_probe > self._RETRY_INTERVAL):
+            self._service_last_probe = now
+            result = self._probe(self.service_url, "healthz")
+            if result != self._service_ok:
+                status = "UP" if result else "unreachable"
+                print(f"  [bridge] w1z4rd_api ({self.service_url}): {status}", flush=True)
+            self._service_ok = result
         return bool(self._service_ok)
 
     @property
     def node_available(self) -> bool:
-        if self._node_ok is None:
-            self._node_ok = self._probe(self.node_url, "health")
-            status = "UP" if self._node_ok else "unreachable"
-            print(f"  [bridge] node ({self.node_url}): {status}", flush=True)
+        now = time.monotonic()
+        if self._node_ok is None or (not self._node_ok and now - self._node_last_probe > self._RETRY_INTERVAL):
+            self._node_last_probe = now
+            result = self._probe(self.node_url, "health")
+            if result != self._node_ok:
+                status = "UP" if result else "unreachable"
+                print(f"  [bridge] node ({self.node_url}): {status}", flush=True)
+            self._node_ok = result
         return bool(self._node_ok)
 
     # ── background worker ─────────────────────────────────────────────────────
@@ -1934,16 +1945,21 @@ def main() -> None:
     print(f"Loaded {len(all_games)} games from {DATA_PATH}")
     total_plies_actual = sum(len(g.moves) for g in all_games)
 
-    # ── Initial neuro train burst ─────────────────────────────────────────────
-    # Send every game's board positions to /neuro/train so the fabric can start
-    # learning piece co-occurrence patterns before the first training iteration.
+    result_names = {0: "1-0", 1: "1/2-1/2", 2: "0-1"}
+
+    # ── Initial neuro train primer (small, resource-aware) ────────────────────
+    # We send only a tiny sample of board positions at startup — enough to give
+    # the fabric its first observations before the first training iteration.
+    # The per-iteration burst (throttled by ResourceMonitor) handles the bulk.
+    # Sending 40,000 snapshots at startup pinned the CPU for 2+ minutes because
+    # replay_symbol_states() is called synchronously for every snapshot even
+    # when the bridge queue (cap=64) drops >99% of them.
     if bridge.service_available:
         ts_base = int(time.time())
         n_sent = 0
-        result_names = {0: "1-0", 1: "1/2-1/2", 2: "0-1"}
-        for gi, game in enumerate(all_games):
-            if gi % NEURO_TRAIN_EVERY_N_GAMES != 0:
-                continue
+        primer_games = min(5, len(all_games))   # max 5 games × 20 plies = 100 snapshots
+        for gi in range(primer_games):
+            game = all_games[gi]
             for pi in range(min(NEURO_MAX_PLIES_PER_GAME, len(game.moves))):
                 sym_states = game.replay_symbol_states(pi)
                 snap = _symbol_states_to_snapshot(
@@ -1952,18 +1968,22 @@ def main() -> None:
                 )
                 bridge.send_neuro_train(snap)
                 n_sent += 1
-        print(f"  [bridge] Queued {n_sent} neuro-train snapshots from {len(all_games)} games", flush=True)
-    # ── Initial QA ingest burst ───────────────────────────────────────────────
+        print(f"  [bridge] Queued {n_sent} primer neuro-train snapshots ({primer_games} games)", flush=True)
+
+    # ── Initial QA primer (small, resource-aware) ─────────────────────────────
+    # Same reasoning: cap to 10 games / 200 examples at startup; per-iteration
+    # bursts in the main loop grow this organically as resources allow.
     if bridge.node_available:
         n_qa = 0
-        for game in all_games[:500]:  # cap initial burst to 500 games
+        qa_primer_games = min(10, len(all_games))
+        for game in all_games[:qa_primer_games]:
             for pi, move in enumerate(game.moves[:-1]):
                 context = list(game.moves[max(0, pi - 5):pi])
                 answer  = game.moves[pi]
                 question = f"chess_move:{' '.join(context)}"
                 bridge.send_qa_ingest(question, answer, context)
                 n_qa += 1
-        print(f"  [bridge] Queued {n_qa} QA examples to node", flush=True)
+        print(f"  [bridge] Queued {n_qa} primer QA examples ({qa_primer_games} games)", flush=True)
 
     outcome_data = build_outcome_features(all_games, outcome_scopes, multi_frame_windows)
     move_datasets, move_defaults, context_lookup, move_factor_lookup, anchor_counters = build_move_datasets(
@@ -2188,13 +2208,18 @@ def main() -> None:
         # 2. Every other iteration send a fresh neuro-train burst using a
         #    random sample of games so the fabric continues accumulating
         #    patterns as accuracy improves.
+        #    ResourceMonitor.game_count() already scales this down under pressure;
+        #    cap plies per game to 5 (was 20) to halve the replay work.
         if bridge.service_available and iteration % 2 == 0:
             ts_now = int(time.time())
-            neuro_sample_n = monitor.game_count(32)
+            # game_count(16) = monitor-scaled; at scale=1.0 → 16 games × 5 plies = 80 snapshots
+            # (was 32 games × 20 plies = 640 replay_symbol_states calls per burst)
+            neuro_sample_n = monitor.game_count(16)
+            neuro_plies    = 5  # 5 plies max per game (was NEURO_MAX_PLIES_PER_GAME=20)
             sample_indices = rng.sample(range(len(all_games)), min(neuro_sample_n, len(all_games)))
             for gi in sample_indices:
                 game = all_games[gi]
-                for pi in range(min(NEURO_MAX_PLIES_PER_GAME, len(game.moves))):
+                for pi in range(min(neuro_plies, len(game.moves))):
                     sym_states = game.replay_symbol_states(pi)
                     snap = _symbol_states_to_snapshot(
                         sym_states, ts_now + gi * 1000 + pi,

@@ -45,12 +45,18 @@ use w1z4rdv1510n::streaming::{
 use crate::data_mesh::PatternResponse;
 
 #[derive(Parser, Debug)]
-#[command(name = "w1z4rdv1510n-node")]
+#[command(name = "w1z4rd", about = "W1z4rD Node — neural fabric + cluster + API")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
     #[arg(long, default_value = "node_config.json")]
     config: String,
+    /// Neuro API bind address (default 0.0.0.0:8080).
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    api_addr: String,
+    /// Storage path for neuro API job runs.
+    #[arg(long, default_value = "logs/service_runs")]
+    storage: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -221,6 +227,46 @@ enum Command {
         #[arg(long)]
         out: Option<String>,
     },
+
+    // ── Distributed cluster ───────────────────────────────────────────────────
+
+    /// Start a new cluster on this machine and print the join OTP.
+    /// Default cluster port: 51611 (SIGIL in leet).
+    ClusterInit {
+        /// Override the bind address (default: 0.0.0.0:51611).
+        #[arg(long, default_value = "0.0.0.0:51611")]
+        bind: String,
+        /// OTP validity in seconds (default: 600 = 10 minutes).
+        #[arg(long, default_value_t = 600)]
+        otp_ttl: u64,
+    },
+
+    /// Join an existing cluster using the OTP printed by `cluster init`.
+    ClusterJoin {
+        /// Address of the coordinator node (e.g. 192.168.1.10:51611).
+        #[arg(long)]
+        coordinator: String,
+        /// One-time password printed by the coordinator.
+        #[arg(long)]
+        otp: String,
+        /// Local bind address for cluster traffic.
+        #[arg(long, default_value = "0.0.0.0:51611")]
+        bind: String,
+    },
+
+    /// Print the status of a running cluster.
+    ClusterStatus {
+        /// Any cluster node address to query (coordinator or worker).
+        #[arg(long)]
+        node: String,
+    },
+
+    /// Generate a fresh OTP for an already-running coordinator.
+    ClusterOtp {
+        /// Address of the coordinator (must be local — OTP generation is local-only).
+        #[arg(long, default_value = "0.0.0.0:51611")]
+        bind: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -389,18 +435,48 @@ fn main() -> anyhow::Result<()> {
             wait_for_responses_ms,
             out,
         ),
-        None => run_node(&config_path),
+        // ── Cluster commands ──────────────────────────────────────────────────
+        Some(Command::ClusterInit { bind, otp_ttl }) => {
+            cluster_init(bind, otp_ttl)
+        }
+        Some(Command::ClusterJoin { coordinator, otp, bind }) => {
+            cluster_join(coordinator, otp, bind)
+        }
+        Some(Command::ClusterStatus { node }) => {
+            cluster_status(node)
+        }
+        Some(Command::ClusterOtp { bind: _ }) => {
+            println!("OTP generation requires a running coordinator process.");
+            println!("Use `cluster init` to start a new cluster and get the first OTP.");
+            Ok(())
+        }
+
+        None => run_node_server(&config_path, &args.api_addr, &args.storage),
     }
+}
+
+/// Default mode: start the node API + neuro API and block until Ctrl-C.
+fn run_node_server(config_path: &Path, api_addr: &str, storage: &str) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let api_sock: std::net::SocketAddr = api_addr.parse()?;
+    let storage_s = storage.to_string();
+
+    rt.block_on(async move {
+        // Start neuro API in background.
+        match w1z4rdv1510n::service::run(api_sock, &storage_s).await {
+            Ok(_)  => tracing::info!("Neuro API up on {api_sock}"),
+            Err(e) => tracing::warn!("Neuro API failed: {e}"),
+        }
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("shutting down");
+    });
+    Ok(())
 }
 
 fn run_node(config_path: &Path) -> anyhow::Result<()> {
     let config = load_or_create_config(config_path)?;
     config.validate()?;
-    info!(
-        target: "w1z4rdv1510n::node",
-        node_id = config.node_id,
-        "loaded node config"
-    );
+    info!(target: "w1z4rdv1510n::node", node_id = config.node_id, "loaded node config");
     let runtime = NodeRuntime::new(config)?;
     runtime.run_until_shutdown()
 }
@@ -1085,6 +1161,89 @@ struct InitReport {
     memory_gb: f64,
     has_gpu: bool,
     chain_ok: ChainStatus,
+}
+
+// ── Cluster command handlers ──────────────────────────────────────────────────
+
+fn cluster_init(bind: String, otp_ttl: u64) -> anyhow::Result<()> {
+    use w1z4rdv1510n_cluster::{ClusterConfig, ClusterNode};
+    let bind_addr = bind.parse()?;
+    let config = ClusterConfig {
+        bind_addr,
+        otp_ttl_secs: otp_ttl,
+        ..Default::default()
+    };
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let (node, otp) = ClusterNode::init(config).await?;
+        println!();
+        println!("  ╔══════════════════════════════════════════╗");
+        println!("  ║   W1z4rD Cluster — SIGIL port 51611     ║");
+        println!("  ╠══════════════════════════════════════════╣");
+        println!("  ║  Cluster ID : {}  ║", node.cluster_id);
+        println!("  ║  Local node : {:<34}║", node.local_id.to_string());
+        println!("  ║  Bind       : {:<34}║", bind_addr);
+        println!("  ╠══════════════════════════════════════════╣");
+        println!("  ║  OTP  >>>   {:<32}  |||", otp);
+        println!("  ║  Expires in {otp_ttl}s — single use             ║");
+        println!("  ╠══════════════════════════════════════════╣");
+        println!("  ║  Join:                                   ║");
+        println!("  ║    w1z4rd_node cluster-join              ║");
+        let port = bind_addr.port();
+        println!("  ║      --coordinator <this-ip>:{port}      ║");
+        println!("  ║      --otp {otp:<33}║");
+        println!("  ╚══════════════════════════════════════════╝");
+        println!();
+        println!("Coordinator running. Ctrl-C to stop.");
+        tokio::signal::ctrl_c().await?;
+        println!("Coordinator shutting down.");
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+fn cluster_join(coordinator: String, otp: String, bind: String) -> anyhow::Result<()> {
+    use w1z4rdv1510n_cluster::{ClusterConfig, ClusterNode};
+    let coord_addr = coordinator.parse()?;
+    let bind_addr  = bind.parse()?;
+    let config = ClusterConfig { bind_addr, ..Default::default() };
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        println!("Joining cluster at {coord_addr}…");
+        let node = ClusterNode::join(config, coord_addr, &otp).await?;
+        let status = node.status().await;
+        println!("{status}");
+        println!("Worker running. Ctrl-C to stop.");
+        tokio::signal::ctrl_c().await?;
+        println!("Worker shutting down.");
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+fn cluster_status(node_addr: String) -> anyhow::Result<()> {
+    use w1z4rdv1510n_cluster::protocol::{self, Message};
+    let addr: std::net::SocketAddr = node_addr.parse()?;
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        let (r, w) = stream.split();
+        let mut reader = tokio::io::BufReader::new(r);
+        let mut writer = tokio::io::BufWriter::new(w);
+        protocol::send_msg(&mut writer, &Message::StatusRequest).await?;
+        match protocol::recv_msg(&mut reader).await? {
+            Message::StatusResponse { cluster_id, coordinator, nodes, ring_size } => {
+                println!("Cluster  : {cluster_id}");
+                println!("Coord    : {coordinator}");
+                println!("Ring     : {ring_size} virtual slots");
+                println!("Nodes    : {}", nodes.len());
+                for n in &nodes {
+                    let role = if n.is_coordinator { " [coordinator]" } else { "" };
+                    println!("  {} @ {} ({} cores, {}){role}", n.id, n.addr, n.capabilities.cpu_cores, n.capabilities.os);
+                }
+            }
+            other => println!("Unexpected response: {other:?}"),
+        }
+        Ok::<_, anyhow::Error>(())
+    })
 }
 
 #[derive(Debug, serde::Serialize)]

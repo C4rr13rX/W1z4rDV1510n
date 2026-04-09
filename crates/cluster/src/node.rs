@@ -1,0 +1,525 @@
+//! The core `ClusterNode` type — the public API surface for this crate.
+//!
+//! Responsibilities:
+//!   - Start as coordinator OR join an existing cluster via OTP.
+//!   - Run the heartbeat loop and election loop in background tasks.
+//!   - Accept incoming peer connections and route messages.
+//!   - Expose `local_labels` / `remote_labels` so callers can split
+//!     an observation across shards without knowing about the cluster.
+
+use crate::{
+    membership::{Membership, COORD_TIMEOUT_SECS, ELECTION_WAIT_SECS, HEARTBEAT_INTERVAL_SECS},
+    otp::OtpRegistry,
+    protocol::{self, local_capabilities, Message, NodeCapabilities, NodeId, NodeInfo, CLUSTER_PORT},
+    ring::HashRing,
+    transport::{accept_loop, ConnectionPool},
+};
+use anyhow::Context;
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    io::{BufReader, BufWriter},
+    net::{TcpListener, TcpStream},
+    sync::{Mutex, RwLock},
+};
+use uuid::Uuid;
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+pub struct ClusterConfig {
+    pub bind_addr:          SocketAddr,
+    pub replication_factor: u8,
+    pub otp_ttl_secs:       u64,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr:          format!("0.0.0.0:{CLUSTER_PORT}").parse().unwrap(),
+            replication_factor: 2,
+            otp_ttl_secs:       600, // 10 minutes
+        }
+    }
+}
+
+// ── ClusterNode ───────────────────────────────────────────────────────────────
+
+/// A running cluster node.  Clone is cheap (everything behind Arc).
+#[derive(Clone)]
+pub struct ClusterNode {
+    pub local_id:    NodeId,
+    pub cluster_id:  Uuid,
+    membership:      Arc<RwLock<Membership>>,
+    ring:            Arc<RwLock<HashRing>>,
+    pool:            ConnectionPool,
+    otp_registry:    Arc<Mutex<OtpRegistry>>,
+    config:          Arc<ClusterConfig>,
+    rep_factor:      u8,
+}
+
+impl ClusterNode {
+    // ── Initialise as coordinator ─────────────────────────────────────────────
+
+    /// Start a brand-new cluster.  Returns `(node, otp_string)`.
+    pub async fn init(config: ClusterConfig) -> anyhow::Result<(Self, String)> {
+        let local_id   = NodeId::new();
+        let cluster_id = Uuid::new_v4();
+        let caps       = local_capabilities();
+        let join_ts    = unix_now();
+
+        let local_info = NodeInfo {
+            id:             local_id.clone(),
+            addr:           config.bind_addr.to_string(),
+            capabilities:   caps,
+            joined_at:      join_ts,
+            is_coordinator: true,
+        };
+
+        let mut membership = Membership::new(local_id.clone(), local_info);
+        membership.set_coordinator(local_id.clone());
+
+        let mut ring = HashRing::new();
+        ring.add_node(&local_id);
+
+        let node = Self {
+            local_id:    local_id.clone(),
+            cluster_id,
+            membership:  Arc::new(RwLock::new(membership)),
+            ring:        Arc::new(RwLock::new(ring)),
+            pool:        ConnectionPool::new(),
+            otp_registry: Arc::new(Mutex::new(OtpRegistry::default())),
+            config:      Arc::new(config),
+            rep_factor:  2,
+        };
+
+        let otp = node.generate_otp().await?;
+        node.clone().run_background().await;
+        Ok((node, otp))
+    }
+
+    // ── Join an existing cluster ──────────────────────────────────────────────
+
+    /// Join an existing cluster.
+    pub async fn join(
+        config: ClusterConfig,
+        coordinator_addr: SocketAddr,
+        otp: &str,
+    ) -> anyhow::Result<Self> {
+        let local_id  = NodeId::new();
+        let caps      = local_capabilities();
+        let join_ts   = unix_now();
+
+        // Connect to coordinator.
+        let stream = TcpStream::connect(coordinator_addr)
+            .await
+            .context("connect to coordinator")?;
+        stream.set_nodelay(true)?;
+        let (r, w) = stream.into_split();
+        let mut reader = BufReader::new(r);
+        let mut writer = BufWriter::new(w);
+
+        // Send Hello.
+        let hello = Message::Hello {
+            node_id:      local_id.clone(),
+            otp_hash:     otp.to_string(),
+            capabilities: caps.clone(),
+            listen_addr:  config.bind_addr.to_string(),
+        };
+        protocol::send_msg(&mut writer, &hello).await?;
+
+        // Await Welcome or Rejected.
+        let resp = protocol::recv_msg(&mut reader).await?;
+        match resp {
+            Message::Welcome { cluster_id, roster, ring, replication_factor } => {
+                let local_info = NodeInfo {
+                    id:             local_id.clone(),
+                    addr:           config.bind_addr.to_string(),
+                    capabilities:   caps,
+                    joined_at:      join_ts,
+                    is_coordinator: false,
+                };
+
+                let membership_state = {
+                    let mut m = Membership::new(local_id.clone(), local_info);
+                    for ni in &roster {
+                        m.upsert(ni.clone());
+                        // Find coordinator.
+                        if ni.is_coordinator {
+                            m.set_coordinator(ni.id.clone());
+                        }
+                    }
+                    m
+                };
+
+                let ring_state = HashRing::from_entries(&ring);
+
+                let pool = ConnectionPool::new();
+                for ni in &roster {
+                    if ni.id == local_id { continue; }
+                    if let Ok(addr) = ni.addr.parse::<SocketAddr>() {
+                        pool.register(ni.id.clone(), addr);
+                    }
+                }
+
+                let node = Self {
+                    local_id:    local_id.clone(),
+                    cluster_id,
+                    membership:  Arc::new(RwLock::new(membership_state)),
+                    ring:        Arc::new(RwLock::new(ring_state)),
+                    pool,
+                    otp_registry: Arc::new(Mutex::new(OtpRegistry::default())),
+                    config:      Arc::new(config),
+                    rep_factor:  replication_factor,
+                };
+                node.clone().run_background().await;
+                Ok(node)
+            }
+            Message::Rejected { reason } => {
+                anyhow::bail!("cluster rejected join: {reason}");
+            }
+            other => {
+                anyhow::bail!("unexpected response: {:?}", other);
+            }
+        }
+    }
+
+    // ── OTP management ────────────────────────────────────────────────────────
+
+    /// Generate a new OTP (coordinator only).
+    pub async fn generate_otp(&self) -> anyhow::Result<String> {
+        let mut reg = self.otp_registry.lock().await;
+        reg.generate(Duration::from_secs(self.config.otp_ttl_secs))
+    }
+
+    // ── Label routing (the core distributed-fabric API) ───────────────────────
+
+    /// True if this node is the current coordinator.
+    pub async fn is_coordinator(&self) -> bool {
+        self.membership.read().await.is_coordinator()
+    }
+
+    /// Returns the labels that belong to THIS node's shard.
+    pub async fn local_labels<'a>(&self, labels: &'a [String]) -> Vec<&'a String> {
+        let ring = self.ring.read().await;
+        labels
+            .iter()
+            .filter(|l| {
+                ring.owner_of(l)
+                    .map(|id| id == &self.local_id)
+                    .unwrap_or(true) // empty ring → everything is local
+            })
+            .collect()
+    }
+
+    /// Returns the labels grouped by the remote node that owns each shard.
+    pub async fn remote_labels<'a>(
+        &self,
+        labels: &'a [String],
+    ) -> Vec<(NodeId, Vec<&'a String>)> {
+        let ring = self.ring.read().await;
+        let (_, remote) = ring.partition(labels, &self.local_id);
+        remote
+    }
+
+    /// Forward a label-route message to a remote node (fire-and-forget).
+    pub async fn forward_labels(
+        &self,
+        target: &NodeId,
+        labels: Vec<String>,
+        payload: serde_json::Value,
+    ) {
+        let msg = Message::LabelRoute {
+            request_id: Uuid::new_v4(),
+            labels,
+            payload,
+        };
+        if let Err(e) = self.pool.send(target, &msg).await {
+            tracing::warn!("label route to {target} failed: {e}");
+        }
+    }
+
+    // ── Status ────────────────────────────────────────────────────────────────
+
+    pub async fn status(&self) -> ClusterStatus {
+        let m    = self.membership.read().await;
+        let ring = self.ring.read().await;
+        ClusterStatus {
+            cluster_id:  self.cluster_id,
+            local_id:    self.local_id.clone(),
+            coordinator: m.coordinator_id().cloned(),
+            nodes:       m.all_nodes().into_iter().cloned().collect(),
+            ring_slots:  ring.len(),
+        }
+    }
+
+    // ── Background tasks ──────────────────────────────────────────────────────
+
+    async fn run_background(self) {
+        let bind_addr = self.config.bind_addr;
+
+        // Accept loop.
+        let accept_node = self.clone();
+        tokio::spawn(async move {
+            let listener = match TcpListener::bind(bind_addr).await {
+                Ok(l) => l,
+                Err(e) => { tracing::error!("cluster bind {bind_addr}: {e}"); return; }
+            };
+            tracing::info!("cluster listening on {bind_addr} (SIGIL port 51611)");
+            accept_loop(listener, move |stream, addr| {
+                let n = accept_node.clone();
+                async move { n.handle_incoming(stream, addr).await }
+            }).await.ok();
+        });
+
+        // Heartbeat loop.
+        let hb_node = self.clone();
+        tokio::spawn(async move { hb_node.heartbeat_loop().await });
+
+        // Watchdog / election loop.
+        let wd_node = self.clone();
+        tokio::spawn(async move { wd_node.watchdog_loop().await });
+    }
+
+    // ── Incoming connection handler ───────────────────────────────────────────
+
+    async fn handle_incoming(&self, stream: TcpStream, _addr: SocketAddr) {
+        let (r, w) = stream.into_split();
+        let mut reader = BufReader::new(r);
+        let mut writer = BufWriter::new(w);
+
+        loop {
+            let msg = match protocol::recv_msg(&mut reader).await {
+                Ok(m)  => m,
+                Err(_) => return,
+            };
+            if let Some(reply) = self.dispatch(msg).await {
+                if protocol::send_msg(&mut writer, &reply).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn dispatch(&self, msg: Message) -> Option<Message> {
+        match msg {
+            // ── Join handshake ────────────────────────────────────────────────
+            Message::Hello { node_id, otp_hash, capabilities, listen_addr } => {
+                let valid = {
+                    let mut reg = self.otp_registry.lock().await;
+                    reg.validate(&otp_hash)
+                };
+                if !valid {
+                    return Some(Message::Rejected { reason: "invalid or expired OTP".into() });
+                }
+                let join_ts = unix_now();
+                let new_info = NodeInfo {
+                    id:             node_id.clone(),
+                    addr:           listen_addr.clone(),
+                    capabilities,
+                    joined_at:      join_ts,
+                    is_coordinator: false,
+                };
+                // Register in ring + membership.
+                {
+                    let mut ring = self.ring.write().await;
+                    ring.add_node(&node_id);
+                }
+                {
+                    let mut m = self.membership.write().await;
+                    m.upsert(new_info.clone());
+                }
+                if let Ok(addr) = listen_addr.parse::<SocketAddr>() {
+                    self.pool.register(node_id.clone(), addr);
+                }
+                // Tell everyone else about the new member.
+                let ring_entries = self.ring.read().await.to_entries();
+                self.pool.broadcast(&Message::MemberJoined {
+                    node:  new_info.clone(),
+                    ring:  ring_entries.clone(),
+                }).await;
+
+                // Build Welcome.
+                let roster = self.membership.read().await.all_nodes().into_iter().cloned().collect();
+                Some(Message::Welcome {
+                    cluster_id:         self.cluster_id,
+                    roster,
+                    ring:               ring_entries,
+                    replication_factor: self.rep_factor,
+                })
+            }
+
+            // ── Heartbeat ─────────────────────────────────────────────────────
+            Message::Heartbeat { node_id, .. } => {
+                self.membership.write().await.touch(&node_id);
+                Some(Message::HeartbeatAck { node_id: self.local_id.clone() })
+            }
+            Message::HeartbeatAck { node_id } => {
+                self.membership.write().await.touch(&node_id);
+                None
+            }
+
+            // ── Membership updates from coordinator ───────────────────────────
+            Message::MemberJoined { node, ring } => {
+                self.membership.write().await.upsert(node.clone());
+                *self.ring.write().await = HashRing::from_entries(&ring);
+                if let Ok(addr) = node.addr.parse::<SocketAddr>() {
+                    self.pool.register(node.id, addr);
+                }
+                None
+            }
+            Message::MemberLeft { node_id, ring } => {
+                self.membership.write().await.remove(&node_id);
+                self.pool.remove(&node_id);
+                *self.ring.write().await = HashRing::from_entries(&ring);
+                None
+            }
+
+            // ── Election ──────────────────────────────────────────────────────
+            Message::ElectionPropose { candidate_id, priority } => {
+                let my_priority = self.membership.read().await.local_priority();
+                if my_priority > priority {
+                    // Override — propose ourselves.
+                    self.pool.broadcast(&Message::ElectionPropose {
+                        candidate_id: self.local_id.clone(),
+                        priority:     my_priority,
+                    }).await;
+                }
+                Some(Message::ElectionAck {
+                    voter_id:  self.local_id.clone(),
+                    for_id:    candidate_id,
+                })
+            }
+            Message::CoordinatorAnnounce { coordinator_id } => {
+                self.membership.write().await.set_coordinator(coordinator_id);
+                None
+            }
+
+            // ── Label routing ─────────────────────────────────────────────────
+            Message::LabelRoute { request_id, labels, payload } => {
+                // The owning node processes these labels against its local shard.
+                // Actual neuro processing is handled by the layer above us
+                // (the node API) via a callback.  For now just ack.
+                tracing::debug!("label route: {} labels (req {})", labels.len(), request_id);
+                Some(Message::LabelRouteAck { request_id })
+            }
+
+            // ── Status ────────────────────────────────────────────────────────
+            Message::StatusRequest => {
+                let m    = self.membership.read().await;
+                let ring = self.ring.read().await;
+                Some(Message::StatusResponse {
+                    cluster_id:  self.cluster_id,
+                    coordinator: m.coordinator_id().cloned().unwrap_or_else(NodeId::new),
+                    nodes:       m.all_nodes().into_iter().cloned().collect(),
+                    ring_size:   ring.len(),
+                })
+            }
+
+            _ => None,
+        }
+    }
+
+    // ── Heartbeat loop ────────────────────────────────────────────────────────
+
+    async fn heartbeat_loop(&self) {
+        let interval = Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
+        loop {
+            tokio::time::sleep(interval).await;
+            let msg = Message::Heartbeat {
+                node_id: self.local_id.clone(),
+                ts:      unix_now(),
+            };
+            self.pool.broadcast(&msg).await;
+
+            // If coordinator: prune dead nodes and announce departures.
+            if self.is_coordinator().await {
+                let dead = self.membership.write().await.prune_dead();
+                for id in dead {
+                    self.ring.write().await.remove_node(&id);
+                    self.pool.remove(&id);
+                    let ring_entries = self.ring.read().await.to_entries();
+                    self.pool.broadcast(&Message::MemberLeft {
+                        node_id: id,
+                        ring:    ring_entries,
+                    }).await;
+                }
+            }
+        }
+    }
+
+    // ── Watchdog / election loop ──────────────────────────────────────────────
+
+    async fn watchdog_loop(&self) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS)).await;
+            let silence = self.membership.read().await.coordinator_silence_secs();
+            if let Some(secs) = silence {
+                if secs >= COORD_TIMEOUT_SECS {
+                    tracing::warn!("coordinator silent for {secs}s — starting election");
+                    self.run_election().await;
+                }
+            }
+        }
+    }
+
+    async fn run_election(&self) {
+        let priority = self.membership.read().await.local_priority();
+        let propose  = Message::ElectionPropose {
+            candidate_id: self.local_id.clone(),
+            priority,
+        };
+        self.pool.broadcast(&propose).await;
+        // Wait for overrides.
+        tokio::time::sleep(Duration::from_secs(ELECTION_WAIT_SECS)).await;
+        // If no higher-priority node overrode us (no new coordinator set), we win.
+        let coord = self.membership.read().await.coordinator_id().cloned();
+        if coord.is_none() || coord.as_ref() == Some(&self.local_id) {
+            tracing::info!("election won — becoming coordinator");
+            self.membership.write().await.set_coordinator(self.local_id.clone());
+            self.pool.broadcast(&Message::CoordinatorAnnounce {
+                coordinator_id: self.local_id.clone(),
+            }).await;
+        }
+    }
+}
+
+// ── Status snapshot ───────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct ClusterStatus {
+    pub cluster_id:  Uuid,
+    pub local_id:    NodeId,
+    pub coordinator: Option<NodeId>,
+    pub nodes:       Vec<NodeInfo>,
+    pub ring_slots:  usize,
+}
+
+impl std::fmt::Display for ClusterStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let coord = self.coordinator.as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".into());
+        writeln!(f, "Cluster  : {}", self.cluster_id)?;
+        writeln!(f, "Local    : {}", self.local_id)?;
+        writeln!(f, "Coord    : {coord}")?;
+        writeln!(f, "Ring     : {} virtual slots", self.ring_slots)?;
+        writeln!(f, "Nodes    : {}", self.nodes.len())?;
+        for n in &self.nodes {
+            let role = if n.is_coordinator { " [coordinator]" } else { "" };
+            writeln!(f, "  {} @ {} ({} cores, {}){}", n.id, n.addr, n.capabilities.cpu_cores, n.capabilities.os, role)?;
+        }
+        Ok(())
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
