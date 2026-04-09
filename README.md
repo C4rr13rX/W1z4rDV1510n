@@ -85,20 +85,49 @@ Machine A (coordinator)            Machine B                 Machine C
 **Cluster commands:**
 
 ```bash
-# Machine A — start the cluster, prints a join OTP
-w1z4rd_node cluster-init
+# Machine A — start the cluster on a specific LAN IP, prints a join OTP
+w1z4rd_node cluster-init --bind 192.168.1.10:51611
 
-# Machine B — join using the OTP from machine A
+# Machine B — join using the OTP printed by machine A
 w1z4rd_node cluster-join --coordinator 192.168.1.10:51611 --otp EMBER-4821
 
 # Any node — print cluster topology and ring status
-w1z4rd_node cluster-status
+w1z4rd_node cluster-status --node 192.168.1.10:51611
 
-# Coordinator — generate a fresh OTP for a new joiner
+# Coordinator — generate a fresh OTP for a new joiner (coordinator must be running)
 w1z4rd_node cluster-otp
 ```
 
+**Startup scripts** (in `scripts/`):
+- `start_cluster.bat` — start this machine as coordinator (Windows, prints OTP)
+- `start_worker.ps1` — join an existing cluster (Windows, prompts for OTP)
+
+OTPs are single-use and expire in 10 minutes by design. Generate a fresh one with `cluster-otp` or by restarting `cluster-init` before each new worker joins.
+
 The neural fabric scales horizontally without changing the API. A script POSTing to `/neuro/train` on any node trains the distributed fabric; `/neuro/snapshot` on any node returns the global view.
+
+---
+
+## What shifts a prediction outcome
+
+Every prediction is the result of multiple components voting simultaneously. Understanding the full stack matters when tuning behavior or writing scripts.
+
+| Component | Mechanism |
+|-----------|-----------|
+| **Hebbian / STDP weights** | Co-occurrence history accumulated over all training — strongest synaptic paths win at inference |
+| **Mini-columns** | Neuron groups that collapse to single concept neurons over time; once promoted they fire as a unit with high confidence |
+| **Working memory carry** | Cosine similarity between consecutive frames sets a dynamic carry factor; similar frames reinforce prior context, dissimilar frames reset it |
+| **Temporal motif priors** | `HierarchicalMotifRuntime` mines recurring sequences at unbounded depth; the proposal kernel pulls candidates toward centroids of motif classes the fabric expects next |
+| **Classical annealer** | Searches minimum-energy state configurations; temperature is coherence-modulated — confident fabric → fast convergence; uncertain fabric → high-temperature exploration |
+| **Motif-prior energy term** | Penalizes proposed states that contradict learned sequence expectations; novelty penalty proportional to distance from all known motif centroids |
+| **Beam search** | Lookahead re-ranking — explores N futures M steps deep and back-propagates energy to the current prediction |
+| **Relational / factorized priors** | Historical role+zone frequency distributions blended into candidate scoring |
+| **Environmental Equation Matrix** | 282 equations across 24 disciplines vote on active sensor labels; matching equations reinforce associated labels; hypothesis gaps suppress confidence when nothing matches |
+| **QaRuntime bleed** | Existing Hebbian weights from Q&A training cross-activate during inference — what the fabric learned from one domain bleeds into another |
+| **Cross-stream activation** | Labels from one stream propagate hop-by-hop through synapses into other streams; cross-domain associations strengthen or weaken retrieval |
+| **Surprise-weighted replay** | Persistent mispredictions are replayed at higher frequency — the system applies stronger correction to its worst errors |
+| **Peer node learning** | In cluster mode, neuro snapshots from other nodes train local weights at low learning rate; distributed observations converge into shared knowledge |
+| **ResourceMonitor** | Under CPU/RAM pressure, batch sizes and update frequency drop — slower adaptation, more conservative predictions |
 
 ---
 
@@ -410,6 +439,45 @@ Typed edges (Structural, Vascular, Neural, Proximity) with speeds and dimension 
 - Ramps workload up in small steps when resources are plentiful; ramps down fast when under pressure
 - Applied to batch sizes, game/sample counts, and iteration sleep — everything scales together
 - Scripts that use the node implement `ResourceMonitor`; the node itself is always responsive
+
+---
+
+## Script application patterns
+
+The node exposes a generic API. Scripts define the domain. Below are four categories of scripts that can be written against the existing API with no changes to the node.
+
+### Conversational / LLM-style
+
+Feed conversation pairs through `/qa/ingest` (`question → answer`). At inference time `/qa/query` fires question tokens through the Hebbian fabric and returns ranked activations as the response. Cross-domain bleed means answers draw on everything else the fabric has been trained on simultaneously — a question that triggers physics-relevant labels also activates matching EEM equations.
+
+This is associative retrieval, not autoregressive generation. Responses are activated from trained state rather than generated token-by-token. Suitable for factual recall, domain Q&A, and follow-up questions that share vocabulary with prior exchanges.
+
+### Code assistance
+
+Code has strong motif structure — function signatures, boilerplate, API call sequences promote quickly through `HierarchicalMotifRuntime`. A bridge script tokenizes source files into labeled symbols (function names, keywords, identifiers at line/column positions) and feeds them as `EnvironmentSnapshot` sequences. Known problem→solution pairs go through `/qa/ingest`.
+
+At query time: current partial code as context labels → cross-stream activations + Q&A retrieval = candidate completions. The annealer can search for minimum-energy completions given a partial context. Strong at recurring patterns within a known codebase; requires training exposure to generalize.
+
+### Scientific and engineering Q&A
+
+The strongest native fit. The EEM already contains the relevant equations; the textbook pipeline (`textbook_scripts/`) already extracts Q&A pairs from OpenStax PDFs; `/knowledge/ingest` handles JATS/NLM papers. A script ingests domain material, then at query time combines `/qa/query` with `/equations/apply` — the answer comes from both the Hebbian fabric and equation matching.
+
+Cross-domain transfer is a genuine advantage: a thermodynamics question activates energy-balance connections built from every other domain trained simultaneously. When no equation matches well, the system reports a hypothesis gap explicitly rather than returning a confident wrong answer.
+
+### GUI / screenshot understanding
+
+The node does not process raw pixels. A bridge script handles vision: take a screenshot → pass through an OCR/vision tool (Tesseract or an API call) → extract UI elements with bounding boxes → convert each to a symbol with position and properties → `POST` to `/neuro/train` or use as query context.
+
+```json
+{
+  "id": "button_OK",
+  "type": "UI_ELEMENT",
+  "position": { "x": 412, "y": 308, "z": 0 },
+  "properties": { "label": "OK", "element_type": "button", "app": "chrome" }
+}
+```
+
+The fabric learns which UI element arrangements co-occur with which operations; the motif system learns GUI workflows across Windows, macOS, Linux, Android — any platform whose screens can be OCR'd. Requires training exposure to each application before generalizing to it.
 
 ---
 
