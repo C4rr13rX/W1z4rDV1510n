@@ -96,6 +96,11 @@ pub struct NeuroRuntimeConfig {
     pub working_memory: usize,
     /// Pull strength from working-memory motifs.
     pub working_memory_pull: f64,
+    /// Optional path to persist the NeuronPool across restarts.
+    /// If set and the file exists at startup, the pool is loaded from it.
+    /// Call `save_pool()` or POST `/neuro/checkpoint` to flush.
+    #[serde(default)]
+    pub pool_state_path: Option<String>,
 }
 
 impl Default for NeuroRuntimeConfig {
@@ -112,6 +117,7 @@ impl Default for NeuroRuntimeConfig {
             curiosity_strength: 0.05,
             working_memory: 6,
             working_memory_pull: 0.08,
+            pool_state_path: None,
         }
     }
 }
@@ -138,20 +144,20 @@ pub struct InfluenceRecord {
     pub step: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Synapse {
     pub target: u32,
     pub weight: f32,
     pub inhibitory: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dendrite {
     pub source: u32,
     pub weight: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neuron {
     pub id: u32,
     pub label: Option<String>,
@@ -255,14 +261,43 @@ struct MiniColumn {
     cached_conflict: f32,
 }
 
+/// Serde helper: serialize/deserialize `HashMap<(String,String), f32>` as a vec of triples.
+mod cooccur_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    #[derive(Serialize, Deserialize)]
+    struct Entry(String, String, f32);
+
+    pub fn serialize<S>(map: &HashMap<(String, String), f32>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let v: Vec<Entry> = map
+            .iter()
+            .map(|((a, b), &v)| Entry(a.clone(), b.clone(), v))
+            .collect();
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<HashMap<(String, String), f32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v: Vec<Entry> = Vec::deserialize(d)?;
+        Ok(v.into_iter().map(|Entry(a, b, v)| ((a, b), v)).collect())
+    }
+}
+
 /// Simple object-pool style neuron store with on-the-fly composite creation from co-occurring symbols.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NeuronPool {
     neurons: Vec<Neuron>,
     free: Vec<u32>,
     label_to_id: HashMap<String, u32>,
     /// EMA co-occurrence rate per label pair.  Incremented with decay:
     /// `rate = rate * EMA_ALPHA + 1.0` on co-occurrence; equilibrium ≈ 33 at alpha=0.97.
+    #[serde(with = "cooccur_serde")]
     cooccur: HashMap<(String, String), f32>,
     config: NeuroConfig,
     step: u64,
@@ -2114,13 +2149,59 @@ impl NeuroRuntime {
             .map(|s| (s.id.clone(), s))
             .collect::<HashMap<_, _>>();
         let hw = HardwareProfile::detect();
+        let hw_cap = hw.cooccur_cap();
         let mut state = NeuroState::new(config.neuro.clone());
-        state.pool.cooccur_cap = hw.cooccur_cap();
+        state.pool.cooccur_cap = hw_cap;
+
+        // Auto-load pool if a state path is configured and the file exists.
+        if let Some(ref path) = config.pool_state_path {
+            if std::path::Path::new(path).exists() {
+                match std::fs::read_to_string(path) {
+                    Ok(json) => match serde_json::from_str::<NeuronPool>(&json) {
+                        Ok(pool) => {
+                            state.pool = pool;
+                            state.pool.cooccur_cap = hw_cap; // restore HW limit
+                            tracing::info!("Loaded NeuronPool from {path}: {} neurons", state.pool.neurons.len());
+                        }
+                        Err(e) => tracing::warn!("Failed to parse pool state at {path}: {e}"),
+                    },
+                    Err(e) => tracing::warn!("Failed to read pool state at {path}: {e}"),
+                }
+            }
+        }
+
         Self {
             config,
             symbol_lookup,
             inner: Arc::new(Mutex::new(state)),
         }
+    }
+
+    /// Serialize the NeuronPool to disk at the configured path (or the given override path).
+    /// Returns an error string on failure.
+    pub fn save_pool(&self) -> Result<(), String> {
+        let path = self
+            .config
+            .pool_state_path
+            .as_deref()
+            .ok_or_else(|| "pool_state_path not configured".to_string())?;
+        self.save_pool_to(path)
+    }
+
+    pub fn save_pool_to(&self, path: &str) -> Result<(), String> {
+        let guard = self.inner.lock();
+        let json = serde_json::to_string(&guard.pool)
+            .map_err(|e| format!("serialize error: {e}"))?;
+        drop(guard);
+        // Atomic write: write to .tmp then rename.
+        let tmp = format!("{path}.tmp");
+        std::fs::write(&tmp, &json).map_err(|e| format!("write error: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename error: {e}"))?;
+        Ok(())
+    }
+
+    pub fn pool_state_path(&self) -> Option<&str> {
+        self.config.pool_state_path.as_deref()
     }
 
     pub fn observe_states<'a, I>(&self, states: I)

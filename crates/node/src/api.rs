@@ -652,6 +652,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let qa_runtime = QaRuntime::new(QaRuntimeConfig::default());
     let identity_runtime = IdentityRuntime::new(config.identity.clone());
     let share_kind = config.streaming.share_payload_kind.clone();
+    let neuro_pool_path = node_data_dir().join("neuro_pool.json");
+    // Ensure data directory exists so save_pool can write to it.
+    let _ = std::fs::create_dir_all(&node_data_dir());
     let neuro_handle: NeuroRuntimeHandle = std::sync::Arc::new(NeuroRuntime::new(
         &EnvironmentSnapshot {
             timestamp: w1z4rdv1510n::schema::Timestamp { unix: 0 },
@@ -660,7 +663,11 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             metadata: std::collections::HashMap::new(),
             stack_history: Vec::new(),
         },
-        NeuroRuntimeConfig { enabled: true, ..Default::default() },
+        NeuroRuntimeConfig {
+            enabled: true,
+            pool_state_path: Some(neuro_pool_path.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
     ));
     let ledger_backend = if config.ledger.enabled {
         config.ledger.backend.clone()
@@ -808,9 +815,10 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // POST /neuro/propagate — read what fires given seed labels, no training
         //   Body: { "seed_labels": [...], "hops": 3 }
         //   Response: { "activated": { "label": strength, ... } }
-        .route("/media/train",      post(media_train))
-        .route("/media/playback",   post(media_playback))
-        .route("/neuro/propagate",  post(neuro_propagate))
+        .route("/media/train",       post(media_train))
+        .route("/media/playback",    post(media_playback))
+        .route("/neuro/propagate",   post(neuro_propagate))
+        .route("/neuro/checkpoint",  post(neuro_checkpoint))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -3825,6 +3833,16 @@ async fn media_train(
         }
     }
 
+    // Background checkpoint: fire-and-forget, non-blocking.
+    if state.neuro.pool_state_path().is_some() {
+        let neuro = state.neuro.clone();
+        tokio::spawn(async move {
+            if let Err(e) = neuro.save_pool() {
+                tracing::warn!("Auto-save pool failed: {e}");
+            }
+        });
+    }
+
     (StatusCode::OK, Json(serde_json::json!({
         "trained": true,
         "modality": modality,
@@ -3990,6 +4008,25 @@ async fn neuro_propagate(
         .map(|(label, strength)| serde_json::json!({ "label": label, "strength": strength }))
         .collect();
     (StatusCode::OK, Json(serde_json::json!({ "activated": result })))
+}
+
+/// POST /neuro/checkpoint
+/// Force-save the NeuronPool to disk immediately.
+/// Returns the path written and the neuron count.
+async fn neuro_checkpoint(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.neuro.save_pool() {
+        Ok(()) => {
+            let path = state.neuro.pool_state_path().unwrap_or("").to_string();
+            (StatusCode::OK, Json(serde_json::json!({
+                "saved": true,
+                "path": path,
+            })))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e }))),
+    }
 }
 
 #[cfg(test)]
