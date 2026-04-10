@@ -815,10 +815,11 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // POST /neuro/propagate — read what fires given seed labels, no training
         //   Body: { "seed_labels": [...], "hops": 3 }
         //   Response: { "activated": { "label": strength, ... } }
-        .route("/media/train",       post(media_train))
-        .route("/media/playback",    post(media_playback))
-        .route("/neuro/propagate",   post(neuro_propagate))
-        .route("/neuro/checkpoint",  post(neuro_checkpoint))
+        .route("/media/train",          post(media_train))
+        .route("/media/train_sequence", post(media_train_sequence))
+        .route("/media/playback",       post(media_playback))
+        .route("/neuro/propagate",      post(neuro_propagate))
+        .route("/neuro/checkpoint",     post(neuro_checkpoint))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -3698,65 +3699,47 @@ fn parse_text_role(s: &str) -> TextRole {
     }
 }
 
-/// POST /media/train
-/// Encode one or more modalities and train the NeuronPool in a single co-activation.
-async fn media_train(
-    State(state): State<ApiState>,
-    Json(req): Json<MediaTrainReq>,
-) -> (StatusCode, Json<serde_json::Value>) {
+/// Encode one frame's modalities into a flat, deduped label list.
+/// Returns `Err` with a user-facing message if decoding fails.
+fn encode_media_labels(
+    modality: &str,
+    data_b64: Option<&str>,
+    text: Option<&str>,
+    spans: Option<&[TextSpanReq]>,
+    motion: Option<&[MotionPointReq]>,
+    keys: Option<&[KeyEventReq]>,
+) -> Result<Vec<String>, String> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
+    let mut labels: Vec<String> = Vec::new();
 
-    let mut image_out = None;
-    let mut audio_out = None;
-    let mut text_out  = None;
-    let mut label_count = 0usize;
-
-    let modality = req.modality.as_str();
-
-    // Image path
+    // Image
     if modality == "image" || modality == "page" || modality == "full" {
-        if let Some(ref data) = req.data_b64 {
-            match b64.decode(data) {
-                Ok(bytes) => {
-                    let enc = ImageBitsEncoder::new(ImageBitsConfig::default());
-                    if let Some(out) = enc.encode_bytes(&bytes) {
-                        label_count += out.labels.len();
-                        image_out = Some(out);
-                    } else {
-                        return (StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": "could not decode image bytes" })));
-                    }
-                }
-                Err(_) => return (StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "invalid base64 for data_b64" }))),
-            }
+        if let Some(data) = data_b64 {
+            let bytes = b64.decode(data).map_err(|_| "invalid base64 for data_b64".to_string())?;
+            let enc = ImageBitsEncoder::new(ImageBitsConfig::default());
+            let out = enc.encode_bytes(&bytes)
+                .ok_or_else(|| "could not decode image bytes".to_string())?;
+            labels.extend_from_slice(&out.labels);
         }
     }
 
-    // Audio path
+    // Audio
     if modality == "audio" || modality == "page" {
-        if let Some(ref data) = req.data_b64 {
-            match b64.decode(data) {
-                Ok(bytes) => {
-                    let enc = AudioBitsEncoder::new(AudioBitsConfig::default());
-                    match enc.encode_wav_bytes(&bytes) {
-                        Some(out) => { label_count += out.labels.len(); audio_out = Some(out); }
-                        None => return (StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": "could not decode WAV bytes" }))),
-                    }
-                }
-                Err(_) => return (StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "invalid base64 for data_b64" }))),
-            }
+        if let Some(data) = data_b64 {
+            let bytes = b64.decode(data).map_err(|_| "invalid base64 for data_b64".to_string())?;
+            let enc = AudioBitsEncoder::new(AudioBitsConfig::default());
+            let out = enc.encode_wav_bytes(&bytes)
+                .ok_or_else(|| "could not decode WAV bytes".to_string())?;
+            labels.extend_from_slice(&out.labels);
         }
     }
 
-    // Text path
+    // Text
     if modality == "text" || modality == "page" || modality == "full" {
         let enc = TextBitsEncoder::new(TextBitsConfig::default());
-        if let Some(ref span_reqs) = req.spans {
-            let spans: Vec<TextSpan> = span_reqs.iter().map(|sr| {
+        if let Some(span_reqs) = spans {
+            let tspans: Vec<TextSpan> = span_reqs.iter().map(|sr| {
                 let emphasis = match (sr.bold, sr.italic) {
                     (true,  true)  => TextEmphasis::BoldItalic,
                     (true,  false) => TextEmphasis::Bold,
@@ -3764,74 +3747,68 @@ async fn media_train(
                     _              => TextEmphasis::None,
                 };
                 TextSpan::positioned(
-                    &sr.text,
-                    parse_text_role(&sr.role),
-                    sr.size_ratio,
-                    emphasis,
-                    sr.indent,
-                    sr.x_frac,
-                    sr.y_frac,
-                    sr.seq_index,
-                    sr.seq_total,
+                    &sr.text, parse_text_role(&sr.role), sr.size_ratio, emphasis,
+                    sr.indent, sr.x_frac, sr.y_frac, sr.seq_index, sr.seq_total,
                 )
             }).collect();
-            let out = enc.encode_spans(&spans);
-            label_count += out.labels.len();
-            text_out = Some(out);
-        } else if let Some(ref plain) = req.text {
-            let out = enc.encode_plain(plain);
-            label_count += out.labels.len();
-            text_out = Some(out);
+            labels.extend_from_slice(&enc.encode_spans(&tspans).labels);
+        } else if let Some(plain) = text {
+            labels.extend_from_slice(&enc.encode_plain(plain).labels);
         }
     }
 
-    // Motion path
-    let mut motion_out = None;
+    // Motion
     if modality == "motion" || modality == "full" {
-        if let Some(ref pts) = req.motion {
+        if let Some(pts) = motion {
             let samples: Vec<MotionSample> = pts.iter()
                 .map(|p| MotionSample { x: p.x, y: p.y, t_secs: p.t_secs, click: p.click })
                 .collect();
-            let enc = MotionBitsEncoder::new(MotionBitsConfig::default());
-            let out = enc.encode_trajectory(&samples);
-            label_count += out.labels.len();
-            motion_out = Some(out);
+            let out = MotionBitsEncoder::new(MotionBitsConfig::default()).encode_trajectory(&samples);
+            labels.extend_from_slice(&out.labels);
         }
     }
 
-    // Keyboard path
-    let mut keys_out = None;
+    // Keyboard
     if modality == "action" || modality == "full" {
-        if let Some(ref evts) = req.keys {
+        if let Some(evts) = keys {
             let events: Vec<KeyEvent> = evts.iter()
                 .map(|e| KeyEvent { key: e.key.clone(), ctrl: e.ctrl, shift: e.shift, alt: e.alt, t_secs: e.t_secs })
                 .collect();
-            let enc = KeyboardBitsEncoder::new(KeyboardBitsConfig::default());
-            let out = enc.encode_sequence(&events);
-            label_count += out.labels.len();
-            keys_out = Some(out);
+            let out = KeyboardBitsEncoder::new(KeyboardBitsConfig::default()).encode_sequence(&events);
+            labels.extend_from_slice(&out.labels);
         }
     }
 
-    if label_count == 0 {
+    labels.sort_unstable();
+    labels.dedup();
+    Ok(labels)
+}
+
+/// POST /media/train
+/// Encode one or more modalities and train the NeuronPool in a single co-activation.
+async fn media_train(
+    State(state): State<ApiState>,
+    Json(req): Json<MediaTrainReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let labels = match encode_media_labels(
+        &req.modality,
+        req.data_b64.as_deref(),
+        req.text.as_deref(),
+        req.spans.as_deref(),
+        req.motion.as_deref(),
+        req.keys.as_deref(),
+    ) {
+        Ok(l) => l,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    };
+
+    if labels.is_empty() {
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "no labels produced — check modality and input" })));
     }
 
-    // Merge all present modalities and train in one co-activation.
-    {
-        let mut labels: Vec<String> = Vec::new();
-        if let Some(ref img) = image_out  { labels.extend_from_slice(&img.labels); }
-        if let Some(ref txt) = text_out   { labels.extend_from_slice(&txt.labels); }
-        if let Some(ref aud) = audio_out  { labels.extend_from_slice(&aud.labels); }
-        if let Some(ref mov) = motion_out { labels.extend_from_slice(&mov.labels); }
-        if let Some(ref key) = keys_out   { labels.extend_from_slice(&key.labels); }
-        labels.sort_unstable();
-        labels.dedup();
-        if !labels.is_empty() {
-            state.neuro.train_weighted(&labels, req.lr_scale, false);
-        }
-    }
+    let label_count = labels.len();
+    state.neuro.train_weighted(&labels, req.lr_scale, false);
 
     // Background checkpoint: fire-and-forget, non-blocking.
     if state.neuro.pool_state_path().is_some() {
@@ -3845,9 +3822,128 @@ async fn media_train(
 
     (StatusCode::OK, Json(serde_json::json!({
         "trained": true,
-        "modality": modality,
+        "modality": req.modality,
         "label_count": label_count,
     })))
+}
+
+// ── Sequence training ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TrainSequenceFrame {
+    /// Seconds from sequence start. Used to compute temporal gaps between frames.
+    #[serde(default)]
+    t_secs: f32,
+    modality: String,
+    #[serde(default)] data_b64: Option<String>,
+    #[serde(default)] text: Option<String>,
+    #[serde(default)] spans: Option<Vec<TextSpanReq>>,
+    #[serde(default)] motion: Option<Vec<MotionPointReq>>,
+    #[serde(default)] keys: Option<Vec<KeyEventReq>>,
+    #[serde(default = "default_lr")] lr_scale: f32,
+}
+
+#[derive(Deserialize)]
+struct TrainSequenceReq {
+    /// Ordered frames. Each is encoded and trained independently, then adjacent
+    /// frames are bridged with a temporally-decayed cross-activation.
+    frames: Vec<TrainSequenceFrame>,
+    /// Time-constant (seconds) for the bridge LR decay: bridge_lr = lr * exp(-dt / tau).
+    /// Smaller tau = only very adjacent frames get linked. Default 2.0s.
+    #[serde(default = "default_temporal_tau")]
+    temporal_tau: f32,
+}
+
+fn default_temporal_tau() -> f32 { 2.0 }
+
+/// POST /media/train_sequence
+/// Train an ordered sequence of frames with temporal Hebbian bridging.
+///
+/// Each frame is trained at its own lr_scale.  Adjacent frame pairs are then
+/// co-activated at a decayed rate: `bridge_lr = frame_lr * exp(-dt / tau)`,
+/// creating soft "A tends to precede B" associations without overwriting
+/// within-frame weights.
+async fn media_train_sequence(
+    State(state): State<ApiState>,
+    Json(req): Json<TrainSequenceReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.frames.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "frames must not be empty" })));
+    }
+
+    let tau = req.temporal_tau.max(0.01); // guard against division by zero
+    let mut frame_labels: Vec<Vec<String>> = Vec::with_capacity(req.frames.len());
+    let mut total_labels = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    // Pass 1: encode every frame and train it independently.
+    for (i, frame) in req.frames.iter().enumerate() {
+        match encode_media_labels(
+            &frame.modality,
+            frame.data_b64.as_deref(),
+            frame.text.as_deref(),
+            frame.spans.as_deref(),
+            frame.motion.as_deref(),
+            frame.keys.as_deref(),
+        ) {
+            Ok(labels) if !labels.is_empty() => {
+                total_labels += labels.len();
+                state.neuro.train_weighted(&labels, frame.lr_scale, false);
+                frame_labels.push(labels);
+            }
+            Ok(_) => {
+                errors.push(format!("frame {i}: no labels produced"));
+                frame_labels.push(Vec::new());
+            }
+            Err(e) => {
+                errors.push(format!("frame {i}: {e}"));
+                frame_labels.push(Vec::new());
+            }
+        }
+    }
+
+    // Pass 2: bridge adjacent frames with temporally-decayed co-activation.
+    for i in 1..req.frames.len() {
+        let prev_labels = &frame_labels[i - 1];
+        let curr_labels = &frame_labels[i];
+        if prev_labels.is_empty() || curr_labels.is_empty() {
+            continue;
+        }
+        let dt = (req.frames[i].t_secs - req.frames[i - 1].t_secs).abs();
+        let base_lr = (req.frames[i - 1].lr_scale + req.frames[i].lr_scale) * 0.5;
+        let bridge_lr = base_lr * (-dt / tau).exp();
+        if bridge_lr < 1e-4 {
+            continue; // negligible — skip
+        }
+        // Union of prev + curr labels for the bridge co-activation.
+        let mut bridge: Vec<String> = prev_labels
+            .iter().chain(curr_labels.iter()).cloned().collect();
+        bridge.sort_unstable();
+        bridge.dedup();
+        state.neuro.train_weighted(&bridge, bridge_lr, false);
+    }
+
+    // Background checkpoint.
+    if state.neuro.pool_state_path().is_some() {
+        let neuro = state.neuro.clone();
+        tokio::spawn(async move {
+            if let Err(e) = neuro.save_pool() {
+                tracing::warn!("Auto-save pool failed: {e}");
+            }
+        });
+    }
+
+    let mut resp = serde_json::json!({
+        "trained_frames": frame_labels.iter().filter(|l| !l.is_empty()).count(),
+        "total_frames": req.frames.len(),
+        "total_labels": total_labels,
+        "temporal_tau": tau,
+    });
+    if !errors.is_empty() {
+        resp["warnings"] = serde_json::json!(errors);
+    }
+    (StatusCode::OK, Json(resp))
 }
 
 #[derive(Deserialize)]
