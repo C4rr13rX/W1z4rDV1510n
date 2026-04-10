@@ -820,6 +820,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/media/playback",       post(media_playback))
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
+        .route("/neuro/motifs",         get(neuro_motifs))
+        .route("/neuro/motifs/predict", post(neuro_motifs_predict))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -4123,6 +4125,55 @@ async fn neuro_checkpoint(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e }))),
     }
+}
+
+/// GET /neuro/motifs
+/// Return all meta-motifs discovered so far across every hierarchy level.
+/// Empty until enough recurring label-sequence patterns cross min_support (default 3).
+///
+/// Each meta-motif represents a label sequence that recurred enough times to
+/// be promoted.  Higher-level motifs are sequences-of-sequences.
+async fn neuro_motifs(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let motifs = state.neuro.meta_motifs();
+    let count = motifs.len();
+    (StatusCode::OK, Json(serde_json::json!({
+        "count": count,
+        "motifs": motifs,
+    })))
+}
+
+#[derive(Deserialize)]
+struct MotifPredictReq {
+    /// The label seen most recently — predict what comes next.
+    last_label: String,
+    /// Max number of predictions to return (default 10).
+    #[serde(default = "default_predict_limit")]
+    limit: usize,
+}
+fn default_predict_limit() -> usize { 10 }
+
+/// POST /neuro/motifs/predict
+/// Given a label that appeared recently, return the most likely successor
+/// labels based on learned transition probabilities across all motif levels.
+///
+/// Body: { "last_label": "txt:word_photosynthesis", "limit": 10 }
+/// Response: { "predictions": [{ "label": "...", "probability": 0.43 }, ...] }
+async fn neuro_motifs_predict(
+    State(state): State<ApiState>,
+    Json(req): Json<MotifPredictReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.last_label.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "last_label must not be empty" })));
+    }
+    let mut preds = state.neuro.motif_predictions(&req.last_label);
+    preds.truncate(req.limit);
+    let result: Vec<serde_json::Value> = preds.iter()
+        .map(|(label, prob)| serde_json::json!({ "label": label, "probability": prob }))
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!({ "predictions": result })))
 }
 
 #[cfg(test)]

@@ -171,10 +171,21 @@ fn sequence_hash(ids: &[String]) -> String {
     compute_payload_hash(payload.as_bytes())
 }
 
+/// Stable fingerprint for a set of labels — used to identify a training call
+/// as a single atomic unit in the inter-call motif sequence.
+pub fn call_fingerprint(labels: &[String]) -> String {
+    let mut sorted = labels.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let payload = sorted.join("|");
+    format!("call::{}", &compute_payload_hash(payload.as_bytes())[..12])
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct HierarchicalMotifRuntime {
     config: HierarchicalMotifConfig,
     levels: Vec<MotifLevel>,
@@ -261,6 +272,69 @@ impl HierarchicalMotifRuntime {
             levels,
             newly_promoted,
         })
+    }
+
+    /// Observe a raw list of labels directly — no `BehaviorMotif` needed.
+    ///
+    /// Intended for the media-training path where labels come from encoder
+    /// output rather than a full streaming pipeline.  Each label becomes a
+    /// synthetic level-0 motif with the given `duration_per_label`.
+    ///
+    /// The labels are observed **in sorted order** so the transition graph is
+    /// deterministic regardless of encoder output ordering, keeping motif IDs
+    /// stable across repeated calls with the same content.
+    pub fn observe_label_sequence(
+        &mut self,
+        labels: &[String],
+        timestamp: Timestamp,
+        duration_per_label: f64,
+    ) -> Option<HierarchicalMotifReport> {
+        if !self.config.enabled || labels.is_empty() {
+            return None;
+        }
+        self.tick += 1;
+
+        let mut ids: Vec<String> = labels.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        let durations: Vec<f64> = vec![duration_per_label.max(0.001); ids.len()];
+
+        let mut newly_promoted: Vec<MetaMotif> = Vec::new();
+        let mut level_ids = ids;
+        let mut level_durations = durations;
+        let mut lvl = 0;
+
+        loop {
+            if level_ids.is_empty() {
+                break;
+            }
+            if lvl >= self.levels.len() {
+                self.levels.push(MotifLevel::new());
+            }
+            let promoted = self.ingest_level(lvl, &level_ids, &level_durations, timestamp.unix);
+            level_ids = promoted.iter().map(|m| m.id.clone()).collect();
+            level_durations = promoted.iter().map(|m| m.duration_secs).collect();
+            newly_promoted.extend(promoted);
+            lvl += 1;
+        }
+
+        let levels: Vec<LevelReport> = self
+            .levels
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.window.is_empty())
+            .map(|(i, l)| LevelReport {
+                level: i,
+                motif_count: l.motif_count(),
+                transition_count: l.transitions.len(),
+                entropy: l.transition_entropy(),
+            })
+            .collect();
+
+        if levels.is_empty() && newly_promoted.is_empty() {
+            return None;
+        }
+        Some(HierarchicalMotifReport { timestamp, levels, newly_promoted })
     }
 
     /// Return all meta-motifs discovered so far across every level.

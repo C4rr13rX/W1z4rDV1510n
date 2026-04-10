@@ -1,5 +1,8 @@
 use crate::hardware::HardwareProfile;
-use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType};
+use crate::schema::{DynamicState, EnvironmentSnapshot, Position, Symbol, SymbolState, SymbolType, Timestamp};
+use crate::streaming::hierarchical_motifs::{
+    call_fingerprint, HierarchicalMotifConfig, HierarchicalMotifRuntime, MetaMotif,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,6 +104,11 @@ pub struct NeuroRuntimeConfig {
     /// Call `save_pool()` or POST `/neuro/checkpoint` to flush.
     #[serde(default)]
     pub pool_state_path: Option<String>,
+    /// Config for the hierarchical motif runtime embedded in NeuroRuntime.
+    /// Motifs are observed on every `train_weighted` call so patterns in
+    /// training data emerge continuously.
+    #[serde(default)]
+    pub motifs: HierarchicalMotifConfig,
 }
 
 impl Default for NeuroRuntimeConfig {
@@ -118,6 +126,7 @@ impl Default for NeuroRuntimeConfig {
             working_memory: 6,
             working_memory_pull: 0.08,
             pool_state_path: None,
+            motifs: HierarchicalMotifConfig::default(),
         }
     }
 }
@@ -1334,10 +1343,13 @@ struct NeuroState {
     /// Auto-resolving prediction registry — predictions registered here are
     /// checked against every new observation frame automatically.
     registry: PredictionRegistry,
+    /// Hierarchical motif discovery — observes every train_weighted call so
+    /// recurring label-sequence patterns get promoted to meta-motifs.
+    motifs: HierarchicalMotifRuntime,
 }
 
 impl NeuroState {
-    fn new(config: NeuroConfig) -> Self {
+    fn new(config: NeuroConfig, motif_config: HierarchicalMotifConfig) -> Self {
         Self {
             pool: NeuronPool::new(config),
             networks: Vec::new(),
@@ -1355,6 +1367,7 @@ impl NeuroState {
             episodic: EpisodicStore::new(),
             sufficiency: ConditionalSufficiencyTracker::new(),
             registry: PredictionRegistry::new(),
+            motifs: HierarchicalMotifRuntime::new(motif_config),
         }
     }
 
@@ -2150,7 +2163,7 @@ impl NeuroRuntime {
             .collect::<HashMap<_, _>>();
         let hw = HardwareProfile::detect();
         let hw_cap = hw.cooccur_cap();
-        let mut state = NeuroState::new(config.neuro.clone());
+        let mut state = NeuroState::new(config.neuro.clone(), config.motifs.clone());
         state.pool.cooccur_cap = hw_cap;
 
         // Auto-load pool if a state path is configured and the file exists.
@@ -2275,6 +2288,46 @@ impl NeuroRuntime {
         }
         let mut guard = self.inner.lock();
         guard.pool.train_weighted(symbols, lr_scale, inhibitory);
+
+        // Feed every training call into the hierarchical motif runtime so
+        // recurring label-sequence patterns are discovered continuously.
+        let ts = Timestamp {
+            unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        };
+        // Intra-call: observe all labels as a sorted sequence — discovers
+        // repeated sub-sequences within each training call.
+        let duration_per = if symbols.is_empty() { 1.0 } else { 1.0 / symbols.len() as f64 };
+        guard.motifs.observe_label_sequence(symbols, ts, duration_per);
+
+        // Inter-call: observe the call's fingerprint as a single level-0 motif
+        // so the motif runtime also learns which sequences of CALLS repeat.
+        // e.g. "cell-membrane call" → "osmosis call" → "ATP call" across K-12 pages.
+        let fp = call_fingerprint(symbols);
+        guard.motifs.observe_label_sequence(&[fp], ts, 1.0);
+    }
+
+    /// Return all meta-motifs discovered so far across every hierarchy level.
+    /// Empty until enough recurring label patterns cross `min_support`.
+    pub fn meta_motifs(&self) -> Vec<MetaMotif> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        let guard = self.inner.lock();
+        guard.motifs.meta_motifs()
+    }
+
+    /// Given a label that appeared recently, predict which labels are likely
+    /// to appear next based on learned transition probabilities.
+    /// Returns `(label, probability)` pairs sorted by probability descending.
+    pub fn motif_predictions(&self, last_label: &str) -> Vec<(String, f64)> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        let guard = self.inner.lock();
+        guard.motifs.next_predictions(last_label)
     }
 
     pub fn snapshot(&self) -> NeuroSnapshot {
@@ -3130,7 +3183,7 @@ mod tests {
         let mut config = NeuroConfig::default();
         config.minicolumn_threshold = 2;
         config.minicolumn_max = 4;
-        let mut state = NeuroState::new(config);
+        let mut state = NeuroState::new(config, HierarchicalMotifConfig::default());
         let mut symbols = HashMap::new();
         symbols.insert("car1".to_string(), car_symbol("car1", "hyundai", "sonata"));
 
@@ -3152,7 +3205,7 @@ mod tests {
         config.minicolumn_max = 4;
         config.minicolumn_inhibition_decay = 0.0;
         config.minicolumn_collapse_threshold = 0.3;
-        let mut state = NeuroState::new(config);
+        let mut state = NeuroState::new(config, HierarchicalMotifConfig::default());
         let mut symbols = HashMap::new();
         symbols.insert("car1".to_string(), car_symbol("car1", "hyundai", "sonata"));
         symbols.insert("car2".to_string(), car_symbol("car2", "chrysler", "500"));
