@@ -2414,16 +2414,30 @@ impl NeuroRuntime {
     /// This is the "read state" call: give it one modality's labels, get back
     /// every associated label — including those from other modalities that were
     /// co-trained at the same timestamps.  No weights are changed.
+    ///
+    /// `min_activation`: use a low value (0.02–0.1) for exploratory playback
+    /// queries. The pool's internal `config.min_activation` (default 0.55) is
+    /// calibrated for live streaming, not for sparse training demos.
     pub fn propagate_all(
         &self,
         seed_labels: &[String],
         hops: usize,
     ) -> HashMap<String, f32> {
+        self.propagate_all_threshold(seed_labels, hops, self.config.min_activation)
+    }
+
+    /// Same as `propagate_all` but with an explicit minimum activation threshold.
+    pub fn propagate_all_threshold(
+        &self,
+        seed_labels: &[String],
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
         if !self.config.enabled || seed_labels.is_empty() {
             return HashMap::new();
         }
         let guard = self.inner.lock();
-        guard.pool.propagate(seed_labels, hops, self.config.min_activation)
+        guard.pool.propagate(seed_labels, hops, min_activation)
     }
 
     // ── Prediction Registry + Episodic Memory API ────────────────────────────

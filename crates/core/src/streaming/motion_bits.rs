@@ -179,27 +179,53 @@ impl MotionBitsEncoder {
 
     /// Decode activated motion labels back to the most likely target zone.
     /// Returns (zx, zy, strength) of the highest-confidence endpoint zone.
-    /// Used by playback scripts to know where to move the cursor.
+    ///
+    /// Priority order:
+    ///  1. If any `mov:endpoint_*` labels are activated, pick the highest-scoring one.
+    ///  2. Otherwise fall back to `act:click_zone_*` labels.
+    ///  3. Otherwise use bare zone labels (`mov:zone_x*_y*` without `_t`).
+    ///
+    /// Trajectory labels (`_t*`) are intentionally ignored — they represent
+    /// path pass-throughs, not targets, and accumulate across many zones,
+    /// drowning the specific endpoint signal.
     pub fn decode_target(activated: &[(String, f32)]) -> Option<(usize, usize, f32)> {
-        // Look for endpoint labels first (strongest signal), then zone labels.
-        let mut best: Option<(usize, usize, f32)> = None;
+        use std::collections::HashMap;
+
+        // Priority 1: endpoint labels
+        let mut endpoint_scores: HashMap<(usize, usize), f32> = HashMap::new();
+        let mut click_scores: HashMap<(usize, usize), f32> = HashMap::new();
+        let mut zone_scores: HashMap<(usize, usize), f32> = HashMap::new();
 
         for (label, strength) in activated {
-            let zone = if label.starts_with("mov:endpoint_x") {
-                parse_zone(label, "mov:endpoint_x", "_y")
+            if label.starts_with("mov:endpoint_x") {
+                if let Some(key) = parse_zone(label, "mov:endpoint_x", "_y") {
+                    *endpoint_scores.entry(key).or_insert(0.0) += strength;
+                }
+            } else if label.starts_with("act:click_zone_x") {
+                if let Some(key) = parse_zone(label, "act:click_zone_x", "_y") {
+                    *click_scores.entry(key).or_insert(0.0) += strength;
+                }
             } else if label.starts_with("mov:zone_x") && !label.contains("_t") {
-                parse_zone(label, "mov:zone_x", "_y")
-            } else {
-                None
-            };
-
-            if let Some((zx, zy)) = zone {
-                if best.map(|(_, _, s)| *strength > s).unwrap_or(true) {
-                    best = Some((zx, zy, *strength));
+                if let Some(key) = parse_zone(label, "mov:zone_x", "_y") {
+                    *zone_scores.entry(key).or_insert(0.0) += strength;
                 }
             }
+            // Ignore mov:zone_x*_y*_t* — trajectory noise, not target signals
         }
-        best
+
+        // Pick best from highest-priority group that has any candidates
+        let best_map = if !endpoint_scores.is_empty() {
+            &endpoint_scores
+        } else if !click_scores.is_empty() {
+            &click_scores
+        } else {
+            &zone_scores
+        };
+
+        best_map
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(&(zx, zy), &score)| (zx, zy, score))
     }
 
     /// Convert a zone (zx, zy) back to approximate screen-fraction coordinates.

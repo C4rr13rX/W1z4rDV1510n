@@ -44,8 +44,12 @@ async def screenshot_b64(page):
     png = await page.screenshot(type="jpeg", quality=70)
     return base64.b64encode(png).decode()
 
-async def ask_playback(client, goal, screen_b64, hops=3):
-    payload = {"goal": goal, "screen_b64": screen_b64, "hops": hops}
+async def ask_playback(client, goal, screen_b64, hops=1):
+    # 1 hop: only direct text→motion associations fire.
+    # More hops add indirect cross-goal noise (shared words like "click" activate all zones).
+    # The screenshot is skipped here because the obstacle course looks identical for all goals,
+    # so image labels add noise rather than discrimination.
+    payload = {"goal": goal, "hops": hops}
     resp = await client.post(f"{NODE_URL}/media/playback", json=payload, timeout=15)
     return resp.json()
 
@@ -72,7 +76,7 @@ async def run_playback(goal: str, auto: bool):
         async with httpx.AsyncClient() as client:
 
             async def execute_command(cmd):
-                print(f"\n▶ Command: \"{cmd}\"")
+                print(f"\n>> Command: \"{cmd}\"")
                 await page.evaluate(f"window.setGoal({json.dumps(cmd)})")
                 await page.wait_for_timeout(300)
 
@@ -93,7 +97,7 @@ async def run_playback(goal: str, auto: bool):
                     print(f"    {a['label']:45s}  {a['strength']:.3f}")
 
                 if action.get("type") == "none":
-                    print("  ✗ No prediction — pool may need more training")
+                    print("  X No prediction — pool may need more training")
                     return
 
                 # Convert to screen coordinates
@@ -113,9 +117,9 @@ async def run_playback(goal: str, auto: bool):
 
                 if action.get("click", False):
                     await page.mouse.click(px, py)
-                    print(f"  ✓ Clicked at ({px}, {py})")
+                    print(f"  OK Clicked at ({px}, {py})")
                 else:
-                    print(f"  ◎ Moved (no click predicted)")
+                    print(f"  o Moved (no click predicted)")
 
                 await page.wait_for_timeout(600)
 

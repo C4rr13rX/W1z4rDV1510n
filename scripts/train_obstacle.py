@@ -37,11 +37,12 @@ NODE_URL   = "http://localhost:8080"
 COURSE_URL = Path(__file__).parent / "obstacle_course.html"
 
 TARGETS = {
-    "btn-red":    "click the red button",
-    "btn-blue":   "click the blue button",
-    "btn-green":  "click the green button",
-    "btn-star":   "click the star button",
-    "btn-purple": "click the purple button",
+    # button_id → (full goal phrase, unique discriminative word)
+    "btn-red":    ("click the red button",    "red"),
+    "btn-blue":   ("click the blue button",   "blue"),
+    "btn-green":  ("click the green button",  "green"),
+    "btn-star":   ("click the star button",   "star"),
+    "btn-purple": ("click the purple button", "purple"),
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -72,13 +73,30 @@ async def take_screenshot_b64(page):
     png = await page.screenshot(type="jpeg", quality=70)
     return base64.b64encode(png).decode()
 
-async def post_training(client, modality, goal, screen_b64, motion):
+async def post_training(client, goal, screen_b64, motion):
     payload = {
         "modality": "full",
         "data_b64": screen_b64,
         "text": goal,
         "motion": motion,
         "lr_scale": 1.0,
+    }
+    resp = await client.post(f"{NODE_URL}/media/train", json=payload, timeout=15)
+    return resp.json()
+
+async def post_anchor(client, unique_word, endpoint_motion, lr_scale=5.0):
+    """Focused training: unique word + endpoint only — no shared words, no trajectory.
+
+    This creates a HIGH-WEIGHT direct link between the discriminative word
+    and the target zone, counteracting the noise from shared words in the full
+    trajectory training.  lr_scale=5.0 makes this 5× stronger than the full
+    trajectory examples.
+    """
+    payload = {
+        "modality": "full",
+        "text": unique_word,       # just the color/object word, NOT "click the X button"
+        "motion": endpoint_motion, # just the single endpoint click point
+        "lr_scale": lr_scale,
     }
     resp = await client.post(f"{NODE_URL}/media/train", json=payload, timeout=15)
     return resp.json()
@@ -105,7 +123,7 @@ async def train(reps: int):
                 targets = list(TARGETS.items())
                 random.shuffle(targets)
 
-                for target_id, goal in targets:
+                for target_id, (goal, unique_word) in targets:
                     # Set goal display
                     await page.evaluate(f"window.setGoal({json.dumps(goal)})")
                     await page.wait_for_timeout(200)
@@ -147,18 +165,31 @@ async def train(reps: int):
                     await page.mouse.click(tx, ty)
                     await page.wait_for_timeout(150)
 
-                    # POST to node
+                    # Build the endpoint-only motion (just the final click, no path)
+                    fx, fy = screen_frac(tx, ty, vw, vh)
+                    endpoint_motion = [{"x": fx, "y": fy, "t_secs": 0.0, "click": True}]
+
+                    # POST full trajectory (rich multi-modal context)
                     try:
-                        result = await post_training(client, "full", goal, screen_b64, motion)
-                        total += 1
+                        result = await post_training(client, goal, screen_b64, motion)
                         lc = result.get("label_count", "?")
-                        print(f"  Rep {rep+1:2d} | {goal:35s} | {lc} labels trained")
+                        print(f"  Rep {rep+1:2d} | {goal:35s} | {lc} labels (full)")
                     except Exception as e:
-                        print(f"  ERROR posting training: {e}")
+                        print(f"  ERROR posting full training: {e}")
+
+                    # POST anchor: unique word + endpoint only (5× weight for discrimination)
+                    try:
+                        anchor = await post_anchor(client, unique_word, endpoint_motion)
+                        alc = anchor.get("label_count", "?")
+                        total += 1
+                        print(f"         | anchor: '{unique_word}' to zone   | {alc} labels (anchor)")
+                    except Exception as e:
+                        print(f"  ERROR posting anchor: {e}")
 
                     await page.wait_for_timeout(300)
 
-            print(f"\n✓ Training complete — {total} examples across {reps} reps")
+            print(f"\nOK Training complete — {total} anchor pairs across {reps} reps")
+            print(f"  Each rep: {len(TARGETS)} full trajectories + {len(TARGETS)} anchor pairs")
             print(f"  Run playback_obstacle.py to test recall.\n")
 
         await browser.close()
@@ -175,6 +206,7 @@ if __name__ == "__main__":
     print(f"\nW1z4rD V1510n — Obstacle Course Trainer")
     print(f"  Node:  {NODE_URL}")
     print(f"  Reps:  {args.reps}")
-    print(f"  Targets: {len(TARGETS)} buttons × {args.reps} reps = {len(TARGETS)*args.reps} examples\n")
+    print(f"  Targets: {len(TARGETS)} buttons × {args.reps} reps")
+    print(f"  Per rep: 1 full trajectory + 1 anchor pair = {len(TARGETS)*2*args.reps} total training calls\n")
 
     asyncio.run(train(args.reps))

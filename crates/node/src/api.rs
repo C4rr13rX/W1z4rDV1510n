@@ -3707,7 +3707,7 @@ async fn media_train(
     let modality = req.modality.as_str();
 
     // Image path
-    if modality == "image" || modality == "page" {
+    if modality == "image" || modality == "page" || modality == "full" {
         if let Some(ref data) = req.data_b64 {
             match b64.decode(data) {
                 Ok(bytes) => {
@@ -3745,7 +3745,7 @@ async fn media_train(
     }
 
     // Text path
-    if modality == "text" || modality == "page" {
+    if modality == "text" || modality == "page" || modality == "full" {
         let enc = TextBitsEncoder::new(TextBitsConfig::default());
         if let Some(ref span_reqs) = req.spans {
             let spans: Vec<TextSpan> = span_reqs.iter().map(|sr| {
@@ -3854,17 +3854,62 @@ async fn media_playback(
     let b64 = base64::engine::general_purpose::STANDARD;
     let motion_cfg = MotionBitsConfig::default();
 
-    // Build seed labels from goal text
+    // Build seed labels from goal text — discriminative words only.
+    //
+    // Strategy: keep only `txt:word_*` labels whose word is NOT a common
+    // English stopword.  Common words like "click", "the", "a", "button"
+    // co-train with every motion zone (they appear in ALL goals), so including
+    // them floods all zones equally and kills discrimination.  Rare, goal-specific
+    // words ("red", "blue", "green", "chess", "left", …) are the actual signal.
+    //
+    // If ALL words in the goal are stopwords we fall back to the full label set.
+    const STOPWORDS: &[&str] = &[
+        "click", "press", "tap", "touch", "select", "choose", "go", "move",
+        "the", "a", "an", "this", "that", "it",
+        "button", "link", "item", "target", "object", "thing", "on",
+        "to", "at", "in", "of", "and", "or", "with",
+    ];
     let text_enc = TextBitsEncoder::new(TextBitsConfig::default());
     let text_out = text_enc.encode_plain(&req.goal);
-    let mut seed_labels = text_out.labels.clone();
 
-    // Add screen image labels if provided
+    // Collect only simple word labels for non-stopwords.
+    // Labels like txt:word_red are kept; compound labels like
+    // txt:word_click_zone_x0_y0 or txt:role_body_word_red are excluded because
+    // the word extracted from them ("click_zone_x0_y0") wouldn't match a stopword
+    // exactly but still contains noise.  We only accept labels whose word part
+    // has no underscore (i.e. it's a single bare word).
+    let discriminative: Vec<String> = text_out.labels.iter()
+        .filter(|l| {
+            if let Some(word) = l.strip_prefix("txt:word_") {
+                // Only accept bare words (no underscore = not a compound label)
+                !word.contains('_') && !STOPWORDS.contains(&word)
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect();
+
+    // Fall back to all text labels if nothing survived stopword filtering
+    let mut seed_labels: Vec<String> = if discriminative.is_empty() {
+        text_out.labels.clone()
+    } else {
+        discriminative
+    };
+
+    // Add screen image zone labels if provided — only zone-aggregate labels
+    // (img:z{x}_{y}) so we get spatial grounding without per-hue noise.
     if let Some(ref data) = req.screen_b64 {
         if let Ok(bytes) = b64.decode(data) {
             let img_enc = ImageBitsEncoder::new(ImageBitsConfig::default());
             if let Some(img_out) = img_enc.encode_bytes(&bytes) {
-                seed_labels.extend_from_slice(&img_out.labels);
+                // Zone aggregate labels only — exclude per-hue/sat/val and edge labels
+                // which are noisy when the scene is static across all goals.
+                for label in &img_out.labels {
+                    if label.starts_with("img:z") {
+                        seed_labels.push(label.clone());
+                    }
+                }
             }
         }
     }
@@ -3872,8 +3917,9 @@ async fn media_playback(
     seed_labels.sort_unstable();
     seed_labels.dedup();
 
-    // Propagate through the pool — get all associated labels
-    let activated = state.neuro.propagate_all(&seed_labels, req.hops);
+    // Low threshold: playback queries need weak associations that training at
+    // 50 examples won't have pushed above the default streaming threshold (0.55).
+    let activated = state.neuro.propagate_all_threshold(&seed_labels, req.hops, 0.02);
     let activated_sorted: Vec<(String, f32)> = {
         let mut v: Vec<(String, f32)> = activated.into_iter().collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -3937,8 +3983,7 @@ async fn neuro_propagate(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "seed_labels must not be empty" })));
     }
-    let activated = state.neuro.propagate_all(&req.seed_labels, req.hops);
-    // Sort by strength descending for readability.
+    let activated = state.neuro.propagate_all_threshold(&req.seed_labels, req.hops, 0.02);
     let mut sorted: Vec<(String, f32)> = activated.into_iter().collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let result: Vec<serde_json::Value> = sorted.iter()
