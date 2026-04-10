@@ -209,7 +209,7 @@ HTML = r"""<!doctype html>
       <div class="metric-row"><span>Move top-1</span><span id="m-top1" class="metric-val">—</span></div>
       <div class="metric-row"><span>Move top-3</span><span id="m-top3" class="metric-val dim">—</span></div>
       <div class="metric-row"><span>Outcome</span><span id="m-out" class="metric-val dim">—</span></div>
-      <div class="metric-row"><span>Plies seen</span><span id="m-plies" class="metric-val dim">—</span></div>
+      <div class="metric-row"><span>Session plies</span><span id="m-plies" class="metric-val dim">—</span></div>
     </div>
 
     <div class="panel-section">

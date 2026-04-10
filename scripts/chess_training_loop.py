@@ -1963,6 +1963,10 @@ def main() -> None:
     np.random.seed(args.seed)
     print(f"Loaded {len(all_games)} games from {DATA_PATH}")
     total_plies_actual = sum(len(g.moves) for g in all_games)
+    print(f"Dataset: {len(all_games):,} games | {total_plies_actual:,} total plies")
+    # Tracks plies sent to the node in THIS session only (resets to 0 each run).
+    # The viz shows this as "Plies seen" so clearing node data shows 0 → growing.
+    session_plies_processed = 0
 
     result_names = {0: "1-0", 1: "1/2-1/2", 2: "0-1"}
 
@@ -1987,6 +1991,7 @@ def main() -> None:
                 )
                 bridge.send_neuro_train(snap)
                 n_sent += 1
+                session_plies_processed += 1
         print(f"  [bridge] Queued {n_sent} primer neuro-train snapshots ({primer_games} games)", flush=True)
 
     # ── Initial QA primer (small, resource-aware) ─────────────────────────────
@@ -2206,7 +2211,7 @@ def main() -> None:
         sample_game = all_games[iteration % len(all_games)] if all_games else None
         animator.update(
             all_games, sample_game,
-            outcome_acc, move_acc, len(all_games), total_plies_actual, iteration,
+            outcome_acc, move_acc, len(all_games), session_plies_processed, iteration,
             outcome_models=outcome_models,
             move_counters=move_counters,
             move_defaults=move_defaults,
@@ -2217,7 +2222,7 @@ def main() -> None:
         sample_ply = 0 if sample_game is None else (iteration * 7) % max(1, len(sample_game.moves))
         write_live_board(
             iteration, sample_game, sample_ply, outcome_acc, move_acc, len(all_games),
-            total_plies_actual=total_plies_actual,
+            total_plies_actual=session_plies_processed,
             outcome_models=outcome_models,
             move_counters=move_counters,
             move_defaults=move_defaults,
@@ -2245,6 +2250,7 @@ def main() -> None:
                         result_names.get(game.result_label),
                     )
                     bridge.send_neuro_train(snap)
+                    session_plies_processed += 1
 
         # ── Virtual-sensor episode recording ─────────────────────────────────
         # Feed prediction outcomes into the fabric's episodic store so the

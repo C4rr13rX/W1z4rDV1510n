@@ -112,6 +112,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Start W1z4rD chess training stack")
     parser.add_argument("--max-games", type=int, default=2000)
     parser.add_argument("--skip-reset", action="store_true", help="Don't clear logs")
+    parser.add_argument("--node-only", action="store_true",
+                        help="Start API + node + dashboard only; skip chess training and viz")
+    parser.add_argument("--dashboard", action="store_true",
+                        help="Also launch the dashboard GUI (always true with --node-only)")
     args = parser.parse_args()
 
     log("\n[W1Z4RD] Starting local chess training stack...\n")
@@ -191,47 +195,64 @@ def main() -> None:
     else:
         log("[OK] w1z4rd_node already on :8090")
 
-    # ── 3. Chess training loop ───────────────────────────────────────────────
-    train_script = ROOT / "scripts" / "chess_training_loop.py"
-    train_log    = ROOT / "logs" / "chess_training_out.txt"
-    start_detached(
-        [sys.executable, str(train_script),
-         "--max-games", str(args.max_games),
-         "--log-file", str(ROOT / "logs" / "chess_training_metrics.log"),
-         "--summary-file", str(ROOT / "logs" / "chess_run_summary.txt")],
-        train_log,
-    )
-    log(f"[TRAIN] Chess training loop started (max-games={args.max_games})")
-    time.sleep(3)
+    # ── 3. Chess training loop (skipped in --node-only mode) ────────────────
+    if not args.node_only:
+        train_script = ROOT / "scripts" / "chess_training_loop.py"
+        train_log    = ROOT / "logs" / "chess_training_out.txt"
+        start_detached(
+            [sys.executable, str(train_script),
+             "--max-games", str(args.max_games),
+             "--log-file", str(ROOT / "logs" / "chess_training_metrics.log"),
+             "--summary-file", str(ROOT / "logs" / "chess_run_summary.txt")],
+            train_log,
+        )
+        log(f"[TRAIN] Chess training loop started (max-games={args.max_games})")
+        time.sleep(3)
 
-    # ── 4. Viz server (port 8765) ────────────────────────────────────────────
-    viz_script = ROOT / "scripts" / "live_viz_server.py"
-    start_detached(
-        [sys.executable, str(viz_script),
-         "--board-file", str(ROOT / "logs" / "chess_live_board.json"),
-         "--port", "8765"],
-        ROOT / "logs" / "viz_server.log",
-    )
-    log("[VIZ] Viz server started on port 8765")
-    time.sleep(2)
+    # ── 4. Viz server (port 8765, skipped in --node-only mode) ──────────────
+    if not args.node_only:
+        viz_script = ROOT / "scripts" / "live_viz_server.py"
+        start_detached(
+            [sys.executable, str(viz_script),
+             "--board-file", str(ROOT / "logs" / "chess_live_board.json"),
+             "--port", "8765"],
+            ROOT / "logs" / "viz_server.log",
+        )
+        log("[VIZ] Viz server started on port 8765")
+        time.sleep(2)
 
-    if is_port_open(8765):
-        log("[OK] Viz server listening on :8765")
-        # Open browser
-        import webbrowser
-        webbrowser.open("http://localhost:8765")
-        log("[VIZ] Opened http://localhost:8765 in browser")
-    else:
-        log("[WARN] Viz server not yet up — check logs/viz_server.log")
+        if is_port_open(8765):
+            log("[OK] Viz server listening on :8765")
+            import webbrowser
+            webbrowser.open("http://localhost:8765")
+            log("[VIZ] Opened http://localhost:8765 in browser")
+        else:
+            log("[WARN] Viz server not yet up — check logs/viz_server.log")
+
+    # ── 5. Dashboard GUI ─────────────────────────────────────────────────────
+    if args.node_only or args.dashboard:
+        dash_bin = ROOT / "bin" / "w1z4rd_dashboard.exe"
+        if dash_bin.exists():
+            import subprocess as _sp
+            _sp.Popen(
+                [str(dash_bin), "--node", "http://localhost:8090", "--api", "http://localhost:8080"],
+                cwd=str(ROOT),
+                creationflags=_WIN_FLAGS if sys.platform == "win32" else 0,
+                close_fds=True,
+            )
+            log("[GUI] Launched w1z4rd_dashboard (node=:8090, api=:8080)")
+        else:
+            log("[WARN] w1z4rd_dashboard.exe not found in bin/")
 
     log("\n" + "=" * 60)
     log("  Stack running:")
     log("    Neuro API  : http://localhost:8080")
     log("    Local Node : http://localhost:8090")
-    log("    Viz Server : http://localhost:8765")
-    log("    Training   : logs/chess_training_out.txt")
-    log("")
-    log("  Monitor:  tail -f logs/chess_training_out.txt")
+    if not args.node_only:
+        log("    Viz Server : http://localhost:8765")
+        log("    Training   : logs/chess_training_out.txt")
+        log("")
+        log("  Monitor:  tail -f logs/chess_training_out.txt")
     log("  Stop all: taskkill /IM python3.exe /F  (Windows)")
     log("=" * 60 + "\n")
 
