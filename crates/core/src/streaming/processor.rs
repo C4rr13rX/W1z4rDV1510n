@@ -12,7 +12,7 @@ use crate::streaming::analysis_runtime::StreamingAnalysisRuntime;
 use crate::streaming::branching_runtime::StreamingBranchingRuntime;
 use crate::compute::QuantumExecutor;
 use crate::streaming::causal_stream::StreamingCausalRuntime;
-use crate::streaming::cross_modal::{CrossModalReport, CrossModalRuntime};
+use crate::streaming::cross_modal::{CrossModalReport, CrossModalRuntime, TriModalReport, TriModalRuntime};
 use crate::streaming::appearance::AppearanceExtractor;
 use crate::streaming::ocr_runtime::FrameOcrRuntime;
 use crate::streaming::dimensions::DimensionTracker;
@@ -746,6 +746,7 @@ pub struct StreamingInference {
     scene: SceneRuntime,
     knowledge: KnowledgeRuntime,
     cross_modal: CrossModalRuntime,
+    tri_modal: TriModalRuntime,
     network_fabric: NetworkPatternRuntime,
     subnet_registry: SubnetworkRegistry,
     spike_runtime: Option<StreamingSpikeRuntime>,
@@ -836,6 +837,7 @@ impl StreamingInference {
         let scene = SceneRuntime::new(run_config.streaming.scene.clone());
         let knowledge = KnowledgeRuntime::default();
         let cross_modal = CrossModalRuntime::new(run_config.streaming.cross_modal.clone());
+        let tri_modal = TriModalRuntime::new(run_config.streaming.cross_modal.clone());
         let network_fabric = NetworkPatternRuntime::new(run_config.streaming.network_fabric.clone());
         let mut subnet_registry = SubnetworkRegistry::new(run_config.streaming.subnet_registry.clone());
         subnet_registry.load_state();
@@ -886,6 +888,7 @@ impl StreamingInference {
             scene,
             knowledge,
             cross_modal,
+            tri_modal,
             network_fabric,
             subnet_registry,
             spike_runtime,
@@ -961,6 +964,11 @@ impl StreamingInference {
         if let Some(value) = share.metadata.get("cross_modal_report") {
             if let Ok(report) = serde_json::from_value::<CrossModalReport>(value.clone()) {
                 self.cross_modal.ingest_report(&report);
+            }
+        }
+        if let Some(value) = share.metadata.get("tri_modal_report") {
+            if let Ok(report) = serde_json::from_value::<TriModalReport>(value.clone()) {
+                self.tri_modal.ingest_report(&report);
             }
         }
         let batch = match self.processor.ingest_fabric_share(share) {
@@ -1086,6 +1094,7 @@ impl StreamingInference {
             batch.layers.extend(substream_output.layers);
         }
         let cross_modal_report = self.cross_modal.update(&batch);
+        let tri_modal_report = self.tri_modal.update(&batch);
         self.last_batch = Some(batch.clone());
         self.last_motifs = self.processor.take_last_motifs();
         let behavior_frame = self.processor.take_last_behavior_frame();
@@ -1338,6 +1347,16 @@ impl StreamingInference {
             );
             snapshot.metadata.insert(
                 "cross_modal_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+        }
+        if let Some(report) = &tri_modal_report {
+            report_metadata.insert(
+                "tri_modal_report".to_string(),
+                serde_json::to_value(report)?,
+            );
+            snapshot.metadata.insert(
+                "tri_modal_report".to_string(),
                 serde_json::to_value(report)?,
             );
         }

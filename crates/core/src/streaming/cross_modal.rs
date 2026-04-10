@@ -775,6 +775,404 @@ fn composite_neuron_label(text_key: &str, video_key: &str) -> String {
     format!("comp::{text_key}+{video_key}")
 }
 
+// ── Tri-modal linker: audio ↔ video ↔ text ───────────────────────────────────
+
+/// An audio observation extracted from a token batch.
+#[derive(Debug, Clone)]
+struct ObservedAudio {
+    key: String,
+    timestamp: Timestamp,
+    confidence: f64,
+    entity_id: Option<String>,
+    frame_ref: Option<String>,
+}
+
+/// A three-way association between a text token, a video token, and an audio token
+/// that co-occurred within the temporal tolerance window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriModalLink {
+    pub text_key: String,
+    pub video_key: String,
+    pub audio_key: String,
+    pub support: u64,
+    pub weight: f64,
+    pub last_seen: Timestamp,
+    #[serde(default)]
+    pub text_preview: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriModalReport {
+    pub timestamp: Timestamp,
+    pub total_links: usize,
+    pub new_links: usize,
+    #[serde(default)]
+    pub top_links: Vec<TriModalLink>,
+}
+
+#[derive(Debug, Clone)]
+struct TriAssociationState {
+    text_key: String,
+    video_key: String,
+    audio_key: String,
+    support: u64,
+    weight: f64,
+    last_seen: Timestamp,
+    text_preview: String,
+}
+
+impl TriAssociationState {
+    fn to_link(&self) -> TriModalLink {
+        TriModalLink {
+            text_key: self.text_key.clone(),
+            video_key: self.video_key.clone(),
+            audio_key: self.audio_key.clone(),
+            support: self.support,
+            weight: self.weight,
+            last_seen: self.last_seen,
+            text_preview: self.text_preview.clone(),
+        }
+    }
+}
+
+/// Three-way co-occurrence linker: audio ↔ video ↔ text.
+///
+/// When all three modalities appear within `temporal_tolerance_secs` of each
+/// other in the same token batch, their association is strengthened.  Pairwise
+/// audio↔video and audio↔text links are also accumulated as a by-product and
+/// are queryable independently.
+///
+/// Reuses `CrossModalConfig` — no extra configuration fields required.
+pub struct TriModalRuntime {
+    config: CrossModalConfig,
+    /// Three-way association table keyed by (text_key, video_key, audio_key).
+    tri: HashMap<(String, String, String), TriAssociationState>,
+    /// audio_key → set of text_keys seen together.
+    audio_text: HashMap<String, HashSet<String>>,
+    /// audio_key → set of video_keys seen together.
+    audio_video: HashMap<String, HashSet<String>>,
+    recent_audio: VecDeque<ObservedAudio>,
+    recent_video: VecDeque<ObservedVideo>,
+    recent_text: VecDeque<ObservedText>,
+}
+
+impl TriModalRuntime {
+    pub fn new(config: CrossModalConfig) -> Self {
+        Self {
+            config,
+            tri: HashMap::new(),
+            audio_text: HashMap::new(),
+            audio_video: HashMap::new(),
+            recent_audio: VecDeque::new(),
+            recent_video: VecDeque::new(),
+            recent_text: VecDeque::new(),
+        }
+    }
+
+    /// Ingest a token batch. Returns a report when new links are formed.
+    pub fn update(&mut self, batch: &TokenBatch) -> Option<TriModalReport> {
+        if !self.config.enabled {
+            return None;
+        }
+        let now = batch.timestamp;
+        let mut new_audios: Vec<ObservedAudio> = Vec::new();
+        let mut new_videos: Vec<ObservedVideo> = Vec::new();
+        let mut new_texts: Vec<ObservedText> = Vec::new();
+
+        for token in &batch.tokens {
+            if is_audio_token(token) {
+                if let Some(a) = observed_audio(token) { new_audios.push(a); }
+            } else if is_video_token(token) {
+                if let Some(v) = observed_video(token) { new_videos.push(v); }
+            } else if is_text_token(token) {
+                if let Some(t) = observed_text(token, self.config.max_text_len) { new_texts.push(t); }
+            }
+        }
+
+        if new_audios.is_empty() && new_videos.is_empty() && new_texts.is_empty() {
+            self.prune(now);
+            return None;
+        }
+
+        for a in &new_audios { self.recent_audio.push_back(a.clone()); }
+        for v in &new_videos { self.recent_video.push_back(v.clone()); }
+        for t in &new_texts  { self.recent_text.push_back(t.clone()); }
+        self.prune(now);
+
+        // Snapshot as owned Vecs to avoid holding borrows on self while mutating self.tri.
+        let all_audios: Vec<ObservedAudio> = self.recent_audio.iter().cloned().collect();
+        let all_videos: Vec<ObservedVideo> = self.recent_video.iter().cloned().collect();
+        let all_texts:  Vec<ObservedText>  = self.recent_text.iter().cloned().collect();
+
+        let tol = self.config.temporal_tolerance_secs;
+        let min_conf = self.config.min_confidence;
+        let mut new_links = 0usize;
+
+        // Match triples — at least one modality must be new in this batch.
+        let new_audio_keys: HashSet<&str> = new_audios.iter().map(|a| a.key.as_str()).collect();
+        let new_video_keys: HashSet<&str> = new_videos.iter().map(|v| v.key.as_str()).collect();
+        let new_text_keys:  HashSet<&str> = new_texts.iter().map(|t| t.key.as_str()).collect();
+
+        for audio in &all_audios {
+            for video in &all_videos {
+                // Skip if neither audio nor video is new (text may be).
+                if !new_audio_keys.contains(audio.key.as_str())
+                    && !new_video_keys.contains(video.key.as_str())
+                {
+                    continue;
+                }
+                let av_w = match match_weight_audio(audio, video, tol) {
+                    Some(w) if w >= min_conf => w,
+                    _ => continue,
+                };
+                for text in &all_texts {
+                    if !new_audio_keys.contains(audio.key.as_str())
+                        && !new_video_keys.contains(video.key.as_str())
+                        && !new_text_keys.contains(text.key.as_str())
+                    {
+                        continue;
+                    }
+                    let at_w = match match_weight_text_audio(text, audio, tol) {
+                        Some(w) if w >= min_conf => w,
+                        _ => continue,
+                    };
+                    let triple_w = (av_w * at_w).sqrt().clamp(0.0, 1.0);
+                    let tkey = (text.key.clone(), video.key.clone(), audio.key.clone());
+                    let is_new = !self.tri.contains_key(&tkey);
+                    {
+                        let entry = self.tri.entry(tkey).or_insert_with(|| TriAssociationState {
+                            text_key:     text.key.clone(),
+                            video_key:    video.key.clone(),
+                            audio_key:    audio.key.clone(),
+                            support:      0,
+                            weight:       0.0,
+                            last_seen:    now,
+                            text_preview: text.text_preview.clone(),
+                        });
+                        entry.support = entry.support.saturating_add(1);
+                        entry.weight  = blend(entry.weight, triple_w, 0.3);
+                        entry.last_seen = now;
+                    } // entry borrow ends — safe to mutate indexes below
+                    if is_new {
+                        new_links += 1;
+                        self.audio_text.entry(audio.key.clone()).or_default().insert(text.key.clone());
+                        self.audio_video.entry(audio.key.clone()).or_default().insert(video.key.clone());
+                    }
+                }
+            }
+        }
+
+        if new_links == 0 && self.tri.is_empty() {
+            return None;
+        }
+
+        self.trim();
+        let top = self.top_links(self.config.max_report_links);
+        Some(TriModalReport {
+            timestamp: now,
+            total_links: self.tri.len(),
+            new_links,
+            top_links: top,
+        })
+    }
+
+    /// Given an audio key, return (text, video) pairs that co-occurred with it.
+    pub fn query_for_audio(&self, audio_key: &str, limit: usize) -> Vec<TriModalLink> {
+        let mut links: Vec<TriModalLink> = self.tri.values()
+            .filter(|s| s.audio_key == audio_key)
+            .map(|s| s.to_link())
+            .collect();
+        sort_tri_links(&mut links);
+        links.truncate(limit.max(1));
+        links
+    }
+
+    /// Given a text key, return (video, audio) pairs that co-occurred with it.
+    pub fn query_for_text(&self, text_key: &str, limit: usize) -> Vec<TriModalLink> {
+        let mut links: Vec<TriModalLink> = self.tri.values()
+            .filter(|s| s.text_key == text_key)
+            .map(|s| s.to_link())
+            .collect();
+        sort_tri_links(&mut links);
+        links.truncate(limit.max(1));
+        links
+    }
+
+    /// Given a video key, return (text, audio) pairs that co-occurred with it.
+    pub fn query_for_video(&self, video_key: &str, limit: usize) -> Vec<TriModalLink> {
+        let mut links: Vec<TriModalLink> = self.tri.values()
+            .filter(|s| s.video_key == video_key)
+            .map(|s| s.to_link())
+            .collect();
+        sort_tri_links(&mut links);
+        links.truncate(limit.max(1));
+        links
+    }
+
+    /// Ingest a TriModalReport produced by another node (gossip / federation).
+    pub fn ingest_report(&mut self, report: &TriModalReport) {
+        if !self.config.enabled { return; }
+        for link in &report.top_links {
+            let key = (link.text_key.clone(), link.video_key.clone(), link.audio_key.clone());
+            let is_new = !self.tri.contains_key(&key);
+            {
+                let entry = self.tri.entry(key).or_insert_with(|| TriAssociationState {
+                    text_key:     link.text_key.clone(),
+                    video_key:    link.video_key.clone(),
+                    audio_key:    link.audio_key.clone(),
+                    support:      0,
+                    weight:       0.0,
+                    last_seen:    link.last_seen,
+                    text_preview: link.text_preview.clone(),
+                });
+                entry.support = entry.support.saturating_add(link.support);
+                entry.weight  = blend(entry.weight, link.weight, 0.3).clamp(0.0, 1.0);
+                entry.last_seen = link.last_seen;
+            }
+            if is_new {
+                self.audio_text.entry(link.audio_key.clone()).or_default().insert(link.text_key.clone());
+                self.audio_video.entry(link.audio_key.clone()).or_default().insert(link.video_key.clone());
+            }
+        }
+        self.trim();
+    }
+
+    fn prune(&mut self, now: Timestamp) {
+        let max_age = self.config.max_age_secs;
+        let max_recent = self.config.max_recent;
+        prune_deque(&mut self.recent_audio, now, max_age, max_recent);
+        prune_deque(&mut self.recent_video, now, max_age, max_recent);
+        prune_deque(&mut self.recent_text, now, max_age, max_recent);
+    }
+
+    fn trim(&mut self) {
+        let max = self.config.max_links;
+        if self.tri.len() <= max { return; }
+        // Evict lowest-support entries.
+        let mut entries: Vec<_> = self.tri.iter()
+            .map(|(k, s)| (k.clone(), s.support))
+            .collect();
+        entries.sort_by_key(|(_, sup)| *sup);
+        let remove = self.tri.len() - max;
+        for (key, _) in entries.into_iter().take(remove) {
+            self.tri.remove(&key);
+        }
+    }
+
+    fn top_links(&self, n: usize) -> Vec<TriModalLink> {
+        let mut links: Vec<TriModalLink> = self.tri.values().map(|s| s.to_link()).collect();
+        sort_tri_links(&mut links);
+        links.truncate(n);
+        links
+    }
+}
+
+fn is_audio_token(token: &EventToken) -> bool {
+    matches!(token.source, Some(StreamSource::AudioFrame) | Some(StreamSource::VideoFrame))
+}
+
+fn observed_audio(token: &EventToken) -> Option<ObservedAudio> {
+    let key = audio_key(token)?;
+    Some(ObservedAudio {
+        key,
+        timestamp: token.onset,
+        confidence: token.confidence.clamp(0.0, 1.0),
+        entity_id: attr_string(&token.attributes, "entity_id"),
+        frame_ref: attr_frame_ref(&token.attributes),
+    })
+}
+
+fn audio_key(token: &EventToken) -> Option<String> {
+    // Prefer an explicit segment/clip ID.
+    for attr in ["segment_id", "clip_id", "audio_id"] {
+        if let Some(v) = attr_string(&token.attributes, attr) {
+            return Some(format!("audio::{v}"));
+        }
+    }
+    if let Some(frame) = attr_frame_ref(&token.attributes) {
+        return Some(format!("audio_frame::{frame}"));
+    }
+    if let Some(entity) = attr_string(&token.attributes, "entity_id") {
+        return Some(format!("audio_entity::{entity}"));
+    }
+    if !token.id.trim().is_empty() {
+        return Some(format!("audio_token::{}", token.id.trim()));
+    }
+    let hash = compute_payload_hash(
+        format!("audio|{}|{}", token.onset.unix, token.confidence.to_bits()).as_bytes(),
+    );
+    Some(format!("audio_hash::{hash}"))
+}
+
+/// Temporal + entity/frame match weight between an audio and video observation.
+fn match_weight_audio(audio: &ObservedAudio, video: &ObservedVideo, tolerance_secs: f64) -> Option<f64> {
+    if let (Some(fa), Some(fv)) = (&audio.frame_ref, &video.frame_ref) {
+        if fa != fv { return None; }
+    }
+    if let (Some(ea), Some(ev)) = (&audio.entity_id, &video.entity_id) {
+        if ea != ev { return None; }
+    }
+    let diff = (audio.timestamp.unix - video.timestamp.unix).abs() as f64;
+    let time_weight = if tolerance_secs <= 0.0 {
+        if diff == 0.0 { 1.0 } else { 0.0 }
+    } else {
+        (1.0 - diff / tolerance_secs).clamp(0.0, 1.0)
+    };
+    if time_weight <= 0.0 { return None; }
+    let w = (audio.confidence * video.confidence).sqrt().clamp(0.0, 1.0);
+    Some((w * time_weight).clamp(0.0, 1.0))
+}
+
+/// Temporal + entity/frame match weight between a text and audio observation.
+fn match_weight_text_audio(text: &ObservedText, audio: &ObservedAudio, tolerance_secs: f64) -> Option<f64> {
+    if let (Some(ft), Some(fa)) = (&text.frame_ref, &audio.frame_ref) {
+        if ft != fa { return None; }
+    }
+    if let (Some(et), Some(ea)) = (&text.entity_id, &audio.entity_id) {
+        if et != ea { return None; }
+    }
+    let diff = (text.timestamp.unix - audio.timestamp.unix).abs() as f64;
+    let time_weight = if tolerance_secs <= 0.0 {
+        if diff == 0.0 { 1.0 } else { 0.0 }
+    } else {
+        (1.0 - diff / tolerance_secs).clamp(0.0, 1.0)
+    };
+    if time_weight <= 0.0 { return None; }
+    let w = (text.confidence * audio.confidence).sqrt().clamp(0.0, 1.0);
+    Some((w * time_weight).clamp(0.0, 1.0))
+}
+
+fn prune_deque<T>(deque: &mut VecDeque<T>, now: Timestamp, max_age: i64, max_len: usize)
+where
+    T: HasTimestamp,
+{
+    while let Some(front) = deque.front() {
+        if (now.unix - front.ts().unix).abs() > max_age {
+            deque.pop_front();
+        } else {
+            break;
+        }
+    }
+    while deque.len() > max_len {
+        deque.pop_front();
+    }
+}
+
+trait HasTimestamp {
+    fn ts(&self) -> Timestamp;
+}
+impl HasTimestamp for ObservedAudio { fn ts(&self) -> Timestamp { self.timestamp } }
+impl HasTimestamp for ObservedVideo  { fn ts(&self) -> Timestamp { self.timestamp } }
+impl HasTimestamp for ObservedText   { fn ts(&self) -> Timestamp { self.timestamp } }
+
+fn sort_tri_links(links: &mut Vec<TriModalLink>) {
+    links.sort_by(|a, b| {
+        b.support.cmp(&a.support)
+            .then_with(|| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| b.last_seen.unix.cmp(&a.last_seen.unix))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
