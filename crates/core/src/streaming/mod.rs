@@ -48,6 +48,8 @@ pub mod organic_encoder;
 pub mod image_bits;
 pub mod audio_bits;
 pub mod text_bits;
+pub mod motion_bits;
+pub mod keyboard_bits;
 pub mod dynamic_pools;
 pub mod sensor_registry;
 pub mod motif_label_bridge;
@@ -141,6 +143,8 @@ pub use text_bits::{
     TextBitsConfig, TextBitsEncoder, TextBitsOutput,
     TextEmphasis, TextRole, TextSize, TextSpan,
 };
+pub use motion_bits::{MotionBitsConfig, MotionBitsEncoder, MotionBitsOutput, MotionSample};
+pub use keyboard_bits::{KeyboardBitsConfig, KeyboardBitsEncoder, KeyboardBitsOutput, KeyEvent};
 pub use dynamic_pools::{DynamicPoolConfig, DynamicPoolRegistry, DynamicPoolReport, PoolSummary};
 
 pub use sensor_registry::{SensorCapability, SensorRegistry, SensorRegistryConfig, SensorRegistryReport};

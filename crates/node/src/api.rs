@@ -46,6 +46,8 @@ use w1z4rdv1510n::streaming::{
     ImageBitsConfig, ImageBitsEncoder,
     AudioBitsConfig, AudioBitsEncoder,
     TextBitsConfig, TextBitsEncoder, TextSpan, TextRole, TextEmphasis,
+    MotionBitsConfig, MotionBitsEncoder, MotionSample,
+    KeyboardBitsConfig, KeyboardBitsEncoder, KeyEvent,
 };
 use w1z4rdv1510n::causal::{CausalEdge, CausalRuntime};
 use w1z4rdv1510n_cluster::{ClusterConfig, ClusterNode};
@@ -807,6 +809,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         //   Body: { "seed_labels": [...], "hops": 3 }
         //   Response: { "activated": { "label": strength, ... } }
         .route("/media/train",      post(media_train))
+        .route("/media/playback",   post(media_playback))
         .route("/neuro/propagate",  post(neuro_propagate))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
@@ -3619,19 +3622,36 @@ async fn cluster_otp(
 // ── Multimodal media ingestion ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+struct MotionPointReq { x: f32, y: f32, t_secs: f32, #[serde(default)] click: bool }
+
+#[derive(Deserialize)]
+struct KeyEventReq {
+    key: String,
+    #[serde(default)] ctrl: bool,
+    #[serde(default)] shift: bool,
+    #[serde(default)] alt: bool,
+    #[serde(default)] t_secs: f32,
+}
+
+#[derive(Deserialize)]
 struct MediaTrainReq {
-    /// "image", "audio", "text", or "page" (all three combined)
+    /// "image" | "audio" | "text" | "page" | "motion" | "action" | "full"
     modality: String,
-    /// Base64-encoded image bytes (JPEG/PNG) or WAV bytes. Used for image/audio/page.
+    /// Base64-encoded image bytes (JPEG/PNG). Used for image/page/full.
     #[serde(default)]
     data_b64: Option<String>,
-    /// Plain text content. Used for text/page modalities.
+    /// Plain text goal/description. Used for text/page/full.
     #[serde(default)]
     text: Option<String>,
-    /// Structured text spans with layout metadata. Used for page modality.
-    /// If absent but `text` is present, text is encoded as plain spans.
+    /// Structured text spans with layout metadata.
     #[serde(default)]
     spans: Option<Vec<TextSpanReq>>,
+    /// Mouse trajectory for motion/full modalities.
+    #[serde(default)]
+    motion: Option<Vec<MotionPointReq>>,
+    /// Keyboard events for action/full modalities.
+    #[serde(default)]
+    keys: Option<Vec<KeyEventReq>>,
     /// Learning rate scale (default 1.0).
     #[serde(default = "default_lr")]
     lr_scale: f32,
@@ -3757,6 +3777,34 @@ async fn media_train(
         }
     }
 
+    // Motion path
+    let mut motion_out = None;
+    if modality == "motion" || modality == "full" {
+        if let Some(ref pts) = req.motion {
+            let samples: Vec<MotionSample> = pts.iter()
+                .map(|p| MotionSample { x: p.x, y: p.y, t_secs: p.t_secs, click: p.click })
+                .collect();
+            let enc = MotionBitsEncoder::new(MotionBitsConfig::default());
+            let out = enc.encode_trajectory(&samples);
+            label_count += out.labels.len();
+            motion_out = Some(out);
+        }
+    }
+
+    // Keyboard path
+    let mut keys_out = None;
+    if modality == "action" || modality == "full" {
+        if let Some(ref evts) = req.keys {
+            let events: Vec<KeyEvent> = evts.iter()
+                .map(|e| KeyEvent { key: e.key.clone(), ctrl: e.ctrl, shift: e.shift, alt: e.alt, t_secs: e.t_secs })
+                .collect();
+            let enc = KeyboardBitsEncoder::new(KeyboardBitsConfig::default());
+            let out = enc.encode_sequence(&events);
+            label_count += out.labels.len();
+            keys_out = Some(out);
+        }
+    }
+
     if label_count == 0 {
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "no labels produced — check modality and input" })));
@@ -3765,9 +3813,11 @@ async fn media_train(
     // Merge all present modalities and train in one co-activation.
     {
         let mut labels: Vec<String> = Vec::new();
-        if let Some(ref img) = image_out { labels.extend_from_slice(&img.labels); }
-        if let Some(ref txt) = text_out  { labels.extend_from_slice(&txt.labels); }
-        if let Some(ref aud) = audio_out { labels.extend_from_slice(&aud.labels); }
+        if let Some(ref img) = image_out  { labels.extend_from_slice(&img.labels); }
+        if let Some(ref txt) = text_out   { labels.extend_from_slice(&txt.labels); }
+        if let Some(ref aud) = audio_out  { labels.extend_from_slice(&aud.labels); }
+        if let Some(ref mov) = motion_out { labels.extend_from_slice(&mov.labels); }
+        if let Some(ref key) = keys_out   { labels.extend_from_slice(&key.labels); }
         labels.sort_unstable();
         labels.dedup();
         if !labels.is_empty() {
@@ -3779,6 +3829,93 @@ async fn media_train(
         "trained": true,
         "modality": modality,
         "label_count": label_count,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PlaybackReq {
+    /// English goal text — what should happen ("click the red button")
+    goal: String,
+    /// Current screenshot as base64 JPEG/PNG (optional but improves accuracy)
+    #[serde(default)]
+    screen_b64: Option<String>,
+    #[serde(default = "default_hops")] hops: usize,
+}
+
+/// POST /media/playback
+/// Given a goal and optional screenshot, predict what action to perform.
+/// Returns the most activated motion zone (where to move the cursor)
+/// and whether a click is expected there.
+async fn media_playback(
+    State(state): State<ApiState>,
+    Json(req): Json<PlaybackReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let motion_cfg = MotionBitsConfig::default();
+
+    // Build seed labels from goal text
+    let text_enc = TextBitsEncoder::new(TextBitsConfig::default());
+    let text_out = text_enc.encode_plain(&req.goal);
+    let mut seed_labels = text_out.labels.clone();
+
+    // Add screen image labels if provided
+    if let Some(ref data) = req.screen_b64 {
+        if let Ok(bytes) = b64.decode(data) {
+            let img_enc = ImageBitsEncoder::new(ImageBitsConfig::default());
+            if let Some(img_out) = img_enc.encode_bytes(&bytes) {
+                seed_labels.extend_from_slice(&img_out.labels);
+            }
+        }
+    }
+
+    seed_labels.sort_unstable();
+    seed_labels.dedup();
+
+    // Propagate through the pool — get all associated labels
+    let activated = state.neuro.propagate_all(&seed_labels, req.hops);
+    let activated_sorted: Vec<(String, f32)> = {
+        let mut v: Vec<(String, f32)> = activated.into_iter().collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    };
+
+    // Decode the highest-confidence motion target
+    let target = MotionBitsEncoder::decode_target(&activated_sorted);
+
+    // Check if click was predicted
+    let click_strength = activated_sorted.iter()
+        .find(|(l, _)| l == "act:click")
+        .map(|(_, s)| *s)
+        .unwrap_or(0.0);
+
+    let has_click = click_strength > 0.1;
+
+    // Build response
+    let action = if let Some((zx, zy, strength)) = target {
+        let (x_frac, y_frac) = MotionBitsEncoder::new(motion_cfg).zone_to_frac(zx, zy);
+        serde_json::json!({
+            "type": if has_click { "move_and_click" } else { "move" },
+            "zone_x": zx,
+            "zone_y": zy,
+            "x_frac": x_frac,
+            "y_frac": y_frac,
+            "confidence": strength,
+            "click": has_click,
+            "click_strength": click_strength,
+        })
+    } else {
+        serde_json::json!({ "type": "none", "reason": "no motion labels activated" })
+    };
+
+    // Top activations for debugging
+    let top: Vec<serde_json::Value> = activated_sorted.iter().take(20)
+        .map(|(l, s)| serde_json::json!({ "label": l, "strength": s }))
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "action": action,
+        "top_activations": top,
     })))
 }
 

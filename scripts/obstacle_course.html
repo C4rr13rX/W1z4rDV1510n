@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>W1z4rD V1510n — Obstacle Course</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0a0c12;
+    color: #e0e6f0;
+    font-family: 'Segoe UI', monospace;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    position: relative;
+  }
+
+  #status-bar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    background: #12162a;
+    border-bottom: 1px solid #2d5fa6;
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    z-index: 100;
+    font-size: 13px;
+  }
+  #status-bar .label { color: #4a8fd4; font-weight: bold; }
+  #current-goal { color: #3db888; font-size: 15px; font-weight: bold; }
+  #last-action  { color: #f0c040; }
+  #click-count  { color: #aaa; }
+
+  #arena {
+    position: absolute;
+    top: 48px; left: 0; right: 0; bottom: 0;
+  }
+
+  .target {
+    position: absolute;
+    width: 90px;
+    height: 90px;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 13px;
+    text-align: center;
+    border: 2px solid transparent;
+    transition: transform 0.1s, box-shadow 0.15s;
+    user-select: none;
+  }
+  .target:hover {
+    transform: scale(1.06);
+  }
+  .target:active {
+    transform: scale(0.96);
+  }
+  .target .icon { font-size: 28px; margin-bottom: 4px; }
+  .target .name { font-size: 11px; letter-spacing: 0.5px; }
+
+  /* Target positions — chosen so they're in clearly distinct screen zones */
+  #btn-red   { top: 12%;  left: 8%;   background: #3a0a0a; border-color: #c0392b; color: #ff6b6b; }
+  #btn-blue  { top: 20%;  left: 50%;  transform: translateX(-50%);
+                background: #0a1a3a; border-color: #2980b9; color: #74b9ff; }
+  #btn-green { top: 55%;  left: 80%;  background: #0a2a10; border-color: #27ae60; color: #55efc4; }
+  #btn-star  { top: 65%;  left: 15%;  background: #2a2a0a; border-color: #f39c12; color: #fdcb6e; }
+  #btn-purple{ top: 38%;  left: 70%;  background: #1a0a2a; border-color: #8e44ad; color: #a29bfe; }
+
+  .target.activated {
+    box-shadow: 0 0 20px currentColor;
+    transform: scale(1.12) !important;
+  }
+
+  #crosshair {
+    position: absolute;
+    width: 16px; height: 16px;
+    border: 2px solid #4a8fd4;
+    border-radius: 50%;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    z-index: 50;
+    transition: none;
+  }
+  #crosshair::after {
+    content: '';
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 4px; height: 4px;
+    background: #4a8fd4;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+  }
+</style>
+</head>
+<body>
+
+<div id="status-bar">
+  <span class="label">GOAL:</span>
+  <span id="current-goal">—</span>
+  <span class="label" style="margin-left:20px">LAST:</span>
+  <span id="last-action">—</span>
+  <span class="label" style="margin-left:20px">CLICKS:</span>
+  <span id="click-count">0</span>
+</div>
+
+<div id="arena">
+  <div class="target" id="btn-red">
+    <div class="icon">🔴</div>
+    <div class="name">RED<br>BUTTON</div>
+  </div>
+
+  <div class="target" id="btn-blue">
+    <div class="icon">🔵</div>
+    <div class="name">BLUE<br>BUTTON</div>
+  </div>
+
+  <div class="target" id="btn-green">
+    <div class="icon">🟢</div>
+    <div class="name">GREEN<br>BUTTON</div>
+  </div>
+
+  <div class="target" id="btn-star">
+    <div class="icon">⭐</div>
+    <div class="name">STAR<br>BUTTON</div>
+  </div>
+
+  <div class="target" id="btn-purple">
+    <div class="icon">🟣</div>
+    <div class="name">PURPLE<br>BUTTON</div>
+  </div>
+</div>
+
+<div id="crosshair"></div>
+
+<script>
+  let clickCount = 0;
+  const crosshair = document.getElementById('crosshair');
+
+  // Track mouse for crosshair
+  document.addEventListener('mousemove', e => {
+    crosshair.style.left = e.clientX + 'px';
+    crosshair.style.top  = e.clientY + 'px';
+  });
+
+  // Button clicks
+  document.querySelectorAll('.target').forEach(btn => {
+    btn.addEventListener('click', e => {
+      const name = btn.querySelector('.name').innerText.replace('\n', ' ');
+      clickCount++;
+      document.getElementById('last-action').textContent = `Clicked ${name} at (${Math.round(e.clientX)}, ${Math.round(e.clientY)})`;
+      document.getElementById('click-count').textContent = clickCount;
+
+      btn.classList.add('activated');
+      setTimeout(() => btn.classList.remove('activated'), 400);
+
+      // Emit event for training script to capture
+      window._lastClick = { id: btn.id, name, x: e.clientX, y: e.clientY, t: Date.now() };
+      window.dispatchEvent(new CustomEvent('target-clicked', { detail: window._lastClick }));
+    });
+  });
+
+  // Allow external script to set the goal display
+  window.setGoal = function(text) {
+    document.getElementById('current-goal').textContent = text;
+  };
+
+  // Allow external script to query button centers
+  window.getTargetCenter = function(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height };
+  };
+
+  // Allow external script to simulate a click visually
+  window.simulateClick = function(id) {
+    const el = document.getElementById(id);
+    if (el) { el.classList.add('activated'); setTimeout(() => el.classList.remove('activated'), 600); }
+  };
+</script>
+</body>
+</html>
