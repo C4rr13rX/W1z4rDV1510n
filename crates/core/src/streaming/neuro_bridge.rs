@@ -41,6 +41,140 @@ impl NeuroStreamBridge {
         self.neuro.train_weighted(symbols, lr_scale, inhibitory);
     }
 
+    /// Ingest a text span set: layout-aware text → labels → NeuronPool train.
+    ///
+    /// Text labels share the same spatial grid vocabulary as image labels, so
+    /// training image + text together on the same page causes the pool to learn
+    /// associations between visual zones and the words/roles that appear there.
+    pub fn ingest_text_bits(
+        &self,
+        output: &crate::streaming::text_bits::TextBitsOutput,
+        lr_scale: f32,
+    ) {
+        if !output.labels.is_empty() {
+            self.neuro.train_weighted(&output.labels, lr_scale, false);
+        }
+    }
+
+    /// Ingest a full page: image of page + extracted text spans + optional audio,
+    /// all co-activated in a single training event.
+    ///
+    /// This is the primary entry point for K-12 material ingestion. Because all
+    /// labels from all modalities are merged before training, the pool learns:
+    ///   - That certain visual patterns (heading edges, image zones) co-occur
+    ///     with certain words and structural roles
+    ///   - That certain words co-occur with certain audio patterns
+    ///   - All of the above simultaneously, without any hard-coded binding
+    ///
+    /// Motif discovery on the pool will then lift repeated co-activation patterns
+    /// (e.g. "top-zone image + large bold text + definition word") into named motifs.
+    pub fn ingest_page(
+        &self,
+        image:  Option<&crate::streaming::image_bits::ImageBitsOutput>,
+        text:   Option<&crate::streaming::text_bits::TextBitsOutput>,
+        audio:  Option<&crate::streaming::audio_bits::AudioBitsOutput>,
+        lr_scale: f32,
+    ) {
+        let mut labels: Vec<String> = Vec::new();
+        if let Some(img) = image { labels.extend_from_slice(&img.labels); }
+        if let Some(txt) = text  { labels.extend_from_slice(&txt.labels); }
+        if let Some(aud) = audio { labels.extend_from_slice(&aud.labels); }
+        labels.sort_unstable();
+        labels.dedup();
+        if !labels.is_empty() {
+            self.neuro.train_weighted(&labels, lr_scale, false);
+        }
+    }
+
+    /// Read what the pool activates given a seed set of labels — no weight changes.
+    ///
+    /// Feed labels from one modality (e.g. image labels from a video frame) and
+    /// the return value contains every label from any modality that fires above
+    /// threshold — including audio, text, and structural labels that were trained
+    /// together with the seed inputs.
+    ///
+    /// Poll this in a loop over a sequence of frames to read the evolving state.
+    /// Filter the result by label prefix to isolate a specific modality:
+    ///   - image activations: keys starting with "img:"
+    ///   - audio activations: keys starting with "aud:"
+    ///   - text activations:  keys starting with "txt:"
+    pub fn propagate_labels(
+        &self,
+        seed_labels: &[String],
+        hops: usize,
+    ) -> std::collections::HashMap<String, f32> {
+        self.neuro.propagate_all(seed_labels, hops)
+    }
+
+    /// Feed a sequence of frames and reconstruct what another modality would
+    /// have produced — e.g. feed video frame labels → get audio label sequence.
+    ///
+    /// This is the temporal read loop. `target_stream` is the label prefix of
+    /// the modality you want to read ("aud", "txt", "img", etc.).
+    /// `carry` controls how much of the previous frame bleeds into the next (0.0–0.9).
+    pub fn reconstruct_sequence(
+        &self,
+        input_frames: &[Vec<String>],
+        target_stream: &str,
+        hops: usize,
+        carry: f32,
+    ) -> crate::neuro::SequenceReconstruction {
+        self.neuro.reconstruct_sequence(input_frames, target_stream, hops, carry)
+    }
+
+    /// Ingest an image frame directly: pixel data → labels → NeuronPool train.
+    ///
+    /// This is the primary entry point for visual input. The encoder converts
+    /// raw RGB pixels into spatial/colour/edge labels which are then fed into
+    /// the fabric as a co-activation pattern (Hebbian: neurons that fire
+    /// together wire together).
+    pub fn ingest_image_bits(
+        &self,
+        output: &crate::streaming::image_bits::ImageBitsOutput,
+        lr_scale: f32,
+    ) {
+        if !output.labels.is_empty() {
+            self.neuro.train_weighted(&output.labels, lr_scale, false);
+        }
+    }
+
+    /// Ingest an audio frame directly: PCM analysis → labels → NeuronPool train.
+    ///
+    /// Frequency/amplitude labels from the AudioBitsEncoder are co-activated so
+    /// the fabric learns acoustic patterns alongside any visual or text labels
+    /// that were active at the same time.
+    pub fn ingest_audio_bits(
+        &self,
+        output: &crate::streaming::audio_bits::AudioBitsOutput,
+        lr_scale: f32,
+    ) {
+        if !output.labels.is_empty() {
+            self.neuro.train_weighted(&output.labels, lr_scale, false);
+        }
+    }
+
+    /// Ingest image + audio together (synchronized video frame).
+    ///
+    /// Both label sets are merged and presented as a single co-activation so
+    /// the fabric can learn audio-visual correlations (e.g. "duck sound" +
+    /// "duck shape" → shared neuron cluster).
+    pub fn ingest_video_frame(
+        &self,
+        image: &crate::streaming::image_bits::ImageBitsOutput,
+        audio: Option<&crate::streaming::audio_bits::AudioBitsOutput>,
+        lr_scale: f32,
+    ) {
+        let mut labels = image.labels.clone();
+        if let Some(a) = audio {
+            labels.extend_from_slice(&a.labels);
+        }
+        labels.sort_unstable();
+        labels.dedup();
+        if !labels.is_empty() {
+            self.neuro.train_weighted(&labels, lr_scale, false);
+        }
+    }
+
     /// Register an explicit prediction for auto-resolution by the fabric.
     ///
     /// Virtual sensors (chess training loop, QA runners, etc.) call this to
@@ -725,6 +859,9 @@ fn source_label(source: StreamSource) -> String {
         StreamSource::CrowdTraffic => "CROWD_TRAFFIC".to_string(),
         StreamSource::PublicTopics => "PUBLIC_TOPICS".to_string(),
         StreamSource::TextAnnotations => "TEXT_ANNOTATIONS".to_string(),
+        StreamSource::Image => "IMAGE".to_string(),
+        StreamSource::AudioFrame => "AUDIO_FRAME".to_string(),
+        StreamSource::VideoFrame => "VIDEO_FRAME".to_string(),
     }
 }
 

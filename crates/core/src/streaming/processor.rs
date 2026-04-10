@@ -169,6 +169,9 @@ impl StreamingProcessor {
                 }
                 self.handle_text_annotation(envelope)
             }
+            // Multimodal sources are handled through the NeuroStreamBridge directly,
+            // not through the legacy StreamingProcessor pipeline.
+            StreamSource::Image | StreamSource::AudioFrame | StreamSource::VideoFrame => None,
         }
     }
 

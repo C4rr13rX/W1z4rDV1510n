@@ -2407,6 +2407,25 @@ impl NeuroRuntime {
         }
     }
 
+    /// Propagate activation from seed labels through all learned connections and
+    /// return every label that fires above `min_activation`, regardless of which
+    /// stream it belongs to.
+    ///
+    /// This is the "read state" call: give it one modality's labels, get back
+    /// every associated label — including those from other modalities that were
+    /// co-trained at the same timestamps.  No weights are changed.
+    pub fn propagate_all(
+        &self,
+        seed_labels: &[String],
+        hops: usize,
+    ) -> HashMap<String, f32> {
+        if !self.config.enabled || seed_labels.is_empty() {
+            return HashMap::new();
+        }
+        let guard = self.inner.lock();
+        guard.pool.propagate(seed_labels, hops, self.config.min_activation)
+    }
+
     // ── Prediction Registry + Episodic Memory API ────────────────────────────
 
     /// Explicitly register a pending prediction for a virtual sensor.

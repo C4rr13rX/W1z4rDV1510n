@@ -279,6 +279,8 @@ fn domain_confidence(batch: &TokenBatch) -> HashMap<DomainKind, f64> {
             StreamSource::CrowdTraffic => DomainKind::Crowd,
             StreamSource::PublicTopics => DomainKind::Topics,
             StreamSource::TextAnnotations => DomainKind::Text,
+            StreamSource::Image | StreamSource::VideoFrame => DomainKind::People,
+            StreamSource::AudioFrame => DomainKind::Topics,
         };
         map.insert(domain, confidence.clamp(0.0, 1.0));
     }

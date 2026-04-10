@@ -43,6 +43,9 @@ use w1z4rdv1510n::streaming::{
     NetworkPatternSummary, NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
     QaCandidateRecord, QaQueryReport, QaRuntime, QaRuntimeConfig,
     EquationMatrixRuntime, EquationMatrixConfig, Discipline, EemPeerPayload,
+    ImageBitsConfig, ImageBitsEncoder,
+    AudioBitsConfig, AudioBitsEncoder,
+    TextBitsConfig, TextBitsEncoder, TextSpan, TextRole, TextEmphasis,
 };
 use w1z4rdv1510n::causal::{CausalEdge, CausalRuntime};
 use w1z4rdv1510n_cluster::{ClusterConfig, ClusterNode};
@@ -793,6 +796,18 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/cluster/init",   post(cluster_init))
         .route("/cluster/join",   post(cluster_join))
         .route("/cluster/otp",    post(cluster_otp))
+        // ── Multimodal media ingestion ─────────────────────────────────────
+        // POST /media/train  — encode and train one modality or a combined page
+        //   Body: { "modality": "image"|"audio"|"text"|"page",
+        //           "data_b64": "<base64>",          // for image/audio
+        //           "text": "...",                    // for text/page
+        //           "spans": [...],                   // for page (with layout)
+        //           "lr_scale": 1.0 }
+        // POST /neuro/propagate — read what fires given seed labels, no training
+        //   Body: { "seed_labels": [...], "hops": 3 }
+        //   Response: { "activated": { "label": strength, ... } }
+        .route("/media/train",      post(media_train))
+        .route("/neuro/propagate",  post(neuro_propagate))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -3599,6 +3614,200 @@ async fn cluster_otp(
             Err(e)  => (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": e.to_string() }))),
         }
     }
+}
+
+// ── Multimodal media ingestion ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MediaTrainReq {
+    /// "image", "audio", "text", or "page" (all three combined)
+    modality: String,
+    /// Base64-encoded image bytes (JPEG/PNG) or WAV bytes. Used for image/audio/page.
+    #[serde(default)]
+    data_b64: Option<String>,
+    /// Plain text content. Used for text/page modalities.
+    #[serde(default)]
+    text: Option<String>,
+    /// Structured text spans with layout metadata. Used for page modality.
+    /// If absent but `text` is present, text is encoded as plain spans.
+    #[serde(default)]
+    spans: Option<Vec<TextSpanReq>>,
+    /// Learning rate scale (default 1.0).
+    #[serde(default = "default_lr")]
+    lr_scale: f32,
+}
+
+fn default_lr() -> f32 { 1.0 }
+
+#[derive(Deserialize)]
+struct TextSpanReq {
+    text: String,
+    #[serde(default = "default_role")]  role: String,
+    #[serde(default = "default_one")]   size_ratio: f32,
+    #[serde(default)]                   bold: bool,
+    #[serde(default)]                   italic: bool,
+    #[serde(default)]                   indent: usize,
+    #[serde(default)]                   x_frac: f32,
+    #[serde(default)]                   y_frac: f32,
+    #[serde(default)]                   seq_index: usize,
+    #[serde(default = "default_one_usize")] seq_total: usize,
+}
+
+fn default_role() -> String { "body".to_string() }
+fn default_one() -> f32 { 1.0 }
+fn default_one_usize() -> usize { 1 }
+
+fn parse_text_role(s: &str) -> TextRole {
+    match s {
+        "heading"    => TextRole::Heading,
+        "subheading" => TextRole::Subheading,
+        "caption"    => TextRole::Caption,
+        "list"       => TextRole::ListItem,
+        "label"      => TextRole::Label,
+        "code"       => TextRole::Code,
+        "footnote"   => TextRole::Footnote,
+        _            => TextRole::Body,
+    }
+}
+
+/// POST /media/train
+/// Encode one or more modalities and train the NeuronPool in a single co-activation.
+async fn media_train(
+    State(state): State<ApiState>,
+    Json(req): Json<MediaTrainReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let mut image_out = None;
+    let mut audio_out = None;
+    let mut text_out  = None;
+    let mut label_count = 0usize;
+
+    let modality = req.modality.as_str();
+
+    // Image path
+    if modality == "image" || modality == "page" {
+        if let Some(ref data) = req.data_b64 {
+            match b64.decode(data) {
+                Ok(bytes) => {
+                    let enc = ImageBitsEncoder::new(ImageBitsConfig::default());
+                    if let Some(out) = enc.encode_bytes(&bytes) {
+                        label_count += out.labels.len();
+                        image_out = Some(out);
+                    } else {
+                        return (StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": "could not decode image bytes" })));
+                    }
+                }
+                Err(_) => return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid base64 for data_b64" }))),
+            }
+        }
+    }
+
+    // Audio path
+    if modality == "audio" || modality == "page" {
+        if let Some(ref data) = req.data_b64 {
+            match b64.decode(data) {
+                Ok(bytes) => {
+                    let enc = AudioBitsEncoder::new(AudioBitsConfig::default());
+                    match enc.encode_wav_bytes(&bytes) {
+                        Some(out) => { label_count += out.labels.len(); audio_out = Some(out); }
+                        None => return (StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": "could not decode WAV bytes" }))),
+                    }
+                }
+                Err(_) => return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid base64 for data_b64" }))),
+            }
+        }
+    }
+
+    // Text path
+    if modality == "text" || modality == "page" {
+        let enc = TextBitsEncoder::new(TextBitsConfig::default());
+        if let Some(ref span_reqs) = req.spans {
+            let spans: Vec<TextSpan> = span_reqs.iter().map(|sr| {
+                let emphasis = match (sr.bold, sr.italic) {
+                    (true,  true)  => TextEmphasis::BoldItalic,
+                    (true,  false) => TextEmphasis::Bold,
+                    (false, true)  => TextEmphasis::Italic,
+                    _              => TextEmphasis::None,
+                };
+                TextSpan::positioned(
+                    &sr.text,
+                    parse_text_role(&sr.role),
+                    sr.size_ratio,
+                    emphasis,
+                    sr.indent,
+                    sr.x_frac,
+                    sr.y_frac,
+                    sr.seq_index,
+                    sr.seq_total,
+                )
+            }).collect();
+            let out = enc.encode_spans(&spans);
+            label_count += out.labels.len();
+            text_out = Some(out);
+        } else if let Some(ref plain) = req.text {
+            let out = enc.encode_plain(plain);
+            label_count += out.labels.len();
+            text_out = Some(out);
+        }
+    }
+
+    if label_count == 0 {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "no labels produced — check modality and input" })));
+    }
+
+    // Merge all present modalities and train in one co-activation.
+    {
+        let mut labels: Vec<String> = Vec::new();
+        if let Some(ref img) = image_out { labels.extend_from_slice(&img.labels); }
+        if let Some(ref txt) = text_out  { labels.extend_from_slice(&txt.labels); }
+        if let Some(ref aud) = audio_out { labels.extend_from_slice(&aud.labels); }
+        labels.sort_unstable();
+        labels.dedup();
+        if !labels.is_empty() {
+            state.neuro.train_weighted(&labels, req.lr_scale, false);
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "trained": true,
+        "modality": modality,
+        "label_count": label_count,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PropagateReq {
+    seed_labels: Vec<String>,
+    #[serde(default = "default_hops")] hops: usize,
+}
+fn default_hops() -> usize { 3 }
+
+/// POST /neuro/propagate
+/// Feed seed labels from any modality; returns every label that fires above
+/// threshold — including cross-modal activations. No weights are changed.
+async fn neuro_propagate(
+    State(state): State<ApiState>,
+    Json(req): Json<PropagateReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.seed_labels.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "seed_labels must not be empty" })));
+    }
+    let activated = state.neuro.propagate_all(&req.seed_labels, req.hops);
+    // Sort by strength descending for readability.
+    let mut sorted: Vec<(String, f32)> = activated.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let result: Vec<serde_json::Value> = sorted.iter()
+        .map(|(label, strength)| serde_json::json!({ "label": label, "strength": strength }))
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!({ "activated": result })))
 }
 
 #[cfg(test)]

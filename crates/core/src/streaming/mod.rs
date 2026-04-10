@@ -45,6 +45,9 @@ pub mod outcome_feedback;
 pub mod experiment_governor;
 pub mod hierarchical_motifs;
 pub mod organic_encoder;
+pub mod image_bits;
+pub mod audio_bits;
+pub mod text_bits;
 pub mod dynamic_pools;
 pub mod sensor_registry;
 pub mod motif_label_bridge;
@@ -132,6 +135,12 @@ pub use hierarchical_motifs::{
     MetaMotif,
 };
 
+pub use image_bits::{ImageBitsConfig, ImageBitsEncoder, ImageBitsOutput};
+pub use audio_bits::{AudioBitsConfig, AudioBitsEncoder, AudioBitsOutput};
+pub use text_bits::{
+    TextBitsConfig, TextBitsEncoder, TextBitsOutput,
+    TextEmphasis, TextRole, TextSize, TextSpan,
+};
 pub use dynamic_pools::{DynamicPoolConfig, DynamicPoolRegistry, DynamicPoolReport, PoolSummary};
 
 pub use sensor_registry::{SensorCapability, SensorRegistry, SensorRegistryConfig, SensorRegistryReport};

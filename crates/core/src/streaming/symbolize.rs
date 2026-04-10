@@ -185,6 +185,9 @@ fn source_index(source: Option<StreamSource>) -> (usize, Option<String>) {
         Some(StreamSource::CrowdTraffic) => (1, Some(stream_source_label(StreamSource::CrowdTraffic))),
         Some(StreamSource::PublicTopics) => (2, Some(stream_source_label(StreamSource::PublicTopics))),
         Some(StreamSource::TextAnnotations) => (3, Some(stream_source_label(StreamSource::TextAnnotations))),
+        Some(StreamSource::Image) => (5, Some(stream_source_label(StreamSource::Image))),
+        Some(StreamSource::AudioFrame) => (6, Some(stream_source_label(StreamSource::AudioFrame))),
+        Some(StreamSource::VideoFrame) => (7, Some(stream_source_label(StreamSource::VideoFrame))),
         None => (4, None),
     }
 }
@@ -195,6 +198,9 @@ fn stream_source_label(source: StreamSource) -> String {
         StreamSource::CrowdTraffic => "CROWD_TRAFFIC".to_string(),
         StreamSource::PublicTopics => "PUBLIC_TOPICS".to_string(),
         StreamSource::TextAnnotations => "TEXT_ANNOTATIONS".to_string(),
+        StreamSource::Image => "IMAGE".to_string(),
+        StreamSource::AudioFrame => "AUDIO_FRAME".to_string(),
+        StreamSource::VideoFrame => "VIDEO_FRAME".to_string(),
     }
 }
 

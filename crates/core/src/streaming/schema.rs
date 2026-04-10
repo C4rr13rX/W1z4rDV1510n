@@ -9,6 +9,12 @@ pub enum StreamSource {
     CrowdTraffic,
     PublicTopics,
     TextAnnotations,
+    /// Raw image frames (from camera, file, or video decoder).
+    Image,
+    /// Raw audio frames (PCM mono or stereo from mic, file, or video audio track).
+    AudioFrame,
+    /// Video frame — image + synchronized audio from the same timestamp.
+    VideoFrame,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
