@@ -39,21 +39,31 @@ When the EEM can't explain a label cluster — when something is happening that 
 │                     w1z4rd_node  (one binary)                        │
 │                                                                      │
 │  :8080  Neuro API ── NeuroRuntime ── EquationMatrix ── QaRuntime    │
+│         Media API ── /media/train  /media/playback  /neuro/propagate│
 │  :8090  Node  API ── ClusterNode  ── HashRing ── OtpRegistry        │
 │                                                                      │
 │  KnowledgeRuntime ── HierarchicalMotifs ── FabricTrainer            │
 │  P2P Gossip / Data Mesh / Blockchain Layer                           │
 └──────────────────────────────────────────────────────────────────────┘
-          ▲                 ▲                  ▲           ▲
-          │                 │                  │           │
+          ▲                 ▲                  ▲                ▲
+          │                 │                  │                │
+   ┌──────────────────────────────────────────────────────────┐
+   │          Multimodal encoder library  (crates/core)        │
+   │  ImageBitsEncoder  AudioBitsEncoder  TextBitsEncoder      │
+   │  MotionBitsEncoder  KeyboardBitsEncoder                   │
+   │  shared 8×8 grid vocabulary — img:, aud:, txt:, mov:, key:│
+   └──────────────────────────────────────────────────────────┘
+          ▲                 ▲                  ▲                ▲
+          │                 │                  │                │
    chess_training     rtsp_pose_bridge   rss_topic_bridge  w1z4rd-dashboard
    _loop.py           .py                .py               (GUI client binary)
+   train_obstacle.py  playback_obstacle.py                 (demo scripts)
    (app / script)     (app / script)     (app / script)
 ```
 
 Both APIs start automatically when the node binary launches — no separate service process. The dashboard is a lightweight GUI binary that polls the node APIs; it does not need to run on the same machine.
 
-**Apps send generic `EnvironmentSnapshot` objects. The node has no knowledge of chess, poses, or topics — it sees symbols with positions, labels, and metadata. Every app trains the same neural fabric.**
+**The node is domain-agnostic. Scripts and apps define the domain.** The node has no knowledge of chess, poses, pixels, or cursor movement — it sees labels and co-occurrences. The encoder library translates raw sensor data (images, audio, text, mouse trajectories, keystrokes) into the node's label vocabulary. Everything is composable because everything speaks the same language.
 
 ---
 
@@ -142,6 +152,24 @@ Every prediction is the result of multiple components voting simultaneously. Und
 - Influence/provenance tracking: every neuron records which streams and data shaped it
 - Double-buffered propagation, binary-search synapse lists, EMA co-occurrence tracking, dirty-flag mini-columns — all hardware-adaptive, no hard-coded limits
 
+### Multimodal encoder library (`crates/core/src/streaming/`)
+
+Translates raw sensor data into the node's label vocabulary. The encoders live in the core library — **not** in the node binary. Scripts import them, encode data, and POST labels to the node API. The node never sees pixels, waveforms, or keystrokes directly.
+
+All encoders share the same default **8×8 spatial grid**. A cursor at zone `(3,2)`, an image feature at zone `(3,2)`, and a text span at zone `(3,2)` all emit the same zone label family. Hebbian learning connects them automatically.
+
+| Encoder | Input | Label prefixes | Notes |
+|---------|-------|----------------|-------|
+| `ImageBitsEncoder` | JPEG/PNG bytes or raw RGB | `img:z{x}_{y}`, `img:h{n}`, `img:edge{dir}_z{x}_{y}` | HSV histogram + Sobel edges per grid zone |
+| `AudioBitsEncoder` | PCM f32 or WAV bytes | `aud:freq{n}`, `aud:amp{n}`, `aud:freq{n}_t{t}` | Hann-windowed DFT; no external FFT dependency |
+| `TextBitsEncoder` | `TextSpan` structs or plain `&str` | `txt:word_{w}`, `txt:role_{r}`, `txt:phon_{ng}`, `txt:zone_x{n}_y{n}` | Layout-aware: captures font size, role, emphasis, indent, position |
+| `MotionBitsEncoder` | `Vec<MotionSample {x,y,t,click}>` | `mov:zone_x{n}_y{n}`, `mov:endpoint_x{n}_y{n}`, `act:click` | Also `decode_target()` for inference |
+| `KeyboardBitsEncoder` | `Vec<KeyEvent {key,ctrl,shift,alt,t}>` | `key:k_{name}`, `key:combo_{mods}{key}`, `txt:word_{w}` | Cross-modal: emits `txt:word_*` for typed words |
+
+**Layout is data.** A heading at the top of a page emits `txt:role_heading + txt:zone_x0_y0 + txt:size_large + txt:emph_bold`. Position, font, role, and emphasis are all Hebbian-connected to whatever content appears there. PDF structure is spatial signal, not decoration.
+
+**Cross-modal associations emerge from co-training.** Feeding image + text + motion together in one `POST /media/train` call Hebbian-connects all three. At inference time, seeding from text labels fires the associated motion zones — no decoder needed.
+
 ### Environmental Equation Matrix (`EquationMatrixRuntime`)
 - A self-growing directed graph of physics equations spanning all domains from Newtonian mechanics to topological quantum phenomena
 - **282 seed equations across 24 disciplines**:
@@ -212,11 +240,19 @@ Both APIs (`:8080` neuro, `:8090` node) run in either mode. Cluster commands are
 
 ## Node API endpoints
 
+All endpoints are on `:8080`. Start the node with the `api` subcommand:
+```bash
+./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
+```
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Node status and uptime |
 | `/neuro/train` | POST | Feed an `EnvironmentSnapshot` to the neural fabric |
 | `/neuro/snapshot` | GET | Current activation, predictions, motifs, top influences |
+| `/neuro/propagate` | POST | Feed seed labels → returns all labels that fire above threshold; cross-modal inference |
+| `/media/train` | POST | Encode and co-train one or more modalities: `image`, `audio`, `text`, `motion`, `action`, `full` |
+| `/media/playback` | POST | Given goal text + optional screenshot → predict action zone (where to move cursor / what to click) |
 | `/equations/search` | GET | Text search across the equation matrix |
 | `/equations/apply` | POST | Find equations that explain active sensor labels + dims |
 | `/equations/ingest` | POST | Add equations from free text |
@@ -487,6 +523,46 @@ The node does not process raw pixels. A bridge script handles vision: take a scr
 
 The fabric learns which UI element arrangements co-occur with which operations; the motif system learns GUI workflows across Windows, macOS, Linux, Android — any platform whose screens can be OCR'd. Requires training exposure to each application before generalizing to it.
 
+### Multimodal screen navigation (cursor / interaction learning)
+
+The `ImageBitsEncoder`, `TextBitsEncoder`, and `MotionBitsEncoder` share an 8×8 grid, which means a cursor trajectory toward pixel zone (3,2), an image feature at zone (3,2), and text at zone (3,2) all train the same neuron family simultaneously through `POST /media/train` with `modality: "full"`.
+
+**Training**: a script captures screenshots, goal text, and mouse trajectories, then POSTs them together. The fabric Hebbian-connects text labels (what the goal says) with motion labels (where the cursor went).
+
+**Inference** (`POST /media/playback`): given goal text and optionally a screenshot, the node propagates from the text's discriminative labels through the learned synapses and returns the predicted action zone and whether a click is expected. The script converts the zone back to pixel coordinates and acts.
+
+**Scope boundary**: The node learns label associations. The *script* operates Playwright, takes screenshots, moves the mouse, and clicks. The node never drives UI directly.
+
+```python
+# Training loop (train_obstacle.py pattern)
+result = httpx.post("/media/train", json={
+    "modality": "full",
+    "data_b64": screenshot_b64,      # -> img: labels
+    "text": "click the red button",  # -> txt: labels
+    "motion": trajectory_points,     # -> mov: labels, act:click
+    "lr_scale": 1.0,
+})
+
+# Inference (playback_obstacle.py pattern)
+result = httpx.post("/media/playback", json={
+    "goal": "click the red button",
+    "hops": 1,
+})
+# -> {"action": {"type": "move_and_click", "zone_x": 0, "zone_y": 1, ...}}
+```
+
+**Anchor training** is the key technique for discrimination: alongside full-trajectory training, post a focused call with only the unique discriminative word and the endpoint point at `lr_scale: 5.0`. This creates a strong direct association that survives the noise from shared words ("click", "the", "button") that appear in every goal.
+
+```python
+# Anchor: just the color word + endpoint, high weight
+httpx.post("/media/train", json={
+    "modality": "full",
+    "text": "red",                          # unique word only
+    "motion": [{"x": fx, "y": fy, "t_secs": 0.0, "click": True}],
+    "lr_scale": 5.0,                        # outweighs shared-word noise
+})
+```
+
 ---
 
 ## Apps / scripts (examples)
@@ -500,8 +576,12 @@ These scripts use the node architecture — the node has no knowledge of their d
 | `rss_topic_bridge.py` | Topics | Topic signals as streaming events |
 | `traffic_sensor_bridge.py` | Traffic | Flow data as crowd sensor stream |
 | `textbook_scripts/` | Knowledge | Q&A pairs from OpenStax textbooks |
+| `scripts/train_obstacle.py` | Screen navigation | Screenshot + goal text + mouse trajectory via `/media/train`; anchor pairs for discrimination |
+| `scripts/playback_obstacle.py` | Screen navigation | Goal text → `/media/playback` → predicted zone → Playwright cursor action |
 
 **Adding a new domain**: translate your data to `EnvironmentSnapshot`, `POST` to `/neuro/train`, optionally send to `/qa/ingest` and `/equations/apply`. The node learns from it alongside everything else.
+
+For multimodal domains (image + text + motion): use `ImageBitsEncoder`, `TextBitsEncoder`, `MotionBitsEncoder` from the encoder library to convert raw data to labels, then `POST /media/train`. The node's neural fabric is the same one everything else trains.
 
 ---
 
@@ -513,43 +593,44 @@ cargo build --release
 
 # Copy to bin/
 cp target/release/w1z4rdv1510n-node  bin/w1z4rd_node      # Linux/macOS
-cp target/release/w1z4rd-dashboard   bin/w1z4rd-dashboard
-# (Windows: .exe extension)
+cp target/release/w1z4rdv1510n-node.exe  bin/w1z4rd_node.exe  # Windows
 
-# Start the node — both APIs come up together (:8080 neuro, :8090 node)
-./bin/w1z4rd_node
-
-# Optional: override addresses
-./bin/w1z4rd_node --api-addr 0.0.0.0:8080
+# Start the node (requires 'api' subcommand)
+./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
 
 # Check node health
-curl http://localhost:8090/health
-
-# Check the neuro API
-curl http://localhost:8080/healthz
+curl http://localhost:8080/health
 
 # Check what the equation matrix knows
-curl http://localhost:8090/equations/report
+curl http://localhost:8080/equations/report
 
 # See open hypothesis gaps (sorted by cross-node corroboration)
-curl http://localhost:8090/equations/gaps
+curl http://localhost:8080/equations/gaps
 
-# See the named-process causal graph
-curl http://localhost:8090/causal/graph
-
-# Find equations for a 2D topological sensor context
-curl -X POST http://localhost:8090/equations/apply \
+# Propagate from seed labels (cross-modal inference)
+curl -X POST http://localhost:8080/neuro/propagate \
   -H "Content-Type: application/json" \
-  -d '{"labels": ["anyon", "topological", "braid", "hall"], "dims": 2}'
+  -d '{"seed_labels": ["txt:word_red"], "hops": 1}'
 
-# --- Dashboard GUI (separate binary, connects to the node APIs) ---
-./bin/w1z4rd-dashboard                                   # localhost defaults
-./bin/w1z4rd-dashboard --node http://10.0.0.5:8090 --api http://10.0.0.5:8080
+# --- Dashboard GUI (separate binary, connects to the node API) ---
+./bin/w1z4rd-dashboard                          # localhost defaults
+
+# --- Obstacle course demo (screen navigation from natural language) ---
+
+# Terminal 1: node
+./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
+
+# Terminal 2: train (opens browser, records mouse trajectories, POSTs to /media/train)
+pip install playwright httpx && playwright install chromium
+python scripts/train_obstacle.py --reps 10
+
+# Terminal 2: playback (opens browser, asks /media/playback, moves cursor to predicted zone)
+python scripts/playback_obstacle.py --auto
 
 # --- Run chess training + live visualizer together ---
 
 # Terminal 1: node
-./bin/w1z4rd_node
+./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
 
 # Terminal 2: chess sensor script (feeds board states to the node as EnvironmentSnapshots)
 python scripts/chess_training_loop.py --max-games 8000
