@@ -1,11 +1,11 @@
 {
-  "node_id": "node-3",
+  "node_id": "node-cd4c5a9a7225",
   "node_mode": "SENSOR",
   "node_role": "WORKER",
   "network": {
     "listen_addr": "0.0.0.0:8088",
-    "advertise_addr": "REPLACE_WITH_THIS_PC_LAN_IP:8088",
-    "bootstrap_peers": ["192.168.1.84:8088"],
+    "advertise_addr": "192.168.1.84:8088",
+    "bootstrap_peers": [],
     "max_peers": 128,
     "gossip_protocol": "w1z4rdv1510n-gossip",
     "security": {
@@ -27,36 +27,36 @@
   },
   "wallet": {
     "enabled": true,
-    "path": "C:\\W1z4rD\\wallet.json",
+    "path": "C:\\Users\\Adam\\AppData\\Roaming\\w1z4rdv1510n\\wallet.json",
     "auto_create": true,
-    "encrypted": false,
-    "passphrase_env": "",
+    "encrypted": true,
+    "passphrase_env": "W1Z4RDV1510N_WALLET_PASSPHRASE",
     "prompt_on_load": false
   },
   "data": {
     "enabled": false,
-    "storage_path": "C:\\W1z4rD\\data",
-    "host_storage": false,
+    "storage_path": "data",
+    "host_storage": true,
     "max_payload_bytes": 524288,
     "chunk_size_bytes": 32768,
-    "replication_factor": 1,
-    "receipt_quorum": 1,
-    "require_manifest_signature": false,
-    "require_receipt_signature": false,
-    "max_pending_chunks": 64,
-    "maintenance_enabled": false,
+    "replication_factor": 3,
+    "receipt_quorum": 2,
+    "require_manifest_signature": true,
+    "require_receipt_signature": true,
+    "max_pending_chunks": 1024,
+    "maintenance_enabled": true,
     "maintenance_interval_secs": 300,
     "retention_days": 30,
     "max_storage_bytes": 0,
-    "max_repair_requests_per_tick": 0,
-    "storage_reward_enabled": false,
-    "storage_reward_base": 0.0,
-    "storage_reward_per_mb": 0.0
+    "max_repair_requests_per_tick": 64,
+    "storage_reward_enabled": true,
+    "storage_reward_base": 0.15,
+    "storage_reward_per_mb": 0.05
   },
   "streaming": {
     "enabled": true,
-    "ultradian_node": false,
-    "run_config_path": "C:\\W1z4rD\\run_config.json",
+    "ultradian_node": true,
+    "run_config_path": "run_config.json",
     "publish_streams": true,
     "publish_shares": true,
     "consume_streams": true,
@@ -69,7 +69,7 @@
   "knowledge": {
     "enabled": true,
     "persist_state": true,
-    "state_path": "C:\\W1z4rD\\knowledge_state.json",
+    "state_path": "data/knowledge_state.json",
     "queue": {
       "min_votes": 2,
       "min_confidence": 0.85,
@@ -80,7 +80,7 @@
     }
   },
   "blockchain": {
-    "enabled": false,
+    "enabled": true,
     "chain_id": "w1z4rdv1510n-l1",
     "consensus": "poa",
     "bootstrap_peers": [],
@@ -108,24 +108,40 @@
   },
   "cluster": {
     "enabled": true,
-    "mode": "join",
+    "mode": "coordinator",
     "min_nodes": 1,
     "openstack_minimal": false
   },
   "ledger": {
-    "enabled": false,
+    "enabled": true,
     "backend": "local",
     "endpoint": ""
   },
-  "sensors": [],
+  "sensors": [
+    {
+      "sensor_id": "chess-board-2d",
+      "kind": "grid_2d",
+      "metadata": {
+        "description": "Chess board — 8x8 grid of piece/position states as EnvironmentSnapshots",
+        "domain": "game_strategy",
+        "dimensions": 2,
+        "grid_w": 8,
+        "grid_h": 8,
+        "symbol_schema": "piece_role_zone",
+        "stream_topic": "chess.board.stream",
+        "feed_url": "http://localhost:8080/neuro/train",
+        "modality": "structured_symbolic"
+      }
+    }
+  ],
   "chain_spec": {
-    "genesis_path": "C:\\W1z4rD\\chain\\genesis.json",
-    "reward_contract_path": "C:\\W1z4rD\\chain\\reward_contract.json",
-    "bridge_contract_path": "C:\\W1z4rD\\chain\\bridge_contract.json",
-    "token_standard_path": "C:\\W1z4rD\\chain\\token_standard.json"
+    "genesis_path": "chain/genesis.json",
+    "reward_contract_path": "chain/reward_contract.json",
+    "bridge_contract_path": "chain/bridge_contract.json",
+    "token_standard_path": "chain/token_standard.json"
   },
   "energy_reporting": {
-    "enabled": false,
+    "enabled": true,
     "sample_interval_secs": 30
   }
 }

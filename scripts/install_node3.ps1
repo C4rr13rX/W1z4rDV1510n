@@ -58,6 +58,28 @@ function ERR($msg)       { Write-Host "      XX  $msg" -ForegroundColor Red }
 
 Banner "Node 3 Installer"
 
+# ── Detect this PC's LAN IP ───────────────────────────────────────────────────
+$ThisPCIP = (
+    Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.IPAddress -notlike "127.*" -and
+        $_.IPAddress -notlike "169.254.*" -and
+        $_.IPAddress -notlike "172.*" -and
+        $_.IPAddress -notlike "192.168.56.*"   # skip VirtualBox host-only
+    } |
+    Sort-Object PrefixLength |
+    Select-Object -First 1 -ExpandProperty IPAddress
+)
+if (-not $ThisPCIP) {
+    # Fallback: first non-loopback IPv4
+    $ThisPCIP = (
+        Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object { $_.IPAddress -notlike "127.*" } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+    )
+}
+Write-Host "  This PC LAN IP : $ThisPCIP" -ForegroundColor Cyan
+
 # ── Locate source binaries ────────────────────────────────────────────────────
 Step 0 "Locating source binaries"
 
@@ -106,7 +128,7 @@ if (Test-Path $dash_src) {
 }
 
 # ── Step 3: Write node config ─────────────────────────────────────────────────
-Step 3 "Writing node_config.json (bootstrap → $NodeHost`:$NodePort)"
+Step 3 "Writing node_config.json (bootstrap → $NodeHost`:$NodePort, advertise → $ThisPCIP`:8088)"
 
 $config = @"
 {
@@ -115,6 +137,7 @@ $config = @"
   "node_role": "WORKER",
   "network": {
     "listen_addr": "0.0.0.0:8088",
+    "advertise_addr": "$ThisPCIP`:8088",
     "bootstrap_peers": ["$NodeHost`:$NodePort"],
     "max_peers": 128,
     "gossip_protocol": "w1z4rdv1510n-gossip",
