@@ -627,8 +627,10 @@ fn tab_cluster(
                     {
                         Ok(v) => {
                             let msg = if let Some(otp) = v["otp"].as_str() {
-                                format!("[cluster] Started. OTP: {}  id={}",
-                                    otp, &v["cluster_id"].as_str().unwrap_or("?")[..8])
+                                {
+                                    let id = v["cluster_id"].as_str().unwrap_or("?");
+                                    format!("[cluster] Started. OTP: {}  id={}", otp, &id[..id.len().min(8)])
+                                }
                             } else {
                                 format!("[cluster] Error: {}", v["error"].as_str().unwrap_or("?"))
                             };
@@ -680,8 +682,9 @@ fn tab_cluster(
                         {
                             Ok(v) => {
                                 let msg = if v["status"].as_str() == Some("ok") {
+                                    let id = v["cluster_id"].as_str().unwrap_or("?");
                                     format!("[cluster] Joined {}  ({} nodes)",
-                                        &v["cluster_id"].as_str().unwrap_or("?")[..8],
+                                        &id[..id.len().min(8)],
                                         v["node_count"].as_u64().unwrap_or(0))
                                 } else {
                                     format!("[cluster] Join failed: {}", v["error"].as_str().unwrap_or("?"))

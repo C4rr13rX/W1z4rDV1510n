@@ -206,10 +206,15 @@ impl ClusterNode {
         let caps      = local_capabilities();
         let join_ts   = unix_now();
 
-        // Connect to coordinator.
-        let stream = TcpStream::connect(coordinator_addr)
-            .await
-            .context("connect to coordinator")?;
+        // Connect to coordinator (10-second timeout so a silent firewall drop
+        // doesn't leave the join hanging until the reqwest client gives up).
+        let stream = tokio::time::timeout(
+            Duration::from_secs(10),
+            TcpStream::connect(coordinator_addr),
+        )
+        .await
+        .context("connect to coordinator: timed out")?
+        .context("connect to coordinator")?;
         stream.set_nodelay(true)?;
         let (r, w) = stream.into_split();
         let mut reader = BufReader::new(r);
