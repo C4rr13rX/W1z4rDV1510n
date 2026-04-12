@@ -449,9 +449,13 @@ impl ClusterNode {
                 if let Ok(addr) = listen_addr.parse::<SocketAddr>() {
                     self.pool.register(node_id.clone(), addr);
                 }
-                // Tell everyone else about the new member.
+                // Tell all *existing* peers about the new member.
+                // The joining node is deliberately excluded: it already received
+                // the full roster via Welcome, and broadcasting to it here would
+                // race against its accept_loop binding — causing a connect hang
+                // that blocks prune_dead and leads to the node being evicted.
                 let ring_entries = self.ring.read().await.to_entries();
-                self.pool.broadcast(&Message::MemberJoined {
+                self.pool.broadcast_except(&node_id, &Message::MemberJoined {
                     node:  new_info.clone(),
                     ring:  ring_entries.clone(),
                 }).await;
@@ -644,7 +648,9 @@ impl ClusterNode {
     async fn heartbeat_loop(&self) {
         let interval = Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
         loop {
-            tokio::time::sleep(interval).await;
+            // Broadcast first, then sleep.  Sending immediately on startup
+            // ensures the coordinator's last_seen is refreshed before the
+            // first prune_dead window (HEARTBEAT_TIMEOUT_SECS) can fire.
             let msg = Message::Heartbeat {
                 node_id: self.local_id.clone(),
                 ts:      unix_now(),
@@ -664,6 +670,8 @@ impl ClusterNode {
                     }).await;
                 }
             }
+
+            tokio::time::sleep(interval).await;
         }
     }
 

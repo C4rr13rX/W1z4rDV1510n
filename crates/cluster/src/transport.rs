@@ -6,12 +6,17 @@
 use crate::protocol::{self, Message, NodeId};
 use anyhow::Context;
 use dashmap::DashMap;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite, BufReader, BufWriter},
     net::{TcpListener, TcpStream},
     sync::Mutex,
 };
+
+/// Timeout for establishing a new peer connection.
+/// Prevents the coordinator's broadcast from hanging when a joining node's
+/// port isn't bound yet, which would otherwise block prune_dead from running.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A pooled connection to a peer.
 struct Conn {
@@ -22,7 +27,9 @@ struct Conn {
 
 impl Conn {
     async fn connect(addr: SocketAddr) -> anyhow::Result<Arc<Self>> {
-        let stream = TcpStream::connect(addr).await
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+            .await
+            .with_context(|| format!("connect to {addr}: timed out"))?
             .with_context(|| format!("connect to {addr}"))?;
         stream.set_nodelay(true)?;
         let (r, w) = stream.into_split();
@@ -98,6 +105,22 @@ impl ConnectionPool {
     /// Broadcast to all registered peers (best-effort; errors logged, not returned).
     pub async fn broadcast(&self, msg: &Message) {
         let ids: Vec<NodeId> = self.addrs.iter().map(|e| e.key().clone()).collect();
+        for id in ids {
+            if let Err(e) = self.send(&id, msg).await {
+                tracing::warn!("broadcast to {} failed: {e}", id);
+            }
+        }
+    }
+
+    /// Broadcast to all registered peers except one (best-effort; errors logged).
+    /// Used when the coordinator notifies existing members of a new join — the
+    /// joining node already received full state via Welcome and must not receive
+    /// a MemberJoined broadcast before its accept_loop is bound.
+    pub async fn broadcast_except(&self, exclude: &NodeId, msg: &Message) {
+        let ids: Vec<NodeId> = self.addrs.iter()
+            .filter(|e| e.key() != exclude)
+            .map(|e| e.key().clone())
+            .collect();
         for id in ids {
             if let Err(e) = self.send(&id, msg).await {
                 tracing::warn!("broadcast to {} failed: {e}", id);
