@@ -67,6 +67,17 @@ impl ConnectionPool {
         self.addrs.remove(id);
     }
 
+    /// Look up the registered address for a peer without connecting.
+    pub fn addr_of(&self, id: &NodeId) -> Option<SocketAddr> {
+        self.addrs.get(id).map(|e| *e)
+    }
+
+    /// Disconnect all peers and clear the pool (used on graceful leave).
+    pub fn clear(&self) {
+        self.conns.clear();
+        self.addrs.clear();
+    }
+
     /// Send a message to a peer, reconnecting if needed.
     pub async fn send(&self, id: &NodeId, msg: &Message) -> anyhow::Result<()> {
         let conn = self.get_or_connect(id).await?;

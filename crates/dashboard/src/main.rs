@@ -324,17 +324,22 @@ fn spawn_poller(state: Arc<Mutex<NodeState>>) {
 
 // ── Cluster controls (mutable, not polled) ────────────────────────────────────
 
-#[derive(Default)]
+/// Which dangerous action the user has clicked once (awaiting confirmation).
+#[derive(PartialEq, Clone, Copy)]
+enum PendingAction { None, Leave, Resign, Shutdown }
+
 struct ClusterControls {
-    coord_input: String,
-    otp_input:   String,
+    coord_input:    String,
+    otp_input:      String,
+    pending_action: PendingAction,
 }
 
 impl ClusterControls {
     fn new() -> Self {
         Self {
-            coord_input: "192.168.1.84:51611".to_string(),
-            otp_input:   String::new(),
+            coord_input:    "192.168.1.84:51611".to_string(),
+            otp_input:      String::new(),
+            pending_action: PendingAction::None,
         }
     }
 }
@@ -754,6 +759,105 @@ fn tab_cluster(
                     ui.label(RichText::new(format!("{} cores", peer.cores)).small());
                     ui.label(RichText::new(&peer.os).small());
                     ui.end_row();
+                }
+            });
+        });
+
+        // ── Danger zone ───────────────────────────────────────────────────────
+        ui.add_space(12.0);
+        card(ui, p, |ui| {
+            ui.label(RichText::new("Node Actions").color(p.warning).strong());
+            ui.add_space(6.0);
+            ui.label(RichText::new(if is_coordinator {
+                "Resign transfers coordinator role to another node via election before leaving. \
+                 Leave removes this node from the cluster — ring slots are redistributed automatically."
+            } else {
+                "Leave removes this node from the cluster. \
+                 The coordinator redistributes your ring slots to the remaining nodes automatically."
+            }).small().color(p.text_dim));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                // ── Resign (coordinator only) ─────────────────────────────────
+                if is_coordinator {
+                    let resign_pending = ctrl.pending_action == PendingAction::Resign;
+                    if resign_pending {
+                        if ui.button(RichText::new("Confirm Resign & Leave").color(p.error).strong()).clicked() {
+                            let url  = format!("{node_url}/cluster/resign");
+                            let st2  = state_arc.clone();
+                            ctrl.pending_action = PendingAction::None;
+                            std::thread::spawn(move || {
+                                let client = reqwest::blocking::Client::builder()
+                                    .timeout(Duration::from_secs(20)).build().unwrap();
+                                match client.post(&url).send()
+                                    .and_then(|r| r.json::<serde_json::Value>())
+                                {
+                                    Ok(v)  => st2.lock().unwrap().push_log(
+                                        format!("[cluster] {}", v["message"].as_str().unwrap_or("resigned"))),
+                                    Err(e) => st2.lock().unwrap().push_log(format!("[cluster] resign failed: {e}")),
+                                }
+                            });
+                        }
+                        if ui.button("Cancel").clicked() { ctrl.pending_action = PendingAction::None; }
+                    } else {
+                        if ui.button(RichText::new("Resign & Transfer").color(p.warning)).clicked() {
+                            ctrl.pending_action = PendingAction::Resign;
+                        }
+                        ui.add_space(4.0);
+                    }
+                }
+
+                // ── Leave ─────────────────────────────────────────────────────
+                if !is_coordinator {
+                    let leave_pending = ctrl.pending_action == PendingAction::Leave;
+                    if leave_pending {
+                        if ui.button(RichText::new("Confirm Leave").color(p.error).strong()).clicked() {
+                            let url  = format!("{node_url}/cluster/leave");
+                            let st2  = state_arc.clone();
+                            ctrl.pending_action = PendingAction::None;
+                            std::thread::spawn(move || {
+                                let client = reqwest::blocking::Client::builder()
+                                    .timeout(Duration::from_secs(10)).build().unwrap();
+                                match client.post(&url).send()
+                                    .and_then(|r| r.json::<serde_json::Value>())
+                                {
+                                    Ok(v)  => st2.lock().unwrap().push_log(
+                                        format!("[cluster] {}", v["message"].as_str().unwrap_or("left"))),
+                                    Err(e) => st2.lock().unwrap().push_log(format!("[cluster] leave failed: {e}")),
+                                }
+                            });
+                        }
+                        if ui.button("Cancel").clicked() { ctrl.pending_action = PendingAction::None; }
+                    } else {
+                        if ui.button(RichText::new("Leave Cluster").color(p.warning)).clicked() {
+                            ctrl.pending_action = PendingAction::Leave;
+                        }
+                        ui.add_space(4.0);
+                    }
+                }
+
+                // ── Shut down node ────────────────────────────────────────────
+                let shutdown_pending = ctrl.pending_action == PendingAction::Shutdown;
+                if shutdown_pending {
+                    if ui.button(RichText::new("Confirm Shut Down").color(p.error).strong()).clicked() {
+                        let url  = format!("{node_url}/node/shutdown");
+                        let st2  = state_arc.clone();
+                        ctrl.pending_action = PendingAction::None;
+                        std::thread::spawn(move || {
+                            let client = reqwest::blocking::Client::builder()
+                                .timeout(Duration::from_secs(10)).build().unwrap();
+                            match client.post(&url).send()
+                                .and_then(|r| r.json::<serde_json::Value>())
+                            {
+                                Ok(_)  => st2.lock().unwrap().push_log("[node] shutting down\u{2026}".to_string()),
+                                Err(e) => st2.lock().unwrap().push_log(format!("[node] shutdown failed: {e}")),
+                            }
+                        });
+                    }
+                    if ui.button("Cancel").clicked() { ctrl.pending_action = PendingAction::None; }
+                } else {
+                    if ui.button(RichText::new("Shut Down Node").color(p.error)).clicked() {
+                        ctrl.pending_action = PendingAction::Shutdown;
+                    }
                 }
             });
         });

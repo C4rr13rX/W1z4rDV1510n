@@ -481,6 +481,29 @@ impl ClusterNode {
                 Some(Message::LabelRouteAck { request_id })
             }
 
+            // ── Graceful departure ────────────────────────────────────────────
+            Message::GracefulLeave { node_id } => {
+                // Only the coordinator processes leave requests.
+                if self.is_coordinator().await {
+                    tracing::info!("graceful leave from {node_id}");
+                    self.ring.write().await.remove_node(&node_id);
+                    self.membership.write().await.remove(&node_id);
+                    self.pool.remove(&node_id);
+                    let ring_entries = self.ring.read().await.to_entries();
+                    self.pool.broadcast(&Message::MemberLeft {
+                        node_id,
+                        ring: ring_entries,
+                    }).await;
+                }
+                Some(Message::LeaveAck)
+            }
+            Message::ResignCoordinator { node_id } => {
+                // Another node is triggering an election because the coordinator is resigning.
+                tracing::info!("coordinator {node_id} is resigning — running election");
+                self.run_election().await;
+                None
+            }
+
             // ── Status ────────────────────────────────────────────────────────
             Message::StatusRequest => {
                 let m    = self.membership.read().await;
@@ -495,6 +518,85 @@ impl ClusterNode {
 
             _ => None,
         }
+    }
+
+    // ── Graceful departure ────────────────────────────────────────────────────
+
+    /// Leave the cluster gracefully as a worker.
+    /// Notifies the coordinator, which redistributes this node's ring slots
+    /// to the remaining nodes via consistent hashing and broadcasts MemberLeft.
+    pub async fn leave(&self) -> anyhow::Result<()> {
+        let coord_addr = {
+            let m = self.membership.read().await;
+            let coord_id = m.coordinator_id().cloned();
+            drop(m);
+            match coord_id {
+                Some(id) if id != self.local_id => self.pool.addr_of(&id),
+                _ => None,
+            }
+        };
+
+        if let Some(addr) = coord_addr {
+            // Tell coordinator we're leaving.
+            match TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true).ok();
+                    let (r, w) = stream.into_split();
+                    let mut reader = BufReader::new(r);
+                    let mut writer = BufWriter::new(w);
+                    protocol::send_msg(&mut writer, &Message::GracefulLeave {
+                        node_id: self.local_id.clone(),
+                    }).await?;
+                    // Wait for ack (or timeout).
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        protocol::recv_msg(&mut reader),
+                    ).await;
+                }
+                Err(e) => tracing::warn!("could not reach coordinator to send leave: {e}"),
+            }
+        } else {
+            // We ARE the coordinator (single node or already standalone) —
+            // nothing to notify, just clean up locally.
+            tracing::info!("sole coordinator leaving — cluster dissolved");
+        }
+
+        // Clear local state so the node goes back to standalone.
+        *self.membership.write().await = {
+            let caps = protocol::local_capabilities();
+            let info = NodeInfo {
+                id:             self.local_id.clone(),
+                addr:           self.config.effective_addr().to_string(),
+                capabilities:   caps,
+                joined_at:      unix_now(),
+                is_coordinator: false,
+            };
+            crate::membership::Membership::new(self.local_id.clone(), info)
+        };
+        *self.ring.write().await = crate::ring::HashRing::new();
+        self.pool.clear();
+        // Remove persisted state so the node doesn't try to rejoin on restart.
+        let _ = std::fs::remove_file(state_path());
+        tracing::info!("left cluster — now standalone");
+        Ok(())
+    }
+
+    /// Resign as coordinator: trigger a new election first so another node
+    /// takes over cleanly, then leave the cluster.
+    /// Ring slots owned by this node are redistributed to remaining peers.
+    pub async fn resign(&self) -> anyhow::Result<()> {
+        if !self.is_coordinator().await {
+            anyhow::bail!("only the coordinator can resign");
+        }
+        tracing::info!("coordinator resigning — triggering election");
+        // Broadcast resign so peers start electing immediately.
+        self.pool.broadcast(&Message::ResignCoordinator {
+            node_id: self.local_id.clone(),
+        }).await;
+        // Give peers time to elect a new coordinator.
+        tokio::time::sleep(Duration::from_secs(ELECTION_WAIT_SECS + 1)).await;
+        // Now leave as a regular worker.
+        self.leave().await
     }
 
     // ── Heartbeat loop ────────────────────────────────────────────────────────

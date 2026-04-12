@@ -806,10 +806,16 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // POST /cluster/init    — start a new cluster on this machine
         // POST /cluster/join    — join an existing cluster with coordinator + OTP
         // POST /cluster/otp     — generate a new OTP (coordinator only)
+        // POST /cluster/leave   — leave cluster gracefully (worker: returns ring to coordinator)
+        // POST /cluster/resign  — coordinator steps down, triggers election, then leaves
+        // POST /node/shutdown   — shut down the node process cleanly
         .route("/cluster/status", get(cluster_status))
         .route("/cluster/init",   post(cluster_init))
         .route("/cluster/join",   post(cluster_join))
         .route("/cluster/otp",    post(cluster_otp))
+        .route("/cluster/leave",  post(cluster_leave))
+        .route("/cluster/resign", post(cluster_resign))
+        .route("/node/shutdown",  post(node_shutdown))
         // ── Multimodal media ingestion ─────────────────────────────────────
         // POST /media/train  — encode and train one modality or a combined page
         //   Body: { "modality": "image"|"audio"|"text"|"page",
@@ -3643,6 +3649,62 @@ async fn cluster_otp(
             Err(e)  => (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": e.to_string() }))),
         }
     }
+}
+
+/// POST /cluster/leave
+/// Leave the cluster gracefully.  This node's ring slots are redistributed
+/// to the remaining nodes by the coordinator via consistent hashing.
+/// After this call the node is standalone again.
+async fn cluster_leave(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let maybe_node = state.cluster.lock().await.take();
+    match maybe_node {
+        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "not in a cluster" }))),
+        Some(node) => match node.leave().await {
+            Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "message": "left cluster — now standalone" }))),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+        }
+    }
+}
+
+/// POST /cluster/resign
+/// Coordinator only.  Triggers an election so another node takes over,
+/// then leaves the cluster.  Ring slots are redistributed automatically.
+async fn cluster_resign(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let maybe_node = state.cluster.lock().await.take();
+    match maybe_node {
+        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "not in a cluster" }))),
+        Some(node) => match node.resign().await {
+            Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "message": "resigned — election triggered, now standalone" }))),
+            Err(e) => (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": e.to_string() }))),
+        }
+    }
+}
+
+/// POST /node/shutdown
+/// Shut down this node process cleanly.  If in a cluster, leaves/resigns first.
+async fn node_shutdown(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Best-effort cluster leave before exiting.
+    let maybe_node = state.cluster.lock().await.take();
+    if let Some(node) = maybe_node {
+        if node.is_coordinator().await {
+            node.resign().await.ok();
+        } else {
+            node.leave().await.ok();
+        }
+    }
+    tracing::info!("node shutdown requested via API");
+    // Spawn a delayed exit so the HTTP response can be sent first.
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::process::exit(0);
+    });
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "message": "shutting down" })))
 }
 
 // ── Multimodal media ingestion ─────────────────────────────────────────────────

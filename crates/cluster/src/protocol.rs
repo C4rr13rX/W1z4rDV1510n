@@ -129,6 +129,17 @@ pub enum Message {
     },
     ShardWriteAck { request_id: Uuid },
 
+    // ── Graceful departure ────────────────────────────────────────────────────
+    /// A node tells the coordinator it is leaving cleanly.
+    /// The coordinator removes it from the ring and broadcasts MemberLeft.
+    /// Ring slots are redistributed to remaining nodes by consistent hashing.
+    GracefulLeave { node_id: NodeId },
+    /// Coordinator → departing node: departure acknowledged, ring updated.
+    LeaveAck,
+    /// Coordinator is stepping down — triggers election so another node takes
+    /// over before the coordinator disconnects.
+    ResignCoordinator { node_id: NodeId },
+
     // ── Cluster management (human-facing) ─────────────────────────────────────
     /// Ask the coordinator for the current status.
     StatusRequest,
