@@ -4,6 +4,7 @@
   "node_role": "WORKER",
   "network": {
     "listen_addr": "0.0.0.0:8090",
+    "advertise_addr": "192.168.1.84:8090",
     "bootstrap_peers": [],
     "max_peers": 1,
     "gossip_protocol": "w1z4rdv1510n-gossip",
