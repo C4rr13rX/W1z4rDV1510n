@@ -59,8 +59,8 @@ PROGRESS_FILE = ROOT / "data" / "k12_progress.json"
 
 # -- PDF rendering --------------------------------------------------------------
 
-DPI = 120          # lower than ingest_openstax for faster processing
-JPEG_QUALITY = 65  # smaller payloads, still recognisable
+DPI = 96           # low but sufficient for visual zone detection; keeps payloads small
+JPEG_QUALITY = 55  # enough for hue/edge/zone features; target <200 KB per page
 
 def render_page_jpeg(page: "fitz.Page") -> bytes:
     mat = fitz.Matrix(DPI / 72, DPI / 72)
@@ -624,7 +624,7 @@ def run_stages(node_url: str, stages: list[int], max_books: int | None,
 
 def main():
     parser = argparse.ArgumentParser(description="K-12 staged training pipeline")
-    parser.add_argument("--node", default="http://localhost:8088",
+    parser.add_argument("--node", default="http://127.0.0.1:8090",
                         help="Node API base URL (default: http://localhost:8088)")
     parser.add_argument("--stages", default="0,1,2",
                         help="Comma-separated stages to run: 0,1,2 (default: all)")

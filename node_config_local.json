@@ -2,6 +2,13 @@
   "node_id": "node-local",
   "node_mode": "SENSOR",
   "node_role": "WORKER",
+  "api": {
+    "require_api_key": false,
+    "rate_limit_window_secs": 60,
+    "rate_limit_max_requests": 600,
+    "rate_limit_bridge_max_requests": 60,
+    "rate_limit_balance_max_requests": 60
+  },
   "network": {
     "listen_addr": "0.0.0.0:8090",
     "advertise_addr": "192.168.1.84:8090",

@@ -730,12 +730,14 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     } else {
         0
     };
+    // Always allow at least 20 MiB so /media/train can accept high-DPI page images.
+    // Bridge proof bytes and data payload limits can bump this higher if needed.
     let max_body = config
         .blockchain
         .bridge
         .max_proof_bytes
         .max(data_limit)
-        .max(1024);
+        .max(20 * 1024 * 1024);
     let identity_enabled = state.identity_enabled;
     let identity_runtime = Arc::clone(&state.identity);
     let identity_mesh = state.data_mesh.clone();

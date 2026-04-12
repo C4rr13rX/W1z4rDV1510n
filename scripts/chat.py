@@ -15,8 +15,8 @@ Capabilities:
   - Episodic feedback loop: each turn becomes training material
 
 Usage:
-  python chat.py [--node http://localhost:8088]
-  python chat.py --node http://localhost:8090
+  python chat.py [--node http://127.0.0.1:8090]
+  python chat.py --node http://127.0.0.1:8088
 
 Commands (in chat):
   /quit   -- exit
@@ -465,7 +465,7 @@ def chat_loop(node_url: str) -> None:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="W1z4rD Conversational Interface")
-    parser.add_argument("--node", default="http://localhost:8088",
+    parser.add_argument("--node", default="http://127.0.0.1:8090",
                         help="Node API base URL (default: http://localhost:8088)")
     args = parser.parse_args()
     chat_loop(args.node)
