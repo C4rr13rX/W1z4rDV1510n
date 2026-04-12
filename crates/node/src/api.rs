@@ -3890,17 +3890,19 @@ async fn media_train(
     }
 
     let label_count = labels.len();
-    state.neuro.train_weighted(&labels, req.lr_scale, false);
+    // Run the Hebbian update on a blocking thread so we don't stall the async
+    // executor (and therefore heartbeat / health / cluster tasks) during heavy
+    // training sessions with large pools.  The pool mutex is held only inside
+    // spawn_blocking, so concurrent requests still queue correctly.
+    let neuro = state.neuro.clone();
+    let lr = req.lr_scale;
+    tokio::task::spawn_blocking(move || {
+        neuro.train_weighted(&labels, lr, false);
+    }).await.ok();
 
-    // Background checkpoint: fire-and-forget, non-blocking.
-    if state.neuro.pool_state_path().is_some() {
-        let neuro = state.neuro.clone();
-        tokio::spawn(async move {
-            if let Err(e) = neuro.save_pool() {
-                tracing::warn!("Auto-save pool failed: {e}");
-            }
-        });
-    }
+    // NOTE: auto-save removed — saving a multi-GB pool on every training call
+    // saturates the disk and blocks Tokio threads.  Use POST /neuro/checkpoint
+    // to persist the pool explicitly (the training script does this periodically).
 
     (StatusCode::OK, Json(serde_json::json!({
         "trained": true,
@@ -3955,11 +3957,14 @@ async fn media_train_sequence(
     }
 
     let tau = req.temporal_tau.max(0.01); // guard against division by zero
+
+    // Encode all frames (CPU-bound but not pool-locked) on the async executor.
     let mut frame_labels: Vec<Vec<String>> = Vec::with_capacity(req.frames.len());
+    let mut frame_lrs: Vec<f32> = Vec::with_capacity(req.frames.len());
+    let mut frame_ts: Vec<f32> = Vec::with_capacity(req.frames.len());
     let mut total_labels = 0usize;
     let mut errors: Vec<String> = Vec::new();
 
-    // Pass 1: encode every frame and train it independently.
     for (i, frame) in req.frames.iter().enumerate() {
         match encode_media_labels(
             &frame.modality,
@@ -3971,7 +3976,6 @@ async fn media_train_sequence(
         ) {
             Ok(labels) if !labels.is_empty() => {
                 total_labels += labels.len();
-                state.neuro.train_weighted(&labels, frame.lr_scale, false);
                 frame_labels.push(labels);
             }
             Ok(_) => {
@@ -3983,41 +3987,38 @@ async fn media_train_sequence(
                 frame_labels.push(Vec::new());
             }
         }
+        frame_lrs.push(frame.lr_scale);
+        frame_ts.push(frame.t_secs);
     }
 
-    // Pass 2: bridge adjacent frames with temporally-decayed co-activation.
-    for i in 1..req.frames.len() {
-        let prev_labels = &frame_labels[i - 1];
-        let curr_labels = &frame_labels[i];
-        if prev_labels.is_empty() || curr_labels.is_empty() {
-            continue;
-        }
-        let dt = (req.frames[i].t_secs - req.frames[i - 1].t_secs).abs();
-        let base_lr = (req.frames[i - 1].lr_scale + req.frames[i].lr_scale) * 0.5;
-        let bridge_lr = base_lr * (-dt / tau).exp();
-        if bridge_lr < 1e-4 {
-            continue; // negligible — skip
-        }
-        // Union of prev + curr labels for the bridge co-activation.
-        let mut bridge: Vec<String> = prev_labels
-            .iter().chain(curr_labels.iter()).cloned().collect();
-        bridge.sort_unstable();
-        bridge.dedup();
-        state.neuro.train_weighted(&bridge, bridge_lr, false);
-    }
-
-    // Background checkpoint.
-    if state.neuro.pool_state_path().is_some() {
-        let neuro = state.neuro.clone();
-        tokio::spawn(async move {
-            if let Err(e) = neuro.save_pool() {
-                tracing::warn!("Auto-save pool failed: {e}");
+    // All Hebbian updates on a blocking thread — keeps async executor free.
+    let neuro = state.neuro.clone();
+    let trained_frames = frame_labels.iter().filter(|l| !l.is_empty()).count();
+    tokio::task::spawn_blocking(move || {
+        // Pass 1: each frame independently.
+        for (labels, lr) in frame_labels.iter().zip(frame_lrs.iter()) {
+            if !labels.is_empty() {
+                neuro.train_weighted(labels, *lr, false);
             }
-        });
-    }
+        }
+        // Pass 2: bridge adjacent frames.
+        for i in 1..frame_labels.len() {
+            let prev = &frame_labels[i - 1];
+            let curr = &frame_labels[i];
+            if prev.is_empty() || curr.is_empty() { continue; }
+            let dt = (frame_ts[i] - frame_ts[i - 1]).abs();
+            let base_lr = (frame_lrs[i - 1] + frame_lrs[i]) * 0.5;
+            let bridge_lr = base_lr * (-dt / tau).exp();
+            if bridge_lr < 1e-4 { continue; }
+            let mut bridge: Vec<String> = prev.iter().chain(curr.iter()).cloned().collect();
+            bridge.sort_unstable();
+            bridge.dedup();
+            neuro.train_weighted(&bridge, bridge_lr, false);
+        }
+    }).await.ok();
 
     let mut resp = serde_json::json!({
-        "trained_frames": frame_labels.iter().filter(|l| !l.is_empty()).count(),
+        "trained_frames": trained_frames,
         "total_frames": req.frames.len(),
         "total_labels": total_labels,
         "temporal_tau": tau,

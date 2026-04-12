@@ -18,9 +18,11 @@ use std::{
 };
 
 /// A node is considered dead after this many seconds without a heartbeat.
-pub const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
+/// Raised to 90s to tolerate coordinators under heavy training/compute load.
+pub const HEARTBEAT_TIMEOUT_SECS: u64 = 90;
 /// Coordinator is considered dead after this many seconds without a heartbeat.
-pub const COORD_TIMEOUT_SECS: u64 = 20;
+/// Raised to 120s for the same reason.
+pub const COORD_TIMEOUT_SECS: u64 = 120;
 /// Interval between outgoing heartbeat pulses.
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 /// Time to wait for overriding proposals before declaring victory.
