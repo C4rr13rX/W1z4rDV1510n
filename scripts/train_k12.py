@@ -562,12 +562,18 @@ def run_stages(node_url: str, stages: list[int], max_books: int | None,
     prog = load_progress() if resume else {"done_books": [], "stages_complete": []}
 
     with httpx.Client() as client:
-        # Health check
-        try:
-            health = client.get(f"{node_url}/health", timeout=8).json()
-            print(f"Node: {health.get('node_id', '?')} — {health.get('status', '?')}")
-        except Exception as e:
-            sys.exit(f"Node unreachable at {node_url}: {e}")
+        # Health check — retry up to 12 times (60s total) to handle node under load
+        for attempt in range(12):
+            try:
+                health = client.get(f"{node_url}/health", timeout=30).json()
+                print(f"Node: {health.get('node_id', '?')} — {health.get('status', '?')}")
+                break
+            except Exception as e:
+                if attempt < 11:
+                    print(f"  Waiting for node ({attempt+1}/12): {e}", flush=True)
+                    time.sleep(5)
+                else:
+                    sys.exit(f"Node unreachable at {node_url} after 60s: {e}")
 
         if 0 in stages:
             if "stage0" not in prog["stages_complete"]:
