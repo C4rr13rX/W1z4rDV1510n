@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const RELATION_BINS: i32 = 4;
@@ -47,6 +48,12 @@ pub struct NeuroConfig {
     pub minicolumn_attr_limit: usize,
     /// Minimum number of labels required to form a minicolumn signature.
     pub minicolumn_min_signature: usize,
+
+    // ── Hot/cold paging ────────────────────────────────────────────────────────
+    /// Evict neurons idle for this many steps.  None = use default (2000 steps).
+    pub eviction_idle_steps: Option<u64>,
+    /// Hard cap on hot-tier neuron count.  None = use default (80_000).
+    pub hot_tier_max: Option<usize>,
 }
 
 impl Default for NeuroConfig {
@@ -71,6 +78,8 @@ impl Default for NeuroConfig {
             minicolumn_collapse_threshold: 0.55,
             minicolumn_attr_limit: 6,
             minicolumn_min_signature: 3,
+            eviction_idle_steps: None,
+            hot_tier_max: None,
         }
     }
 }
@@ -189,6 +198,9 @@ pub struct Neuron {
     /// Rolling provenance: which metadata contexts shaped this neuron.
     /// Bounded to MAX_INFLUENCE_HISTORY; weakest evicted when full.
     pub influence_history: Vec<InfluenceRecord>,
+    /// The pool step at which this neuron was last activated (for eviction tracking).
+    #[serde(default)]
+    pub last_active_step: u64,
 }
 
 impl Neuron {
@@ -207,6 +219,7 @@ impl Neuron {
             fatigue: 0.0,
             trace: 0.0,
             influence_history: Vec::new(),
+            last_active_step: 0,
         }
     }
 
@@ -298,10 +311,51 @@ mod cooccur_serde {
     }
 }
 
-/// Simple object-pool style neuron store with on-the-fly composite creation from co-occurring symbols.
+/// One slot in the neuron array.  Hot = in RAM, Cold = evicted to disk, Free = recycled ID.
+#[derive(Debug, Clone)]
+enum NeuronSlot {
+    Hot(Neuron),
+    /// Neuron evicted to disk.  `last_active_step` is the step it was frozen at,
+    /// used to apply lazy geometric decay when the neuron is warmed back up.
+    Cold { last_active_step: u64 },
+    /// Recycled/unused slot — ID available via the free list.
+    Free,
+}
+
+impl NeuronSlot {
+    fn as_hot(&self) -> Option<&Neuron> {
+        if let NeuronSlot::Hot(n) = self { Some(n) } else { None }
+    }
+    fn as_hot_mut(&mut self) -> Option<&mut Neuron> {
+        if let NeuronSlot::Hot(n) = self { Some(n) } else { None }
+    }
+}
+
+// ── Custom serde for NeuronPool: serialize only hot neurons so checkpoints stay small.
+// Wire format is identical to the old monolithic format ("neurons": [...Neuron...]),
+// which means old checkpoint files load transparently.
+mod pool_serde {
+    use super::{Neuron, NeuronSlot};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(slots: &Vec<NeuronSlot>, s: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        let hot: Vec<&Neuron> = slots.iter().filter_map(|sl| sl.as_hot()).collect();
+        hot.serialize(s)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Vec<NeuronSlot>, D::Error>
+    where D: Deserializer<'de> {
+        let neurons: Vec<Neuron> = Vec::deserialize(d)?;
+        Ok(neurons.into_iter().map(NeuronSlot::Hot).collect())
+    }
+}
+
+/// Simple object-pool style neuron store with hot/cold paging.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NeuronPool {
-    neurons: Vec<Neuron>,
+    #[serde(with = "pool_serde")]
+    neurons: Vec<NeuronSlot>,
     free: Vec<u32>,
     label_to_id: HashMap<String, u32>,
     /// EMA co-occurrence rate per label pair.  Incremented with decay:
@@ -312,9 +366,27 @@ pub struct NeuronPool {
     step: u64,
     /// Maximum cooccur entries before pruning low-rate entries.  `usize::MAX` = unlimited.
     cooccur_cap: usize,
+
+    // ── Hot/cold paging ────────────────────────────────────────────────────────
+    /// Base directory for cold neuron files.  None = eviction disabled (in-memory only).
+    #[serde(skip)]
+    cold_dir: Option<PathBuf>,
+    /// Evict neurons idle for this many steps.  Default 2000 (~3 min at 10 Hz training).
+    #[serde(skip)]
+    eviction_idle_steps: u64,
+    /// Hard cap on hot-tier size.  When exceeded, LRU eviction runs immediately.
+    #[serde(skip)]
+    hot_tier_max: usize,
+    /// Cached count of Hot slots (avoids iterating to count).
+    #[serde(skip)]
+    hot_count: usize,
 }
 
 const COOCCUR_EMA_ALPHA: f32 = 0.97;
+/// Default: evict neurons idle for 2000 steps (~3 minutes at normal training cadence).
+const DEFAULT_EVICTION_IDLE_STEPS: u64 = 2000;
+/// Default hot-tier cap: 80K neurons in RAM regardless of idle threshold.
+const DEFAULT_HOT_TIER_MAX: usize = 80_000;
 
 impl NeuronPool {
     pub fn new(config: NeuroConfig) -> Self {
@@ -326,29 +398,238 @@ impl NeuronPool {
             config,
             step: 0,
             cooccur_cap: usize::MAX,
+            cold_dir: None,
+            eviction_idle_steps: DEFAULT_EVICTION_IDLE_STEPS,
+            hot_tier_max: DEFAULT_HOT_TIER_MAX,
+            hot_count: 0,
         }
+    }
+
+    /// Configure hot/cold paging.  Called by NeuroRuntime::new after construction.
+    pub fn set_cold_dir(&mut self, dir: PathBuf, idle_steps: u64, hot_max: usize) {
+        self.cold_dir = Some(dir);
+        self.eviction_idle_steps = idle_steps;
+        self.hot_tier_max = hot_max;
+        // Recount hot slots (important after loading a checkpoint that was all-hot).
+        self.hot_count = self.neurons.iter().filter(|s| matches!(s, NeuronSlot::Hot(_))).count();
+    }
+
+    // ── Internal hot/cold helpers ──────────────────────────────────────────────
+
+    /// Path to a cold neuron file for the given ID.
+    fn cold_path(&self, id: u32) -> Option<PathBuf> {
+        let base = self.cold_dir.as_ref()?;
+        let shard = format!("shard_{:04x}", id / 1000);
+        Some(base.join(shard).join(format!("n_{:06}.json", id)))
+    }
+
+    /// Ensure neuron `id` is in the hot tier.  Reads from disk if cold,
+    /// applies lazy geometric decay, then replaces the Cold slot with Hot.
+    /// No-op if already hot. Does nothing if cold_dir is not configured.
+    fn ensure_hot(&mut self, id: u32) {
+        let slot = match self.neurons.get(id as usize) {
+            Some(NeuronSlot::Cold { .. }) => true,
+            _ => return,
+        };
+        if !slot { return; }
+
+        let frozen_step = if let Some(NeuronSlot::Cold { last_active_step }) = self.neurons.get(id as usize) {
+            *last_active_step
+        } else { return; };
+
+        let path = match self.cold_path(id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let mut neuron = if path.exists() {
+            match std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Neuron>(&s).ok()) {
+                Some(n) => n,
+                None => {
+                    // File corrupt or missing — recreate a blank neuron at this ID
+                    let mut n = Neuron::new(id, None, self.step);
+                    n.last_active_step = frozen_step;
+                    n
+                }
+            }
+        } else {
+            // File was never written (should not happen, but be defensive)
+            let mut n = Neuron::new(id, None, self.step);
+            n.last_active_step = frozen_step;
+            n
+        };
+
+        // Apply lazy geometric decay for all the steps the neuron spent cold.
+        let elapsed = self.step.saturating_sub(frozen_step) as f32;
+        if elapsed > 0.0 {
+            let act_factor = self.config.decay.powf(elapsed);
+            let fat_factor = self.config.fatigue_decay.powf(elapsed);
+            neuron.activation *= act_factor;
+            neuron.fatigue    *= fat_factor;
+            neuron.trace      *= act_factor;
+        }
+
+        self.neurons[id as usize] = NeuronSlot::Hot(neuron);
+        self.hot_count += 1;
+    }
+
+    /// Write a neuron to its cold file and replace the slot with Cold.
+    fn evict_to_cold(&mut self, id: u32) {
+        let neuron = match self.neurons.get(id as usize) {
+            Some(NeuronSlot::Hot(n)) => n.clone(),
+            _ => return,
+        };
+        if let Some(path) = self.cold_path(id) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string(&neuron) {
+                let tmp = path.with_extension("tmp");
+                if std::fs::write(&tmp, &json).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            }
+        }
+        let last_active_step = neuron.last_active_step;
+        self.neurons[id as usize] = NeuronSlot::Cold { last_active_step };
+        self.hot_count -= 1;
+    }
+
+    /// Eviction pass: called periodically from `step()`.
+    /// Evicts neurons that have been idle longer than `eviction_idle_steps`.
+    fn run_eviction(&mut self) {
+        if self.cold_dir.is_none() { return; }
+        let idle_threshold = self.eviction_idle_steps;
+        let current_step = self.step;
+        let hot_max = self.hot_tier_max;
+
+        // Collect IDs to evict: idle + activation below threshold.
+        // We collect first to avoid borrow issues during mutation.
+        let to_evict: Vec<u32> = self.neurons.iter().enumerate().filter_map(|(idx, slot)| {
+            if let NeuronSlot::Hot(n) = slot {
+                let idle = current_step.saturating_sub(n.last_active_step);
+                // Evict if idle long enough AND activation has decayed to near zero.
+                if idle >= idle_threshold && n.activation < 0.005 && n.trace < 0.005 {
+                    return Some(idx as u32);
+                }
+            }
+            None
+        }).collect();
+
+        for id in to_evict {
+            self.evict_to_cold(id);
+        }
+
+        // Hard cap: if still over hot_tier_max, evict by LRU (oldest last_active_step first).
+        if self.hot_count > hot_max {
+            let mut hot_ids: Vec<(u64, u32)> = self.neurons.iter().enumerate().filter_map(|(idx, slot)| {
+                if let NeuronSlot::Hot(n) = slot {
+                    Some((n.last_active_step, idx as u32))
+                } else { None }
+            }).collect();
+            hot_ids.sort_unstable_by_key(|(ts, _)| *ts); // oldest first
+            let evict_count = self.hot_count.saturating_sub(hot_max);
+            for (_, id) in hot_ids.into_iter().take(evict_count) {
+                self.evict_to_cold(id);
+            }
+        }
+    }
+
+    /// Scan the cold directory and mark all evicted neurons as Cold slots in the slot array.
+    /// Called on startup when a checkpoint is loaded alongside an existing cold directory.
+    pub fn restore_cold_index(&mut self, cold_dir: &PathBuf) {
+        let meta_path = cold_dir.join("meta.json");
+        if let Ok(json) = std::fs::read_to_string(&meta_path) {
+            if let Ok(index) = serde_json::from_str::<HashMap<u32, u64>>(&json) {
+                for (id, last_active_step) in index {
+                    let idx = id as usize;
+                    // Grow slot array if needed (cold neurons beyond current hot count).
+                    while self.neurons.len() <= idx {
+                        self.neurons.push(NeuronSlot::Free);
+                    }
+                    // Only mark as Cold if not already Hot (hot checkpoint wins).
+                    if !matches!(self.neurons.get(idx), Some(NeuronSlot::Hot(_))) {
+                        self.neurons[idx] = NeuronSlot::Cold { last_active_step };
+                        // Restore label_to_id mapping from cold file if not present.
+                        if let Some(label) = self.read_cold_label(id) {
+                            self.label_to_id.entry(label).or_insert(id);
+                        }
+                    }
+                }
+            }
+        }
+        // Recount hot slots after restoration.
+        self.hot_count = self.neurons.iter().filter(|s| matches!(s, NeuronSlot::Hot(_))).count();
+    }
+
+    /// Persist cold-tier index (id → last_active_step) so it can be restored on next boot.
+    fn save_cold_index(&self) {
+        let cd = match &self.cold_dir { Some(d) => d, None => return };
+        let index: HashMap<u32, u64> = self.neurons.iter().enumerate().filter_map(|(idx, slot)| {
+            if let NeuronSlot::Cold { last_active_step } = slot {
+                Some((idx as u32, *last_active_step))
+            } else { None }
+        }).collect();
+        let meta_path = cd.join("meta.json");
+        if let Ok(json) = serde_json::to_string(&index) {
+            let tmp = meta_path.with_extension("tmp");
+            let _ = std::fs::create_dir_all(cd);
+            if std::fs::write(&tmp, &json).is_ok() {
+                let _ = std::fs::rename(&tmp, &meta_path);
+            }
+        }
+    }
+
+    /// Read the label of a cold neuron without warming it up (label_for read-only path).
+    fn read_cold_label(&self, id: u32) -> Option<String> {
+        let path = self.cold_path(id)?;
+        let json = std::fs::read_to_string(&path).ok()?;
+        // Fast path: extract "label" field without full parse
+        serde_json::from_str::<serde_json::Value>(&json).ok()
+            .and_then(|v| v.get("label")?.as_str().map(|s| s.to_string()))
+    }
+
+    /// Access a hot neuron by slot index (read-only).
+    fn get_hot(&self, idx: usize) -> Option<&Neuron> {
+        self.neurons.get(idx)?.as_hot()
+    }
+
+    /// Access a hot neuron by slot index (mutable). Does NOT warm up cold neurons.
+    fn get_hot_mut(&mut self, idx: usize) -> Option<&mut Neuron> {
+        self.neurons.get_mut(idx)?.as_hot_mut()
     }
 
     pub fn step(&mut self) {
         self.step += 1;
-        for neuron in self.neurons.iter_mut() {
-            neuron.activation *= self.config.decay;
-            neuron.fatigue *= self.config.fatigue_decay;
-            neuron.trace *= self.config.decay;
+        for slot in self.neurons.iter_mut() {
+            if let NeuronSlot::Hot(neuron) = slot {
+                neuron.activation *= self.config.decay;
+                neuron.fatigue    *= self.config.fatigue_decay;
+                neuron.trace      *= self.config.decay;
+            }
+        }
+        // Eviction: every 200 steps (amortises the O(n) scan cost).
+        if self.step % 200 == 0 {
+            self.run_eviction();
         }
     }
 
     pub fn get_or_create(&mut self, label: &str) -> u32 {
-        if let Some(id) = self.label_to_id.get(label) {
-            return *id;
+        if let Some(&id) = self.label_to_id.get(label) {
+            // Warm up cold neuron on demand.
+            self.ensure_hot(id);
+            return id;
         }
         let id = if let Some(id) = self.free.pop() {
-            let neuron = &mut self.neurons[id as usize];
-            neuron.label = Some(label.to_string());
+            // Reuse a freed slot — it may have been cold; overwrite it directly.
+            let step = self.step;
+            let mut neuron = Neuron::new(id, Some(label.to_string()), step);
             neuron.symbol_id = label.strip_prefix("id::").map(|s| s.to_string());
-            neuron.activation = 0.0;
-            neuron.use_count = 0;
-            neuron.born_at = self.step;
+            if matches!(self.neurons.get(id as usize), Some(NeuronSlot::Hot(_))) {
+                self.hot_count -= 1; // was hot, being replaced
+            }
+            self.neurons[id as usize] = NeuronSlot::Hot(neuron);
+            self.hot_count += 1;
             id
         } else {
             let id = self.neurons.len() as u32;
@@ -357,7 +638,8 @@ impl NeuronPool {
             }
             let mut neuron = Neuron::new(id, Some(label.to_string()), self.step);
             neuron.symbol_id = label.strip_prefix("id::").map(|s| s.to_string());
-            self.neurons.push(neuron);
+            self.neurons.push(NeuronSlot::Hot(neuron));
+            self.hot_count += 1;
             id
         };
         self.label_to_id.insert(label.to_string(), id);
@@ -382,13 +664,16 @@ impl NeuronPool {
     ) {
         // activate neurons for symbols
         let mut ids = Vec::with_capacity(symbols.len());
+        let current_step = self.step;
+        let fatigue_increment = self.config.fatigue_increment;
         for label in symbols {
             let id = self.get_or_create(label);
-            if let Some(neuron) = self.neurons.get_mut(id as usize) {
+            if let Some(neuron) = self.get_hot_mut(id as usize) {
                 neuron.activation = (1.0 - neuron.fatigue).max(0.0);
                 neuron.use_count += 1;
                 neuron.trace += 0.1;
-                neuron.fatigue = (neuron.fatigue + self.config.fatigue_increment).min(0.6);
+                neuron.fatigue = (neuron.fatigue + fatigue_increment).min(0.6);
+                neuron.last_active_step = current_step;
             }
             ids.push(id);
         }
@@ -408,7 +693,7 @@ impl NeuronPool {
                     step,
                 };
                 for &id in &ids {
-                    if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                    if let Some(neuron) = self.get_hot_mut(id as usize) {
                         if neuron.activation > 0.05 {
                             neuron.record_influence(influence.clone());
                         }
@@ -474,12 +759,14 @@ impl NeuronPool {
             return;
         }
         let mut ids = Vec::with_capacity(symbols.len());
+        let current_step = self.step;
         for label in symbols {
             let id = self.get_or_create(label);
-            if let Some(neuron) = self.neurons.get_mut(id as usize) {
+            if let Some(neuron) = self.get_hot_mut(id as usize) {
                 neuron.activation = (1.0 - neuron.fatigue).max(0.0);
                 neuron.use_count += 1;
                 neuron.trace += 0.1 * lr_scale;
+                neuron.last_active_step = current_step;
             }
             ids.push(id);
         }
@@ -499,7 +786,7 @@ impl NeuronPool {
                     step,
                 };
                 for &id in &ids {
-                    if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                    if let Some(neuron) = self.get_hot_mut(id as usize) {
                         if neuron.activation > 0.05 {
                             neuron.record_influence(influence.clone());
                         }
@@ -517,16 +804,22 @@ impl NeuronPool {
 
     pub fn active_ids(&self, min_activation: f32) -> HashSet<u32> {
         let mut set = HashSet::new();
-        for neuron in &self.neurons {
-            if neuron.activation >= min_activation {
-                set.insert(neuron.id);
+        for slot in &self.neurons {
+            if let NeuronSlot::Hot(n) = slot {
+                if n.activation >= min_activation {
+                    set.insert(n.id);
+                }
             }
         }
         set
     }
 
     pub fn label_for(&self, id: u32) -> Option<String> {
-        self.neurons.get(id as usize).and_then(|n| n.label.clone())
+        match self.neurons.get(id as usize) {
+            Some(NeuronSlot::Hot(n)) => n.label.clone(),
+            Some(NeuronSlot::Cold { .. }) => self.read_cold_label(id),
+            _ => None,
+        }
     }
 
     /// Propagate activation forward through excitatory synapses.
@@ -547,6 +840,7 @@ impl NeuronPool {
     ) -> HashMap<String, f32> {
         // Current activation state — keyed by neuron ID to avoid label lookups in the hot path.
         // We work on a scratch copy so we never mutate the live pool state.
+        // Cold neurons have activation=0 by definition so they safely contribute nothing.
         let n = self.neurons.len();
         let mut activation: Vec<f32> = vec![0.0; n];
 
@@ -567,7 +861,8 @@ impl NeuronPool {
                 if src_act < 0.001 {
                     continue;
                 }
-                let neuron = match self.neurons.get(src_idx) {
+                // Only hot neurons have synapses accessible in RAM.
+                let neuron = match self.get_hot(src_idx) {
                     Some(n) => n,
                     None => continue,
                 };
@@ -593,11 +888,11 @@ impl NeuronPool {
             std::mem::swap(&mut activation, &mut next);
         }
 
-        // Collect results above threshold
+        // Collect results above threshold (hot neurons only — cold neurons cannot have activation)
         let mut result = HashMap::new();
         for (idx, act) in activation.iter().enumerate() {
             if *act >= min_activation {
-                if let Some(label) = self.neurons.get(idx).and_then(|n| n.label.as_ref()) {
+                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
                     result.insert(label.clone(), *act);
                 }
             }
@@ -620,7 +915,10 @@ impl NeuronPool {
     }
 
     fn hebbian_pair(&mut self, a: u32, b: u32, scale: f32, inhibitory: bool) {
-        let (Some(n_a), Some(n_b)) = (self.neurons.get(a as usize), self.neurons.get(b as usize))
+        // Warm up both neurons before accessing them (no-op if already hot).
+        self.ensure_hot(a);
+        self.ensure_hot(b);
+        let (Some(n_a), Some(n_b)) = (self.get_hot(a as usize), self.get_hot(b as usize))
         else {
             return;
         };
@@ -633,7 +931,7 @@ impl NeuronPool {
     }
 
     fn add_synapse(&mut self, from: u32, to: u32, delta: f32, inhibitory: bool) {
-        if let Some(neuron) = self.neurons.get_mut(from as usize) {
+        if let Some(neuron) = self.get_hot_mut(from as usize) {
             let list = if inhibitory {
                 &mut neuron.inhibitory
             } else {
@@ -646,7 +944,7 @@ impl NeuronPool {
             }
         }
         // add dendrite on target side (sorted by source)
-        if let Some(target) = self.neurons.get_mut(to as usize) {
+        if let Some(target) = self.get_hot_mut(to as usize) {
             match target.dendrites.binary_search_by_key(&from, |d| d.source) {
                 Ok(idx) => target.dendrites[idx].weight += delta,
                 Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: delta }),
@@ -681,10 +979,12 @@ impl NeuronPool {
 
     pub fn active_labels(&self, min_activation: f32) -> HashSet<String> {
         let mut set = HashSet::new();
-        for neuron in self.neurons.iter() {
-            if neuron.activation >= min_activation {
-                if let Some(label) = &neuron.label {
-                    set.insert(label.clone());
+        for slot in self.neurons.iter() {
+            if let NeuronSlot::Hot(n) = slot {
+                if n.activation >= min_activation {
+                    if let Some(label) = &n.label {
+                        set.insert(label.clone());
+                    }
                 }
             }
         }
@@ -1630,24 +1930,19 @@ impl NeuroState {
             let mut sorted = ids
                 .iter()
                 .filter_map(|id| {
-                    self.pool
-                        .neurons
-                        .get(*id as usize)
-                        .map(|n| (n.activation, *id))
+                    self.pool.get_hot(*id as usize).map(|n| (n.activation, *id))
                 })
                 .collect::<Vec<_>>();
             sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             let keep: HashSet<u32> = sorted.iter().take(k).map(|(_, id)| *id).collect();
+            let inhibitory_scale = self.pool.config.inhibitory_scale;
             for (_, id) in sorted.iter().skip(k) {
-                if let Some(neuron) = self.pool.neurons.get_mut(*id as usize) {
-                    neuron.activation *= self.pool.config.inhibitory_scale;
+                if let Some(neuron) = self.pool.get_hot_mut(*id as usize) {
+                    neuron.activation *= inhibitory_scale;
                 }
             }
-            // lateral inhibition between kept neurons
             for id in &keep {
-                if let Some(neuron) = self.pool.neurons.get_mut(*id as usize) {
-                    neuron.activation *= 1.0;
-                }
+                let _ = self.pool.get_hot_mut(*id as usize); // no-op, lateral inhibition placeholder
             }
         }
     }
@@ -1747,13 +2042,13 @@ impl NeuroState {
             column.collapsed = column.inhibition >= collapse_threshold;
             let active = column.stability >= activation_threshold && !column.collapsed;
             let column_activation = (column.stability * (1.0 - column.inhibition)).clamp(0.0, 1.0);
-            if let Some(neuron) = self.pool.neurons.get_mut(column.id as usize) {
+            if let Some(neuron) = self.pool.get_hot_mut(column.id as usize) {
                 neuron.activation = neuron.activation.max(column_activation);
                 neuron.use_count = neuron.use_count.saturating_add(active as u64);
             }
             if active {
                 for member_id in &column.members {
-                    if let Some(neuron) = self.pool.neurons.get_mut(*member_id as usize) {
+                    if let Some(neuron) = self.pool.get_hot_mut(*member_id as usize) {
                         neuron.activation *= inhibit_scale;
                     }
                 }
@@ -1887,10 +2182,12 @@ impl NeuroState {
         }
 
         // Collect top influences from most active neurons (top 20 by activation)
+        // Only hot neurons can be active — cold neurons have decayed activation.
         let mut neuron_activations: Vec<(f32, &Neuron)> = self
             .pool
             .neurons
             .iter()
+            .filter_map(|slot| slot.as_hot())
             .filter(|n| n.activation >= min_activation && !n.influence_history.is_empty())
             .map(|n| (n.activation, n))
             .collect();
@@ -2093,46 +2390,30 @@ impl NeuroState {
         let scale = self.pool.config.stdp_scale;
         let len = self.pool.neurons.len();
         for idx in 0..len {
-            let (pre_trace, pre_fatigue) = {
-                let pre = &self.pool.neurons[idx];
-                (pre.trace as f32, pre.fatigue)
+            // Skip cold/free neurons — they have no activation and no synapses in RAM.
+            let (pre_trace, pre_fatigue) = match self.pool.get_hot(idx) {
+                Some(pre) => (pre.trace as f32, pre.fatigue),
+                None => continue,
             };
-            // borrow target activations first to avoid aliasing
             let excit_updates = {
-                let neuron = &self.pool.neurons[idx];
-                neuron
-                    .excitatory
-                    .iter()
-                    .map(|syn| {
-                        let post_act = self
-                            .pool
-                            .neurons
-                            .get(syn.target as usize)
-                            .map(|p| p.activation as f32)
-                            .unwrap_or(0.0);
-                        let delta = scale * (pre_trace * post_act - pre_fatigue * syn.weight * 0.1);
-                        (syn.target, delta, syn.inhibitory)
-                    })
-                    .collect::<Vec<_>>()
+                let neuron = match self.pool.get_hot(idx) { Some(n) => n, None => continue };
+                neuron.excitatory.iter().map(|syn| {
+                    let post_act = self.pool.get_hot(syn.target as usize)
+                        .map(|p| p.activation as f32).unwrap_or(0.0);
+                    let delta = scale * (pre_trace * post_act - pre_fatigue * syn.weight * 0.1);
+                    (syn.target, delta, syn.inhibitory)
+                }).collect::<Vec<_>>()
             };
             let inhib_updates = {
-                let neuron = &self.pool.neurons[idx];
-                neuron
-                    .inhibitory
-                    .iter()
-                    .map(|syn| {
-                        let post_act = self
-                            .pool
-                            .neurons
-                            .get(syn.target as usize)
-                            .map(|p| p.activation as f32)
-                            .unwrap_or(0.0);
-                        let delta = scale * (pre_trace * post_act - pre_fatigue * syn.weight * 0.1);
-                        (syn.target, delta, syn.inhibitory)
-                    })
-                    .collect::<Vec<_>>()
+                let neuron = match self.pool.get_hot(idx) { Some(n) => n, None => continue };
+                neuron.inhibitory.iter().map(|syn| {
+                    let post_act = self.pool.get_hot(syn.target as usize)
+                        .map(|p| p.activation as f32).unwrap_or(0.0);
+                    let delta = scale * (pre_trace * post_act - pre_fatigue * syn.weight * 0.1);
+                    (syn.target, delta, syn.inhibitory)
+                }).collect::<Vec<_>>()
             };
-            if let Some(neuron) = self.pool.neurons.get_mut(idx) {
+            if let Some(neuron) = self.pool.get_hot_mut(idx) {
                 for (syn, (_, delta, _)) in neuron.excitatory.iter_mut().zip(excit_updates.iter()) {
                     syn.weight = (syn.weight + delta).clamp(-2.0, 2.0);
                 }
@@ -2166,20 +2447,59 @@ impl NeuroRuntime {
         let mut state = NeuroState::new(config.neuro.clone(), config.motifs.clone());
         state.pool.cooccur_cap = hw_cap;
 
+        // Derive cold-tier directory alongside the pool checkpoint file.
+        let cold_dir = config.pool_state_path.as_deref().map(|p| {
+            let pb = std::path::Path::new(p);
+            let stem = pb.file_stem().unwrap_or_default().to_string_lossy();
+            pb.parent().unwrap_or(std::path::Path::new("."))
+                .join(format!("{stem}_cold"))
+        });
+
         // Auto-load pool if a state path is configured and the file exists.
         if let Some(ref path) = config.pool_state_path {
-            if std::path::Path::new(path).exists() {
-                match std::fs::read_to_string(path) {
-                    Ok(json) => match serde_json::from_str::<NeuronPool>(&json) {
-                        Ok(pool) => {
+            let pool_path = std::path::Path::new(path);
+            if pool_path.exists() {
+                // Use a streaming reader for large files to avoid double-buffering.
+                match std::fs::File::open(pool_path) {
+                    Ok(file) => match serde_json::from_reader::<_, NeuronPool>(std::io::BufReader::new(file)) {
+                        Ok(mut pool) => {
+                            pool.cooccur_cap = hw_cap;
+                            // Wire hot/cold paging now that we have the path.
+                            if let Some(ref cd) = cold_dir {
+                                let idle = config.neuro.eviction_idle_steps
+                                    .unwrap_or(DEFAULT_EVICTION_IDLE_STEPS);
+                                let hot_max = config.neuro.hot_tier_max
+                                    .unwrap_or(DEFAULT_HOT_TIER_MAX);
+                                pool.set_cold_dir(cd.clone(), idle, hot_max);
+                                // If cold_dir exists from a previous run, restore Cold slots.
+                                pool.restore_cold_index(cd);
+                            }
+                            let hot = pool.hot_count;
+                            let total = pool.neurons.len();
+                            tracing::info!("Loaded NeuronPool from {path}: {hot} hot / {total} total slots");
                             state.pool = pool;
-                            state.pool.cooccur_cap = hw_cap; // restore HW limit
-                            tracing::info!("Loaded NeuronPool from {path}: {} neurons", state.pool.neurons.len());
                         }
                         Err(e) => tracing::warn!("Failed to parse pool state at {path}: {e}"),
                     },
                     Err(e) => tracing::warn!("Failed to read pool state at {path}: {e}"),
                 }
+            } else if let Some(ref cd) = cold_dir {
+                // No hot-tier checkpoint but cold dir may exist (restart after OOM).
+                if cd.exists() {
+                    let idle = config.neuro.eviction_idle_steps.unwrap_or(DEFAULT_EVICTION_IDLE_STEPS);
+                    let hot_max = config.neuro.hot_tier_max.unwrap_or(DEFAULT_HOT_TIER_MAX);
+                    state.pool.set_cold_dir(cd.clone(), idle, hot_max);
+                    state.pool.restore_cold_index(cd);
+                    tracing::info!("Restored cold-only pool from {}", cd.display());
+                }
+            }
+        }
+        // Wire paging even if no checkpoint loaded (fresh start).
+        if state.pool.cold_dir.is_none() {
+            if let Some(ref cd) = cold_dir {
+                let idle = config.neuro.eviction_idle_steps.unwrap_or(DEFAULT_EVICTION_IDLE_STEPS);
+                let hot_max = config.neuro.hot_tier_max.unwrap_or(DEFAULT_HOT_TIER_MAX);
+                state.pool.set_cold_dir(cd.clone(), idle, hot_max);
             }
         }
 
@@ -2203,8 +2523,12 @@ impl NeuroRuntime {
 
     pub fn save_pool_to(&self, path: &str) -> Result<(), String> {
         let guard = self.inner.lock();
+        // The custom pool_serde serializer emits only Hot neurons, so checkpoints
+        // stay small regardless of how many Cold neurons are on disk.
         let json = serde_json::to_string(&guard.pool)
             .map_err(|e| format!("serialize error: {e}"))?;
+        // Persist cold-tier index alongside the checkpoint.
+        guard.pool.save_cold_index();
         drop(guard);
         // Atomic write: write to .tmp then rename.
         let tmp = format!("{path}.tmp");
@@ -2374,7 +2698,7 @@ impl NeuroRuntime {
                 label.starts_with(&stream_prefix_a)
                     || label.starts_with(&stream_prefix_b)
                     || guard.pool.label_to_id.get(label).and_then(|&id| {
-                        guard.pool.neurons.get(id as usize)
+                        guard.pool.get_hot(id as usize)
                     }).map(|n| {
                         n.influence_history.iter().any(|r| r.stream == target_stream)
                     }).unwrap_or(false)
@@ -2382,7 +2706,7 @@ impl NeuroRuntime {
             .map(|(label, strength)| {
                 // Collect top influences for this label from its neuron's history
                 let influences = guard.pool.label_to_id.get(&label)
-                    .and_then(|&id| guard.pool.neurons.get(id as usize))
+                    .and_then(|&id| guard.pool.get_hot(id as usize))
                     .map(|n| {
                         let mut inf = n.influence_history.clone();
                         inf.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
@@ -2491,7 +2815,7 @@ impl NeuroRuntime {
                     label.starts_with(&stream_prefix_a)
                         || label.starts_with(&stream_prefix_b)
                         || guard.pool.label_to_id.get(*label).and_then(|&id| {
-                            guard.pool.neurons.get(id as usize)
+                            guard.pool.get_hot(id as usize)
                         }).map(|n| {
                             n.influence_history.iter().any(|r| r.stream == target_stream)
                         }).unwrap_or(false)
@@ -2500,7 +2824,7 @@ impl NeuroRuntime {
                     label: label.clone(),
                     strength,
                     influences: guard.pool.label_to_id.get(label)
-                        .and_then(|&id| guard.pool.neurons.get(id as usize))
+                        .and_then(|&id| guard.pool.get_hot(id as usize))
                         .map(|n| {
                             let mut inf = n.influence_history.clone();
                             inf.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
@@ -2519,7 +2843,7 @@ impl NeuroRuntime {
                 .filter(|(label, _)| {
                     label.starts_with(&stream_prefix_a) || label.starts_with(&stream_prefix_b)
                         || guard.pool.label_to_id.get(label).and_then(|&id| {
-                            guard.pool.neurons.get(id as usize)
+                            guard.pool.get_hot(id as usize)
                         }).map(|n| {
                             n.influence_history.iter().any(|r| r.stream == target_stream)
                         }).unwrap_or(false)
