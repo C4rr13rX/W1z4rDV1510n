@@ -3803,8 +3803,9 @@ fn encode_media_labels(
         }
     }
 
-    // Audio
-    if modality == "audio" || modality == "page" {
+    // Audio — only for "audio"/"full" modalities.
+    // "page" is image+text (PDF documents); it does NOT carry WAV data.
+    if modality == "audio" || modality == "full" {
         if let Some(data) = data_b64 {
             let bytes = b64.decode(data).map_err(|_| "invalid base64 for data_b64".to_string())?;
             let enc = AudioBitsEncoder::new(AudioBitsConfig::default());
