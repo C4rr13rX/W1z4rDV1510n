@@ -80,9 +80,44 @@ pub struct ClusterConfig {
 
 impl ClusterConfig {
     /// The address we tell other nodes to connect back to us on.
+    ///
+    /// Priority:
+    ///   1. Explicit `advertise_addr` from config (always wins).
+    ///   2. Auto-detected LAN IP — when `bind_addr` is `0.0.0.0` we ask the OS
+    ///      which local interface it would use to reach an external host.  No
+    ///      packets are sent; this is purely a routing-table lookup.
+    ///   3. `bind_addr` verbatim (fallback — will be `0.0.0.0` only if detection
+    ///      fails, which should never happen on a machine with network access).
     pub fn effective_addr(&self) -> SocketAddr {
-        self.advertise_addr.unwrap_or(self.bind_addr)
+        if let Some(addr) = self.advertise_addr {
+            return addr;
+        }
+        let port = self.bind_addr.port();
+        if !self.bind_addr.ip().is_unspecified() {
+            return self.bind_addr;
+        }
+        // bind_addr is 0.0.0.0 — detect the real outbound IP.
+        if let Some(ip) = detect_lan_ip() {
+            return SocketAddr::new(ip, port);
+        }
+        self.bind_addr
     }
+}
+
+/// Ask the OS which local IP it would use to reach an external host.
+/// Uses a UDP socket connected to 8.8.8.8:80 — no packets are sent,
+/// the OS just resolves the route and fills in the local address.
+fn detect_lan_ip() -> Option<std::net::IpAddr> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let local = socket.local_addr().ok()?;
+    let ip = local.ip();
+    // Reject loopback or another unspecified address.
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+    Some(ip)
 }
 
 impl Default for ClusterConfig {
