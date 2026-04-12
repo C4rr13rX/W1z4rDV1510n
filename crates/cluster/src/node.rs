@@ -69,14 +69,27 @@ fn load_saved_cluster_id() -> Option<(Uuid, bool)> {
 
 pub struct ClusterConfig {
     pub bind_addr:          SocketAddr,
+    /// The address advertised to other cluster members.  When `None` the node
+    /// falls back to `bind_addr`, which means peers see `0.0.0.0` — only
+    /// correct for loopback / single-machine clusters.  Set this to the
+    /// machine's LAN IP so remote peers can actually reach it.
+    pub advertise_addr:     Option<SocketAddr>,
     pub replication_factor: u8,
     pub otp_ttl_secs:       u64,
+}
+
+impl ClusterConfig {
+    /// The address we tell other nodes to connect back to us on.
+    pub fn effective_addr(&self) -> SocketAddr {
+        self.advertise_addr.unwrap_or(self.bind_addr)
+    }
 }
 
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
             bind_addr:          format!("0.0.0.0:{CLUSTER_PORT}").parse().unwrap(),
+            advertise_addr:     None,
             replication_factor: 2,
             otp_ttl_secs:       600, // 10 minutes
         }
@@ -117,7 +130,7 @@ impl ClusterNode {
 
         let local_info = NodeInfo {
             id:             local_id.clone(),
-            addr:           config.bind_addr.to_string(),
+            addr:           config.effective_addr().to_string(),
             capabilities:   caps,
             joined_at:      join_ts,
             is_coordinator: true,
@@ -172,7 +185,7 @@ impl ClusterNode {
             node_id:      local_id.clone(),
             otp_hash:     otp.to_string(),
             capabilities: caps.clone(),
-            listen_addr:  config.bind_addr.to_string(),
+            listen_addr:  config.effective_addr().to_string(),
         };
         protocol::send_msg(&mut writer, &hello).await?;
 
@@ -182,7 +195,7 @@ impl ClusterNode {
             Message::Welcome { cluster_id, roster, ring, replication_factor } => {
                 let local_info = NodeInfo {
                     id:             local_id.clone(),
-                    addr:           config.bind_addr.to_string(),
+                    addr:           config.effective_addr().to_string(),
                     capabilities:   caps,
                     joined_at:      join_ts,
                     is_coordinator: false,

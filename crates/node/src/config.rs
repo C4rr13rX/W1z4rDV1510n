@@ -494,6 +494,10 @@ impl NodeConfig {
 #[serde(default)]
 pub struct NodeNetworkConfig {
     pub listen_addr: String,
+    /// Address advertised to cluster peers.  Defaults to listen_addr when
+    /// absent.  Set to the LAN IP so remote nodes can actually connect back.
+    #[serde(default)]
+    pub advertise_addr: Option<String>,
     pub bootstrap_peers: Vec<String>,
     pub max_peers: usize,
     pub gossip_protocol: String,
@@ -536,6 +540,7 @@ impl Default for NodeNetworkConfig {
     fn default() -> Self {
         Self {
             listen_addr: "0.0.0.0:8088".to_string(),
+            advertise_addr: None,
             bootstrap_peers: Vec::new(),
             max_peers: 128,
             gossip_protocol: "w1z4rdv1510n-gossip".to_string(),

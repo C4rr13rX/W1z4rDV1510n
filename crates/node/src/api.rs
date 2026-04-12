@@ -91,6 +91,9 @@ struct ApiState {
     /// Live cluster node — None until cluster-init or cluster-join is called
     /// via POST /cluster/init or POST /cluster/join.
     cluster: Arc<tokio::sync::Mutex<Option<ClusterNode>>>,
+    /// LAN address to advertise to cluster peers (from network.advertise_addr in config).
+    /// When None the bind address is used, which means peers see 0.0.0.0.
+    cluster_advertise_addr: Option<std::net::SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -719,6 +722,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         ))),
         origin_index: Arc::new(Mutex::new(HashMap::new())),
         cluster: Arc::new(tokio::sync::Mutex::new(None)),
+        cluster_advertise_addr: config.network.advertise_addr.as_deref()
+            .and_then(|s| s.parse().ok()),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -3553,8 +3558,14 @@ async fn cluster_init(
         Ok(a) => a,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid bind address: {e}") }))),
     };
+    // Derive advertise_addr: replace 0.0.0.0 with the configured LAN IP if known.
+    let advertise_addr = state.cluster_advertise_addr.map(|mut a| {
+        a.set_port(bind_addr.port());
+        a
+    });
     let config = ClusterConfig {
         bind_addr,
+        advertise_addr,
         otp_ttl_secs: req.otp_ttl_secs.unwrap_or(600),
         ..Default::default()
     };
@@ -3597,7 +3608,11 @@ async fn cluster_join(
         Ok(a) => a,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid bind address: {e}") }))),
     };
-    let config = ClusterConfig { bind_addr, ..Default::default() };
+    let advertise_addr = state.cluster_advertise_addr.map(|mut a| {
+        a.set_port(bind_addr.port());
+        a
+    });
+    let config = ClusterConfig { bind_addr, advertise_addr, ..Default::default() };
     match ClusterNode::join(config, coord_addr, &req.otp).await {
         Ok(node) => {
             let s = node.status().await;
