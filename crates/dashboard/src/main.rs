@@ -313,6 +313,8 @@ fn spawn_poller(state: Arc<Mutex<NodeState>>) {
                         cores:    n["capabilities"]["cpu_cores"].as_u64().unwrap_or(0) as u32,
                         is_coord: n["is_coordinator"].as_bool().unwrap_or(false),
                     }).collect();
+                } else {
+                    s.cluster_nodes.clear();
                 }
                 s.cluster_id   = v["cluster_id"].as_str().unwrap_or("").to_string();
                 s.cluster_role = v["role"].as_str().unwrap_or("standalone").to_string();
