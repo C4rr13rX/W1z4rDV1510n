@@ -3517,7 +3517,7 @@ async fn cluster_status(
             let saved = ClusterNode::saved_state();
             (StatusCode::OK, Json(serde_json::json!({
                 "status": "standalone",
-                "saved_cluster_id": saved.map(|(id, _)| id.to_string()),
+                "saved_cluster_id": saved.map(|(id, _nid, _coord)| id.to_string()),
             })))
         }
         Some(node) => {

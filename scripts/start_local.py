@@ -235,7 +235,7 @@ def main() -> None:
         if dash_bin.exists():
             import subprocess as _sp
             _sp.Popen(
-                [str(dash_bin), "--node", "http://localhost:8090", "--api", "http://localhost:8080"],
+                [str(dash_bin), "--node", "http://127.0.0.1:8090", "--api", "http://127.0.0.1:8080"],
                 cwd=str(ROOT),
                 creationflags=_WIN_FLAGS if sys.platform == "win32" else 0,
                 close_fds=True,

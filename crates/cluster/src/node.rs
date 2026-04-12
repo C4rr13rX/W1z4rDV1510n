@@ -36,6 +36,10 @@ struct PersistedState {
     cluster_id:     String,
     bind_addr:      String,
     is_coordinator: bool,
+    /// The node's own stable UUID so it survives restarts.
+    /// Absent in older state files — falls back to generating a new one.
+    #[serde(default)]
+    node_id:        Option<String>,
 }
 
 fn state_path() -> PathBuf {
@@ -47,22 +51,29 @@ fn state_path() -> PathBuf {
     dir.join("cluster_state.json")
 }
 
-fn save_state(cluster_id: Uuid, bind_addr: SocketAddr, is_coordinator: bool) {
+fn save_state(cluster_id: Uuid, node_id: &NodeId, bind_addr: SocketAddr, is_coordinator: bool) {
     let ps = PersistedState {
         cluster_id:     cluster_id.to_string(),
         bind_addr:      bind_addr.to_string(),
         is_coordinator,
+        node_id:        Some(node_id.0.to_string()),
     };
     if let Ok(json) = serde_json::to_string_pretty(&ps) {
         std::fs::write(state_path(), json).ok();
     }
 }
 
-fn load_saved_cluster_id() -> Option<(Uuid, bool)> {
+/// Returns `(cluster_id, node_id, is_coordinator)` from the saved state, or `None`.
+fn load_saved_state() -> Option<(Uuid, NodeId, bool)> {
     let data = std::fs::read_to_string(state_path()).ok()?;
     let ps: PersistedState = serde_json::from_str(&data).ok()?;
-    let id = ps.cluster_id.parse().ok()?;
-    Some((id, ps.is_coordinator))
+    let cluster_id = ps.cluster_id.parse().ok()?;
+    let node_id = ps.node_id
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .map(NodeId)
+        .unwrap_or_else(NodeId::new);
+    Some((cluster_id, node_id, ps.is_coordinator))
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -153,13 +164,12 @@ impl ClusterNode {
     /// the coordinator can restart without orphaning its workers.
     /// Returns `(node, otp_string)`.
     pub async fn init(config: ClusterConfig) -> anyhow::Result<(Self, String)> {
-        let local_id   = NodeId::new();
-        // Reuse the persisted cluster_id if this machine was previously coordinator,
-        // so workers that were already joined don't see a foreign cluster.
-        let cluster_id = load_saved_cluster_id()
-            .filter(|(_, was_coord)| *was_coord)
-            .map(|(id, _)| id)
-            .unwrap_or_else(Uuid::new_v4);
+        // Reuse both cluster_id AND node_id if this machine was previously coordinator,
+        // so workers that were already joined can reconnect without re-joining.
+        let (cluster_id, local_id) = load_saved_state()
+            .filter(|(_, _, was_coord)| *was_coord)
+            .map(|(cid, nid, _)| (cid, nid))
+            .unwrap_or_else(|| (Uuid::new_v4(), NodeId::new()));
         let caps       = local_capabilities();
         let join_ts    = unix_now();
 
@@ -189,7 +199,7 @@ impl ClusterNode {
         };
 
         let otp = node.generate_otp().await?;
-        save_state(cluster_id, node.config.bind_addr, true);
+        save_state(cluster_id, &local_id, node.config.bind_addr, true);
         node.clone().run_background().await;
         Ok((node, otp))
     }
@@ -273,7 +283,7 @@ impl ClusterNode {
                     config:      Arc::new(config),
                     rep_factor:  replication_factor,
                 };
-                save_state(cluster_id, node.config.bind_addr, false);
+                save_state(cluster_id, &local_id, node.config.bind_addr, false);
                 node.clone().run_background().await;
                 Ok(node)
             }
@@ -303,10 +313,10 @@ impl ClusterNode {
         self.generate_otp().await
     }
 
-    /// Returns the persisted cluster_id and coordinator flag for the local machine,
-    /// or None if this machine has never been in a cluster.
-    pub fn saved_state() -> Option<(Uuid, bool)> {
-        load_saved_cluster_id()
+    /// Returns the persisted `(cluster_id, node_id, is_coordinator)` for this machine,
+    /// or None if it has never been in a cluster.
+    pub fn saved_state() -> Option<(Uuid, NodeId, bool)> {
+        load_saved_state()
     }
 
     // ── Label routing (the core distributed-fabric API) ───────────────────────

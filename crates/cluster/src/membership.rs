@@ -105,11 +105,41 @@ impl Membership {
         Some(state.last_seen.elapsed().as_secs())
     }
 
-    /// Election priority: lower join timestamp = higher priority (older wins).
-    /// Ties broken by node UUID (lexicographic, deterministic).
+    /// Election priority score — higher wins.
+    ///
+    /// Composite of:
+    ///   - CPU cores      (weight 40): more cores = better coordinator
+    ///   - RAM            (weight 30): more RAM = better coordinator (score capped at 64 GiB)
+    ///   - Uptime/seniority (weight 20): older node_ts = longer-lived = more stable
+    ///   - Availability   (weight 10): tie-break by join timestamp (older = better)
+    ///
+    /// All components are normalised to 0–100 and combined, then scaled to u64
+    /// so the wire format stays a single integer.
     pub fn local_priority(&self) -> u64 {
-        // Invert join_ts so smaller = "older" = numerically larger priority.
-        u64::MAX - self.local_join_ts
+        let info = match self.nodes.get(&self.local_id) {
+            Some(s) => &s.info,
+            None => return 0,
+        };
+        let caps = &info.capabilities;
+
+        // CPU: 1 core = 1 pt, capped at 128.
+        let cpu_score = caps.cpu_cores.min(128) as f64;
+
+        // RAM: score as GiB, capped at 64 GiB.
+        let ram_gib = (caps.ram_bytes / (1024 * 1024 * 1024)) as f64;
+        let ram_score = ram_gib.min(64.0);
+
+        // Seniority: invert join_ts so older = larger score (capped at ~1 year of seconds).
+        const YEAR_SECS: u64 = 365 * 24 * 3600;
+        let age_score = YEAR_SECS.saturating_sub(self.local_join_ts % YEAR_SECS) as f64
+            / YEAR_SECS as f64
+            * 100.0;
+
+        // Weighted sum.
+        let score = cpu_score * 0.40 + ram_score * 0.30 + age_score * 0.20;
+
+        // Scale to u64, preserving relative ordering.
+        (score * 1_000_000.0) as u64
     }
 
     /// All live nodes (heartbeat seen within HEARTBEAT_TIMEOUT_SECS).
