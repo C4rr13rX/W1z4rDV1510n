@@ -4235,23 +4235,34 @@ async fn neuro_ask(
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
 
-    // 1. Hebbian word associations from the neural fabric
-    let associations = state.neuro.ask_text(&req.text, req.hops, req.top_k, req.min_strength);
+    // Run both the Hebbian propagation and QA lookup on a blocking thread
+    // so the async executor stays free for heartbeats and other requests
+    // even while training holds the pool mutex.
+    let neuro = state.neuro.clone();
+    let qa_arc = state.qa_runtime.clone();
+    let text = req.text.clone();
+    let (associations, qa_report) = tokio::task::spawn_blocking(move || {
+        // 1. Hebbian word associations from the neural fabric
+        let assoc = neuro.ask_text(&text, req.hops, req.top_k, req.min_strength);
+        // 2. QA recall
+        let now = now_timestamp();
+        let report = {
+            let mut qa = qa_arc.lock().expect("qa mutex");
+            qa.query(&text, now)
+        };
+        (assoc, report)
+    }).await.unwrap_or_else(|_| (Vec::new(), QaQueryReport {
+        question: req.text.clone(),
+        active_question_neurons: 0,
+        results: Vec::new(),
+        timestamp: now_timestamp(),
+    }));
+
     let assoc_words: Vec<String> = associations.iter()
         .map(|(label, _)| label.strip_prefix("txt:word_").unwrap_or(label.as_str()).to_string())
         .collect();
 
-    // 2. QA recall — the node's learned Q&A knowledge
-    let now = now_timestamp();
-    let qa_report = {
-        let mut qa = state.qa_runtime.lock().expect("qa mutex");
-        qa.query(&req.text, now)
-    };
-
-    // 3. Synthesize a readable response from the top QA answers.
-    // Strategy: the best answer (highest confidence) is the primary response.
-    // Supporting answers that aren't near-duplicates add context.
-    // Associations fill in when QA is sparse.
+    // 3. Synthesize a readable response
     let response_text = synthesize_response(&req.text, &qa_report.results, &assoc_words);
 
     let assoc_json: Vec<serde_json::Value> = associations.iter().map(|(label, strength)| {
@@ -4285,69 +4296,83 @@ fn synthesize_response(
 ) -> String {
     if results.is_empty() && associations.is_empty() {
         return format!(
-            "I haven't learned enough yet to answer \"{}\" confidently. Keep training.",
-            question
+            "I haven't learned enough about \"{}\" yet.",
+            question.trim()
         );
     }
 
     let mut parts: Vec<String> = Vec::new();
+    // Track all seen 30-char prefixes to deduplicate across all results
+    let mut seen_prefixes: Vec<String> = Vec::new();
 
-    // Primary answer: best scoring result that's a substantive fragment (>20 chars)
-    let primary = results.iter().find(|r| r.answer.trim().len() > 20 && r.confidence > 0.1);
-    if let Some(r) = primary {
-        // Clean up the fragment — strip leading punctuation/whitespace
-        let cleaned = r.answer.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
-        if !cleaned.is_empty() {
-            // Capitalise first letter
-            let mut answer = cleaned.to_string();
-            if let Some(first) = answer.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            // Ensure it ends with punctuation
-            if !answer.ends_with(['.', '!', '?', ',', ';']) {
-                answer.push('.');
-            }
-            parts.push(answer);
+    fn clean_fragment(s: &str) -> String {
+        let s = s.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+        if s.is_empty() { return String::new(); }
+        let mut out = s.to_string();
+        // Capitalise first letter (ASCII only — sufficient for textbook English)
+        if let Some(b) = out.get_mut(0..1) {
+            b.make_ascii_uppercase();
         }
+        if !out.ends_with(['.', '!', '?']) {
+            // Strip trailing comma/semicolon fragments before adding period
+            let trimmed = out.trim_end_matches([',', ';', ' ']).to_string();
+            out = trimmed + ".";
+        }
+        out
     }
 
-    // Supporting answers: add up to 2 more non-duplicate fragments
-    let mut added = 0;
-    for r in results.iter().skip(if primary.is_some() { 1 } else { 0 }) {
-        if added >= 2 { break; }
-        let cleaned = r.answer.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
-        if cleaned.len() < 20 { continue; }
-        // Skip near-duplicates (first 40 chars same as something already added)
-        let prefix: String = cleaned.chars().take(40).collect();
-        if parts.iter().any(|p| p.starts_with(&prefix)) { continue; }
-        let mut fragment = cleaned.to_string();
-        if let Some(first) = fragment.get_mut(0..1) {
-            first.make_ascii_uppercase();
-        }
-        if !fragment.ends_with(['.', '!', '?', ',', ';']) {
-            fragment.push('.');
-        }
-        parts.push(fragment);
-        added += 1;
+    fn is_duplicate(text: &str, seen: &[String]) -> bool {
+        let prefix: String = text.chars().take(35).collect::<String>().to_lowercase();
+        seen.iter().any(|s| s == &prefix)
     }
 
-    // If we have associations but no strong QA answers, mention related concepts
+    // Question words for relevance filtering (stop words removed)
+    let stop_words = ["what","is","are","how","does","do","the","a","an","in","of",
+                      "to","and","or","it","this","that","be","was","were","tell","me","about"];
+    let question_words: Vec<String> = question.split_whitespace()
+        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| w.len() > 2 && !stop_words.contains(&w.as_str()))
+        .collect();
+
+    // Add up to 3 distinct, substantive answer fragments
+    for r in results.iter() {
+        if parts.len() >= 3 { break; }
+        if r.confidence < 0.05 { continue; }
+        let cleaned = clean_fragment(&r.answer);
+        if cleaned.len() < 35 { continue; }
+        if is_duplicate(&cleaned, &seen_prefixes) { continue; }
+
+        // Skip instructional/meta fragments
+        let lower = cleaned.to_lowercase();
+        if lower.contains("introduced after students")
+            || lower.contains("see section")
+            || lower.contains("refer to chapter")
+            || lower.starts_with("see ")
+            || lower.starts_with("note:")
+            || lower.starts_with("figure ")
+            || lower.starts_with("table ")
+        { continue; }
+
+        // Skip fragments that are clearly truncated mid-word (end in a lone letter + period)
+        // e.g. "circuit elements, i." — the trailing ", i." is a truncation artifact
+        let trimmed = cleaned.trim_end_matches('.');
+        let last_word = trimmed.split_whitespace().last().unwrap_or("");
+        if last_word.len() == 1 && last_word != "a" { continue; }
+
+        // For questions with known words, prefer fragments containing at least one
+        // (soft filter — don't block if we have no other answers)
+        let relevant = question_words.is_empty() || question_words.iter().any(|qw| lower.contains(qw.as_str()));
+        if !relevant && parts.len() >= 1 { continue; }
+
+        let prefix = cleaned.chars().take(35).collect::<String>().to_lowercase();
+        seen_prefixes.push(prefix);
+        parts.push(cleaned);
+    }
+
+    // Fallback to associations if QA gave nothing useful
     if parts.is_empty() && !associations.is_empty() {
         let words: Vec<&str> = associations.iter().take(8).map(|s| s.as_str()).collect();
-        parts.push(format!(
-            "I associate \"{}\" with: {}.",
-            question.trim(),
-            words.join(", ")
-        ));
-    } else if !associations.is_empty() && parts.len() < 3 {
-        let words: Vec<&str> = associations.iter()
-            .filter(|w| !question.to_lowercase().contains(w.as_str()))
-            .take(6)
-            .map(|s| s.as_str())
-            .collect();
-        if !words.is_empty() {
-            parts.push(format!("Related concepts: {}.", words.join(", ")));
-        }
+        return format!("I associate that with: {}.", words.join(", "));
     }
 
     parts.join(" ")
