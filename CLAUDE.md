@@ -20,18 +20,20 @@ Toolchain: `stable-x86_64-pc-windows-gnu` (requires WinLibs MinGW-w64 for `dllto
 
 ## Run
 ```bash
-# Node (from install dir so it picks up node_config.json)
-cd /c/W1z4rD && ./w1z4rd_node.exe
+# Node — launch from project root (config is relative to CWD)
+cd /d/Projects/W1z4rDV1510n
+W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 
 # Dashboard
-./target/release/w1z4rd-dashboard.exe
+./bin/w1z4rd_dashboard.exe
 ```
-Install dir: `C:\W1z4rD\` — always launch node from there (config is relative to CWD).
+Project dir: `D:\Projects\W1z4rDV1510n\` — always launch node from there.
+Neuro pool data dir: `D:\w1z4rdv1510n-data\` (set via `W1Z4RDV1510N_DATA_DIR` env var).
 
 ## Deploy after build
 ```bash
-# Copy fresh node binary (requires admin)
-powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList '-Command Copy-Item -Force C:\\Users\\Node\\W1z4rDV1510n\\target\\release\\w1z4rdv1510n-node.exe C:\\W1z4rD\\w1z4rd_node.exe' -Wait"
+# Copy fresh node binary to bin/
+cp target/release/w1z4rdv1510n-node.exe bin/w1z4rd_node.exe
 ```
 
 ## Key Ports
@@ -48,6 +50,7 @@ powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList '-Comman
 ## Important Notes
 - Always commit and push after any code changes
 - Kill old processes before deploying new binary (port conflicts cause silent API thread death)
-- `node_config.json` in `C:\W1z4rD\` has `data.enabled: false` and `wallet.prompt_on_load: false`
+- `node_config.json` in project root has `data.enabled: false` and `wallet.prompt_on_load: false`
+- Neuro pool data lives at `D:\w1z4rdv1510n-data\` — set `W1Z4RDV1510N_DATA_DIR` before launching node
 - The GNU toolchain requires WinLibs PATH to be set or dlltool errors occur
 - Avira AV may quarantine Rust build artifacts — exclusions are set in Windows Defender

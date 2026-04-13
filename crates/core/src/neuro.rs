@@ -795,9 +795,21 @@ impl NeuronPool {
             }
         }
         let scale = self.config.excitatory_scale * lr_scale.clamp(0.01, 8.0);
-        for i in 0..ids.len() {
-            for j in (i + 1)..ids.len() {
+        // Windowed pairing: only pair symbols within HEBBIAN_WINDOW positions of
+        // each other.  Full all-pairs is O(N²) — a 500-symbol page produces 125k
+        // pairs; with a window of 20 it produces at most ~5k.  Local co-occurrence
+        // is the semantically meaningful signal anyway.
+        const HEBBIAN_WINDOW: usize = 20;
+        const MAX_PAIRS: usize = 8_000;
+        let mut pair_count = 0usize;
+        'outer: for i in 0..ids.len() {
+            let end = (i + 1 + HEBBIAN_WINDOW).min(ids.len());
+            for j in (i + 1)..end {
                 self.hebbian_pair(ids[i], ids[j], scale, inhibitory);
+                pair_count += 1;
+                if pair_count >= MAX_PAIRS {
+                    break 'outer;
+                }
             }
         }
     }
