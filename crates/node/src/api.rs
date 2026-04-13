@@ -41,7 +41,7 @@ use w1z4rdv1510n::streaming::{
     HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
     KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
     NetworkPatternSummary, NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
-    QaCandidateRecord, QaQueryReport, QaRuntime, QaRuntimeConfig,
+    QaCandidateRecord, QaQueryReport, QaQueryResult, QaRuntime, QaRuntimeConfig,
     EquationMatrixRuntime, EquationMatrixConfig, Discipline, EemPeerPayload,
     ImageBitsConfig, ImageBitsEncoder,
     AudioBitsConfig, AudioBitsEncoder,
@@ -836,6 +836,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/motifs",         get(neuro_motifs))
         .route("/neuro/motifs/predict", post(neuro_motifs_predict))
         .route("/neuro/ask",            post(neuro_ask))
+        .route("/chat",                 post(neuro_ask))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -4219,20 +4220,29 @@ async fn neuro_ask(
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
 
-    // 1. Hebbian associations from the neural fabric
+    // 1. Hebbian word associations from the neural fabric
     let associations = state.neuro.ask_text(&req.text, req.hops, req.top_k, req.min_strength);
-    let assoc_json: Vec<serde_json::Value> = associations.iter().map(|(label, strength)| {
-        // Strip the "txt:word_" prefix for clean output
-        let word = label.strip_prefix("txt:word_").unwrap_or(label.as_str());
-        serde_json::json!({ "word": word, "strength": strength })
-    }).collect();
+    let assoc_words: Vec<String> = associations.iter()
+        .map(|(label, _)| label.strip_prefix("txt:word_").unwrap_or(label.as_str()).to_string())
+        .collect();
 
-    // 2. QA recall from the question-answer store
+    // 2. QA recall — the node's learned Q&A knowledge
     let now = now_timestamp();
     let qa_report = {
         let mut qa = state.qa_runtime.lock().expect("qa mutex");
         qa.query(&req.text, now)
     };
+
+    // 3. Synthesize a readable response from the top QA answers.
+    // Strategy: the best answer (highest confidence) is the primary response.
+    // Supporting answers that aren't near-duplicates add context.
+    // Associations fill in when QA is sparse.
+    let response_text = synthesize_response(&req.text, &qa_report.results, &assoc_words);
+
+    let assoc_json: Vec<serde_json::Value> = associations.iter().map(|(label, strength)| {
+        let word = label.strip_prefix("txt:word_").unwrap_or(label.as_str());
+        serde_json::json!({ "word": word, "strength": strength })
+    }).collect();
     let qa_answers: Vec<serde_json::Value> = qa_report.results.iter().map(|r| {
         serde_json::json!({
             "answer": r.answer,
@@ -4244,9 +4254,88 @@ async fn neuro_ask(
 
     (StatusCode::OK, Json(serde_json::json!({
         "question": req.text,
+        "response": response_text,
         "associations": assoc_json,
         "qa_answers": qa_answers,
+        "active_question_neurons": qa_report.active_question_neurons,
     })))
+}
+
+/// Compose a human-readable response from ranked QA results and word associations.
+/// This is the node's "voice" — it speaks from what it has learned.
+fn synthesize_response(
+    question: &str,
+    results: &[QaQueryResult],
+    associations: &[String],
+) -> String {
+    if results.is_empty() && associations.is_empty() {
+        return format!(
+            "I haven't learned enough yet to answer \"{}\" confidently. Keep training.",
+            question
+        );
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Primary answer: best scoring result that's a substantive fragment (>20 chars)
+    let primary = results.iter().find(|r| r.answer.trim().len() > 20 && r.confidence > 0.1);
+    if let Some(r) = primary {
+        // Clean up the fragment — strip leading punctuation/whitespace
+        let cleaned = r.answer.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+        if !cleaned.is_empty() {
+            // Capitalise first letter
+            let mut answer = cleaned.to_string();
+            if let Some(first) = answer.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            // Ensure it ends with punctuation
+            if !answer.ends_with(['.', '!', '?', ',', ';']) {
+                answer.push('.');
+            }
+            parts.push(answer);
+        }
+    }
+
+    // Supporting answers: add up to 2 more non-duplicate fragments
+    let mut added = 0;
+    for r in results.iter().skip(if primary.is_some() { 1 } else { 0 }) {
+        if added >= 2 { break; }
+        let cleaned = r.answer.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+        if cleaned.len() < 20 { continue; }
+        // Skip near-duplicates (first 40 chars same as something already added)
+        let prefix: String = cleaned.chars().take(40).collect();
+        if parts.iter().any(|p| p.starts_with(&prefix)) { continue; }
+        let mut fragment = cleaned.to_string();
+        if let Some(first) = fragment.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        if !fragment.ends_with(['.', '!', '?', ',', ';']) {
+            fragment.push('.');
+        }
+        parts.push(fragment);
+        added += 1;
+    }
+
+    // If we have associations but no strong QA answers, mention related concepts
+    if parts.is_empty() && !associations.is_empty() {
+        let words: Vec<&str> = associations.iter().take(8).map(|s| s.as_str()).collect();
+        parts.push(format!(
+            "I associate \"{}\" with: {}.",
+            question.trim(),
+            words.join(", ")
+        ));
+    } else if !associations.is_empty() && parts.len() < 3 {
+        let words: Vec<&str> = associations.iter()
+            .filter(|w| !question.to_lowercase().contains(w.as_str()))
+            .take(6)
+            .map(|s| s.as_str())
+            .collect();
+        if !words.is_empty() {
+            parts.push(format!("Related concepts: {}.", words.join(", ")));
+        }
+    }
+
+    parts.join(" ")
 }
 
 /// POST /neuro/checkpoint
