@@ -100,7 +100,7 @@ pub struct QaPair {
 
 /// An answer entry stored in the fabric.  The `weights` map associates
 /// question-token neuron IDs with learned Hebbian weights.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AnswerEntry {
     answer_id: u32,
     text: String,
@@ -157,7 +157,9 @@ pub struct QaRuntimeReport {
 /// State lives entirely in CPU RAM.  No locks needed for single-threaded
 /// streaming — the fabric is owned by `StreamingInference` which processes
 /// one batch at a time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaRuntime {
+    #[serde(skip)]
     config: QaRuntimeConfig,
 
     /// question token string → input neuron ID
@@ -425,6 +427,30 @@ impl QaRuntime {
 
     pub fn answer_count(&self) -> usize {
         self.answers.len()
+    }
+
+    // ── Persistence ─────────────────────────────────────────────────────────
+
+    /// Save the QA store to disk (atomic write via .tmp file).
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let tmp = path.with_extension("json.tmp");
+        let f = std::fs::File::create(&tmp)?;
+        let mut w = std::io::BufWriter::new(f);
+        serde_json::to_writer(&mut w, self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        w.flush()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load from disk, restoring the config that was skipped during serde.
+    pub fn load(path: &std::path::Path, config: QaRuntimeConfig) -> std::io::Result<Self> {
+        let f = std::fs::File::open(path)?;
+        let mut rt: QaRuntime = serde_json::from_reader(std::io::BufReader::new(f))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        rt.config = config;
+        Ok(rt)
     }
 
     // ── Internal ────────────────────────────────────────────────────────────

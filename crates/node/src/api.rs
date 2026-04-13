@@ -652,7 +652,22 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         config.api.rate_limit_window_secs,
     )));
     let (knowledge_runtime, knowledge_persist) = build_knowledge_runtime(&config.knowledge);
-    let qa_runtime = QaRuntime::new(QaRuntimeConfig::default());
+    let qa_state_path = node_data_dir().join("qa_store.json");
+    let qa_config = QaRuntimeConfig::default();
+    let qa_runtime = if qa_state_path.exists() {
+        match QaRuntime::load(&qa_state_path, qa_config.clone()) {
+            Ok(rt) => {
+                tracing::info!("QA store loaded: {} pairs", rt.pairs_ingested());
+                rt
+            }
+            Err(e) => {
+                tracing::warn!("QA store load failed ({}), starting fresh", e);
+                QaRuntime::new(qa_config)
+            }
+        }
+    } else {
+        QaRuntime::new(qa_config)
+    };
     let identity_runtime = IdentityRuntime::new(config.identity.clone());
     let share_kind = config.streaming.share_payload_kind.clone();
     let neuro_pool_path = node_data_dir().join("neuro_pool.json");
@@ -4344,16 +4359,27 @@ fn synthesize_response(
 async fn neuro_checkpoint(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.neuro.save_pool() {
-        Ok(()) => {
-            let path = state.neuro.pool_state_path().unwrap_or("").to_string();
-            (StatusCode::OK, Json(serde_json::json!({
-                "saved": true,
-                "path": path,
-            })))
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e }))),
+    // Save the Hebbian pool
+    let pool_result = state.neuro.save_pool();
+    let pool_path = state.neuro.pool_state_path().unwrap_or("").to_string();
+
+    // Save the QA store alongside the pool
+    let qa_path = node_data_dir().join("qa_store.json");
+    let qa_result = {
+        let qa = state.qa_runtime.lock().expect("qa mutex");
+        qa.save(&qa_path)
+    };
+
+    match (pool_result, qa_result) {
+        (Ok(()), Ok(())) => (StatusCode::OK, Json(serde_json::json!({
+            "saved": true,
+            "pool_path": pool_path,
+            "qa_path": qa_path.to_string_lossy(),
+        }))),
+        (Err(e), _) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("pool: {}", e) }))),
+        (_, Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("qa_store: {}", e) }))),
     }
 }
 
