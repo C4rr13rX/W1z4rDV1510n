@@ -529,9 +529,11 @@ impl Default for NodeApiConfig {
             api_key_header: "x-api-key".to_string(),
             api_key_hashes: Vec::new(),
             rate_limit_window_secs: 60,
-            rate_limit_max_requests: 10,
-            rate_limit_bridge_max_requests: 10,
-            rate_limit_balance_max_requests: 10,
+            // Default: effectively unlimited — this is your node, not a public API.
+            // Set lower values in node_config.json only if exposing to untrusted callers.
+            rate_limit_max_requests: u32::MAX,
+            rate_limit_bridge_max_requests: u32::MAX,
+            rate_limit_balance_max_requests: u32::MAX,
         }
     }
 }

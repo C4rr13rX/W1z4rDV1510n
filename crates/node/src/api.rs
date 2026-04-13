@@ -3107,9 +3107,9 @@ fn rate_limit(state: &ApiState, headers: &HeaderMap, route: &str) -> Result<()> 
         .unwrap_or("anonymous");
     let mut limiter = state.limiter.lock().expect("api limiter lock");
     let max_requests = match route {
-        "bridge" => state.rate_limit_bridge_max,
+        "bridge"  => state.rate_limit_bridge_max,
         "balance" => state.rate_limit_balance_max,
-        _ => state.rate_limit_default_max,
+        _         => state.rate_limit_default_max,
     };
     limiter.check_and_update(key, route, max_requests)
 }
