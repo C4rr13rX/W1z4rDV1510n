@@ -108,7 +108,14 @@ struct AnswerEntry {
     weights: HashMap<u32, f32>,
     /// Total activation across all reinforcements (for ranking ties).
     cumulative_activation: f64,
+    /// Highest source confidence seen across all pairs that map to this answer.
+    /// Used to boost high-confidence pairs (e.g. toddler 0.95) over low-confidence
+    /// textbook extractions (0.72) when raw activation is otherwise equal.
+    #[serde(default = "default_confidence")]
+    max_source_confidence: f32,
 }
+
+fn default_confidence() -> f32 { 0.5 }
 
 /// A single query result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +255,11 @@ impl QaRuntime {
                 let w = entry.weights.entry(q_id).or_insert(0.0);
                 *w = (*w + lr).min(1.0);
             }
+            // Keep the highest source confidence seen for this answer so the
+            // scoring pass can boost high-quality pairs over noisy extractions.
+            if confidence > entry.max_source_confidence {
+                entry.max_source_confidence = confidence;
+            }
             if let Some(pair) = self.pairs.get_mut(&qa_id) {
                 pair.reinforcement_count += 1;
             }
@@ -261,6 +273,7 @@ impl QaRuntime {
                     text: answer.to_string(),
                     weights: HashMap::new(),
                     cumulative_activation: 0.0,
+                    max_source_confidence: confidence,
                 };
                 self.hebbian_update_entry(&mut entry, &active_q_ids);
                 self.answer_index.insert(answer_key, self.answers.len());
@@ -325,9 +338,20 @@ impl QaRuntime {
         let tokens = tokenize(question);
 
         // Resolve token → neuron ID for known tokens only.
+        // Fallback: if the stemmed form isn't in vocab (vocab was built before
+        // stemming was added), try the unstemmed plural form so existing stored
+        // data stays usable without a full re-ingest.
         let active_q_ids: Vec<u32> = tokens
             .iter()
-            .filter_map(|t| self.question_vocab.get(t).copied())
+            .filter_map(|t| {
+                self.question_vocab.get(t).copied().or_else(|| {
+                    if !t.ends_with('s') {
+                        self.question_vocab.get(&format!("{}s", t)).copied()
+                    } else {
+                        None
+                    }
+                })
+            })
             .collect();
 
         if active_q_ids.is_empty() || self.answers.is_empty() {
@@ -340,6 +364,9 @@ impl QaRuntime {
         }
 
         // ── Compute activation for every answer entry ────────────────────
+        // Score = raw Hebbian activation × source confidence.  This boosts
+        // high-quality pairs (toddler: 0.95, verified: 1.0) over low-confidence
+        // textbook extractions (typically 0.72) when raw activation ties.
         let mut scored: Vec<(f32, usize)> = self
             .answers
             .iter_mut()
@@ -352,7 +379,8 @@ impl QaRuntime {
                     }
                 }
                 entry.cumulative_activation += act as f64;
-                (act, idx)
+                let weighted = act * entry.max_source_confidence;
+                (weighted, idx)
             })
             .filter(|(act, _)| *act >= self.config.min_activation)
             .collect();
@@ -361,6 +389,11 @@ impl QaRuntime {
         scored.truncate(self.config.top_k);
 
         // ── Normalize scores to [0, 1] ───────────────────────────────────
+        // The confidence-weighted scoring above already separates high-quality
+        // pairs (toddler: 0.95) from low-quality textbook extractions (0.72).
+        // Relative normalization keeps the top answer at 1.0; the synthesis
+        // relative-gap filter (see synthesize_response) then drops secondary
+        // results that don't score within 80% of the winner.
         let max_act = scored.first().map(|(a, _)| *a).unwrap_or(1.0).max(1e-6);
 
         let results: Vec<QaQueryResult> = scored
@@ -525,7 +558,22 @@ fn tokenize(text: &str) -> Vec<String> {
             if STOP_WORDS.contains(&cleaned.as_str()) {
                 return None;
             }
-            Some(cleaned)
+            // Simple English plural stemming: strip trailing 's' for words > 3
+            // chars that don't end in 'ss'.  This maps "trees"→"tree",
+            // "animals"→"animal", "colors"→"color" so rephrased queries match
+            // the singular vocabulary built during toddler/textbook ingestion.
+            let stemmed = if cleaned.len() > 3
+                && cleaned.ends_with('s')
+                && !cleaned.ends_with("ss")
+            {
+                cleaned[..cleaned.len() - 1].to_string()
+            } else {
+                cleaned
+            };
+            if stemmed.len() < 2 {
+                return None;
+            }
+            Some(stemmed)
         })
         .collect()
 }

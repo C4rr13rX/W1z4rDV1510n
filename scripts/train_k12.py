@@ -206,13 +206,22 @@ def ingest_qa_batch(client: httpx.Client, node_url: str,
     return 0
 
 def checkpoint(client: httpx.Client, node_url: str) -> None:
+    # Save QA store first (fast, < 1 MB) via dedicated endpoint.
     try:
-        resp = client.post(f"{node_url}/neuro/checkpoint", timeout=15)
-        if resp.is_success:
-            path = resp.json().get("path", "?")
-            tqdm.write(f"  Checkpointed -> {path}")
+        r = client.post(f"{node_url}/qa/checkpoint", timeout=30)
+        if r.is_success:
+            tqdm.write(f"  QA store saved -> {r.json().get('qa_path', '?')}")
     except Exception as e:
-        tqdm.write(f"  Checkpoint failed: {e}")
+        tqdm.write(f"  QA checkpoint failed: {e}")
+    # Full neuro pool checkpoint — may take several minutes for large pools.
+    # Fire the request but don't wait long; the node will finish in background.
+    try:
+        resp = client.post(f"{node_url}/neuro/checkpoint", timeout=600)
+        if resp.is_success:
+            path = resp.json().get("pool_path", "?")
+            tqdm.write(f"  Neuro pool saved -> {path}")
+    except Exception as e:
+        tqdm.write(f"  Neuro checkpoint: {e} (pool save may still be running)")
 
 def train_sequence(client: httpx.Client, node_url: str,
                    texts: list[str], tau: float = 1.5) -> bool:

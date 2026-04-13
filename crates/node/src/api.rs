@@ -848,6 +848,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/media/playback",       post(media_playback))
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
+        .route("/qa/checkpoint",        post(qa_checkpoint))
         .route("/neuro/motifs",         get(neuro_motifs))
         .route("/neuro/motifs/predict", post(neuro_motifs_predict))
         .route("/neuro/ask",            post(neuro_ask))
@@ -4326,18 +4327,39 @@ fn synthesize_response(
         seen.iter().any(|s| s == &prefix)
     }
 
-    // Question words for relevance filtering (stop words removed)
+    // Question words for relevance filtering (stop words removed, plurals stemmed)
     let stop_words = ["what","is","are","how","does","do","the","a","an","in","of",
                       "to","and","or","it","this","that","be","was","were","tell","me","about"];
     let question_words: Vec<String> = question.split_whitespace()
         .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
         .filter(|w| w.len() > 2 && !stop_words.contains(&w.as_str()))
+        .flat_map(|w| {
+            // Emit both the original word and its simple stemmed form so that
+            // "trees" matches an answer containing "tree", and vice versa.
+            let stemmed = if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") {
+                Some(w[..w.len()-1].to_string())
+            } else {
+                None
+            };
+            let mut forms = vec![w];
+            if let Some(s) = stemmed { forms.push(s); }
+            forms
+        })
         .collect();
 
-    // Add up to 3 distinct, substantive answer fragments
+    // Add up to 3 distinct, substantive answer fragments.
+    // Only include secondary/tertiary results if they score within 70% of the
+    // top result — prevents low-confidence textbook noise from appending to a
+    // clear toddler answer.
+    let top_conf = results.first().map(|r| r.confidence).unwrap_or(0.0);
     for r in results.iter() {
         if parts.len() >= 3 { break; }
         if r.confidence < 0.05 { continue; }
+        // Relative gap filter: secondary answers must be close enough to the best.
+        // At 80% the threshold cleanly separates toddler-quality pairs (source
+        // confidence 0.95 → weighted top) from textbook extractions (0.72 →
+        // ratio 0.72/0.95 ≈ 0.758 < 0.80), preventing cross-domain noise.
+        if parts.len() >= 1 && r.confidence < top_conf * 0.80 { continue; }
         let cleaned = clean_fragment(&r.answer);
         if cleaned.len() < 35 { continue; }
         if is_duplicate(&cleaned, &seen_prefixes) { continue; }
@@ -4359,10 +4381,11 @@ fn synthesize_response(
         let last_word = trimmed.split_whitespace().last().unwrap_or("");
         if last_word.len() == 1 && last_word != "a" { continue; }
 
-        // For questions with known words, prefer fragments containing at least one
-        // (soft filter — don't block if we have no other answers)
+        // Relevance filter: if we have question keywords, the answer must contain
+        // at least one of them.  Applied to all results (including the first) so
+        // a completely off-topic top result is also suppressed.
         let relevant = question_words.is_empty() || question_words.iter().any(|qw| lower.contains(qw.as_str()));
-        if !relevant && parts.len() >= 1 { continue; }
+        if !relevant { continue; }
 
         let prefix = cleaned.chars().take(35).collect::<String>().to_lowercase();
         seen_prefixes.push(prefix);
@@ -4379,21 +4402,32 @@ fn synthesize_response(
 }
 
 /// POST /neuro/checkpoint
-/// Force-save the NeuronPool to disk immediately.
-/// Returns the path written and the neuron count.
+/// Force-save the NeuronPool and QA store to disk.
+/// Both saves run on the blocking thread pool so the async executor stays free.
 async fn neuro_checkpoint(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Save the Hebbian pool
-    let pool_result = state.neuro.save_pool();
     let pool_path = state.neuro.pool_state_path().unwrap_or("").to_string();
-
-    // Save the QA store alongside the pool
     let qa_path = node_data_dir().join("qa_store.json");
-    let qa_result = {
+
+    // Snapshot the QA store under the lock, then release before the blocking save.
+    let qa_snapshot = {
         let qa = state.qa_runtime.lock().expect("qa mutex");
-        qa.save(&qa_path)
+        qa.clone()
     };
+
+    let pool_path_clone = pool_path.clone();
+    let qa_path_clone = qa_path.clone();
+
+    let (pool_result, qa_result) = tokio::task::spawn_blocking(move || {
+        let pr = state.neuro.save_pool();
+        let qr = qa_snapshot.save(&qa_path_clone);
+        (pr, qr)
+    }).await.unwrap_or_else(|e| (
+        Err(e.to_string()),
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "join error")),
+    ));
+    let _ = pool_path_clone; // suppress unused warning
 
     match (pool_result, qa_result) {
         (Ok(()), Ok(())) => (StatusCode::OK, Json(serde_json::json!({
@@ -4405,6 +4439,34 @@ async fn neuro_checkpoint(
             Json(serde_json::json!({ "error": format!("pool: {}", e) }))),
         (_, Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("qa_store: {}", e) }))),
+    }
+}
+
+/// POST /qa/checkpoint
+/// Save only the QA store to disk (fast — typically < 1 MB).
+/// Use this instead of /neuro/checkpoint when you only need to persist
+/// Q&A pair updates without serializing the full 22 GB neuro pool.
+async fn qa_checkpoint(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let qa_path = node_data_dir().join("qa_store.json");
+    let qa_snapshot = {
+        let qa = state.qa_runtime.lock().expect("qa mutex");
+        qa.clone()
+    };
+    let qa_path_clone = qa_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        qa_snapshot.save(&qa_path_clone)
+    }).await;
+    match result {
+        Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({
+            "saved": true,
+            "qa_path": qa_path.to_string_lossy(),
+        }))),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("qa_store: {}", e) }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("task: {}", e) }))),
     }
 }
 
