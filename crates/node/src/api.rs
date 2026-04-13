@@ -835,6 +835,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
         .route("/neuro/motifs",         get(neuro_motifs))
         .route("/neuro/motifs/predict", post(neuro_motifs_predict))
+        .route("/neuro/ask",            post(neuro_ask))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -4166,8 +4167,11 @@ async fn media_playback(
 struct PropagateReq {
     seed_labels: Vec<String>,
     #[serde(default = "default_hops")] hops: usize,
+    #[serde(default = "default_min_strength")] min_strength: f32,
+    #[serde(default)] top_k: Option<usize>,
 }
-fn default_hops() -> usize { 3 }
+fn default_hops() -> usize { 2 }
+fn default_min_strength() -> f32 { 0.02 }
 
 /// POST /neuro/propagate
 /// Feed seed labels from any modality; returns every label that fires above
@@ -4180,13 +4184,69 @@ async fn neuro_propagate(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "seed_labels must not be empty" })));
     }
-    let activated = state.neuro.propagate_all_threshold(&req.seed_labels, req.hops, 0.02);
+    let activated = state.neuro.propagate_all_threshold(&req.seed_labels, req.hops, req.min_strength);
     let mut sorted: Vec<(String, f32)> = activated.into_iter().collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some(k) = req.top_k {
+        sorted.truncate(k);
+    }
     let result: Vec<serde_json::Value> = sorted.iter()
         .map(|(label, strength)| serde_json::json!({ "label": label, "strength": strength }))
         .collect();
     (StatusCode::OK, Json(serde_json::json!({ "activated": result })))
+}
+
+#[derive(Deserialize)]
+struct AskReq {
+    text: String,
+    #[serde(default = "default_hops")] hops: usize,
+    #[serde(default = "default_ask_top_k")] top_k: usize,
+    #[serde(default = "default_ask_min_strength")] min_strength: f32,
+}
+fn default_ask_top_k() -> usize { 20 }
+fn default_ask_min_strength() -> f32 { 0.05 }
+
+/// POST /neuro/ask
+/// Plain English in → the node returns what it associates with that text,
+/// drawn directly from its trained Hebbian fabric and QA store.
+/// This is the primary inference interface — the node speaking from what it learned.
+async fn neuro_ask(
+    State(state): State<ApiState>,
+    Json(req): Json<AskReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "text must not be empty" })));
+    }
+
+    // 1. Hebbian associations from the neural fabric
+    let associations = state.neuro.ask_text(&req.text, req.hops, req.top_k, req.min_strength);
+    let assoc_json: Vec<serde_json::Value> = associations.iter().map(|(label, strength)| {
+        // Strip the "txt:word_" prefix for clean output
+        let word = label.strip_prefix("txt:word_").unwrap_or(label.as_str());
+        serde_json::json!({ "word": word, "strength": strength })
+    }).collect();
+
+    // 2. QA recall from the question-answer store
+    let now = now_timestamp();
+    let qa_report = {
+        let mut qa = state.qa_runtime.lock().expect("qa mutex");
+        qa.query(&req.text, now)
+    };
+    let qa_answers: Vec<serde_json::Value> = qa_report.results.iter().map(|r| {
+        serde_json::json!({
+            "answer": r.answer,
+            "confidence": r.confidence,
+            "book_id": r.book_id,
+            "page": r.page_index,
+        })
+    }).collect();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "question": req.text,
+        "associations": assoc_json,
+        "qa_answers": qa_answers,
+    })))
 }
 
 /// POST /neuro/checkpoint

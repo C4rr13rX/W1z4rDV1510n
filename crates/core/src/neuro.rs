@@ -866,11 +866,14 @@ impl NeuronPool {
                     Some(n) => n,
                     None => continue,
                 };
-                // Excitatory: add weighted activation
+                // Excitatory: add weighted activation, normalized by fan-out so
+                // high-degree nodes (common words with thousands of connections)
+                // don't swamp every downstream neuron equally.
+                let fan_out = (neuron.excitatory.len() as f32).sqrt().max(1.0);
                 for syn in &neuron.excitatory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] + src_act * syn.weight * 0.5).min(1.0);
+                        next[tgt] = (next[tgt] + src_act * syn.weight * 0.5 / fan_out).min(1.0);
                     }
                 }
                 // Inhibitory: suppress target
@@ -2896,6 +2899,33 @@ impl NeuroRuntime {
         }
         let guard = self.inner.lock();
         guard.pool.propagate(seed_labels, hops, min_activation)
+    }
+
+    /// Encode plain English text to neuro labels, propagate through the pool,
+    /// and return the top-k most strongly activated word labels.
+    /// This is the primary "ask the node" interface — text in, associations out.
+    pub fn ask_text(&self, text: &str, hops: usize, top_k: usize, min_strength: f32) -> Vec<(String, f32)> {
+        use crate::streaming::text_bits::{TextBitsConfig, TextBitsEncoder};
+        if !self.config.enabled || text.trim().is_empty() {
+            return Vec::new();
+        }
+        let enc = TextBitsEncoder::new(TextBitsConfig::default());
+        let labels = enc.encode_plain(text).labels;
+        if labels.is_empty() {
+            return Vec::new();
+        }
+        let activated = self.propagate_all_threshold(&labels, hops, min_strength);
+        // Return only word labels (skip structural noise like zone/role/seq/phon)
+        let mut words: Vec<(String, f32)> = activated
+            .into_iter()
+            .filter(|(label, _)| {
+                // Keep only "txt:word_X" labels (direct word associations)
+                label.starts_with("txt:word_") && !label.contains("_zone_")
+            })
+            .collect();
+        words.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        words.truncate(top_k);
+        words
     }
 
     // ── Prediction Registry + Episodic Memory API ────────────────────────────
