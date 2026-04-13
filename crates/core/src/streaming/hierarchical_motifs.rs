@@ -198,10 +198,14 @@ pub struct HierarchicalMotifRuntime {
 impl HierarchicalMotifRuntime {
     pub fn new(config: HierarchicalMotifConfig) -> Self {
         let hw = HardwareProfile::detect();
+        // Cap the window on ALL hardware to prevent unbounded growth.
+        // On constrained hardware use 4×max_seq_len; on high-spec use 64×max_seq_len.
+        // An unlimited window means collecting the entire history into a Vec on every
+        // train_weighted call — O(history_size) per call — which stalls after long runs.
         let window_cap = if hw.motif_window_cap().is_some() {
             Some(config.max_sequence_len * 4)
         } else {
-            None
+            Some(config.max_sequence_len * 64)  // 1024 items — ample for pattern detection
         };
         Self {
             config,
@@ -550,7 +554,10 @@ impl HierarchicalMotifRuntime {
     fn find_similar_candidate(&self, lvl: usize, subseq: &[String]) -> Option<String> {
         let level = &self.levels[lvl];
         let query_len = subseq.len();
-        for (key, occ) in &level.candidates {
+        // Scan at most 2000 candidates to keep the per-call cost O(1)-amortised.
+        // When candidates exceeds this the oldest entries are simply not re-matched,
+        // which is acceptable: motif discovery is an approximation anyway.
+        for (key, occ) in level.candidates.iter().take(2_000) {
             let cand_len = occ.ids.len();
             // Length filter: if the length ratio already exceeds the threshold, edit distance
             // can't possibly be within the threshold — skip the O(n*m) computation.
