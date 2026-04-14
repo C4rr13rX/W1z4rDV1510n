@@ -87,10 +87,10 @@ EDGE_CONF   = 0.25   # confidence < this for untrained → edge case PASS
 # ---------------------------------------------------------------------------
 
 def neuro_ask(client: httpx.Client, node_url: str, question: str) -> dict:
-    """POST /neuro/ask → full response dict."""
+    """POST /chat → full response dict (same handler as /neuro/ask)."""
     try:
         r = client.post(
-            f"{node_url}/neuro/ask",
+            f"{node_url}/chat",
             json={"text": question, "hops": 2, "top_k": 5, "min_strength": 0.01},
             timeout=30,
         )
@@ -266,7 +266,7 @@ def run_tests(node_url: str, verbose: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 0 validation tests")
-    parser.add_argument("--node", default="http://127.0.0.1:8090", help="Node API URL")
+    parser.add_argument("--node", default="http://127.0.0.1:8080", help="Node API URL")
     parser.add_argument("--verbose", action="store_true", help="Show all responses, not just failures")
     args = parser.parse_args()
     run_tests(args.node, args.verbose)

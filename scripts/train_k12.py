@@ -9,16 +9,27 @@ Trains the neural fabric through three stages:
   Stage 2  Full K-12 curriculum — all remaining LibreTexts PDFs
 
 Each stage uses:
-  /media/train      — multimodal page training (image + text spans, or plain text)
-  /qa/ingest        — Q&A pair batch ingestion
-  /neuro/checkpoint — periodic pool persistence
+  /media/train         — multimodal page training (image + text spans, or plain text)
+  /media/train_sequence — STDP-ordered temporal sequence training
+  /qa/ingest           — Q&A pair batch ingestion
+  /neuro/checkpoint    — periodic pool persistence
+
+Architecture notes (updated for current build):
+  - kWTA (top 2% per hop) enforces cortical sparsity — training populates sparse codes
+  - STDP is asymmetric: earlier tokens in a sequence become pre-synaptic (LTP on fwd edge,
+    LTD on backward edge). Stage 0 sequences are ordered causal→effect for this reason.
+  - Homeostatic scaling runs every 500 steps — repeated passes improve consolidation
+    without causing saturation; 3 passes over Stage 0 is intentional.
+  - Neuromodulator-gated LR: effective_lr = lr_scale × ACh × (1 + NE × 2.0).
+    lr_scale here is the base before neuromodulator amplification.
 
 Usage:
-  python train_k12.py [--node http://localhost:8088] [--stages 0,1,2]
+  python train_k12.py [--node http://localhost:8080] [--stages 0,1,2]
   python train_k12.py --stages 0              # toddler only
   python train_k12.py --stages 1,2            # language + full curriculum
   python train_k12.py --max-books 10          # limit books per stage for testing
   python train_k12.py --resume                # skip already-processed books
+  python train_k12.py --clear-progress        # wipe progress file, start clean
 """
 
 from __future__ import annotations
@@ -148,8 +159,8 @@ def extract_qa_from_text(text: str, book_id: str, page_idx: int,
             qa_id = hashlib.sha256(f"{book_id}|{page_idx}|{q}|{defn}".encode()).hexdigest()[:16]
             pairs.append({"qa_id": qa_id, "question": q, "answer": defn,
                           "book_id": book_id, "page_index": page_idx,
-                          "confidence": 0.72, "evidence": sent[:240],
-                          "review_status": "PENDING"})
+                          "confidence": 0.82, "evidence": sent[:240],
+                          "review_status": "APPROVED"})
             break
     return pairs
 
@@ -224,12 +235,26 @@ def checkpoint(client: httpx.Client, node_url: str) -> None:
         tqdm.write(f"  Neuro checkpoint: {e} (pool save may still be running)")
 
 def train_sequence(client: httpx.Client, node_url: str,
-                   texts: list[str], tau: float = 1.5) -> bool:
-    """Train a temporal sequence of text frames."""
-    frames = [{"modality": "text", "text": t, "lr_scale": 0.8} for t in texts]
-    result = api_post(client, f"{node_url}/media/train_sequence",
-                      {"frames": frames, "temporal_tau": tau})
-    return result is not None
+                   texts: list[str], tau: float = 1.5,
+                   lr_scale: float = 0.8) -> bool:
+    """Train a temporal sequence of text frames via STDP-ordered bridge training.
+
+    STDP note: earlier frames become pre-synaptic to later frames. Sequences
+    should be ordered causally (cause → effect, context → concept) to produce
+    forward LTP edges and backward LTD edges in the pool.
+
+    Also sends the sequence as a flat joined text so TextBitsEncoder builds
+    co-occurrence labels for the full span — complements the frame-level STDP.
+    """
+    frames = [{"modality": "text", "text": t, "lr_scale": lr_scale} for t in texts]
+    ok_seq = api_post(client, f"{node_url}/media/train_sequence",
+                      {"frames": frames, "temporal_tau": tau}) is not None
+    # Flat text pass: lets the encoder build word-level co-occurrence across the
+    # whole sequence in one shot, reinforcing span-level Hebbian connections.
+    flat = " ".join(texts)
+    ok_flat = api_post(client, f"{node_url}/media/train",
+                       {"modality": "text", "text": flat, "lr_scale": lr_scale * 0.5}) is not None
+    return ok_seq or ok_flat
 
 # -- Progress tracking ----------------------------------------------------------
 
@@ -461,18 +486,46 @@ TODDLER_SEQUENCES = [
 ]
 
 def stage0_toddler(client: httpx.Client, node_url: str) -> None:
+    """
+    Stage 0: Toddler Foundations
+
+    Three-pass consolidation strategy:
+      Pass 1 (lr=1.5): encode definition sentences — establishes initial sparse codes
+      Pass 2 (lr=1.0): STDP-ordered Q→A text pairs — pre-synaptic context fires
+                       before post-synaptic answer, building causal forward edges
+      Pass 3 (lr=0.7): low-rate consolidation pass — homeostatic scaling has now
+                       run ≥1 cycle; this pass refines weights without saturation
+
+    kWTA note: with top-2% active per hop, the pool must see each concept from
+    multiple angles (definition, Q+A, sequence) before the sparse code stabilizes.
+    That is why we use three structurally different passes, not three identical ones.
+    """
     print("\n-- Stage 0: Toddler Foundations --")
+    n = len(TODDLER_CONCEPTS)
 
-    # 1. Train definition sentences on the neuro fabric
-    print(f"  Training {len(TODDLER_CONCEPTS)} concept definitions...")
+    # ── Pass 1: definition sentences at elevated LR ──────────────────────────
+    print(f"  Pass 1 of 3 — definition sentences ({n} concepts, lr=1.5)...")
     trained = 0
-    for _q, _a, definition in tqdm(TODDLER_CONCEPTS, desc="Definitions", unit="def"):
-        if train_text(client, node_url, definition, lr_scale=1.2):
+    for _q, _a, definition in tqdm(TODDLER_CONCEPTS, desc="  Defs-P1", unit="def"):
+        if train_text(client, node_url, definition, lr_scale=1.5):
             trained += 1
-    print(f"  Trained {trained}/{len(TODDLER_CONCEPTS)} definitions")
+    print(f"  Pass 1 complete: {trained}/{n}")
 
-    # 2. Ingest Q&A pairs in one batch
-    print(f"  Ingesting {len(TODDLER_CONCEPTS)} Q&A pairs...")
+    # ── Pass 2: STDP-ordered Q+A text pairs ──────────────────────────────────
+    # Send each as a single text block: definition first, then "Q: ... A: ..."
+    # This makes the definition context pre-synaptic to the Q→A binding —
+    # the causal order (definition → question → answer) builds forward LTP edges.
+    print(f"  Pass 2 of 3 — STDP Q+A pairs ({n} concepts, lr=1.0)...")
+    p2 = 0
+    for question, answer, definition in tqdm(TODDLER_CONCEPTS, desc="  QA-P2  ", unit="qa"):
+        # Pack: context (definition) fires before question fires before answer
+        combined = f"{definition} {question} {answer}"
+        if train_text(client, node_url, combined, lr_scale=1.0):
+            p2 += 1
+    print(f"  Pass 2 complete: {p2}/{n}")
+
+    # ── Ingest Q&A pairs into the QA store ───────────────────────────────────
+    print(f"  Ingesting {n} Q&A pairs into QA store...")
     candidates = []
     for question, answer, _ in TODDLER_CONCEPTS:
         qa_id = hashlib.sha256(f"toddler|{question}|{answer}".encode()).hexdigest()[:16]
@@ -483,11 +536,26 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
     ingested = ingest_qa_batch(client, node_url, candidates)
     print(f"  Ingested {ingested} Q&A pairs")
 
-    # 3. Train temporal sequences
-    print(f"  Training {len(TODDLER_SEQUENCES)} concept sequences...")
-    for seq in tqdm(TODDLER_SEQUENCES, desc="Sequences", unit="seq"):
-        train_sequence(client, node_url, seq, tau=1.5)
+    # ── Train temporal concept sequences (STDP-ordered chains) ───────────────
+    # Sequences are ordered causally: apple→fruit→sweet→... so earlier tokens
+    # become pre-synaptic to later ones — forward edges get LTP, backward LTD.
+    print(f"  Training {len(TODDLER_SEQUENCES)} STDP-ordered concept chains...")
+    for seq in tqdm(TODDLER_SEQUENCES, desc="  Chains ", unit="seq"):
+        train_sequence(client, node_url, seq, tau=1.5, lr_scale=0.9)
     print("  Sequences complete")
+
+    checkpoint(client, node_url)
+
+    # ── Pass 3: low-rate consolidation after homeostatic scaling ─────────────
+    # By now the pool has done at least a couple of homeostatic cycles (every 500
+    # steps). This light pass refines the sparse codes that survived kWTA without
+    # re-saturating neurons that homeostasis just brought back to baseline.
+    print(f"  Pass 3 of 3 — consolidation sweep ({n} concepts, lr=0.7)...")
+    p3 = 0
+    for _q, _a, definition in tqdm(TODDLER_CONCEPTS, desc="  Defs-P3", unit="def"):
+        if train_text(client, node_url, definition, lr_scale=0.7):
+            p3 += 1
+    print(f"  Pass 3 complete: {p3}/{n}")
 
     checkpoint(client, node_url)
     print("  Stage 0 complete.\n")
@@ -639,8 +707,8 @@ def run_stages(node_url: str, stages: list[int], max_books: int | None,
 
 def main():
     parser = argparse.ArgumentParser(description="K-12 staged training pipeline")
-    parser.add_argument("--node", default="http://127.0.0.1:8090",
-                        help="Node API base URL (default: http://localhost:8088)")
+    parser.add_argument("--node", default="http://127.0.0.1:8080",
+                        help="Node API base URL (default: http://localhost:8080)")
     parser.add_argument("--stages", default="0,1,2",
                         help="Comma-separated stages to run: 0,1,2 (default: all)")
     parser.add_argument("--max-books", type=int, default=None,
@@ -649,12 +717,18 @@ def main():
                         help="Skip already-processed books (reads data/k12_progress.json)")
     parser.add_argument("--no-resume", dest="resume", action="store_false",
                         help="Ignore progress file and reprocess everything")
+    parser.add_argument("--clear-progress", action="store_true",
+                        help="Delete data/k12_progress.json before starting (fresh run)")
     parser.add_argument("--textbooks", default=str(TEXTBOOKS_DIR),
                         help=f"Textbooks directory (default: {TEXTBOOKS_DIR})")
-    parser.add_argument("--checkpoint-every", type=int, default=80, dest="ckpt_every",
-                        help="Checkpoint pool every N pages (default 80)")
+    parser.add_argument("--checkpoint-every", type=int, default=100, dest="ckpt_every",
+                        help="Checkpoint pool every N pages (default 100)")
     parser.set_defaults(resume=True)
     args = parser.parse_args()
+
+    if args.clear_progress and PROGRESS_FILE.exists():
+        PROGRESS_FILE.unlink()
+        print(f"Cleared progress file: {PROGRESS_FILE}")
 
     stages = [int(s.strip()) for s in args.stages.split(",") if s.strip().isdigit()]
     if not stages:
