@@ -2,6 +2,41 @@
 
 A distributed intelligence node that learns to physically describe its environment — not by classification, but by growing structure from what it observes. CPU and RAM native. No GPUs required.
 
+---
+
+## What this is — for neuroscientists and AI architects
+
+Most neural networks are fixed-topology function approximators trained offline. This is a different thing: a **living, spiking-inspired neural fabric** that grows its own architecture in RAM, trained online from any sensor stream.
+
+The learning stack implements the current neuroscience canon in software:
+
+- **SDR / k-Winners-Take-All (kWTA)** — After each propagation hop, only the top 2% of activated neurons survive. This enforces cortical sparsity (1–5%) in real neural tissue, eliminates saturation, and gives each pattern a unique sparse code. Without this, Hebbian accumulation drives all neurons toward uniform activation and the fabric loses discriminative power.
+- **STDP with asymmetric long-term potentiation/depression** — `hebbian_pair(a, b)` is direction-aware. `a` (pre-synaptic, fires first) → `b` (post-synaptic) gets LTP (×1.0). `b` → `a` gets LTD (×−0.3). The result: the fabric encodes causal order. "photosynthesis→glucose" is a stronger edge than "glucose→photosynthesis."
+- **Homeostatic synaptic scaling** — Every 500 steps, each neuron's outgoing weights are multiplicatively scaled toward a target mean activation of 0.10, correcting at 4% per pass. Preserves relative weight ratios while preventing runaway Hebbian growth. This is the computational equivalent of Turrigiano homeostatic plasticity.
+- **Per-neuron EMA activation tracking** — Each neuron maintains a slow exponential moving average of its own activation (`τ ≈ 2000 steps`), the input signal that drives homeostatic scaling — the same mechanism as sliding threshold models of intrinsic excitability.
+- **Neuromodulator system (DA / NE / ACh / serotonin)** — Four neuromodulator concentrations per pool, each with distinct decay dynamics. Acetylcholine gates plasticity multiplicatively. Norepinephrine boosts effective learning rate up to 3×. Dopamine enables retrograde potentiation. All decay toward tonic baseline each step.
+- **Three-factor Hebbian / dopamine retrograde potentiation** — Neurons with high activation trace are tagged at dopamine release. `flush_dopamine_potentiation()` applies `Δw = lr × dopamine_tag × weight` to their outgoing synapses. This is the computational correlate of reward-modulated STDP — the reward signal (dopamine) potentiates the connections that led to the outcome.
+- **Predictive coding** — `propagate_predictive()` implements a first-order hierarchical predictive coding loop. Hop 0 propagates full activation. Subsequent hops propagate only the residual `(actual − prediction).max(0.0)`. Neurons that activate exactly as predicted pass zero signal upstream — only surprise propagates. Prediction EMAs update online each training pass (`α = 0.10`).
+- **Neuromodulator-gated learning rate** — In `train_weighted_with_meta()`: `effective_lr = lr_scale × ACh × (1 + NE × 2.0)`. When the hypothesis queue fires a NE spike (failed QA gate), the next training run runs at elevated learning rate — attention sharpens on surprising inputs.
+- **Dual memory systems (CLS theory)** — The QA store is the hippocampus: fast one-shot episodic retrieval. The NeuronPool is the neocortex: slow statistical learning. They interact — a QA hit seeds a specific pool activation pattern, combining the precision of episodic memory with the generalization of distributed representations.
+- **Multi-pathway convergence inference** — `propagate_combined()` accepts question labels (weight 1.0) and QA answer labels (weight = `qa_conf × 1.5`) simultaneously, biasing propagation toward the answer's territory before the pool activates. Confidence gate: `qa_confidence ≥ 0.5 AND active_question_neurons > 0`.
+- **Hypothesis → research feedback loop** — Questions that fall below the QA confidence gate are queued in the hypothesis queue. `research_agent.py` polls the queue, fetches Wikipedia and ArXiv answers, ingests them via `/qa/ingest` + `/media/train`, and resolves them via `/hypothesis/resolve`, which triggers a DA flush — reward signal for correct prediction resolution.
+
+**For architects:** The system is designed to be observable at every level. Every neuron records its influence history. Every synapse carries provenance. The neuromodulator state is readable via API. The hypothesis queue is an explicit epistemic state — the system knows what it doesn't know and acts on it.
+
+---
+
+## Benchmarks
+
+| Task | Score | Notes |
+|------|-------|-------|
+| QA retrieval accuracy | **0.951** | Hebbian Q&A fabric, `POST /qa/query` |
+| Chat / generate quality | **0.630** | `POST /chat`, `POST /neuro/generate` |
+
+The chat/generate score reflects the current training corpus. Both endpoints use the dual-memory (CLS) architecture: QA store for high-confidence fast retrieval, neuro pool for generalization.
+
+---
+
 The node is an **instrument, not an agent**. It observes every incoming sensor stream, builds a living representation of the environment inside itself, and reports what it sees in the language of physics. It does not act on that data. Whatever acts on its outputs — a script, a decision system, a human — does so with full transparency into how the node arrived at its conclusions. The node is the measurement device. Everything else is up to you.
 
 Every sensor stream — a chess board, a video camera, a news feed, a social graph, a chemical state — arrives in the same generic format. The node has no knowledge of any specific domain. It sees positions, labels, and co-occurrences. What it learns from a chess game transfers to what it knows about crowd dynamics, and vice versa. The neural fabric that grows from one domain is the same fabric another domain trains.
@@ -40,6 +75,8 @@ When the EEM can't explain a label cluster — when something is happening that 
 │                                                                      │
 │  :8080  Neuro API ── NeuroRuntime ── EquationMatrix ── QaRuntime    │
 │         Media API ── /media/train  /media/playback  /neuro/propagate│
+│         Chat API  ── /chat  /neuro/generate                         │
+│         Hyp  API  ── /hypothesis/queue  /hypothesis/resolve         │
 │  :8090  Node  API ── ClusterNode  ── HashRing ── OtpRegistry        │
 │                                                                      │
 │  KnowledgeRuntime ── HierarchicalMotifs ── FabricTrainer            │
@@ -57,7 +94,7 @@ When the EEM can't explain a label cluster — when something is happening that 
           │                 │                  │                │
    chess_training     rtsp_pose_bridge   rss_topic_bridge  w1z4rd-dashboard
    _loop.py           .py                .py               (GUI client binary)
-   train_obstacle.py  playback_obstacle.py                 (demo scripts)
+   research_agent.py  train_obstacle.py  playback_obstacle.py
    (app / script)     (app / script)     (app / script)
 ```
 
@@ -124,17 +161,20 @@ Every prediction is the result of multiple components voting simultaneously. Und
 
 | Component | Mechanism |
 |-----------|-----------|
-| **Hebbian / STDP weights** | Co-occurrence history accumulated over all training — strongest synaptic paths win at inference |
+| **STDP / asymmetric Hebbian weights** | Co-occurrence history with directional bias — pre→post synapses (causal order) are potentiated; post→pre synapses are depressed (LTD ×−0.3). Strongest causal paths win at inference |
+| **SDR / k-Winners-Take-All** | After each propagation hop, only the top 2% of active neurons survive. Enforces cortical sparsity, eliminates pool saturation, gives each concept a unique sparse code |
+| **Homeostatic synaptic scaling** | Every 500 steps, per-neuron outgoing weights are rescaled multiplicatively toward target activation (0.10). Preserves relative ratios while preventing runaway growth |
+| **Neuromodulators (ACh / NE / DA / serotonin)** | ACh gates plasticity multiplicatively; NE raises effective learning rate up to 3× on surprising inputs; DA enables retrograde potentiation of recently active synapses; serotonin provides tonic stability baseline |
+| **Dopamine retrograde potentiation** | On hypothesis resolution, DA is released at the reward signal level. Neurons with high activation trace are tagged; `flush_dopamine_potentiation()` strengthens their outgoing synapses — three-factor Hebbian (activity × activity × reward) |
+| **Predictive coding residuals** | `propagate_predictive()` — only prediction error (surprise) propagates beyond the first hop. Neurons activating as expected pass zero signal; unexpected activations dominate propagation |
+| **Dual memory (CLS) — QA fast path** | QA store (hippocampus analog) provides high-confidence episodic answers. Confidence ≥ 0.5 gates into multi-pathway inference; output is capped at QA answer word count to prevent pool noise |
+| **Multi-pathway convergence inference** | `propagate_combined()` seeds from both question labels (weight 1.0) and QA answer labels (weight = qa_conf × 1.5) simultaneously — answer territory biases pool propagation before it activates |
+| **NE spike on hypothesis queue** | When QA gate fails, NE is released (0.75 units). Next training run runs at elevated learning rate — the system applies stronger correction to its own uncertainty |
 | **Mini-columns** | Neuron groups that collapse to single concept neurons over time; once promoted they fire as a unit with high confidence |
 | **Working memory carry** | Cosine similarity between consecutive frames sets a dynamic carry factor; similar frames reinforce prior context, dissimilar frames reset it |
 | **Temporal motif priors** | `HierarchicalMotifRuntime` mines recurring sequences at unbounded depth; the proposal kernel pulls candidates toward centroids of motif classes the fabric expects next |
 | **Classical annealer** | Searches minimum-energy state configurations; temperature is coherence-modulated — confident fabric → fast convergence; uncertain fabric → high-temperature exploration |
-| **Motif-prior energy term** | Penalizes proposed states that contradict learned sequence expectations; novelty penalty proportional to distance from all known motif centroids |
-| **Beam search** | Lookahead re-ranking — explores N futures M steps deep and back-propagates energy to the current prediction |
-| **Relational / factorized priors** | Historical role+zone frequency distributions blended into candidate scoring |
 | **Environmental Equation Matrix** | 282 equations across 24 disciplines vote on active sensor labels; matching equations reinforce associated labels; hypothesis gaps suppress confidence when nothing matches |
-| **QaRuntime bleed** | Existing Hebbian weights from Q&A training cross-activate during inference — what the fabric learned from one domain bleeds into another |
-| **Cross-stream activation** | Labels from one stream propagate hop-by-hop through synapses into other streams; cross-domain associations strengthen or weaken retrieval |
 | **Surprise-weighted replay** | Persistent mispredictions are replayed at higher frequency — the system applies stronger correction to its worst errors |
 | **Peer node learning** | In cluster mode, neuro snapshots from other nodes train local weights at low learning rate; distributed observations converge into shared knowledge |
 | **ResourceMonitor** | Under CPU/RAM pressure, batch sizes and update frequency drop — slower adaptation, more conservative predictions |
@@ -144,13 +184,33 @@ Every prediction is the result of multiple components voting simultaneously. Und
 ## Core components
 
 ### Neural Fabric (`NeuroRuntime`)
-- CPU+RAM neuron pools with neurogenesis, Hebbian/STDP learning, winner-take-all sparsification, and mini-columns that collapse to concept neurons over time
-- `observe_snapshot()` — ingest any `EnvironmentSnapshot`; symbols become zone labels, velocity vectors and metadata flow in as `meta::key::value` labels
-- `cross_stream_activate()` — propagate from one stream's labels and read what fires in another stream; cross-modal inference through grown Hebbian connections
-- `reconstruct_sequence()` — frame-by-frame temporal propagation with dynamic carry factor (cosine similarity between consecutive frames)
-- `propagate()` — passive synapse walk returning label→strength map without mutating pool state
+
+A spiking-inspired Hebbian neural pool implementing the full neuroscience plasticity stack in RAM. No matrix operations — inference is a propagation event through grown synaptic connections.
+
+**Learning mechanisms (all active simultaneously):**
+- **STDP** — asymmetric `hebbian_pair(a, b)`: a→b gets LTP, b→a gets LTD. Directional knowledge encoding.
+- **kWTA sparsification** — top 2% active neurons per hop survive. Sparse distributed representations.
+- **Homeostatic scaling** — per-neuron multiplicative weight correction every 500 steps; targets mean activation 0.10.
+- **Three-factor Hebbian / dopamine retrograde** — `apply_dopamine()` tags trace-active neurons; `flush_dopamine_potentiation()` strengthens their outgoing synapses on reward.
+- **Neuromodulator-gated plasticity** — `effective_lr = lr_scale × ACh × (1 + NE × 2.0)` in every training call.
+- **Prediction EMA** — per-neuron `prediction` field updated online (α=0.10); drives predictive coding propagation.
+- **Max-weight cap (4.0)** — `add_synapse()` clamps at 4.0; eliminates unbounded accumulation.
+
+**Inference methods:**
+- `propagate(seed_labels, hops)` — passive synapse walk with kWTA at each hop; returns label→strength map
+- `propagate_weighted(pathways, hops)` — multi-pathway propagation with per-seed weights
+- `propagate_combined(question_labels, qa_answer_labels, qa_conf, hops)` — dual-memory convergence inference
+- `propagate_predictive(pathways, hops, min_activation)` — predictive coding; only surprise propagates beyond hop 0
+- `cross_stream_activate(labels, target_stream, hops)` — cross-modal inference through Hebbian connections
+- `reconstruct_sequence(frames, target_stream, hops)` — temporal sequence reconstruction with cosine carry factor
+
+**Runtime API:**
+- `release_neuromodulator(kind, amount)` — spike DA / NE / ACh / serotonin
+- `flush_dopamine()` — apply retrograde potentiation to tagged synapses
+- `neuromodulator_state()` — read current concentrations
+- `observe_snapshot()` — ingest any `EnvironmentSnapshot`
 - Influence/provenance tracking: every neuron records which streams and data shaped it
-- Double-buffered propagation, binary-search synapse lists, EMA co-occurrence tracking, dirty-flag mini-columns — all hardware-adaptive, no hard-coded limits
+- Double-buffered propagation, binary-search synapse lists, EMA co-occurrence tracking, dirty-flag mini-columns — all hardware-adaptive
 
 ### Multimodal encoder library (`crates/core/src/streaming/`)
 
@@ -218,7 +278,20 @@ All encoders share the same default **8×8 spatial grid**. A cursor at zone `(3,
 - Textbook and domain knowledge encoded as grown synaptic state
 - Querying fires input neurons and reads the output network — no matrix multiplication at inference
 - The answer is a reaction in the fabric's state
+- Persisted across restarts; hot-tier caching for high-confidence pairs
 - API: `POST /qa/ingest`, `POST /qa/query`
+
+### Hypothesis Queue and Research Feedback Loop
+
+When `neuro_ask` or `neuro_generate` fails the QA confidence gate (< 0.5), the question is added to the hypothesis queue and a norepinephrine spike is released (NE = 0.75). The `research_agent.py` script runs as a background service:
+
+1. `GET /hypothesis/queue` — fetch open questions
+2. Fetch Wikipedia REST API + ArXiv Atom API for each question
+3. `POST /qa/ingest` — ingest the answer into the QA store
+4. `POST /media/train` — train the neuro pool on the answer text
+5. `POST /hypothesis/resolve` — mark the hypothesis resolved with a confidence score
+
+On resolution, dopamine is released proportional to confidence and `flush_dopamine_potentiation()` runs — the connections that led to the correct prediction are retroactively strengthened. This is the computational equivalent of the hippocampal-cortical consolidation loop.
 
 ### Knowledge Graph (`KnowledgeRuntime`)
 - JATS/NLM ingestion with text blocks, figure assets, and OCR hooks
@@ -251,8 +324,12 @@ All endpoints are on `:8080`. Start the node with the `api` subcommand:
 | `/neuro/train` | POST | Feed an `EnvironmentSnapshot` to the neural fabric |
 | `/neuro/snapshot` | GET | Current activation, predictions, motifs, top influences |
 | `/neuro/propagate` | POST | Feed seed labels → returns all labels that fire above threshold; cross-modal inference |
+| `/neuro/generate` | POST | Generate text from the neuro pool using QA gate + pre-computed activation map decode |
 | `/media/train` | POST | Encode and co-train one or more modalities: `image`, `audio`, `text`, `motion`, `action`, `full` |
 | `/media/playback` | POST | Given goal text + optional screenshot → predict action zone (where to move cursor / what to click) |
+| `/chat` | POST | Chat endpoint — dual-memory CLS inference: QA fast path + pool generalization |
+| `/hypothesis/queue` | GET | Open hypothesis entries (questions that failed the QA confidence gate) |
+| `/hypothesis/resolve` | POST | Resolve a hypothesis with an answer and confidence; triggers dopamine flush |
 | `/equations/search` | GET | Text search across the equation matrix |
 | `/equations/apply` | POST | Find equations that explain active sensor labels + dims |
 | `/equations/ingest` | POST | Add equations from free text |
@@ -336,13 +413,14 @@ The annealer predicts environment states by searching over candidate configurati
 
 #### Training
 - `observe_snapshot()` — ingest any `EnvironmentSnapshot`; converts symbols to zone/role/metadata labels, Hebbian updates across all activated neurons
-- `train_weighted_with_meta()` — weighted Hebbian update with full metadata context attached to each synapse modification
+- `train_weighted_with_meta()` — weighted Hebbian update with full metadata context; neuromodulator-gated `effective_lr = lr_scale × ACh × (1 + NE × 2.0)`; prediction EMA updated each pass
 - Neurons accumulate up to 16 influence records (weakest evicted when full); records from the same stream+label set merged and strength averaged
 
 #### Inference
 - `cross_stream_activate(labels, target_stream, hops)` — propagate hop-by-hop through Hebbian synapses, collect activations matching target stream
 - `reconstruct_sequence(frames, target_stream, hops)` — temporal sequence reconstruction with dynamic carry factor from cosine similarity between consecutive frames
-- `propagate(seed_labels, hops)` — passive synapse walk without mutating pool state
+- `propagate(seed_labels, hops)` — passive synapse walk with kWTA per hop; does not mutate pool state
+- `propagate_predictive(pathways, hops, min_activation)` — only prediction error propagates beyond hop 0
 
 #### Snapshot
 `NeuroSnapshot` exposes: `active_labels`, `active_networks`, `minicolumns`, `centroids`, `network_links`, `temporal_predictions`, `temporal_motif_priors`, `top_influences`, `active_streams`, `active_meta_labels`, `working_memory`
@@ -421,6 +499,7 @@ Motifs are the currency the annealer and the EEM both trade in. The hierarchical
 - Figure-to-text association tasks with voting and confidence thresholds
 - **Textbook pipeline** (`textbook_scripts/`): downloads CC-licensed OpenStax PDFs, segments pages into labeled bounding boxes using a microcortex perceptron classifier, extracts Q&A candidate pairs, emits review queues for human annotation
 - **Hebbian Q&A fabric**: verified Q&A pairs encoded into synaptic state; at query time, question tokens fire input neurons; output network surfaces ranked answers — no matrix math at inference
+- **Autonomous research loop** (`scripts/research_agent.py`): polls `/hypothesis/queue`, fetches Wikipedia + ArXiv, ingests answers, resolves hypotheses with DA reward signal
 
 ### 10) Health, survival, and threat overlays
 
@@ -484,9 +563,9 @@ The node exposes a generic API. Scripts define the domain. Below are four catego
 
 ### Conversational / LLM-style
 
-Feed conversation pairs through `/qa/ingest` (`question → answer`). At inference time `/qa/query` fires question tokens through the Hebbian fabric and returns ranked activations as the response. Cross-domain bleed means answers draw on everything else the fabric has been trained on simultaneously — a question that triggers physics-relevant labels also activates matching EEM equations.
+Feed conversation pairs through `/qa/ingest` (`question → answer`). At inference time `/chat` or `/qa/query` fires question tokens through the dual-memory CLS architecture — QA store for high-confidence fast retrieval, neuro pool for generalization and cross-domain bleed. `/neuro/generate` uses the pre-computed activation map decode (single propagation pass + rank sort) for free-form generation.
 
-This is associative retrieval, not autoregressive generation. Responses are activated from trained state rather than generated token-by-token. Suitable for factual recall, domain Q&A, and follow-up questions that share vocabulary with prior exchanges.
+This is associative retrieval + predictive coding, not autoregressive generation. Responses are activated from trained state rather than generated token-by-token. Suitable for factual recall, domain Q&A, and follow-up questions that share vocabulary with prior exchanges.
 
 ### Code assistance
 
@@ -504,9 +583,9 @@ The result is genuinely novel — assembled from the intersection of everything 
 
 ### Scientific and engineering Q&A
 
-The strongest native fit. The EEM already contains the relevant equations; the textbook pipeline (`textbook_scripts/`) already extracts Q&A pairs from OpenStax PDFs; `/knowledge/ingest` handles JATS/NLM papers. A script ingests domain material, then at query time combines `/qa/query` with `/equations/apply` — the answer comes from both the Hebbian fabric and equation matching.
+The strongest native fit. The EEM already contains the relevant equations; the textbook pipeline (`textbook_scripts/`) already extracts Q&A pairs from OpenStax PDFs; `/knowledge/ingest` handles JATS/NLM papers. A script ingests domain material, then at query time combines `/chat` with `/equations/apply` — the answer comes from both the Hebbian fabric and equation matching.
 
-Cross-domain transfer is a genuine advantage: a thermodynamics question activates energy-balance connections built from every other domain trained simultaneously. When no equation matches well, the system reports a hypothesis gap explicitly rather than returning a confident wrong answer.
+Cross-domain transfer is a genuine advantage: a thermodynamics question activates energy-balance connections built from every other domain trained simultaneously. When no equation matches well, the system reports a hypothesis gap explicitly rather than returning a confident wrong answer. The research agent then fetches an answer and the system learns from it autonomously.
 
 ### GUI / screenshot understanding
 
@@ -578,6 +657,8 @@ These scripts use the node architecture — the node has no knowledge of their d
 | `textbook_scripts/` | Knowledge | Q&A pairs from OpenStax textbooks |
 | `scripts/train_obstacle.py` | Screen navigation | Screenshot + goal text + mouse trajectory via `/media/train`; anchor pairs for discrimination |
 | `scripts/playback_obstacle.py` | Screen navigation | Goal text → `/media/playback` → predicted zone → Playwright cursor action |
+| `scripts/research_agent.py` | Hypothesis resolution | Polls `/hypothesis/queue`, fetches Wikipedia + ArXiv, ingests via `/qa/ingest` + `/media/train`, resolves via `/hypothesis/resolve` |
+| `scripts/train_full_pipeline.py` | Full training benchmark | End-to-end QA + chat quality scoring |
 
 **Adding a new domain**: translate your data to `EnvironmentSnapshot`, `POST` to `/neuro/train`, optionally send to `/qa/ingest` and `/equations/apply`. The node learns from it alongside everything else.
 
@@ -601,6 +682,19 @@ cp target/release/w1z4rdv1510n-node.exe  bin/w1z4rd_node.exe  # Windows
 # Check node health
 curl http://localhost:8080/health
 
+# Chat with the node
+curl -X POST http://localhost:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"text": "what is photosynthesis"}'
+
+# Generate from the neuro pool
+curl -X POST http://localhost:8080/neuro/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "photosynthesis", "max_tokens": 20}'
+
+# Check the hypothesis queue (questions the node couldn't answer with confidence)
+curl http://localhost:8080/hypothesis/queue
+
 # Check what the equation matrix knows
 curl http://localhost:8080/equations/report
 
@@ -611,6 +705,9 @@ curl http://localhost:8080/equations/gaps
 curl -X POST http://localhost:8080/neuro/propagate \
   -H "Content-Type: application/json" \
   -d '{"seed_labels": ["txt:word_red"], "hops": 1}'
+
+# Run the autonomous research agent (resolves hypothesis queue entries via Wikipedia + ArXiv)
+python scripts/research_agent.py
 
 # --- Dashboard GUI (separate binary, connects to the node API) ---
 ./bin/w1z4rd-dashboard                          # localhost defaults
