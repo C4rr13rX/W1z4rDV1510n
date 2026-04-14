@@ -4376,6 +4376,12 @@ struct AskReq {
     #[serde(default = "default_hops")] hops: usize,
     #[serde(default = "default_ask_top_k")] top_k: usize,
     #[serde(default = "default_ask_min_strength")] min_strength: f32,
+    /// If set, this turn is a reply to a previous system question.
+    /// The node trains the (context → text) pair, resolves the queued
+    /// hypothesis, and fires dopamine — then continues to process `text`
+    /// as the current input so the conversation flows forward.
+    #[serde(default)]
+    context: Option<String>,
 }
 fn default_ask_top_k() -> usize { 20 }
 fn default_ask_min_strength() -> f32 { 0.05 }
@@ -4405,8 +4411,78 @@ async fn neuro_ask(
     let hops    = req.hops;
     let max_tok = req.top_k.max(30);
     let min_str = req.min_strength;
+    let context = req.context.clone();
 
     let result = tokio::task::spawn_blocking(move || {
+        // ── Context training: user is answering a previous system question ─────
+        // When `context` is provided the current `text` is a reply — treat the
+        // (context → text) pair as direct teaching.  Train it into the neuro pool,
+        // ingest it as a QA candidate, resolve the queued hypothesis, and fire
+        // dopamine retrograde potentiation so the synaptic path that generated the
+        // original question gets strengthened.  The network literally rewires from
+        // the conversation.  Then fall through to process `text` normally so the
+        // turn still produces a response.
+        let context_trained = if let Some(ref ctx) = context {
+            let ctx = ctx.trim();
+            if !ctx.is_empty() {
+                let enc = TextBitsEncoder::new(TextBitsConfig::default());
+                // Train the question → answer passage as a single co-activation.
+                // Elevated LR (1.4) because explicit user teaching is high-signal.
+                let combined = format!("{ctx} {text}");
+                let labels = enc.encode_plain(&combined).labels;
+                if !labels.is_empty() {
+                    neuro.train_weighted(&labels, 1.4, false);
+                    // STDP char pass: plant forward edges through each word's letter chain.
+                    let char_seqs = enc.encode_plain(&combined).char_sequences;
+                    for seq in &char_seqs {
+                        if seq.len() >= 2 {
+                            for pair in seq.windows(2) {
+                                neuro.train_weighted(pair, 1.0, false);
+                            }
+                        }
+                    }
+                }
+
+                // Ingest into QA store so the answer can be retrieved next time.
+                let now = now_timestamp();
+                let ingested = {
+                    let mut qa = qa_arc.lock().expect("qa mutex");
+                    let qa_id = {
+                        let mut h = 0u64;
+                        for b in format!("conv|{ctx}|{text}").bytes() {
+                            h = h.wrapping_mul(31).wrapping_add(b as u64);
+                        }
+                        format!("{h:x}")
+                    };
+                    let before = qa.pairs_ingested();
+                    qa.ingest(ctx, text.trim(), "conversation", 0, 0.90, now);
+                    qa.pairs_ingested() > before
+                };
+
+                // Resolve the queued hypothesis for this question (if any).
+                {
+                    let hyp_id = {
+                        let mut h = 0u64;
+                        for b in ctx.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                        format!("{h:x}")
+                    };
+                    let mut hq = hq_arc.lock().expect("hypothesis mutex");
+                    if let Some(entry) = hq.iter_mut()
+                        .find(|e| e.question.trim() == ctx || e.id == hyp_id)
+                    {
+                        entry.resolved   = true;
+                        entry.answer     = Some(text.trim().to_string());
+                        entry.confidence = Some(0.90);
+                    }
+                }
+
+                // Dopamine: reward the path that asked the right question.
+                neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, 0.9);
+                neuro.flush_dopamine();
+                ingested
+            } else { false }
+        } else { false };
+        let _ = context_trained; // used below for response tagging
         // English stop words — excluded from the propagation seed so they don't
         // create a uniform activation blanket over the entire vocabulary.
         // These function words appear in almost every textbook sentence, so their
@@ -4531,46 +4607,44 @@ async fn neuro_ask(
                 .cloned()
                 .collect();
 
-            let resolution = neuro.activate_with_resolution(
+            // Run char-level resolution for novel character registration and
+            // mini-column formation — even without a QA answer this seeds future
+            // learning by registering the novel char sequences in the fabric.
+            // We do NOT return a partial word-soup answer here; char-path activation
+            // is trivially non-zero for any input (common chars fire on everything),
+            // so a char-gated early return would always suppress the hypothesis path.
+            // When qa_gated is false the right response is always hypothesis →
+            // surface what we *do* know and invite the user to teach us the rest.
+            let _resolution = neuro.activate_with_resolution(
                 &word_only_labels,
-                0.40,  // word-level must reach 0.40 to skip char path
+                0.40,  // word-level threshold for char-path skip (internal heuristic)
                 hops,
                 0.005,
             );
 
-            // If the char path found something meaningful, attempt a partial answer.
-            let char_qa_gate = resolution.used_char_fallback
-                && resolution.peak_activation >= 0.10;
-
-            if char_qa_gate {
-                // Extract word activations from char-path result for response synthesis.
-                let mut char_word_acts: Vec<(String, f32)> = resolution.activations.iter()
-                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                    .map(|(l, &v)| (l.clone(), v))
-                    .collect();
-                char_word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal));
-                char_word_acts.truncate(max_tok);
-                let char_words: Vec<String> = char_word_acts.iter()
-                    .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
-                    .map(|(l, _)| l.strip_prefix("txt:word_").unwrap_or(l).to_string())
-                    .collect();
-                if !char_words.is_empty() {
-                    let partial_answer = char_words.join(" ");
-                    let novel_count = resolution.novel_char_candidates.len();
-                    return serde_json::json!({
-                        "question":           text,
-                        "hypothesis":         false,
-                        "answer":             partial_answer,
-                        "peak_activation":    resolution.peak_activation,
-                        "char_fallback":      true,
-                        "novel_words":        novel_count,
-                        "message":            "Partial answer via char-level path — concept neurons still forming.",
-                    });
-                }
-            }
-
             // Char path also gave nothing — queue as hypothesis.
+            // Generate a clarifying question from what DID activate.  These are
+            // the concepts the network already knows that are nearest to the query
+            // in Hebbian space — they represent partial understanding.  Surfacing
+            // them as a question makes the uncertainty visible and invites the user
+            // to teach, which feeds directly back into training via `context`.
+            let activated_concepts: Vec<String> = word_acts_1hop.iter()
+                .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
+                .filter_map(|(l, _)| l.strip_prefix("txt:word_").map(|w| w.to_string()))
+                .filter(|w| !w.contains('_') && w.len() > 2)
+                .take(4)
+                .collect();
+
+            let question_for_user = if activated_concepts.is_empty() {
+                "I don't know about that yet. Can you tell me?".to_string()
+            } else {
+                format!(
+                    "I'm not sure about that yet. I'm connecting it to: {}. \
+                     Can you tell me more?",
+                    activated_concepts.join(", ")
+                )
+            };
+
             let id = {
                 let mut h = 0u64;
                 for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
@@ -4580,7 +4654,7 @@ async fn neuro_ask(
                 let mut hq = hq_arc.lock().expect("hypothesis mutex");
                 if !hq.iter().any(|e| e.question == text) {
                     hq.push(HypothesisEntry {
-                        id,
+                        id: id.clone(),
                         question: text.clone(),
                         queued_at_unix: now.unix,
                         attempts: 0,
@@ -4592,11 +4666,13 @@ async fn neuro_ask(
                 }
             }
             return serde_json::json!({
-                "question":        text,
-                "hypothesis":      true,
-                "answer":          null,
-                "peak_activation": peak_1hop,
-                "message":         "Not enough learned signal — added to research queue.",
+                "question":           text,
+                "hypothesis":         true,
+                "answer":             null,
+                "question_for_user":  question_for_user,
+                "activated_concepts": activated_concepts,
+                "peak_activation":    peak_1hop,
+                "message":            "Added to research queue. Reply with `context` set to teach me.",
             });
         }
 
@@ -4725,6 +4801,7 @@ async fn neuro_ask(
             "word_activations":       word_activations,
             "qa_candidates":          qa_candidates,
             "active_question_neurons": qa_report.active_question_neurons,
+            "context_trained":        context_trained,
         })
     }).await.unwrap_or_else(|e| serde_json::json!({ "error": format!("internal: {e}") }));
 
