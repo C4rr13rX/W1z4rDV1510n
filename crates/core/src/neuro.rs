@@ -2537,17 +2537,21 @@ impl NeuroRuntime {
     }
 
     pub fn save_pool_to(&self, path: &str) -> Result<(), String> {
-        let guard = self.inner.lock();
-        // The custom pool_serde serializer emits only Hot neurons, so checkpoints
-        // stay small regardless of how many Cold neurons are on disk.
-        let json = serde_json::to_string(&guard.pool)
-            .map_err(|e| format!("serialize error: {e}"))?;
-        // Persist cold-tier index alongside the checkpoint.
-        guard.pool.save_cold_index();
-        drop(guard);
-        // Atomic write: write to .tmp then rename.
         let tmp = format!("{path}.tmp");
-        std::fs::write(&tmp, &json).map_err(|e| format!("write error: {e}"))?;
+        // Stream directly to a file — avoids allocating the full JSON in memory.
+        // The custom pool_serde serializer emits only Hot neurons, so only the
+        // hot tier is written regardless of cold-neuron count on disk.
+        let file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("create error: {e}"))?;
+        let writer = std::io::BufWriter::with_capacity(8 * 1024 * 1024, file);
+        {
+            let guard = self.inner.lock();
+            // Persist cold-tier index while we hold the lock.
+            guard.pool.save_cold_index();
+            serde_json::to_writer(writer, &guard.pool)
+                .map_err(|e| format!("serialize error: {e}"))?;
+            // Lock released here — disk flush happens after the guard drops.
+        }
         std::fs::rename(&tmp, path).map_err(|e| format!("rename error: {e}"))?;
         Ok(())
     }

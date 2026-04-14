@@ -308,14 +308,30 @@ impl HierarchicalMotifRuntime {
         let mut level_durations = durations;
         let mut lvl = 0;
 
+        // Cascade depth and per-level promotion budget are both derived from
+        // max_sequence_len so they scale with the operator's intended complexity.
+        // depth_limit: each level compounds the sequence length by at least 2,
+        //   so log2(max_sequence_len) levels is the natural ceiling before motifs
+        //   would exceed max_sequence_len themselves.
+        // carry_limit: the next level sees at most max_sequence_len promotions —
+        //   more than that is noise given the motif length contract.
+        let depth_limit = (self.config.max_sequence_len as f64).log2().ceil() as usize + 1;
+        let carry_limit = self.config.max_sequence_len;
         loop {
-            if level_ids.is_empty() {
+            if level_ids.is_empty() || lvl >= depth_limit {
                 break;
             }
             if lvl >= self.levels.len() {
                 self.levels.push(MotifLevel::new());
             }
-            let promoted = self.ingest_level(lvl, &level_ids, &level_durations, timestamp.unix);
+            let mut promoted = self.ingest_level(lvl, &level_ids, &level_durations, timestamp.unix);
+            // Carry only the highest-support promotions to the next level.
+            if promoted.len() > carry_limit {
+                promoted.sort_unstable_by(|a, b| {
+                    b.support.partial_cmp(&a.support).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                promoted.truncate(carry_limit);
+            }
             level_ids = promoted.iter().map(|m| m.id.clone()).collect();
             level_durations = promoted.iter().map(|m| m.duration_secs).collect();
             newly_promoted.extend(promoted);
