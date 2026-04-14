@@ -54,7 +54,57 @@ pub struct NeuroConfig {
     pub eviction_idle_steps: Option<u64>,
     /// Hard cap on hot-tier neuron count.  None = use default (80_000).
     pub hot_tier_max: Option<usize>,
+
+    // ── SDR / Sparse Distributed Representations ──────────────────────────────
+    /// Fraction of neurons kept active after each propagation hop (k-Winners-Take-All).
+    /// Matches cortical sparsity of 1–5 %.  0.0 = disabled (legacy dense mode).
+    #[serde(default = "default_sdr_sparsity")]
+    pub sdr_sparsity: f32,
+    /// Absolute floor on the kWTA active-neuron count (never sparsify below this).
+    #[serde(default = "default_sdr_k_min")]
+    pub sdr_k_min: usize,
+
+    // ── STDP (Spike-Timing-Dependent Plasticity) ──────────────────────────────
+    /// Forward STDP multiplier: pre fires BEFORE post → potentiate pre→post synapse.
+    /// 1.0 = standard Hebbian potentiation.
+    #[serde(default = "default_stdp_pre_post")]
+    pub stdp_pre_post: f32,
+    /// Backward STDP multiplier: post fires before pre → depress post→pre synapse.
+    /// Negative = LTD (biologically correct); 0.0 = symmetric legacy behaviour.
+    #[serde(default = "default_stdp_post_pre")]
+    pub stdp_post_pre: f32,
+    /// Hard ceiling on individual synapse weights.  Prevents unbounded potentiation.
+    #[serde(default = "default_max_weight")]
+    pub max_weight: f32,
+
+    // ── Homeostatic synaptic scaling ──────────────────────────────────────────
+    /// Target mean activation per neuron for homeostatic scaling.
+    /// Over-active neurons scale down; under-active scale up.
+    #[serde(default = "default_homeostatic_target")]
+    pub homeostatic_target: f32,
+    /// Steps between homeostatic scaling passes (amortises the O(n) scan).
+    #[serde(default = "default_homeostatic_period")]
+    pub homeostatic_period: u64,
+    /// Per-pass correction fraction applied toward the homeostatic target.
+    #[serde(default = "default_homeostatic_lr")]
+    pub homeostatic_lr: f32,
+
+    // ── Dopamine retrograde potentiation ─────────────────────────────────────
+    /// Additional weight increment applied to recently-active synapses when
+    /// dopamine is flushed (three-factor Hebbian: pre × post × dopamine).
+    #[serde(default = "default_dopamine_retrograde_lr")]
+    pub dopamine_retrograde_lr: f32,
 }
+
+fn default_sdr_sparsity()          -> f32   { 0.02  }
+fn default_sdr_k_min()             -> usize { 50    }
+fn default_stdp_pre_post()         -> f32   { 1.0   }
+fn default_stdp_post_pre()         -> f32   { -0.3  }
+fn default_max_weight()            -> f32   { 4.0   }
+fn default_homeostatic_target()    -> f32   { 0.10  }
+fn default_homeostatic_period()    -> u64   { 500   }
+fn default_homeostatic_lr()        -> f32   { 0.04  }
+fn default_dopamine_retrograde_lr()-> f32   { 0.08  }
 
 impl Default for NeuroConfig {
     fn default() -> Self {
@@ -80,6 +130,15 @@ impl Default for NeuroConfig {
             minicolumn_min_signature: 3,
             eviction_idle_steps: None,
             hot_tier_max: None,
+            sdr_sparsity: default_sdr_sparsity(),
+            sdr_k_min: default_sdr_k_min(),
+            stdp_pre_post: default_stdp_pre_post(),
+            stdp_post_pre: default_stdp_post_pre(),
+            max_weight: default_max_weight(),
+            homeostatic_target: default_homeostatic_target(),
+            homeostatic_period: default_homeostatic_period(),
+            homeostatic_lr: default_homeostatic_lr(),
+            dopamine_retrograde_lr: default_dopamine_retrograde_lr(),
         }
     }
 }
@@ -201,6 +260,20 @@ pub struct Neuron {
     /// The pool step at which this neuron was last activated (for eviction tracking).
     #[serde(default)]
     pub last_active_step: u64,
+    /// Exponential moving average of activation — drives homeostatic synaptic scaling.
+    /// Updated each step: mean = mean * 0.9995 + activation * 0.0005.
+    #[serde(default)]
+    pub mean_activation: f32,
+    /// Top-down prediction (expected activation) for predictive coding.
+    /// Learns toward actual activation during training; used to compute
+    /// prediction error during inference so only novel signals propagate.
+    #[serde(default)]
+    pub prediction: f32,
+    /// Dopamine exposure tag — set by `apply_dopamine`, decays each step.
+    /// When flushed via `flush_dopamine_potentiation`, tags synapses on
+    /// recently-active paths for retrograde three-factor Hebbian potentiation.
+    #[serde(default)]
+    pub dopamine_tag: f32,
 }
 
 impl Neuron {
@@ -220,6 +293,9 @@ impl Neuron {
             trace: 0.0,
             influence_history: Vec::new(),
             last_active_step: 0,
+            mean_activation: 0.0,
+            prediction: 0.0,
+            dopamine_tag: 0.0,
         }
     }
 
@@ -281,6 +357,49 @@ struct MiniColumn {
     cached_evidence: f32,
     /// Cached conflict from last best_signature_match call.
     cached_conflict: f32,
+}
+
+// ── Neuromodulator system ─────────────────────────────────────────────────────
+
+/// Which neuromodulator to release via [`NeuroRuntime::release_neuromodulator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeuromodulatorKind {
+    /// Reward signal.  Tags recently-active synaptic paths for retrograde
+    /// three-factor Hebbian potentiation (pre × post × dopamine).
+    Dopamine,
+    /// Novelty/surprise.  Boosts the effective learning rate for the next
+    /// training call and lowers the activation threshold during propagation.
+    Norepinephrine,
+    /// Attention/focus.  Multiplicative gate on synaptic plasticity:
+    /// 1.0 = normal learning; < 1.0 = consolidation / low-plasticity mode.
+    Acetylcholine,
+    /// Baseline mood.  Shifts the homeostatic target activation level.
+    Serotonin,
+}
+
+/// Instantaneous neuromodulator concentrations in the pool.
+/// Stored inside `NeuronPool`; exposed to callers via `NeuroRuntime`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeuromodulatorState {
+    /// Reward/reinforcement signal (0 = baseline, 1 = maximum).
+    pub dopamine: f32,
+    /// Novelty/arousal signal (0 = baseline, 1 = maximum).
+    pub norepinephrine: f32,
+    /// Plasticity gate (1.0 = fully plastic, 0.0 = fully consolidated).
+    pub acetylcholine: f32,
+    /// Mood/baseline (0.5 = neutral).
+    pub serotonin: f32,
+}
+
+impl Default for NeuromodulatorState {
+    fn default() -> Self {
+        Self {
+            dopamine: 0.0,
+            norepinephrine: 0.0,
+            acetylcholine: 1.0, // tonic: learning always enabled at baseline
+            serotonin: 0.5,
+        }
+    }
 }
 
 /// Serde helper: serialize/deserialize `HashMap<(String,String), f32>` as a vec of triples.
@@ -380,6 +499,10 @@ pub struct NeuronPool {
     /// Cached count of Hot slots (avoids iterating to count).
     #[serde(skip)]
     hot_count: usize,
+    /// Live neuromodulator concentrations.  Modulate learning rate, propagation
+    /// threshold, and plasticity on every training and inference call.
+    #[serde(default)]
+    pub neuromodulators: NeuromodulatorState,
 }
 
 const COOCCUR_EMA_ALPHA: f32 = 0.97;
@@ -402,6 +525,7 @@ impl NeuronPool {
             eviction_idle_steps: DEFAULT_EVICTION_IDLE_STEPS,
             hot_tier_max: DEFAULT_HOT_TIER_MAX,
             hot_count: 0,
+            neuromodulators: NeuromodulatorState::default(),
         }
     }
 
@@ -603,14 +727,137 @@ impl NeuronPool {
         self.step += 1;
         for slot in self.neurons.iter_mut() {
             if let NeuronSlot::Hot(neuron) = slot {
-                neuron.activation *= self.config.decay;
-                neuron.fatigue    *= self.config.fatigue_decay;
-                neuron.trace      *= self.config.decay;
+                neuron.activation  *= self.config.decay;
+                neuron.fatigue     *= self.config.fatigue_decay;
+                neuron.trace       *= self.config.decay;
+                // Dopamine tag decays fast (seconds-scale transient signal).
+                neuron.dopamine_tag *= 0.90;
+                // Slow EMA of activation for homeostatic target monitoring.
+                // τ ≈ 2000 steps so a single spike doesn't destabilise scaling.
+                neuron.mean_activation =
+                    neuron.mean_activation * 0.9995 + neuron.activation * 0.0005;
             }
+        }
+        // Neuromodulator decay — each modulator returns toward its tonic baseline.
+        {
+            let nm = &mut self.neuromodulators;
+            nm.dopamine        *= 0.80;  // fast (reward is transient)
+            nm.norepinephrine  *= 0.85;  // moderate (novelty lasts a few calls)
+            // ACh drifts back to tonic 1.0 (always-plastic baseline).
+            nm.acetylcholine    = nm.acetylcholine * 0.995 + 1.0 * 0.005;
+            nm.serotonin        = nm.serotonin * 0.999 + 0.5 * 0.001; // returns to 0.5
         }
         // Eviction: every 200 steps (amortises the O(n) scan cost).
         if self.step % 200 == 0 {
             self.run_eviction();
+        }
+        // Homeostatic scaling: every homeostatic_period steps.
+        let hp = self.config.homeostatic_period.max(1);
+        if self.step % hp == 0 {
+            self.homeostatic_scaling_pass();
+        }
+    }
+
+    // ── Homeostatic synaptic scaling ──────────────────────────────────────────
+
+    /// Multiplicative synaptic scaling pass: neurons that fire more than their
+    /// homeostatic target have their outgoing weights scaled down; under-active
+    /// neurons have their weights scaled up.  Preserves relative weight ratios
+    /// (memories intact) while preventing unbounded Hebbian growth.
+    fn homeostatic_scaling_pass(&mut self) {
+        let target  = self.config.homeostatic_target;
+        let lr      = self.config.homeostatic_lr;
+        let max_w   = self.config.max_weight;
+        for slot in self.neurons.iter_mut() {
+            if let NeuronSlot::Hot(neuron) = slot {
+                if neuron.mean_activation < 1e-6 { continue; }
+                // Scale factor > 1 when under-active, < 1 when over-active.
+                let scale  = (target / neuron.mean_activation).clamp(0.5, 2.0);
+                // Small step: lerp from 1.0 toward scale by lr per pass.
+                let factor = 1.0 + lr * (scale - 1.0);
+                for syn in neuron.excitatory.iter_mut() {
+                    syn.weight = (syn.weight * factor).clamp(0.0, max_w);
+                }
+                for syn in neuron.inhibitory.iter_mut() {
+                    syn.weight = (syn.weight * factor).clamp(0.0, max_w);
+                }
+                // Also scale dendrite weights so the dual bookkeeping stays consistent.
+                for den in neuron.dendrites.iter_mut() {
+                    den.weight = (den.weight * factor).clamp(0.0, max_w);
+                }
+            }
+        }
+    }
+
+    // ── SDR / k-Winners-Take-All ──────────────────────────────────────────────
+
+    /// Zero out all but the top-`k` activations in-place (k-WTA).
+    /// Only iterates over positive values so cost is O(active), not O(n).
+    fn apply_kwta(activation: &mut [f32], k: usize) {
+        if k == 0 || k >= activation.len() { return; }
+        // Collect positive activation values to find the kth-largest threshold.
+        let mut vals: Vec<f32> = activation.iter().filter(|&&v| v > 0.0).copied().collect();
+        if vals.len() <= k { return; }
+        // Sort descending; kth element gives the cutoff.
+        vals.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let threshold = vals[k - 1];
+        for v in activation.iter_mut() {
+            if *v < threshold { *v = 0.0; }
+        }
+    }
+
+    // ── Dopamine retrograde potentiation ─────────────────────────────────────
+
+    /// Tag all recently-active neurons (non-zero trace) with a dopamine signal.
+    /// Call this immediately after the rewarding event so the trace is still warm.
+    pub fn apply_dopamine(&mut self, amount: f32) {
+        for slot in self.neurons.iter_mut() {
+            if let NeuronSlot::Hot(neuron) = slot {
+                if neuron.trace > 0.005 {
+                    // Tag proportional to trace strength (how recently/strongly it fired).
+                    neuron.dopamine_tag = (neuron.dopamine_tag + amount * neuron.trace).min(1.0);
+                }
+            }
+        }
+    }
+
+    /// Flush accumulated dopamine tags into permanent weight boosts.
+    /// Implements three-factor Hebbian: Δw = lr_da × dopamine_tag × existing_weight.
+    /// Call after `apply_dopamine` once per reward episode.
+    pub fn flush_dopamine_potentiation(&mut self) {
+        let lr      = self.config.dopamine_retrograde_lr;
+        let max_w   = self.config.max_weight;
+        for slot in self.neurons.iter_mut() {
+            if let NeuronSlot::Hot(neuron) = slot {
+                let tag = neuron.dopamine_tag;
+                if tag < 0.01 { continue; }
+                for syn in neuron.excitatory.iter_mut() {
+                    // Potentiate in proportion to both tag and existing weight strength.
+                    syn.weight = (syn.weight + lr * tag * syn.weight).min(max_w);
+                }
+                neuron.dopamine_tag = 0.0;
+            }
+        }
+    }
+
+    // ── STDP LTD helper ───────────────────────────────────────────────────────
+
+    /// Weaken an existing synapse (Long-Term Depression).  Only acts on already-
+    /// existing synapses — LTD cannot depress connections that don't exist yet.
+    fn weaken_synapse(&mut self, from: u32, to: u32, amount: f32, inhibitory: bool) {
+        if let Some(neuron) = self.get_hot_mut(from as usize) {
+            let list = if inhibitory { &mut neuron.inhibitory } else { &mut neuron.excitatory };
+            if let Ok(idx) = list.binary_search_by_key(&to, |s| s.target) {
+                list[idx].weight = (list[idx].weight - amount).max(0.0);
+                if list[idx].weight < 1e-6 { list.remove(idx); }
+            }
+        }
+        // Mirror on dendrite bookkeeping.
+        if let Some(target) = self.get_hot_mut(to as usize) {
+            if let Ok(idx) = target.dendrites.binary_search_by_key(&from, |d| d.source) {
+                target.dendrites[idx].weight = (target.dendrites[idx].weight - amount).max(0.0);
+                if target.dendrites[idx].weight < 1e-6 { target.dendrites.remove(idx); }
+            }
         }
     }
 
@@ -794,7 +1041,14 @@ impl NeuronPool {
                 }
             }
         }
-        let scale = self.config.excitatory_scale * lr_scale.clamp(0.01, 8.0);
+        // ── Neuromodulator-gated effective learning rate ──────────────────────
+        // Acetylcholine gates plasticity (1.0 = fully plastic, 0 = consolidated).
+        // Norepinephrine boosts LR under novelty/surprise (up to 3× at maximum).
+        let ach = self.neuromodulators.acetylcholine.max(0.05);
+        let ne_boost = 1.0 + self.neuromodulators.norepinephrine * 2.0;
+        let effective_lr = lr_scale * ach * ne_boost;
+        let scale = self.config.excitatory_scale * effective_lr.clamp(0.01, 8.0);
+
         // Windowed pairing: only pair symbols within HEBBIAN_WINDOW positions of
         // each other.  Full all-pairs is O(N²) — a 500-symbol page produces 125k
         // pairs; with a window of 20 it produces at most ~5k.  Local co-occurrence
@@ -810,6 +1064,16 @@ impl NeuronPool {
                 if pair_count >= MAX_PAIRS {
                     break 'outer;
                 }
+            }
+        }
+
+        // ── Predictive coding: update top-down prediction toward actual ───────
+        // Each trained neuron's `prediction` field slowly learns its expected
+        // activation so future propagate_predictive calls can compute error = actual − predicted.
+        for &id in &ids {
+            if let Some(neuron) = self.get_hot_mut(id as usize) {
+                // Fast EMA (α = 0.1) so prediction tracks training distribution.
+                neuron.prediction = neuron.prediction * 0.90 + neuron.activation * 0.10;
             }
         }
     }
@@ -865,6 +1129,11 @@ impl NeuronPool {
             }
         }
 
+        // Compute kWTA active-neuron count from pool config.
+        let k_active = if self.config.sdr_sparsity > 0.0 {
+            ((n as f32 * self.config.sdr_sparsity) as usize).max(self.config.sdr_k_min)
+        } else { 0 };
+
         // Hop-by-hop propagation — scratch buffer pre-allocated to avoid per-hop alloc.
         let mut next: Vec<f32> = vec![0.0; n];
         for _ in 0..hops {
@@ -896,10 +1165,12 @@ impl NeuronPool {
                     }
                 }
             }
-            // Decay so distant hops carry less weight
-            for v in next.iter_mut() {
-                *v *= 0.85;
-            }
+            // Decay so distant hops carry less weight.
+            for v in next.iter_mut() { *v *= 0.85; }
+            // SDR: keep only the top-k active neurons (k-Winners-Take-All).
+            // Eliminates the dense saturation problem: only the k neurons with
+            // the strongest combined input from this hop remain active.
+            if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
             std::mem::swap(&mut activation, &mut next);
         }
 
@@ -927,6 +1198,10 @@ impl NeuronPool {
         min_activation: f32,
     ) -> HashMap<String, f32> {
         let n = self.neurons.len();
+        let k_active = if self.config.sdr_sparsity > 0.0 {
+            ((n as f32 * self.config.sdr_sparsity) as usize).max(self.config.sdr_k_min)
+        } else { 0 };
+
         let mut activation: Vec<f32> = vec![0.0; n];
         for (label, &init_act) in seed_activations {
             if let Some(&id) = self.label_to_id.get(label) {
@@ -939,9 +1214,7 @@ impl NeuronPool {
         for _ in 0..hops {
             next.copy_from_slice(&activation);
             for (src_idx, &src_act) in activation.iter().enumerate() {
-                if src_act < 0.001 {
-                    continue;
-                }
+                if src_act < 0.001 { continue; }
                 let neuron = match self.get_hot(src_idx) {
                     Some(n) => n,
                     None => continue,
@@ -960,11 +1233,100 @@ impl NeuronPool {
                     }
                 }
             }
-            for v in next.iter_mut() {
-                *v *= 0.85;
-            }
+            for v in next.iter_mut() { *v *= 0.85; }
+            if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
             std::mem::swap(&mut activation, &mut next);
         }
+        let mut result = HashMap::new();
+        for (idx, act) in activation.iter().enumerate() {
+            if *act >= min_activation {
+                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
+                    result.insert(label.clone(), *act);
+                }
+            }
+        }
+        result
+    }
+
+    /// Propagate using **prediction errors** rather than raw activations
+    /// (hierarchical predictive coding).
+    ///
+    /// On the first hop, full seed activations propagate as normal.
+    /// On subsequent hops, only the *surprise* component — `actual − prediction` —
+    /// is forwarded.  Neurons that activate exactly as predicted pass zero signal;
+    /// novel activations propagate at full strength.
+    ///
+    /// The pool's per-neuron `prediction` field is continuously updated during
+    /// `train_weighted_with_meta`, so predictions reflect the training distribution.
+    pub fn propagate_predictive(
+        &self,
+        seed_activations: &HashMap<String, f32>,
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        let n = self.neurons.len();
+        let k_active = if self.config.sdr_sparsity > 0.0 {
+            ((n as f32 * self.config.sdr_sparsity) as usize).max(self.config.sdr_k_min)
+        } else { 0 };
+
+        // Load stored per-neuron predictions.
+        let mut prediction: Vec<f32> = (0..n)
+            .map(|i| self.get_hot(i).map_or(0.0, |neuron| neuron.prediction))
+            .collect();
+
+        let mut activation: Vec<f32> = vec![0.0; n];
+        for (label, &init_act) in seed_activations {
+            if let Some(&id) = self.label_to_id.get(label) {
+                if (id as usize) < n {
+                    activation[id as usize] = init_act.clamp(0.0, 1.0);
+                }
+            }
+        }
+
+        let mut next: Vec<f32> = vec![0.0; n];
+        for hop in 0..hops {
+            next.fill(0.0);
+            for (src_idx, &src_act) in activation.iter().enumerate() {
+                if src_act < 0.001 { continue; }
+                let neuron = match self.get_hot(src_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                // First hop propagates full activation (bottom-up sensory input).
+                // Subsequent hops propagate only the unsuppressed error component.
+                let signal = if hop == 0 {
+                    src_act
+                } else {
+                    // Prediction error: only the part that exceeds expectation.
+                    (src_act - prediction[src_idx]).max(0.0)
+                };
+                if signal < 0.001 { continue; }
+
+                let fan_out = (neuron.excitatory.len() as f32).sqrt().max(1.0);
+                for syn in &neuron.excitatory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] + signal * syn.weight * 0.5 / fan_out).min(1.0);
+                    }
+                }
+                for syn in &neuron.inhibitory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] - signal * syn.weight.abs() * 0.3).max(0.0);
+                    }
+                }
+            }
+            // Update running prediction toward what we actually saw this hop.
+            for i in 0..n {
+                if next[i] > 0.0 {
+                    prediction[i] = prediction[i] * 0.85 + next[i] * 0.15;
+                }
+            }
+            for v in next.iter_mut() { *v *= 0.85; }
+            if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
+            std::mem::swap(&mut activation, &mut next);
+        }
+
         let mut result = HashMap::new();
         for (idx, act) in activation.iter().enumerate() {
             if *act >= min_activation {
@@ -990,23 +1352,44 @@ impl NeuronPool {
             .collect()
     }
 
+    /// Hebbian pairing with STDP asymmetry.
+    ///
+    /// `a` is treated as the *pre-synaptic* neuron (fired first in the sequence)
+    /// and `b` as *post-synaptic* (fired later).  This gives us biologically
+    /// correct spike-timing-dependent plasticity:
+    ///
+    /// - **a→b (pre→post)**: potentiated by `stdp_pre_post` (default 1.0, LTP).
+    /// - **b→a (post→pre)**: depressed by `stdp_post_pre` (default -0.3, LTD)
+    ///   or potentiated at a weaker level if positive.
     fn hebbian_pair(&mut self, a: u32, b: u32, scale: f32, inhibitory: bool) {
-        // Warm up both neurons before accessing them (no-op if already hot).
         self.ensure_hot(a);
         self.ensure_hot(b);
         let (Some(n_a), Some(n_b)) = (self.get_hot(a as usize), self.get_hot(b as usize))
-        else {
-            return;
-        };
-        let delta = self.config.hebbian_lr
+        else { return; };
+        let base = self.config.hebbian_lr
             * (n_a.activation + n_a.trace)
             * (n_b.activation + n_b.trace)
             * scale;
-        self.add_synapse(a, b, delta, inhibitory);
-        self.add_synapse(b, a, delta, inhibitory);
+        if base <= 0.0 { return; }
+
+        // Pre→Post: LTP (always positive)
+        let delta_fwd = base * self.config.stdp_pre_post;
+        if delta_fwd > 0.0 {
+            self.add_synapse(a, b, delta_fwd, inhibitory);
+        }
+
+        // Post→Pre: LTD if stdp_post_pre < 0, weaker LTP if positive
+        let delta_bwd = base * self.config.stdp_post_pre;
+        if delta_bwd > 0.0 {
+            self.add_synapse(b, a, delta_bwd, inhibitory);
+        } else if delta_bwd < 0.0 {
+            // Only depress if the synapse already exists (can't weaken what isn't there).
+            self.weaken_synapse(b, a, (-delta_bwd).min(base * 0.5), inhibitory);
+        }
     }
 
     fn add_synapse(&mut self, from: u32, to: u32, delta: f32, inhibitory: bool) {
+        let max_w = self.config.max_weight;
         if let Some(neuron) = self.get_hot_mut(from as usize) {
             let list = if inhibitory {
                 &mut neuron.inhibitory
@@ -1015,15 +1398,15 @@ impl NeuronPool {
             };
             // Lists are kept sorted by target for O(log n) lookup.
             match list.binary_search_by_key(&to, |s| s.target) {
-                Ok(idx) => list[idx].weight += delta,
-                Err(idx) => list.insert(idx, Synapse { target: to, weight: delta, inhibitory }),
+                Ok(idx)  => list[idx].weight = (list[idx].weight + delta).min(max_w),
+                Err(idx) => list.insert(idx, Synapse { target: to, weight: delta.min(max_w), inhibitory }),
             }
         }
-        // add dendrite on target side (sorted by source)
+        // Mirror on dendrite bookkeeping (kept in sync with excitatory/inhibitory lists).
         if let Some(target) = self.get_hot_mut(to as usize) {
             match target.dendrites.binary_search_by_key(&from, |d| d.source) {
-                Ok(idx) => target.dendrites[idx].weight += delta,
-                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: delta }),
+                Ok(idx)  => target.dendrites[idx].weight = (target.dendrites[idx].weight + delta).min(max_w),
+                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: delta.min(max_w) }),
             }
         }
     }
@@ -2711,6 +3094,83 @@ impl NeuroRuntime {
         // e.g. "cell-membrane call" → "osmosis call" → "ATP call" across K-12 pages.
         let fp = call_fingerprint(symbols);
         guard.motifs.observe_label_sequence(&[fp], ts, 1.0);
+    }
+
+    // ── Neuromodulator API ────────────────────────────────────────────────────
+
+    /// Release a neuromodulator into the pool.
+    ///
+    /// | Modulator | Effect |
+    /// |-----------|--------|
+    /// | Dopamine | Tags recently-active neurons; call [`flush_dopamine`] to apply weight boost |
+    /// | Norepinephrine | Boosts LR on next training call; lowers propagation threshold |
+    /// | Acetylcholine | Gates plasticity (1.0 = normal; < 1.0 = consolidation) |
+    /// | Serotonin | Shifts homeostatic target baseline |
+    pub fn release_neuromodulator(&self, kind: NeuromodulatorKind, amount: f32) {
+        if !self.config.enabled { return; }
+        let mut guard = self.inner.lock();
+        let nm = &mut guard.pool.neuromodulators;
+        match kind {
+            NeuromodulatorKind::Dopamine => {
+                nm.dopamine = (nm.dopamine + amount).min(1.0);
+                let da = nm.dopamine;
+                guard.pool.apply_dopamine(da);
+            }
+            NeuromodulatorKind::Norepinephrine => {
+                nm.norepinephrine = (nm.norepinephrine + amount).min(1.0);
+            }
+            NeuromodulatorKind::Acetylcholine => {
+                nm.acetylcholine = amount.clamp(0.0, 1.5);
+            }
+            NeuromodulatorKind::Serotonin => {
+                nm.serotonin = amount.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    /// Convert dopamine tags accumulated via [`release_neuromodulator`] into
+    /// permanent weight boosts (retrograde three-factor Hebbian potentiation).
+    /// Call this once per reward episode, after the dopamine-tagged training.
+    pub fn flush_dopamine(&self) {
+        if !self.config.enabled { return; }
+        let mut guard = self.inner.lock();
+        guard.pool.flush_dopamine_potentiation();
+        guard.pool.neuromodulators.dopamine = 0.0;
+    }
+
+    /// Read current neuromodulator levels (for diagnostics / /neuro/status).
+    pub fn neuromodulator_state(&self) -> NeuromodulatorState {
+        if !self.config.enabled { return NeuromodulatorState::default(); }
+        let guard = self.inner.lock();
+        guard.pool.neuromodulators.clone()
+    }
+
+    /// Propagate using predictive coding (error-only after first hop).
+    ///
+    /// Identical call signature to `propagate_combined` but internally routes
+    /// through `NeuronPool::propagate_predictive`.  Novel activations propagate;
+    /// expected/predicted activations are suppressed.  Use for inference on
+    /// well-trained pools where you want the network to surface *surprises*.
+    pub fn propagate_predictive(
+        &self,
+        pathways: &[(&[String], f32)],
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        if !self.config.enabled || pathways.is_empty() {
+            return HashMap::new();
+        }
+        let mut seeds: HashMap<String, f32> = HashMap::new();
+        for (labels, weight) in pathways {
+            for label in *labels {
+                let entry = seeds.entry(label.clone()).or_insert(0.0);
+                let contribution = weight.clamp(0.0, 1.0);
+                if contribution > *entry { *entry = contribution; }
+            }
+        }
+        if seeds.is_empty() { return HashMap::new(); }
+        let guard = self.inner.lock();
+        guard.pool.propagate_predictive(&seeds, hops, min_activation)
     }
 
     /// Return all meta-motifs discovered so far across every hierarchy level.

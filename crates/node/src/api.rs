@@ -30,7 +30,7 @@ use tracing::warn;
 use w1z4rdv1510n::blockchain::{
     BlockchainLedger, BridgeIntent, NoopLedger, RewardBalance, bridge_intent_id,
 };
-use w1z4rdv1510n::neuro::{NeuroRuntime, NeuroRuntimeConfig, NeuroRuntimeHandle, NeuroSnapshot};
+use w1z4rdv1510n::neuro::{NeuroRuntime, NeuroRuntimeConfig, NeuroRuntimeHandle, NeuroSnapshot, NeuromodulatorKind};
 use w1z4rdv1510n::schema::EnvironmentSnapshot;
 use w1z4rdv1510n::threat::{ThreatOverlay, ThreatScene};
 use w1z4rdv1510n::bridge::{BridgeProof, BridgeVerificationMode, ChainKind, bridge_deposit_id};
@@ -4435,7 +4435,10 @@ async fn neuro_ask(
             .is_some();
 
         if !qa_gated {
-            // Neither gate passed — queue as hypothesis for research
+            // Neither gate passed — queue as hypothesis for research.
+            // Spike norepinephrine: prediction failure = novelty signal.
+            // The next training call for this concept will run at elevated LR.
+            neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
             let id = {
                 let mut h = 0u64;
                 for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
@@ -4612,6 +4615,9 @@ struct HypothesisResolveReq {
 /// POST /hypothesis/resolve
 /// Mark a hypothesis as resolved with a provided answer.
 /// Called by research_agent.py after fetching authoritative sources.
+/// On successful resolution, triggers dopamine retrograde potentiation so the
+/// synaptic path that led to the question gets strengthened — the network learns
+/// to answer similar questions faster next time.
 async fn hypothesis_resolve(
     State(state): State<ApiState>,
     Json(req): Json<HypothesisResolveReq>,
@@ -4621,7 +4627,13 @@ async fn hypothesis_resolve(
         Some(entry) => {
             entry.resolved   = true;
             entry.answer     = Some(req.answer);
-            entry.confidence = req.confidence;
+            let conf         = req.confidence.unwrap_or(0.7);
+            entry.confidence = Some(conf);
+            // Dopamine signal: reward the network for having queued the right question.
+            // Retrograde potentiation strengthens recently-active paths proportionally
+            // to how confident the resolved answer is.
+            state.neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, conf);
+            state.neuro.flush_dopamine();
             (StatusCode::OK, Json(serde_json::json!({ "resolved": true, "id": entry.id })))
         }
         None => (StatusCode::NOT_FOUND,
@@ -4930,6 +4942,8 @@ async fn neuro_generate(
             .is_some();
 
         if !qa_gated {
+            // NE spike: prediction failure = novel input, boost LR for next training.
+            neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
             let id = {
                 let mut h = 0u64;
                 for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
