@@ -24,6 +24,28 @@ The learning stack implements the current neuroscience canon in software:
 
 **For architects:** The system is designed to be observable at every level. Every neuron records its influence history. Every synapse carries provenance. The neuromodulator state is readable via API. The hypothesis queue is an explicit epistemic state — the system knows what it doesn't know and acts on it.
 
+## What makes this fundamentally different from every other AI language model
+
+Every language model in existence — GPT, LLaMA, BERT, all of them — starts with a tokenizer. A human-written program that chops text into chunks before any learning happens. The model never sees letters. It never discovers what a word is. It is handed pre-segmented units and learns statistical relationships between them. This is why LLMs hallucinate morphology, mishandle rare words, and cannot transfer knowledge across languages without explicit multilingual training: the sub-word structure was never in their representations to begin with.
+
+**This system does not have a tokenizer. It has a bottom-up architecture.**
+
+Language understanding is grown from the ground up through the same Hebbian machinery that processes everything else:
+
+```
+Letters  →  Morphemes  →  Words  →  Usage patterns  →  Motifs
+```
+
+Every character fires as its own labeled neuron (`txt:char_a`, `txt:char_p`...). Positional context is encoded (`txt:char_a_pos0` ≠ `txt:char_a_pos4`). Every punctuation mark fires as its own label — `txt:punct_comma`, `txt:punct_apostrophe`, `txt:punct_period` — because **punctuation is signal, not noise**. "Let's eat, Grandma." and "Let's eat Grandma." differ by one comma, and that comma changes everything. Stripping it destroys the meaning. This system learns it.
+
+Character sequences within words are trained with STDP ordering: `c` fires before `a` fires before `t` in "cat". Forward edges get LTP; backward edges get LTD. Recurring sub-sequences across words (`p-o-r-t` in `transport`, `import`, `export`, `portable`) accumulate shared activation paths. The pool's kWTA sparsification ensures that when enough co-activation builds up, the sub-sequence promotes to a mini-column — a morpheme neuron, discovered entirely from statistical exposure, with no hand-coded rule.
+
+This means:
+- **Training on Latin textbooks produces genuine morpheme understanding.** The `trans-` prefix builds a cluster that connects `transport`, `transfer`, `transmit`, `translate` — not because a rule said so, but because those words share the character sub-sequence in every sentence where it appears. A question about `transference` is answered through the same connections even if that exact word never appeared in training.
+- **The system learns punctuation grammar.** After enough training, commas before proper nouns build a different activation pattern than commas in lists. The pool encodes the difference because the character context around the comma was different every time.
+- **Morpheme-level generalization is free.** You don't need to train `"automobile"` if you trained `"auto"` (self) and `"mobile"` (movable) and the pool has seen both roots in enough contexts. The Hebbian connections through shared character sub-sequences provide the bridge.
+- **Every level is simultaneously active.** When the pool processes text, character labels, phonetic bigrams, word labels, punctuation labels, role labels, and spatial zone labels all co-activate in the same training call. Motif discovery runs across all levels simultaneously. The hierarchy emerges from the data, not from architecture choices made before training.
+
 ---
 
 ## Benchmarks
@@ -222,9 +244,24 @@ All encoders share the same default **8×8 spatial grid**. A cursor at zone `(3,
 |---------|-------|----------------|-------|
 | `ImageBitsEncoder` | JPEG/PNG bytes or raw RGB | `img:z{x}_{y}`, `img:h{n}`, `img:edge{dir}_z{x}_{y}` | HSV histogram + Sobel edges per grid zone |
 | `AudioBitsEncoder` | PCM f32 or WAV bytes | `aud:freq{n}`, `aud:amp{n}`, `aud:freq{n}_t{t}` | Hann-windowed DFT; no external FFT dependency |
-| `TextBitsEncoder` | `TextSpan` structs or plain `&str` | `txt:word_{w}`, `txt:role_{r}`, `txt:phon_{ng}`, `txt:zone_x{n}_y{n}` | Layout-aware: captures font size, role, emphasis, indent, position |
+| `TextBitsEncoder` | `TextSpan` structs or plain `&str` | `txt:char_{c}`, `txt:char_{c}_pos{n}`, `txt:word_{w}`, `txt:phon_{ng}`, `txt:punct_{name}`, `txt:role_{r}`, `txt:zone_x{n}_y{n}` | Bottom-up: characters → bigrams → words → layout. Punctuation preserved. STDP char sequences auto-trained per word. |
 | `MotionBitsEncoder` | `Vec<MotionSample {x,y,t,click}>` | `mov:zone_x{n}_y{n}`, `mov:endpoint_x{n}_y{n}`, `act:click` | Also `decode_target()` for inference |
 | `KeyboardBitsEncoder` | `Vec<KeyEvent {key,ctrl,shift,alt,t}>` | `key:k_{name}`, `key:combo_{mods}{key}`, `txt:word_{w}` | Cross-modal: emits `txt:word_*` for typed words |
+
+**`TextBitsEncoder` label hierarchy (bottom-up):**
+
+| Level | Labels emitted | Purpose |
+|-------|---------------|---------|
+| Character | `txt:char_a`, `txt:char_a_pos0` | Foundation layer — letters build morphemes through co-occurrence |
+| Bigram | `txt:phon_ap`, `txt:phon_pp` | Morpheme seeds — recurring bigrams across words form root clusters |
+| Punctuation | `txt:punct_comma`, `txt:punct_period`, `txt:punct_apostrophe` | Syntactic signal — comma in "eat, Grandma" ≠ no comma |
+| Word | `txt:word_apple` | Whole-word label — emerges from character cluster, also emitted directly |
+| Layout | `txt:role_heading`, `txt:size_large`, `txt:emph_bold` | Structural context — same word means differently in a heading vs footnote |
+| Spatial | `txt:zone_x3_y1`, `txt:word_apple_zone_x3_y1` | Page position — shared vocabulary with `img:` labels |
+
+Every `/media/train` call with text runs two passes automatically:
+1. **Co-occurrence pass** — all labels fire together in one `train_weighted` call
+2. **STDP character-sequence pass** — each word's character chain is trained with adjacent-letter bridging (lr decay τ=0.5 char-steps), so forward `c→a→t` edges get LTP and the pool builds directed paths through letter sequences
 
 **Layout is data.** A heading at the top of a page emits `txt:role_heading + txt:zone_x0_y0 + txt:size_large + txt:emph_bold`. Position, font, role, and emphasis are all Hebbian-connected to whatever content appears there. PDF structure is spatial signal, not decoration.
 
