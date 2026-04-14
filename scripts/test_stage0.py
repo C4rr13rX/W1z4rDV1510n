@@ -76,10 +76,14 @@ ALL_TESTS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Thresholds
+# Thresholds (raw activation, not normalized confidence)
 # ---------------------------------------------------------------------------
-PASS_CONF   = 0.30   # confidence ≥ this → PASS for trained questions
-EDGE_CONF   = 0.25   # confidence < this for untrained → edge case PASS
+# The /chat endpoint returns normalized confidence (always 1.0 for the top
+# result) which is meaningless for thresholding.  We use /qa/query to get
+# the raw Hebbian activation score for all checks.
+PASS_ACT    = 0.12   # trained question: raw activation must be ≥ this
+EDGE_ACT    = 0.20   # edge case PASSES if top raw activation is < this
+                     # (anything above means the system thinks it knows)
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +118,27 @@ def qa_query(client: httpx.Client, node_url: str, question: str) -> dict:
         return {"error": str(e)}
 
 
-def extract_confidence(resp: dict) -> float:
-    """Pull best confidence from a /chat response."""
-    qa = resp.get("qa_candidates") or []
-    if qa:
-        return max(a.get("confidence", 0.0) for a in qa)
+def extract_best_activation(qa_resp: dict) -> float:
+    """Pull the top raw activation score from a /qa/query response.
+
+    The normalized 'confidence' field in /chat is always 1.0 for the top
+    result and is meaningless for thresholding.  Raw activation is the actual
+    Hebbian score before normalization and is what the min_activation gate
+    in QaRuntime uses — it's the right metric for pass/fail decisions.
+    """
+    results = qa_resp.get("report", {}).get("results", [])
+    if results:
+        return max(r.get("activation", 0.0) for r in results)
     return 0.0
+
+
+def best_qa_answer(qa_resp: dict) -> str:
+    """Return the answer text with the highest raw activation."""
+    results = qa_resp.get("report", {}).get("results", [])
+    if not results:
+        return ""
+    top = max(results, key=lambda r: r.get("activation", 0.0))
+    return top.get("answer", "")
 
 
 def keyword_hit(response_text: str, keyword: Optional[str]) -> bool:
@@ -180,37 +199,37 @@ def run_tests(node_url: str, verbose: bool) -> None:
         print("-" * len(section_label))
 
         for label, question, keyword in cases:
-            resp = neuro_ask(client, node_url, question)
+            qa_resp  = qa_query(client, node_url, question)
+            chat_resp = neuro_ask(client, node_url, question)
 
-            if "error" in resp:
+            if "error" in qa_resp and "error" in chat_resp:
                 result = Result(
                     label=label, question=question, keyword=keyword,
                     confidence=0.0, response="[REQUEST FAILED]",
-                    qa_answer="", passed=False, note=resp["error"]
+                    qa_answer="", passed=False, note=qa_resp.get("error", "")
                 )
             else:
-                conf = extract_confidence(resp)
-                response_text = resp.get("answer", "")
-                qa_answers = resp.get("qa_candidates") or []
-                best_qa = qa_answers[0].get("answer", "") if qa_answers else ""
+                act  = extract_best_activation(qa_resp)
+                top_qa = best_qa_answer(qa_resp)
+                response_text = chat_resp.get("answer", "") if "error" not in chat_resp else ""
 
                 if is_edge:
-                    passed = conf < EDGE_CONF
-                    note = "correctly uncertain" if passed else f"false positive (conf={conf:.2f})"
+                    passed = act < EDGE_ACT
+                    note = "correctly uncertain" if passed else f"false positive (act={act:.3f})"
                 else:
-                    kw_ok = keyword_hit(response_text + " " + best_qa, keyword)
-                    passed = conf >= PASS_CONF and kw_ok
-                    if conf < PASS_CONF:
-                        note = f"low conf={conf:.2f}"
+                    kw_ok = keyword_hit(response_text + " " + top_qa, keyword)
+                    passed = act >= PASS_ACT and kw_ok
+                    if act < PASS_ACT:
+                        note = f"low act={act:.3f}"
                     elif not kw_ok:
-                        note = f"keyword '{keyword}' missing (conf={conf:.2f})"
+                        note = f"keyword '{keyword}' missing (act={act:.3f})"
                     else:
-                        note = f"conf={conf:.2f}"
+                        note = f"act={act:.3f}"
 
                 result = Result(
                     label=label, question=question, keyword=keyword,
-                    confidence=conf, response=response_text,
-                    qa_answer=best_qa, passed=passed, note=note,
+                    confidence=act, response=response_text,
+                    qa_answer=top_qa, passed=passed, note=note,
                 )
 
             status = "PASS" if result.passed else "FAIL"
