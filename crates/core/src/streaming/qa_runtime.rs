@@ -525,57 +525,91 @@ pub struct QaCandidateRecord {
 
 // ─── Tokenizer ─────────────────────────────────────────────────────────────
 
-/// Minimal question tokenizer.
+/// Question tokenizer for Hebbian Q&A lookup.
 ///
-/// Lowercases, strips punctuation, splits on whitespace, and drops stop words.
-/// Stop words are removed because they contribute no discriminative signal to
-/// Hebbian associations and would pollute every answer entry's weight row.
+/// Lowercases and splits text into word tokens and punctuation tokens.
+/// Punctuation is preserved as named tokens (e.g. `punct_comma`) because it
+/// carries meaning: "When should I not eat?" ≠ "When should I eat?" — the
+/// word "not" changes the answer, and "Let's eat, Grandma." ≠ "Let's eat
+/// Grandma." — the comma changes the entire meaning.
+///
+/// Stop word policy:
+///   Only pure grammatical articles/prepositions with zero semantic content
+///   are dropped.  Negation words ("not", "no", "never", "without"),
+///   question words ("how", "what", "when", "where", "why", "who"), and
+///   modal verbs ("should", "must", "can") are KEPT — they are often the
+///   most discriminative token in a question.
+///
+/// Stemming:
+///   Basic suffix stripping is preserved for now so existing vocabulary built
+///   from non-character-level training still matches.  Once the pool has been
+///   trained at character level, morphology emerges from Hebbian co-occurrence
+///   and the stemming can be disabled via `QaRuntimeConfig::use_stemming`.
 fn tokenize(text: &str) -> Vec<String> {
+    // Only articles, conjunctions, and pure-preposition glue words that carry
+    // zero semantic content go here.  Negation, question words, and modals
+    // are intentionally ABSENT from this list.
     const STOP_WORDS: &[&str] = &[
-        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-        "should", "may", "might", "must", "can", "could", "of", "to", "in",
-        "for", "on", "with", "at", "by", "from", "up", "about", "into",
-        "through", "during", "before", "after", "above", "below", "between",
-        "and", "but", "or", "nor", "so", "yet", "both", "either", "neither",
-        "not", "only", "own", "same", "than", "too", "very", "just", "that",
-        "this", "it", "its", "as", "if", "how", "what", "which", "who", "whom",
-        "when", "where", "why", "all", "each", "every", "any", "no", "more",
-        "most", "other", "such", "how", "much", "many", "some",
+        "a", "an", "the",
+        "of", "to", "in", "for", "on", "with", "at", "by", "from",
+        "into", "through", "during", "above", "below", "between",
+        "and", "but", "or", "nor", "so",
+        "it", "its", "this", "that",
+        "be", "been", "being", "is", "are", "was", "were",
+        "have", "has", "had", "do", "does", "did",
     ];
 
-    text.split_whitespace()
-        .flat_map(|word| {
-            // Strip leading/trailing punctuation.
-            let cleaned: String = word
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '-')
-                .collect::<String>()
-                .to_lowercase();
-            if cleaned.len() < 2 {
-                return None;
-            }
-            if STOP_WORDS.contains(&cleaned.as_str()) {
-                return None;
-            }
-            // Simple English plural stemming: strip trailing 's' for words > 3
-            // chars that don't end in 'ss'.  This maps "trees"→"tree",
-            // "animals"→"animal", "colors"→"color" so rephrased queries match
-            // the singular vocabulary built during toddler/textbook ingestion.
-            let stemmed = if cleaned.len() > 3
-                && cleaned.ends_with('s')
-                && !cleaned.ends_with("ss")
+    let mut tokens: Vec<String> = Vec::new();
+    let mut word_buf = String::new();
+
+    let flush = |buf: &mut String, out: &mut Vec<String>| {
+        if !buf.is_empty() {
+            // Basic plural stemming: "trees"→"tree", "animals"→"animal".
+            // Kept for backward compatibility until character-level training
+            // makes morphology emerge from the pool itself.
+            let stemmed = if buf.len() > 3
+                && buf.ends_with('s')
+                && !buf.ends_with("ss")
             {
-                cleaned[..cleaned.len() - 1].to_string()
+                buf[..buf.len() - 1].to_string()
             } else {
-                cleaned
+                buf.clone()
             };
-            if stemmed.len() < 2 {
-                return None;
+            if stemmed.len() >= 1 && !STOP_WORDS.contains(&stemmed.as_str()) {
+                out.push(stemmed);
             }
-            Some(stemmed)
-        })
-        .collect()
+            buf.clear();
+        }
+    };
+
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            word_buf.push(ch.to_lowercase().next().unwrap_or(ch));
+        } else {
+            flush(&mut word_buf, &mut tokens);
+            // Punctuation as named tokens — they are part of the query signal.
+            if let Some(name) = punct_token(ch) {
+                tokens.push(format!("punct_{name}"));
+            }
+        }
+    }
+    flush(&mut word_buf, &mut tokens);
+    tokens
+}
+
+/// Map punctuation characters to token names for the QA tokenizer.
+fn punct_token(ch: char) -> Option<&'static str> {
+    match ch {
+        ','  => Some("comma"),
+        '.'  => Some("period"),
+        '?'  => Some("question"),
+        '!'  => Some("exclaim"),
+        '\'' | '\u{2019}' | '\u{0060}' => Some("apostrophe"),
+        '-'  | '\u{2013}' | '\u{2014}' => Some("hyphen"),
+        ':'  => Some("colon"),
+        ';'  => Some("semicolon"),
+        _    => None,
+    }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────

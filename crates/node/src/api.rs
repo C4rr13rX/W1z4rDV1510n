@@ -3972,10 +3972,26 @@ fn encode_media_labels(
 
 /// POST /media/train
 /// Encode one or more modalities and train the NeuronPool in a single co-activation.
+///
+/// For text modalities this does two things automatically:
+///
+/// 1. **Co-occurrence pass** — all labels (word, char, punct, role, zone) fire
+///    together in one `train_weighted` call.  The pool builds Hebbian connections
+///    between everything that co-activated.
+///
+/// 2. **STDP character-sequence pass** — for every word in the text, the encoder
+///    now returns the ordered character sequence (e.g. `["txt:char_c", "txt:char_a",
+///    "txt:char_t"]` for "cat").  These are trained as adjacent-frame bridges with
+///    exponential lr decay (tau = 0.5 char-steps), so STDP builds strong *forward*
+///    (pre→post) edges through each word's letter chain.  Recurring sub-sequences
+///    across words (morphemes like "port" in transport/import/export) accumulate
+///    shared activating paths and eventually promote to mini-columns — emergent
+///    morpheme recognition with no hand-coded rules.
 async fn media_train(
     State(state): State<ApiState>,
     Json(req): Json<MediaTrainReq>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Encode labels (co-occurrence pass).
     let labels = match encode_media_labels(
         &req.modality,
         req.data_b64.as_deref(),
@@ -3993,25 +4009,69 @@ async fn media_train(
             Json(serde_json::json!({ "error": "no labels produced — check modality and input" })));
     }
 
+    // Extract character sequences for STDP ordering (text modalities only).
+    let char_seqs: Vec<Vec<String>> =
+        if req.modality == "text" || req.modality == "page" || req.modality == "full" {
+            let enc = TextBitsEncoder::new(TextBitsConfig::default());
+            if let Some(ref span_reqs) = req.spans {
+                let tspans: Vec<TextSpan> = span_reqs.iter().map(|sr| {
+                    let emphasis = match (sr.bold, sr.italic) {
+                        (true, true)   => TextEmphasis::BoldItalic,
+                        (true, false)  => TextEmphasis::Bold,
+                        (false, true)  => TextEmphasis::Italic,
+                        _              => TextEmphasis::None,
+                    };
+                    TextSpan::positioned(
+                        &sr.text, parse_text_role(&sr.role), sr.size_ratio, emphasis,
+                        sr.indent, sr.x_frac, sr.y_frac, sr.seq_index, sr.seq_total,
+                    )
+                }).collect();
+                enc.encode_spans(&tspans).char_sequences
+            } else if let Some(ref plain) = req.text {
+                enc.encode_plain(plain).char_sequences
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
     let label_count = labels.len();
-    // Run the Hebbian update on a blocking thread so we don't stall the async
-    // executor (and therefore heartbeat / health / cluster tasks) during heavy
-    // training sessions with large pools.  The pool mutex is held only inside
-    // spawn_blocking, so concurrent requests still queue correctly.
+    let char_seq_count = char_seqs.len();
+
     let neuro = state.neuro.clone();
     let lr = req.lr_scale;
     tokio::task::spawn_blocking(move || {
+        // Pass 1: full co-occurrence — all labels fire together.
         neuro.train_weighted(&labels, lr, false);
-    }).await.ok();
 
-    // NOTE: auto-save removed — saving a multi-GB pool on every training call
-    // saturates the disk and blocks Tokio threads.  Use POST /neuro/checkpoint
-    // to persist the pool explicitly (the training script does this periodically).
+        // Pass 2: STDP character sequences — one per word, trained as a
+        // temporal chain.  Adjacent characters are bridged with exponentially
+        // decayed lr (tau = 0.5 char-steps) so forward edges get LTP and the
+        // pool learns directed character-to-character paths through words.
+        // lr for char sequences is scaled down (× 0.3) to avoid over-weighting
+        // sub-word connections relative to word-level co-occurrence.
+        let char_lr = lr * 0.3;
+        let tau = 0.5f32; // char-step time constant
+        for seq in &char_seqs {
+            if seq.len() < 2 { continue; }
+            for i in 1..seq.len() {
+                let prev = &seq[i - 1];
+                let curr = &seq[i];
+                // Bridge: [prev, curr] as a 2-label co-activation with decayed lr.
+                // Position i is one step from i-1, so dt = 1.0 char-step.
+                let bridge_lr = char_lr * (-1.0f32 / tau).exp();
+                let pair = vec![prev.clone(), curr.clone()];
+                neuro.train_weighted(&pair, bridge_lr, false);
+            }
+        }
+    }).await.ok();
 
     (StatusCode::OK, Json(serde_json::json!({
         "trained": true,
         "modality": req.modality,
         "label_count": label_count,
+        "char_sequences": char_seq_count,
     })))
 }
 
