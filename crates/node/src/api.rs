@@ -4499,6 +4499,27 @@ async fn neuro_ask(
             .collect();
         let stop_set: std::collections::HashSet<&str> = STOP_WORDS.iter().copied().collect();
 
+        // When qa_gated, cap output at the number of content words in the QA answer
+        // so pool-activated noise is never appended after the correct answer keywords.
+        // When not qa_gated (shouldn't reach here, but just in case), use max_tok.
+        let output_cap: usize = if qa_gated {
+            best_qa
+                .filter(|r| r.confidence >= 0.5)
+                .map(|best| {
+                    best.answer
+                        .split_whitespace()
+                        .filter(|word| {
+                            let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                            w.len() > 2 && !stop_set.contains(w.as_str())
+                        })
+                        .count()
+                        .max(1)
+                })
+                .unwrap_or(max_tok.min(20))
+        } else {
+            max_tok.min(20)
+        };
+
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut output: Vec<String> = Vec::new();
         // If we have a QA answer, start the output with keywords from the answer text.
@@ -4510,13 +4531,15 @@ async fn neuro_ask(
                 if w.len() > 2 && !stop_set.contains(w.as_str()) && !used.contains(&w) {
                     used.insert(w.clone());
                     output.push(w);
-                    if output.len() >= max_tok.min(20) { break; }
+                    if output.len() >= output_cap { break; }
                 }
             }
         }
-        // Append top pool-activated words that aren't already in the output
+        // Append top pool-activated words that aren't already in the output.
+        // When qa_gated this loop is a no-op because output already reached output_cap
+        // from the QA answer above (pool words would only add noise on a saturated pool).
         for (label, _strength) in &word_acts {
-            if output.len() >= max_tok.min(20) { break; }
+            if output.len() >= output_cap { break; }
             let w = label.strip_prefix("txt:word_").unwrap_or("").to_string();
             if w.is_empty() || w == "eos" || w.contains('_') { continue; }
             if stop_set.contains(w.as_str()) { continue; }
@@ -4853,62 +4876,167 @@ async fn neuro_generate(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
-    let neuro  = state.neuro.clone();
-    let text   = req.text.clone();
-    let tokens = tokio::task::spawn_blocking(move || {
-        // Encode the prompt → word labels.
-        let enc    = TextBitsEncoder::new(TextBitsConfig::default());
-        let labels = enc.encode_plain(&text).labels;
+    let neuro   = state.neuro.clone();
+    let qa_arc  = state.qa_runtime.clone();
+    let hq_arc  = state.hypothesis_queue.clone();
+    let text    = req.text.clone();
+    let hops    = req.hops;
+    let max_tok = req.max_tokens;
 
-        // Seed = full prompt encoding; used = question words so we don't echo them.
-        let mut seed: Vec<String> = labels;
-        let mut used: std::collections::HashSet<String> = seed.iter()
-            .filter_map(|l| {
-                let w = l.strip_prefix("txt:word_")?;
-                if w.contains('_') { None } else { Some(w.to_string()) }
+    let result = tokio::task::spawn_blocking(move || {
+        const STOP_WORDS: &[&str] = &[
+            "what","is","are","how","does","do","the","a","an","in","of",
+            "to","and","or","it","this","that","be","was","were","can","will",
+            "would","could","should","did","have","has","had","for","with","by",
+            "at","as","but","not","he","she","they","we","you","i","its","get",
+            "about","tell","me","describe","explain","define",
+        ];
+        let stop_set: std::collections::HashSet<&str> = STOP_WORDS.iter().copied().collect();
+
+        // Encode the prompt text into neural labels
+        let enc = TextBitsEncoder::new(TextBitsConfig::default());
+        let prompt_labels: Vec<String> = enc.encode_plain(&text).labels;
+
+        // Filter out stop-word txt:word_* labels from the seed
+        let content_labels: Vec<String> = prompt_labels.iter()
+            .filter(|l| {
+                if let Some(w) = l.strip_prefix("txt:word_") {
+                    !STOP_WORDS.contains(&w)
+                } else {
+                    true
+                }
             })
+            .cloned()
             .collect();
 
+        // QA recall: find if the node has trained knowledge about this prompt
+        let now = now_timestamp();
+        let qa_report = {
+            let mut qa = qa_arc.lock().expect("qa mutex");
+            qa.query(&text, now)
+        };
+        let best_qa = qa_report.results.first();
+        let (qa_answer_labels, qa_conf): (Vec<String>, f32) = best_qa
+            .filter(|r| r.confidence > 0.3)
+            .map(|r| {
+                let labels = enc.encode_plain(&r.answer).labels;
+                (labels, (r.confidence * 1.5).min(1.0))
+            })
+            .unwrap_or_default();
+
+        // QA gate — same logic as neuro_ask
+        let qa_gated = best_qa
+            .filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0)
+            .is_some();
+
+        if !qa_gated {
+            let id = {
+                let mut h = 0u64;
+                for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                format!("{h:x}")
+            };
+            {
+                let mut hq = hq_arc.lock().expect("hypothesis mutex");
+                if !hq.iter().any(|e| e.question == text) {
+                    hq.push(HypothesisEntry {
+                        id,
+                        question: text.clone(),
+                        queued_at_unix: now.unix,
+                        attempts: 0,
+                        max_attempts: 5,
+                        resolved: false,
+                        answer: None,
+                        confidence: None,
+                    });
+                }
+            }
+            return serde_json::json!({
+                "prompt":     text,
+                "hypothesis": true,
+                "response":   null,
+                "tokens":     [],
+                "message":    "Not enough learned signal — added to research queue.",
+            });
+        }
+
+        // Full propagation for decode (QA answer seeds give accurate token ranking)
+        let combined = neuro.propagate_combined(
+            &[
+                (content_labels.as_slice(), 1.0_f32),
+                (qa_answer_labels.as_slice(), qa_conf),
+            ],
+            hops,
+            0.005,
+        );
+        let mut word_acts: Vec<(String, f32)> = combined
+            .iter()
+            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .map(|(l, &v)| (l.clone(), v))
+            .collect();
+        word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
+
+        // Cap at QA answer word count to avoid noisy pool tail
+        let output_cap: usize = best_qa
+            .filter(|r| r.confidence >= 0.5)
+            .map(|best| {
+                best.answer
+                    .split_whitespace()
+                    .filter(|word| {
+                        let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                        w.len() > 2 && !stop_set.contains(w.as_str())
+                    })
+                    .count()
+                    .max(1)
+            })
+            .unwrap_or(max_tok);
+
+        // Seed words that should not appear in output
+        let seed_words: std::collections::HashSet<String> = content_labels.iter()
+            .chain(qa_answer_labels.iter())
+            .filter_map(|l| l.strip_prefix("txt:word_").map(|w| w.to_string()))
+            .collect();
+
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut output: Vec<String> = Vec::new();
 
-        for _ in 0..req.max_tokens {
-            let activated = neuro.propagate_all_threshold(&seed, req.hops, req.min_strength);
-
-            // Collect clean bare-word labels not yet used, sorted by strength.
-            let mut hits: Vec<(String, f32)> = activated
-                .into_iter()
-                .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                .filter(|(l, _)| {
-                    let w = l.strip_prefix("txt:word_").unwrap_or("");
-                    !used.contains(w)
-                })
-                .collect();
-            hits.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal));
-
-            let Some((label, strength)) = hits.first() else { break };
-            if *strength < req.min_strength { break; }
-
-            let word = label.strip_prefix("txt:word_").unwrap_or("").to_string();
-            if word == "eos" { break; }
-
-            used.insert(word.clone());
-            output.push(word.clone());
-            // Feedback: the chosen word drives the next hop.
-            seed = vec![label.clone()];
+        // Prepend QA answer keywords
+        if let Some(best) = best_qa.filter(|r| r.confidence >= 0.5) {
+            for word in best.answer.split_whitespace() {
+                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                if w.len() > 2 && !stop_set.contains(w.as_str()) && !used.contains(&w) {
+                    used.insert(w.clone());
+                    output.push(w);
+                    if output.len() >= output_cap { break; }
+                }
+            }
         }
-        output
-    }).await.unwrap_or_default();
 
-    let mut sentence = tokens.join(" ");
-    if let Some(c) = sentence.get_mut(0..1) { c.make_ascii_uppercase(); }
-    if !sentence.is_empty() && !sentence.ends_with(['.','!','?']) { sentence.push('.'); }
+        // Pool-activated supplement (no-op when output_cap already reached above)
+        for (label, _) in &word_acts {
+            if output.len() >= output_cap { break; }
+            let w = label.strip_prefix("txt:word_").unwrap_or("").to_string();
+            if w.is_empty() || w == "eos" || w.contains('_') { continue; }
+            if stop_set.contains(w.as_str()) { continue; }
+            if seed_words.contains(&w) { continue; }
+            if used.contains(&w) { continue; }
+            used.insert(w.clone());
+            output.push(w);
+        }
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "prompt":    req.text,
-        "response":  sentence,
-        "tokens":    tokens,
-    })))
+        let mut response = output.join(" ");
+        if let Some(c) = response.get_mut(0..1) { c.make_ascii_uppercase(); }
+        if !response.is_empty() && !response.ends_with(['.','!','?']) { response.push('.'); }
+
+        serde_json::json!({
+            "prompt":     text,
+            "hypothesis": false,
+            "response":   response,
+            "tokens":     output,
+        })
+    }).await.unwrap_or_else(|e| serde_json::json!({ "error": format!("internal: {e}") }));
+
+    (StatusCode::OK, Json(result))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
