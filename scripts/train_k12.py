@@ -605,6 +605,26 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
 
 # -- PDF book processing --------------------------------------------------------
 
+def _last_sentence_boundary(text: str) -> int:
+    """Return the index *after* the last sentence-ending punctuation in text.
+
+    Returns 0 if no sentence boundary is found (i.e. the whole text is a
+    single incomplete sentence and should be carried forward).
+    """
+    best = 0
+    for end_seq in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+        p = text.rfind(end_seq)
+        if p >= 0:
+            candidate = p + len(end_seq)
+            if candidate > best:
+                best = candidate
+    # Also check if the text ends with a sentence-terminator at the very end
+    stripped = text.rstrip()
+    if stripped and stripped[-1] in ".!?" and best == 0:
+        best = len(text)
+    return best
+
+
 def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
                  ckpt_every: int = 80) -> dict:
     book_id = re.sub(r"[^a-z0-9]+", "_", pdf_path.stem.lower()).strip("_")[:48]
@@ -614,6 +634,11 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
     trained_pages = 0
     skipped = 0
     qa_candidates: list[dict] = []
+    # Cross-page sentence stitching: carry an incomplete trailing sentence
+    # from the bottom of one page to the top of the next.  Textbooks regularly
+    # break a sentence across a page turn; without stitching, QA extraction
+    # only ever sees fragments and misses many valid definitional sentences.
+    sentence_carry = ""
 
     pages_iter = tqdm(range(total), total=total, desc=book_id[:30], unit="pg")
     for page_idx in pages_iter:
@@ -621,20 +646,38 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
         try:
             jpeg = render_page_jpeg(page)
             spans = extract_spans(page)
-            text = page_plain_text(page)
+            raw_text = page_plain_text(page)
 
             if not spans and len(jpeg) < 3000:
                 skipped += 1
+                sentence_carry = ""  # reset on blank pages
                 continue
+
+            # Stitch cross-page fragments: prepend incomplete trailing sentence
+            # from the previous page to this page's text.
+            if sentence_carry:
+                stitched = sentence_carry + " " + raw_text
+                sentence_carry = ""
+            else:
+                stitched = raw_text
 
             if train_page_media(client, node_url, jpeg, spans):
                 trained_pages += 1
             else:
                 skipped += 1
 
-            # Extract Q&A from this page's text
+            # Split at last sentence boundary for QA extraction.
+            # The tail (after the last complete sentence) is carried forward.
+            boundary = _last_sentence_boundary(stitched)
+            if 0 < boundary < len(stitched):
+                text_for_qa = stitched[:boundary]
+                sentence_carry = stitched[boundary:].strip()
+            else:
+                text_for_qa = stitched
+
+            # Extract Q&A from the complete-sentence portion of the stitched text
             qa_candidates.extend(
-                extract_qa_from_text(text, book_id, page_idx, max_per_page=3)
+                extract_qa_from_text(text_for_qa, book_id, page_idx, max_per_page=3)
             )
 
             if trained_pages > 0 and trained_pages % ckpt_every == 0:
