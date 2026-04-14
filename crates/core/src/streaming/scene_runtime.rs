@@ -176,6 +176,24 @@ impl SceneRuntime {
         })
     }
 
+    /// Returns the current entities as `SceneEntityReport` values without
+    /// requiring a new `TokenBatch`. Useful for polling the latest known state.
+    pub fn entity_reports(&self) -> Vec<SceneEntityReport> {
+        self.entities.values().map(|state| {
+            let stability = (1.0 / (1.0 + state.speed)).clamp(0.0, 1.0);
+            SceneEntityReport {
+                entity_id: state.entity_id.clone(),
+                position: state.position,
+                velocity: state.velocity,
+                speed: state.speed,
+                phenotype_signature: state.phenotype_signature.clone(),
+                last_seen: state.last_seen,
+                stability,
+                static_age_secs: state.static_age_secs,
+            }
+        }).collect()
+    }
+
     fn prune(&mut self, now: Timestamp) {
         let ttl = (self.config.prediction_horizon_secs * 4.0).max(5.0) as i64;
         self.entities.retain(|_, state| {

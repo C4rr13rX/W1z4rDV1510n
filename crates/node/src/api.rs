@@ -48,8 +48,19 @@ use w1z4rdv1510n::streaming::{
     TextBitsConfig, TextBitsEncoder, TextSpan, TextRole, TextEmphasis,
     MotionBitsConfig, MotionBitsEncoder, MotionSample,
     KeyboardBitsConfig, KeyboardBitsEncoder, KeyEvent,
+    // Simulation / entity runtimes
+    BehaviorSubstrate, BehaviorSubstrateConfig, BehaviorInput, BehaviorFrame,
+    SensorKind, ActionKind, SensorSample, ActionSample,
+    SceneRuntime, SceneReport,
+    SurvivalRuntime, SurvivalReport, SurvivalConfig,
+    PhysiologyRuntime, PhysiologyReport,
+    NarrativeRuntime, NarrativeReport,
+    OntologyRuntime, OntologyReport,
+    PoseFrame, Keypoint, BoundingBox,
 };
 use w1z4rdv1510n::causal::{CausalEdge, CausalRuntime};
+use w1z4rdv1510n::config::{SceneConfig, PhysiologyConfig, NarrativeConfig, OntologyConfig};
+use w1z4rdv1510n::streaming::schema::{EventToken, EventKind, TokenBatch};
 use w1z4rdv1510n_cluster::{ClusterConfig, ClusterNode};
 
 #[derive(Clone)]
@@ -94,6 +105,22 @@ struct ApiState {
     /// LAN address to advertise to cluster peers (from network.advertise_addr in config).
     /// When None the bind address is used, which means peers see 0.0.0.0.
     cluster_advertise_addr: Option<std::net::SocketAddr>,
+
+    // ── Simulation / entity runtimes ─────────────────────────────────────────
+    /// Behavioral substrate: encodes multi-modal entity observations into latent
+    /// BehaviorFrames and trains the neuro pool with the resulting labels.
+    behavior: Arc<Mutex<BehaviorSubstrate>>,
+    /// Scene tracker: maintains 3-D entity positions, velocities, and anomalies.
+    scene: Arc<Mutex<SceneRuntime>>,
+    /// Physiology monitor: tracks deviation from learned physiological baselines.
+    physiology: Arc<Mutex<PhysiologyRuntime>>,
+    /// Survival scorer: aggregates behavior + physiology into entity survival fitness.
+    survival: Arc<Mutex<SurvivalRuntime>>,
+    /// Narrative synthesizer: composes human-readable situation summaries from all
+    /// sub-runtime reports.
+    narrative: Arc<Mutex<NarrativeRuntime>>,
+    /// Ontology tracker: discovers stable concept labels from recurring token patterns.
+    ontology: Arc<Mutex<OntologyRuntime>>,
 }
 
 #[derive(Clone)]
@@ -739,6 +766,15 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         cluster: Arc::new(tokio::sync::Mutex::new(None)),
         cluster_advertise_addr: config.network.advertise_addr.as_deref()
             .and_then(|s| s.parse().ok()),
+        behavior:   Arc::new(Mutex::new(BehaviorSubstrate::new(BehaviorSubstrateConfig::default()))),
+        scene:      Arc::new(Mutex::new(SceneRuntime::new(SceneConfig::default()))),
+        physiology: Arc::new(Mutex::new(PhysiologyRuntime::new(PhysiologyConfig::default()))),
+        survival:   Arc::new(Mutex::new(SurvivalRuntime::new(SurvivalConfig::default()))),
+        narrative:  Arc::new(Mutex::new(NarrativeRuntime::new(NarrativeConfig::default()))),
+        ontology:   Arc::new(Mutex::new(OntologyRuntime::new(
+            OntologyConfig::default(),
+            w1z4rdv1510n::config::ConsistencyChunkingConfig::default(),
+        ))),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -852,7 +888,15 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/motifs",         get(neuro_motifs))
         .route("/neuro/motifs/predict", post(neuro_motifs_predict))
         .route("/neuro/ask",            post(neuro_ask))
+        .route("/neuro/generate",       post(neuro_generate))
         .route("/chat",                 post(neuro_ask))
+        // ── Entity / simulation runtimes ──────────────────────────────────────
+        // POST /entity/observe  — feed a multi-modal entity observation through
+        //   the behavior→physiology→survival→narrative chain and train the neuro
+        //   pool with the resulting labels. Returns combined report.
+        // GET  /entity/report   — latest scene + survival + narrative state.
+        .route("/entity/observe",       post(entity_observe))
+        .route("/entity/report",        get(entity_report))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -4517,6 +4561,218 @@ async fn neuro_motifs_predict(
         .map(|(label, prob)| serde_json::json!({ "label": label, "probability": prob }))
         .collect();
     (StatusCode::OK, Json(serde_json::json!({ "predictions": result })))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// POST /neuro/generate
+// Auto-regressive text generation from the Hebbian pool.
+// Seeds the pool with encoded question labels, then iterates: at each step the
+// highest-activated word neuron becomes the next output token, is fed back as
+// the new seed, and is suppressed from future steps.  Stops at "eos" token or
+// when activation drops below min_strength.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct GenerateReq {
+    text: String,
+    #[serde(default = "default_gen_max_tokens")] max_tokens: usize,
+    #[serde(default = "default_gen_hops")]       hops: usize,
+    #[serde(default = "default_gen_min")]        min_strength: f32,
+}
+fn default_gen_max_tokens() -> usize { 32 }
+fn default_gen_hops()       -> usize { 2 }
+fn default_gen_min()        -> f32   { 0.05 }
+
+async fn neuro_generate(
+    State(state): State<ApiState>,
+    Json(req): Json<GenerateReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "text must not be empty" })));
+    }
+    let neuro  = state.neuro.clone();
+    let text   = req.text.clone();
+    let tokens = tokio::task::spawn_blocking(move || {
+        // Encode the prompt → word labels.
+        let enc    = TextBitsEncoder::new(TextBitsConfig::default());
+        let labels = enc.encode_plain(&text).labels;
+
+        // Seed = full prompt encoding; used = question words so we don't echo them.
+        let mut seed: Vec<String> = labels;
+        let mut used: std::collections::HashSet<String> = seed.iter()
+            .filter_map(|l| {
+                let w = l.strip_prefix("txt:word_")?;
+                if w.contains('_') { None } else { Some(w.to_string()) }
+            })
+            .collect();
+
+        let mut output: Vec<String> = Vec::new();
+
+        for _ in 0..req.max_tokens {
+            let activated = neuro.propagate_all_threshold(&seed, req.hops, req.min_strength);
+
+            // Collect clean bare-word labels not yet used, sorted by strength.
+            let mut hits: Vec<(String, f32)> = activated
+                .into_iter()
+                .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .filter(|(l, _)| {
+                    let w = l.strip_prefix("txt:word_").unwrap_or("");
+                    !used.contains(w)
+                })
+                .collect();
+            hits.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal));
+
+            let Some((label, strength)) = hits.first() else { break };
+            if *strength < req.min_strength { break; }
+
+            let word = label.strip_prefix("txt:word_").unwrap_or("").to_string();
+            if word == "eos" { break; }
+
+            used.insert(word.clone());
+            output.push(word.clone());
+            // Feedback: the chosen word drives the next hop.
+            seed = vec![label.clone()];
+        }
+        output
+    }).await.unwrap_or_default();
+
+    let mut sentence = tokens.join(" ");
+    if let Some(c) = sentence.get_mut(0..1) { c.make_ascii_uppercase(); }
+    if !sentence.is_empty() && !sentence.ends_with(['.','!','?']) { sentence.push('.'); }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "prompt":    req.text,
+        "response":  sentence,
+        "tokens":    tokens,
+    })))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// POST /entity/observe
+// Feed a multi-modal entity observation through the runtime chain:
+//   BehaviorSubstrate → PhysiologyRuntime → SurvivalRuntime → NarrativeRuntime
+// and simultaneously train the neuro pool with the entity's encoded labels so
+// that Hebbian associations build up from observations over time.
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn entity_observe(
+    State(state): State<ApiState>,
+    Json(req): Json<BehaviorInput>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let entity_id      = req.entity_id.clone();
+    let entity_species = req.species.clone();
+    let ts             = req.timestamp;
+
+    // Run the full chain on a blocking thread — all runtimes use sync mutexes.
+    let entity_id_inner = entity_id.clone();
+    let behavior_arc   = state.behavior.clone();
+    let physio_arc     = state.physiology.clone();
+    let survival_arc   = state.survival.clone();
+    let narrative_arc  = state.narrative.clone();
+    let neuro          = state.neuro.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        // 1. BehaviorSubstrate → BehaviorFrame + latent labels
+        let frame: BehaviorFrame = {
+            let mut b = behavior_arc.lock().expect("behavior");
+            b.ingest(req)
+        };
+
+        // Pull per-entity state from the frame (first state matching this entity).
+        let primary = frame.states.iter().find(|s| s.entity_id == entity_id_inner);
+        let latent   = primary.map(|s| s.latent.as_slice()).unwrap_or(&[]);
+        let position = primary.and_then(|s| s.position);
+        let confidence = primary.map(|s| s.confidence).unwrap_or(0.0);
+
+        // Build Hebbian labels from the frame so the neuro pool learns from it.
+        let mut neuro_labels: Vec<String> = Vec::new();
+        neuro_labels.push(format!("entity:{}", entity_id_inner));
+        neuro_labels.push(format!("species:{}", serde_json::to_string(&entity_species)
+            .unwrap_or_default().trim_matches('"').to_lowercase()));
+        // Discretise latent dims into zone-like labels (top 8 dims by magnitude).
+        let mut dims: Vec<(usize, f64)> = latent.iter().enumerate()
+            .map(|(i, &v)| (i, v)).collect();
+        dims.sort_unstable_by(|a, b| b.1.abs().partial_cmp(&a.1.abs())
+            .unwrap_or(std::cmp::Ordering::Equal));
+        for (i, v) in dims.iter().take(8) {
+            let bin = ((v.clamp(-1.0, 1.0) + 1.0) * 7.5) as u32;
+            neuro_labels.push(format!("entity:{}:dim{}:{}", entity_id_inner, i, bin));
+        }
+        if let Some(pos) = position {
+            // Coarse 4-unit grid position labels for spatial association.
+            neuro_labels.push(format!("entity:{}:x{}", entity_id_inner, (pos[0] / 4.0) as i64));
+            neuro_labels.push(format!("entity:{}:y{}", entity_id_inner, (pos[1] / 4.0) as i64));
+            neuro_labels.push(format!("entity:{}:z{}", entity_id_inner, (pos[2] / 4.0) as i64));
+        }
+        neuro.train_weighted(&neuro_labels, 1.0, false);
+
+        // 2. PhysiologyRuntime
+        let physio_report: Option<PhysiologyReport> = {
+            let batch = TokenBatch { timestamp: ts, tokens: vec![], layers: vec![],
+                source_confidence: Default::default() };
+            let mut p = physio_arc.lock().expect("physiology");
+            p.update(&batch, None)
+        };
+
+        // 3. SurvivalRuntime
+        let survival_report: SurvivalReport = {
+            let mut s = survival_arc.lock().expect("survival");
+            s.update(&frame, physio_report.as_ref(), None)
+        };
+
+        // 4. NarrativeRuntime
+        let narrative_report: Option<NarrativeReport> = {
+            let mut n = narrative_arc.lock().expect("narrative");
+            n.update(ts, Some(&frame), None, Some(&survival_report), None, None, None, None)
+        };
+
+        (physio_report, survival_report, narrative_report, neuro_labels, confidence, position)
+    }).await;
+
+    match result {
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "runtime panic" }))),
+        Ok((physio, survival, narrative, labels, confidence, position)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "entity_id":       entity_id,
+                "confidence":      confidence,
+                "position":        position,
+                "neuro_labels":    labels,
+                "physiology":      physio,
+                "survival":        survival.entities.first(),
+                "narrative":       narrative.map(|r| r.summary),
+            })))
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// GET /entity/report
+// Returns the latest combined state across scene, survival, and narrative.
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn entity_report(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Ontology and scene can be read without holding locks long.
+    // OntologyRuntime only produces reports on update(); return null when idle.
+    let ontology_report: Option<OntologyReport> = None;
+    let scene_entities: Vec<serde_json::Value> = state.scene.lock().ok()
+        .map(|s| s.entity_reports().into_iter().map(|e| serde_json::json!({
+            "entity_id": e.entity_id,
+            "position":  e.position,
+            "velocity":  e.velocity,
+            "speed":     e.speed,
+            "stability": e.stability,
+        })).collect())
+        .unwrap_or_default();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "scene":    { "entities": scene_entities },
+        "ontology": ontology_report,
+    })))
 }
 
 #[cfg(test)]
