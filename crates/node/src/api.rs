@@ -121,6 +121,27 @@ struct ApiState {
     narrative: Arc<Mutex<NarrativeRuntime>>,
     /// Ontology tracker: discovers stable concept labels from recurring token patterns.
     ontology: Arc<Mutex<OntologyRuntime>>,
+    /// Unresolved questions whose activation was below ANSWER_THRESHOLD.
+    /// Background task polls this and drives research until resolved.
+    hypothesis_queue: Arc<Mutex<Vec<HypothesisEntry>>>,
+}
+
+/// Minimum peak `txt:word_*` activation required to emit an answer.
+/// Below this threshold the question is added to the hypothesis queue.
+const ANSWER_THRESHOLD: f32 = 0.08;
+
+/// An unresolved question that the node cannot answer from current memory.
+/// Persists in `hypothesis_queue` until resolved via research or training.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HypothesisEntry {
+    id: String,
+    question: String,
+    queued_at_unix: i64,
+    attempts: u32,
+    max_attempts: u32,
+    resolved: bool,
+    answer: Option<String>,
+    confidence: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -775,6 +796,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             OntologyConfig::default(),
             w1z4rdv1510n::config::ConsistencyChunkingConfig::default(),
         ))),
+        hypothesis_queue: Arc::new(Mutex::new(Vec::new())),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -797,6 +819,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let label_mesh = state.data_mesh.clone();
     let label_share_kind = state.fabric_share_kind.clone();
     let label_neuro = Arc::clone(&state.neuro);
+    let app_hypothesis_queue = Arc::clone(&state.hypothesis_queue);
+    let app_neuro = Arc::clone(&state.neuro);
+    let app_qa = Arc::clone(&state.qa_runtime);
     let app = Router::new()
         .route("/health", get(get_health))
         .route("/ready", get(get_ready))
@@ -890,6 +915,10 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/ask",            post(neuro_ask))
         .route("/neuro/generate",       post(neuro_generate))
         .route("/chat",                 post(neuro_ask))
+        // ── Hypothesis queue ──────────────────────────────────────────────────
+        // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
+        .route("/hypothesis/queue",     get(hypothesis_queue_list))
+        .route("/hypothesis/resolve",   post(hypothesis_resolve))
         // ── Entity / simulation runtimes ──────────────────────────────────────
         // POST /entity/observe  — feed a multi-modal entity observation through
         //   the behavior→physiology→survival→narrative chain and train the neuro
@@ -919,6 +948,19 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             let neuro = label_neuro;
             tokio::spawn(async move {
                 label_queue_sync(mesh, label_state, share_kind, neuro).await;
+            });
+        }
+        // ── Background hypothesis research loop ───────────────────────────────
+        // Every 30 seconds, pick the oldest unresolved hypothesis, POST it to
+        // /neuro/ask internally, and if activation has risen above threshold,
+        // mark it resolved.  External research agents (research_agent.py) poll
+        // GET /hypothesis/queue and POST /hypothesis/resolve.
+        {
+            let hq = app_hypothesis_queue.clone();
+            let neuro = app_neuro.clone();
+            let qa_arc = app_qa.clone();
+            tokio::spawn(async move {
+                hypothesis_research_loop(hq, neuro, qa_arc).await;
             });
         }
         let listener = tokio::net::TcpListener::bind(addr)
@@ -4267,10 +4309,16 @@ struct AskReq {
 fn default_ask_top_k() -> usize { 20 }
 fn default_ask_min_strength() -> f32 { 0.05 }
 
-/// POST /neuro/ask
-/// Plain English in → the node returns what it associates with that text,
-/// drawn directly from its trained Hebbian fabric and QA store.
-/// This is the primary inference interface — the node speaking from what it learned.
+/// POST /neuro/ask  (also POST /chat)
+///
+/// Multi-pathway convergence inference:
+///   1. Encode question → Pathway A seed labels (weight 1.0)
+///   2. QA recall → encode best answer text → Pathway B seed labels (weight conf × 1.5)
+///   3. Single unified propagation pass (`propagate_combined`) — inhibitory edges
+///      from one pathway can suppress noise from another
+///   4. Read converged `txt:word_*` activation state
+///   5. If peak < ANSWER_THRESHOLD → add to hypothesis queue, return null answer
+///   6. Sequential auto-regressive decode from the pre-seeded combined activation
 async fn neuro_ask(
     State(state): State<ApiState>,
     Json(req): Json<AskReq>,
@@ -4279,170 +4327,371 @@ async fn neuro_ask(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
+    let neuro   = state.neuro.clone();
+    let qa_arc  = state.qa_runtime.clone();
+    let hq_arc  = state.hypothesis_queue.clone();
+    let text    = req.text.clone();
+    let hops    = req.hops;
+    let max_tok = req.top_k.max(30);
+    let min_str = req.min_strength;
 
-    // Run both the Hebbian propagation and QA lookup on a blocking thread
-    // so the async executor stays free for heartbeats and other requests
-    // even while training holds the pool mutex.
-    let neuro = state.neuro.clone();
-    let qa_arc = state.qa_runtime.clone();
-    let text = req.text.clone();
-    let (associations, qa_report) = tokio::task::spawn_blocking(move || {
-        // 1. Hebbian word associations from the neural fabric
-        let assoc = neuro.ask_text(&text, req.hops, req.top_k, req.min_strength);
-        // 2. QA recall
+    let result = tokio::task::spawn_blocking(move || {
+        // English stop words — excluded from the propagation seed so they don't
+        // create a uniform activation blanket over the entire vocabulary.
+        // These function words appear in almost every textbook sentence, so their
+        // Hebbian edges connect to nearly every word; seeding them would fire
+        // everything equally, making the threshold signal useless.
+        const STOP_WORDS: &[&str] = &[
+            "what","is","are","how","does","do","the","a","an","in","of",
+            "to","and","or","it","this","that","be","was","were","can","will",
+            "would","could","should","did","have","has","had","for","with","by",
+            "at","as","but","not","he","she","they","we","you","i","its","get",
+            "about","tell","me","describe","explain","define",
+        ];
+
+        // ── Pathway A: question text labels ──────────────────────────────────
+        let enc = TextBitsEncoder::new(TextBitsConfig::default());
+        let question_labels: Vec<String> = enc.encode_plain(&text).labels;
+
+        // Content-word-only seed: exclude stop-word txt:word_* labels so only
+        // semantically significant question concepts are seeded into the pool.
+        // Non-word labels (phonetic, zone, role) are kept as-is.
+        let question_content_labels: Vec<String> = question_labels.iter()
+            .filter(|l| {
+                if let Some(w) = l.strip_prefix("txt:word_") {
+                    !STOP_WORDS.contains(&w)
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+
+        // ── Pathway B: QA store answer labels ────────────────────────────────
         let now = now_timestamp();
-        let report = {
+        let qa_report = {
             let mut qa = qa_arc.lock().expect("qa mutex");
             qa.query(&text, now)
         };
-        (assoc, report)
-    }).await.unwrap_or_else(|_| (Vec::new(), QaQueryReport {
-        question: req.text.clone(),
-        active_question_neurons: 0,
-        results: Vec::new(),
-        timestamp: now_timestamp(),
-    }));
+        let best_qa = qa_report.results.first();
+        let (qa_answer_labels, qa_conf): (Vec<String>, f32) = best_qa
+            .filter(|r| r.confidence > 0.3)
+            .map(|r| {
+                let labels = enc.encode_plain(&r.answer).labels;
+                (labels, (r.confidence * 1.5).min(1.0))
+            })
+            .unwrap_or_default();
 
-    let assoc_words: Vec<String> = associations.iter()
-        .map(|(label, _)| label.strip_prefix("txt:word_").unwrap_or(label.as_str()).to_string())
-        .collect();
+        // ── Combined propagation — one unified pass ───────────────────────────
+        // Use a tight 1-hop pass for the threshold signal.  At hop=1, only
+        // neurons directly Hebbian-connected to the seed labels fire, so the
+        // output is discriminative (trained pairs >> background noise).
+        // The full `hops` count is used later for the auto-regressive decode.
+        let combined_1hop = neuro.propagate_combined(
+            &[
+                (question_content_labels.as_slice(), 1.0_f32),
+                (qa_answer_labels.as_slice(), qa_conf),
+            ],
+            1,   // 1 hop for discriminative threshold check
+            0.005,
+        );
 
-    // 3. Synthesize a readable response
-    let response_text = synthesize_response(&req.text, &qa_report.results, &assoc_words);
+        // ── Threshold check ───────────────────────────────────────────────────
+        // Collect all activated word labels from the 1-hop result.
+        let mut word_acts_1hop: Vec<(String, f32)> = combined_1hop
+            .iter()
+            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .map(|(l, &v)| (l.clone(), v))
+            .collect();
+        word_acts_1hop.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
 
-    let assoc_json: Vec<serde_json::Value> = associations.iter().map(|(label, strength)| {
-        let word = label.strip_prefix("txt:word_").unwrap_or(label.as_str());
-        serde_json::json!({ "word": word, "strength": strength })
-    }).collect();
-    let qa_answers: Vec<serde_json::Value> = qa_report.results.iter().map(|r| {
+        // Seed word labels — excluded from the signal because they trivially
+        // reach high activation (they were directly seeded).
+        let seed_word_labels: std::collections::HashSet<String> = question_content_labels.iter()
+            .chain(qa_answer_labels.iter())
+            .filter(|l| l.starts_with("txt:word_"))
+            .cloned()
+            .collect();
+
+        // Peak activation among non-seed words in the 1-hop result.
+        let peak_1hop = word_acts_1hop.iter()
+            .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
+            .map(|(_, v)| *v)
+            .fold(0.0f32, f32::max);
+
+        // Primary gate: QA store has a semantically matched, high-confidence pair.
+        // This is the reliable learned-knowledge signal when the pool's Hebbian
+        // connections are still forming (early in training).
+        let qa_gated = best_qa
+            .filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0)
+            .is_some();
+
+        // Secondary gate: strong 1-hop propagation signal (direct Hebbian link).
+        let propagation_gated = peak_1hop >= ANSWER_THRESHOLD;
+
+        if !qa_gated && !propagation_gated {
+            // Neither gate passed — queue as hypothesis for research
+            let id = {
+                let mut h = 0u64;
+                for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                format!("{h:x}")
+            };
+            {
+                let mut hq = hq_arc.lock().expect("hypothesis mutex");
+                if !hq.iter().any(|e| e.question == text) {
+                    hq.push(HypothesisEntry {
+                        id,
+                        question: text.clone(),
+                        queued_at_unix: now.unix,
+                        attempts: 0,
+                        max_attempts: 5,
+                        resolved: false,
+                        answer: None,
+                        confidence: None,
+                    });
+                }
+            }
+            return serde_json::json!({
+                "question":        text,
+                "hypothesis":      true,
+                "answer":          null,
+                "peak_activation": peak_1hop,
+                "message":         "Not enough learned signal — added to research queue.",
+            });
+        }
+
+        // ── Full multi-hop propagation for decode ─────────────────────────────
+        // Use content-word seed (no stop words) for the full-hop propagation too.
+        let combined = neuro.propagate_combined(
+            &[
+                (question_content_labels.as_slice(), 1.0_f32),
+                (qa_answer_labels.as_slice(), qa_conf),
+            ],
+            hops,
+            0.005,
+        );
+        let mut word_acts: Vec<(String, f32)> = combined
+            .iter()
+            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .map(|(l, &v)| (l.clone(), v))
+            .collect();
+        word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
+        let peak = word_acts.first().map(|(_, v)| *v).unwrap_or(peak_1hop);
+
+        // ── Sequential auto-regressive decode ─────────────────────────────────
+        // Prime with content labels + QA answer labels.
+        let mut seed: Vec<String> = question_content_labels.clone();
+        seed.extend(qa_answer_labels.iter().cloned());
+        let mut used: std::collections::HashSet<String> = seed.iter()
+            .filter_map(|l| {
+                let w = l.strip_prefix("txt:word_")?;
+                if w.contains('_') { None } else { Some(w.to_string()) }
+            })
+            .collect();
+
+        let mut output: Vec<String> = Vec::new();
+        for _ in 0..max_tok.min(30) {
+            let activated = neuro.propagate_all_threshold(&seed, hops, min_str);
+            let mut hits: Vec<(String, f32)> = activated
+                .into_iter()
+                .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .filter(|(l, _)| {
+                    let w = l.strip_prefix("txt:word_").unwrap_or("");
+                    !used.contains(w)
+                })
+                .collect();
+            hits.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal));
+
+            let Some((label, strength)) = hits.first() else { break };
+            if *strength < min_str { break; }
+            let word = label.strip_prefix("txt:word_").unwrap_or("").to_string();
+            if word == "eos" || word.is_empty() { break; }
+            used.insert(word.clone());
+            output.push(word.clone());
+            seed = vec![label.clone()];
+        }
+
+        let mut answer = output.join(" ");
+        if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
+        if !answer.is_empty() && !answer.ends_with(['.','!','?']) { answer.push('.'); }
+
+        let word_activations: Vec<serde_json::Value> = word_acts.iter().take(20)
+            .map(|(label, strength)| {
+                let word = label.strip_prefix("txt:word_").unwrap_or(label.as_str());
+                serde_json::json!({ "word": word, "strength": strength })
+            })
+            .collect();
+        let qa_candidates: Vec<serde_json::Value> = qa_report.results.iter().take(3)
+            .map(|r| serde_json::json!({
+                "answer":     r.answer,
+                "confidence": r.confidence,
+                "book_id":    r.book_id,
+                "page":       r.page_index,
+            }))
+            .collect();
+
         serde_json::json!({
-            "answer": r.answer,
-            "confidence": r.confidence,
-            "book_id": r.book_id,
-            "page": r.page_index,
+            "question":               text,
+            "hypothesis":             false,
+            "answer":                 answer,
+            "tokens":                 output,
+            "confidence":             peak,
+            "peak_activation":        peak,
+            "word_activations":       word_activations,
+            "qa_candidates":          qa_candidates,
+            "active_question_neurons": qa_report.active_question_neurons,
         })
-    }).collect();
+    }).await.unwrap_or_else(|e| serde_json::json!({ "error": format!("internal: {e}") }));
 
+    (StatusCode::OK, Json(result))
+}
+
+// ── Hypothesis queue endpoints ────────────────────────────────────────────────
+
+/// GET /hypothesis/queue
+/// Returns all hypothesis entries (both resolved and unresolved).
+/// External research agents poll this to find questions needing research.
+async fn hypothesis_queue_list(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let hq = state.hypothesis_queue.lock().expect("hypothesis mutex");
+    let unresolved: usize = hq.iter().filter(|e| !e.resolved).count();
     (StatusCode::OK, Json(serde_json::json!({
-        "question": req.text,
-        "response": response_text,
-        "associations": assoc_json,
-        "qa_answers": qa_answers,
-        "active_question_neurons": qa_report.active_question_neurons,
+        "count":      hq.len(),
+        "unresolved": unresolved,
+        "entries":    *hq,
     })))
 }
 
-/// Compose a human-readable response from ranked QA results and word associations.
-/// This is the node's "voice" — it speaks from what it has learned.
-fn synthesize_response(
-    question: &str,
-    results: &[QaQueryResult],
-    associations: &[String],
-) -> String {
-    if results.is_empty() && associations.is_empty() {
-        return format!(
-            "I haven't learned enough about \"{}\" yet.",
-            question.trim()
-        );
-    }
+#[derive(Deserialize)]
+struct HypothesisResolveReq {
+    id: String,
+    answer: String,
+    #[serde(default)]
+    confidence: Option<f32>,
+}
 
-    let mut parts: Vec<String> = Vec::new();
-    // Track all seen 30-char prefixes to deduplicate across all results
-    let mut seen_prefixes: Vec<String> = Vec::new();
-
-    fn clean_fragment(s: &str) -> String {
-        let s = s.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
-        if s.is_empty() { return String::new(); }
-        let mut out = s.to_string();
-        // Capitalise first letter (ASCII only — sufficient for textbook English)
-        if let Some(b) = out.get_mut(0..1) {
-            b.make_ascii_uppercase();
+/// POST /hypothesis/resolve
+/// Mark a hypothesis as resolved with a provided answer.
+/// Called by research_agent.py after fetching authoritative sources.
+async fn hypothesis_resolve(
+    State(state): State<ApiState>,
+    Json(req): Json<HypothesisResolveReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut hq = state.hypothesis_queue.lock().expect("hypothesis mutex");
+    match hq.iter_mut().find(|e| e.id == req.id) {
+        Some(entry) => {
+            entry.resolved   = true;
+            entry.answer     = Some(req.answer);
+            entry.confidence = req.confidence;
+            (StatusCode::OK, Json(serde_json::json!({ "resolved": true, "id": entry.id })))
         }
-        if !out.ends_with(['.', '!', '?']) {
-            // Strip trailing comma/semicolon fragments before adding period
-            let trimmed = out.trim_end_matches([',', ';', ' ']).to_string();
-            out = trimmed + ".";
+        None => (StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "hypothesis not found", "id": req.id }))),
+    }
+}
+
+// ── Background hypothesis research loop ──────────────────────────────────────
+//
+// Every 30 seconds, re-evaluates the oldest unresolved hypothesis against the
+// current neural state.  If training has raised activation above ANSWER_THRESHOLD
+// since the hypothesis was queued, the entry is automatically marked resolved.
+//
+// External research agents (research_agent.py) feed new knowledge via
+// /qa/ingest + /neuro/train, then either wait for this loop to pick it up or
+// call /hypothesis/resolve directly.
+async fn hypothesis_research_loop(
+    hq: Arc<Mutex<Vec<HypothesisEntry>>>,
+    neuro: NeuroRuntimeHandle,
+    qa_arc: Arc<Mutex<QaRuntime>>,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        // Grab the oldest unresolved question (hold the lock only briefly)
+        let question: Option<String> = {
+            let guard = hq.lock().expect("hypothesis mutex");
+            guard.iter()
+                .filter(|e| !e.resolved && e.attempts < e.max_attempts)
+                .min_by_key(|e| e.queued_at_unix)
+                .map(|e| e.question.clone())
+        };
+        let Some(question) = question else { continue };
+
+        // Re-evaluate: has new training raised activation above threshold?
+        let outcome = tokio::task::spawn_blocking({
+            let neuro   = neuro.clone();
+            let qa_arc  = qa_arc.clone();
+            let q       = question.clone();
+            move || -> (f32, Option<String>) {
+                const STOP_WORDS: &[&str] = &[
+                    "what","is","are","how","does","do","the","a","an","in","of",
+                    "to","and","or","it","this","that","be","was","were","can","will",
+                    "would","could","should","did","have","has","had","for","with","by",
+                    "at","as","but","not","he","she","they","we","you","i","its","get",
+                    "about","tell","me","describe","explain","define",
+                ];
+                let enc = TextBitsEncoder::new(TextBitsConfig::default());
+                let all_labels = enc.encode_plain(&q).labels;
+                let qlabels: Vec<String> = all_labels.iter()
+                    .filter(|l| {
+                        if let Some(w) = l.strip_prefix("txt:word_") {
+                            !STOP_WORDS.contains(&w)
+                        } else { true }
+                    })
+                    .cloned()
+                    .collect();
+                let now = now_timestamp();
+                let qa_report = {
+                    let mut qa = qa_arc.lock().expect("qa mutex");
+                    qa.query(&q, now)
+                };
+                let best = qa_report.results.first();
+                let (qa_labels, qa_w): (Vec<String>, f32) = best
+                    .filter(|r| r.confidence > 0.3)
+                    .map(|r| (enc.encode_plain(&r.answer).labels, (r.confidence * 1.5).min(1.0)))
+                    .unwrap_or_default();
+                // 1-hop discriminative check (same gate logic as neuro_ask)
+                let combined_1h = neuro.propagate_combined(
+                    &[
+                        (qlabels.as_slice(), 1.0_f32),
+                        (qa_labels.as_slice(), qa_w),
+                    ],
+                    1,
+                    0.005,
+                );
+                let seed_set: std::collections::HashSet<String> = qlabels.iter()
+                    .chain(qa_labels.iter())
+                    .filter(|l| l.starts_with("txt:word_"))
+                    .cloned()
+                    .collect();
+                let peak_1h = combined_1h.iter()
+                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_") && !seed_set.contains(l.as_str()))
+                    .map(|(_, &v)| v)
+                    .fold(0.0f32, f32::max);
+                let qa_ok = best.filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0).is_some();
+                let peak = if qa_ok { ANSWER_THRESHOLD } else { peak_1h };
+                let top_answer = best.map(|r| r.answer.clone());
+                (peak, top_answer)
+            }
+        }).await;
+
+        // Update hypothesis state
+        let mut guard = hq.lock().expect("hypothesis mutex");
+        if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
+            entry.attempts += 1;
+            if let Ok((peak, answer)) = outcome {
+                if peak >= ANSWER_THRESHOLD {
+                    entry.resolved   = true;
+                    entry.answer     = answer;
+                    entry.confidence = Some(peak);
+                }
+            }
         }
-        out
     }
-
-    fn is_duplicate(text: &str, seen: &[String]) -> bool {
-        let prefix: String = text.chars().take(35).collect::<String>().to_lowercase();
-        seen.iter().any(|s| s == &prefix)
-    }
-
-    // Question words for relevance filtering (stop words removed, plurals stemmed)
-    let stop_words = ["what","is","are","how","does","do","the","a","an","in","of",
-                      "to","and","or","it","this","that","be","was","were","tell","me","about"];
-    let question_words: Vec<String> = question.split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|w| w.len() > 2 && !stop_words.contains(&w.as_str()))
-        .flat_map(|w| {
-            // Emit both the original word and its simple stemmed form so that
-            // "trees" matches an answer containing "tree", and vice versa.
-            let stemmed = if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") {
-                Some(w[..w.len()-1].to_string())
-            } else {
-                None
-            };
-            let mut forms = vec![w];
-            if let Some(s) = stemmed { forms.push(s); }
-            forms
-        })
-        .collect();
-
-    // Add up to 3 distinct, substantive answer fragments.
-    // Only include secondary/tertiary results if they score within 70% of the
-    // top result — prevents low-confidence textbook noise from appending to a
-    // clear toddler answer.
-    let top_conf = results.first().map(|r| r.confidence).unwrap_or(0.0);
-    for r in results.iter() {
-        if parts.len() >= 3 { break; }
-        if r.confidence < 0.05 { continue; }
-        // Relative gap filter: secondary answers must be close enough to the best.
-        // At 80% the threshold cleanly separates toddler-quality pairs (source
-        // confidence 0.95 → weighted top) from textbook extractions (0.72 →
-        // ratio 0.72/0.95 ≈ 0.758 < 0.80), preventing cross-domain noise.
-        if parts.len() >= 1 && r.confidence < top_conf * 0.80 { continue; }
-        let cleaned = clean_fragment(&r.answer);
-        if cleaned.len() < 35 { continue; }
-        if is_duplicate(&cleaned, &seen_prefixes) { continue; }
-
-        // Skip instructional/meta fragments
-        let lower = cleaned.to_lowercase();
-        if lower.contains("introduced after students")
-            || lower.contains("see section")
-            || lower.contains("refer to chapter")
-            || lower.starts_with("see ")
-            || lower.starts_with("note:")
-            || lower.starts_with("figure ")
-            || lower.starts_with("table ")
-        { continue; }
-
-        // Skip fragments that are clearly truncated mid-word (end in a lone letter + period)
-        // e.g. "circuit elements, i." — the trailing ", i." is a truncation artifact
-        let trimmed = cleaned.trim_end_matches('.');
-        let last_word = trimmed.split_whitespace().last().unwrap_or("");
-        if last_word.len() == 1 && last_word != "a" { continue; }
-
-        // Relevance filter: if we have question keywords, the answer must contain
-        // at least one of them.  Applied to all results (including the first) so
-        // a completely off-topic top result is also suppressed.
-        let relevant = question_words.is_empty() || question_words.iter().any(|qw| lower.contains(qw.as_str()));
-        if !relevant { continue; }
-
-        let prefix = cleaned.chars().take(35).collect::<String>().to_lowercase();
-        seen_prefixes.push(prefix);
-        parts.push(cleaned);
-    }
-
-    // Fallback to associations if QA gave nothing useful
-    if parts.is_empty() && !associations.is_empty() {
-        let words: Vec<&str> = associations.iter().take(8).map(|s| s.as_str()).collect();
-        return format!("I associate that with: {}.", words.join(", "));
-    }
-
-    parts.join(" ")
 }
 
 /// POST /neuro/checkpoint

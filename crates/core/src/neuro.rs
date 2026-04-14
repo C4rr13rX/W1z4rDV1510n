@@ -915,6 +915,67 @@ impl NeuronPool {
         result
     }
 
+    /// Like `propagate` but each seed label can have a custom initial activation
+    /// weight instead of 1.0.  Weights are clamped to [0, 1].
+    ///
+    /// This is the variable-strength seed entry point used by multi-pathway
+    /// convergence in `NeuroRuntime::propagate_combined`.
+    pub fn propagate_weighted(
+        &self,
+        seed_activations: &HashMap<String, f32>,
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        let n = self.neurons.len();
+        let mut activation: Vec<f32> = vec![0.0; n];
+        for (label, &init_act) in seed_activations {
+            if let Some(&id) = self.label_to_id.get(label) {
+                if (id as usize) < n {
+                    activation[id as usize] = init_act.clamp(0.0, 1.0);
+                }
+            }
+        }
+        let mut next: Vec<f32> = vec![0.0; n];
+        for _ in 0..hops {
+            next.copy_from_slice(&activation);
+            for (src_idx, &src_act) in activation.iter().enumerate() {
+                if src_act < 0.001 {
+                    continue;
+                }
+                let neuron = match self.get_hot(src_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let fan_out = (neuron.excitatory.len() as f32).sqrt().max(1.0);
+                for syn in &neuron.excitatory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] + src_act * syn.weight * 0.5 / fan_out).min(1.0);
+                    }
+                }
+                for syn in &neuron.inhibitory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                    }
+                }
+            }
+            for v in next.iter_mut() {
+                *v *= 0.85;
+            }
+            std::mem::swap(&mut activation, &mut next);
+        }
+        let mut result = HashMap::new();
+        for (idx, act) in activation.iter().enumerate() {
+            if *act >= min_activation {
+                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
+                    result.insert(label.clone(), *act);
+                }
+            }
+        }
+        result
+    }
+
     pub fn cooccurrences_above(&self, threshold: u64) -> Vec<((String, String), f32)> {
         let t = threshold as f32;
         self.cooccur
@@ -2942,6 +3003,42 @@ impl NeuroRuntime {
         words.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         words.truncate(top_k);
         words
+    }
+
+    /// Merge multiple seed sets — each with its own pathway weight — and run a
+    /// single propagation pass over the unified weighted seed map.
+    ///
+    /// `pathways` is a list of `(seed_labels_at_1.0, pathway_weight)` pairs.
+    /// The combined initial activation for a label is the maximum of all
+    /// pathway contributions (pathway_weight × 1.0), clamped to [0, 1].
+    ///
+    /// Use this instead of calling `propagate` multiple times and merging
+    /// results — one unified pass lets inhibitory edges from one pathway
+    /// suppress spurious activations from another.
+    pub fn propagate_combined(
+        &self,
+        pathways: &[(&[String], f32)],
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        if !self.config.enabled || pathways.is_empty() {
+            return HashMap::new();
+        }
+        let mut seeds: HashMap<String, f32> = HashMap::new();
+        for (labels, weight) in pathways {
+            for label in *labels {
+                let entry = seeds.entry(label.clone()).or_insert(0.0);
+                let contribution = weight.clamp(0.0, 1.0);
+                if contribution > *entry {
+                    *entry = contribution;
+                }
+            }
+        }
+        if seeds.is_empty() {
+            return HashMap::new();
+        }
+        let guard = self.inner.lock();
+        guard.pool.propagate_weighted(&seeds, hops, min_activation)
     }
 
     // ── Prediction Registry + Episodic Memory API ────────────────────────────
