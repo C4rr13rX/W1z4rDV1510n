@@ -56,14 +56,14 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 OI_CLASS_DESC_URL = (
-    "https://storage.googleapis.com/openimages/v6/oidv6-class-descriptions.csv"
+    "https://storage.googleapis.com/openimages/v7/oidv7-class-descriptions-boxable.csv"
 )
 OI_VAL_IMAGES_URL = (
     "https://storage.googleapis.com/openimages/2018_04/validation/"
-    "validation-images-boxable.csv"
+    "validation-images-with-rotation.csv"
 )
 OI_VAL_BBOX_URL = (
-    "https://storage.googleapis.com/openimages/v6/"
+    "https://storage.googleapis.com/openimages/v5/"
     "validation-annotations-bbox.csv"
 )
 
