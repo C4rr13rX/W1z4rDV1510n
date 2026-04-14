@@ -4684,7 +4684,19 @@ async fn neuro_ask(
             output.push(w);
         }
 
-        let mut answer = output.join(" ");
+        // When the QA store has any valid match (activation above min_activation=0.10),
+        // return the stored answer verbatim — it is full, grammatical prose.
+        // The word-reconstruction path strips stop words and produces telegraphic keyword
+        // bags, which is the right fallback only when no QA match exists at all.
+        // The `output` vector is preserved for the `tokens` debug field.
+        let mut answer = if qa_gated {
+            best_qa
+                .filter(|r| r.activation > 0.10)
+                .map(|best| best.answer.clone())
+                .unwrap_or_else(|| output.join(" "))
+        } else {
+            output.join(" ")
+        };
         if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
         if !answer.is_empty() && !answer.ends_with(['.','!','?']) { answer.push('.'); }
 
