@@ -119,6 +119,39 @@ def extract_spans(page: "fitz.Page") -> list[dict]:
 def page_plain_text(page: "fitz.Page") -> str:
     return page.get_text("text").strip()
 
+def page_body_text(page: "fitz.Page") -> str:
+    """Extract only body-role text from the page (no headings, footnotes, page numbers).
+
+    Uses the same span-role heuristic as extract_spans(): body text is at the
+    median font size.  Headings (>=1.5× median), subheadings (>=1.2×), and
+    footnotes (<0.85×) are excluded.  This gives cleaner text for cross-page
+    sentence stitching and QA extraction because page numbers, chapter titles,
+    and margin notes can't pollute the carry buffer.
+    """
+    blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+    raw_sizes = []
+    raw_spans = []
+    for block in blocks:
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                t = span.get("text", "").strip()
+                if not t:
+                    continue
+                raw_sizes.append(span.get("size", 12.0))
+                raw_spans.append((span.get("size", 12.0), t))
+    if not raw_sizes:
+        return page.get_text("text").strip()
+    sizes = sorted(raw_sizes)
+    med = sizes[len(sizes) // 2]
+    body_parts = []
+    for sz, t in raw_spans:
+        # Keep only spans at approximately body size (exclude headings and footnotes)
+        if med * 0.85 <= sz < med * 1.2:
+            body_parts.append(t)
+    return " ".join(body_parts).strip()
+
 # -- Q&A extraction from page text ---------------------------------------------
 
 _QA_PATTERNS = [
@@ -646,7 +679,10 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
         try:
             jpeg = render_page_jpeg(page)
             spans = extract_spans(page)
-            raw_text = page_plain_text(page)
+            # Use body-only text for QA extraction and sentence stitching.
+            # page_body_text() strips headings, subheadings, footnotes, and
+            # page numbers — the noise that pollutes cross-page carry buffers.
+            raw_text = page_body_text(page)
 
             if not spans and len(jpeg) < 3000:
                 skipped += 1
