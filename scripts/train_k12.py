@@ -131,6 +131,10 @@ _QA_PATTERNS = [
 ]
 _SKIP_SUBJECTS = {"this", "that", "these", "those", "it", "they", "he", "she",
                   "we", "you", "i", "a", "an", "the"}
+# Subjects containing these patterns refer to contextual things, not named concepts
+_CONTEXT_SUBJECT_RE = re.compile(r"\b(of the|of a|of an|in the|in a|by the|for the)\b", re.I)
+# Answers that are purely mathematical/numeric notation
+_MATH_ONLY_RE = re.compile(r'^[\d\s\+\-\*\/\=\.\,\(\)\[\]\\<>%°±×÷√π]+$')
 
 def extract_qa_from_text(text: str, book_id: str, page_idx: int,
                          max_per_page: int = 4) -> list[dict]:
@@ -140,7 +144,7 @@ def extract_qa_from_text(text: str, book_id: str, page_idx: int,
         if len(pairs) >= max_per_page:
             break
         sent = sent.strip()
-        if len(sent) < 20:
+        if len(sent) < 30:
             continue
         for pat in _QA_PATTERNS:
             m = pat.match(sent)
@@ -152,7 +156,20 @@ def extract_qa_from_text(text: str, book_id: str, page_idx: int,
                 continue
             if subj.lower().split()[0] in _SKIP_SUBJECTS:
                 continue
-            if len(subj.split()) > 8:
+            if len(subj.split()) > 6:
+                continue
+            # Skip context-dependent subjects ("resistance of the circuit", etc.)
+            if _CONTEXT_SUBJECT_RE.search(subj):
+                continue
+            # Answer must be a real definition: long enough and word-rich enough
+            defn_words = defn.split()
+            if len(defn) < 30 or len(defn_words) < 4:
+                continue
+            # Reject math/symbol-only answers
+            if _MATH_ONLY_RE.match(defn):
+                continue
+            # Answer must have at least one substantial content word (5+ chars) in its first 8 words
+            if not any(len(w.strip(".,;:()[]\"'")) >= 5 for w in defn_words[:8]):
                 continue
             verb = "are" if "are" in pat.pattern else "is"
             q = f"What {verb} {subj}?"
