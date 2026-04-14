@@ -696,8 +696,22 @@ def api_entity_observe(client: httpx.Client, fact: Fact, ts: int) -> dict | None
 
 
 def api_neuro_train(client: httpx.Client, labels: list[str], lr: float = 1.1) -> bool:
-    result = _post(client, "/neuro/train",
-                   {"labels": labels, "lr_scale": lr},
+    # /neuro/train expects a full EnvironmentSnapshot; use /media/train with
+    # the labels converted to a plain-text sentence instead — this creates
+    # Hebbian co-activations between all words in the text on the same pathway.
+    words = []
+    for l in labels:
+        for prefix in ("txt:word_", "entity:", "concept:"):
+            if l.startswith(prefix):
+                words.append(l[len(prefix):])
+                break
+        else:
+            words.append(l.split(":")[-1])  # fallback: last component
+    text = " ".join(dict.fromkeys(words))  # dedup preserving order
+    if not text.strip():
+        return False
+    result = _post(client, "/media/train",
+                   {"modality": "text", "text": text, "lr_scale": lr},
                    label="neuro_train")
     return result is not None
 
@@ -902,8 +916,8 @@ def qa_query(client: httpx.Client, question: str) -> tuple[str, float]:
 
 
 def chat_query(client: httpx.Client, question: str) -> str:
-    data = _post(client, "/chat", {"question": question}, timeout=15) or {}
-    return data.get("answer", "") or data.get("response", "")
+    data = _post(client, "/chat", {"text": question, "hops": 2, "top_k": 20, "min_strength": 0.05}, timeout=15) or {}
+    return data.get("answer") or data.get("response", "")
 
 
 def generate_query(client: httpx.Client, question: str) -> str:
@@ -1034,6 +1048,7 @@ def run_chat(client: httpx.Client) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    global NODE_URL
     parser = argparse.ArgumentParser(description="W1z4rD Full Pipeline Trainer")
     parser.add_argument("--rounds",      type=int,   default=2,
                         help="Training passes over the full dataset (default 2)")
@@ -1050,8 +1065,6 @@ def main():
     parser.add_argument("--node",        default=NODE_URL,
                         help=f"Node URL (default: {NODE_URL})")
     args = parser.parse_args()
-
-    global NODE_URL
     NODE_URL = args.node
 
     facts = FACTS

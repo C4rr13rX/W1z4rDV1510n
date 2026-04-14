@@ -4420,17 +4420,21 @@ async fn neuro_ask(
             .map(|(_, v)| *v)
             .fold(0.0f32, f32::max);
 
-        // Primary gate: QA store has a semantically matched, high-confidence pair.
-        // This is the reliable learned-knowledge signal when the pool's Hebbian
-        // connections are still forming (early in training).
+        // Gate: QA store has a semantically matched, high-confidence answer.
+        //
+        // The propagation-based gate (peak_1hop >= ANSWER_THRESHOLD) cannot be
+        // reliably used on a pool with accumulated large Hebbian weights: after
+        // many training rounds, common content words have large-weight edges to
+        // virtually every other word, causing saturation within 1 hop.
+        //
+        // The QA store gate is more reliable: active_question_neurons > 0 means
+        // the question's labels actually match encoded entries in the QA store,
+        // and confidence >= 0.5 means the best match is strong.
         let qa_gated = best_qa
             .filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0)
             .is_some();
 
-        // Secondary gate: strong 1-hop propagation signal (direct Hebbian link).
-        let propagation_gated = peak_1hop >= ANSWER_THRESHOLD;
-
-        if !qa_gated && !propagation_gated {
+        if !qa_gated {
             // Neither gate passed — queue as hypothesis for research
             let id = {
                 let mut h = 0u64;
@@ -4480,38 +4484,46 @@ async fn neuro_ask(
             .unwrap_or(std::cmp::Ordering::Equal));
         let peak = word_acts.first().map(|(_, v)| *v).unwrap_or(peak_1hop);
 
-        // ── Sequential auto-regressive decode ─────────────────────────────────
-        // Prime with content labels + QA answer labels.
-        let mut seed: Vec<String> = question_content_labels.clone();
-        seed.extend(qa_answer_labels.iter().cloned());
-        let mut used: std::collections::HashSet<String> = seed.iter()
-            .filter_map(|l| {
-                let w = l.strip_prefix("txt:word_")?;
-                if w.contains('_') { None } else { Some(w.to_string()) }
-            })
+        // ── Decode from pre-computed activation map ────────────────────────────
+        // The combined propagation result is already computed above (word_acts).
+        // Instead of 30 sequential O(pool_size) propagation calls, we rank the
+        // already-computed word_acts by activation and exclude:
+        //  - seed words (question + QA answer)
+        //  - stop words (they dominate by connection but don't contribute to answer)
+        //  - words already used
+        //
+        // This is O(k log k) and finishes in <1ms regardless of pool size.
+        let seed_words_for_decode: std::collections::HashSet<String> = question_content_labels.iter()
+            .chain(qa_answer_labels.iter())
+            .filter_map(|l| l.strip_prefix("txt:word_").map(|w| w.to_string()))
             .collect();
+        let stop_set: std::collections::HashSet<&str> = STOP_WORDS.iter().copied().collect();
 
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut output: Vec<String> = Vec::new();
-        for _ in 0..max_tok.min(30) {
-            let activated = neuro.propagate_all_threshold(&seed, hops, min_str);
-            let mut hits: Vec<(String, f32)> = activated
-                .into_iter()
-                .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                .filter(|(l, _)| {
-                    let w = l.strip_prefix("txt:word_").unwrap_or("");
-                    !used.contains(w)
-                })
-                .collect();
-            hits.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal));
-
-            let Some((label, strength)) = hits.first() else { break };
-            if *strength < min_str { break; }
-            let word = label.strip_prefix("txt:word_").unwrap_or("").to_string();
-            if word == "eos" || word.is_empty() { break; }
-            used.insert(word.clone());
-            output.push(word.clone());
-            seed = vec![label.clone()];
+        // If we have a QA answer, start the output with keywords from the answer text.
+        // This ensures the core answer concept appears first even if it has lower
+        // pool-activation than random highly-connected words.
+        if let Some(best) = best_qa.filter(|r| r.confidence >= 0.5) {
+            for word in best.answer.split_whitespace() {
+                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                if w.len() > 2 && !stop_set.contains(w.as_str()) && !used.contains(&w) {
+                    used.insert(w.clone());
+                    output.push(w);
+                    if output.len() >= max_tok.min(20) { break; }
+                }
+            }
+        }
+        // Append top pool-activated words that aren't already in the output
+        for (label, _strength) in &word_acts {
+            if output.len() >= max_tok.min(20) { break; }
+            let w = label.strip_prefix("txt:word_").unwrap_or("").to_string();
+            if w.is_empty() || w == "eos" || w.contains('_') { continue; }
+            if stop_set.contains(w.as_str()) { continue; }
+            if seed_words_for_decode.contains(&w) { continue; }
+            if used.contains(&w) { continue; }
+            used.insert(w.clone());
+            output.push(w);
         }
 
         let mut answer = output.join(" ");
@@ -4673,7 +4685,8 @@ async fn hypothesis_research_loop(
                     .map(|(_, &v)| v)
                     .fold(0.0f32, f32::max);
                 let qa_ok = best.filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0).is_some();
-                let peak = if qa_ok { ANSWER_THRESHOLD } else { peak_1h };
+                // Use QA confidence as the primary gate (same as neuro_ask)
+                let peak = if qa_ok { ANSWER_THRESHOLD } else { 0.0 };
                 let top_answer = best.map(|r| r.answer.clone());
                 (peak, top_answer)
             }
