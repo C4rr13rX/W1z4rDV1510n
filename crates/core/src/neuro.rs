@@ -359,6 +359,57 @@ struct MiniColumn {
     cached_conflict: f32,
 }
 
+// ── Resolution-aware activation (char-level feedback loop) ───────────────────
+
+/// Result of [`NeuroRuntime::activate_with_resolution`].
+///
+/// The neural fabric first tries concept-level propagation (word labels,
+/// mini-column neurons).  If peak activation falls below the confidence
+/// threshold, it decomposes word labels to their constituent character labels
+/// and retries.  Char-level paths that outperform concept-level paths register
+/// their novel word sequences as mini-column candidates — the fabric counts how
+/// often a particular char sequence needed the fallback, and once the count
+/// crosses `composite_threshold`, the mini-column is promoted automatically.
+///
+/// This is the in-fabric feedback loop: concept neurons fire and suppress their
+/// constituent characters when they are confident; when they are not confident,
+/// character neurons re-activate and accumulate toward concept promotion.
+#[derive(Debug, Clone)]
+pub struct ActivationResult {
+    /// Label → activation strength from the best-performing path.
+    pub activations: HashMap<String, f32>,
+    /// Highest activation value in the map.
+    pub peak_activation: f32,
+    /// True when the char-level fallback was triggered AND produced better
+    /// activation than the concept-level pass.
+    pub used_char_fallback: bool,
+    /// Word labels that were novel (no strong concept neuron found) and triggered
+    /// the char fallback.  Each inner vec is the `txt:char_X` decomposition of
+    /// one novel word.  Registered as mini-column candidates when `used_char_fallback`.
+    pub novel_char_candidates: Vec<Vec<String>>,
+}
+
+/// Decompose a text word label to its constituent character labels.
+///
+/// `"txt:word_water"` → `["txt:char_w", "txt:char_a", "txt:char_t", "txt:char_e", "txt:char_r"]`
+///
+/// Returns an empty vec for labels that are not text word labels
+/// (e.g. image labels, audio labels, structural role labels, char labels).
+fn word_label_to_chars(label: &str) -> Vec<String> {
+    // Standard word label emitted by TextBitsEncoder: "txt:word_<word>"
+    let word = if let Some(w) = label.strip_prefix("txt:word_") {
+        w
+    // Role-qualified word label: "txt:role_body_word_<word>" — rare but possible
+    } else if let Some(rest) = label.strip_prefix("txt:role_") {
+        if let Some(w) = rest.split("_word_").nth(1) { w } else { return vec![]; }
+    } else {
+        return vec![];
+    };
+    // Skip single-character words — char labels already cover them
+    if word.len() < 2 { return vec![]; }
+    word.chars().map(|c| format!("txt:char_{c}")).collect()
+}
+
 // ── Neuromodulator system ─────────────────────────────────────────────────────
 
 /// Which neuromodulator to release via [`NeuroRuntime::release_neuromodulator`].
@@ -2094,6 +2145,9 @@ struct NeuroState {
     prediction_error: HashMap<String, f64>,
     working_memory: Vec<String>,
     temporal_motif_counts: HashMap<String, u64>,
+    /// Step count at which the last `run_minicolumn_promotion` ran.
+    /// Used to rate-limit the O(N×K) co-occurrence scan to once per 50 steps.
+    last_promotion_step: u64,
     /// Content-addressable episodic memory — resolved prediction episodes
     /// cross-tagged by stream source, retrieved on wrong predictions.
     episodic: EpisodicStore,
@@ -2123,6 +2177,7 @@ impl NeuroState {
             prediction_error: HashMap::new(),
             working_memory: Vec::new(),
             temporal_motif_counts: HashMap::new(),
+            last_promotion_step: 0,
             episodic: EpisodicStore::new(),
             sufficiency: ConditionalSufficiencyTracker::new(),
             registry: PredictionRegistry::new(),
@@ -2515,6 +2570,112 @@ impl NeuroState {
                 column.activation_dirty = true;
             }
         }
+    }
+
+    // ── Resolution-aware activation (inner, holds guard) ─────────────────────
+
+    /// Core implementation of the char-level feedback loop.
+    ///
+    /// **Step 1 — Concept pass**: propagate from the provided `labels` at full
+    ///   weight.  Return immediately if `peak >= confidence_threshold`.
+    ///
+    /// **Step 2 — Char fallback**: for each `txt:word_X` label whose concept
+    ///   neuron use-count is below the establishment threshold, decompose to
+    ///   `txt:char_X` labels and add them to a combined seed set.  Propagate
+    ///   from the mixed (char + remaining concept) seeds.
+    ///
+    /// **Step 3 — Candidate registration**: if the char path outperforms the
+    ///   concept path, bump each novel word's `minicolumn_counts` entry by 1.
+    ///   Once the count exceeds `composite_threshold`, the next
+    ///   `promote_text_concepts` call will create a mini-column concept neuron.
+    fn activate_with_resolution_inner(
+        &mut self,
+        labels: &[String],
+        confidence_threshold: f32,
+        hops: usize,
+        min_activation: f32,
+    ) -> (HashMap<String, f32>, f32, bool, Vec<Vec<String>>) {
+        // ── Step 1: concept-level propagation ─────────────────────────────
+        let seeds: HashMap<String, f32> = labels.iter()
+            .map(|l| (l.clone(), 1.0f32))
+            .collect();
+        let concept_acts = self.pool.propagate_weighted(&seeds, hops, min_activation);
+        let concept_peak = concept_acts.values().cloned().fold(0.0f32, f32::max);
+
+        if concept_peak >= confidence_threshold {
+            return (concept_acts, concept_peak, false, vec![]);
+        }
+
+        // ── Step 2: char-level fallback ────────────────────────────────────
+        let establish_threshold = self.pool.config.composite_threshold;
+        let mut char_seeds: HashMap<String, f32> = HashMap::new();
+        let mut novel_candidates: Vec<Vec<String>> = Vec::new();
+
+        for label in labels {
+            let chars = word_label_to_chars(label);
+            if chars.is_empty() {
+                // Not a word label (image, audio, structural) — keep at concept level.
+                char_seeds.entry(label.clone()).or_insert(1.0f32);
+            } else {
+                // Check whether the word neuron is well-established.
+                let use_count = self.pool.label_to_id.get(label.as_str())
+                    .and_then(|&id| self.pool.get_hot(id as usize))
+                    .map(|n| n.use_count)
+                    .unwrap_or(0);
+                if use_count >= establish_threshold {
+                    // Established concept — keep it in the char seed set as anchor.
+                    char_seeds.entry(label.clone()).or_insert(1.0f32);
+                }
+                // Always add char decomposition at reduced weight (0.8) so char
+                // neurons contribute without drowning out any established concept.
+                for cl in &chars {
+                    char_seeds.entry(cl.clone()).or_insert(0.8f32);
+                }
+                novel_candidates.push(chars);
+            }
+        }
+
+        if char_seeds.is_empty() {
+            return (concept_acts, concept_peak, false, vec![]);
+        }
+
+        let char_acts = self.pool.propagate_weighted(&char_seeds, hops, min_activation);
+        let char_peak = char_acts.values().cloned().fold(0.0f32, f32::max);
+
+        // ── Step 3: register mini-column candidates when char wins ─────────
+        // A margin of 0.01 prevents noise flips from triggering candidate bumps.
+        if char_peak > concept_peak + 0.01 {
+            for chars in &novel_candidates {
+                let key = format!("mini::{}", chars.join("|"));
+                let count = self.minicolumn_counts.entry(key).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+            return (char_acts, char_peak, true, novel_candidates);
+        }
+
+        (concept_acts, concept_peak, false, novel_candidates)
+    }
+
+    /// Promote frequently co-occurring label pairs to concept neurons.
+    ///
+    /// Scans the Hebbian co-occurrence counts and promotes any pair that exceeds
+    /// `composite_threshold` to a `NeuralNetwork` (concept neuron).  Call this
+    /// periodically after text training — not on every call — since the scan is
+    /// O(C) over the co-occurrence table.
+    ///
+    /// Internally rate-limited to once every 50 pool steps.
+    fn run_minicolumn_promotion(&mut self) {
+        const PROMOTION_CADENCE: u64 = 50;
+        let current_step = self.pool.step_counter();
+        if current_step.saturating_sub(self.last_promotion_step) < PROMOTION_CADENCE {
+            return;
+        }
+        self.last_promotion_step = current_step;
+        let threshold  = self.pool.config.composite_threshold;
+        let max_nets   = self.pool.config.max_neurons.min(2000);
+        let min_act    = 0.01f32;
+        self.promote_networks(threshold, max_nets);
+        self.promote_super_networks(threshold, max_nets, min_act);
     }
 
     fn refresh_network_strengths(&mut self, min_activation: f32, decay: f32) {
@@ -3499,6 +3660,75 @@ impl NeuroRuntime {
         }
         let guard = self.inner.lock();
         guard.pool.propagate_weighted(&seeds, hops, min_activation)
+    }
+
+    // ── Resolution-aware activation + concept promotion ──────────────────────
+
+    /// Propagate with automatic char-level fallback and mini-column candidate
+    /// registration.
+    ///
+    /// This is the in-fabric feedback loop described by the architecture:
+    ///
+    /// 1. **Concept-level pass** — propagate from the input labels as-is.
+    ///    If `peak_activation >= confidence_threshold`, return immediately.
+    ///    The concept neurons already gave a confident answer; their activated
+    ///    mini-column inhibition suppresses lower-level char neurons (already
+    ///    wired in [`NeuroState::update_minicolumns`]).
+    ///
+    /// 2. **Char-level fallback** — any `txt:word_X` label that does not have
+    ///    an established concept neuron (low use-count) is decomposed to its
+    ///    `txt:char_X` character labels.  Propagation reruns from the mixed
+    ///    (char + residual concept) seed set.
+    ///
+    /// 3. **Mini-column candidate registration** — if the char path gives
+    ///    meaningfully higher activation, each novel word's char sequence is
+    ///    counted in `minicolumn_counts`.  Once that count crosses
+    ///    `composite_threshold`, the next [`promote_text_concepts`] call
+    ///    will promote it to a permanent concept neuron (mini-column).
+    ///
+    /// The result tells the caller which path was taken (`used_char_fallback`)
+    /// and which words triggered it (`novel_char_candidates`).
+    pub fn activate_with_resolution(
+        &self,
+        labels: &[String],
+        confidence_threshold: f32,
+        hops: usize,
+        min_activation: f32,
+    ) -> ActivationResult {
+        if !self.config.enabled || labels.is_empty() {
+            return ActivationResult {
+                activations: HashMap::new(),
+                peak_activation: 0.0,
+                used_char_fallback: false,
+                novel_char_candidates: vec![],
+            };
+        }
+        let mut guard = self.inner.lock();
+        let (activations, peak, fallback, novel) =
+            guard.activate_with_resolution_inner(labels, confidence_threshold, hops, min_activation);
+        ActivationResult {
+            activations,
+            peak_activation: peak,
+            used_char_fallback: fallback,
+            novel_char_candidates: novel,
+        }
+    }
+
+    /// Promote frequently co-occurring label pairs to concept neurons.
+    ///
+    /// Scans the Hebbian co-occurrence table for pairs above
+    /// `composite_threshold` and creates `NeuralNetwork` concept nodes for
+    /// them.  Also runs the super-network promotion pass (networks of
+    /// networks).
+    ///
+    /// **When to call**: after every batch of `train_weighted` calls — not
+    /// on every individual call.  The underlying scan is O(N×K) over pool
+    /// synapses; calling it once per ~50 training items keeps the overhead
+    /// negligible.  `media_train` does this automatically.
+    pub fn promote_text_concepts(&self) {
+        if !self.config.enabled { return; }
+        let mut guard = self.inner.lock();
+        guard.run_minicolumn_promotion();
     }
 
     // ── Prediction Registry + Episodic Memory API ────────────────────────────

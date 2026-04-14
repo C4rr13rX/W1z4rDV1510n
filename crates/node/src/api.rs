@@ -4045,26 +4045,37 @@ async fn media_train(
         // Pass 1: full co-occurrence — all labels fire together.
         neuro.train_weighted(&labels, lr, false);
 
-        // Pass 2: STDP character sequences — one per word, trained as a
-        // temporal chain.  Adjacent characters are bridged with exponentially
-        // decayed lr (tau = 0.5 char-steps) so forward edges get LTP and the
-        // pool learns directed character-to-character paths through words.
-        // lr for char sequences is scaled down (× 0.3) to avoid over-weighting
-        // sub-word connections relative to word-level co-occurrence.
+        // Pass 2: STDP character sequences — collect all unique char labels
+        // from adjacent pairs across every word, then fire ONE batched
+        // train_weighted call.  This avoids O(words × chars) separate mutex
+        // acquisitions that caused exponential slowdown as the pool grew.
+        // The single co-activation still plants Hebbian edges between every
+        // adjacent character label in the batch; motif discovery + mini-column
+        // promotion will later collapse recurring sub-sequences into concept
+        // neurons without needing per-pair calls here.
         let char_lr = lr * 0.3;
         let tau = 0.5f32; // char-step time constant
+        let bridge_lr = char_lr * (-1.0f32 / tau).exp();
+        let mut char_pair_labels: Vec<String> = Vec::new();
         for seq in &char_seqs {
-            if seq.len() < 2 { continue; }
-            for i in 1..seq.len() {
-                let prev = &seq[i - 1];
-                let curr = &seq[i];
-                // Bridge: [prev, curr] as a 2-label co-activation with decayed lr.
-                // Position i is one step from i-1, so dt = 1.0 char-step.
-                let bridge_lr = char_lr * (-1.0f32 / tau).exp();
-                let pair = vec![prev.clone(), curr.clone()];
-                neuro.train_weighted(&pair, bridge_lr, false);
+            for window in seq.windows(2) {
+                char_pair_labels.push(window[0].clone());
+                char_pair_labels.push(window[1].clone());
             }
         }
+        char_pair_labels.sort_unstable();
+        char_pair_labels.dedup();
+        if !char_pair_labels.is_empty() {
+            neuro.train_weighted(&char_pair_labels, bridge_lr, false);
+        }
+
+        // ── Periodic concept promotion ────────────────────────────────────────
+        // Scan co-occurrence counts and promote frequently co-occurring label
+        // pairs to concept neurons (mini-columns / neural networks).  Run every
+        // 50 training calls to amortise the O(N×K) synapse scan.  This is the
+        // mechanism by which recurring char sequences (morphemes) and word
+        // clusters self-organise into concept neurons without hand-coded rules.
+        neuro.promote_text_concepts();
     }).await.ok();
 
     (StatusCode::OK, Json(serde_json::json!({
@@ -4495,10 +4506,69 @@ async fn neuro_ask(
             .is_some();
 
         if !qa_gated {
-            // Neither gate passed — queue as hypothesis for research.
-            // Spike norepinephrine: prediction failure = novelty signal.
-            // The next training call for this concept will run at elevated LR.
+            // ── Char-level fallback (in-fabric feedback loop) ─────────────────
+            // Concept-level activation was insufficient.  Try decomposing each
+            // txt:word_X label to its txt:char_X constituents and re-probing.
+            // If char-level activation is higher, the novel char sequences are
+            // registered as mini-column candidates inside activate_with_resolution.
+            //
+            // If the char path finds a meaningful answer, return it as a partial
+            // response (lower confidence) rather than immediately queuing as unknown.
+            // Either way, spike norepinephrine so the next training call on this
+            // concept runs at elevated LR.
             neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
+
+            // Extract word-only labels for the resolution call.
+            // The full `question_content_labels` already contains char labels
+            // from the encoder, which would trivially satisfy any threshold.
+            // By seeding only word labels, the concept pass tests ONLY the
+            // word-level Hebbian graph: if a word is untrained, its concept
+            // neuron has few connections → low activation → char fallback fires.
+            let word_only_labels: Vec<String> = question_content_labels.iter()
+                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .cloned()
+                .collect();
+
+            let resolution = neuro.activate_with_resolution(
+                &word_only_labels,
+                0.40,  // word-level must reach 0.40 to skip char path
+                hops,
+                0.005,
+            );
+
+            // If the char path found something meaningful, attempt a partial answer.
+            let char_qa_gate = resolution.used_char_fallback
+                && resolution.peak_activation >= 0.10;
+
+            if char_qa_gate {
+                // Extract word activations from char-path result for response synthesis.
+                let mut char_word_acts: Vec<(String, f32)> = resolution.activations.iter()
+                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                    .map(|(l, &v)| (l.clone(), v))
+                    .collect();
+                char_word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal));
+                char_word_acts.truncate(max_tok);
+                let char_words: Vec<String> = char_word_acts.iter()
+                    .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
+                    .map(|(l, _)| l.strip_prefix("txt:word_").unwrap_or(l).to_string())
+                    .collect();
+                if !char_words.is_empty() {
+                    let partial_answer = char_words.join(" ");
+                    let novel_count = resolution.novel_char_candidates.len();
+                    return serde_json::json!({
+                        "question":           text,
+                        "hypothesis":         false,
+                        "answer":             partial_answer,
+                        "peak_activation":    resolution.peak_activation,
+                        "char_fallback":      true,
+                        "novel_words":        novel_count,
+                        "message":            "Partial answer via char-level path — concept neurons still forming.",
+                    });
+                }
+            }
+
+            // Char path also gave nothing — queue as hypothesis.
             let id = {
                 let mut h = 0u64;
                 for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }

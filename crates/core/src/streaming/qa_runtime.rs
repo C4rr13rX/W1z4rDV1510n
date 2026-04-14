@@ -546,17 +546,39 @@ pub struct QaCandidateRecord {
 ///   trained at character level, morphology emerges from Hebbian co-occurrence
 ///   and the stemming can be disabled via `QaRuntimeConfig::use_stemming`.
 fn tokenize(text: &str) -> Vec<String> {
-    // Only articles, conjunctions, and pure-preposition glue words that carry
-    // zero semantic content go here.  Negation, question words, and modals
-    // are intentionally ABSENT from this list.
+    // Stop-word policy for the QA associative memory:
+    //
+    // DROPPED — question-forming words ("what", "how", "when", "where", "why",
+    //   "who", "which", "tell", "describe", "explain", "define"): these appear
+    //   in virtually every question in the corpus.  Because they co-activate with
+    //   every answer entry during ingestion, they carry *zero discriminative
+    //   signal* in the Hebbian dot-product lookup — they just add uniform noise.
+    //   Their semantic role (answer format: factual vs procedural) is handled at
+    //   the synthesis level, not here.
+    //
+    //   Negation words ("not", "no", "never", "without") and modal verbs
+    //   ("should", "must", "can") ARE kept — they genuinely change which answer
+    //   is appropriate and appear in a minority of questions, so they are
+    //   discriminative.
     const STOP_WORDS: &[&str] = &[
+        // Articles / determiners
         "a", "an", "the",
+        // Prepositions
         "of", "to", "in", "for", "on", "with", "at", "by", "from",
         "into", "through", "during", "above", "below", "between",
+        // Conjunctions
         "and", "but", "or", "nor", "so",
+        // Demonstratives / vague pronouns
         "it", "its", "this", "that",
+        // Copulae and auxiliaries
         "be", "been", "being", "is", "are", "was", "were",
         "have", "has", "had", "do", "does", "did",
+        // Question-forming words — non-discriminative in QA dot-product lookup
+        // (appear in ~100% of questions; kept out to prevent false gate passes)
+        "what", "how", "when", "where", "why", "who", "which",
+        // Common query openers that add no semantic content to the lookup
+        "tell", "describe", "explain", "define", "give", "list",
+        "me", "us", "please", "about",
     ];
 
     let mut tokens: Vec<String> = Vec::new();

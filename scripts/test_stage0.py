@@ -266,7 +266,7 @@ def run_tests(node_url: str, verbose: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 0 validation tests")
-    parser.add_argument("--node", default="http://127.0.0.1:8080", help="Node API URL")
+    parser.add_argument("--node", default="http://127.0.0.1:8090", help="Node API URL")
     parser.add_argument("--verbose", action="store_true", help="Show all responses, not just failures")
     args = parser.parse_args()
     run_tests(args.node, args.verbose)

@@ -707,7 +707,7 @@ def run_stages(node_url: str, stages: list[int], max_books: int | None,
 
 def main():
     parser = argparse.ArgumentParser(description="K-12 staged training pipeline")
-    parser.add_argument("--node", default="http://127.0.0.1:8080",
+    parser.add_argument("--node", default="http://127.0.0.1:8090",
                         help="Node API base URL (default: http://localhost:8080)")
     parser.add_argument("--stages", default="0,1,2",
                         help="Comma-separated stages to run: 0,1,2 (default: all)")
