@@ -129,8 +129,22 @@ _QA_PATTERNS = [
     re.compile(r"^(?P<s>[^.]{3,80}?)\s+consists? of\s+(?P<d>[^.]{8,240})", re.I),
     re.compile(r"^(?P<s>[^.]{3,80}?)\s+can be defined as\s+(?P<d>[^.]{8,240})", re.I),
 ]
-_SKIP_SUBJECTS = {"this", "that", "these", "those", "it", "they", "he", "she",
-                  "we", "you", "i", "a", "an", "the"}
+_SKIP_SUBJECTS = {
+    # Personal / demonstrative pronouns
+    "this", "that", "these", "those", "it", "they", "he", "she", "we", "you", "i",
+    # Articles
+    "a", "an", "the",
+    # Conjunctions / subordinators (can't open a concept name)
+    "because", "when", "if", "although", "while", "since", "once",
+    "however", "therefore", "thus", "hence", "moreover", "furthermore",
+    # Adverbs as faux-subjects
+    "there", "here", "then", "now",
+    # Quantifiers / indefinite pronouns used as subjects
+    "no", "not", "one", "some", "many", "most", "all", "each", "both",
+    "several", "few", "any", "every", "either", "neither",
+    # Prepositions starting a phrase (not a concept name)
+    "for", "with", "by", "from", "of", "in", "on", "at", "as", "to",
+}
 # Subjects containing these patterns refer to contextual things, not named concepts
 _CONTEXT_SUBJECT_RE = re.compile(r"\b(of the|of a|of an|in the|in a|by the|for the)\b", re.I)
 # Answers that are purely mathematical/numeric notation
@@ -170,6 +184,18 @@ def extract_qa_from_text(text: str, book_id: str, page_idx: int,
                 continue
             # Answer must have at least one substantial content word (5+ chars) in its first 8 words
             if not any(len(w.strip(".,;:()[]\"'")) >= 5 for w in defn_words[:8]):
+                continue
+            # Reject answers that are question fragments (end with ?)
+            if defn.rstrip().endswith("?"):
+                continue
+            # Answer must start like a sentence or article-led phrase.
+            # Valid: "A heart is...", "Sleep is...", "The force that..."
+            # Invalid: "retain the...", "dispensed with...", "accurate all the way to..."
+            # (these are continuation verb-phrases, not definitions)
+            first_word = defn_words[0].strip(".,;:()[]\"'")
+            is_sentence_start = bool(first_word) and first_word[0].isupper()
+            is_article_start = first_word.lower() in ("a", "an", "the")
+            if not (is_sentence_start or is_article_start):
                 continue
             verb = "are" if "are" in pat.pattern else "is"
             q = f"What {verb} {subj}?"
