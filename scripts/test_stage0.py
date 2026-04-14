@@ -115,8 +115,8 @@ def qa_query(client: httpx.Client, node_url: str, question: str) -> dict:
 
 
 def extract_confidence(resp: dict) -> float:
-    """Pull best confidence from a /neuro/ask response."""
-    qa = resp.get("qa_answers") or []
+    """Pull best confidence from a /chat response."""
+    qa = resp.get("qa_candidates") or []
     if qa:
         return max(a.get("confidence", 0.0) for a in qa)
     return 0.0
@@ -190,8 +190,8 @@ def run_tests(node_url: str, verbose: bool) -> None:
                 )
             else:
                 conf = extract_confidence(resp)
-                response_text = resp.get("response", "")
-                qa_answers = resp.get("qa_answers") or []
+                response_text = resp.get("answer", "")
+                qa_answers = resp.get("qa_candidates") or []
                 best_qa = qa_answers[0].get("answer", "") if qa_answers else ""
 
                 if is_edge:

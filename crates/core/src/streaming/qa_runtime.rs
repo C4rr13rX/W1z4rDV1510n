@@ -67,7 +67,14 @@ impl Default for QaRuntimeConfig {
             weight_decay: 0.999,
             max_question_neurons: 65_536,
             max_answers: 131_072,
-            min_activation: 0.01,
+            // IDF-weighted activation floor.  With IDF reweighting, a single
+            // discriminative token match (weight=0.05, IDF≈3.7) produces ~0.18
+            // activation.  Background noise from common tokens like "is"+"a"
+            // (combined ≈0.09 at Stage 0 scale) is well below this threshold.
+            // 0.10 provides a clean boundary that holds as the corpus grows
+            // (common-token IDF asymptotes as corpus expands; specific-token IDF
+            // grows logarithmically with N, widening the gap further over time).
+            min_activation: 0.10,
             top_k: 5,
             enabled: true,
         }
@@ -183,6 +190,14 @@ pub struct QaRuntime {
 
     /// Count of pairs ingested.
     pairs_ingested: u64,
+
+    /// Per-neuron document frequency: how many distinct Q&A pairs each question
+    /// neuron has appeared in.  Used to compute IDF at query time so that tokens
+    /// present in nearly every question (e.g. "what", "is", "?") contribute
+    /// near-zero activation while rare, specific tokens dominate.
+    /// No stop-word lists needed — the architecture handles discrimination.
+    #[serde(default)]
+    neuron_doc_freq: HashMap<u32, u64>,
 }
 
 impl QaRuntime {
@@ -195,6 +210,7 @@ impl QaRuntime {
             answers: Vec::new(),
             pairs: HashMap::new(),
             pairs_ingested: 0,
+            neuron_doc_freq: HashMap::new(),
         }
     }
 
@@ -240,6 +256,14 @@ impl QaRuntime {
             if !active_q_ids.contains(&id) {
                 active_q_ids.push(id);
             }
+        }
+
+        // ── IDF tracking: increment document frequency for each unique token ─
+        // This runs unconditionally so that tokens appearing in every Q&A pair
+        // (articles, question words, punctuation) accumulate a high doc_freq and
+        // thus a near-zero IDF weight at query time — no stop-word list needed.
+        for &q_id in &active_q_ids {
+            *self.neuron_doc_freq.entry(q_id).or_insert(0) += 1;
         }
 
         // ── Answer entry lookup / creation ───────────────────────────────
@@ -363,19 +387,32 @@ impl QaRuntime {
             };
         }
 
+        // ── IDF weights for active tokens ────────────────────────────────
+        // Compute per-token IDF: ln((N+1) / (df+1)).
+        // Tokens present in every Q&A pair (articles, question words, punctuation)
+        // have df ≈ N → IDF ≈ 0, contributing near-zero activation.
+        // Rare, specific tokens have df ≪ N → IDF is large, dominating the score.
+        // No stop-word lists required — the Hebbian statistics handle discrimination.
+        let n = self.pairs_ingested.max(1) as f32;
+        let idf_weights: Vec<f32> = active_q_ids.iter().map(|&q_id| {
+            let df = self.neuron_doc_freq.get(&q_id).copied().unwrap_or(1) as f32;
+            ((n + 1.0) / (df + 1.0)).ln().max(0.0)
+        }).collect();
+
         // ── Compute activation for every answer entry ────────────────────
-        // Score = raw Hebbian activation × source confidence.  This boosts
-        // high-quality pairs (toddler: 0.95, verified: 1.0) over low-confidence
-        // textbook extractions (typically 0.72) when raw activation ties.
+        // Score = IDF-weighted Hebbian activation × source confidence.
+        // IDF weighting ensures common tokens (ubiquitous in all questions) add
+        // near-zero signal while rare, specific tokens (appear in few questions)
+        // dominate and point to the right answer.
         let mut scored: Vec<(f32, usize)> = self
             .answers
             .iter_mut()
             .enumerate()
             .map(|(idx, entry)| {
                 let mut act = 0.0f32;
-                for &q_id in &active_q_ids {
+                for (i, &q_id) in active_q_ids.iter().enumerate() {
                     if let Some(&w) = entry.weights.get(&q_id) {
-                        act += w;
+                        act += w * idf_weights[i];
                     }
                 }
                 entry.cumulative_activation += act as f64;
@@ -533,62 +570,28 @@ pub struct QaCandidateRecord {
 /// word "not" changes the answer, and "Let's eat, Grandma." ≠ "Let's eat
 /// Grandma." — the comma changes the entire meaning.
 ///
-/// Stop word policy:
-///   Only pure grammatical articles/prepositions with zero semantic content
-///   are dropped.  Negation words ("not", "no", "never", "without"),
-///   question words ("how", "what", "when", "where", "why", "who"), and
-///   modal verbs ("should", "must", "can") are KEPT — they are often the
-///   most discriminative token in a question.
+/// Tokenization policy:
+///   Every token in the input is preserved — words, punctuation, articles,
+///   question words, everything.  Discrimination is handled architecturally
+///   by IDF-weighted query activation (common tokens that appear in nearly every
+///   Q&A pair contribute near-zero weight; rare, specific tokens dominate).
+///   This mirrors biological perception: a reading human processes all symbols
+///   and the network learns what is discriminative through co-occurrence statistics,
+///   not through hard-coded exclusion lists.
 ///
 /// Stemming:
 ///   Basic suffix stripping is preserved for now so existing vocabulary built
 ///   from non-character-level training still matches.  Once the pool has been
 ///   trained at character level, morphology emerges from Hebbian co-occurrence
-///   and the stemming can be disabled via `QaRuntimeConfig::use_stemming`.
+///   and the stemming can be removed entirely.
 fn tokenize(text: &str) -> Vec<String> {
-    // Stop-word policy for the QA associative memory:
-    //
-    // DROPPED — question-forming words ("what", "how", "when", "where", "why",
-    //   "who", "which", "tell", "describe", "explain", "define"): these appear
-    //   in virtually every question in the corpus.  Because they co-activate with
-    //   every answer entry during ingestion, they carry *zero discriminative
-    //   signal* in the Hebbian dot-product lookup — they just add uniform noise.
-    //   Their semantic role (answer format: factual vs procedural) is handled at
-    //   the synthesis level, not here.
-    //
-    //   Negation words ("not", "no", "never", "without") and modal verbs
-    //   ("should", "must", "can") ARE kept — they genuinely change which answer
-    //   is appropriate and appear in a minority of questions, so they are
-    //   discriminative.
-    const STOP_WORDS: &[&str] = &[
-        // Articles / determiners
-        "a", "an", "the",
-        // Prepositions
-        "of", "to", "in", "for", "on", "with", "at", "by", "from",
-        "into", "through", "during", "above", "below", "between",
-        // Conjunctions
-        "and", "but", "or", "nor", "so",
-        // Demonstratives / vague pronouns
-        "it", "its", "this", "that",
-        // Copulae and auxiliaries
-        "be", "been", "being", "is", "are", "was", "were",
-        "have", "has", "had", "do", "does", "did",
-        // Question-forming words — non-discriminative in QA dot-product lookup
-        // (appear in ~100% of questions; kept out to prevent false gate passes)
-        "what", "how", "when", "where", "why", "who", "which",
-        // Common query openers that add no semantic content to the lookup
-        "tell", "describe", "explain", "define", "give", "list",
-        "me", "us", "please", "about",
-    ];
-
     let mut tokens: Vec<String> = Vec::new();
     let mut word_buf = String::new();
 
     let flush = |buf: &mut String, out: &mut Vec<String>| {
         if !buf.is_empty() {
             // Basic plural stemming: "trees"→"tree", "animals"→"animal".
-            // Kept for backward compatibility until character-level training
-            // makes morphology emerge from the pool itself.
+            // Temporary until character-level training makes morphology emerge.
             let stemmed = if buf.len() > 3
                 && buf.ends_with('s')
                 && !buf.ends_with("ss")
@@ -597,7 +600,7 @@ fn tokenize(text: &str) -> Vec<String> {
             } else {
                 buf.clone()
             };
-            if stemmed.len() >= 1 && !STOP_WORDS.contains(&stemmed.as_str()) {
+            if !stemmed.is_empty() {
                 out.push(stemmed);
             }
             buf.clear();
@@ -655,7 +658,7 @@ mod tests {
             0.9,
             ts(1),
         );
-        assert_eq!(rep.question_tokens, 1); // only "photosynthesis" — "what" and "is" are stop words
+        assert!(rep.question_tokens >= 1); // includes "photosynthesis" plus common tokens; IDF will down-weight common ones
         assert!(!rep.reinforced);
         assert_eq!(rep.total_pairs, 1);
 

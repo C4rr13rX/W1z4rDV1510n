@@ -4445,11 +4445,15 @@ async fn neuro_ask(
             qa.query(&text, now)
         };
         let best_qa = qa_report.results.first();
+        // Use raw IDF-weighted activation (not normalized confidence) to gate
+        // the QA answer path.  Normalized confidence is always 1.0 for the
+        // top result and carries no signal; raw activation reflects the actual
+        // Hebbian match strength after IDF reweighting.
         let (qa_answer_labels, qa_conf): (Vec<String>, f32) = best_qa
-            .filter(|r| r.confidence > 0.3)
+            .filter(|r| r.activation > 0.10)
             .map(|r| {
                 let labels = enc.encode_plain(&r.answer).labels;
-                (labels, (r.confidence * 1.5).min(1.0))
+                (labels, r.confidence.min(1.0))
             })
             .unwrap_or_default();
 
@@ -4493,16 +4497,14 @@ async fn neuro_ask(
 
         // Gate: QA store has a semantically matched, high-confidence answer.
         //
-        // The propagation-based gate (peak_1hop >= ANSWER_THRESHOLD) cannot be
-        // reliably used on a pool with accumulated large Hebbian weights: after
-        // many training rounds, common content words have large-weight edges to
-        // virtually every other word, causing saturation within 1 hop.
-        //
-        // The QA store gate is more reliable: active_question_neurons > 0 means
-        // the question's labels actually match encoded entries in the QA store,
-        // and confidence >= 0.5 means the best match is strong.
+        // Gate on raw IDF-weighted activation — not normalized confidence.
+        // Normalized confidence is always 1.0 for the top result regardless of
+        // signal quality.  Raw activation > 0.05 means at least one discriminative
+        // token fired (a token with IDF corresponding to ≤20% corpus frequency).
+        // This naturally rejects queries whose only active tokens are ubiquitous
+        // words like "what", "is", "?" that have near-zero IDF weight.
         let qa_gated = best_qa
-            .filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0)
+            .filter(|r| r.activation > 0.10)
             .is_some();
 
         if !qa_gated {
@@ -4637,7 +4639,7 @@ async fn neuro_ask(
         // When not qa_gated (shouldn't reach here, but just in case), use max_tok.
         let output_cap: usize = if qa_gated {
             best_qa
-                .filter(|r| r.confidence >= 0.5)
+                .filter(|r| r.activation > 0.10)
                 .map(|best| {
                     best.answer
                         .split_whitespace()
@@ -4658,7 +4660,7 @@ async fn neuro_ask(
         // If we have a QA answer, start the output with keywords from the answer text.
         // This ensures the core answer concept appears first even if it has lower
         // pool-activation than random highly-connected words.
-        if let Some(best) = best_qa.filter(|r| r.confidence >= 0.5) {
+        if let Some(best) = best_qa.filter(|r| r.activation > 0.10) {
             for word in best.answer.split_whitespace() {
                 let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
                 if w.len() > 2 && !stop_set.contains(w.as_str()) && !used.contains(&w) {
@@ -4828,7 +4830,7 @@ async fn hypothesis_research_loop(
                 };
                 let best = qa_report.results.first();
                 let (qa_labels, qa_w): (Vec<String>, f32) = best
-                    .filter(|r| r.confidence > 0.3)
+                    .filter(|r| r.activation > 0.10)
                     .map(|r| (enc.encode_plain(&r.answer).labels, (r.confidence * 1.5).min(1.0)))
                     .unwrap_or_default();
                 // 1-hop discriminative check (same gate logic as neuro_ask)
@@ -4849,7 +4851,7 @@ async fn hypothesis_research_loop(
                     .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_") && !seed_set.contains(l.as_str()))
                     .map(|(_, &v)| v)
                     .fold(0.0f32, f32::max);
-                let qa_ok = best.filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0).is_some();
+                let qa_ok = best.filter(|r| r.activation > 0.10).is_some();
                 // Use QA confidence as the primary gate (same as neuro_ask)
                 let peak = if qa_ok { ANSWER_THRESHOLD } else { 0.0 };
                 let top_answer = best.map(|r| r.answer.clone());
@@ -5059,16 +5061,16 @@ async fn neuro_generate(
         };
         let best_qa = qa_report.results.first();
         let (qa_answer_labels, qa_conf): (Vec<String>, f32) = best_qa
-            .filter(|r| r.confidence > 0.3)
+            .filter(|r| r.activation > 0.10)
             .map(|r| {
                 let labels = enc.encode_plain(&r.answer).labels;
-                (labels, (r.confidence * 1.5).min(1.0))
+                (labels, r.confidence.min(1.0))
             })
             .unwrap_or_default();
 
-        // QA gate — same logic as neuro_ask
+        // QA gate — raw activation threshold, same as neuro_ask
         let qa_gated = best_qa
-            .filter(|r| r.confidence >= 0.5 && qa_report.active_question_neurons > 0)
+            .filter(|r| r.activation > 0.10)
             .is_some();
 
         if !qa_gated {
@@ -5122,7 +5124,7 @@ async fn neuro_generate(
 
         // Cap at QA answer word count to avoid noisy pool tail
         let output_cap: usize = best_qa
-            .filter(|r| r.confidence >= 0.5)
+            .filter(|r| r.activation > 0.10)
             .map(|best| {
                 best.answer
                     .split_whitespace()
@@ -5145,7 +5147,7 @@ async fn neuro_generate(
         let mut output: Vec<String> = Vec::new();
 
         // Prepend QA answer keywords
-        if let Some(best) = best_qa.filter(|r| r.confidence >= 0.5) {
+        if let Some(best) = best_qa.filter(|r| r.activation > 0.10) {
             for word in best.answer.split_whitespace() {
                 let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
                 if w.len() > 2 && !stop_set.contains(w.as_str()) && !used.contains(&w) {
