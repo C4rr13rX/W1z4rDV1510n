@@ -494,6 +494,20 @@ async def run_images_pass(node_url: str, data_dir: Path, limit: int | None,
 # Main
 # ---------------------------------------------------------------------------
 
+async def checkpoint(node_url: str) -> None:
+    """Force-save both the neuro pool and QA store to disk."""
+    try:
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post(f"{node_url}/neuro/checkpoint")
+            if r.status_code == 200:
+                d = r.json()
+                print(f"  Checkpoint saved: pool={d.get('pool_path','?')}  qa={d.get('qa_path','?')}")
+            else:
+                print(f"  Checkpoint warning: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"  Checkpoint failed: {e}")
+
+
 async def main_async(args: argparse.Namespace) -> None:
     data_dir = Path(args.data_dir)
 
@@ -508,14 +522,17 @@ async def main_async(args: argparse.Namespace) -> None:
     if args.mode in ("concepts", "all"):
         await run_concept_pass(args.node, data_dir, args.limit,
                                args.concurrency, args.batch_size)
+        await checkpoint(args.node)
 
     if args.mode in ("text", "all"):
         await run_text_pass(args.node, data_dir, args.limit,
                             args.concurrency, args.batch_size)
+        await checkpoint(args.node)
 
     if args.mode in ("images", "all"):
         await run_images_pass(args.node, data_dir, args.limit,
                               args.concurrency, args.batch_size)
+        await checkpoint(args.node)
 
     print("\nFoundation training complete.")
 
