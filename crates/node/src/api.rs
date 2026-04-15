@@ -4694,23 +4694,15 @@ async fn neuro_ask(
                 .map(|(_, v)| *v)
                 .fold(0.0f32, f32::max);
 
-            // Surface the nearest known concepts as context for the question.
+            // Surface the nearest known concepts — the Hebbian neighbourhood of
+            // the question that the network already has representations for.
+            // Returned as raw labels so the caller decides how to phrase them.
             let activated_concepts: Vec<String> = word_acts_1hop.iter()
                 .filter(|(l, _)| !seed_word_labels_hyp.contains(l))
                 .filter_map(|(l, _)| l.strip_prefix("txt:word_").map(|w| w.to_string()))
                 .filter(|w| !w.contains('_') && w.len() > 2)
                 .take(4)
                 .collect();
-
-            let question_for_user = if activated_concepts.is_empty() {
-                "I don't know about that yet. Can you tell me?".to_string()
-            } else {
-                format!(
-                    "I'm not sure about that yet. I'm connecting it to: {}. \
-                     Can you tell me more?",
-                    activated_concepts.join(", ")
-                )
-            };
 
             let id = {
                 let mut h = 0u64;
@@ -4732,18 +4724,19 @@ async fn neuro_ask(
                     });
                 }
             }
+            // The fabric returns structured signal only — no hardcoded English.
+            // activated_concepts: what the network associates with this query.
+            // The calling app/script decides how to phrase the response.
             return serde_json::json!({
                 "question":           text,
                 "hypothesis":         true,
                 "answer":             null,
-                "question_for_user":  question_for_user,
                 "activated_concepts": activated_concepts,
                 "qa_activation":      qa_activation,
                 "confidence_tier":    "uncertain",
                 "peak_activation":    peak_1hop,
                 "intent":             format!("{:?}", intent),
                 "session_id":         session_id,
-                "message":            "Added to research queue. Reply with `context` set to teach me.",
             });
         }
 
@@ -5337,7 +5330,6 @@ async fn neuro_generate(
                 "hypothesis": true,
                 "response":   null,
                 "tokens":     [],
-                "message":    "Not enough learned signal — added to research queue.",
             });
         }
 
