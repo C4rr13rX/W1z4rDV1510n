@@ -703,75 +703,330 @@ For multimodal domains (image + text + motion): use `ImageBitsEncoder`, `TextBit
 
 ---
 
-## Running
+## Running — Complete Tutorial
+
+### Prerequisites
 
 ```bash
-# Build everything
-cargo build --release
+# Rust toolchain (stable, GNU target on Windows)
+# Set PATH so dlltool.exe is found (Windows only)
+export PATH="$PATH:/c/Users/Node/.cargo/bin:/c/Users/Node/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin"
 
-# Copy to bin/
-cp target/release/w1z4rdv1510n-node  bin/w1z4rd_node      # Linux/macOS
-cp target/release/w1z4rdv1510n-node.exe  bin/w1z4rd_node.exe  # Windows
+# Python dependencies (install once)
+pip install httpx httpx[http2] aiohttp pillow requests nltk
 
-# Start the node (requires 'api' subcommand)
-./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
+# Node binary in bin/ (build or use pre-built)
+cargo build --release --workspace
+cp target/release/w1z4rdv1510n-node.exe bin/w1z4rd_node.exe   # Windows
+# cp target/release/w1z4rdv1510n-node  bin/w1z4rd_node        # Linux/macOS
+```
 
-# Check node health
-curl http://localhost:8080/health
+---
 
-# Chat with the node
-curl -X POST http://localhost:8080/chat \
+### 1. Start the node
+
+The node exposes two APIs on startup — the neuro API (`:8080`) and the node/cluster API (`:8090`).
+Always launch from the project root with `W1Z4RDV1510N_DATA_DIR` set so the neural pool and QA
+store persist to the right location.
+
+```bash
+# Windows (Git Bash / PowerShell)
+cd /d/Projects/W1z4rDV1510n
+W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
+
+# Verify both APIs are up
+curl http://127.0.0.1:8080/health   # neuro API
+curl http://127.0.0.1:8090/health   # node API
+```
+
+Expected output: `{"status":"OK","node_id":"node-...","uptime_secs":0,...}`
+
+> **Port note:** All training scripts default to `:8090` (node API). The `/chat`, `/qa/*`,
+> `/neuro/*` and `/media/*` routes are available on **both** ports.
+> The `:8080` neuro API is the primary training/inference surface.
+> The `:8090` node API adds cluster, wallet, and admin routes.
+
+---
+
+### 2. Interactive chat
+
+```bash
+# Simple curl one-shot
+curl -s -X POST http://127.0.0.1:8090/chat \
   -H "Content-Type: application/json" \
-  -d '{"text": "what is photosynthesis"}'
+  -d '{"text": "What is gravity?", "hops": 2, "top_k": 5}'
 
-# Generate from the neuro pool
-curl -X POST http://localhost:8080/neuro/generate \
+# Full conversational interface with hypothesis tracking and affect
+python scripts/chat.py --node http://127.0.0.1:8090
+# Type /help inside the chat for commands, /quit to exit
+```
+
+---
+
+### 3. Stage 0 — Toddler foundation training
+
+Stage 0 builds the base vocabulary: ~1,675 concepts from letters through kindergarten-level ideas.
+Run this after a fresh node start (empty pool) before any other training.
+
+**Step 1 — Build the concept dataset** (run once; output cached in `data/foundation/`)
+
+```bash
+pip install nltk
+python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
+python scripts/build_concept_dataset.py
+# Writes data/foundation/concept_dataset.jsonl  (~1,675 entries)
+```
+
+**Step 2 — Train**
+
+```bash
+python scripts/train_foundation.py \
+  --node http://127.0.0.1:8090 \
+  --pass concepts \
+  --concurrency 8
+# Runtime: ~3–5 min; checkpoints pool+QA after each developmental level
+```
+
+**Step 3 — Validate**
+
+```bash
+python scripts/test_stage0.py --node http://127.0.0.1:8090
+# Expected: 26/26 (100%)  — "Architecture looks solid — ready for more training data."
+```
+
+---
+
+### 4. Foundation language training (Simple English Wikipedia)
+
+Builds broad English word co-occurrence from ~200k articles.
+Requires downloading the Wikipedia dump first (~300 MB compressed).
+
+```bash
+pip install requests
+python scripts/fetch_simple_wikipedia.py
+# Downloads to data/foundation/simple_wiki_articles.jsonl  (~200k articles)
+
+python scripts/train_foundation.py \
+  --node http://127.0.0.1:8090 \
+  --pass text \
+  --concurrency 10
+# Runtime: ~30–60 min depending on hardware
+```
+
+---
+
+### 5. K-12 full curriculum training
+
+Trains through all three stages — toddler (Stage 0), introductory textbooks (Stage 1),
+and full K-12 curriculum (Stage 2). Requires LibreTexts PDFs in a textbooks directory
+(default `D:\Projects\StateOfLoci\textbooks`).
+
+```bash
+# Run all stages (long-running — hours)
+python scripts/train_k12.py \
+  --node http://localhost:8080 \
+  --stages 0,1,2 \
+  --checkpoint-every 100
+
+# Run only Stage 0 (toddler concepts)
+python scripts/train_k12.py --stages 0
+
+# Limit to 10 books per stage (useful for quick testing)
+python scripts/train_k12.py --stages 1,2 --max-books 10
+
+# Resume after interruption (skips already-processed books)
+python scripts/train_k12.py --resume
+
+# Fresh run ignoring prior progress
+python scripts/train_k12.py --clear-progress
+```
+
+---
+
+### 6. QA store query and ingest
+
+```bash
+# Query the Hebbian QA fabric directly (returns raw activation scores)
+curl -s -X POST http://127.0.0.1:8090/qa/query \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "photosynthesis", "max_tokens": 20}'
+  -d '{"question": "What is the sun?"}'
 
-# Check the hypothesis queue (questions the node couldn't answer with confidence)
-curl http://localhost:8080/hypothesis/queue
-
-# Check what the equation matrix knows
-curl http://localhost:8080/equations/report
-
-# See open hypothesis gaps (sorted by cross-node corroboration)
-curl http://localhost:8080/equations/gaps
-
-# Propagate from seed labels (cross-modal inference)
-curl -X POST http://localhost:8080/neuro/propagate \
+# Ingest one or more QA pairs
+curl -s -X POST http://127.0.0.1:8090/qa/ingest \
   -H "Content-Type: application/json" \
-  -d '{"seed_labels": ["txt:word_red"], "hops": 1}'
+  -d '{
+    "candidates": [{
+      "qa_id": "my-pair-001",
+      "question": "What is photosynthesis?",
+      "answer": "Photosynthesis is the process plants use to convert sunlight into food.",
+      "confidence": 0.9
+    }]
+  }'
+```
 
-# Run the autonomous research agent (resolves hypothesis queue entries via Wikipedia + ArXiv)
-python scripts/research_agent.py
+---
 
-# --- Dashboard GUI (separate binary, connects to the node API) ---
-./bin/w1z4rd-dashboard                          # localhost defaults
+### 7. Checkpoint (save pool + QA store to disk)
 
-# --- Obstacle course demo (screen navigation from natural language) ---
+The node accumulates learning in RAM. Checkpoint persists it.
+Training scripts call this automatically, but you can trigger it manually:
 
-# Terminal 1: node
-./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
+```bash
+curl -s -X POST http://127.0.0.1:8090/neuro/checkpoint
+# Returns: {"status":"OK","pool_path":"...","qa_path":"..."}
+```
 
-# Terminal 2: train (opens browser, records mouse trajectories, POSTs to /media/train)
-pip install playwright httpx && playwright install chromium
+---
+
+### 8. Recover QA store after corruption
+
+If the QA store's `answer_index` becomes corrupted (e.g. after manual surgery),
+re-ingest all pairs from the intact `pairs` dict in the JSON file:
+
+```bash
+python scripts/recover_qa_store.py \
+  --node http://127.0.0.1:8090 \
+  --qa-store D:/w1z4rdv1510n-data/qa_store.json
+
+# Preview what would be ingested without touching the node
+python scripts/recover_qa_store.py --dry-run
+```
+
+---
+
+### 9. Autonomous research agent
+
+Polls the hypothesis queue, fetches Wikipedia + ArXiv answers, ingests them,
+and resolves each hypothesis with a dopamine reward signal.
+
+```bash
+pip install aiohttp
+python scripts/research_agent.py \
+  --node http://127.0.0.1:8090 \
+  --interval 30          # poll every 30 seconds
+```
+
+---
+
+### 10. Neural propagation and inference
+
+```bash
+# Propagate from seed labels — returns all concept labels that activate
+curl -s -X POST http://127.0.0.1:8080/neuro/propagate \
+  -H "Content-Type: application/json" \
+  -d '{"seed_labels": ["txt:word_gravity"], "hops": 2}'
+
+# Generate free-form text from the neuro pool
+curl -s -X POST http://127.0.0.1:8080/neuro/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "photosynthesis", "max_tokens": 30}'
+
+# Query the hypothesis queue (questions the node could not answer confidently)
+curl http://127.0.0.1:8080/hypothesis/queue
+
+# Resolve a hypothesis (triggers dopamine potentiation)
+curl -s -X POST http://127.0.0.1:8080/hypothesis/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"hypothesis_id": "...", "answer": "...", "confidence": 0.85}'
+```
+
+---
+
+### 11. Environmental Equation Matrix
+
+```bash
+# Search equations by keyword
+curl "http://127.0.0.1:8080/equations/search?q=entropy"
+
+# Apply equations to active sensor labels
+curl -s -X POST http://127.0.0.1:8080/equations/apply \
+  -H "Content-Type: application/json" \
+  -d '{"labels": ["txt:word_temperature", "txt:word_energy"], "dims": 3}'
+
+# Full report: equation counts by discipline
+curl http://127.0.0.1:8080/equations/report
+
+# Open hypothesis gaps (sorted by cross-node corroboration)
+curl http://127.0.0.1:8080/equations/gaps
+```
+
+---
+
+### 12. Obstacle course — screen navigation from natural language
+
+Teaches the node to predict cursor targets from plain English instructions.
+
+```bash
+pip install playwright httpx
+playwright install chromium
+
+# Terminal 1: node (must already be running)
+
+# Terminal 2: training (opens browser, records mouse trajectories)
 python scripts/train_obstacle.py --reps 10
 
-# Terminal 2: playback (opens browser, asks /media/playback, moves cursor to predicted zone)
+# Terminal 2: playback (asks node for predicted zone, moves cursor)
 python scripts/playback_obstacle.py --auto
+```
 
-# --- Run chess training + live visualizer together ---
+---
 
+### 13. Chess training
+
+```bash
 # Terminal 1: node
-./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
 
-# Terminal 2: chess sensor script (feeds board states to the node as EnvironmentSnapshots)
+# Terminal 2: feed board states as EnvironmentSnapshots
 python scripts/chess_training_loop.py --max-games 8000
 
 # Terminal 3: live visualizer (opens browser automatically)
-python scripts/live_viz_server.py --board-file logs/chess_live_board.json --port 8765 --open
+python scripts/live_viz_server.py \
+  --board-file logs/chess_live_board.json \
+  --port 8765 --open
 ```
+
+---
+
+### 14. Dashboard GUI
+
+```bash
+./bin/w1z4rd_dashboard.exe    # Windows
+# ./bin/w1z4rd-dashboard      # Linux/macOS
+# Connects to :8080 and :8090 by default; configure in dashboard settings
+```
+
+---
+
+### 15. Cluster — join multiple nodes into one virtual brain
+
+```bash
+# Machine A — start coordinator (prints a join OTP)
+w1z4rd_node cluster-init --bind 192.168.1.10:51611
+
+# Machine B — join using the OTP
+w1z4rd_node cluster-join --coordinator 192.168.1.10:51611 --otp EMBER-4821
+
+# Check cluster topology
+w1z4rd_node cluster-status --node 192.168.1.10:51611
+
+# Generate a fresh OTP for a new joiner
+w1z4rd_node cluster-otp
+```
+
+Windows convenience scripts: `scripts/start_cluster.bat` (coordinator),
+`scripts/start_worker.ps1` (worker — prompts for OTP).
+
+---
+
+### Common troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Port already in use | Old node process still running | `powershell -Command "Stop-Process -Name w1z4rd_node -Force"` |
+| `dlltool.exe not found` | WinLibs not in PATH | `export PATH="$PATH:/path/to/mingw64/bin"` |
+| QA returns 0 active neurons | Corrupted `answer_index` | `python scripts/recover_qa_store.py` |
+| Checkpoint saves to AppData | `W1Z4RDV1510N_DATA_DIR` not set | Set env var before launching node |
+| Avira quarantines build artifact | AV false positive | Add `target/` to Windows Defender exclusions |
 
 ---
 
