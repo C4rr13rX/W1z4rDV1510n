@@ -4764,8 +4764,20 @@ async fn neuro_ask(
                     };
                     // Accept at a lower threshold than direct recall — this is
                     // associative, not exact.  The caller knows it's hypothesis.
+                    //
+                    // Thematic relevance filter: only surface the gap answer if it
+                    // actually mentions one of the activated concepts.  This prevents
+                    // the network from confabulating by returning a nearby-but-unrelated
+                    // QA entry.  When no answer is thematically relevant, the network
+                    // is genuinely silent — the `activated_concepts` field IS the
+                    // discovery (the constraint cluster the network built around the
+                    // unknown concept from Hebbian co-occurrence alone).
                     gap_qa.results.first()
                         .filter(|r| r.activation > 0.08)
+                        .filter(|r| {
+                            let answer_lower = r.answer.to_lowercase();
+                            activated_concepts.iter().any(|c| answer_lower.contains(c.as_str()))
+                        })
                         .map(|r| r.answer.clone())
                 } else {
                     None
@@ -5427,6 +5439,12 @@ async fn neuro_generate(
                     let gqr = { let mut qa = qa_arc.lock().expect("qa mutex"); qa.query(&gp, now) };
                     gqr.results.first()
                         .filter(|r| r.activation > 0.08)
+                        .filter(|r| {
+                            // Thematic relevance: only return if the answer mentions
+                            // at least one activated concept.
+                            let al = r.answer.to_lowercase();
+                            activated_gen.iter().any(|c| al.contains(c.as_str()))
+                        })
                         .map(|r| r.answer.clone())
                 } else { None }
             } else { None };
