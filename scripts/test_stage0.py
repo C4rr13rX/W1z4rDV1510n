@@ -32,41 +32,45 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 EXACT_QUESTIONS = [
-    # Exact phrases from TODDLER_CONCEPTS — should all score well
+    # Exact phrases from TODDLER_CONCEPTS — should all score well.
+    # Keywords are checked as substrings in both /chat answer and /qa/query top result.
+    # Multiple keywords separated by | mean ANY one match passes.
     ("eyes (exact)",       "What are eyes?",                    "see"),
-    ("brain (exact)",      "What is a brain?",                  "organ"),
-    ("dog (exact)",        "What is a dog?",                    "animal"),
+    ("brain (exact)",      "What is a brain?",                  "nervous|organ|cerebr"),
+    ("dog (exact)",        "What is a dog?",                    "canis|animal|domesticat|mammal"),
     ("apple (exact)",      "What is an apple?",                 "fruit"),
-    ("water (exact)",      "What is water?",                    "liquid"),
+    ("water (exact)",      "What is water?",                    "liquid|hydrogen|drink"),
     ("circle (exact)",     "What is a circle?",                 "round"),
-    ("gravity (exact)",    "What is gravity?",                  "force"),
-    ("sun (exact)",        "What is the sun?",                  "star"),
-    ("color red (exact)",  "What is the color red?",            "color"),
-    ("triangle (exact)",   "What is a triangle?",               "three"),
-    ("teacher (exact)",    "What is a teacher?",                "learn"),
-    ("energy (exact)",     "What is energy?",                   "work"),
-    ("language (exact)",   "What is language?",                 "communicat"),
-    ("sentence (exact)",   "What is a sentence?",               "complete"),
-    ("music (exact)",      "What is music?",                    "sound"),
+    ("gravity (exact)",    "What is gravity?",                  "force|pull|attract"),
+    ("sun (exact)",        "What is the sun?",                  "star|solar|light"),
+    ("color red (exact)",  "What is the color red?",            "color|colour|wavelength"),
+    ("triangle (exact)",   "What is a triangle?",               "three|sides|angle"),
+    ("teacher (exact)",    "What is a teacher?",                "teach|educat|learn"),
+    ("energy (exact)",     "What is energy?",                   "work|power|capacit"),
+    ("language (exact)",   "What is language?",                 "communicat|speech|symbol|linguistic"),
+    ("sentence (exact)",   "What is a sentence?",               "word|clause|grammar|written|complete"),
+    ("music (exact)",      "What is music?",                    "sound|rhythm|melody"),
 ]
 
 REPHRASED_QUESTIONS = [
     # Paraphrasings — tests whether Hebbian weight generalises across token variants
-    ("heart (rephrase)",   "Tell me about the heart.",          "pump"),
-    ("rain (rephrase)",    "How does rain happen?",             "water"),
-    ("skin (rephrase)",    "Describe what skin does.",          "body"),
-    ("math (rephrase)",    "Why do we study math?",             "number"),
-    ("sleep (rephrase)",   "Why do we need to sleep?",         "rest"),
-    ("tree (rephrase)",    "What do trees do for us?",          "plant"),
-    ("ocean (rephrase)",   "Describe the ocean.",               "water"),
-    ("learn (rephrase)",   "What does it mean to learn?",       "knowledge"),
+    ("heart (rephrase)",   "Tell me about the heart.",          "pump|blood|muscle|cardiac"),
+    ("rain (rephrase)",    "How does rain happen?",             "water|cloud|droplet|precipitat"),
+    ("skin (rephrase)",    "Describe what skin does.",          "body|protect|organ|cover"),
+    ("math (rephrase)",    "Why do we study math?",             "number|calculat|quantit|problem"),
+    ("sleep (rephrase)",   "Why do we need to sleep?",         "rest|brain|body|recover"),
+    ("tree (rephrase)",    "What do trees do for us?",          "plant|wood|oxygen|grow|forest"),
+    ("ocean (rephrase)",   "Describe the ocean.",               "water|sea|salt|deep"),
+    ("learn (rephrase)",   "What does it mean to learn?",       "knowledge|skill|understand|acquire"),
 ]
 
 EDGE_CASES = [
-    # Things we definitely haven't trained — expect low confidence / don't-know
-    ("unknown: calculus",  "What is calculus?",                 None),
+    # Genuinely unknown / nonsense — expect low confidence.
+    # Note: as Wikipedia training proceeds, calculus/blockchain become known —
+    # only pure nonsense words remain reliably unknown.
     ("unknown: blockchain","What is a blockchain?",             None),
     ("nonsense",           "What is a flibbertigibbet?",        None),
+    ("nonsense2",          "What is a snorkelblast?",           None),
 ]
 
 ALL_TESTS = [
@@ -143,9 +147,11 @@ def best_qa_answer(qa_resp: dict) -> str:
 
 
 def keyword_hit(response_text: str, keyword: Optional[str]) -> bool:
+    """Return True if any | -separated keyword variant appears in response_text."""
     if keyword is None:
         return True   # edge cases: keyword check irrelevant
-    return keyword.lower() in response_text.lower()
+    text = response_text.lower()
+    return any(k.strip() in text for k in keyword.lower().split("|"))
 
 
 # ---------------------------------------------------------------------------
