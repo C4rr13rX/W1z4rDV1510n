@@ -4694,16 +4694,87 @@ async fn neuro_ask(
                 .map(|(_, v)| *v)
                 .fold(0.0f32, f32::max);
 
-            // Surface the nearest known concepts — the Hebbian neighbourhood of
-            // the question that the network already has representations for.
-            // Returned as raw labels so the caller decides how to phrase them.
+            // ── Gap-state activated concepts ──────────────────────────────────
+            // The Hebbian neighbourhood of what did fire around this unknown.
+            // These are NOT formatted into a sentence — they are the network's
+            // current state, which we propagate from to let a response emerge.
             let activated_concepts: Vec<String> = word_acts_1hop.iter()
                 .filter(|(l, _)| !seed_word_labels_hyp.contains(l))
                 .filter_map(|(l, _)| l.strip_prefix("txt:word_").map(|w| w.to_string()))
                 .filter(|w| !w.contains('_') && w.len() > 2)
-                .take(4)
+                .take(6)
                 .collect();
 
+            // ── Associative generation from gap state ─────────────────────────
+            // The network is in a state: NE elevated, concept unknown, but nearby
+            // associations are active.  Rather than returning silence or a
+            // hardcoded phrase, propagate from those activated labels with full
+            // hops and query the QA store from the resulting activation state.
+            //
+            // This is the same mechanism as a known answer — propagation through
+            // the Hebbian graph — but seeded from what the network knows *near*
+            // the gap rather than from the question itself.  The response that
+            // surfaces is the network speaking from its current internal state.
+            // It will be associative, adjacent, uncertain in character — because
+            // the activation state it came from is exactly that.
+            //
+            // As training grows the pool, the gap-state responses become richer
+            // and closer to the actual concept.  No code changes needed.
+            // When the pool is sparse, the response is null — the network is
+            // genuinely silent, which is honest.
+            let gap_answer: Option<String> = if !activated_concepts.is_empty() {
+                // Build word labels from activated concepts to seed the propagation.
+                let gap_seed_labels: Vec<String> = activated_concepts.iter()
+                    .map(|w| format!("txt:word_{w}"))
+                    .collect();
+
+                // Full propagation from the gap state — NE elevation means the
+                // network is in exploratory mode, so we use a slightly lower
+                // min_activation to allow looser associations through.
+                let gap_propagated = neuro.propagate_combined(
+                    &[(gap_seed_labels.as_slice(), 1.0_f32)],
+                    hops,
+                    0.001,
+                );
+
+                // Collect the top word labels from the gap propagation.
+                let mut gap_word_acts: Vec<(String, f32)> = gap_propagated.iter()
+                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                    .map(|(l, &v)| (l.clone(), v))
+                    .collect();
+                gap_word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal));
+
+                // Form a mini-prompt from the top activated words and query the
+                // QA store.  Whatever the store surfaces from this state is the
+                // network's self-expression — not chosen by code.
+                let gap_seed_set: std::collections::HashSet<&String> =
+                    gap_seed_labels.iter().collect();
+                let gap_prompt_words: Vec<&str> = gap_word_acts.iter()
+                    .filter(|(l, _)| !gap_seed_set.contains(l))
+                    .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
+                    .take(8)
+                    .collect();
+
+                if !gap_prompt_words.is_empty() {
+                    let gap_prompt = gap_prompt_words.join(" ");
+                    let gap_qa = {
+                        let mut qa = qa_arc.lock().expect("qa mutex");
+                        qa.query(&gap_prompt, now)
+                    };
+                    // Accept at a lower threshold than direct recall — this is
+                    // associative, not exact.  The caller knows it's hypothesis.
+                    gap_qa.results.first()
+                        .filter(|r| r.activation > 0.08)
+                        .map(|r| r.answer.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Queue the hypothesis.
             let id = {
                 let mut h = 0u64;
                 for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
@@ -4724,13 +4795,10 @@ async fn neuro_ask(
                     });
                 }
             }
-            // The fabric returns structured signal only — no hardcoded English.
-            // activated_concepts: what the network associates with this query.
-            // The calling app/script decides how to phrase the response.
             return serde_json::json!({
                 "question":           text,
                 "hypothesis":         true,
-                "answer":             null,
+                "answer":             gap_answer,
                 "activated_concepts": activated_concepts,
                 "qa_activation":      qa_activation,
                 "confidence_tier":    "uncertain",
@@ -5263,8 +5331,8 @@ async fn neuro_generate(
             "would","could","should","did","have","has","had","for","with","by",
             "at","as","but","not","he","she","they","we","you","i","its","get",
             "about","tell","me","describe","explain","define",
+            "why","where","when","who","which",
         ];
-        let stop_set: std::collections::HashSet<&str> = STOP_WORDS.iter().copied().collect();
 
         // Encode the prompt text into neural labels
         let enc = TextBitsEncoder::new(TextBitsConfig::default());
@@ -5298,13 +5366,71 @@ async fn neuro_generate(
             .unwrap_or_default();
 
         // QA gate — raw activation threshold, same as neuro_ask
-        let qa_gated = best_qa
-            .filter(|r| r.activation > 0.10)
-            .is_some();
+        let qa_activation_gen = best_qa.map(|r| r.activation).unwrap_or(0.0_f32);
+        let qa_gated = qa_activation_gen > 0.10;
 
         if !qa_gated {
-            // NE spike: prediction failure = novel input, boost LR for next training.
+            // NE spike: novel input, boost LR for next training.
             neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
+
+            // Gap-state generation: same mechanism as neuro_ask hypothesis path.
+            // Propagate from the 1-hop activation neighbourhood of the prompt,
+            // query the QA store from the resulting state.
+            let word_only_gen: Vec<String> = content_labels.iter()
+                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .cloned()
+                .collect();
+            let gap_1hop = if word_only_gen.is_empty() {
+                HashMap::new()
+            } else {
+                neuro.propagate_combined(&[(word_only_gen.as_slice(), 1.0_f32)], 1, 0.001)
+            };
+            let word_seed_set_gen: std::collections::HashSet<&String> =
+                word_only_gen.iter().collect();
+            let mut gap_acts_gen: Vec<(String, f32)> = gap_1hop.iter()
+                .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .filter(|(l, _)| !word_seed_set_gen.contains(l))
+                .map(|(l, &v)| (l.clone(), v))
+                .collect();
+            gap_acts_gen.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal));
+            let activated_gen: Vec<String> = gap_acts_gen.iter()
+                .filter_map(|(l, _)| l.strip_prefix("txt:word_").map(|w| w.to_string()))
+                .filter(|w| !w.contains('_') && w.len() > 2)
+                .take(6)
+                .collect();
+
+            let gap_response: Option<String> = if !activated_gen.is_empty() {
+                let gap_seed_labels_gen: Vec<String> = activated_gen.iter()
+                    .map(|w| format!("txt:word_{w}"))
+                    .collect();
+                let gap_prop = neuro.propagate_combined(
+                    &[(gap_seed_labels_gen.as_slice(), 1.0_f32)],
+                    hops,
+                    0.001,
+                );
+                let seed_set_gen: std::collections::HashSet<&String> =
+                    gap_seed_labels_gen.iter().collect();
+                let mut gpa: Vec<(String, f32)> = gap_prop.iter()
+                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                    .filter(|(l, _)| !seed_set_gen.contains(l))
+                    .map(|(l, &v)| (l.clone(), v))
+                    .collect();
+                gpa.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal));
+                let gap_words: Vec<&str> = gpa.iter()
+                    .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
+                    .take(8)
+                    .collect();
+                if !gap_words.is_empty() {
+                    let gp = gap_words.join(" ");
+                    let gqr = { let mut qa = qa_arc.lock().expect("qa mutex"); qa.query(&gp, now) };
+                    gqr.results.first()
+                        .filter(|r| r.activation > 0.08)
+                        .map(|r| r.answer.clone())
+                } else { None }
+            } else { None };
+
             let id = {
                 let mut h = 0u64;
                 for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
@@ -5326,87 +5452,29 @@ async fn neuro_generate(
                 }
             }
             return serde_json::json!({
-                "prompt":     text,
-                "hypothesis": true,
-                "response":   null,
-                "tokens":     [],
+                "prompt":             text,
+                "hypothesis":         true,
+                "response":           gap_response,
+                "activated_concepts": activated_gen,
+                "qa_activation":      qa_activation_gen,
             });
         }
 
-        // Full propagation for decode (QA answer seeds give accurate token ranking)
-        let combined = neuro.propagate_combined(
-            &[
-                (content_labels.as_slice(), 1.0_f32),
-                (qa_answer_labels.as_slice(), qa_conf),
-            ],
-            hops,
-            0.005,
-        );
-        let mut word_acts: Vec<(String, f32)> = combined
-            .iter()
-            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-            .map(|(l, &v)| (l.clone(), v))
-            .collect();
-        word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal));
-
-        // Cap at QA answer word count to avoid noisy pool tail
-        let output_cap: usize = best_qa
+        // Known concept — return verbatim QA answer.
+        // The generate path respects grown representations: no word extraction,
+        // no reconstruction.  The answer is the stored unit.
+        let mut response = best_qa
             .filter(|r| r.activation > 0.10)
-            .map(|best| {
-                best.answer
-                    .split_whitespace()
-                    .filter(|word| {
-                        let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-                        w.len() > 2 && !stop_set.contains(w.as_str())
-                    })
-                    .count()
-                    .max(1)
-            })
-            .unwrap_or(max_tok);
-
-        // Seed words that should not appear in output
-        let seed_words: std::collections::HashSet<String> = content_labels.iter()
-            .chain(qa_answer_labels.iter())
-            .filter_map(|l| l.strip_prefix("txt:word_").map(|w| w.to_string()))
-            .collect();
-
-        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut output: Vec<String> = Vec::new();
-
-        // Prepend QA answer keywords
-        if let Some(best) = best_qa.filter(|r| r.activation > 0.10) {
-            for word in best.answer.split_whitespace() {
-                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-                if w.len() > 2 && !stop_set.contains(w.as_str()) && !used.contains(&w) {
-                    used.insert(w.clone());
-                    output.push(w);
-                    if output.len() >= output_cap { break; }
-                }
-            }
-        }
-
-        // Pool-activated supplement (no-op when output_cap already reached above)
-        for (label, _) in &word_acts {
-            if output.len() >= output_cap { break; }
-            let w = label.strip_prefix("txt:word_").unwrap_or("").to_string();
-            if w.is_empty() || w == "eos" || w.contains('_') { continue; }
-            if stop_set.contains(w.as_str()) { continue; }
-            if seed_words.contains(&w) { continue; }
-            if used.contains(&w) { continue; }
-            used.insert(w.clone());
-            output.push(w);
-        }
-
-        let mut response = output.join(" ");
+            .map(|best| best.answer.clone())
+            .unwrap_or_default();
         if let Some(c) = response.get_mut(0..1) { c.make_ascii_uppercase(); }
         if !response.is_empty() && !response.ends_with(['.','!','?']) { response.push('.'); }
 
         serde_json::json!({
-            "prompt":     text,
-            "hypothesis": false,
-            "response":   response,
-            "tokens":     output,
+            "prompt":        text,
+            "hypothesis":    false,
+            "response":      response,
+            "qa_activation": qa_activation_gen,
         })
     }).await.unwrap_or_else(|e| serde_json::json!({ "error": format!("internal: {e}") }));
 
