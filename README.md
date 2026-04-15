@@ -725,9 +725,13 @@ cp target/release/w1z4rdv1510n-node.exe bin/w1z4rd_node.exe   # Windows
 
 ### 1. Start the node
 
-The node exposes two APIs on startup — the neuro API (`:8080`) and the node/cluster API (`:8090`).
-Always launch from the project root with `W1Z4RDV1510N_DATA_DIR` set so the neural pool and QA
-store persist to the right location.
+The node exposes two APIs on startup:
+- **`:8090` — Node API**: all training routes (`/media/train`, `/qa/ingest`, `/qa/query`, `/chat`,
+  `/neuro/*`, `/hypothesis/*`, `/equations/*`, `/health`, etc.)  
+- **`:8080` — Neuro API**: an internal lighter API for snapshot reads and propagation
+
+**Use port 8090 for all training scripts.** Always launch from the project root with
+`W1Z4RDV1510N_DATA_DIR` set so the neural pool and QA store persist to the right location.
 
 ```bash
 # Windows (Git Bash / PowerShell)
@@ -823,22 +827,23 @@ and full K-12 curriculum (Stage 2). Requires LibreTexts PDFs in a textbooks dire
 
 ```bash
 # Run all stages (long-running — hours)
+# NOTE: use port 8090 (Node API) — /media/train lives there, not on 8080
 python scripts/train_k12.py \
-  --node http://localhost:8080 \
+  --node http://127.0.0.1:8090 \
   --stages 0,1,2 \
   --checkpoint-every 100
 
 # Run only Stage 0 (toddler concepts)
-python scripts/train_k12.py --stages 0
+python scripts/train_k12.py --node http://127.0.0.1:8090 --stages 0
 
 # Limit to 10 books per stage (useful for quick testing)
-python scripts/train_k12.py --stages 1,2 --max-books 10
+python scripts/train_k12.py --node http://127.0.0.1:8090 --stages 1,2 --max-books 10
 
 # Resume after interruption (skips already-processed books)
-python scripts/train_k12.py --resume
+python scripts/train_k12.py --node http://127.0.0.1:8090 --resume
 
 # Fresh run ignoring prior progress
-python scripts/train_k12.py --clear-progress
+python scripts/train_k12.py --node http://127.0.0.1:8090 --clear-progress
 ```
 
 ---
