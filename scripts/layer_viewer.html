@@ -5,145 +5,208 @@
 <title>W1z4rD V1510n — Layered Physiology Viewer</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace;
+  body { background: #080810; color: #d0d0e8; font-family: 'Courier New', monospace;
          display: flex; height: 100vh; overflow: hidden; }
 
-  #canvas-container { flex: 1; position: relative; }
-  #renderer-canvas  { display: block; width: 100%; height: 100%; }
+  /* ── Canvas ─────────────────────────────────────────────────────── */
+  #canvas-wrap { flex: 1; position: relative; }
+  canvas       { display: block; width: 100%; height: 100%; }
 
+  /* ── Sidebar ─────────────────────────────────────────────────────── */
   #sidebar {
-    width: 320px; background: #111118; border-left: 1px solid #2a2a4a;
-    display: flex; flex-direction: column; overflow: hidden;
+    width: 310px; background: #0d0d18; border-left: 1px solid #1e2040;
+    display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
   }
-  #sidebar-header {
-    padding: 12px 16px; background: #16161f; border-bottom: 1px solid #2a2a4a;
-    font-size: 11px; color: #7070a0; letter-spacing: 1px; text-transform: uppercase;
+  #sb-header {
+    padding: 10px 14px 8px; background: #12121e; border-bottom: 1px solid #1e2040;
   }
-  #sidebar-header h2 { font-size: 13px; color: #a0c0ff; margin-bottom: 4px; }
+  #sb-header h2 { font-size: 12px; color: #7090d0; letter-spacing: 2px; text-transform: uppercase; }
+  #sb-header .subtitle { font-size: 10px; color: #404060; margin-top: 2px; }
 
-  #controls {
-    padding: 12px 16px; border-bottom: 1px solid #2a2a4a;
-    display: flex; flex-direction: column; gap: 10px;
+  /* ── Controls block ──────────────────────────────────────────────── */
+  #controls { padding: 10px 14px; border-bottom: 1px solid #161630; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; font-size: 11px; }
+  .lbl { width: 68px; color: #5060a0; flex-shrink: 0; font-size: 10px; text-transform: uppercase; }
+
+  select, input[type="text"] {
+    flex: 1; background: #13131f; border: 1px solid #2a2a44; color: #c0c8f0;
+    padding: 4px 7px; font-family: inherit; font-size: 11px; border-radius: 3px;
+    outline: none;
   }
-  .ctrl-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-  .ctrl-label { width: 80px; color: #7070a0; flex-shrink: 0; }
+  select:focus, input:focus { border-color: #404880; }
+
   input[type="range"] {
-    flex: 1; appearance: none; height: 4px; background: #2a2a4a;
+    flex: 1; -webkit-appearance: none; height: 3px; background: #1e2040;
     border-radius: 2px; outline: none;
   }
   input[type="range"]::-webkit-slider-thumb {
-    appearance: none; width: 14px; height: 14px; border-radius: 50%;
-    background: #4080ff; cursor: pointer;
+    -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+    background: #4060cc; cursor: pointer;
   }
-  input[type="text"] {
-    flex: 1; background: #1a1a2e; border: 1px solid #3a3a5a; color: #e0e0e0;
-    padding: 4px 8px; font-family: inherit; font-size: 12px; border-radius: 3px;
-  }
+  .range-val { width: 40px; text-align: right; font-size: 10px; color: #6070a0; flex-shrink: 0; }
+
+  .btn-row { display: flex; gap: 6px; margin-top: 2px; }
   button {
-    background: #1e2a4a; border: 1px solid #3a5aaa; color: #a0c0ff;
-    padding: 6px 12px; font-family: inherit; font-size: 11px; cursor: pointer;
-    border-radius: 3px; letter-spacing: 0.5px;
+    flex: 1; background: #161630; border: 1px solid #2a2a50; color: #8090c0;
+    padding: 5px 8px; font-family: inherit; font-size: 10px; cursor: pointer;
+    border-radius: 3px; letter-spacing: 0.5px; text-transform: uppercase;
+    transition: background 0.15s;
   }
-  button:hover { background: #2a3a6a; }
+  button:hover { background: #1e2048; color: #a0b0d8; }
+  button.active { background: #1a3060; border-color: #3050a0; color: #80b0ff; }
 
-  #info-panel { flex: 1; overflow-y: auto; padding: 12px 16px; font-size: 12px; }
-  #info-panel h3 { color: #6090d0; font-size: 11px; margin: 10px 0 4px;
-                   letter-spacing: 1px; text-transform: uppercase; }
-  .entity-block { margin-bottom: 14px; border-bottom: 1px solid #1a1a2a; padding-bottom: 10px; }
-  .entity-id { color: #80d0a0; font-size: 13px; font-weight: bold; }
-  .layer-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer;
-               padding: 2px 4px; border-radius: 2px; }
-  .layer-row:hover { background: #1a2a3a; }
-  .layer-row.selected { background: #1a3050; }
-  .depth-badge {
-    width: 20px; height: 20px; border-radius: 50%; display: flex;
-    align-items: center; justify-content: center; font-size: 9px; font-weight: bold;
-    flex-shrink: 0; border: 1px solid rgba(255,255,255,0.2);
-  }
-  .layer-name { flex: 1; color: #c0c0e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .layer-z { color: #7070a0; font-size: 10px; white-space: nowrap; }
+  /* ── Info panel ──────────────────────────────────────────────────── */
+  #info { flex: 1; overflow-y: auto; padding: 10px 14px; scrollbar-width: thin;
+          scrollbar-color: #1e2040 transparent; }
+  #info::-webkit-scrollbar { width: 4px; }
+  #info::-webkit-scrollbar-thumb { background: #1e2040; }
 
-  #poetry-box {
-    background: #0d0d1a; border: 1px solid #2a2a4a; padding: 10px;
-    margin: 8px 0; font-size: 11px; color: #9090b0; line-height: 1.6;
-    border-radius: 3px;
+  .section-title {
+    font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+    color: #3a4060; margin: 10px 0 5px; border-bottom: 1px solid #13131f;
+    padding-bottom: 3px;
   }
 
-  #status-bar {
-    padding: 6px 16px; font-size: 10px; color: #5060a0;
-    border-top: 1px solid #1a1a2a; background: #0d0d18;
-    display: flex; justify-content: space-between;
+  /* Layer list */
+  .layer-item {
+    display: flex; align-items: center; gap: 7px; padding: 4px 6px;
+    border-radius: 3px; cursor: pointer; margin: 2px 0;
+    border: 1px solid transparent; transition: all 0.15s;
   }
-  #status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-                background: #20a040; margin-right: 4px; }
+  .layer-item:hover   { background: #131328; border-color: #1e2040; }
+  .layer-item.sel     { background: #101a30; border-color: #2040a0; }
+  .layer-dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  .layer-label { flex: 1; font-size: 11px; color: #a0a8d0; overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; }
+  .layer-meta  { font-size: 9px; color: #4050a0; text-align: right; line-height: 1.5; }
 
-  .tooltip {
-    position: absolute; background: rgba(10,10,20,0.95); border: 1px solid #3a4a6a;
-    padding: 6px 10px; font-size: 11px; pointer-events: none;
-    border-radius: 3px; max-width: 200px; z-index: 10;
+  /* Poetry box */
+  #poetry {
+    background: #0b0b17; border: 1px solid #1a1a30; padding: 8px 10px;
+    font-size: 10px; color: #7080a8; line-height: 1.7; border-radius: 3px;
+    min-height: 50px;
+  }
+
+  /* Scale profile */
+  #scale-profile { font-size: 10px; color: #4050a0; line-height: 2; }
+  .scale-row { display: flex; align-items: center; gap: 6px; }
+  .scale-bar { flex: 1; height: 3px; background: #1a1a30; border-radius: 1px; }
+  .scale-fill { height: 100%; border-radius: 1px; }
+  .scale-z { width: 60px; text-align: right; color: #5060a0; }
+
+  /* Status bar */
+  #statusbar {
+    padding: 5px 14px; font-size: 9px; color: #3a4060; border-top: 1px solid #131325;
+    display: flex; justify-content: space-between; background: #0a0a14;
+  }
+  #statusdot { display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+               background: #204040; margin-right: 5px; transition: background 0.3s; }
+
+  /* Tooltip */
+  #tip {
+    position: absolute; background: rgba(8,8,20,0.97); border: 1px solid #2a3060;
+    padding: 6px 10px; font-size: 10px; pointer-events: none; border-radius: 3px;
+    max-width: 220px; z-index: 10; display: none; line-height: 1.6;
+  }
+  #tip b { color: #8090d0; }
+
+  /* Layer "x-ray" indicator overlay on canvas */
+  #depth-label-overlay {
+    position: absolute; top: 14px; left: 14px; font-size: 11px;
+    color: rgba(100,120,200,0.7); pointer-events: none; letter-spacing: 1px;
   }
 </style>
 </head>
 <body>
-
-<div id="canvas-container">
-  <canvas id="renderer-canvas"></canvas>
-  <div id="tooltip" class="tooltip" style="display:none"></div>
+<div id="canvas-wrap">
+  <canvas id="c"></canvas>
+  <div id="depth-label-overlay">DEPTH&thinsp;0</div>
+  <div id="tip"></div>
 </div>
 
 <div id="sidebar">
-  <div id="sidebar-header">
-    <h2>W1z4rD V1510n</h2>
-    Layered Physiology — 3D Explorer
+  <div id="sb-header">
+    <h2>Layered Physiology</h2>
+    <div class="subtitle">W1z4rD V1510n &mdash; 3D structural explorer</div>
   </div>
 
   <div id="controls">
-    <div class="ctrl-row">
-      <span class="ctrl-label">Entity</span>
-      <input type="text" id="entity-input" value="game_console" placeholder="entity id">
-      <button onclick="refresh()">↺</button>
+    <div class="row">
+      <span class="lbl">Entity</span>
+      <select id="entity-sel" onchange="selectEntity(this.value)">
+        <option value="game_console">Game Console (30 cm)</option>
+        <option value="pcb">PCB Board (10 cm)</option>
+        <option value="integrated_circuit">Integrated Circuit (12 mm)</option>
+        <option value="transistor">FinFET Transistor (7 nm)</option>
+        <option value="silicon_crystal">Silicon Crystal (5.43 Å)</option>
+        <option value="cell">Biological Cell (~20 µm)</option>
+        <option value="custom">Custom…</option>
+      </select>
     </div>
-    <div class="ctrl-row">
-      <span class="ctrl-label">Depth</span>
-      <input type="range" id="depth-slider" min="0" max="5" step="1" value="5"
-             oninput="onDepthChange(this.value)">
-      <span id="depth-label" style="font-size:11px;color:#a0a0c0;width:20px;text-align:right">5</span>
+    <div class="row" id="custom-row" style="display:none">
+      <span class="lbl">Labels</span>
+      <input type="text" id="custom-labels" placeholder="comma-separated labels">
     </div>
-    <div class="ctrl-row">
-      <span class="ctrl-label">Opacity</span>
-      <input type="range" id="opacity-slider" min="0.05" max="0.7" step="0.05" value="0.22"
-             oninput="onOpacityChange(this.value)">
+
+    <div class="row">
+      <span class="lbl">Max Depth</span>
+      <input type="range" id="depth-sl" min="0" max="5" step="1" value="5"
+             oninput="onDepth(+this.value)">
+      <span class="range-val" id="depth-val">5</span>
     </div>
-    <div class="ctrl-row">
-      <span class="ctrl-label">Explode</span>
-      <input type="range" id="explode-slider" min="0" max="3" step="0.1" value="0"
-             oninput="onExplodeChange(this.value)">
+    <div class="row">
+      <span class="lbl">Opacity</span>
+      <input type="range" id="opacity-sl" min="0.04" max="0.75" step="0.01" value="0.22"
+             oninput="onOpacity(+this.value)">
+      <span class="range-val" id="opacity-val">0.22</span>
     </div>
-    <div class="ctrl-row">
-      <span class="ctrl-label">Host</span>
-      <input type="text" id="host-input" value="192.168.1.84:8090" style="font-size:11px">
+    <div class="row">
+      <span class="lbl">Explode</span>
+      <input type="range" id="explode-sl" min="0" max="4" step="0.1" value="0"
+             oninput="onExplode(+this.value)">
+      <span class="range-val" id="explode-val">0.0</span>
     </div>
-    <div class="ctrl-row" style="gap:6px">
-      <button onclick="togglePoll()">⏸ Pause</button>
-      <button onclick="calibrateDialog()">⚡ Calibrate</button>
-      <button onclick="exportScene()">↓ JSON</button>
+    <div class="row">
+      <span class="lbl">Cross-sect</span>
+      <input type="range" id="clip-sl" min="-1.2" max="1.2" step="0.05" value="1.2"
+             oninput="onClip(+this.value)">
+      <span class="range-val" id="clip-val">off</span>
+    </div>
+
+    <div class="btn-row">
+      <button id="btn-poll" onclick="togglePoll()">PAUSE</button>
+      <button onclick="calibDialog()">CALIBRATE</button>
+      <button onclick="refresh()">REFRESH</button>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <span class="lbl">API Host</span>
+      <input type="text" id="host-in" value="192.168.1.84:8090" style="font-size:10px">
     </div>
   </div>
 
-  <div id="info-panel">
-    <div id="entity-info">Loading...</div>
-    <h3>Scientific Poetry</h3>
-    <div id="poetry-box">—</div>
-    <h3>Scale Profile</h3>
-    <div id="scale-info" style="font-size:11px;color:#6070a0;line-height:1.8">—</div>
+  <div id="info">
+    <div class="section-title">Structural Layers</div>
+    <div id="layer-list">—</div>
+
+    <div class="section-title">Scientific Synthesis</div>
+    <div id="poetry">Waiting for data…</div>
+
+    <div class="section-title">Physical Scale Profile</div>
+    <div id="scale-profile">—</div>
   </div>
 
-  <div id="status-bar">
-    <span><span id="status-dot"></span><span id="status-text">idle</span></span>
-    <span id="last-update">—</span>
+  <div id="statusbar">
+    <span><span id="statusdot"></span><span id="statustext">idle</span></span>
+    <span id="statustime">—</span>
   </div>
 </div>
 
+<!-- ═══════════════════════════════════════════════════════════════════
+     Three.js (module, CDN)
+═════════════════════════════════════════════════════════════════════ -->
 <script type="importmap">
 {
   "imports": {
@@ -152,331 +215,543 @@
   }
 }
 </script>
-
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ── Scene setup ──────────────────────────────────────────────────────────────
-const canvas = document.getElementById('renderer-canvas');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setClearColor(0x0a0a0f, 1);
+// ═══════════════════════════════════════════════════════════════════
+// Entity profiles — known anatomy labels per entity type
+// ═══════════════════════════════════════════════════════════════════
+const PROFILES = {
+  game_console: {
+    known_scale_m: 0.30,
+    labels: [
+      { name: 'outer',      score: 1.00 },
+      { name: 'shell',      score: 0.96 },
+      { name: 'housing',    score: 0.92 },
+      { name: 'casing',     score: 0.88 },
+      { name: 'chassis',    score: 0.84 },
+      { name: 'layer',      score: 0.80 },
+      { name: 'board',      score: 0.75 },
+      { name: 'circuit',    score: 0.70 },
+      { name: 'trace',      score: 0.65 },
+      { name: 'chip',       score: 0.60 },
+      { name: 'transistor', score: 0.55 },
+      { name: 'silicon',    score: 0.50 },
+      { name: 'crystal',    score: 0.45 },
+      { name: 'quantum',    score: 0.40 },
+    ],
+  },
+  pcb: {
+    known_scale_m: 0.10,
+    labels: [
+      { name: 'board',      score: 1.00 },
+      { name: 'layer',      score: 0.95 },
+      { name: 'trace',      score: 0.90 },
+      { name: 'pad',        score: 0.85 },
+      { name: 'via',        score: 0.80 },
+      { name: 'capacitor',  score: 0.75 },
+      { name: 'resistor',   score: 0.70 },
+      { name: 'chip',       score: 0.65 },
+      { name: 'circuit',    score: 0.60 },
+      { name: 'transistor', score: 0.55 },
+    ],
+  },
+  integrated_circuit: {
+    known_scale_m: 0.012,
+    labels: [
+      { name: 'die',        score: 1.00 },
+      { name: 'chip',       score: 0.95 },
+      { name: 'layer',      score: 0.90 },
+      { name: 'circuit',    score: 0.85 },
+      { name: 'junction',   score: 0.80 },
+      { name: 'transistor', score: 0.75 },
+      { name: 'gate',       score: 0.70 },
+      { name: 'silicon',    score: 0.65 },
+      { name: 'dopant',     score: 0.60 },
+      { name: 'electron',   score: 0.55 },
+      { name: 'quantum',    score: 0.45 },
+    ],
+  },
+  transistor: {
+    known_scale_m: 7e-9,
+    labels: [
+      { name: 'channel',    score: 1.00 },
+      { name: 'fin',        score: 0.95 },
+      { name: 'gate',       score: 0.90 },
+      { name: 'silicon',    score: 0.85 },
+      { name: 'oxide',      score: 0.80 },
+      { name: 'dopant',     score: 0.75 },
+      { name: 'electron',   score: 0.70 },
+      { name: 'transistor', score: 0.65 },
+      { name: 'atom',       score: 0.55 },
+      { name: 'quantum',    score: 0.50 },
+    ],
+  },
+  silicon_crystal: {
+    known_scale_m: 5.43e-10,
+    labels: [
+      { name: 'crystal',    score: 1.00 },
+      { name: 'lattice',    score: 0.95 },
+      { name: 'silicon',    score: 0.90 },
+      { name: 'bond',       score: 0.85 },
+      { name: 'atom',       score: 0.80 },
+      { name: 'electron',   score: 0.75 },
+      { name: 'ion',        score: 0.70 },
+      { name: 'quantum',    score: 0.65 },
+      { name: 'orbital',    score: 0.60 },
+      { name: 'spin',       score: 0.55 },
+      { name: 'phonon',     score: 0.50 },
+    ],
+  },
+  cell: {
+    known_scale_m: 20e-6,
+    labels: [
+      { name: 'membrane',   score: 1.00 },
+      { name: 'wall',       score: 0.95 },
+      { name: 'cortex',     score: 0.90 },
+      { name: 'cytoplasm',  score: 0.85 },
+      { name: 'organelle',  score: 0.80 },
+      { name: 'nucleus',    score: 0.75 },
+      { name: 'ribosome',   score: 0.70 },
+      { name: 'mitochondria', score: 0.65 },
+      { name: 'dna',        score: 0.60 },
+      { name: 'molecule',   score: 0.55 },
+      { name: 'protein',    score: 0.50 },
+      { name: 'atom',       score: 0.40 },
+      { name: 'quantum',    score: 0.30 },
+    ],
+  },
+  custom: { known_scale_m: 0.10, labels: [] },
+};
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 100);
-camera.position.set(0, 0.5, 3.5);
+// ═══════════════════════════════════════════════════════════════════
+// Depth colors — outermost (0) dark, innermost (5) bright
+// ═══════════════════════════════════════════════════════════════════
+const DEPTH_HEX = [
+  '#1a2233',  // 0 surface   (very dark)
+  '#1a3a6a',  // 1 subsystem (navy)
+  '#1a6a4a',  // 2 cellular  (dark green)
+  '#6a6a1a',  // 3 molecular (amber)
+  '#8a3010',  // 4 atomic    (dark orange)
+  '#8a1050',  // 5 quantum   (deep pink)
+];
+const DEPTH_BRIGHT = [
+  '#3a5588', '#2a65bb', '#22a86a', '#c8b822', '#e8501c', '#e81870',
+];
+
+function hexToThree(h) {
+  return new THREE.Color(h);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Scene setup
+// ═══════════════════════════════════════════════════════════════════
+const canvas   = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x080810, 1);
+renderer.shadowMap.enabled = false;
+renderer.localClippingEnabled = true;
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, 1, 0.0001, 100);
+camera.position.set(0, 0.4, 4.0);
 
 const controls = new OrbitControls(camera, canvas);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.minDistance = 0.5;
-controls.maxDistance = 15;
+controls.enableDamping    = true;
+controls.dampingFactor    = 0.06;
+controls.minDistance      = 0.3;
+controls.maxDistance      = 18;
+controls.autoRotate       = true;
+controls.autoRotateSpeed  = 0.4;
 
-// Ambient + point light.
-scene.add(new THREE.AmbientLight(0x303050, 2));
-const pLight = new THREE.PointLight(0x6080ff, 3, 10);
-pLight.position.set(2, 2, 2);
-scene.add(pLight);
+// Lights
+const ambLight = new THREE.AmbientLight(0x202840, 3.0);
+scene.add(ambLight);
+const ptLight = new THREE.PointLight(0x5070d0, 6, 15);
+ptLight.position.set(2.5, 2, 2);
+scene.add(ptLight);
+const ptLight2 = new THREE.PointLight(0xd05030, 2, 10);
+ptLight2.position.set(-2, -1, -2);
+scene.add(ptLight2);
 
-// Grid plane.
-const grid = new THREE.GridHelper(8, 20, 0x1a1a3a, 0x12122a);
-grid.position.y = -1.2;
+// Grid
+const grid = new THREE.GridHelper(10, 24, 0x12122a, 0x0e0e1e);
+grid.position.y = -1.6;
 scene.add(grid);
 
-// ── State ────────────────────────────────────────────────────────────────────
-let meshes      = [];
-let layerData   = [];
+// ═══════════════════════════════════════════════════════════════════
+// Clipping plane (cross-section)
+// ═══════════════════════════════════════════════════════════════════
+const clipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 1.2);
+let   clipActive = false;
+
+// ═══════════════════════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════════════════════
+let meshes       = [];     // { mesh, layer, radius }
+let lastReport   = null;
+let currentEntity = 'game_console';
 let currentDepth = 5;
 let globalOpacity = 0.22;
 let explodeFactor = 0;
-let polling     = true;
-let pollTimer   = null;
-let lastReport  = null;
+let selectedIdx  = -1;
+let polling      = true;
+let pollTimer    = null;
+let userInteracting = false;
+const dragStart  = { x: 0, y: 0 };
 
-// Depth → color (outer=dark, inner=bright).
-const DEPTH_COLORS = [
-  0x334455,  // 0 — surface (dark teal)
-  0x2255aa,  // 1 — subsystem (blue)
-  0x22aa66,  // 2 — cellular/circuit (green)
-  0xaaaa22,  // 3 — molecular (yellow)
-  0xdd6622,  // 4 — atomic (orange)
-  0xff3388,  // 5 — quantum (pink)
-];
+canvas.addEventListener('mousedown', e => {
+  dragStart.x = e.clientX; dragStart.y = e.clientY;
+  userInteracting = true;
+  controls.autoRotate = false;
+});
+canvas.addEventListener('mouseup', () => {
+  userInteracting = false;
+  // Re-enable auto-rotate only when not hovering a sphere
+});
 
-function depthColor(d) {
-  return DEPTH_COLORS[d] || 0x888888;
-}
-
-// ── Build 3D scene from report ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Build scene from a LayeredPhysiologyReport
+// ═══════════════════════════════════════════════════════════════════
 function buildScene(report) {
-  // Clear old meshes.
-  meshes.forEach(m => scene.remove(m));
+  meshes.forEach(({ mesh }) => scene.remove(mesh));
   meshes = [];
-  layerData = [];
-
-  if (!report || !report.layers || report.layers.length === 0) return;
+  if (!report || !report.layers || !report.layers.length) return;
 
   const layers = report.layers.filter(l => l.depth <= currentDepth);
+  const maxD   = report.max_depth || 5;
 
-  // Base sphere radius = entity size, shrinks with depth.
-  const maxLayers = report.max_depth || 5;
+  // Sort by depth descending so outer spheres render first (correct transparency).
+  layers.sort((a, b) => b.depth - a.depth);
 
   layers.forEach((layer, i) => {
     const d = layer.depth;
-    // Radius: outer layers are larger.
-    const radiusFrac = 1.0 - (d / (maxLayers + 1)) * 0.75;
-    const r = 0.9 * radiusFrac;
+    // Outer = large, inner = small.
+    const rFrac = 1.0 - (d / (maxD + 1)) * 0.78;
+    const r     = 1.05 * rFrac;
 
-    const geo  = new THREE.SphereGeometry(r, 48, 32);
-    const mat  = new THREE.MeshPhongMaterial({
-      color:       depthColor(d),
+    const geo = new THREE.SphereGeometry(r, 64, 40);
+    const col = hexToThree(DEPTH_HEX[d] || '#222244');
+    const mat = new THREE.MeshPhongMaterial({
+      color:       col,
+      emissive:    hexToThree(DEPTH_HEX[d]).multiplyScalar(0.25),
       transparent: true,
-      opacity:     globalOpacity * (0.7 + d * 0.08),
-      wireframe:   false,
+      opacity:     globalOpacity,
       side:        THREE.DoubleSide,
       depthWrite:  false,
+      clippingPlanes: clipActive ? [clipPlane] : [],
     });
+
     const mesh = new THREE.Mesh(geo, mat);
 
-    // Explode: shift each layer outward along its z direction.
-    const z_raw = layer.position.z_est_m || 0;
-    const zNorm = Math.log10(1 + z_raw * 1e6) / 6; // log-scale normalisation
-    mesh.position.set(0, 0, explodeFactor * (d / maxLayers) * -1.5);
-
-    // Confidence → emissive glow.
-    const conf = layer.position.z_confidence || 0;
-    mat.emissive = new THREE.Color(depthColor(d)).multiplyScalar(0.1 + conf * 0.25);
+    // Explode: push each layer radially along Z.
+    const explodeZ = explodeFactor * (d / Math.max(maxD, 1)) * -2.2;
+    mesh.position.set(0, 0, explodeZ);
 
     scene.add(mesh);
-    meshes.push(mesh);
-    layerData.push({ mesh, layer, radius: r });
+    meshes.push({ mesh, layer, radius: r, depth: d });
+  });
 
-    // Wireframe overlay for depth hint.
-    if (d === currentDepth) {
+  // Wireframe on innermost currently-visible layer.
+  if (layers.length > 0) {
+    const inner = layers.reduce((a, b) => a.depth > b.depth ? a : b);
+    const wr    = meshes.find(({ layer }) => layer === inner);
+    if (wr) {
       const wMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff, wireframe: true, transparent: true, opacity: 0.08
+        color: 0xffffff, wireframe: true, transparent: true, opacity: 0.05,
+        clippingPlanes: clipActive ? [clipPlane] : [],
       });
-      const wMesh = new THREE.Mesh(new THREE.SphereGeometry(r * 1.002, 24, 16), wMat);
-      wMesh.position.copy(mesh.position);
+      const wMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(wr.radius * 1.003, 24, 16), wMat
+      );
+      wMesh.position.copy(wr.mesh.position);
       scene.add(wMesh);
-      meshes.push(wMesh);
+      meshes.push({ mesh: wMesh, layer: inner, radius: wr.radius, depth: inner.depth, _wire: true });
     }
-  });
+  }
 
-  // Axis label lines.
-  addAxisLabels(report);
+  // Depth overlay label.
+  const visDepths = [...new Set(layers.map(l => l.depth))].sort();
+  document.getElementById('depth-label-overlay').textContent =
+    `DEPTHS ${visDepths.join(' · ')}`;
 }
 
-function addAxisLabels(report) {
-  // X-axis guide.
-  const mats = new THREE.LineBasicMaterial({ color: 0x334466, transparent: true, opacity: 0.4 });
-  const pts  = [new THREE.Vector3(-1.2, 0, 0), new THREE.Vector3(1.2, 0, 0)];
-  const geo  = new THREE.BufferGeometry().setFromPoints(pts);
-  const line = new THREE.Line(geo, mats);
-  scene.add(line);
-  meshes.push(line);
-}
-
-// ── Poll API ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// API calls
+// ═══════════════════════════════════════════════════════════════════
 async function fetchLayers() {
-  const host   = document.getElementById('host-input').value.trim();
-  const entity = document.getElementById('entity-input').value.trim() || 'game_console';
-  const url    = `http://${host}/overlay/layers/${encodeURIComponent(entity)}?depth=${currentDepth}`;
-  const url2   = `http://${host}/overlay/poetry`;
+  const host    = document.getElementById('host-in').value.trim();
+  const profile = PROFILES[currentEntity] || PROFILES.game_console;
+  setStatus('fetch', '#9a7a10');
 
-  setStatus('fetching', '#aa8820');
-  try {
-    const [layersRes, poetryRes] = await Promise.all([
-      fetch(url).then(r => r.json()),
-      fetch(url2).then(r => r.json()).catch(() => null),
-    ]);
-
-    lastReport = layersRes;
-    buildScene(layersRes);
-    updateSidebar(layersRes, poetryRes, entity);
-    setStatus('live', '#20a040');
-    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
-  } catch (e) {
-    setStatus('error', '#a04020');
-    console.error(e);
-  }
-}
-
-function setStatus(text, color) {
-  document.getElementById('status-text').textContent = text;
-  document.getElementById('status-dot').style.background = color;
-}
-
-function updateSidebar(report, poetry, entityId) {
-  const infoEl = document.getElementById('entity-info');
-  if (!report || !report.layers) {
-    infoEl.innerHTML = `<div style="color:#a05050">No data for "${entityId}"</div>`;
-    return;
-  }
-
-  const layers = report.layers;
-  let html = `<div class="entity-block">`;
-  html += `<div class="entity-id">${report.entity_id}</div>`;
-  html += `<div style="font-size:10px;color:#5060a0;margin:3px 0">
-    ${layers.length} layers  ·  max_depth=${report.max_depth}  ·  components=${report.total_components}
-  </div>`;
-
-  layers.forEach((l, i) => {
-    const col = `#${depthColor(l.depth).toString(16).padStart(6,'0')}`;
-    const zStr = formatZ(l.position.z_est_m);
-    const conf = (l.position.z_confidence * 100).toFixed(0);
-    const eem  = l.position.z_from_eem ? '⚡' : '';
-    html += `<div class="layer-row" id="lr-${i}" onclick="selectLayer(${i})">
-      <div class="depth-badge" style="background:${col}20;border-color:${col};color:${col}">
-        ${l.depth}
-      </div>
-      <div class="layer-name" title="${l.label}">${l.label}</div>
-      <div class="layer-z">${eem}${zStr} (${conf}%)</div>
-    </div>`;
-  });
-  html += `</div>`;
-  infoEl.innerHTML = html;
-
-  // Scale profile.
-  const sp = report.scale_profile || {};
-  const scaleParts = (sp.z_metres || []).map((v, i) =>
-    `<span style="color:${v ? '#80c080' : '#404060'}">D${i}:${v ? formatZ(v) : '?'}</span>`
-  ).join('  ');
-  document.getElementById('scale-info').innerHTML =
-    `calibrated: <b style="color:${sp.calibrated ? '#80d080' : '#707090'}">${sp.calibrated}</b>
-     eem_eqs: ${sp.eem_equation_count || 0}  weight: ${(sp.eem_total_weight || 0).toFixed(2)}<br>
-     ${scaleParts}`;
-
-  // Poetry.
-  const poetryEl = document.getElementById('poetry-box');
-  if (poetry && poetry.entities && poetry.entities.length > 0) {
-    const p = poetry.entities[0];
-    poetryEl.textContent = p.synthesis || '—';
-  } else if (poetry && poetry.synthesis) {
-    poetryEl.textContent = poetry.synthesis;
+  // If custom entity, read labels from text box.
+  let labels;
+  if (currentEntity === 'custom') {
+    const raw = document.getElementById('custom-labels').value;
+    labels = raw.split(',').map(s => s.trim()).filter(Boolean)
+              .map((name, i, arr) => ({ name, score: 1 - i / arr.length }));
   } else {
-    // Build minimal poetry from layer data.
-    const topLabels = layers.slice(0,3).map(l => l.label.replace(/^txt:|img:/,'')).join(', ');
-    poetryEl.textContent = `${entityId}: ${layers.length} structural layers identified. ` +
-      `Surface to depth-${report.max_depth}. ` +
-      (topLabels ? `Characterized by: ${topLabels}.` : '');
+    labels = profile.labels;
   }
-}
+  if (!labels.length) {
+    setStatus('no labels', '#602020'); return;
+  }
 
-window.selectLayer = function(idx) {
-  document.querySelectorAll('.layer-row').forEach(el => el.classList.remove('selected'));
-  const el = document.getElementById(`lr-${idx}`);
-  if (el) el.classList.add('selected');
-  if (layerData[idx]) {
-    const { mesh } = layerData[idx];
-    // Highlight selected sphere.
-    layerData.forEach(({ mesh: m }, i) => {
-      m.material.opacity = i === idx ? 0.6 : globalOpacity * (0.7 + layerData[i].layer.depth * 0.08);
+  const active_labels  = labels.map(l => l.name);
+  const label_scores   = Object.fromEntries(labels.map(l => [l.name, l.score]));
+
+  const body = {
+    entities: [{
+      entity_id:     currentEntity,
+      phenotype:     currentEntity,
+      active_labels,
+      label_scores,
+      x_frac:        0.5,
+      y_frac:        0.5,
+      size_est:      profile.known_scale_m || 0.1,
+    }]
+  };
+
+  try {
+    const res = await fetch(`http://${host}/overlay/layers`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
     });
-  }
-};
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const report = data.layers?.[0];
+    if (!report) throw new Error('empty response');
 
-function formatZ(v) {
-  if (!v && v !== 0) return '?';
-  if (v < 1e-9)  return `${(v*1e12).toFixed(1)} pm`;
-  if (v < 1e-6)  return `${(v*1e9).toFixed(1)} nm`;
-  if (v < 1e-3)  return `${(v*1e6).toFixed(1)} µm`;
-  if (v < 1)     return `${(v*1e3).toFixed(1)} mm`;
-  return `${v.toFixed(3)} m`;
+    lastReport = report;
+    buildScene(report);
+    updateSidebar(report);
+    setStatus('live', '#208040');
+    document.getElementById('statustime').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    setStatus(`error: ${e.message}`, '#902020');
+  }
 }
 
-// ── Controls callbacks ────────────────────────────────────────────────────────
-window.onDepthChange = function(val) {
-  currentDepth = parseInt(val);
-  document.getElementById('depth-label').textContent = currentDepth;
-  if (lastReport) buildScene(lastReport);
-};
+// Ensure calibrations are registered when switching entity.
+async function ensureCalibrated(entityId) {
+  const host    = document.getElementById('host-in').value.trim();
+  const profile = PROFILES[entityId];
+  if (!profile || !profile.known_scale_m) return;
+  try {
+    await fetch(`http://${host}/overlay/layers/calibrate`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ entity_type: entityId, known_scale_m: profile.known_scale_m }),
+    });
+  } catch (_) {}
+}
 
-window.onOpacityChange = function(val) {
-  globalOpacity = parseFloat(val);
-  layerData.forEach(({ mesh, layer }) => {
-    mesh.material.opacity = globalOpacity * (0.7 + layer.depth * 0.08);
+// ═══════════════════════════════════════════════════════════════════
+// Sidebar update
+// ═══════════════════════════════════════════════════════════════════
+function fmtZ(v) {
+  if (!v && v !== 0) return '?';
+  if (v === 0)      return '0';
+  if (v < 1e-12)    return `${(v*1e15).toPrecision(3)} fm`;
+  if (v < 1e-9)     return `${(v*1e12).toPrecision(3)} pm`;
+  if (v < 1e-6)     return `${(v*1e9).toPrecision(3)} nm`;
+  if (v < 1e-3)     return `${(v*1e6).toPrecision(3)} µm`;
+  if (v < 1)        return `${(v*1e3).toPrecision(3)} mm`;
+  return `${v.toPrecision(3)} m`;
+}
+
+function updateSidebar(report) {
+  // Layer list.
+  const ll = document.getElementById('layer-list');
+  const layers = report.layers.slice().sort((a, b) => a.depth - b.depth);
+  if (!layers.length) { ll.innerHTML = '<span style="color:#3040a0">no layers at this depth</span>'; return; }
+
+  ll.innerHTML = layers.map((l, i) => {
+    const col    = DEPTH_BRIGHT[l.depth] || '#888';
+    const eem    = l.position.z_from_eem ? ' ⚡' : '';
+    const conf   = (l.position.z_confidence * 100).toFixed(0);
+    const zStr   = fmtZ(l.position.z_est_m);
+    const label  = l.label.replace(/^txt:\w+_|^img:/g, '').replace(/_zone.*$/,'');
+    const subs   = l.components.slice(0, 4)
+                    .map(c => c.replace(/^txt:\w+_|^img:/g,'').replace(/_zone.*$/,''))
+                    .join(', ');
+    return `<div class="layer-item" id="li-${i}" onclick="selLayer(${i})">
+      <div class="layer-dot" style="background:${col}40;border-color:${col}"></div>
+      <div class="layer-label" title="${l.label}">D${l.depth}: ${label}</div>
+      <div class="layer-meta">${zStr}${eem}<br>${conf}% conf</div>
+    </div>
+    ${subs ? `<div style="font-size:9px;color:#303060;padding:0 0 3px 26px">${subs}</div>` : ''}`;
+  }).join('');
+
+  // Build scientific synthesis from layer data.
+  const topLabels = layers.slice(0, 3).map(l =>
+    l.label.replace(/^txt:\w+_|^img:/g,'').replace(/_zone.*$/,'')
+  );
+  const sp = report.scale_profile;
+  const scaleSrc = sp.eem_equation_count > 0
+    ? `EEM-calibrated (${sp.eem_equation_count} eqs, weight ${sp.eem_total_weight.toFixed(2)})`
+    : sp.calibrated ? 'explicit calibration' : 'linear heuristic';
+
+  document.getElementById('poetry').textContent =
+    `${report.entity_id}: ${layers.length} structural depth layers resolved from learned labels.\n` +
+    `Surface → depth ${report.max_depth}. Characterized by ${topLabels.join(', ')}.\n` +
+    `Z-axis: ${scaleSrc}. Total ${report.total_components} sub-components.`;
+
+  // Scale profile bars.
+  const z_metres = sp.z_metres || [];
+  const zMax = z_metres.reduce((m, v) => v != null ? Math.max(m, v) : m, 1e-15) || 1;
+  document.getElementById('scale-profile').innerHTML =
+    z_metres.map((v, d) => {
+      if (v == null) return `<div class="scale-row"><span style="color:#202038;width:28px">D${d}</span><div class="scale-bar"><div class="scale-fill" style="width:0%;background:#1a1a30"></div></div><span class="scale-z">—</span></div>`;
+      const pct = (v / zMax) * 100;
+      const col = DEPTH_BRIGHT[d] || '#888';
+      return `<div class="scale-row">
+        <span style="color:${col};width:28px;font-size:9px">D${d}</span>
+        <div class="scale-bar"><div class="scale-fill" style="width:${pct.toFixed(1)}%;background:${col}88"></div></div>
+        <span class="scale-z">${fmtZ(v)}</span>
+      </div>`;
+    }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Controls
+// ═══════════════════════════════════════════════════════════════════
+window.selLayer = function(idx) {
+  selectedIdx = idx;
+  document.querySelectorAll('.layer-item').forEach((el, i) =>
+    el.classList.toggle('sel', i === idx));
+  meshes.filter(m => !m._wire).forEach(({ mesh, layer }, i) => {
+    const layerIdx = lastReport?.layers.findIndex(l => l === layer) ?? -1;
+    mesh.material.opacity = (layerIdx === idx) ? 0.7 : globalOpacity;
   });
 };
 
-window.onExplodeChange = function(val) {
-  explodeFactor = parseFloat(val);
+window.onDepth = function(v) {
+  currentDepth = v;
+  document.getElementById('depth-val').textContent = v;
   if (lastReport) buildScene(lastReport);
+};
+
+window.onOpacity = function(v) {
+  globalOpacity = v;
+  document.getElementById('opacity-val').textContent = v.toFixed(2);
+  meshes.filter(m => !m._wire).forEach(({ mesh }) => {
+    mesh.material.opacity = v;
+  });
+};
+
+window.onExplode = function(v) {
+  explodeFactor = v;
+  document.getElementById('explode-val').textContent = v.toFixed(1);
+  if (lastReport) buildScene(lastReport);
+};
+
+window.onClip = function(v) {
+  clipPlane.constant = v;
+  clipActive = v < 1.15;
+  renderer.localClippingEnabled = clipActive;
+  document.getElementById('clip-val').textContent = clipActive ? fmtZ(v * 1.0) : 'off';
+  if (lastReport) buildScene(lastReport);
+};
+
+window.selectEntity = async function(v) {
+  currentEntity = v;
+  document.getElementById('custom-row').style.display = v === 'custom' ? 'flex' : 'none';
+  await ensureCalibrated(v);
+  await fetchLayers();
+};
+
+window.togglePoll = function() {
+  polling = !polling;
+  document.getElementById('btn-poll').textContent = polling ? 'PAUSE' : 'RESUME';
+  document.getElementById('btn-poll').classList.toggle('active', !polling);
+  if (polling) schedulePoll();
+};
+
+window.calibDialog = async function() {
+  const host = document.getElementById('host-in').value.trim();
+  const type = prompt('Entity type to calibrate (e.g. "game_console", "cell"):');
+  if (!type) return;
+  const scale = parseFloat(prompt('Known physical size in metres\n(e.g. 0.30 for 30cm, 7e-9 for 7nm):'));
+  if (!scale || isNaN(scale)) return;
+  const r = await fetch(`http://${host}/overlay/layers/calibrate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entity_type: type, known_scale_m: scale }),
+  }).then(r => r.json()).catch(e => ({ error: String(e) }));
+  alert(r.ok ? `Calibrated: ${type} = ${scale} m` : `Error: ${r.error}`);
+  await fetchLayers();
 };
 
 window.refresh = fetchLayers;
 
-window.togglePoll = function() {
-  polling = !polling;
-  document.querySelector('button[onclick="togglePoll()"]').textContent =
-    polling ? '⏸ Pause' : '▶ Resume';
-  if (polling) schedulePoll();
-};
+function setStatus(text, color) {
+  document.getElementById('statustext').textContent = text;
+  document.getElementById('statusdot').style.background = color;
+}
 
-window.calibrateDialog = function() {
-  const host = document.getElementById('host-input').value.trim();
-  const type = prompt('Entity type (e.g. "game_console", "cell"):');
-  if (!type) return;
-  const scale = parseFloat(prompt('Known physical size in metres (e.g. 0.30 for 30cm):'));
-  if (!scale || isNaN(scale)) return;
-  fetch(`http://${host}/overlay/layers/calibrate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ entity_type: type, known_scale_m: scale })
-  }).then(r => r.json()).then(d => {
-    alert(`Calibrated: ${type} = ${scale} m\n${JSON.stringify(d)}`);
-    fetchLayers();
-  });
-};
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  if (polling) pollTimer = setTimeout(async () => {
+    await fetchLayers();
+    schedulePoll();
+  }, 2500);
+}
 
-window.exportScene = function() {
-  if (!lastReport) return;
-  const blob = new Blob([JSON.stringify(lastReport, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `layers_${lastReport.entity_id}_${Date.now()}.json`;
-  a.click();
-};
-
-// ── Raycasting for hover tooltip ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Raycasting — hover tooltip
+// ═══════════════════════════════════════════════════════════════════
 const raycaster = new THREE.Raycaster();
 const mouse2    = new THREE.Vector2();
-const tooltip   = document.getElementById('tooltip');
+const tip       = document.getElementById('tip');
 
-canvas.addEventListener('mousemove', (e) => {
+canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   mouse2.x = ((e.clientX - rect.left) / rect.width)  * 2 - 1;
   mouse2.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
   raycaster.setFromCamera(mouse2, camera);
-  const sphereMeshes = layerData.map(d => d.mesh);
-  const hits = raycaster.intersectObjects(sphereMeshes);
+  const hits = raycaster.intersectObjects(
+    meshes.filter(m => !m._wire).map(m => m.mesh)
+  );
 
-  if (hits.length > 0) {
-    const hitMesh = hits[hits.length - 1].object; // innermost hit
-    const idx = layerData.findIndex(d => d.mesh === hitMesh);
-    if (idx >= 0) {
-      const l = layerData[idx].layer;
-      tooltip.style.display = 'block';
-      tooltip.style.left    = (e.clientX - rect.left + 12) + 'px';
-      tooltip.style.top     = (e.clientY - rect.top  + 12) + 'px';
-      tooltip.innerHTML = `<b>Depth ${l.depth}</b><br>${l.label}<br>` +
-        `z = ${formatZ(l.position.z_est_m)}<br>` +
-        `prob = ${(l.probability * 100).toFixed(0)}%<br>` +
-        (l.components.length ? `sub: ${l.components.slice(0,3).join(', ')}` : '');
+  if (hits.length) {
+    // Take the hit closest to camera that corresponds to a real layer.
+    const hit  = hits[0];
+    const entry = meshes.find(m => m.mesh === hit.object && !m._wire);
+    if (entry) {
+      const l  = entry.layer;
+      const zs = fmtZ(l.position.z_est_m);
+      const conf = (l.position.z_confidence * 100).toFixed(0);
+      const label = l.label.replace(/^txt:\w+_|^img:/g,'').replace(/_zone.*$/,'');
+      const subs  = l.components.slice(0,5)
+        .map(c => c.replace(/^txt:\w+_|^img:/g,'').replace(/_zone.*$/,''))
+        .join(', ');
+      tip.style.display = 'block';
+      tip.style.left    = (e.clientX - rect.left + 14) + 'px';
+      tip.style.top     = (e.clientY - rect.top  + 14) + 'px';
+      tip.innerHTML     = `<b>Depth ${l.depth}</b> — ${label}<br>` +
+                          `z = ${zs}  (${conf}% confidence)` +
+                          (l.position.z_from_eem ? ' <span style="color:#f0b010">⚡EEM</span>' : '') +
+                          (subs ? `<br><span style="color:#404060">${subs}</span>` : '');
       canvas.style.cursor = 'crosshair';
+      controls.autoRotate = false;
+      return;
     }
-  } else {
-    tooltip.style.display = 'none';
-    canvas.style.cursor = 'default';
   }
+  tip.style.display   = 'none';
+  canvas.style.cursor = 'default';
+  if (!userInteracting) controls.autoRotate = true;
 });
 
-// ── Render loop ───────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Render loop
+// ═══════════════════════════════════════════════════════════════════
 function resize() {
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== w || canvas.height !== h) {
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
@@ -488,36 +763,46 @@ function animate() {
   requestAnimationFrame(animate);
   resize();
   controls.update();
-  // Slow rotation when not interacting.
-  if (!controls.isDragging) {
-    scene.rotation.y += 0.0008;
-  }
   renderer.render(scene, camera);
 }
 
-function schedulePoll() {
-  if (pollTimer) clearTimeout(pollTimer);
-  if (polling) pollTimer = setTimeout(async () => {
-    await fetchLayers();
-    schedulePoll();
-  }, 2000);
-}
-
-animate();
-fetchLayers();
-schedulePoll();
-
-// Keyboard depth navigation (← → keys).
-document.addEventListener('keydown', (e) => {
-  const slider = document.getElementById('depth-slider');
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
-    slider.value = Math.max(0, currentDepth - 1);
-    window.onDepthChange(slider.value);
-  } else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
-    slider.value = Math.min(5, currentDepth + 1);
-    window.onDepthChange(slider.value);
+// ═══════════════════════════════════════════════════════════════════
+// Keyboard
+// ═══════════════════════════════════════════════════════════════════
+document.addEventListener('keydown', e => {
+  const sl = document.getElementById('depth-sl');
+  if (e.key === 'ArrowLeft' || e.key === '[') {
+    sl.value = Math.max(0, currentDepth - 1);
+    window.onDepth(+sl.value);
+  } else if (e.key === 'ArrowRight' || e.key === ']') {
+    sl.value = Math.min(5, currentDepth + 1);
+    window.onDepth(+sl.value);
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════════
+async function init() {
+  animate();
+  // Register all calibrations upfront.
+  const host = document.getElementById('host-in').value.trim();
+  await Promise.all(
+    Object.entries(PROFILES)
+      .filter(([, p]) => p.known_scale_m)
+      .map(([type, p]) =>
+        fetch(`http://${host}/overlay/layers/calibrate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entity_type: type, known_scale_m: p.known_scale_m }),
+        }).catch(() => {})
+      )
+  );
+  await fetchLayers();
+  schedulePoll();
+}
+
+init();
 </script>
 </body>
 </html>
