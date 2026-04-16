@@ -24,6 +24,9 @@
 /logs/
 *.log
 *.tmp
+# Git Bash creates a file named 'null' in CWD when a Windows EXE is run as a
+# background job (&) without explicit stdout redirection.
+/null
 
 # ── Data directories (large datasets, fetched at runtime) ─────────────────────
 /data/
@@ -58,6 +61,7 @@ node_modules/
 
 # ── Claude Code local settings (machine-specific) ─────────────────────────────
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # ── Wallet and key material ───────────────────────────────────────────────────
 *.wallet
