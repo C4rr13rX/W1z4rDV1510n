@@ -3656,6 +3656,9 @@ async fn cluster_status(
         }
         Some(node) => {
             let s = node.status().await;
+            // Keep distributed peer list in sync with the current cluster roster.
+            let peer_addrs = peer_http_addrs(&s.nodes, &s.local_id);
+            state.distributed.set_peers(peer_addrs).await;
             let coord_str = s.coordinator.as_ref().map(|id| id.to_string()).unwrap_or_default();
             let local_is_coord = s.coordinator.as_ref().map(|c| c == &s.local_id).unwrap_or(false);
             (StatusCode::OK, Json(serde_json::json!({

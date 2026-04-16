@@ -26,6 +26,7 @@ use tokio::{
     io::{BufReader, BufWriter},
     net::{TcpListener, TcpStream},
     sync::{Mutex, RwLock},
+    task::AbortHandle,
 };
 use uuid::Uuid;
 
@@ -155,6 +156,9 @@ pub struct ClusterNode {
     otp_registry:    Arc<Mutex<OtpRegistry>>,
     config:          Arc<ClusterConfig>,
     rep_factor:      u8,
+    /// Abort handles for the three background tasks (accept, heartbeat, watchdog).
+    /// Stored so `leave()` can cleanly stop them and free the cluster port.
+    bg_tasks:        Arc<Mutex<Vec<AbortHandle>>>,
 }
 
 impl ClusterNode {
@@ -196,6 +200,7 @@ impl ClusterNode {
             otp_registry: Arc::new(Mutex::new(OtpRegistry::default())),
             config:      Arc::new(config),
             rep_factor:  2,
+            bg_tasks:    Arc::new(Mutex::new(Vec::new())),
         };
 
         let otp = node.generate_otp().await?;
@@ -282,6 +287,7 @@ impl ClusterNode {
                     otp_registry: Arc::new(Mutex::new(OtpRegistry::default())),
                     config:      Arc::new(config),
                     rep_factor:  replication_factor,
+                    bg_tasks:    Arc::new(Mutex::new(Vec::new())),
                 };
                 save_state(cluster_id, &local_id, node.config.bind_addr, false);
                 node.clone().run_background().await;
@@ -387,7 +393,7 @@ impl ClusterNode {
 
         // Accept loop.
         let accept_node = self.clone();
-        tokio::spawn(async move {
+        let h1 = tokio::spawn(async move {
             let listener = match TcpListener::bind(bind_addr).await {
                 Ok(l) => l,
                 Err(e) => { tracing::error!("cluster bind {bind_addr}: {e}"); return; }
@@ -401,11 +407,17 @@ impl ClusterNode {
 
         // Heartbeat loop.
         let hb_node = self.clone();
-        tokio::spawn(async move { hb_node.heartbeat_loop().await });
+        let h2 = tokio::spawn(async move { hb_node.heartbeat_loop().await });
 
         // Watchdog / election loop.
         let wd_node = self.clone();
-        tokio::spawn(async move { wd_node.watchdog_loop().await });
+        let h3 = tokio::spawn(async move { wd_node.watchdog_loop().await });
+
+        // Register abort handles so leave() can cleanly stop all three tasks.
+        let mut tasks = self.bg_tasks.lock().await;
+        tasks.push(h1.abort_handle());
+        tasks.push(h2.abort_handle());
+        tasks.push(h3.abort_handle());
     }
 
     // ── Incoming connection handler ───────────────────────────────────────────
@@ -614,6 +626,15 @@ impl ClusterNode {
             // nothing to notify, just clean up locally.
             tracing::info!("sole coordinator leaving — cluster dissolved");
         }
+
+        // Abort background tasks so the cluster port (51611) is freed immediately.
+        // Without this, a subsequent cluster_init cannot bind the port.
+        {
+            let tasks = self.bg_tasks.lock().await;
+            for h in tasks.iter() { h.abort(); }
+        }
+        // Small yield so the aborted tasks release the TcpListener.
+        tokio::task::yield_now().await;
 
         // Clear local state so the node goes back to standalone.
         *self.membership.write().await = {
