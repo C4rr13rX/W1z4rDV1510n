@@ -17,6 +17,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tower_http;
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -988,9 +989,20 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/overlay/predictions",          get(overlay_predictions))
         // Layered physiology: hierarchical inside-out structural decomposition.
         .route("/overlay/layers",               post(overlay_layers))
+        .route("/overlay/layers/calibrate",     post(overlay_layers_calibrate))
         .route("/overlay/layers/:entity_id",    get(overlay_layers_entity))
         .with_state(state)
-        .layer(DefaultBodyLimit::max(max_body));
+        .layer(DefaultBodyLimit::max(max_body))
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers(tower_http::cors::Any),
+        );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -6053,6 +6065,7 @@ async fn overlay_layers(
     Json(req): Json<LayersRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let layers_arc = state.layered_physiology.clone();
+    let eem        = state.equation_matrix.clone();
     let ts = w1z4rdv1510n::schema::Timestamp {
         unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -6061,6 +6074,13 @@ async fn overlay_layers(
     };
 
     let reports: Vec<LayeredPhysiologyReport> = tokio::task::spawn_blocking(move || {
+        // Collect all labels across all entities for a single EEM pass.
+        let all_labels: Vec<String> = req.entities.iter()
+            .flat_map(|e| e.active_labels.iter().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter().collect();
+        let eem_candidates = eem.apply_to_context(&all_labels, 3).candidates;
+
         let requests: Vec<EntityDecomposeRequest> = req.entities.into_iter().map(|e| {
             EntityDecomposeRequest {
                 entity_id:       e.entity_id,
@@ -6072,26 +6092,35 @@ async fn overlay_layers(
             }
         }).collect();
         let rt = layers_arc.lock().expect("layered_physiology");
-        rt.decompose_all(&requests, ts)
+        rt.decompose_all(&requests, &eem_candidates, ts)
     }).await.unwrap_or_default();
 
     (StatusCode::OK, Json(serde_json::json!({ "timestamp": ts, "layers": reports })))
 }
 
-// GET /overlay/layers/:entity_id
+// GET /overlay/layers/:entity_id[?depth=N]
 // Returns layered decomposition for a specific entity using neuro pool labels.
+// Optional ?depth=N filters to layers at depth 0..=N.
+#[derive(Deserialize)]
+struct LayersQuery {
+    depth: Option<usize>,
+}
+
 async fn overlay_layers_entity(
     State(state): State<ApiState>,
     Path(entity_id): Path<String>,
+    Query(q): Query<LayersQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let layers_arc = state.layered_physiology.clone();
     let neuro      = state.neuro.clone();
+    let eem        = state.equation_matrix.clone();
     let ts = w1z4rdv1510n::schema::Timestamp {
         unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64,
     };
+    let max_depth = q.depth;
 
     let report: Option<LayeredPhysiologyReport> = tokio::task::spawn_blocking(move || {
         let snapshot = neuro.snapshot();
@@ -6101,9 +6130,17 @@ async fn overlay_layers_entity(
             .enumerate()
             .map(|(i, l)| (l.clone(), 1.0 - (i as f64 / (active_labels.len().max(1)) as f64)))
             .collect();
+        let eem_candidates = eem.apply_to_context(&active_labels, 3).candidates;
 
         let rt = layers_arc.lock().expect("layered_physiology");
-        Some(rt.decompose(&entity_id, None, &active_labels, &label_scores, (0.5, 0.5), 0.15, ts))
+        let mut r = rt.decompose(&entity_id, None, &active_labels, &label_scores,
+            (0.5, 0.5), 0.15, &eem_candidates, ts);
+        // Apply depth filter if requested.
+        if let Some(max_d) = max_depth {
+            r.layers.retain(|l| l.depth <= max_d);
+            r.total_components = r.layers.iter().map(|l| l.components.len() + 1).sum();
+        }
+        Some(r)
     }).await.unwrap_or(None);
 
     match report {
@@ -6111,6 +6148,40 @@ async fn overlay_layers_entity(
         None    => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "layers runtime unavailable" }))),
     }
+}
+
+// POST /overlay/layers/calibrate
+// Register a known physical scale for an entity type.
+#[derive(Deserialize)]
+struct LayersCalibrateReq {
+    /// Entity type label (e.g. "cell", "leaf", "game_console").
+    entity_type: String,
+    /// Known physical extent of this entity type in SI metres.
+    known_scale_m: f64,
+}
+
+async fn overlay_layers_calibrate(
+    State(state): State<ApiState>,
+    Json(req): Json<LayersCalibrateReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.known_scale_m <= 0.0 || !req.known_scale_m.is_finite() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "known_scale_m must be positive finite" })));
+    }
+    let entity_type  = req.entity_type.clone();
+    let known_scale  = req.known_scale_m;
+    let layers_arc   = state.layered_physiology.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let mut rt = layers_arc.lock().expect("layered_physiology");
+        rt.set_scale_override(&entity_type, known_scale);
+    }).await.ok();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "ok": true,
+        "entity_type":  req.entity_type,
+        "known_scale_m": req.known_scale_m
+    })))
 }
 
 #[cfg(test)]
