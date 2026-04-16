@@ -1068,6 +1068,11 @@ impl NeuronPool {
         if symbols.is_empty() || lr_scale <= 0.0 {
             return;
         }
+        // Advance the step counter so that last_active_step tracks real training
+        // progress and export_delta_since() can produce incremental deltas.
+        // Without this, pool.step stays at 0 for nodes that only do text training
+        // (no sensor observations), causing every sync to export the full pool.
+        self.step += 1;
         let mut ids = Vec::with_capacity(symbols.len());
         let current_step = self.step;
         for label in symbols {
@@ -1553,9 +1558,24 @@ impl NeuronPool {
                 }
             }
         }
+        // Only export co-occurrences where at least one involved label has a
+        // neuron that was active since since_step.  Exporting the full matrix
+        // on every sync was the dominant cause of oversized delta payloads.
+        let active_labels: std::collections::HashSet<&str> = self.neurons.iter()
+            .filter_map(|slot| {
+                if let NeuronSlot::Hot(n) = slot {
+                    if n.last_active_step >= since_step {
+                        n.label.as_deref()
+                    } else { None }
+                } else { None }
+            })
+            .collect();
         let cooccur = self
             .cooccur
             .iter()
+            .filter(|((a, b), _)| {
+                active_labels.contains(a.as_str()) || active_labels.contains(b.as_str())
+            })
             .map(|((a, b), w)| (a.clone(), b.clone(), *w))
             .collect();
         (synapses, cooccur)
@@ -1572,10 +1592,21 @@ impl NeuronPool {
         cooccur: &[(String, String, f32)],
     ) -> usize {
         let max_w = self.config.max_weight;
+        let current_step = self.step;
         let mut applied = 0usize;
         for sd in synapses {
             let from_id = self.get_or_create(&sd.from_label);
             let to_id   = self.get_or_create(&sd.to_label);
+            // Stamp newly-created (or cold-warmed) neurons with the current step
+            // so they are not immediately eligible for eviction.  Without this,
+            // neurons received via delta always start at last_active_step=0.
+            for id in [from_id, to_id] {
+                if let Some(NeuronSlot::Hot(n)) = self.neurons.get_mut(id as usize) {
+                    if n.last_active_step == 0 {
+                        n.last_active_step = current_step;
+                    }
+                }
+            }
             // Forward synapse
             if let Some(n) = self.get_hot_mut(from_id as usize) {
                 let list = if sd.inhibitory { &mut n.inhibitory } else { &mut n.excitatory };

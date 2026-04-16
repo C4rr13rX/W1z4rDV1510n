@@ -18,9 +18,12 @@
 //! API call; the coordinator role (for routing purposes) is determined by
 //! checking whether this node is the cluster leader.
 
-use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
-    Arc,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -31,12 +34,19 @@ use w1z4rdv1510n::neuro::SynapseDelta;
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Push a weight delta to all peers after every N local training calls.
-/// Lower = better convergence, higher network traffic.
-/// Higher = less traffic, longer before peers learn this node's training.
-const SYNC_EVERY: u64 = 50;
+/// 20 = sync every ~40 API calls at 50/50 split; balances latency vs traffic.
+const SYNC_EVERY: u64 = 20;
 
 /// HTTP client timeout for peer calls (training forwards + delta pushes).
 const PEER_TIMEOUT_SECS: u64 = 60;
+
+/// Minimum synapse weight to include in a delta payload.  Near-zero weights
+/// add payload bytes without meaningfully changing the recipient's pool.
+const MIN_SYNC_WEIGHT: f32 = 0.005;
+
+/// After this many consecutive forwarding/push failures a peer is evicted from
+/// the active peer list.  It will be re-added on the next cluster/status refresh.
+const MAX_PEER_FAILURES: u32 = 5;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -76,6 +86,10 @@ pub struct DistributedCoordinator {
 
     /// Shared HTTP client — reused across all peer calls.
     client: reqwest::Client,
+
+    /// Consecutive failure count per peer.  Peers that exceed MAX_PEER_FAILURES
+    /// are evicted from the active list until the next cluster/status refresh.
+    peer_failures: Arc<tokio::sync::Mutex<HashMap<PeerAddr, u32>>>,
 }
 
 impl DistributedCoordinator {
@@ -90,16 +104,19 @@ impl DistributedCoordinator {
             calls_since_sync: Arc::new(AtomicU64::new(0)),
             last_sync_step:   Arc::new(AtomicU64::new(0)),
             client,
+            peer_failures:    Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
     // ── Peer list management ──────────────────────────────────────────────────
 
     /// Replace the peer list with fresh addresses from the cluster roster.
-    /// Called after each cluster membership change.
+    /// Also clears failure counters so previously-evicted peers get a clean slate.
     pub async fn set_peers(&self, addrs: Vec<PeerAddr>) {
         let mut guard = self.peers.write().await;
         *guard = addrs;
+        // Reset failure counts — fresh roster = fresh start.
+        self.peer_failures.lock().await.clear();
     }
 
     pub async fn peer_count(&self) -> usize {
@@ -129,13 +146,14 @@ impl DistributedCoordinator {
 
     /// Forward a raw JSON training body to a specific peer's `/media/train`.
     /// Returns `true` if the peer accepted and trained successfully.
+    /// Tracks consecutive failures; evicts the peer after MAX_PEER_FAILURES.
     pub async fn forward_train(
         &self,
         peer: &str,
         body: serde_json::Value,
     ) -> bool {
         let url = format!("{peer}/media/train");
-        match self.client.post(&url).header("x-w1z-local", "1").json(&body).send().await {
+        let ok = match self.client.post(&url).header("x-w1z-local", "1").json(&body).send().await {
             Ok(resp) if resp.status().is_success() => true,
             Ok(resp) => {
                 warn!("forward_train to {peer} returned {}", resp.status());
@@ -145,6 +163,29 @@ impl DistributedCoordinator {
                 warn!("forward_train to {peer} failed: {e}");
                 false
             }
+        };
+        self.record_peer_result(peer, ok).await;
+        ok
+    }
+
+    /// Record a success or failure for a peer.  On consecutive failures ≥
+    /// MAX_PEER_FAILURES, evict the peer from the active list.
+    async fn record_peer_result(&self, peer: &str, ok: bool) {
+        if ok {
+            self.peer_failures.lock().await.remove(peer);
+            return;
+        }
+        let failures = {
+            let mut map = self.peer_failures.lock().await;
+            let count = map.entry(peer.to_string()).or_insert(0);
+            *count += 1;
+            *count
+        };
+        if failures >= MAX_PEER_FAILURES {
+            warn!("evicting peer {peer} after {failures} consecutive failures");
+            let mut peers = self.peers.write().await;
+            peers.retain(|p| p != peer);
+            self.peer_failures.lock().await.remove(peer);
         }
     }
 
@@ -187,7 +228,11 @@ impl DistributedCoordinator {
         }
 
         let since_step = self.last_sync_step.load(Ordering::Relaxed);
-        let (synapses, cooccur) = neuro.export_delta_since(since_step);
+        let (raw_synapses, cooccur) = neuro.export_delta_since(since_step);
+        // Strip near-zero weights — they add bytes without changing recipient behaviour.
+        let synapses: Vec<_> = raw_synapses.into_iter()
+            .filter(|s| s.weight >= MIN_SYNC_WEIGHT)
+            .collect();
         let to_step = neuro.pool_step();
 
         if synapses.is_empty() && cooccur.is_empty() {
