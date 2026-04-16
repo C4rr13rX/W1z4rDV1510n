@@ -56,6 +56,12 @@ pub mod motif_label_bridge;
 pub mod qa_runtime;
 pub mod fabric_trainer;
 pub mod equation_matrix;
+pub mod entity_health;
+pub mod delta_engine;
+pub mod scientific_poetry;
+pub mod chaos_model;
+pub mod prediction_experiment;
+pub mod layered_physiology;
 
 pub use equation_matrix::{
     ContextApplicationResult, Discipline, EquationLink, EquationMatrixConfig,
@@ -155,4 +161,27 @@ pub use qa_runtime::{
 };
 pub use fabric_trainer::{
     FabricTrainer, FabricTrainerConfig, FabricTrainerReport, FabricTrainerStats, TrainingSignal,
+};
+pub use entity_health::{
+    blend_color, grayscale, health_label, make_rings,
+    EntityHealthConfig, EntityHealthOverlay, EntityHealthRuntime,
+    HealthRing, HealthVector,
+};
+pub use delta_engine::{
+    DeltaEngine, DeltaEngineConfig, DeltaReport, HealthPrediction, HealthVelocity,
+};
+pub use scientific_poetry::{
+    EntityPoetry, PoetryConfig, PoetryRuntime,
+};
+pub use chaos_model::{
+    build_reverse_index, ChaosHistoryReport, ChaosWorldConfig, ChaosWorldModel,
+    HistoryStep, TransitionIndex,
+};
+pub use prediction_experiment::{
+    EvaluatedPrediction, ExperimentReport, PendingPrediction,
+    PredictionExperimentConfig, PredictionExperimentRuntime,
+};
+pub use layered_physiology::{
+    EntityDecomposeRequest, LayerPosition, LayeredPhysiologyConfig,
+    LayeredPhysiologyReport, LayeredPhysiologyRuntime, StructuralLayer,
 };

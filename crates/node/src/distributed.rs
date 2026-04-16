@@ -330,6 +330,90 @@ impl DistributedCoordinator {
         });
     }
 
+    // ── Least-loaded peer routing ─────────────────────────────────────────────
+
+    /// Find the peer with the lowest recent call load, for routing heavy
+    /// compute operations (e.g. chaos reconstruction, layered decomposition).
+    ///
+    /// Probes each peer's `GET /cluster/sync/status` endpoint and reads
+    /// `calls_since_last_sync` as a load proxy.  The peer with the smallest
+    /// value is returned.  Returns `None` if no peers are reachable, meaning
+    /// the caller should execute locally.
+    ///
+    /// The call is bounded by a short timeout (3 s) and runs probes concurrently.
+    pub async fn find_least_loaded_peer(&self) -> Option<PeerAddr> {
+        let peers = self.peers.read().await.clone();
+        if peers.is_empty() { return None; }
+
+        let client = self.client.clone();
+        let mut handles = Vec::with_capacity(peers.len());
+        for peer in &peers {
+            let url = format!("{peer}/cluster/sync/status");
+            let c   = client.clone();
+            let p   = peer.clone();
+            handles.push(tokio::spawn(async move {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    c.get(&url).send(),
+                ).await {
+                    Ok(Ok(resp)) if resp.status().is_success() => {
+                        let load: u64 = resp.json::<serde_json::Value>().await
+                            .ok()
+                            .and_then(|v| v.get("calls_since_last_sync").and_then(|x| x.as_u64()))
+                            .unwrap_or(u64::MAX);
+                        Some((p, load))
+                    }
+                    _ => None,
+                }
+            }));
+        }
+
+        let mut best_peer: Option<PeerAddr> = None;
+        let mut best_load = u64::MAX;
+        for handle in handles {
+            if let Ok(Some((peer, load))) = handle.await {
+                if load < best_load {
+                    best_load = load;
+                    best_peer = Some(peer);
+                }
+            }
+        }
+        best_peer
+    }
+
+    /// Route a heavy compute request JSON body to the least-loaded peer, or
+    /// return `None` if this node should handle it locally.
+    ///
+    /// The `endpoint` should be a path like `"/overlay/chaos"`.  The body is
+    /// forwarded as JSON.  Returns the deserialized response JSON on success.
+    pub async fn route_or_local(
+        &self,
+        endpoint: &str,
+        body: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let peer = self.find_least_loaded_peer().await?;
+        let url  = format!("{peer}{endpoint}");
+        match self.client
+            .post(&url)
+            .header("x-w1z-local", "1")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                resp.json::<serde_json::Value>().await.ok()
+            }
+            Ok(resp) => {
+                warn!("route_or_local to {url} failed: {}", resp.status());
+                None
+            }
+            Err(e) => {
+                warn!("route_or_local to {url} error: {e}");
+                None
+            }
+        }
+    }
+
     // ── Status ────────────────────────────────────────────────────────────────
 
     pub async fn status(&self) -> serde_json::Value {

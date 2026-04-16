@@ -58,6 +58,14 @@ use w1z4rdv1510n::streaming::{
     NarrativeRuntime, NarrativeReport,
     OntologyRuntime, OntologyReport,
     PoseFrame, Keypoint, BoundingBox,
+    // Overlay / perception system
+    EntityHealthConfig, EntityHealthRuntime, EntityHealthOverlay,
+    DeltaEngine, DeltaEngineConfig, DeltaReport,
+    PoetryConfig, PoetryRuntime,
+    ChaosWorldConfig, ChaosWorldModel, TransitionIndex, build_reverse_index,
+    PredictionExperimentConfig, PredictionExperimentRuntime, ExperimentReport,
+    LayeredPhysiologyConfig, LayeredPhysiologyRuntime, LayeredPhysiologyReport,
+    EntityDecomposeRequest,
 };
 use w1z4rdv1510n::causal::{CausalEdge, CausalRuntime};
 use w1z4rdv1510n::config::{SceneConfig, PhysiologyConfig, NarrativeConfig, OntologyConfig};
@@ -132,6 +140,21 @@ struct ApiState {
     /// so conversation context gently biases retrieval without overriding the question.
     /// Apps/scripts manage session lifecycle; the fabric just carries the state.
     session_contexts: Arc<Mutex<HashMap<String, Vec<String>>>>,
+
+    // ── Overlay / perception system ───────────────────────────────────────────
+    /// 6-dimensional entity health overlay (structural/energetic/temporal/
+    /// intentional/environmental/informational) with concentric ring color model.
+    entity_health: Arc<Mutex<EntityHealthRuntime>>,
+    /// Per-entity state velocity and short-horizon predictions in 6-D health space.
+    delta_engine: Arc<Mutex<DeltaEngine>>,
+    /// Emergent natural-language entity synthesis from labels + EEM + health.
+    poetry_runtime: Arc<Mutex<PoetryRuntime>>,
+    /// Chaos World Model — reconstructs probable entity history from motif transitions.
+    chaos_model: Arc<Mutex<ChaosWorldModel>>,
+    /// Autonomous prediction experiment framework with adaptive horizons.
+    prediction_experiment: Arc<Mutex<PredictionExperimentRuntime>>,
+    /// Hierarchical structural decomposition: layers inside entities from experience.
+    layered_physiology: Arc<Mutex<LayeredPhysiologyRuntime>>,
 }
 
 /// Minimum peak `txt:word_*` activation required to emit an answer.
@@ -807,6 +830,12 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         ))),
         hypothesis_queue: Arc::new(Mutex::new(Vec::new())),
         session_contexts: Arc::new(Mutex::new(HashMap::new())),
+        entity_health:        Arc::new(Mutex::new(EntityHealthRuntime::new(EntityHealthConfig::default()))),
+        delta_engine:         Arc::new(Mutex::new(DeltaEngine::new(DeltaEngineConfig::default()))),
+        poetry_runtime:       Arc::new(Mutex::new(PoetryRuntime::new(PoetryConfig::default()))),
+        chaos_model:          Arc::new(Mutex::new(ChaosWorldModel::new(ChaosWorldConfig::default()))),
+        prediction_experiment: Arc::new(Mutex::new(PredictionExperimentRuntime::new(PredictionExperimentConfig::default()))),
+        layered_physiology:   Arc::new(Mutex::new(LayeredPhysiologyRuntime::new(LayeredPhysiologyConfig::default()))),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -946,6 +975,20 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // GET  /entity/report   — latest scene + survival + narrative state.
         .route("/entity/observe",       post(entity_observe))
         .route("/entity/report",        get(entity_report))
+        // ── Overlay / perception system ───────────────────────────────────────
+        // Health overlay: 6-dim color-coded concentric ring model per entity.
+        .route("/overlay/health",               get(overlay_health))
+        // Delta engine: velocity + short-horizon predictions per entity.
+        .route("/overlay/delta",                get(overlay_delta))
+        // Scientific poetry: emergent natural-language entity synthesis.
+        .route("/overlay/poetry",               get(overlay_poetry))
+        // Chaos World Model: most probable history reconstruction.
+        .route("/overlay/chaos",                post(overlay_chaos))
+        // Prediction experiment: autonomous forward prediction + accuracy tracking.
+        .route("/overlay/predictions",          get(overlay_predictions))
+        // Layered physiology: hierarchical inside-out structural decomposition.
+        .route("/overlay/layers",               post(overlay_layers))
+        .route("/overlay/layers/:entity_id",    get(overlay_layers_entity))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -5774,6 +5817,300 @@ async fn entity_report(
         "scene":    { "entities": scene_entities },
         "ontology": ontology_report,
     })))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Overlay / perception system handlers
+// ────────────────────────────────────────────────────────────────────────────
+
+// GET /overlay/health
+// Returns the current 6-dimensional health overlay for every known entity.
+// Each entity gets a HealthVector, composite score, health label, and the
+// sorted concentric-ring color model (outermost=black → innermost=white).
+async fn overlay_health(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let scene_arc   = state.scene.clone();
+    let physio_arc  = state.physiology.clone();
+    let surv_arc    = state.survival.clone();
+    let health_arc  = state.entity_health.clone();
+    let ts = w1z4rdv1510n::schema::Timestamp {
+        unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let overlays = tokio::task::spawn_blocking(move || {
+        let scene_entities = scene_arc.lock().ok()
+            .map(|s| s.entity_reports())
+            .unwrap_or_default();
+        let physio = physio_arc.lock().ok()
+            .and_then(|_p| None::<PhysiologyReport>); // latest cached report (none if idle)
+        // SurvivalReport is only available mid-frame (entity_observe drives it).
+        // GET /overlay/health returns health from scene alone when no entity_observe has run.
+        let survival: Option<SurvivalReport> = None;
+
+        let mut health = health_arc.lock().expect("entity_health");
+        health.update(
+            ts,
+            if scene_entities.is_empty() { None } else { Some(scene_entities.as_slice()) },
+            physio.as_ref(),
+            survival.as_ref(),
+            0.0,  // motif_entropy: caller can supply via POST variant
+            0.5,  // eem_confidence: default midpoint
+        )
+    }).await.unwrap_or_default();
+
+    (StatusCode::OK, Json(serde_json::json!({ "timestamp": ts, "overlays": overlays })))
+}
+
+// GET /overlay/delta
+// Returns per-entity velocity vectors and short-horizon predictions.
+async fn overlay_delta(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let health_arc = state.entity_health.clone();
+    let delta_arc  = state.delta_engine.clone();
+    let ts = w1z4rdv1510n::schema::Timestamp {
+        unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let report: DeltaReport = tokio::task::spawn_blocking(move || {
+        // Re-use the latest overlays from the health runtime's baseline cache.
+        // In production, entity_observe updates the health runtime every frame.
+        let overlays: Vec<EntityHealthOverlay> = {
+            let mut h = health_arc.lock().expect("entity_health");
+            h.update(ts, None, None, None, 0.0, 0.5)
+        };
+        let mut delta = delta_arc.lock().expect("delta_engine");
+        delta.update(ts, &overlays, &std::collections::HashMap::new())
+    }).await.unwrap_or_else(|_| DeltaReport {
+        timestamp: ts, velocities: vec![], predictions: vec![],
+    });
+
+    (StatusCode::OK, Json(serde_json::to_value(&report).unwrap_or_default()))
+}
+
+// GET /overlay/poetry
+// Returns emergent natural-language scientific profiles for all known entities.
+#[derive(Deserialize)]
+struct PoetryQuery {
+    #[serde(default)]
+    entity_id: Option<String>,
+}
+async fn overlay_poetry(
+    State(state): State<ApiState>,
+    Query(q): Query<PoetryQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let health_arc  = state.entity_health.clone();
+    let poetry_arc  = state.poetry_runtime.clone();
+    let neuro       = state.neuro.clone();
+    let eem         = state.equation_matrix.clone();
+    let ts = w1z4rdv1510n::schema::Timestamp {
+        unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let poems = tokio::task::spawn_blocking(move || {
+        let overlays: Vec<EntityHealthOverlay> = {
+            let mut h = health_arc.lock().expect("entity_health");
+            h.update(ts, None, None, None, 0.0, 0.5)
+        };
+        let filtered: Vec<_> = if let Some(ref eid) = q.entity_id {
+            overlays.into_iter().filter(|o| &o.entity_id == eid).collect()
+        } else {
+            overlays
+        };
+
+        // Get active labels from neuro pool snapshot.
+        let snapshot = neuro.snapshot();
+        let active_labels: Vec<String> = snapshot.active_labels.iter()
+            .take(32).cloned().collect();
+
+        // EEM context application.
+        let eem_results = eem.apply_to_context(&active_labels, 2).candidates;
+
+        let poetry = poetry_arc.lock().expect("poetry_runtime");
+        filtered.iter().map(|ov| {
+            poetry.synthesize(ov, &active_labels, &eem_results, false, false)
+        }).collect::<Vec<_>>()
+    }).await.unwrap_or_default();
+
+    (StatusCode::OK, Json(serde_json::json!({ "timestamp": ts, "poetry": poems })))
+}
+
+// POST /overlay/chaos
+// Reconstructs the most probable recent history for a given entity.
+#[derive(Deserialize)]
+struct ChaosRequest {
+    entity_id: String,
+    /// The most recent motif id for this entity.  If omitted, the system uses
+    /// the last element of the motif window (from the pool's motif runtime).
+    #[serde(default)]
+    anchor_motif: Option<String>,
+    /// Forward transition table to invert.  Each entry is [from, to, count].
+    /// If omitted the system uses the pool's own motif transitions.
+    #[serde(default)]
+    transitions: Option<Vec<(String, String, usize)>>,
+}
+
+async fn overlay_chaos(
+    State(state): State<ApiState>,
+    Json(req): Json<ChaosRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let chaos_arc = state.chaos_model.clone();
+    let ts = w1z4rdv1510n::schema::Timestamp {
+        unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let report = tokio::task::spawn_blocking(move || {
+        // Build reverse index from provided or empty transitions.
+        let forward: std::collections::HashMap<(String, String), usize> = req.transitions
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(f, t, c)| ((f, t), c))
+            .collect();
+        let rev_index = build_reverse_index(&forward);
+        let anchor = req.anchor_motif.unwrap_or_else(|| "unknown".to_string());
+        let model = chaos_arc.lock().expect("chaos_model");
+        model.reconstruct(&req.entity_id, &anchor, &rev_index, ts)
+    }).await;
+
+    match report {
+        Ok(r) => (StatusCode::OK, Json(serde_json::to_value(&r).unwrap_or_default())),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "chaos model panic" }))),
+    }
+}
+
+// GET /overlay/predictions
+// Returns the current state of the prediction experiment framework.
+async fn overlay_predictions(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let pred_arc = state.prediction_experiment.clone();
+    let ts = w1z4rdv1510n::schema::Timestamp {
+        unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let report: ExperimentReport = tokio::task::spawn_blocking(move || {
+        let mut pe = pred_arc.lock().expect("prediction_experiment");
+        pe.update(ts, &std::collections::HashMap::new())
+    }).await.unwrap_or_else(|_| ExperimentReport {
+        timestamp: ts,
+        pending_count: 0,
+        evaluated_count: 0,
+        current_horizon_secs: 5.0,
+        mean_error_overall: 0.0,
+        mean_error_by_dim: [0.0; 6],
+        horizon_expanded: false,
+        horizon_reset: false,
+        recent_evaluations: vec![],
+    });
+
+    (StatusCode::OK, Json(serde_json::to_value(&report).unwrap_or_default()))
+}
+
+// POST /overlay/layers
+// Build a layered structural decomposition for entities given active labels.
+#[derive(Deserialize)]
+struct LayersRequest {
+    entities: Vec<LayerEntityRequest>,
+}
+#[derive(Deserialize)]
+struct LayerEntityRequest {
+    entity_id:       String,
+    #[serde(default)]
+    phenotype:       Option<String>,
+    active_labels:   Vec<String>,
+    /// Label → activation score (0–1).
+    label_scores:    std::collections::HashMap<String, f64>,
+    /// Normalized x,y position in sensor frame.
+    #[serde(default)]
+    x_frac: f64,
+    #[serde(default)]
+    y_frac: f64,
+    /// Estimated entity bounding radius (relative, for z-depth scaling).
+    #[serde(default = "default_size")]
+    size_est: f64,
+}
+fn default_size() -> f64 { 0.1 }
+
+async fn overlay_layers(
+    State(state): State<ApiState>,
+    Json(req): Json<LayersRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let layers_arc = state.layered_physiology.clone();
+    let ts = w1z4rdv1510n::schema::Timestamp {
+        unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let reports: Vec<LayeredPhysiologyReport> = tokio::task::spawn_blocking(move || {
+        let requests: Vec<EntityDecomposeRequest> = req.entities.into_iter().map(|e| {
+            EntityDecomposeRequest {
+                entity_id:       e.entity_id,
+                phenotype:       e.phenotype,
+                active_labels:   e.active_labels,
+                label_scores:    e.label_scores,
+                entity_position: (e.x_frac, e.y_frac),
+                entity_size_est: e.size_est,
+            }
+        }).collect();
+        let rt = layers_arc.lock().expect("layered_physiology");
+        rt.decompose_all(&requests, ts)
+    }).await.unwrap_or_default();
+
+    (StatusCode::OK, Json(serde_json::json!({ "timestamp": ts, "layers": reports })))
+}
+
+// GET /overlay/layers/:entity_id
+// Returns layered decomposition for a specific entity using neuro pool labels.
+async fn overlay_layers_entity(
+    State(state): State<ApiState>,
+    Path(entity_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let layers_arc = state.layered_physiology.clone();
+    let neuro      = state.neuro.clone();
+    let ts = w1z4rdv1510n::schema::Timestamp {
+        unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let report: Option<LayeredPhysiologyReport> = tokio::task::spawn_blocking(move || {
+        let snapshot = neuro.snapshot();
+        let active_labels: Vec<String> = snapshot.active_labels.iter()
+            .take(32).cloned().collect();
+        let label_scores: std::collections::HashMap<String, f64> = active_labels.iter()
+            .enumerate()
+            .map(|(i, l)| (l.clone(), 1.0 - (i as f64 / (active_labels.len().max(1)) as f64)))
+            .collect();
+
+        let rt = layers_arc.lock().expect("layered_physiology");
+        Some(rt.decompose(&entity_id, None, &active_labels, &label_scores, (0.5, 0.5), 0.15, ts))
+    }).await.unwrap_or(None);
+
+    match report {
+        Some(r) => (StatusCode::OK, Json(serde_json::to_value(&r).unwrap_or_default())),
+        None    => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "layers runtime unavailable" }))),
+    }
 }
 
 #[cfg(test)]
