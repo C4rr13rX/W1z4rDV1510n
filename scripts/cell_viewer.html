@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>W1z4rD V1510n — Plant Cell Deconstructor</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; color:#bcd; }
+canvas { display:block; width:100vw; height:100vh; }
+
+/* ── HUD overlays ────────────────────────────────────────── */
+#hud {
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  pointer-events:none;
+}
+
+/* top left — breadcrumb */
+#breadcrumb {
+  position:absolute; top:18px; left:20px;
+  font-size:11px; letter-spacing:1.5px; color:#6080a0;
+}
+#breadcrumb span { color:#a0c0e0; }
+#breadcrumb .sep { margin:0 6px; color:#304060; }
+
+/* top right — entity info panel */
+#panel {
+  position:absolute; top:18px; right:20px;
+  width:260px; background:rgba(5,5,18,0.88);
+  border:1px solid #1a2a40; border-radius:4px;
+  padding:12px 14px; font-size:10px;
+}
+#panel h3 { font-size:11px; color:#6090c0; letter-spacing:1px;
+            text-transform:uppercase; margin-bottom:8px; }
+#panel .row { display:flex; justify-content:space-between;
+              color:#4060a0; margin:3px 0; }
+#panel .row span:last-child { color:#80a0c8; }
+#panel #synthesis { margin-top:8px; color:#506080; font-size:9px;
+                    line-height:1.7; border-top:1px solid #0d1830;
+                    padding-top:8px; }
+
+/* bottom — layer list */
+#layer-bar {
+  position:absolute; bottom:0; left:0; right:0;
+  background:rgba(3,3,14,0.9); border-top:1px solid #0d1830;
+  padding:10px 20px; display:flex; gap:8px; align-items:center;
+  pointer-events:all;
+}
+.layer-chip {
+  padding:5px 12px; border-radius:20px; font-size:10px;
+  cursor:pointer; border:1px solid; letter-spacing:0.5px;
+  transition:all 0.2s; white-space:nowrap;
+}
+.layer-chip:hover { filter:brightness(1.5); transform:translateY(-1px); }
+.layer-chip.active { filter:brightness(1.8); }
+#layer-bar-label { font-size:9px; color:#2a3a50; letter-spacing:1px;
+                   text-transform:uppercase; flex-shrink:0; }
+
+/* centre — click hint */
+#click-hint {
+  position:absolute; bottom:70px; left:50%;
+  transform:translateX(-50%);
+  font-size:11px; color:rgba(80,120,160,0.6);
+  letter-spacing:2px; text-transform:uppercase;
+  pointer-events:none; transition:opacity 0.5s;
+}
+
+/* scale bar */
+#scalebar {
+  position:absolute; bottom:60px; left:20px;
+  font-size:10px; color:#304050;
+}
+#scalebar-line {
+  width:80px; height:2px; background:#304050; margin:3px 0;
+}
+
+/* loading overlay */
+#loading {
+  position:absolute; inset:0; background:#000;
+  display:flex; align-items:center; justify-content:center;
+  font-size:13px; color:#304060; letter-spacing:3px;
+  text-transform:uppercase; transition:opacity 1s;
+}
+
+/* tooltip */
+#tip {
+  position:absolute; background:rgba(3,8,20,0.95);
+  border:1px solid #1a2840; border-radius:3px;
+  padding:7px 10px; font-size:10px; pointer-events:none;
+  max-width:200px; line-height:1.7; display:none;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  <div id="breadcrumb">PLANT CELL</div>
+
+  <div id="panel">
+    <h3 id="panel-title">Plant Cell</h3>
+    <div class="row"><span>Scale</span><span id="p-scale">~20 µm</span></div>
+    <div class="row"><span>Layers</span><span id="p-layers">—</span></div>
+    <div class="row"><span>Depth</span><span id="p-depth">0 / 5</span></div>
+    <div class="row"><span>Calibrated</span><span id="p-cal">—</span></div>
+    <div id="synthesis">Loading from neural fabric…</div>
+  </div>
+
+  <div id="click-hint">CLICK OBJECT TO DRILL IN &nbsp;|&nbsp; ESC / RIGHT-CLICK TO GO BACK</div>
+
+  <div id="scalebar">
+    <div id="scalebar-label">20 µm</div>
+    <div id="scalebar-line"></div>
+  </div>
+
+  <div id="layer-bar">
+    <span id="layer-bar-label">Layers</span>
+    <!-- filled by JS -->
+  </div>
+
+  <div id="tip"></div>
+  <div id="loading">Initialising neural fabric connection…</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ═══════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════
+const API = "http://192.168.1.84:8090";
+
+// Level definitions — each level = one "zoom" step
+const LEVELS = [
+  {
+    id: "plant_cell",    name: "Plant Cell",
+    scale_m: 20e-6,      label: "~20 µm",
+    depth: 0,
+    hint: "Click the cell to zoom inside",
+    labels: ["outer","wall","surface","membrane","cell","nucleus","vacuole",
+             "chloroplast","cytoplasm","layer","organelle","rectangular","green"],
+  },
+  {
+    id: "chloroplast",   name: "Chloroplast",
+    scale_m: 5e-6,       label: "~5 µm",
+    depth: 2,
+    hint: "Click the chloroplast to see inside",
+    labels: ["organelle","membrane","stroma","thylakoid","disc","granum",
+             "stack","inner","outer","envelope","lumen","chlorophyll","green"],
+  },
+  {
+    id: "thylakoid",     name: "Thylakoid Membrane",
+    scale_m: 10e-9,      label: "~10 nm",
+    depth: 3,
+    hint: "Click a protein complex to zoom to molecule",
+    labels: ["membrane","layer","protein","complex","surface","electron",
+             "light","photosystem","chlorophyll","disc","flat","bilayer"],
+  },
+  {
+    id: "chlorophyll",   name: "Chlorophyll a",
+    scale_m: 1e-9,       label: "~1 nm",
+    depth: 4,
+    hint: "Click a ring atom to zoom to carbon atom",
+    labels: ["molecule","ring","atom","bond","carbon","nitrogen","magnesium",
+             "oxygen","hydrogen","chain","tail","porphyrin","flat"],
+  },
+  {
+    id: "carbon_atom",   name: "Carbon Atom",
+    scale_m: 0.154e-9,   label: "~154 pm",
+    depth: 5,
+    hint: "Deepest level — atomic structure",
+    labels: ["atom","nucleus","electron","orbital","quantum","bond",
+             "proton","neutron","spin","wavefunction","shell","cloud"],
+  },
+];
+
+// Depth colours matching the sidebar
+const DEPTH_COLORS = [
+  new THREE.Color(0x223344),
+  new THREE.Color(0x1a4a28),
+  new THREE.Color(0x2a6a2a),
+  new THREE.Color(0x8a7010),
+  new THREE.Color(0x8a2800),
+  new THREE.Color(0x7a0840),
+];
+
+// ═══════════════════════════════════════════════════════
+// Three.js setup
+// ═══════════════════════════════════════════════════════
+const canvas   = document.getElementById("c");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x000005, 1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene  = new THREE.Scene();
+scene.fog    = new THREE.FogExp2(0x000008, 0.06);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 200);
+camera.position.set(0, 0.5, 5.5);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping   = true;
+controls.dampingFactor   = 0.05;
+controls.minDistance     = 0.5;
+controls.maxDistance     = 20;
+controls.autoRotate      = true;
+controls.autoRotateSpeed = 0.4;
+
+// Lights
+scene.add(new THREE.AmbientLight(0x101830, 4));
+const sun = new THREE.DirectionalLight(0x8090d0, 3);
+sun.position.set(3, 5, 4);
+sun.castShadow = true;
+scene.add(sun);
+const fill = new THREE.PointLight(0x204a10, 4, 20);
+fill.position.set(-3, -1, 2);
+scene.add(fill);
+const rim  = new THREE.PointLight(0x601050, 2, 15);
+rim.position.set(0, -3, -4);
+scene.add(rim);
+
+// ═══════════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════════
+let currentLevelIdx  = 0;
+let levelGroup       = null;    // current THREE.Group
+let apiData          = {};      // levelId → API response
+let clickableObjects = [];      // objects raycaster checks
+let transitioning    = false;
+let hintTimeout      = null;
+
+// Camera animation state
+const camTarget = { pos: new THREE.Vector3(), look: new THREE.Vector3() };
+let camAnimating = false;
+let camAlpha     = 0;
+
+// ═══════════════════════════════════════════════════════
+// API helpers
+// ═══════════════════════════════════════════════════════
+async function apiPost(path, body) {
+  const r = await fetch(`${API}${path}`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify(body),
+  });
+  return r.ok ? r.json() : null;
+}
+
+async function fetchLayersFor(level) {
+  const n = level.labels.length;
+  const scores = Object.fromEntries(level.labels.map((l, i) => [l, 1 - i / n]));
+  const resp = await apiPost("/overlay/layers", {
+    entities: [{
+      entity_id:     level.id,
+      phenotype:     level.id,
+      active_labels: level.labels,
+      label_scores:  scores,
+      x_frac: 0.5, y_frac: 0.5,
+      size_est: level.scale_m,
+    }]
+  });
+  return resp?.layers?.[0] ?? null;
+}
+
+async function registerCalibrations() {
+  await Promise.all(LEVELS.map(l =>
+    apiPost("/overlay/layers/calibrate", {
+      entity_type:   l.id,
+      known_scale_m: l.scale_m,
+    }).catch(() => {})
+  ));
+}
+
+// ═══════════════════════════════════════════════════════
+// Level builders — procedurally generate the 3D scene
+// each one uses the API layer data to parameterise geometry
+// ═══════════════════════════════════════════════════════
+
+function fmtZ(v) {
+  if (!v) return "0";
+  if (v < 1e-12) return `${(v*1e15).toPrecision(3)} fm`;
+  if (v < 1e-9)  return `${(v*1e12).toPrecision(3)} pm`;
+  if (v < 1e-6)  return `${(v*1e9).toPrecision(3)} nm`;
+  if (v < 1e-3)  return `${(v*1e6).toPrecision(3)} µm`;
+  if (v < 1)     return `${(v*1e3).toPrecision(3)} mm`;
+  return `${v.toPrecision(3)} m`;
+}
+
+// ── Level 0: Plant Cell ────────────────────────────────
+function buildPlantCell(report, group) {
+  const layers  = report?.layers ?? [];
+  const nChlopl = Math.max(8, layers.filter(l => l.depth === 2).length * 6 + 6);
+
+  // Cell body — semi-transparent box
+  const cellGeo = new THREE.BoxGeometry(2.4, 1.5, 1.0);
+  const cellMat = new THREE.MeshPhongMaterial({
+    color: 0x0a1a0a, transparent: true, opacity: 0.25,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+  group.add(new THREE.Mesh(cellGeo, cellMat));
+
+  // Cell wall — edge glow
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0x204820, linewidth: 1 });
+  const edges   = new THREE.EdgesGeometry(new THREE.BoxGeometry(2.41, 1.51, 1.01));
+  group.add(new THREE.LineSegments(edges, edgeMat));
+
+  // Vacuole — large central sphere, blue-tinted
+  const vacuoleMat = new THREE.MeshPhongMaterial({
+    color: 0x0a1530, transparent: true, opacity: 0.18, depthWrite: false,
+  });
+  const vac = new THREE.Mesh(new THREE.SphereGeometry(0.55, 32, 20), vacuoleMat);
+  vac.position.set(0.1, -0.05, 0);
+  group.add(vac);
+
+  // Nucleus — yellow sphere, slightly off-center
+  const nucGeo = new THREE.SphereGeometry(0.18, 24, 16);
+  const nucMat = new THREE.MeshPhongMaterial({ color: 0xc0a020, emissive: 0x302000 });
+  const nuc = new THREE.Mesh(nucGeo, nucMat);
+  nuc.position.set(-0.5, 0.3, 0.15);
+  nuc.castShadow = true;
+  nuc.userData.label  = "Nucleus";
+  nuc.userData.detail = "~8 µm · stores DNA · controls transcription";
+  group.add(nuc);
+  clickableObjects.push(nuc);
+
+  // Chloroplasts — green oval bodies
+  for (let i = 0; i < nChlopl; i++) {
+    const angle = (i / nChlopl) * Math.PI * 2;
+    const r     = 0.55 + Math.random() * 0.35;
+    const x     = Math.cos(angle) * r * 0.9;
+    const y     = (Math.random() - 0.5) * 0.9;
+    const z     = Math.sin(angle) * r * 0.4;
+    // Ellipsoid via scaled sphere
+    const geo   = new THREE.SphereGeometry(0.10, 16, 10);
+    const brightness = 0.15 + (i / nChlopl) * 0.25;
+    const mat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(0, 0.35 + brightness, 0),
+      emissive: new THREE.Color(0, 0.04, 0),
+    });
+    const cp = new THREE.Mesh(geo, mat);
+    cp.scale.set(1.8, 0.9, 0.9);
+    cp.position.set(x, y, z);
+    cp.castShadow = true;
+    cp.userData.label  = "Chloroplast";
+    cp.userData.detail = `~5 µm · ${i % 2 === 0 ? "light reactions" : "Calvin cycle"}`;
+    cp.userData.drillTarget = 1; // clicking takes us to level 1
+    group.add(cp);
+    clickableObjects.push(cp);
+  }
+
+  // Label tags (floating text via canvas sprite)
+  addSprite(group, "CELL WALL", new THREE.Vector3(0, 0.85, 0),  "#2a5a2a", 10);
+  addSprite(group, "NUCLEUS",   new THREE.Vector3(-0.5,0.55,0), "#c0a020", 10);
+  addSprite(group, "VACUOLE",   new THREE.Vector3(0.1, 0.0, 0), "#2040a0", 10);
+  addSprite(group, "CHLOROPLASTS", new THREE.Vector3(0.7,-0.2,0), "#208020", 10);
+}
+
+// ── Level 1: Chloroplast ──────────────────────────────
+function buildChloroplast(report, group) {
+  const layers = report?.layers ?? [];
+  const nGrana = Math.max(6, layers.filter(l => l.depth <= 3).length * 2 + 4);
+
+  // Outer envelope — double membrane ellipsoid
+  for (let shell = 0; shell < 2; shell++) {
+    const r = 1.0 + shell * 0.06;
+    const geo = new THREE.SphereGeometry(r, 32, 24);
+    const mat = new THREE.MeshPhongMaterial({
+      color: shell === 0 ? 0x0a2010 : 0x0d2a14,
+      transparent: true, opacity: shell === 0 ? 0.30 : 0.15,
+      side: THREE.DoubleSide, depthWrite: false,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.scale.set(1.6, 1.0, 0.9);
+    group.add(m);
+  }
+
+  // Edges
+  const edgeGeo = new THREE.EdgesGeometry(new THREE.SphereGeometry(1.02, 16, 12));
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0x1a4a1a, transparent: true, opacity: 0.5 });
+  const eM = new THREE.LineSegments(edgeGeo, edgeMat);
+  eM.scale.set(1.62, 1.02, 0.92);
+  group.add(eM);
+
+  // Grana — stacks of thylakoid discs
+  for (let g = 0; g < nGrana; g++) {
+    const angle = (g / nGrana) * Math.PI * 2;
+    const gx = Math.cos(angle) * 0.6;
+    const gz = Math.sin(angle) * 0.3;
+    const gy = (Math.random() - 0.5) * 0.4;
+
+    const granum = new THREE.Group();
+    const nDiscs = 3 + Math.floor(Math.random() * 5);
+    for (let d = 0; d < nDiscs; d++) {
+      const discGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.025, 20);
+      const discMat = new THREE.MeshPhongMaterial({
+        color: new THREE.Color(0, 0.30 + d * 0.04, 0.02),
+        emissive: new THREE.Color(0, 0.05, 0),
+      });
+      const disc = new THREE.Mesh(discGeo, discMat);
+      disc.position.y = d * 0.028;
+      disc.castShadow = true;
+      disc.userData.label  = "Thylakoid Disc";
+      disc.userData.detail = `${fmtZ(10e-9)} diameter · chlorophyll embedded`;
+      disc.userData.drillTarget = 2;
+      granum.add(disc);
+      clickableObjects.push(disc);
+    }
+    granum.position.set(gx, gy, gz);
+    group.add(granum);
+  }
+
+  // Stroma particles
+  const ptGeo = new THREE.BufferGeometry();
+  const pts = [];
+  for (let i = 0; i < 400; i++) {
+    pts.push((Math.random()-0.5)*2.4, (Math.random()-0.5)*1.5, (Math.random()-0.5)*1.4);
+  }
+  ptGeo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+  const ptMat = new THREE.PointsMaterial({ color: 0x205030, size: 0.015, sizeAttenuation: true });
+  group.add(new THREE.Points(ptGeo, ptMat));
+
+  addSprite(group, "OUTER MEMBRANE", new THREE.Vector3(0, 1.15, 0),  "#205030", 9);
+  addSprite(group, "GRANA (thylakoid stacks)", new THREE.Vector3(0.6,-0.5,0), "#30a040", 9);
+  addSprite(group, "STROMA", new THREE.Vector3(-0.5,0.2,0), "#204a28", 9);
+}
+
+// ── Level 2: Thylakoid Membrane ───────────────────────
+function buildThylakoid(report, group) {
+  const layers = report?.layers ?? [];
+
+  // Flat membrane disc — two layers (bilayer)
+  for (let layer = 0; layer < 2; layer++) {
+    const y = (layer - 0.5) * 0.055;
+    const geo = new THREE.CylinderGeometry(1.8, 1.8, 0.04, 48);
+    const mat = new THREE.MeshPhongMaterial({
+      color: layer === 0 ? 0x0a2a12 : 0x0d3016,
+      transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.y = y;
+    group.add(m);
+  }
+
+  // Protein complexes on the surface
+  const complexData = [
+    { name: "Photosystem II", color: 0x2255aa, n: 8  },
+    { name: "Cytochrome b6f", color: 0x8a4010, n: 6  },
+    { name: "Photosystem I",  color: 0x1a9a40, n: 8  },
+    { name: "ATP Synthase",   color: 0xaa8810, n: 5  },
+  ];
+  complexData.forEach((cx, ci) => {
+    for (let i = 0; i < cx.n; i++) {
+      const angle = (i / cx.n) * Math.PI * 2 + ci * 0.4;
+      const r     = 0.3 + (ci % 2 === 0 ? 0.6 : 1.1);
+      const x     = Math.cos(angle) * r;
+      const z     = Math.sin(angle) * r;
+      const geo   = new THREE.CylinderGeometry(0.08, 0.10, 0.16, 12);
+      const mat   = new THREE.MeshPhongMaterial({
+        color: cx.color,
+        emissive: new THREE.Color(cx.color).multiplyScalar(0.15),
+      });
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, 0.10, z);
+      m.castShadow = true;
+      m.userData.label  = cx.name;
+      m.userData.detail = cx.name === "Photosystem II"
+        ? "P680 reaction center · 35 chlorophyll"
+        : cx.name === "Photosystem I"
+        ? "P700 reaction center · 100 chlorophyll"
+        : cx.name === "ATP Synthase"
+        ? "Proton pump · makes ATP"
+        : "Electron transfer · cytochrome b6f";
+      m.userData.drillTarget = 3;
+      group.add(m);
+      clickableObjects.push(m);
+    }
+  });
+
+  // Electron flow particles
+  const ePts = [];
+  for (let i = 0; i < 200; i++) {
+    const angle = (i / 200) * Math.PI * 2;
+    const r = 0.8 + Math.random() * 0.8;
+    ePts.push(Math.cos(angle)*r, 0.06, Math.sin(angle)*r);
+  }
+  const eGeo = new THREE.BufferGeometry();
+  eGeo.setAttribute("position", new THREE.Float32BufferAttribute(ePts, 3));
+  group.add(new THREE.Points(eGeo, new THREE.PointsMaterial({
+    color: 0x40a0ff, size: 0.025, sizeAttenuation: true, transparent: true, opacity: 0.7,
+  })));
+
+  addSprite(group, "THYLAKOID MEMBRANE", new THREE.Vector3(0, 0.25, 0), "#2a6040", 9);
+  addSprite(group, "PSII (P680)",    new THREE.Vector3(-0.6, 0.35, 0.3), "#2255aa", 8);
+  addSprite(group, "PSI (P700)",     new THREE.Vector3( 0.6, 0.35, 0.3), "#1a9a40", 8);
+  addSprite(group, "ATP SYNTHASE",   new THREE.Vector3( 0.0, 0.35,-0.8), "#aa8810", 8);
+}
+
+// ── Level 3: Chlorophyll a molecule ──────────────────
+function buildChlorophyll(report, group) {
+  // Porphyrin ring — 4 pyrrole rings connected by methine bridges
+  // Approximate as a flat ring with atoms at nodes
+
+  const ATOM_COLORS = {
+    C: 0x404040, N: 0x2266cc, O: 0xcc2222,
+    H: 0xeeeeee, Mg: 0x22cc44,
+  };
+  const ATOM_RADII  = { C: 0.06, N: 0.065, O: 0.065, H: 0.04, Mg: 0.09 };
+
+  function atom(type, x, y, z) {
+    const geo = new THREE.SphereGeometry(ATOM_RADII[type] || 0.06, 14, 10);
+    const mat = new THREE.MeshPhongMaterial({
+      color: ATOM_COLORS[type] || 0x888888,
+      emissive: new THREE.Color(ATOM_COLORS[type] || 0x888888).multiplyScalar(0.1),
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.castShadow = true;
+    m.userData.label  = type + " atom";
+    m.userData.detail = type === "Mg"
+      ? "Magnesium · coordinated by 4 N · light absorption"
+      : type === "N" ? "Nitrogen · pyrrole ring · 0.134nm bond"
+      : type === "O" ? "Oxygen · ester linkage"
+      : "Carbon · sp2 · 0.140nm bond";
+    m.userData.drillTarget = type === "C" ? 4 : -1;
+    group.add(m);
+    clickableObjects.push(m);
+    return m;
+  }
+
+  function bond(a, b) {
+    const dir  = new THREE.Vector3().subVectors(b, a);
+    const len  = dir.length();
+    const mid  = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+    const geo  = new THREE.CylinderGeometry(0.018, 0.018, len, 8);
+    const mat  = new THREE.MeshPhongMaterial({ color: 0x303030 });
+    const m    = new THREE.Mesh(geo, mat);
+    m.position.copy(mid);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+    group.add(m);
+  }
+
+  // 4 pyrrole rings arranged around the porphyrin macrocycle
+  // Ring centres at 0.43 units from origin, at 45°/135°/225°/315°
+  const ringCentres = [
+    [  0.43,  0.43 ],   // top-right    pyrrole A
+    [ -0.43,  0.43 ],   // top-left     pyrrole B
+    [ -0.43, -0.43 ],   // bottom-left  pyrrole C
+    [  0.43, -0.43 ],   // bottom-right pyrrole D
+  ];
+
+  // Pyrrole ring (5-membered: N + 4 C)
+  const pyrroleAtoms = [];
+  ringCentres.forEach(([cx, cy], ri) => {
+    const ringA = [];
+    for (let i = 0; i < 5; i++) {
+      const angle = (i / 5) * Math.PI * 2 - Math.PI / 2;
+      const x = cx + Math.cos(angle) * 0.22;
+      const z = cy + Math.sin(angle) * 0.22;
+      const type = i === 0 ? "N" : "C";
+      const a = atom(type, x, 0, z);
+      ringA.push(new THREE.Vector3(x, 0, z));
+    }
+    // Close ring bonds
+    for (let i = 0; i < 5; i++) {
+      bond(ringA[i], ringA[(i+1)%5]);
+    }
+    pyrroleAtoms.push(ringA);
+  });
+
+  // Central Mg
+  const mg = atom("Mg", 0, 0, 0);
+
+  // Connect Mg to all 4 N atoms
+  [0,1,2,3].forEach(ri => {
+    bond(new THREE.Vector3(0,0,0), pyrroleAtoms[ri][0]);
+  });
+
+  // Methine bridge C atoms between rings
+  const bridges = [
+    [ringCentres[0][0]/2 + ringCentres[1][0]/2, ringCentres[0][1]*0.2],
+    [ringCentres[1][0]*0.2, ringCentres[2][1]/2 + ringCentres[1][1]/2],
+    [ringCentres[2][0]/2 + ringCentres[3][0]/2, ringCentres[2][1]*0.2],
+    [ringCentres[3][0]*0.2, ringCentres[0][1]/2 + ringCentres[3][1]/2],
+  ];
+  const bridgeVecs = [];
+  bridges.forEach(([bx, bz]) => {
+    atom("C", bx, 0, bz);
+    bridgeVecs.push(new THREE.Vector3(bx, 0, bz));
+  });
+
+  // Phytol tail — chain of C atoms extending in -z direction
+  let prev = new THREE.Vector3(0.43, 0, -0.55);
+  atom("O", prev.x, 0, prev.z);
+  for (let i = 0; i < 8; i++) {
+    const nx = prev.x + (i % 2 === 0 ? 0.05 : -0.05);
+    const nz = prev.z - 0.16;
+    atom("C", nx, 0, nz);
+    bond(prev, new THREE.Vector3(nx, 0, nz));
+    prev = new THREE.Vector3(nx, 0, nz);
+  }
+
+  // Labels
+  addSprite(group, "PORPHYRIN RING", new THREE.Vector3(0, 0.25, 0),   "#20aa40", 9);
+  addSprite(group, "Mg²⁺",          new THREE.Vector3(0.08,0.12, 0),  "#22cc44", 8);
+  addSprite(group, "PHYTOL TAIL",   new THREE.Vector3(0.5, 0.15,-1.2),"#c08020", 8);
+  addSprite(group, "N",             new THREE.Vector3( 0.43, 0.12, 0.35), "#2266cc", 8);
+}
+
+// ── Level 4: Carbon atom ──────────────────────────────
+function buildCarbonAtom(report, group) {
+  // Nucleus (6 protons + 6 neutrons)
+  const nucGeo = new THREE.SphereGeometry(0.15, 32, 24);
+  const nucMat = new THREE.MeshPhongMaterial({
+    color: 0xaa3010, emissive: 0x401008,
+    shininess: 80,
+  });
+  const nuc = new THREE.Mesh(nucGeo, nucMat);
+  nuc.castShadow = true;
+  nuc.userData.label  = "Carbon Nucleus";
+  nuc.userData.detail = "6 protons · 6 neutrons · 3 fm radius · strong force";
+  group.add(nuc);
+  clickableObjects.push(nuc);
+
+  addSprite(group, "NUCLEUS\n6p 6n", new THREE.Vector3(0.2, 0.28, 0), "#cc4010", 9);
+
+  // 1s orbital — innermost shell (sphere cloud)
+  buildOrbitalCloud(group, 0.30, 200, 0xff6030, 0.6, "1s (2e⁻)");
+
+  // 2s orbital
+  buildOrbitalCloud(group, 0.65, 300, 0xffa030, 0.45, "2s (2e⁻)");
+
+  // 2p orbitals — three dumbbell shapes
+  const pCols = [0x4080ff, 0x40d0ff, 0x40ffcc];
+  const pAxes = [
+    new THREE.Vector3(1,0,0),
+    new THREE.Vector3(0,1,0),
+    new THREE.Vector3(0,0,1),
+  ];
+  pAxes.forEach((axis, i) => {
+    buildPOrbital(group, axis, pCols[i], i < 2); // 3rd p orbital empty in ground state
+  });
+
+  // Bohr model orbit ring (schematic)
+  [0.32, 0.72].forEach((r, i) => {
+    const torus = new THREE.TorusGeometry(r, 0.008, 8, 60);
+    const mat   = new THREE.MeshBasicMaterial({
+      color: i === 0 ? 0xff6030 : 0x4080ff,
+      transparent: true, opacity: 0.25,
+    });
+    const t = new THREE.Mesh(torus, mat);
+    if (i === 1) t.rotation.x = Math.PI / 3;
+    group.add(t);
+  });
+
+  addSprite(group, "1s ORBITAL",    new THREE.Vector3( 0.38, 0.12, 0), "#ff6030", 8);
+  addSprite(group, "2s ORBITAL",    new THREE.Vector3( 0.72, 0.12, 0), "#ffa030", 8);
+  addSprite(group, "2px ORBITAL",   new THREE.Vector3( 1.15, 0.12, 0), "#4080ff", 8);
+  addSprite(group, "2py ORBITAL",   new THREE.Vector3( 0.0,  1.15, 0), "#40d0ff", 8);
+  addSprite(group, "2pz ORBITAL",   new THREE.Vector3( 0.0,  0.12,1.15),"#40ffcc", 8);
+}
+
+function buildOrbitalCloud(group, radius, n, color, opacity, _label) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    // Gaussian distribution centred at radius
+    const r = radius + (Math.random() - 0.5) * radius * 0.5;
+    const theta = Math.acos(2 * Math.random() - 1);
+    const phi   = Math.random() * Math.PI * 2;
+    pts.push(
+      r * Math.sin(theta) * Math.cos(phi),
+      r * Math.sin(theta) * Math.sin(phi),
+      r * Math.cos(theta),
+    );
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+  group.add(new THREE.Points(geo, new THREE.PointsMaterial({
+    color, size: 0.022, sizeAttenuation: true,
+    transparent: true, opacity,
+  })));
+}
+
+function buildPOrbital(group, axis, color, filled) {
+  // Two lobes along axis
+  [-1, 1].forEach(sign => {
+    const pts = [];
+    for (let i = 0; i < 150; i++) {
+      const r     = 0.7 + (Math.random() - 0.5) * 0.3;
+      const theta = Math.random() * Math.PI * 0.5;
+      const phi   = Math.random() * Math.PI * 2;
+      const x     = r * Math.sin(theta) * Math.cos(phi);
+      const y     = r * Math.cos(theta) * sign;
+      const z     = r * Math.sin(theta) * Math.sin(phi);
+      const v     = new THREE.Vector3(x, y, z);
+      // Rotate to axis
+      const quat  = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), axis);
+      v.applyQuaternion(quat);
+      pts.push(v.x, v.y, v.z);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+    group.add(new THREE.Points(geo, new THREE.PointsMaterial({
+      color, size: 0.025, sizeAttenuation: true,
+      transparent: true, opacity: filled ? 0.55 : 0.2,
+    })));
+  });
+}
+
+// ── Sprite labels ─────────────────────────────────────
+function addSprite(group, text, pos, color, fontSize) {
+  const c2   = document.createElement("canvas");
+  const lines = text.split("\n");
+  c2.width   = 256;
+  c2.height  = lines.length * (fontSize + 4) + 8;
+  const ctx  = c2.getContext("2d");
+  ctx.font   = `${fontSize}px Courier New`;
+  ctx.fillStyle = color;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, 4, (i + 1) * (fontSize + 2));
+  });
+  const tex = new THREE.CanvasTexture(c2);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const sp  = new THREE.Sprite(mat);
+  sp.position.copy(pos);
+  const aspect = c2.width / c2.height;
+  sp.scale.set(aspect * 0.28, 0.28, 1);
+  group.add(sp);
+}
+
+// ═══════════════════════════════════════════════════════
+// Level management
+// ═══════════════════════════════════════════════════════
+const BUILDERS = [
+  buildPlantCell,
+  buildChloroplast,
+  buildThylakoid,
+  buildChlorophyll,
+  buildCarbonAtom,
+];
+
+async function loadLevel(idx, skipFetch = false) {
+  if (transitioning) return;
+  transitioning = true;
+
+  const level = LEVELS[idx];
+
+  // Fetch API data (unless we already have it)
+  if (!skipFetch && !apiData[level.id]) {
+    apiData[level.id] = await fetchLayersFor(level);
+  }
+  const report = apiData[level.id];
+
+  // Remove previous level group
+  if (levelGroup) scene.remove(levelGroup);
+  clickableObjects = [];
+
+  // Build new group
+  levelGroup = new THREE.Group();
+  const builder = BUILDERS[idx];
+  if (builder) builder(report, levelGroup);
+  scene.add(levelGroup);
+
+  // Update HUD
+  updateHUD(idx, report);
+
+  // Animate camera to default view for this level
+  const camPos = new THREE.Vector3(0, 0.5 + idx * 0.1, 4.5 - idx * 0.3);
+  controls.target.set(0, 0, 0);
+  animateCameraTo(camPos, new THREE.Vector3(0,0,0));
+
+  currentLevelIdx = idx;
+  transitioning   = false;
+}
+
+function updateHUD(idx, report) {
+  const level  = LEVELS[idx];
+  const layers = report?.layers ?? [];
+  const sp     = report?.scale_profile ?? {};
+
+  // Breadcrumb
+  const crumbs = LEVELS.slice(0, idx + 1).map((l, i) =>
+    i === idx ? `<span>${l.name}</span>` : l.name
+  ).join('<span class="sep">›</span>');
+  document.getElementById("breadcrumb").innerHTML = crumbs;
+
+  document.getElementById("panel-title").textContent = level.name;
+  document.getElementById("p-scale").textContent = level.label;
+  document.getElementById("p-layers").textContent = layers.length;
+  document.getElementById("p-depth").textContent  = `${idx} / ${LEVELS.length - 1}`;
+  document.getElementById("p-cal").textContent    = sp.calibrated ? "YES" : "No";
+  document.getElementById("scalebar-label").textContent = level.label;
+
+  // Synthesis text from layer data
+  const topLabels = layers.slice(0, 4).map(l =>
+    l.label.replace(/^txt:\w+_|^img:/g, "").replace(/_zone.*$/, "")
+  );
+  const synth = `Neural fabric activation at ${level.label} scale:\n` +
+    (topLabels.length
+      ? `Characterised by: ${topLabels.join(", ")}.`
+      : "No specific labels activated at this depth yet.") +
+    (sp.eem_equation_count > 0
+      ? `\nEEM-calibrated: ${sp.eem_equation_count} physics equations matched.`
+      : "\nZ-axis: explicit calibration.");
+  document.getElementById("synthesis").textContent = synth;
+
+  // Layer chips at bottom
+  const bar  = document.getElementById("layer-bar");
+  bar.innerHTML = '<span id="layer-bar-label" class="layer-bar-label">LAYERS</span>';
+  layers.slice(0, 8).forEach((l, i) => {
+    const col   = DEPTH_COLORS[l.depth] ?? new THREE.Color(0x444444);
+    const hexC  = "#" + col.getHexString();
+    const label = l.label.replace(/^txt:\w+_|^img:/g, "").replace(/_zone.*$/, "");
+    const chip  = document.createElement("div");
+    chip.className    = "layer-chip" + (i === 0 ? " active" : "");
+    chip.style.borderColor = hexC;
+    chip.style.color  = hexC;
+    chip.style.background = hexC + "22";
+    chip.textContent  = `D${l.depth}: ${label}`;
+    chip.title        = `z=${fmtZ(l.position.z_est_m)} · conf=${(l.position.z_confidence*100).toFixed(0)}%`;
+    chip.addEventListener("click", () => {
+      document.querySelectorAll(".layer-chip").forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+    });
+    bar.appendChild(chip);
+  });
+
+  // Click hint
+  document.getElementById("click-hint").textContent =
+    idx < LEVELS.length - 1 ? level.hint : "Deepest level — right-click or ESC to go back";
+}
+
+// ═══════════════════════════════════════════════════════
+// Camera animation
+// ═══════════════════════════════════════════════════════
+const camFrom = new THREE.Vector3();
+const camTo   = new THREE.Vector3();
+let camLerp   = 1;
+
+function animateCameraTo(pos, lookAt) {
+  camFrom.copy(camera.position);
+  camTo.copy(pos);
+  controls.target.copy(lookAt);
+  camLerp = 0;
+}
+
+// ═══════════════════════════════════════════════════════
+// Raycasting / click interaction
+// ═══════════════════════════════════════════════════════
+const raycaster = new THREE.Raycaster();
+const mouse     = new THREE.Vector2();
+const tip       = document.getElementById("tip");
+let   dragMoved = false;
+let   mouseDown = new THREE.Vector2();
+
+canvas.addEventListener("mousedown", e => {
+  mouseDown.set(e.clientX, e.clientY);
+  dragMoved = false;
+});
+
+canvas.addEventListener("mousemove", e => {
+  if (Math.abs(e.clientX - mouseDown.x) > 4 ||
+      Math.abs(e.clientY - mouseDown.y) > 4) dragMoved = true;
+
+  const rect = canvas.getBoundingClientRect();
+  mouse.set(
+    ((e.clientX - rect.left) / rect.width)  * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(clickableObjects, true);
+  if (hits.length) {
+    const obj = hits[0].object;
+    if (obj.userData.label) {
+      tip.style.display = "block";
+      tip.style.left    = (e.clientX + 14) + "px";
+      tip.style.top     = (e.clientY + 14) + "px";
+      tip.innerHTML = `<b style="color:#80a0d0">${obj.userData.label}</b><br>
+        ${obj.userData.detail || ""}
+        ${obj.userData.drillTarget != null && obj.userData.drillTarget >= 0
+          ? `<br><span style="color:#406080">Click → zoom to ${LEVELS[obj.userData.drillTarget]?.name}</span>`
+          : ""}`;
+      canvas.style.cursor = "pointer";
+      controls.autoRotate = false;
+      return;
+    }
+  }
+  tip.style.display   = "none";
+  canvas.style.cursor = "default";
+  if (!controls.isLocked) controls.autoRotate = true;
+});
+
+canvas.addEventListener("click", e => {
+  if (dragMoved) return;
+  const rect = canvas.getBoundingClientRect();
+  mouse.set(
+    ((e.clientX - rect.left) / rect.width)  * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(clickableObjects, true);
+  if (hits.length) {
+    const obj    = hits[0].object;
+    const target = obj.userData.drillTarget;
+    if (target != null && target >= 0 && target < LEVELS.length && !transitioning) {
+      // Fly camera toward the clicked point first, then load next level
+      const hitPt = hits[0].point.clone();
+      animateCameraTo(
+        hitPt.clone().add(camera.position.clone().sub(hitPt).normalize().multiplyScalar(1.5)),
+        hitPt,
+      );
+      setTimeout(() => loadLevel(target), 600);
+    }
+  } else if (currentLevelIdx > 0 && !transitioning) {
+    // Click empty space to go back (same as right-click)
+  }
+});
+
+canvas.addEventListener("contextmenu", e => {
+  e.preventDefault();
+  if (currentLevelIdx > 0 && !transitioning) drillOut();
+});
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && currentLevelIdx > 0) drillOut();
+  if (e.key === "ArrowDown" || e.key === "Enter") {
+    const next = currentLevelIdx + 1;
+    if (next < LEVELS.length && !transitioning) loadLevel(next);
+  }
+  if (e.key === "ArrowUp") {
+    if (currentLevelIdx > 0 && !transitioning) drillOut();
+  }
+});
+
+function drillOut() {
+  loadLevel(currentLevelIdx - 1);
+}
+
+// ═══════════════════════════════════════════════════════
+// Render loop
+// ═══════════════════════════════════════════════════════
+let prevTime = performance.now();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const now = performance.now();
+  const dt  = (now - prevTime) / 1000;
+  prevTime  = now;
+
+  // Camera lerp
+  if (camLerp < 1) {
+    camLerp = Math.min(1, camLerp + dt * 2.5);
+    const t = 1 - Math.pow(1 - camLerp, 3); // ease-out cubic
+    camera.position.lerpVectors(camFrom, camTo, t);
+  }
+
+  // Animate electron cloud at atomic level
+  if (currentLevelIdx === 4 && levelGroup) {
+    levelGroup.rotation.y += dt * 0.15;
+  }
+
+  // Animate thylakoid electron flow particles (gentle bob)
+  if (currentLevelIdx === 2 && levelGroup) {
+    levelGroup.children.forEach(child => {
+      if (child.isPoints) {
+        child.rotation.y += dt * 0.4;
+      }
+    });
+  }
+
+  controls.update();
+
+  // Resize
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+
+  renderer.render(scene, camera);
+}
+
+// ═══════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════
+async function init() {
+  animate(); // start render loop immediately
+
+  try {
+    await registerCalibrations();
+    await loadLevel(0);
+    document.getElementById("loading").style.opacity = "0";
+    setTimeout(() => document.getElementById("loading").style.display = "none", 1100);
+  } catch (e) {
+    document.getElementById("loading").textContent =
+      `Error connecting to ${API} — is the node running?`;
+  }
+}
+
+init();
+</script>
+</body>
+</html>
