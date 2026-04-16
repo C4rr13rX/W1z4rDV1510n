@@ -1,48 +1,45 @@
 #!/usr/bin/env python3
 """
-Train the neural fabric on a plant cell (Elodea mesophyll) at 6 physical scales.
+Dense multi-scale scientific training corpus for plant cell physiology.
+Journal-quality text with Latin/Greek nomenclature, crystallographic data,
+biochemical pathway parameters, and SI measurements at each scale.
 
-Scales trained:
-  0  plant_cell       ~20 µm  whole cell phenotype
-  1  cell_wall        ~1  µm  cellulose wall + membrane
-  2  chloroplast      ~5  µm  photosynthetic organelle
-  3  thylakoid        ~10 nm  membrane + pigment complexes
-  4  chlorophyll      ~1  nm  chlorophyll a molecule
-  5  carbon_atom      ~154 pm atomic structure
-
-Run:
-  python scripts/train_cell_layers.py --host 192.168.1.84 --port 8090 --passes 5
+Scales:
+  plant_cell     ~20 µm  — mesophyll cell ultrastructure
+  cell_wall      ~0.5 µm — cellulose microfibril composite
+  chloroplast    ~5 µm   — thylakoid/stroma architecture
+  thylakoid      ~10 nm  — photosynthetic membrane complexes
+  chlorophyll    ~1 nm   — porphyrin chromophore
+  carbon_atom    ~154 pm — sp2 hybridised carbon, quantum structure
 """
-import argparse, json, time, sys
-import urllib.request, urllib.error
+import argparse, json, time, sys, urllib.request, urllib.error
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── HTTP helpers ─────────────────────────────────────────────────────────────
 
-def post(host, port, path, body):
-    url  = f"http://{host}:{port}{path}"
+def post(h, p, path, body):
+    url  = f"http://{h}:{p}{path}"
     data = json.dumps(body).encode()
     req  = urllib.request.Request(url, data=data,
-                                  headers={"Content-Type": "application/json"})
+                                  headers={"Content-Type":"application/json"})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        print(f"  HTTP {e.code} {path}: {e.read().decode()[:120]}")
+        print(f"  HTTP {e.code} {path}: {e.read().decode()[:80]}")
         return {}
 
-def train_text(host, port, text):
-    r = post(host, port, "/media/train", {"modality": "text", "text": text.strip()})
+def train(h, p, text):
+    r = post(h, p, "/media/train", {"modality": "text", "text": text.strip()})
     return r.get("label_count", 0)
 
-def calibrate(host, port, entity_type, scale_m):
-    r = post(host, port, "/overlay/layers/calibrate",
-             {"entity_type": entity_type, "known_scale_m": scale_m})
+def calibrate(h, p, entity, scale_m):
+    r = post(h, p, "/overlay/layers/calibrate",
+             {"entity_type": entity, "known_scale_m": scale_m})
     return r.get("ok", False)
 
-# ── Training corpus ──────────────────────────────────────────────────────────
+# ── Physical calibrations ─────────────────────────────────────────────────────
 
 SCALES = [
-    # (entity_type, known_scale_m)
     ("plant_cell",    20e-6),
     ("cell_wall",     0.5e-6),
     ("chloroplast",   5e-6),
@@ -51,157 +48,426 @@ SCALES = [
     ("carbon_atom",   0.154e-9),
 ]
 
+# ── Corpus ── 5 documents per scale, journal-quality prose ───────────────────
+
 CORPUS = [
-    # ── 0: Whole plant cell ───────────────────────────────────────────────────
-    ("plant_cell", """
-The Elodea mesophyll plant cell is a rectangular box-shaped cell 20 to 50 micrometres
-long and 10 to 20 micrometres wide. The outer surface is a rigid cell wall made of
-cellulose giving the cell its boxy rectangular shape. The green colour comes from
-chloroplasts distributed in the cytoplasm just inside the wall. A large central vacuole
-occupies up to 90 percent of the cell volume and appears as a clear region inside.
-The plasma membrane lies just inside the cell wall. The nucleus is a spherical body
-5 to 10 micrometres in diameter. Multiple chloroplasts each 4 to 6 micrometres long
-appear as bright green oval bodies. Cytoplasmic streaming moves chloroplasts in a
-circular path. The outer wall appears dark under light microscopy. The cell interior
-is green with moving oval organelles. Four walls form the rectangular border.
-"""),
-    ("plant_cell", """
-The plant cell outer layer is a cell wall made of cellulose fibres. Inside the wall
-is the plasma membrane. The cell interior cytoplasm contains organelles. The nucleus
-stores DNA and controls cell activity. Chloroplasts carry out photosynthesis. The
-large vacuole stores water and maintains turgor pressure. Mitochondria provide energy.
-The endoplasmic reticulum forms a network of membranes. Ribosomes make proteins.
-The cell is enclosed by the outer cell wall surface exterior. Looking at the cell from
-outside you see the flat rectangular face of the wall. The corners of the box cell
-are sharp. The cell surface is the outermost visible layer of the plant cell.
+
+# ════════════════════════════════════════════════════════════════════
+# SCALE 0 — Plant Cell Phenotype  (~20 µm)
+# ════════════════════════════════════════════════════════════════════
+
+("plant_cell", """
+The mesophyll parenchyma cell of Elodea canadensis (Michaux 1803) constitutes
+the principal photosynthetic unit of the leaf lamina. The cell is bounded by a
+primary cell wall (paries cellularis) 0.10–0.50 µm in thickness, consisting
+of a (1→4)-β-D-glucan cellulose scaffold reinforced by xyloglucan,
+arabinoxylan, and homogalacturonan pectin. The plasmalemma (plasma membrane,
+unit membrane) subtends the wall at 7–10 nm thickness, maintaining a resting
+electrical potential of −120 to −180 mV (electrogenic H+-ATPase, EC 3.6.3.6).
+The central vacuole (vacuolum centrale) occupies 80–95% of the mature cell
+volume and is bounded by the tonoplast (vacuolar membrane), which houses
+V-type H+-ATPase and H+-PPase for luminal acidification (pH 5.0–5.5).
+Cell dimensions: 25–50 µm (longitudinal axis) × 15–25 µm (transverse) ×
+10–20 µm (depth), yielding a mean cell volume of approximately 5,000–12,000 µm³.
+The nucleus (nucleus cellularis), 8–12 µm in diameter, is enveloped by the
+nuclear envelope (two unit membranes, 20–40 nm total), studded with nuclear pore
+complexes (NPC, ~120 nm diameter, ~800 per nucleus). Heterochromatin lines
+the inner nuclear membrane; euchromatin occupies the nucleoplasm. The nucleolus
+(nucleolus, ~2–4 µm) synthesises 18S, 5.8S, and 25S rRNA. Chloroplasts (5–50
+per cell, mean ~20) are discoid, 3–8 µm long, 1.5–3 µm wide. Each chloroplast
+contains 30–80 grana stacks. Mitochondria (chondriosome) number 200–2000 per
+cell, 0.5–2 µm length, with a distinctive double membrane and cristae system.
+Rough endoplasmic reticulum (ergastoplasm) forms a continuous lumenal network
+with the outer nuclear envelope. The Golgi apparatus (dictyosome) consists of
+4–8 cisternae, 0.8–1.2 µm diameter per cisterna, processing glycoproteins and
+polysaccharides for secretion to the cell wall. Microtubules (24 nm outer
+diameter) and actin microfilaments (7 nm) form the cytoskeletal network.
+Plasmodesmata (symplastic connections, 40–60 nm diameter) traverse the cell
+wall at a frequency of 1–15 per µm² connecting adjacent cells.
 """),
 
-    # ── 1: Cell wall ──────────────────────────────────────────────────────────
-    ("cell_wall", """
-The plant cell wall is a layered composite structure. The primary cell wall is
-0.1 to 0.5 micrometres thick made of cellulose microfibrils in a hemicellulose
-matrix. Each cellulose microfibril is 5 to 12 nanometres in diameter and several
-micrometres long. The microfibrils cross each other in different orientations
-forming a woven mesh. Pectin fills the spaces between microfibrils. The middle
-lamella between two adjacent cells contains pectin and calcium. Plasmodesmata
-are cytoplasmic channels 50 to 60 nanometres wide passing through the wall.
-The plasma membrane beneath the wall is a lipid bilayer 7 to 10 nanometres thick.
-The cell wall provides structural support and protection. Its surface appears
-fibrous and layered when seen by electron microscopy. The outer face of the wall
-is the exterior surface of the plant cell.
-"""),
-    ("cell_wall", """
-Cellulose fibres in the cell wall are arranged in layers. Each layer has fibres
-running in a different direction creating strength. The middle lamella is the first
-layer deposited during cell division. The primary wall is thin and flexible. Some
-cells deposit a secondary wall inside the primary wall. The secondary wall is much
-thicker with lignin. Lignin makes wood cells rigid and impermeable. The wall layers
-from outside to inside are: middle lamella outer layer, primary wall layer, secondary
-wall inner layer, plasma membrane. Each layer has different chemistry and thickness.
-The fibrous texture of the wall surface shows under electron microscopy.
+("plant_cell", """
+Mesophyll cell ultrastructure as revealed by transmission electron microscopy
+(TEM) and cryogenic electron tomography shows a precisely organised cytoplasm
+occupying the cortical layer beneath the plasmalemma (cortical cytoplasm).
+Cytosolic ionic composition: K⁺ 80–160 mM, Mg²⁺ 0.5–5 mM (free), Ca²⁺
+100–200 nM (resting, rises to 1–5 µM upon stimulus), pH 7.2–7.5, osmolarity
+300–400 mOsm. The central vacuole contains a dilute solution of organic acids
+(malate, citrate, oxalate), inorganic ions, hydrolytic enzymes (α-mannosidase,
+β-glucosidase, protease), phenolic compounds, and anthocyanins. Turgor pressure
+(pressure potential ψp) of 0.3–1.0 MPa maintains cell rigidity. Chloroplasts
+exhibit acropetal streaming (cyclosis) at rates of 2–5 µm/s driven by myosin-XI
+(plant myosin superfamily) on actin cables. Peroxisomes (0.2–1.5 µm, bounded by
+a single membrane) participate in the C2 photorespiratory pathway alongside
+chloroplasts and mitochondria in a metabolon. Ribosomes (80S, 25 nm diameter)
+stud the rough ER and the chloroplast ribosomes (70S, Svedberg unit) reside in
+the plastid stroma. The cell plate (phragmoplast, nascent cell wall) forms from
+fusing Golgi vesicles during cytokinesis. Cell division is preceded by a
+preprophase band of microtubules defining the future division plane.
 """),
 
-    # ── 2: Chloroplast ────────────────────────────────────────────────────────
-    ("chloroplast", """
-The chloroplast is an oval organelle 3 to 10 micrometres long and 1 to 3 micrometres
-wide enclosed by a double outer envelope membrane. The stroma is a fluid matrix inside
-filled with enzymes for the Calvin cycle carbon fixation. Within the stroma stacks of
-flat membrane discs called grana contain chlorophyll. Each granum is a stack of
-thylakoid discs 300 to 600 nanometres in diameter. A mature chloroplast has 10 to 100
-grana. Thylakoid membranes hold photosystems and the electron transport chain.
-The chloroplast contains its own circular DNA. Plastoglobules are small lipid droplets
-100 to 500 nanometres across in the stroma. The inner envelope membrane separates
-stroma from the intermembrane space. The outer envelope is smooth. The thylakoid
-lumen is the space inside each disc 10 to 30 nanometres wide.
-"""),
-    ("chloroplast", """
-Inside the chloroplast the stacked grana look like piles of coins under electron
-microscopy. Each coin-shaped thylakoid disc is a flattened membrane sac. The grana
-are interconnected by stromal lamellae flat membrane tubes running through the stroma.
-Photosynthesis happens in two stages. The light reactions happen in the thylakoid
-membranes. The dark reactions happen in the stroma. The green colour of chloroplasts
-comes from chlorophyll pigment in the thylakoid membranes. Chloroplasts were once
-free-living cyanobacteria that were incorporated into eukaryotic cells by endosymbiosis.
-The outer envelope of the chloroplast is the surface boundary of this organelle.
+("plant_cell", """
+Photosynthetic mesophyll cells are the primary site of carbon assimilation in
+C3 plants via the Calvin–Benson–Bassham (CBB) cycle, fixing CO₂ through
+ribulose-1,5-bisphosphate carboxylase/oxygenase (RuBisCO, EC 4.1.1.39).
+RuBisCO constitutes 25–50% of total leaf nitrogen and is the most abundant
+enzyme on Earth (~700 Tg globally). The Km(CO₂) of plant RuBisCO is ~10 µM
+and kcat ~3 s⁻¹ per active site, necessitating its extreme abundance.
+Carboxysomes are absent in eukaryotic chloroplasts; CO₂ concentration is
+achieved by carbonic anhydrase (CA, EC 4.2.1.1) activity and the
+CO₂/HCO₃⁻ equilibrium. Stomatal conductance to CO₂ (gs,CO₂) is 50–300
+mmol m⁻² s⁻¹ in well-watered conditions. Mesophyll conductance (gm) limits
+CO₂ diffusion from substomatal cavity to chloroplast stroma (~0.1–0.5 mol
+m⁻² s⁻¹ bar⁻¹). Net photosynthesis (Pn) peaks at 15–30 µmol CO₂ m⁻² s⁻¹
+under light saturation (1000–1500 µmol photons m⁻² s⁻¹) and 380 µL L⁻¹ CO₂.
+The cell outer wall surface (epidermis-facing) is coated with a waxy cuticle
+layer of cutin polyester and wax esters providing the hydrophobic exterior
+barrier to water loss and pathogen ingress.
 """),
 
-    # ── 3: Thylakoid ──────────────────────────────────────────────────────────
-    ("thylakoid", """
-The thylakoid membrane is a lipid bilayer 7 to 8 nanometres thick. Large protein
-complexes are embedded in it: Photosystem II is 20 to 25 nanometres wide. The
-cytochrome b6f complex transfers electrons. Photosystem I reduces NADP+ to NADPH.
-ATP synthase makes ATP using the proton gradient. Photosystem II contains 35
-chlorophyll molecules and the P680 reaction centre absorbing at 680 nanometres.
-Light-harvesting complex LHCII holds 14 chlorophyll molecules. Photosystem I
-holds 100 chlorophyll molecules and P700 absorbing at 700 nanometres. The
-thylakoid lumen is acidic at pH 5 during photosynthesis. Electrons flow from
-water through PSII along the electron transport chain to PSI. The outer surface
-of the thylakoid disc faces the stroma. Protein bumps visible on the outer surface
-are the photosystem complexes.
-"""),
-    ("thylakoid", """
-Chlorophyll molecules in the thylakoid membrane are arranged in antenna arrays.
-Light hits an antenna chlorophyll and the energy is passed from molecule to molecule
-until it reaches the reaction centre. Energy transfer in the antenna complex
-happens in femtoseconds. Each chlorophyll absorbs specific wavelengths of light.
-Chlorophyll a absorbs red 662 nm and blue 430 nm light most strongly. The
-porphyrin head of chlorophyll is held flat in the membrane by the protein scaffold.
-The phytol tail anchors chlorophyll into the lipid bilayer. The magnesium ion at
-the centre of the porphyrin ring is essential for light absorption. Carotenoid
-pigments also absorb light in the 400 to 500 nm range.
+# ════════════════════════════════════════════════════════════════════
+# SCALE 1 — Cell Wall  (~0.5 µm)
+# ════════════════════════════════════════════════════════════════════
+
+("cell_wall", """
+The primary cell wall (paries cellularis primarius) of angiosperm mesophyll
+cells is a hydrated, viscoelastic, fibre-reinforced composite. Cellulose
+microfibrils (CMF, crystalline core) are synthesised by rosette cellulose
+synthase complexes (CSC, CESA1/3/6 trimers in Arabidopsis) embedded in the
+plasmalemma, extruding β-(1→4)-glucan chains that self-assemble into crystalline
+elementary fibrils of 18 glucan chains (cross-section ~3 nm × 5 nm) and
+macrofibrils of 5–12 nm diameter. The degree of polymerisation (DP) is
+6,000–13,000 glucose residues. CMF microfibril angle (MFA) relative to the
+cell axis is 0°–5° in elongated cells. Cellulose mass fraction in the primary
+wall is ~20–30%; hemicelluloses (xyloglucan dominant in eudicots, 20–25%),
+pectins (homogalacturonan HG, rhamnogalacturonan RGI/RGII, 35–40%), and
+structural glycoproteins (extensin, arabinogalactan-protein) comprise the
+matrix. Xyloglucan binds directly to CMF surfaces via van der Waals contacts
+and hydrogen bonds (Kd ~0.1 mM). Pectin Ca²⁺-crosslinking (egg-box model,
+HG degree of methylesterification <50%) determines wall stiffness modulus
+E ≈ 0.3–1.0 GPa. The middle lamella (lamella media), enriched in calcium
+pectate, cements adjacent cells and is 0.02–0.20 µm thick. Wall-associated
+kinases (WAK1–5) sense pectin fragmentation during pathogen attack.
+Plasmodesmata (PD) are lined by the desmotubule (compressed appressed ER,
+~15 nm diam) passing through a plasma membrane collar, creating cytoplasmic
+annuli (~20–30 nm effective aperture for macromolecular transport cutoff ~67 kDa).
+The outer face of the wall facing the intercellular airspace is the surface
+exterior layer that forms the visible boundary of the cell phenotype.
 """),
 
-    # ── 4: Chlorophyll molecule ───────────────────────────────────────────────
-    ("chlorophyll", """
-Chlorophyll a has molecular formula C55H72O5N4Mg and molecular weight 893 daltons.
-The molecule has a flat porphyrin ring head approximately 1.2 nanometres across.
-The porphyrin ring contains four pyrrole rings connected by methine bridges in a
-macrocycle. A central magnesium atom is coordinated by four nitrogen atoms from
-the pyrrole rings. The phytol tail is a 20-carbon isoprenoid chain approximately
-2.8 nanometres long. Carbon-carbon bond lengths in the ring are 0.140 nanometres
-for aromatic bonds. Nitrogen-carbon bonds are 0.134 nanometres. The magnesium-nitrogen
-bond is 0.208 nanometres. The pi electron system is delocalized over the entire
-porphyrin ring. The molecule is essentially planar with the phytol tail extending
-perpendicular from the edge of the ring. Absorption peaks are at 430 nm and 662 nm.
-"""),
-    ("chlorophyll", """
-The porphyrin ring of chlorophyll is similar to haem in haemoglobin but contains
-magnesium instead of iron. The ring system is aromatic with 18 pi electrons following
-Huckel's rule. Four nitrogen atoms point inward holding the magnesium. The ring
-carbons are approximately 0.14 nanometres apart. Carbon atoms in the ring are sp2
-hybridized forming a planar network. The ester linkage connects the phytol tail
-to the ring. Oxygen atoms at the ester group are 0.122 nanometres from carbon.
-The entire molecule from ring to tail end is approximately 3 to 4 nanometres long.
-The molecule is a flat disc with a long flexible tail.
+("cell_wall", """
+Cell wall polysaccharide architecture at nanometre resolution, as resolved by
+solid-state ¹³C NMR spectroscopy and small-angle X-ray scattering (SAXS):
+Cellulose I_β is the dominant allomorph in higher plants, with a monoclinic
+unit cell a=7.78 Å, b=8.20 Å, c=10.38 Å, γ=96.5°. The adjacent cellulose
+chains pack in a parallel arrangement (all non-reducing ends facing the same
+direction), forming intrachain O3…O5′ and O2…O6′ hydrogen bonds of ~2.5–2.8 Å.
+Interchain hydrogen bonds (O6…O3′, ~2.6 Å) and van der Waals stacking of the
+hydrophobic (110) face contribute to microfibril stability. Water occupies
+the non-crystalline surface of CMFs (accessible via D₂O exchange, 30–40%
+of cellulose hydroxyl groups). The overall wall thickness of 0.1–0.5 µm
+encompasses 50–250 lamellae of CMFs each ~10 nm apart in the transverse section.
+The outer layer of the wall (outer face, lamella prima) was deposited earliest
+and contains the highest pectin concentration. The inner layer (nearest
+plasmalemma, lamella ultima) is freshest and contains the highest proportion
+of newly synthesised xyloglucan. Wall expansion during cell elongation requires
+expansin proteins (α-expansin, EXPA) disrupting hydrogen bonds between xyloglucan
+and cellulose, yielding wall creep at pH 4.5–5.5 (acid growth hypothesis).
 """),
 
-    # ── 5: Carbon atom ────────────────────────────────────────────────────────
-    ("carbon_atom", """
-Carbon has atomic number 6 with 6 protons 6 neutrons and 6 electrons. The nuclear
-radius is approximately 3 femtometres. The covalent radius is 77 picometres.
-The van der Waals radius is 170 picometres. Electron configuration is 1s2 2s2 2p2.
-The 1s shell holds 2 electrons close to the nucleus. The 2s orbital holds 2 electrons.
-The 2p orbital holds 2 electrons in lobed orbitals above and below. In sp2 hybridization
-three hybrid orbitals point in a plane at 120 degrees forming sigma bonds. The
-unhybridized p orbital forms a pi bond perpendicular to the plane. Bond length
-for a C-C single bond is 154 picometres. A C=C double bond is 134 picometres.
-The C-H bond is 109 picometres. First ionization energy is 11.26 electron volts.
+("cell_wall", """
+The plasma membrane (plasmalemma) subtending the inner surface of the cell wall
+is a Type I fluid mosaic bilayer composed of ~35 mol% phosphatidylcholine (PC),
+~28% phosphatidylethanolamine (PE), ~20% phosphatidylserine (PS) and
+phosphatidylinositol (PI), ~14% sterols (sitosterol, campesterol), and
+~3% sphingolipids (glucocerebrosides, GIPC). Bilayer thickness is 7.5–8.0 nm
+(leaflet 3.5–4.0 nm each). Membrane protein density: ~25,000 integral proteins
+per µm², lateral diffusion coefficient D_lat ~0.1–1.0 µm² s⁻¹. The H⁺-ATPase
+(P-type ATPase, AHA1–11 in Arabidopsis) is the primary electrogenic pump;
+10-subunit C₁₀ proteolipid ring, stoichiometry 1 ATP per 3.3 H⁺, turnover
+100–200 s⁻¹. K⁺ channels (AKT1, AKT2, KAT1) mediate K⁺ uptake and efflux.
+Aquaporins (PIP1, PIP2 tetramers, ~30-Å pore diameter) allow water flux
+(osmotic permeability Pf ~100 µm s⁻¹) essential for turgor regulation.
+The cell wall-plasma membrane interface is the apoplast-symplast boundary.
 """),
-    ("carbon_atom", """
-The quantum mechanical model of carbon describes electrons as wavefunctions.
-The 1s orbital is a sphere close to the nucleus. The 2s orbital is a larger sphere.
-The three 2p orbitals are dumbbell-shaped lobes oriented along x y z axes. In the
-ground state the two 2p electrons occupy different orbitals with parallel spins by
-Hund's rule. The de Broglie wavelength of a 2p electron is approximately 0.3 nm.
-The Bohr radius is 52.9 picometres defining the most probable electron position
-in hydrogen. Carbon nuclear charge 6 pulls electrons closer. Electron probability
-density maps show a fuzzy cloud around the nucleus. Quantum numbers n l m s
-describe each electron state. The nucleus consists of 6 protons and 6 neutrons
-bound by the strong nuclear force. Proton diameter is approximately 1.7 femtometres.
+
+# ════════════════════════════════════════════════════════════════════
+# SCALE 2 — Chloroplast  (~5 µm)
+# ════════════════════════════════════════════════════════════════════
+
+("chloroplast", """
+The chloroplast (plastid) of vascular plant mesophyll cells is a semiautonomous,
+double-membrane-bounded organelle of cyanobacterial endosymbiotic origin
+(primary endosymbiosis, ~1.5 Ga). The organelle's prolate-spheroid envelope
+measures 3–8 µm (long axis) × 1.5–3 µm (short axis). The outer envelope
+membrane (OEM, 30–38% protein) is permeable to metabolites ≤10 kDa via the
+non-selective outer envelope channel (OEP24, β-barrel). The inner envelope
+membrane (IEM, ~60% protein) is tightly regulated; the triose phosphate/phosphate
+translocator (TPT) exports 3-phosphoglycerate (3-PGA) and dihydroxyacetone
+phosphate (DHAP) in antiport with Pi (Km,DHAP ~0.5 mM). The intermembrane space
+(IMS, ~6 nm) has enzymatic activity including adenylate kinase. The stroma
+(pH 8.0 in light, 7.1 in dark) is a concentrated protein solution (~600 mg/mL):
+RuBisCO hexadecamer (550 kDa, L8S8) accounts for 30–50% of stromal protein,
+forming a paracrystalline array visible in TEM. The plastid-encoded RNA polymerase
+(PEP) and nucleus-encoded RNA polymerase (NEP) both transcribe the ~154 kb
+plastome (ptDNA) organised in 2–100 copies per organelle in nucleoid bodies
+(~500 nm, stainable with DAPI). Translation occurs on 70S ribosomes (50S + 30S
+subunits; streptomycin inhibitable) at a density of ~1,000 per µm³ of stroma.
+The thylakoid membrane network (thylakoidale Membransystem) is highly folded
+into stacked grana (5–25 discs each, mean 10, disc diameter 300–600 nm,
+interthylakoid repeat distance 18–20 nm) interconnected by unstacked stromal
+lamellae. Total thylakoid membrane area per chloroplast ≈ 150–200 µm².
 """),
-]
+
+("chloroplast", """
+Chloroplast ultrastructure as characterised by cryo-electron tomography
+(cryo-ET) and three-dimensional reconstruction reveals the following
+architecture of the thylakoid system: Grana stacks (granum, pl. grana)
+consist of appressed thylakoid membrane pairs held together by the
+LHCII–LHCII stacking interaction (van der Waals + electrostatic) mediated
+by the N-terminal stromal domain of LHCII trimers (LHCB1-3). The lumenal
+space within a granum stack is narrowed to 4–6 nm (compressed by Lhcb
+proteins), vs. 20–40 nm in unstacked stromal lamellae and margins.
+Stromal lamellae connect adjacent grana at right angles and have a lumenal
+width of 20–40 nm. The chloroplast lipid composition is unique: monogalactosyl
+diacylglycerol (MGDG, ~50 mol%) is a non-bilayer lipid forming type-II
+hexagonal phases; digalactosyl diacylglycerol (DGDG, ~30%) stabilises
+the bilayer; sulfoquinovosyl diacylglycerol (SQDG, ~10%) and
+phosphatidylglycerol (PG, ~10%). All four lipids carry predominantly
+16:0, 18:1Δ9, 18:2Δ9,12, and 18:3Δ9,12,15 fatty acid tails. The thylakoid
+membrane is only ~30% lipid by mass; the remaining 70% is protein.
+Plastoglobules (osmiophilic droplets, 50–500 nm diam) are semicrystalline
+lipid bodies attached to the outer thylakoid face, enriched in plastochromanol
+and tocopherol (vitamin E precursors).
+"""),
+
+("chloroplast", """
+Chloroplast import machinery: Newly synthesised nuclear-encoded chloroplast
+proteins (~2,500–3,000 proteins) are imported post-translationally via the
+TOC/TIC (Translocon at Outer/Inner envelope membrane of Chloroplast) complexes.
+TOC75 (β-barrel, OEP channel) + TOC34 + TOC159 form the TOC complex (~500 kDa);
+TIC110 + TIC40 + TIC20 + TIC214 form the inner TIC complex. Import requires
+a stromal targeting sequence (STP, ~30–60 aa, amphipathic helix), GTP
+(TOC34/TOC159 GTPases), and ATP (stromal Hsp70/Hsp93/chaperonin-60 unfoldase).
+Transit peptide cleavage by stromal processing peptidase (SPP, ~150 kDa Zn²⁺
+metalloprotease) releases mature protein. Chloroplast proteome import rate
+~100 proteins min⁻¹ per organelle in high light. The division of chloroplasts
+uses FtsZ1/FtsZ2 (prokaryotic tubulin homologues) forming a mid-plastid Z-ring
+(50-nm-diameter protofilaments), MinD/MinE positioning system, and DRP5B
+dynamin for membrane constriction. Chloroplast number per mesophyll cell doubles
+during leaf expansion (1–2 d at 20°C, 400 µmol m⁻² s⁻¹).
+"""),
+
+# ════════════════════════════════════════════════════════════════════
+# SCALE 3 — Thylakoid Membrane  (~10 nm)
+# ════════════════════════════════════════════════════════════════════
+
+("thylakoid", """
+The thylakoid membrane harbours the photosynthetic electron transport chain
+(PETC) embedded in a 7.5 nm lipid bilayer (40% MGDG, 30% DGDG, 10% SQDG,
+10% PG, 10% mixed). The four major supramolecular complexes and their
+crystallographic structures (PDB):
+
+Photosystem II (PSII, PDB 3ARC, spinach): ~700 kDa, dimeric supercomplex,
+~170 Å × 110 Å footprint. Core subunits D1 (PsbA, 32 kDa) + D2 (PsbD, 34 kDa)
+bind the primary donor P680 (chlorophyll a pair, Mg–Mg 8.2 Å, special pair at
+centre-to-centre distance), pheophytin (PheoD1), and plastoquinone QA/QB.
+Mn4CaO5 oxygen-evolving complex (OEC) at the lumenal face oxidises 2H₂O
+→ O₂ + 4H⁺ + 4e⁻ (S-state cycle, Kok cycle, S0–S4). OEC Mn–Mn distances
+2.7–3.3 Å; Ca–Mn 3.3–3.5 Å. E°(P680⁺/P680) = +1.25 V (strongest biological
+oxidant). Tyrosine 161 (TyrZ, YZ) acts as the radical intermediate.
+The LHCII major antenna complex (PDB 1RWT): trimer, 3 × 25 kDa (Lhcb1-3),
+14 Chl a+b molecules + 4 carotenoids per monomer. Absorption cross-section
+~100 Å² per Chl. Förster resonance energy transfer (FRET) from Chl b
+(λabs 650 nm) to Chl a (λabs 680 nm) in <100 fs.
+"""),
+
+("thylakoid", """
+Cytochrome b6f complex (Cyt b6f, PDB 1Q90, Chlamydomonas): dimeric ~220 kDa,
+cytochrome f (31 kDa, c-type haem, E° = +0.37 V, lumenal), cytochrome b6
+(24 kDa, two b-haems: bp E° = −0.18 V, bn E° = −0.08 V), Rieske Fe-S protein
+(20 kDa, [2Fe-2S] cluster E° = +0.30 V), subunit IV + 4 small subunits.
+Cyt b6f is the rate-limiting step in PETC, turnover ~200–400 H⁺ s⁻¹.
+The Q-cycle (Mitchell chemiosmotic loop) translocates 2H⁺/e⁻ across the
+membrane. Plastocyanin (PC, 10.4 kDa, type I copper protein, E° = +0.37 V)
+is the mobile electron carrier between Cyt b6f and PSI in the lumen.
+
+Photosystem I (PSI, PDB 1JB0): ~540 kDa monomer, 12 protein subunits (PsaA–PsaF).
+P700 (Chl a/a′ heterodimer, 8.9 Å Mg–Mg) E° = +0.49 V; reduced by PC (lumenal).
+Electron transfer: P700* → A0 (Chl a, <5 ps) → A1 (phylloquinone, 10–25 ps)
+→ Fx ([4Fe-4S], ~200 ps) → FA/FB ([4Fe-4S]/[4Fe-4S], ~600 ns) → Fd (ferredoxin,
+11 kDa, [2Fe-2S], E° = −0.42 V). FNR (Fd:NADP⁺ oxidoreductase, EC 1.18.1.2)
+reduces NADP⁺ to NADPH. ΔG for full PETC (H₂O → NADPH) ≈ −220 kJ mol⁻¹.
+
+ATP synthase (CF0–CF1, PDB 6FKF): 595 kDa, c14 proteolipid ring (CF0),
+α3β3γδε (CF1). Rotary mechanism: 14 c-subunits × 1 H⁺/c-subunit = 14 H⁺
+per revolution = ~4.7 ATP synthesised (3 catalytic sites × 120° each per
+revolution × 14/3 = 4.67). ΔpH component ΔΨ ~120 mV + ΔpH ~3 units =
+~300 mV total proton motive force (pmf) in steady-state light.
+"""),
+
+("thylakoid", """
+State transition kinetics and lateral heterogeneity of thylakoid proteins.
+PSII is concentrated in appressed grana membrane; PSI and ATP synthase are
+restricted to non-appressed stroma lamellae (lateral segregation confirmed by
+immuno-gold TEM and single-particle TIRF). Under state-1 conditions (low light),
+LHCII trimers are predominantly PSII-associated. Under state-2 (high light /
+reduced PQ pool), STN7 kinase (Arabidopsis) phosphorylates Thr3 on Lhcb1/2
+(confirmed by phosphoproteomics MS/MS), reducing LHCII–PSII interaction and
+causing LHCII migration to stroma lamellae for energy coupling to PSI.
+Mg²⁺ concentration in the thylakoid lumen oscillates between 1 mM (dark)
+and 3–5 mM (light) due to H⁺/Mg²⁺ exchange via the CLCe channel.
+The plastoquinone (PQ) pool (4–8 PQ molecules per PSII; hydrophobic, diffuses
+in membrane at D_lat ~5 × 10⁻⁹ cm² s⁻¹) equilibrates PSII and Cyt b6f.
+Non-photochemical quenching (NPQ) up-regulates under excess light:
+qE (energy-dependent quenching, PsbS sensor protein + zeaxanthin, fastest,
+ΔpH-triggered), qT (state transition), qI (photoinhibition, D1 turnover ~30 min).
+Thylakoid protein complex stoichiometry per granum disc: ~180 PSII, ~120 LHCII
+trimers, ~80 PSI, ~40 Cyt b6f, ~30 ATP synthase molecules.
+"""),
+
+# ════════════════════════════════════════════════════════════════════
+# SCALE 4 — Chlorophyll a Molecule  (~1 nm)
+# ════════════════════════════════════════════════════════════════════
+
+("chlorophyll", """
+Chlorophyll a (Chl a), systematic IUPAC name: [(2R,3S)-3-[(1Z)-1-[(3E,7R,11R)-
+4,8,12-trimethyltridec-3-en-1-yl]ethylidene]... C55H72MgN4O5, CAS 479-61-8,
+Mr = 893.49 g mol⁻¹. Crystallographic data (X-ray, P2₁/c, R = 0.039):
+porphyrin macrocycle is a chlorin (one pyrrole ring B is reduced:
+C17–C18 single bond, sp3 carbons). Porphyrin plane dimension: ~8.5 Å × 8.5 Å.
+Mg coordination: square planar, Mg–N bond lengths 2.080–2.090 Å (equatorial
+N1, N2, N3, N4). Porphyrin ring bond distances: Cα–Cβ (pyrrole α to β)
+1.380–1.395 Å; Cα–Cm (meso carbon) 1.370–1.385 Å; Cβ–Cβ 1.437–1.445 Å;
+N–Cα 1.365–1.378 Å. The macrocycle deviation from planarity (rms displacement
+of heavy atoms) is <0.04 Å in crystal but up to 0.3 Å in the protein-bound state
+(conformational distortion modulating photophysics). Phytol tail (C20H39OH
+3,7,11,15-tetramethylhexadec-2-en-1-ol, isoprenoid polyterpenol) is connected
+at C17³ ester to the propionic acid side chain. Extended phytol conformation
+spans 18–20 Å. The molecule has μ=3.2 D permanent dipole (in vacuo);
+in protein it modulates to 1–6 D. UV-Vis (diethyl ether): λmax 430 nm (Soret,
+ε = 1.11 × 10⁵ M⁻¹cm⁻¹), λmax 662 nm (Qy, ε = 8.6 × 10⁴ M⁻¹cm⁻¹).
+Excited state: Qy S₁ lifetime 6 ns (in solution), 100–300 fs in antenna
+(Förster/Dexter quenching); triplet yield 64% in O₂-free solvent.
+"""),
+
+("chlorophyll", """
+Electronic structure and photophysics of chlorophyll a (DFT/TD-DFT analysis,
+B3LYP/6-31G*): The HOMO is delocalised over the entire 18-π-electron macrocycle
+(Hückel aromatic, 4n+2 = 18 electrons). The LUMO is concentrated on pyrrole
+rings A and C. HOMO–LUMO gap 1.87 eV (Qy transition at 662 nm = 1.87 eV),
+Soret band = B-band transition at 430 nm (2.88 eV). Natural transition orbital
+(NTO) analysis: Qy NTO pair is delocalised; B-band NTO pair has more localised
+character on individual pyrrole rings. Mg²⁺ is not formally oxidised; it acts
+as a 2+ Lewis acid Lewis coordinating N lone pairs, contracting the macrocycle
+and raising HOMO energy by ~0.4 eV relative to free-base porphyrin.
+Inter-pigment Förster transfer rate: kFRET = 1/τD × (R₀/r)⁶, where τD = 6 ns,
+R₀ = 6.5–8.0 nm (Chl a→Chl a), r = 0.9–1.5 nm (nearest-neighbour in LHCII).
+Calculated kFRET ~10¹² s⁻¹, consistent with femtosecond pump-probe kinetics.
+The Mg²⁺ is coordinated by a fifth axial histidine ligand (protein-bound) in
+PSII/PSI, shifting Qy by −5 to −10 nm (red shift). The excited state energy of
+P680* in PSII is ~1.83 eV (Qy 680 nm), sufficient to oxidise water
+(E°(O₂/H₂O) = +0.82 V at pH 7) given that E°(P680⁺/P680*) ≈ −0.68 V.
+"""),
+
+("chlorophyll", """
+Biosynthesis of chlorophyll a in higher plants proceeds via 17 enzymatic steps
+from 5-aminolevulinic acid (ALA, formed by the C5 pathway: Glu + tRNA^Glu
+→ Glu-1-semialdehyde via GluTR, EC 1.2.1.70, then GSAT aminotransferase).
+Two ALA molecules condense to porphobilinogen (PBG) via ALA dehydratase (ALAD,
+EC 4.2.1.24, Zn²⁺-dependent, homooctamer). Four PBG → hydroxymethylbilane
+→ uroporphyrinogen III → coproporphyrinogen III → protoporphyrinogen IX
+→ protoporphyrin IX (Proto IX, the Mg branch point). Mg chelatase
+(ChlH + ChlI + ChlD + GUN4, ATP-dependent, 4 Mg²⁺ per subunit of ChlI ATPase,
+kcat ~0.25 Mg²⁺ s⁻¹) inserts Mg²⁺ into Proto IX to form Mg-protoporphyrin IX.
+Phytol attachment: chlorophyll synthase (CHLG, EC 2.5.1.62) esterifies
+chlorophyllide a with geranylgeranyl pyrophosphate (GGPP) then geranylgeranyl
+reductase (CHLP) progressively reduces the C17-C18, C13-C14, C9-C10 double bonds
+to yield the saturated phytol tail. Chl a:Chl b ratio in mesophyll cell is
+~3:1; Chl b is formed from Chl a by chlorophyllide a oxygenase (CAO, EC 1.14.13.-).
+"""),
+
+# ════════════════════════════════════════════════════════════════════
+# SCALE 5 — Carbon Atom  (~154 pm)
+# ════════════════════════════════════════════════════════════════════
+
+("carbon_atom", """
+Carbon (C, ⁶₁₂C, atomic number Z = 6): ground-state electron configuration
+1s² 2s² 2p₁¹ 2p₂¹ (Hund's rule, maximised spin multiplicity triplet, S = 1).
+The 1s orbital (nodeless, spherically symmetric, ψ₁s ∝ e^(−Zr/a₀)) has
+a Bohr radius of a₁s = 0.529 / Z_eff Å = 0.529 / 5.67 Å ≈ 0.093 Å (Z_eff for 1s
+via Slater screening σ₁s = 0.30 × 1 = 0.30; Z_eff = 5.70). The 2s and 2p
+orbitals have one radial node (2s) or no radial node but one angular node (2p);
+Z_eff(2s/2p) = 6 − σ₂ = 6 − 3.35 = 2.65 (Slater rules: σ from two 1s
+electrons = 2 × 0.85 = 1.70; σ from the other 2s/2p = 0.35 × 3 = 1.05;
+σ_total = 2.75, Z_eff = 3.25 more precisely by Clementi–Raimondi).
+First ionisation energy: I₁ = 11.2603 eV (=1086.5 kJ mol⁻¹). Electron
+affinity: EA = 1.2629 eV (121.9 kJ mol⁻¹). Electronegativity: χ (Pauling) = 2.55;
+χ (Mulliken) = (I₁ + EA)/2 = 6.26 eV. Covalent radius (sp3): 77 pm; sp2: 73 pm;
+sp: 69 pm. Van der Waals radius: 170 pm. C–C single bond: 154 pm; double 134 pm;
+triple 120 pm. C–H: 109 pm. In sp2 hybridisation (as in porphyrin macrocycle):
+three sp2 hybrid orbitals in a plane at 120° (σ-bonding framework); one
+unhybridised 2pz orbital perpendicular, participating in π-bonding.
+Nuclear: ¹²C, nuclear spin I=0 (even Z, even N, ¹³C: I=1/2, natural abundance
+1.11%, key NMR nucleus). Binding energy of ¹²C nucleus: 92.16 MeV (7.68 MeV/nucleon).
+"""),
+
+("carbon_atom", """
+Quantum mechanical wavefunctions for the carbon atom in the independent-particle
+model (Hartree–Fock, HF): The hydrogenic wavefunction ψ_nlm(r, θ, φ) = R_nl(r) ×
+Y_l^m(θ,φ), where R_nl is the radial wavefunction and Y_l^m the spherical harmonic.
+For carbon the effective nuclear charge modifies R_nl. Hartree–Fock eigenvalues
+(Koopmans' theorem): ε_1s = −305.9 eV; ε_2s = −16.59 eV; ε_2p = −11.33 eV.
+Probability density |ψ|² of the 2pz orbital: dumbbell-shaped lobes of maximum
+probability at r ≈ 2a₀/Z_eff ≈ 0.75 Å from nucleus (for Z_eff ≈ 2.6). Radial
+expectation value ⟨r⟩_2p = (3/2)(a₀/Z_eff) × n² in hydrogenic approximation
+= 1.09 Å (for n=2, Z_eff=2.6). The de Broglie wavelength of a 2p electron:
+λ_dB = h/p = h/(√2mE) = 1.226/√(E_keV) nm; E_2p ≈ 11.3 eV = 0.0113 keV,
+λ_dB = 1.226/√0.0113 = 11.5 nm >> atomic dimension (quantum wavelike). The
+nucleus occupies radius ~3 fm (3 × 10⁻¹⁵ m) per the nuclear shell model,
+comprising 6 protons and 6 neutrons bound by gluon-mediated strong force
+(≈200 MeV fm⁻¹ at short range). Proton mass 938.3 MeV/c²; neutron 939.6 MeV/c².
+Nuclear binding energy 92.16 MeV ÷ 12 nucleons = 7.68 MeV per nucleon,
+consistent with the semi-empirical Bethe–Weizsäcker formula.
+"""),
+
+("carbon_atom", """
+sp2 hybridisation of carbon and the porphyrin π-system: In the flat porphyrin
+macrocycle each meso and pyrrole α,β carbon is sp2-hybridised. The three sp2
+orbitals (formed from 2s + 2px + 2py) point at 120° in the molecular plane.
+The unhybridised 2pz orbital is perpendicular, contributing to the delocalized
+π-network. The 18 π-electrons of chlorophyll's macrocycle satisfy Hückel's rule
+(4n+2, n=4). The HOMO (π) and LUMO (π*) of the 18π macrocycle define the
+optical gap. In conjugated sp2 carbons the C–C bond length averages 1.40 Å
+(between single 1.54 Å and double 1.34 Å, resonance-delocalised). The resonance
+energy of the porphyrin macrocycle is ~600 kJ mol⁻¹ relative to the
+localised-bond reference. Carbon HOMO orbital lobes (2pz) have maximum amplitude
+at ±a₀/Z_eff ≈ ±0.20 nm from the nucleus perpendicular to the porphyrin plane.
+The ionisation energy of a sp2 ring carbon in porphyrin is lowered ~0.5 eV
+relative to isolated carbon due to through-space conjugation stabilisation.
+Electron probability density at the nucleus: |ψ(0)|² = Z³_eff/(πa₀³) for s-orbitals;
+for the 1s of C: |ψ₁s(0)|² = (Z_eff,1s)³/(πa₀³) ≈ 2.7 × 10⁶ nm⁻³, accounting
+for the Fermi contact interaction measured in ¹³C NMR hyperfine coupling.
+"""),
+
+]  # end CORPUS
 
 # ── Quality check ─────────────────────────────────────────────────────────────
+
+PROBE = {
+    "plant_cell":   ["outer","wall","surface","membrane","cell","nucleus","vacuole",
+                     "chloroplast","cytoplasm","organelle","mitochondria","plasmalemma"],
+    "cell_wall":    ["wall","layer","cellulose","fibril","membrane","surface","outer",
+                     "middle","primary","pectin","lamella","plasma"],
+    "chloroplast":  ["organelle","membrane","stroma","thylakoid","disc","granum",
+                     "stack","envelope","lumen","grana","lamella"],
+    "thylakoid":    ["membrane","layer","protein","complex","surface","electron",
+                     "photosystem","chlorophyll","bilayer","antenna","lumen"],
+    "chlorophyll":  ["molecule","ring","atom","bond","carbon","nitrogen","magnesium",
+                     "oxygen","porphyrin","macrocycle","phytol","pyrrole"],
+    "carbon_atom":  ["atom","nucleus","electron","orbital","quantum","bond",
+                     "proton","neutron","wavefunction","shell","hybridisation","pi"],
+}
 
 def fz(v):
     if v is None: return "?"
@@ -210,90 +476,69 @@ def fz(v):
     if v < 1e-6:  return f"{v*1e9:.2f}nm"
     if v < 1e-3:  return f"{v*1e6:.1f}um"
     if v < 1:     return f"{v*1e3:.1f}mm"
-    return f"{v:.3f}m"
+    return f"{v:.4f}m"
 
-PROBE_LABELS = {
-    "plant_cell":  ["outer","wall","surface","membrane","cell","nucleus","vacuole",
-                    "chloroplast","cytoplasm","layer","organelle","interior"],
-    "cell_wall":   ["wall","layer","cellulose","fibril","membrane","surface","outer",
-                    "middle","primary","secondary","pectin","lamella"],
-    "chloroplast": ["organelle","membrane","stroma","thylakoid","disc","granum",
-                    "stack","inner","outer","envelope","lumen"],
-    "thylakoid":   ["membrane","layer","protein","complex","surface","channel",
-                    "electron","light","photosystem","chlorophyll"],
-    "chlorophyll": ["molecule","ring","atom","bond","carbon","nitrogen","magnesium",
-                    "oxygen","hydrogen","chain","tail","porphyrin"],
-    "carbon_atom": ["atom","nucleus","electron","orbital","quantum","bond",
-                    "proton","neutron","spin","wavefunction","shell"],
-}
-
-def quality_check(host, port):
-    print("\n=== Layer decomposition quality check ===")
-    print(f"{'ENTITY':<16} {'CAL':3} {'N':>2}  {'Z_MIN':>10} {'Z_MAX':>10}  LAYERS")
-    print("-"*80)
+def quality_check(h, p):
+    print(f"\n{'ENTITY':<16} {'CAL':3} {'N':>2}  {'Z_MIN':>10} {'Z_MAX':>10}  ACTIVATED LAYERS")
+    print("-"*85)
     for entity, scale_m in SCALES:
-        labels = PROBE_LABELS[entity]
+        labels = PROBE[entity]
         n = len(labels)
         scores = {l: 1.0 - i/n for i,l in enumerate(labels)}
         body = {"entities":[{
-            "entity_id":     entity,
-            "phenotype":     entity,
-            "active_labels": labels,
-            "label_scores":  scores,
-            "x_frac": 0.5, "y_frac": 0.5,
-            "size_est": scale_m,
+            "entity_id": entity, "phenotype": entity,
+            "active_labels": labels, "label_scores": scores,
+            "x_frac": 0.5, "y_frac": 0.5, "size_est": scale_m,
         }]}
-        r = post(host, port, "/overlay/layers", body)
+        r = post(h, p, "/overlay/layers", body)
         reps = r.get("layers", [])
-        if not reps:
-            print(f"  {entity:<16}: NO REPORT")
-            continue
-        rep = reps[0]
-        sp = rep["scale_profile"]
-        lyrs = rep["layers"]
-        if not lyrs:
-            print(f"  {entity:<16}: 0 layers")
-            continue
-        zvs = [l["position"]["z_est_m"] for l in lyrs]
-        layer_brief = "  ".join(f"d{l['depth']}:{l['label'][:10]}" for l in sorted(lyrs, key=lambda x: x["depth"])[:4])
-        print(f"  {entity:<16} {'T' if sp['calibrated'] else 'F':3} {len(lyrs):>2}  {fz(min(zvs)):>10} {fz(max(zvs)):>10}  {layer_brief}")
+        if not reps: print(f"  {entity:<16}: NO REPORT"); continue
+        rep   = reps[0]
+        sp    = rep["scale_profile"]
+        lyrs  = rep["layers"]
+        if not lyrs: print(f"  {entity:<16}: 0 layers"); continue
+        zvs   = [l["position"]["z_est_m"] for l in lyrs]
+        brief = "  ".join(f"d{l['depth']}:{l['label'][:14]}"
+                          for l in sorted(lyrs, key=lambda x: x["depth"])[:4])
+        print(f"  {entity:<16} {'T' if sp['calibrated'] else 'F':3} {len(lyrs):>2}"
+              f"  {fz(min(zvs)):>10} {fz(max(zvs)):>10}  {brief}")
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host",  default="192.168.1.84")
     ap.add_argument("--port",  type=int, default=8090)
-    ap.add_argument("--passes",type=int, default=5)
+    ap.add_argument("--passes",type=int, default=6)
     args = ap.parse_args()
     h, p = args.host, args.port
 
-    # Connectivity check — snapshot is GET, not POST.
-    url = f"http://{h}:{p}/neuro/snapshot"
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            r = json.loads(resp.read())
+        with urllib.request.urlopen(f"http://{h}:{p}/neuro/snapshot", timeout=10) as r:
+            snap = json.loads(r.read())
     except Exception as e:
         print(f"ERROR: cannot reach {h}:{p} — {e}"); sys.exit(1)
-    print(f"Connected to {h}:{p}  pool labels: {len(r.get('active_labels',[]))}")
+    print(f"Connected  pool_labels={len(snap.get('active_labels',[]))}")
 
-    # Register calibrations first.
-    print("\n=== Registering physical scale calibrations ===")
+    print("\n=== Calibrations ===")
     for entity, scale_m in SCALES:
         ok = calibrate(h, p, entity, scale_m)
-        print(f"  {'OK' if ok else '!!'} {entity:<16} -> {fz(scale_m)}")
+        print(f"  {'OK' if ok else '!!'} {entity:<16} {fz(scale_m)}")
 
-    # Training passes.
     total = 0
     for pass_idx in range(args.passes):
-        print(f"\n=== Training pass {pass_idx+1}/{args.passes} ===")
+        print(f"\n=== Pass {pass_idx+1}/{args.passes} ({len(CORPUS)} docs) ===")
         for i, (entity, text) in enumerate(CORPUS):
-            n = train_text(h, p, text)
+            n = train(h, p, text)
             total += n
-            print(f"  [{i+1:02d}/{len(CORPUS)}] {entity:<16} +{n:4d} labels")
-            time.sleep(0.15)
+            bar = "#" * min(40, n // 15)
+            print(f"  [{i+1:02d}/{len(CORPUS)}] {entity:<16} {bar:<40} +{n}")
+            time.sleep(0.12)
 
-    print(f"\nTotal labels trained across {args.passes} passes: {total}")
+    print(f"\nTotal labels: {total:,}  ({total // len(CORPUS)} avg/doc)")
+    print("\n=== Quality check ===")
     quality_check(h, p)
-    print("\nDone. Open cell_viewer.html to explore.")
+    print("\nTraining complete. Open cell_viewer.html")
 
 if __name__ == "__main__":
     main()

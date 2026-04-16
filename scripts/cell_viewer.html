@@ -2,1010 +2,868 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>W1z4rD V1510n — Plant Cell Deconstructor</title>
+<title>W1z4rD V1510n — Cellular Ultrastructure</title>
 <style>
 * { box-sizing:border-box; margin:0; padding:0; }
-body { background:#000; overflow:hidden; font-family:'Courier New',monospace; color:#bcd; }
+body { background:#000307; overflow:hidden; font-family:'Courier New',monospace; color:#8ab4cc; }
 canvas { display:block; width:100vw; height:100vh; }
+#hud { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
 
-/* ── HUD overlays ────────────────────────────────────────── */
-#hud {
-  position:absolute; top:0; left:0; width:100%; height:100%;
-  pointer-events:none;
-}
+#breadcrumb { position:absolute; top:16px; left:20px; font-size:10px; letter-spacing:2px; color:#3a5a6a; text-transform:uppercase; }
+#breadcrumb .crumb { color:#6a9ab8; }
+#breadcrumb .sep { margin:0 8px; color:#1a2a3a; }
+#breadcrumb .active { color:#b0d8f0; }
+#level-badge { position:absolute; top:34px; left:20px; font-size:9px; letter-spacing:2px; color:#1a3a4a; }
+#level-badge .sv { color:#3a7a9a; }
 
-/* top left — breadcrumb */
-#breadcrumb {
-  position:absolute; top:18px; left:20px;
-  font-size:11px; letter-spacing:1.5px; color:#6080a0;
-}
-#breadcrumb span { color:#a0c0e0; }
-#breadcrumb .sep { margin:0 6px; color:#304060; }
-
-/* top right — entity info panel */
 #panel {
-  position:absolute; top:18px; right:20px;
-  width:260px; background:rgba(5,5,18,0.88);
-  border:1px solid #1a2a40; border-radius:4px;
-  padding:12px 14px; font-size:10px;
+  position:absolute; top:16px; right:16px; width:290px;
+  background:rgba(2,5,12,0.94); border:1px solid #0a1828;
+  border-top:2px solid #1a5a7a; border-radius:3px;
+  padding:14px 16px; font-size:10px; pointer-events:all;
 }
-#panel h3 { font-size:11px; color:#6090c0; letter-spacing:1px;
-            text-transform:uppercase; margin-bottom:8px; }
-#panel .row { display:flex; justify-content:space-between;
-              color:#4060a0; margin:3px 0; }
-#panel .row span:last-child { color:#80a0c8; }
-#panel #synthesis { margin-top:8px; color:#506080; font-size:9px;
-                    line-height:1.7; border-top:1px solid #0d1830;
-                    padding-top:8px; }
+#panel .pt { font-size:9px; letter-spacing:2px; color:#1a4a5a; text-transform:uppercase;
+             margin-bottom:10px; border-bottom:1px solid #081420; padding-bottom:6px; }
+#panel .en { font-size:13px; color:#a0cce0; margin-bottom:2px; }
+#panel .el { font-size:9px; color:#2a5a7a; font-style:italic; margin-bottom:8px; }
+#panel .kv { display:flex; justify-content:space-between; margin:2px 0; }
+#panel .kv .k { color:#1a3a4a; font-size:9px; text-transform:uppercase; letter-spacing:0.5px; }
+#panel .kv .v { color:#5a8aaa; font-size:9px; max-width:180px; text-align:right; }
+#panel #ls { margin-top:10px; border-top:1px solid #081420; padding-top:8px; }
+#panel .lt { font-size:8px; letter-spacing:2px; color:#0e2a38; text-transform:uppercase; margin-bottom:5px; }
+#panel .lr { display:flex; align-items:center; gap:6px; margin:3px 0; }
+#panel .ld { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+#panel .ln { font-size:9px; color:#3a6a8a; flex:1; }
+#panel .lz { font-size:9px; color:#1a4a6a; }
+#panel #syn { margin-top:8px; border-top:1px solid #081420; padding-top:8px;
+              font-size:9px; color:#1a3a4a; line-height:1.7; }
 
-/* bottom — layer list */
 #layer-bar {
   position:absolute; bottom:0; left:0; right:0;
-  background:rgba(3,3,14,0.9); border-top:1px solid #0d1830;
-  padding:10px 20px; display:flex; gap:8px; align-items:center;
-  pointer-events:all;
+  background:rgba(1,3,8,0.96); border-top:1px solid #080e18;
+  padding:8px 20px; display:flex; gap:6px; align-items:center;
+  pointer-events:all; overflow-x:auto;
 }
-.layer-chip {
-  padding:5px 12px; border-radius:20px; font-size:10px;
-  cursor:pointer; border:1px solid; letter-spacing:0.5px;
-  transition:all 0.2s; white-space:nowrap;
-}
-.layer-chip:hover { filter:brightness(1.5); transform:translateY(-1px); }
-.layer-chip.active { filter:brightness(1.8); }
-#layer-bar-label { font-size:9px; color:#2a3a50; letter-spacing:1px;
-                   text-transform:uppercase; flex-shrink:0; }
+.lchip { padding:3px 9px; border-radius:2px; font-size:8px; border:1px solid;
+         letter-spacing:0.5px; cursor:pointer; white-space:nowrap;
+         text-transform:uppercase; transition:filter 0.2s; }
+.lchip:hover { filter:brightness(2.5); }
+.lchip.active { filter:brightness(3); }
+#lbl { font-size:8px; color:#0e1e28; letter-spacing:1.5px; text-transform:uppercase; flex-shrink:0; }
 
-/* centre — click hint */
-#click-hint {
-  position:absolute; bottom:70px; left:50%;
-  transform:translateX(-50%);
-  font-size:11px; color:rgba(80,120,160,0.6);
-  letter-spacing:2px; text-transform:uppercase;
-  pointer-events:none; transition:opacity 0.5s;
-}
+#scalebar { position:absolute; bottom:58px; left:20px; font-size:9px; color:#1a3040; letter-spacing:1px; }
+#scalebar-line { width:80px; height:1px; background:#1a3040; margin:3px 0; }
+#click-hint { position:absolute; bottom:56px; left:50%; transform:translateX(-50%);
+              font-size:10px; color:rgba(40,90,120,0.5); letter-spacing:2.5px;
+              text-transform:uppercase; pointer-events:none; transition:opacity 0.5s; }
+#esc-hint { position:absolute; top:16px; left:50%; transform:translateX(-50%);
+            font-size:9px; color:rgba(40,70,100,0.5); letter-spacing:2px;
+            text-transform:uppercase; display:none; pointer-events:none; }
 
-/* scale bar */
-#scalebar {
-  position:absolute; bottom:60px; left:20px;
-  font-size:10px; color:#304050;
+#tooltip {
+  position:absolute; max-width:300px; background:rgba(2,6,15,0.97);
+  border:1px solid #0d2035; border-left:2px solid #2a7ab8;
+  border-radius:3px; padding:10px 13px; font-size:10px;
+  pointer-events:none; opacity:0; transition:opacity 0.12s; z-index:100;
 }
-#scalebar-line {
-  width:80px; height:2px; background:#304050; margin:3px 0;
-}
+#tooltip .ttn { font-size:12px; color:#b8d8f0; margin-bottom:3px; }
+#tooltip .ttl { font-size:9px; color:#3a6a8a; font-style:italic; margin-bottom:5px; }
+#tooltip .ttd { color:#5a8aaa; margin-bottom:4px; font-size:9px; }
+#tooltip .tti { color:#304858; font-size:9px; line-height:1.6; }
+#tooltip .ttx { margin-top:5px; border-top:1px solid #0a1825; padding-top:5px; }
+#tooltip .ttc { display:inline-block; background:rgba(15,35,55,0.7);
+                border:1px solid #0e2030; border-radius:2px;
+                padding:1px 5px; font-size:7px; color:#3a6888; margin:1px; }
 
-/* loading overlay */
 #loading {
-  position:absolute; inset:0; background:#000;
-  display:flex; align-items:center; justify-content:center;
-  font-size:13px; color:#304060; letter-spacing:3px;
-  text-transform:uppercase; transition:opacity 1s;
+  position:absolute; inset:0; background:#000307;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  font-size:11px; color:#1a4a6a; letter-spacing:3px; z-index:200;
 }
-
-/* tooltip */
-#tip {
-  position:absolute; background:rgba(3,8,20,0.95);
-  border:1px solid #1a2840; border-radius:3px;
-  padding:7px 10px; font-size:10px; pointer-events:none;
-  max-width:200px; line-height:1.7; display:none;
-}
+#loading-bar { width:200px; height:1px; background:#08121c; margin-top:16px; overflow:hidden; }
+#loading-progress { height:100%; background:#2a7ab8; width:0; transition:width 0.3s; }
+#loading-text { margin-top:8px; font-size:9px; color:#0e2a3a; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 
-<div id="hud">
-  <div id="breadcrumb">PLANT CELL</div>
+<div id="loading">
+  <span>W1Z4RD V1510N — CELLULAR ULTRASTRUCTURE</span>
+  <div id="loading-bar"><div id="loading-progress"></div></div>
+  <div id="loading-text">CALIBRATING PHYSICAL SCALES...</div>
+</div>
 
+<div id="hud" style="display:none">
+  <div id="breadcrumb"></div>
+  <div id="level-badge"></div>
   <div id="panel">
-    <h3 id="panel-title">Plant Cell</h3>
-    <div class="row"><span>Scale</span><span id="p-scale">~20 µm</span></div>
-    <div class="row"><span>Layers</span><span id="p-layers">—</span></div>
-    <div class="row"><span>Depth</span><span id="p-depth">0 / 5</span></div>
-    <div class="row"><span>Calibrated</span><span id="p-cal">—</span></div>
-    <div id="synthesis">Loading from neural fabric…</div>
+    <div class="pt">Neural Fabric — Overlay API</div>
+    <div class="en" id="p-name">—</div>
+    <div class="el" id="p-latin">—</div>
+    <div id="p-kvs"></div>
+    <div id="ls">
+      <div class="lt">Calibrated Layers</div>
+      <div id="p-layers"></div>
+    </div>
+    <div id="syn" id="p-syn"></div>
   </div>
-
-  <div id="click-hint">CLICK OBJECT TO DRILL IN &nbsp;|&nbsp; ESC / RIGHT-CLICK TO GO BACK</div>
-
-  <div id="scalebar">
-    <div id="scalebar-label">20 µm</div>
-    <div id="scalebar-line"></div>
-  </div>
-
-  <div id="layer-bar">
-    <span id="layer-bar-label">Layers</span>
-    <!-- filled by JS -->
-  </div>
-
-  <div id="tip"></div>
-  <div id="loading">Initialising neural fabric connection…</div>
+  <div id="layer-bar"><span id="lbl">Depth Layers</span></div>
+  <div id="scalebar"><div id="scalebar-line"></div><span id="scalebar-text">—</span></div>
+  <div id="click-hint">Click structure to drill down</div>
+  <div id="esc-hint">Right-click / ESC to ascend</div>
+</div>
+<div id="tooltip">
+  <div class="ttn" id="tt-name"></div>
+  <div class="ttl" id="tt-latin"></div>
+  <div class="ttd" id="tt-dim"></div>
+  <div class="tti" id="tt-detail"></div>
+  <div class="ttx" id="tt-chips"></div>
 </div>
 
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
   }
 }
 </script>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-// ═══════════════════════════════════════════════════════
-// CONFIG
-// ═══════════════════════════════════════════════════════
-const API = "http://192.168.1.84:8090";
+const HOST = '192.168.1.84:8090';
+const DEPTH_COLORS = ['#6a2a8a','#2a5aaa','#1a8a9a','#1a9a5a','#8a9a1a','#9a5a1a'];
 
-// Level definitions — each level = one "zoom" step
 const LEVELS = [
-  {
-    id: "plant_cell",    name: "Plant Cell",
-    scale_m: 20e-6,      label: "~20 µm",
-    depth: 0,
-    hint: "Click the cell to zoom inside",
-    labels: ["outer","wall","surface","membrane","cell","nucleus","vacuole",
-             "chloroplast","cytoplasm","layer","organelle","rectangular","green"],
-  },
-  {
-    id: "chloroplast",   name: "Chloroplast",
-    scale_m: 5e-6,       label: "~5 µm",
-    depth: 2,
-    hint: "Click the chloroplast to see inside",
-    labels: ["organelle","membrane","stroma","thylakoid","disc","granum",
-             "stack","inner","outer","envelope","lumen","chlorophyll","green"],
-  },
-  {
-    id: "thylakoid",     name: "Thylakoid Membrane",
-    scale_m: 10e-9,      label: "~10 nm",
-    depth: 3,
-    hint: "Click a protein complex to zoom to molecule",
-    labels: ["membrane","layer","protein","complex","surface","electron",
-             "light","photosystem","chlorophyll","disc","flat","bilayer"],
-  },
-  {
-    id: "chlorophyll",   name: "Chlorophyll a",
-    scale_m: 1e-9,       label: "~1 nm",
-    depth: 4,
-    hint: "Click a ring atom to zoom to carbon atom",
-    labels: ["molecule","ring","atom","bond","carbon","nitrogen","magnesium",
-             "oxygen","hydrogen","chain","tail","porphyrin","flat"],
-  },
-  {
-    id: "carbon_atom",   name: "Carbon Atom",
-    scale_m: 0.154e-9,   label: "~154 pm",
-    depth: 5,
-    hint: "Deepest level — atomic structure",
-    labels: ["atom","nucleus","electron","orbital","quantum","bond",
-             "proton","neutron","spin","wavefunction","shell","cloud"],
-  },
+  { id:'plant_cell',  name:'Mesophyll Cell',          latin:'Cellula mesophylli chlorenchymatis',    scaleM:20e-6,   camPos:[0,0,3.4], look:[0,0,0] },
+  { id:'chloroplast', name:'Chloroplast',               latin:'Chloroplastum',                         scaleM:5e-6,    camPos:[0,0,1.6], look:[0,0,0] },
+  { id:'thylakoid',   name:'Thylakoid Membrane',       latin:'Membrana thylakoidea',                  scaleM:10e-9,   camPos:[0,0.4,1.2], look:[0,0,0] },
+  { id:'chlorophyll', name:'Chlorophyll a',             latin:'Chlorophyllum a — C₅₅H₇₂MgN₄O₅',      scaleM:1e-9,    camPos:[0,0,0.9], look:[0,0,0] },
+  { id:'carbon_atom', name:'sp² Carbon Atom',           latin:'Atomus carbonis — hybridisatio sp²',    scaleM:154e-12, camPos:[0,0,0.18], look:[0,0,0] },
 ];
 
-// Depth colours matching the sidebar
-const DEPTH_COLORS = [
-  new THREE.Color(0x223344),
-  new THREE.Color(0x1a4a28),
-  new THREE.Color(0x2a6a2a),
-  new THREE.Color(0x8a7010),
-  new THREE.Color(0x8a2800),
-  new THREE.Color(0x7a0840),
-];
+const ENTITY_KVS = {
+  plant_cell:  [['Dimensions','20–50 µm × 10–30 µm'],['Genome','~135 Mbp (A. thaliana)'],['Vacuole pH','5.0–5.5'],['Turgor','0.8–1.2 MPa'],['Chloroplasts','50–200 per cell']],
+  chloroplast: [['Dimensions','4–8 µm × 2–4 µm'],['Thylakoids','10–100 grana per chloroplast'],['cpDNA','154 kb circular (tobacco)'],['Import','TOC75/TIC110 translocon'],['Division','FtsZ1/FtsZ2 GTPases']],
+  thylakoid:   [['Bilayer','~10 nm; MGDG 55%, DGDG 25%'],['PSII','350 kDa · PDB 3ARC · 17×10 nm'],['PSI','520 kDa · PDB 1JB0 · 15 nm'],['CF₀CF₁','580 kDa · PDB 6FKF · 14 nm'],['ΔpH','3.5 units; ΔΨ ≈ 120 mV']],
+  chlorophyll: [['Formula','C₅₅H₇₂MgN₄O₅'],['MW','893.49 Da'],['Mg–N bond','2.080–2.090 Å (crystallographic)'],['Qy absorbance','680 nm (in vivo 683 nm)'],['ε (Soret)','85 000 M⁻¹cm⁻¹ at 430 nm']],
+  carbon_atom: [['Z / A','6 / 12'],['Config','[He] 2s² 2p²'],['ε₁s (HF)','–305.9 eV'],['ε₂p (HF)','–11.33 eV'],['r_cov (sp²)','73 pm; r_vdW 170 pm']],
+};
+const ENTITY_SYN = {
+  plant_cell:  'CO₂ + H₂O → [CH₂O] + O₂\nΔG°ʹ = +2870 kJ mol⁻¹\n48 photons consumed per hexose',
+  chloroplast: 'Chl a Qy 680/700 nm + Chl b Qy 650 nm\nLight harvesting via LHCII trimer (27 Chl)',
+  thylakoid:   'Z-scheme: P680 → PQ → Cyt b6f → PC → P700\nATP yield: ~1.3 ATP per 2e⁻ via CF₀CF₁',
+  chlorophyll: 'Biosynthesis: Glu-1P → ALA → Urogen III → Protoporphyrin IX → Mg-Proto → Chl a\nGlutamate-1-semialdehyde aminotransferase (GluTR)',
+  carbon_atom: 'sp² hybridisation: 3 × σ (120° planar) + 1 × π (2pz ⊥ plane)\nSlater Z_eff(2p) = 3.25; de Broglie λ = h/p at E₂p',
+};
 
-// ═══════════════════════════════════════════════════════
-// Three.js setup
-// ═══════════════════════════════════════════════════════
-const canvas   = document.getElementById("c");
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const STRUCTURE_INFO = {
+  cell_wall:   { name:'Cell Wall',          latin:'Paries cellularis',            dim:'0.1–0.5 µm thick',       detail:'Primary wall: cellulose I_β microfibrils (3.5 nm Ø) in hemicellulose/pectin matrix; unit cell a=7.78 Å, b=8.20 Å, c=10.38 Å (monoclinic).' },
+  vacuole:     { name:'Central Vacuole',    latin:'Vacuola centralis',            dim:'Up to 90% cell volume',  detail:'Tonoplast-bounded compartment; pH 5.0–5.5; turgor: 0.8–1.2 MPa; malate/citrate accumulation; anthocyanin storage in pH indicator role.' },
+  nucleus:     { name:'Nucleus',            latin:'Nucleus cellulae',             dim:'5–10 µm Ø',              detail:'Double-membrane (NPC 120 nm Ø, ~2000 per nucleus); Arabidopsis: 5 chromosomes, 135 Mbp; nucleolus generates 45S pre-rRNA (18S+5.8S+28S).' },
+  chloroplast: { name:'Chloroplast',        latin:'Chloroplastum',                dim:'5 µm × 2–3 µm',          detail:'Plastid of streptophyte lineage; ~1500 nucleus-encoded proteins imported via TOC/TIC; 50–100 per mesophyll cell; self-replicating via FtsZ.' },
+  mitochondria:{ name:'Mitochondrion',      latin:'Mitochondrium',                dim:'0.5–2 µm',               detail:'Cristae-membraned organelle; OXPHOS: Complex I–V; mtDNA ~367 kb (Arabidopsis); fusion/fission via DRP3A/FZL; generates ~30–32 ATP per glucose.' },
+  er:          { name:'Rough ER',           latin:'Reticulum endoplasmicum granulosum', dim:'30–100 nm lumen', detail:'Ribosome-studded ER; co-translational import via Sec61 translocon; N-glycosylation by OST complex; BiP/GRP78 chaperone-mediated folding.' },
+  golgi:       { name:'Golgi Apparatus',    latin:'Apparatus Golgiensis',         dim:'1–3 µm stack',           detail:'5–8 cisternae (cis→medial→trans); glycan processing; TGN vesicle sorting; plant Golgi moves along actin at 3–5 µm/s (myosin XI).' },
+  grana:       { name:'Granum / Thylakoid Stack', latin:'Granum',                dim:'300–600 nm Ø; 5–15 discs',detail:'Stacked appressed thylakoids enriched in PSII/LHCII; non-appressed stroma lamellae carry PSI/ATP synthase; PSII repair via FtsH protease.' },
+  stroma_lam:  { name:'Stroma Lamellae',   latin:'Lamellae stromales',           dim:'~10 nm thick',           detail:'Non-appressed membranes bridging grana; enriched in PSI (P700), NADPH-dehydrogenase, ATP synthase; site of cyclic electron flow.' },
+  psii:        { name:'Photosystem II',     latin:'Photosystema II',              dim:'17×10×8 nm; 350 kDa',    detail:'PDB 3ARC; D1/D2 heterodimer reaction centre; Mn₄CaO₅ cluster oxidises 2H₂O → O₂ + 4H⁺ + 4e⁻; P680 Eₒ′ = +1.26 V; 36 Chl per monomer.' },
+  psi:         { name:'Photosystem I',      latin:'Photosystema I',               dim:'15 nm; 520 kDa trimer',  detail:'PDB 1JB0; PsaA/PsaB core; P700 Chl a special pair (Eₒ′ = −0.43 V); reduces Fd → NADPH via FNR; serves cyclic and linear electron flow.' },
+  cytb6f:      { name:'Cytochrome b₆f',    latin:'Complexus cytochromi b₆f',     dim:'8×5×5 nm; 215 kDa dimer',detail:'PDB 1Q90; Q-cycle pumps 2H⁺/e⁻; contains haem b_L, b_H, c_n, f (c₁); plastocyanin reduction Eₒ′ PC = +0.37 V; regulatory hub of state transitions.' },
+  atp_syn:     { name:'ATP Synthase CF₀CF₁','latin':'Complexus ATP synthasei',   dim:'14 nm stalk + 10 nm head',detail:'PDB 6FKF; CF₀: c₁₄ ring + a/b₂; CF₁: α₃β₃γδε; ΔG_ATP = 30.5 kJ/mol; rotational catalysis ~120 H⁺ per ATP at 150 RPM; H⁺/ATP ratio ~4.67.' },
+  porphyrin:   { name:'Porphyrin Macrocycle','latin':'Porphyrinum',               dim:'8.6 Å ring Ø',           detail:'Aromatic 18π-electron [18]annulene core; four pyrrole subunits (A–D) bridged by meso-carbons; ring current shift δ(inner NH) ~–3 ppm (¹H NMR); Mg²⁺ displaces 2 NH protons.' },
+  mg_ion:      { name:'Magnesium(II) Ion', latin:'Mg²⁺ (magnesium)',             dim:'r_ion = 72 pm',          detail:'Square-planar coordination by 4 porphyrin N atoms (Mg–N 2.08–2.09 Å); fifth axial ligand from His residue in antenna protein; Lewis acid activates carbonyl groups.' },
+  phytol:      { name:'Phytol Chain',       latin:'Catena phytolica',             dim:'C₂₀ isoprenoid; ~1.8 nm',detail:'3,7,11,15-tetramethylhexadec-2-en-1-ol esterified to ring IV propionate; provides hydrophobic membrane anchor; derived from geranylgeranyl-PP via reduction.' },
+  nucleus_atom:{ name:'Carbon Nucleus',     latin:'Nucleus atomicus',             dim:'r ≈ 2.7 fm',             detail:'6 protons + 6 neutrons; ¹²C spin-0 (abundant 98.9%), ¹³C spin-½ (NMR active, 1.1%); ¹⁴C t½ = 5730 yr (radiocarbon dating); nuclear binding energy 92.16 MeV.' },
+  orbital_1s:  { name:'1s Orbital',         latin:'Orbitalis 1s',                 dim:'⟨r⟩ = 3a₀/2Z ≈ 79 pm',  detail:'Spherically symmetric ψ₁s = (Z³/πa₀³)^½ · e^(−Zr/a₀); Slater Z_eff = 5.70 for C; node-free; contributes ~–305.9 eV (HF eigenvalue) to total energy.' },
+  orbital_2s:  { name:'2s Orbital',         latin:'Orbitalis 2s',                 dim:'⟨r⟩ = 6a₀/Z ≈ 158 pm', detail:'1 radial node at r = 2a₀/Z; penetrates near nucleus; Slater Z_eff(2s) = 3.25; screened by 1s² pair; contributes –16.59 eV (HF); sp hybridisation mixes with 2p.' },
+  orbital_2p:  { name:'2p Orbital (pure)',  latin:'Orbitalis 2p purus',           dim:'⟨r⟩ = 5a₀/Z ≈ 132 pm', detail:'Dumbbell lobe symmetry; 1 angular node (nodal plane through nucleus); in sp² carbon, 2pz stays pure and forms π-bond; ε₂p = –11.33 eV (HF); de Broglie λ = 327 pm at this energy.' },
+  sp2_hybrid:  { name:'sp² Hybrid Orbital', latin:'Orbitalis hybridus sp²',       dim:'σ-framework; 120° angle', detail:'Linear combination: ψ(sp²) = (1/√3)ψ2s + (√2/√3)ψ2px etc.; 33.3% s-character; bond shorter/stronger than sp³; Cα–Cm in porphyrin 1.37–1.38 Å; characteristic of graphene, benzene, and porphyrins.' },
+};
+
+// ─── Three.js setup ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, powerPreference:'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setClearColor(0x000005, 1);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-const scene  = new THREE.Scene();
-scene.fog    = new THREE.FogExp2(0x000008, 0.06);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000307);
+scene.fog = new THREE.FogExp2(0x000307, 0.18);
 
-const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 200);
-camera.position.set(0, 0.5, 5.5);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.001, 100);
+camera.position.set(0, 0, 3.4);
 
 const controls = new OrbitControls(camera, canvas);
-controls.enableDamping   = true;
-controls.dampingFactor   = 0.05;
-controls.minDistance     = 0.5;
-controls.maxDistance     = 20;
-controls.autoRotate      = true;
-controls.autoRotateSpeed = 0.4;
+controls.enableDamping = true; controls.dampingFactor = 0.07;
+controls.autoRotate = true; controls.autoRotateSpeed = 0.4;
 
-// Lights
-scene.add(new THREE.AmbientLight(0x101830, 4));
-const sun = new THREE.DirectionalLight(0x8090d0, 3);
-sun.position.set(3, 5, 4);
-sun.castShadow = true;
-scene.add(sun);
-const fill = new THREE.PointLight(0x204a10, 4, 20);
-fill.position.set(-3, -1, 2);
-scene.add(fill);
-const rim  = new THREE.PointLight(0x601050, 2, 15);
-rim.position.set(0, -3, -4);
-scene.add(rim);
+// Lighting — confocal CLSM aesthetic
+const ambLight = new THREE.AmbientLight(0x020408, 1.0);
+scene.add(ambLight);
+const keyLight = new THREE.PointLight(0x80c0e8, 3.0, 12);
+keyLight.position.set(2, 3, 3);
+scene.add(keyLight);
+const rimLight = new THREE.PointLight(0x1a3060, 2.0, 10);
+rimLight.position.set(-3, -1, -2);
+scene.add(rimLight);
+const fillLight = new THREE.PointLight(0x602010, 0.8, 8);
+fillLight.position.set(1, -2, 1);
+scene.add(fillLight);
 
-// ═══════════════════════════════════════════════════════
-// State
-// ═══════════════════════════════════════════════════════
-let currentLevelIdx  = 0;
-let levelGroup       = null;    // current THREE.Group
-let apiData          = {};      // levelId → API response
-let clickableObjects = [];      // objects raycaster checks
-let transitioning    = false;
-let hintTimeout      = null;
+// Post-processing — UnrealBloom
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight), 1.4, 0.6, 0.12);
+composer.addPass(bloomPass);
 
-// Camera animation state
-const camTarget = { pos: new THREE.Vector3(), look: new THREE.Vector3() };
-let camAnimating = false;
-let camAlpha     = 0;
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
 
-// ═══════════════════════════════════════════════════════
-// API helpers
-// ═══════════════════════════════════════════════════════
-async function apiPost(path, body) {
-  const r = await fetch(`${API}${path}`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify(body),
+// ─── State ─────────────────────────────────────────────────────────────────────
+let currentLevel = 0;
+let currentGroup = null;
+let hoveredMesh = null;
+let drillables = [];
+let cameraAnim = null;
+let layerData = {};  // entity_id → layers[]
+const clock = new THREE.Clock();
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let mouseDownPos = null;
+
+// ─── Material helpers ───────────────────────────────────────────────────────────
+function mat(color, opts={}) {
+  return new THREE.MeshPhysicalMaterial({
+    color, roughness:0.35, metalness:0.05,
+    emissive: opts.emissive ?? 0x000000,
+    emissiveIntensity: opts.ei ?? 1.0,
+    transparent: opts.transparent ?? false,
+    opacity: opts.opacity ?? 1.0,
+    transmission: opts.transmission ?? 0,
+    thickness: opts.thickness ?? 0,
+    side: opts.side ?? THREE.FrontSide,
+    ...opts.extra,
   });
-  return r.ok ? r.json() : null;
 }
+function info(obj, key) { obj.userData.info = STRUCTURE_INFO[key] ?? {}; }
+function drillable(obj, level) { obj.userData.drillTarget = level; drillables.push(obj); }
 
-async function fetchLayersFor(level) {
-  const n = level.labels.length;
-  const scores = Object.fromEntries(level.labels.map((l, i) => [l, 1 - i / n]));
-  const resp = await apiPost("/overlay/layers", {
-    entities: [{
-      entity_id:     level.id,
-      phenotype:     level.id,
-      active_labels: level.labels,
-      label_scores:  scores,
-      x_frac: 0.5, y_frac: 0.5,
-      size_est: level.scale_m,
-    }]
-  });
-  return resp?.layers?.[0] ?? null;
-}
+// ─── LEVEL 0 — Mesophyll Plant Cell ────────────────────────────────────────────
+function buildPlantCell(group) {
+  // Cell wall (paries cellularis)
+  const wallMat = mat(0x0e2810, { transparent:true, opacity:0.35, side:THREE.DoubleSide });
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(2.12,2.12,1.06,3,3,2), wallMat);
+  info(wall,'cell_wall'); group.add(wall);
 
-async function registerCalibrations() {
-  await Promise.all(LEVELS.map(l =>
-    apiPost("/overlay/layers/calibrate", {
-      entity_type:   l.id,
-      known_scale_m: l.scale_m,
-    }).catch(() => {})
-  ));
-}
+  // Cell body (plasma membrane inside wall)
+  const bodyMat = mat(0x060e18, { transparent:true, opacity:0.12, transmission:0.5, thickness:0.1, side:THREE.DoubleSide });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2,2,1,3,3,2), bodyMat);
+  group.add(body);
 
-// ═══════════════════════════════════════════════════════
-// Level builders — procedurally generate the 3D scene
-// each one uses the API layer data to parameterise geometry
-// ═══════════════════════════════════════════════════════
+  // Central vacuole (tonoplast)
+  const vacMat = mat(0x030a1a, { transparent:true, opacity:0.18, transmission:0.85, thickness:0.5 });
+  const vac = new THREE.Mesh(new THREE.SphereGeometry(0.76,32,24), vacMat);
+  vac.scale.set(1, 1, 0.7);
+  info(vac,'vacuole'); group.add(vac);
 
-function fmtZ(v) {
-  if (!v) return "0";
-  if (v < 1e-12) return `${(v*1e15).toPrecision(3)} fm`;
-  if (v < 1e-9)  return `${(v*1e12).toPrecision(3)} pm`;
-  if (v < 1e-6)  return `${(v*1e9).toPrecision(3)} nm`;
-  if (v < 1e-3)  return `${(v*1e6).toPrecision(3)} µm`;
-  if (v < 1)     return `${(v*1e3).toPrecision(3)} mm`;
-  return `${v.toPrecision(3)} m`;
-}
+  // Nucleus (karyon)
+  const nucMat = mat(0x28084a, { emissive:0x180030, ei:0.8, roughness:0.2 });
+  const nuc = new THREE.Mesh(new THREE.SphereGeometry(0.14,24,16), nucMat);
+  nuc.position.set(0.15, 0.18, 0.1);
+  info(nuc,'nucleus'); group.add(nuc);
+  // nucleolus
+  const nuclMat = mat(0x4a0a72, { emissive:0x28003a, ei:1.0 });
+  const nucl = new THREE.Mesh(new THREE.SphereGeometry(0.048,12,8), nuclMat);
+  nucl.position.set(0.15, 0.18, 0.1).addScalar(0.04);
+  group.add(nucl);
 
-// ── Level 0: Plant Cell ────────────────────────────────
-function buildPlantCell(report, group) {
-  const layers  = report?.layers ?? [];
-  const nChlopl = Math.max(8, layers.filter(l => l.depth === 2).length * 6 + 6);
-
-  // Cell body — semi-transparent box
-  const cellGeo = new THREE.BoxGeometry(2.4, 1.5, 1.0);
-  const cellMat = new THREE.MeshPhongMaterial({
-    color: 0x0a1a0a, transparent: true, opacity: 0.25,
-    side: THREE.DoubleSide, depthWrite: false,
-  });
-  group.add(new THREE.Mesh(cellGeo, cellMat));
-
-  // Cell wall — edge glow
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x204820, linewidth: 1 });
-  const edges   = new THREE.EdgesGeometry(new THREE.BoxGeometry(2.41, 1.51, 1.01));
-  group.add(new THREE.LineSegments(edges, edgeMat));
-
-  // Vacuole — large central sphere, blue-tinted
-  const vacuoleMat = new THREE.MeshPhongMaterial({
-    color: 0x0a1530, transparent: true, opacity: 0.18, depthWrite: false,
-  });
-  const vac = new THREE.Mesh(new THREE.SphereGeometry(0.55, 32, 20), vacuoleMat);
-  vac.position.set(0.1, -0.05, 0);
-  group.add(vac);
-
-  // Nucleus — yellow sphere, slightly off-center
-  const nucGeo = new THREE.SphereGeometry(0.18, 24, 16);
-  const nucMat = new THREE.MeshPhongMaterial({ color: 0xc0a020, emissive: 0x302000 });
-  const nuc = new THREE.Mesh(nucGeo, nucMat);
-  nuc.position.set(-0.5, 0.3, 0.15);
-  nuc.castShadow = true;
-  nuc.userData.label  = "Nucleus";
-  nuc.userData.detail = "~8 µm · stores DNA · controls transcription";
-  group.add(nuc);
-  clickableObjects.push(nuc);
-
-  // Chloroplasts — green oval bodies
-  for (let i = 0; i < nChlopl; i++) {
-    const angle = (i / nChlopl) * Math.PI * 2;
-    const r     = 0.55 + Math.random() * 0.35;
-    const x     = Math.cos(angle) * r * 0.9;
-    const y     = (Math.random() - 0.5) * 0.9;
-    const z     = Math.sin(angle) * r * 0.4;
-    // Ellipsoid via scaled sphere
-    const geo   = new THREE.SphereGeometry(0.10, 16, 10);
-    const brightness = 0.15 + (i / nChlopl) * 0.25;
-    const mat = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(0, 0.35 + brightness, 0),
-      emissive: new THREE.Color(0, 0.04, 0),
-    });
-    const cp = new THREE.Mesh(geo, mat);
-    cp.scale.set(1.8, 0.9, 0.9);
-    cp.position.set(x, y, z);
-    cp.castShadow = true;
-    cp.userData.label  = "Chloroplast";
-    cp.userData.detail = `~5 µm · ${i % 2 === 0 ? "light reactions" : "Calvin cycle"}`;
-    cp.userData.drillTarget = 1; // clicking takes us to level 1
+  // Chloroplasts (chloroplastum) — drillable
+  const cpMat = mat(0x083810, { emissive:0x001e08, ei:1.2, roughness:0.3 });
+  const cpGeo = new THREE.SphereGeometry(0.09,16,10);
+  const cpPositions = [];
+  for (let i=0; i<16; i++) {
+    const a = (i/16)*Math.PI*2 + Math.random()*0.4;
+    const r = 0.48 + Math.random()*0.38;
+    const z = (Math.random()-0.5)*0.28;
+    cpPositions.push([r*Math.cos(a), r*Math.sin(a), z]);
+  }
+  cpPositions.forEach(([x,y,z]) => {
+    const cp = new THREE.Mesh(cpGeo, cpMat);
+    cp.position.set(x,y,z);
+    cp.scale.set(1, 0.55, 0.55);
+    cp.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, 0);
+    cp.userData.info = STRUCTURE_INFO.chloroplast;
+    drillable(cp, 1);
     group.add(cp);
-    clickableObjects.push(cp);
-  }
-
-  // Label tags (floating text via canvas sprite)
-  addSprite(group, "CELL WALL", new THREE.Vector3(0, 0.85, 0),  "#2a5a2a", 10);
-  addSprite(group, "NUCLEUS",   new THREE.Vector3(-0.5,0.55,0), "#c0a020", 10);
-  addSprite(group, "VACUOLE",   new THREE.Vector3(0.1, 0.0, 0), "#2040a0", 10);
-  addSprite(group, "CHLOROPLASTS", new THREE.Vector3(0.7,-0.2,0), "#208020", 10);
-}
-
-// ── Level 1: Chloroplast ──────────────────────────────
-function buildChloroplast(report, group) {
-  const layers = report?.layers ?? [];
-  const nGrana = Math.max(6, layers.filter(l => l.depth <= 3).length * 2 + 4);
-
-  // Outer envelope — double membrane ellipsoid
-  for (let shell = 0; shell < 2; shell++) {
-    const r = 1.0 + shell * 0.06;
-    const geo = new THREE.SphereGeometry(r, 32, 24);
-    const mat = new THREE.MeshPhongMaterial({
-      color: shell === 0 ? 0x0a2010 : 0x0d2a14,
-      transparent: true, opacity: shell === 0 ? 0.30 : 0.15,
-      side: THREE.DoubleSide, depthWrite: false,
-    });
-    const m = new THREE.Mesh(geo, mat);
-    m.scale.set(1.6, 1.0, 0.9);
-    group.add(m);
-  }
-
-  // Edges
-  const edgeGeo = new THREE.EdgesGeometry(new THREE.SphereGeometry(1.02, 16, 12));
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x1a4a1a, transparent: true, opacity: 0.5 });
-  const eM = new THREE.LineSegments(edgeGeo, edgeMat);
-  eM.scale.set(1.62, 1.02, 0.92);
-  group.add(eM);
-
-  // Grana — stacks of thylakoid discs
-  for (let g = 0; g < nGrana; g++) {
-    const angle = (g / nGrana) * Math.PI * 2;
-    const gx = Math.cos(angle) * 0.6;
-    const gz = Math.sin(angle) * 0.3;
-    const gy = (Math.random() - 0.5) * 0.4;
-
-    const granum = new THREE.Group();
-    const nDiscs = 3 + Math.floor(Math.random() * 5);
-    for (let d = 0; d < nDiscs; d++) {
-      const discGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.025, 20);
-      const discMat = new THREE.MeshPhongMaterial({
-        color: new THREE.Color(0, 0.30 + d * 0.04, 0.02),
-        emissive: new THREE.Color(0, 0.05, 0),
-      });
-      const disc = new THREE.Mesh(discGeo, discMat);
-      disc.position.y = d * 0.028;
-      disc.castShadow = true;
-      disc.userData.label  = "Thylakoid Disc";
-      disc.userData.detail = `${fmtZ(10e-9)} diameter · chlorophyll embedded`;
-      disc.userData.drillTarget = 2;
-      granum.add(disc);
-      clickableObjects.push(disc);
-    }
-    granum.position.set(gx, gy, gz);
-    group.add(granum);
-  }
-
-  // Stroma particles
-  const ptGeo = new THREE.BufferGeometry();
-  const pts = [];
-  for (let i = 0; i < 400; i++) {
-    pts.push((Math.random()-0.5)*2.4, (Math.random()-0.5)*1.5, (Math.random()-0.5)*1.4);
-  }
-  ptGeo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-  const ptMat = new THREE.PointsMaterial({ color: 0x205030, size: 0.015, sizeAttenuation: true });
-  group.add(new THREE.Points(ptGeo, ptMat));
-
-  addSprite(group, "OUTER MEMBRANE", new THREE.Vector3(0, 1.15, 0),  "#205030", 9);
-  addSprite(group, "GRANA (thylakoid stacks)", new THREE.Vector3(0.6,-0.5,0), "#30a040", 9);
-  addSprite(group, "STROMA", new THREE.Vector3(-0.5,0.2,0), "#204a28", 9);
-}
-
-// ── Level 2: Thylakoid Membrane ───────────────────────
-function buildThylakoid(report, group) {
-  const layers = report?.layers ?? [];
-
-  // Flat membrane disc — two layers (bilayer)
-  for (let layer = 0; layer < 2; layer++) {
-    const y = (layer - 0.5) * 0.055;
-    const geo = new THREE.CylinderGeometry(1.8, 1.8, 0.04, 48);
-    const mat = new THREE.MeshPhongMaterial({
-      color: layer === 0 ? 0x0a2a12 : 0x0d3016,
-      transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide,
-    });
-    const m = new THREE.Mesh(geo, mat);
-    m.position.y = y;
-    group.add(m);
-  }
-
-  // Protein complexes on the surface
-  const complexData = [
-    { name: "Photosystem II", color: 0x2255aa, n: 8  },
-    { name: "Cytochrome b6f", color: 0x8a4010, n: 6  },
-    { name: "Photosystem I",  color: 0x1a9a40, n: 8  },
-    { name: "ATP Synthase",   color: 0xaa8810, n: 5  },
-  ];
-  complexData.forEach((cx, ci) => {
-    for (let i = 0; i < cx.n; i++) {
-      const angle = (i / cx.n) * Math.PI * 2 + ci * 0.4;
-      const r     = 0.3 + (ci % 2 === 0 ? 0.6 : 1.1);
-      const x     = Math.cos(angle) * r;
-      const z     = Math.sin(angle) * r;
-      const geo   = new THREE.CylinderGeometry(0.08, 0.10, 0.16, 12);
-      const mat   = new THREE.MeshPhongMaterial({
-        color: cx.color,
-        emissive: new THREE.Color(cx.color).multiplyScalar(0.15),
-      });
-      const m = new THREE.Mesh(geo, mat);
-      m.position.set(x, 0.10, z);
-      m.castShadow = true;
-      m.userData.label  = cx.name;
-      m.userData.detail = cx.name === "Photosystem II"
-        ? "P680 reaction center · 35 chlorophyll"
-        : cx.name === "Photosystem I"
-        ? "P700 reaction center · 100 chlorophyll"
-        : cx.name === "ATP Synthase"
-        ? "Proton pump · makes ATP"
-        : "Electron transfer · cytochrome b6f";
-      m.userData.drillTarget = 3;
-      group.add(m);
-      clickableObjects.push(m);
-    }
   });
 
-  // Electron flow particles
-  const ePts = [];
-  for (let i = 0; i < 200; i++) {
-    const angle = (i / 200) * Math.PI * 2;
-    const r = 0.8 + Math.random() * 0.8;
-    ePts.push(Math.cos(angle)*r, 0.06, Math.sin(angle)*r);
+  // Mitochondria
+  const mitoMat = mat(0x1e0802, { emissive:0x0e0401, ei:0.9, roughness:0.5 });
+  for (let i=0; i<8; i++) {
+    const m = new THREE.Mesh(new THREE.CapsuleGeometry(0.016,0.055,4,8), mitoMat);
+    const a = Math.random()*Math.PI*2, r = 0.3+Math.random()*0.5;
+    m.position.set(r*Math.cos(a), r*Math.sin(a), (Math.random()-0.5)*0.24);
+    m.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, 0);
+    m.userData.info = STRUCTURE_INFO.mitochondria;
+    group.add(m);
   }
-  const eGeo = new THREE.BufferGeometry();
-  eGeo.setAttribute("position", new THREE.Float32BufferAttribute(ePts, 3));
-  group.add(new THREE.Points(eGeo, new THREE.PointsMaterial({
-    color: 0x40a0ff, size: 0.025, sizeAttenuation: true, transparent: true, opacity: 0.7,
-  })));
 
-  addSprite(group, "THYLAKOID MEMBRANE", new THREE.Vector3(0, 0.25, 0), "#2a6040", 9);
-  addSprite(group, "PSII (P680)",    new THREE.Vector3(-0.6, 0.35, 0.3), "#2255aa", 8);
-  addSprite(group, "PSI (P700)",     new THREE.Vector3( 0.6, 0.35, 0.3), "#1a9a40", 8);
-  addSprite(group, "ATP SYNTHASE",   new THREE.Vector3( 0.0, 0.35,-0.8), "#aa8810", 8);
+  // Rough ER (3 tube segments)
+  const erMat = mat(0x120828, { transparent:true, opacity:0.65, roughness:0.5 });
+  const erPaths = [
+    [[-0.35,0.35,0.05],[-0.2,0.5,0.08],[0.05,0.46,-0.05],[0.22,0.32,0.0]],
+    [[0.28,-0.28,0.1],[0.15,-0.5,0.05],[-.12,-0.46,-0.08],[-0.24,-0.3,0.05]],
+    [[-0.4,-0.1,0.0],[-0.3,0.1,-0.05],[-0.18,0.28,0.08]],
+  ];
+  erPaths.forEach(pts => {
+    const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p)));
+    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve,20,0.011,6,false), erMat);
+    info(tube,'er'); group.add(tube);
+  });
+
+  // Golgi apparatus (5 cisternae)
+  const golgiGroup = new THREE.Group();
+  golgiGroup.position.set(0.28,-0.25,0.08);
+  golgiGroup.rotation.z = 0.3;
+  for (let i=0; i<5; i++) {
+    const disc = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.055-i*0.004, 0.057-i*0.004, 0.007, 18),
+      mat(0x1a0c04, { emissive:0x0c0600, ei:0.8 })
+    );
+    disc.position.y = i*0.011; disc.rotation.z = i*0.03;
+    info(disc,'golgi'); golgiGroup.add(disc);
+  }
+  group.add(golgiGroup);
 }
 
-// ── Level 3: Chlorophyll a molecule ──────────────────
-function buildChlorophyll(report, group) {
-  // Porphyrin ring — 4 pyrrole rings connected by methine bridges
-  // Approximate as a flat ring with atoms at nodes
+// ─── LEVEL 1 — Chloroplast ──────────────────────────────────────────────────────
+function buildChloroplast(group) {
+  // Outer envelope
+  const outerMat = mat(0x062210, { transparent:true, opacity:0.35, side:THREE.DoubleSide });
+  const outer = new THREE.Mesh(new THREE.SphereGeometry(0.96,32,24), outerMat);
+  outer.scale.set(1,0.64,0.9); group.add(outer);
 
-  const ATOM_COLORS = {
-    C: 0x404040, N: 0x2266cc, O: 0xcc2222,
-    H: 0xeeeeee, Mg: 0x22cc44,
-  };
-  const ATOM_RADII  = { C: 0.06, N: 0.065, O: 0.065, H: 0.04, Mg: 0.09 };
+  // Inner envelope
+  const innerMat = mat(0x052010, { transparent:true, opacity:0.28, side:THREE.DoubleSide });
+  const inner = new THREE.Mesh(new THREE.SphereGeometry(0.87,32,24), innerMat);
+  inner.scale.set(1,0.64,0.9); group.add(inner);
 
-  function atom(type, x, y, z) {
-    const geo = new THREE.SphereGeometry(ATOM_RADII[type] || 0.06, 14, 10);
-    const mat = new THREE.MeshPhongMaterial({
-      color: ATOM_COLORS[type] || 0x888888,
-      emissive: new THREE.Color(ATOM_COLORS[type] || 0x888888).multiplyScalar(0.1),
-    });
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, y, z);
-    m.castShadow = true;
-    m.userData.label  = type + " atom";
-    m.userData.detail = type === "Mg"
-      ? "Magnesium · coordinated by 4 N · light absorption"
-      : type === "N" ? "Nitrogen · pyrrole ring · 0.134nm bond"
-      : type === "O" ? "Oxygen · ester linkage"
-      : "Carbon · sp2 · 0.140nm bond";
-    m.userData.drillTarget = type === "C" ? 4 : -1;
-    group.add(m);
-    clickableObjects.push(m);
+  // Stroma fill
+  const stromaMat = mat(0x020c04, { transparent:true, opacity:0.10 });
+  const stroma = new THREE.Mesh(new THREE.SphereGeometry(0.84,20,16), stromaMat);
+  stroma.scale.set(1,0.64,0.9); group.add(stroma);
+
+  // Grana stacks — drillable
+  const discMat = mat(0x0a3810, { emissive:0x003010, ei:1.4, roughness:0.2 });
+  const graPos = [[0,0,0],[0.28,0.1,0.15],[-0.28,0.05,-0.12],[0.12,-0.18,0.22],[-0.14,0.14,-0.2]];
+  graPos.forEach(([gx,gy,gz]) => {
+    const graGroup = new THREE.Group();
+    graGroup.position.set(gx,gy,gz);
+    const nDiscs = 7+Math.floor(Math.random()*5);
+    for (let d=0; d<nDiscs; d++) {
+      const disc = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.17,0.17,0.018,20), discMat.clone()
+      );
+      disc.position.y = d*0.022;
+      disc.userData.info = STRUCTURE_INFO.grana;
+      drillable(disc, 2);
+      graGroup.add(disc);
+    }
+    group.add(graGroup);
+  });
+
+  // Stroma lamellae (thin sheets connecting grana)
+  const lamMat = mat(0x052208, { transparent:true, opacity:0.45, roughness:0.4 });
+  [[0,0.28,0],[0.18,0.05,0.18],[-0.16,0.1,-0.16]].forEach(([x,y,z]) => {
+    const lam = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.006,0.08), lamMat);
+    lam.position.set(x,y,z); lam.rotation.y = Math.random()*0.8-0.4;
+    info(lam,'stroma_lam'); group.add(lam);
+  });
+
+  // Plastoglobules (8 — electron-dense lipid droplets)
+  const pgMat = mat(0x181802, { emissive:0x0c0c01, ei:0.7, roughness:0.15 });
+  for (let i=0;i<8;i++) {
+    const pg = new THREE.Mesh(new THREE.SphereGeometry(0.022,8,6), pgMat);
+    const a=Math.random()*Math.PI*2, r=0.3+Math.random()*0.4;
+    pg.position.set(r*Math.cos(a), (Math.random()-0.5)*0.35, r*Math.sin(a));
+    group.add(pg);
+  }
+
+  // Nucleoid regions (plastid DNA)
+  const ndMat = mat(0x180838, { emissive:0x100022, ei:0.9 });
+  [[0.1,0.02,0.3],[-0.12,0.04,-0.28]].forEach(([x,y,z]) => {
+    const nd = new THREE.Mesh(new THREE.TorusGeometry(0.06,0.015,8,20), ndMat);
+    nd.position.set(x,y,z); nd.rotation.x = Math.PI/2;
+    group.add(nd);
+  });
+}
+
+// ─── LEVEL 2 — Thylakoid Membrane ──────────────────────────────────────────────
+function buildThylakoid(group) {
+  // Lipid bilayer slab
+  const bilayerMat = mat(0x050c14, { transparent:true, opacity:0.5, roughness:0.6 });
+  const bilayer = new THREE.Mesh(new THREE.BoxGeometry(2.2,0.07,1.6), bilayerMat);
+  group.add(bilayer);
+
+  // Outer leaflet highlight
+  const leafMat = mat(0x061420, { transparent:true, opacity:0.3, roughness:0.8 });
+  [0.04, -0.04].forEach(y => {
+    const leaf = new THREE.Mesh(new THREE.BoxGeometry(2.2,0.006,1.6), leafMat);
+    leaf.position.y = y; group.add(leaf);
+  });
+
+  // PSII complexes — drillable
+  const psiiMat = mat(0x080820, { emissive:0x040418, ei:1.5, roughness:0.15, metalness:0.15 });
+  const psiiPositions = [[-0.7,0.06,0.3],[-0.35,0.06,-0.3],[0,0.06,0.4],[0.35,0.06,-0.2],[0.7,0.06,0.3],
+                         [-0.55,-0.06,-0.4],[0.15,-0.06,0.5],[0.65,-0.06,-0.35]];
+  psiiPositions.forEach(([x,y,z]) => {
+    const ps = new THREE.Mesh(new THREE.BoxGeometry(0.14,0.1,0.1), psiiMat.clone());
+    ps.position.set(x,y,z);
+    ps.userData.info = STRUCTURE_INFO.psii;
+    drillable(ps, 3);
+    group.add(ps);
+  });
+
+  // PSI complexes
+  const psiMat = mat(0x002020, { emissive:0x001212, ei:1.2, roughness:0.2, metalness:0.1 });
+  [[-0.6,0.07,-0.1],[-0.1,0.07,0.0],[0.5,0.07,-0.4],[0.8,-0.07,0.2],[-0.4,-0.07,0.4],[0.2,-0.07,-0.5]].forEach(([x,y,z]) => {
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.065,0.065,0.1,8), psiMat.clone());
+    p.position.set(x,y,z); p.rotation.x = Math.PI/2;
+    info(p,'psi'); group.add(p);
+  });
+
+  // Cytochrome b6f
+  const b6fMat = mat(0x180e00, { emissive:0x0c0800, ei:1.0, roughness:0.25 });
+  [[-0.2,0.065,0.35],[0.4,0.065,-0.05],[-0.8,-0.065,0.1],[0.1,-0.065,-0.42],[0.7,-0.065,0.5]].forEach(([x,y,z]) => {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.11,0.09,0.08), b6fMat.clone());
+    b.position.set(x,y,z); info(b,'cytb6f'); group.add(b);
+  });
+
+  // ATP synthase (CF0-CF1, stalked)
+  const atpMat = mat(0x180400, { emissive:0x0e0200, ei:1.3, roughness:0.2 });
+  [[0.25,0,0.1],[-0.5,0,-0.2],[0.85,0,-0.1]].forEach(([x,y,z]) => {
+    const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.04,0.18,10), atpMat.clone());
+    stalk.position.set(x,0.09,z);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.06,12,8), atpMat.clone());
+    head.position.set(x,0.2,z);
+    head.scale.set(1.2,0.9,1.2);
+    info(stalk,'atp_syn'); info(head,'atp_syn');
+    group.add(stalk); group.add(head);
+  });
+
+  // Plastoquinone carriers (animated small spheres)
+  const pqMat = mat(0x202000, { emissive:0x141400, ei:1.8 });
+  for (let i=0; i<20; i++) {
+    const pq = new THREE.Mesh(new THREE.SphereGeometry(0.018,6,4), pqMat);
+    pq.position.set((Math.random()-0.5)*2.0, (Math.random()-0.5)*0.06, (Math.random()-0.5)*1.4);
+    pq.userData.animPQ = { t: Math.random()*Math.PI*2, speed: 0.4+Math.random()*0.4 };
+    group.add(pq);
+  }
+}
+
+// ─── LEVEL 3 — Chlorophyll a Molecule ──────────────────────────────────────────
+function buildChlorophyll(group) {
+  const SCALE = 0.055; // 1 unit = 1 Å; total ring ~8.6 Å across → ~0.47 scene units
+
+  // Porphyrin atom positions (Å from centre)
+  const Mg = [0,0,0];
+  const N = [[0,2.03,0],[2.03,0,0],[0,-2.03,0],[-2.03,0,0]];
+  const MESO = [[1.37,1.37,0],[1.37,-1.37,0],[-1.37,-1.37,0],[-1.37,1.37,0]];
+  // α-carbons (inner ring, adjacent to N)
+  const CA = [[0.82,2.85,0],[-0.82,2.85,0],[2.85,0.82,0],[2.85,-0.82,0],
+              [0.82,-2.85,0],[-0.82,-2.85,0],[-2.85,-0.82,0],[-2.85,0.82,0]];
+  // β-carbons (outer pyrrole)
+  const CB = [[1.2,3.7,0],[-1.2,3.7,0],[3.7,1.2,0],[3.7,-1.2,0],
+              [1.2,-3.7,0],[-1.2,-3.7,0],[-3.7,-1.2,0],[-3.7,1.2,0]];
+
+  function addAtom(pos, color, r, infoKey) {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(r,14,10),
+      mat(color, { roughness:0.15, metalness:0.25, emissive: color, ei:0.3 })
+    );
+    m.position.set(pos[0]*SCALE, pos[1]*SCALE, (pos[2]||0)*SCALE);
+    if (infoKey) info(m, infoKey);
+    group.add(m); return m;
+  }
+
+  function addBond(a, b, color=0x303030) {
+    const va = new THREE.Vector3(a[0]*SCALE, a[1]*SCALE, (a[2]||0)*SCALE);
+    const vb = new THREE.Vector3(b[0]*SCALE, b[1]*SCALE, (b[2]||0)*SCALE);
+    const mid = new THREE.Vector3().addVectors(va,vb).multiplyScalar(0.5);
+    const len = va.distanceTo(vb);
+    const dir = new THREE.Vector3().subVectors(vb,va).normalize();
+    const bond = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.012,0.012,len,6),
+      mat(color, { roughness:0.5 })
+    );
+    bond.position.copy(mid);
+    bond.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), dir);
+    group.add(bond);
+  }
+
+  // Mg centre
+  addAtom(Mg, 0xd0c020, 0.11, 'mg_ion');
+  // Nitrogens
+  N.forEach(n => addAtom(n, 0x1a5ab8, 0.075, 'porphyrin'));
+  // Meso carbons
+  MESO.forEach(m => addAtom(m, 0x404040, 0.055));
+  // Alpha carbons
+  CA.forEach(c => addAtom(c, 0x303030, 0.052));
+  // Beta carbons
+  CB.forEach(c => addAtom(c, 0x282828, 0.052));
+
+  // Bonds: Mg to each N
+  N.forEach(n => addBond(Mg, n, 0x605010));
+  // N to adjacent alpha-C (N[0]=north → CA[0],CA[1]; N[1]=east → CA[2],CA[3]; etc.)
+  [[0,0],[0,1],[1,2],[1,3],[2,4],[2,5],[3,6],[3,7]].forEach(([ni,ci]) => addBond(N[ni], CA[ci], 0x202820));
+  // Alpha to meso (CA[0]→MESO[3], CA[1]→MESO[0], CA[2]→MESO[0], CA[3]→MESO[1], etc.)
+  [[0,3],[1,0],[2,0],[3,1],[4,1],[5,2],[6,2],[7,3]].forEach(([ci,mi]) => addBond(CA[ci], MESO[mi], 0x282828));
+  // Alpha to beta within each pyrrole
+  [[0,0],[1,1],[2,2],[3,3],[4,4],[5,5],[6,6],[7,7]].forEach(([ca,cb]) => addBond(CA[ca],CB[cb], 0x282828));
+  // Beta-beta within each pyrrole pair
+  [[0,1],[2,3],[4,5],[6,7]].forEach(([a,b]) => addBond(CB[a],CB[b],0x282828));
+
+  // Phytol tail (C20 isoprenoid) — zigzag chain from ring IV propionate
+  const tailStart = [-1.37,-1.37,0];
+  let prev = tailStart;
+  for (let i=0; i<12; i++) {
+    const next = [
+      prev[0] - 0.8 - (i%3===0?0.3:0),
+      prev[1] - 0.5 + (i%2===0?0.3:-0.3),
+      prev[2] + (i%3===0?0.2:-0.1)
+    ];
+    const c = new THREE.Mesh(new THREE.SphereGeometry(0.045,8,6),
+      mat(0x282828, { roughness:0.3 }));
+    c.position.set(next[0]*SCALE, next[1]*SCALE, next[2]*SCALE);
+    if (i===0) info(c,'phytol');
+    group.add(c);
+    addBond(prev, next, 0x222222);
+    prev = next;
+  }
+
+  // Carbonyl oxygen on ring IV (ester linkage)
+  const carbO = [-2.0,-3.7,0];
+  addAtom(carbO, 0xb02010, 0.065, 'porphyrin');
+  addBond(CB[6], carbO, 0x602010);
+}
+
+// ─── LEVEL 4 — Carbon Atom (sp² hybridisation) ──────────────────────────────────
+function buildCarbonAtom(group) {
+  // Nucleus
+  const nucMat = mat(0x8a1010, { emissive:0x500808, ei:1.5, roughness:0.15, metalness:0.3 });
+  const nuc = new THREE.Mesh(new THREE.SphereGeometry(0.018,12,8), nucMat);
+  info(nuc,'nucleus_atom'); group.add(nuc);
+
+  // 1s orbital cloud
+  function cloudSphere(r, color, opacity) {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(r,24,16),
+      mat(color, { transparent:true, opacity, roughness:0.8, side:THREE.DoubleSide })
+    );
     return m;
   }
+  const s1 = cloudSphere(0.028, 0x1030b0, 0.18); info(s1,'orbital_1s'); group.add(s1);
+  const s2 = cloudSphere(0.058, 0x1050c0, 0.08); info(s2,'orbital_2s'); group.add(s2);
 
-  function bond(a, b) {
-    const dir  = new THREE.Vector3().subVectors(b, a);
-    const len  = dir.length();
-    const mid  = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
-    const geo  = new THREE.CylinderGeometry(0.018, 0.018, len, 8);
-    const mat  = new THREE.MeshPhongMaterial({ color: 0x303030 });
-    const m    = new THREE.Mesh(geo, mat);
-    m.position.copy(mid);
-    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
-    group.add(m);
+  // p-orbital dumbbell helper
+  function pDumbbell(axis, color, infoKey) {
+    const lobeMat = mat(color, { transparent:true, opacity:0.22, roughness:0.7, side:THREE.DoubleSide,
+                                  emissive:color, ei:0.15 });
+    const geo = new THREE.SphereGeometry(0.05,16,10);
+    const l1 = new THREE.Mesh(geo, lobeMat.clone());
+    const l2 = new THREE.Mesh(geo, lobeMat.clone());
+    l1.scale.set(...axis.map((v,i)=>(v?1.5:0.55))); // elongated along active axis
+    l2.scale.copy(l1.scale);
+    const off = 0.052;
+    l1.position.set(axis[0]*off, axis[1]*off, axis[2]*off);
+    l2.position.set(-axis[0]*off,-axis[1]*off,-axis[2]*off);
+    if (infoKey) { info(l1,infoKey); info(l2,infoKey); }
+    group.add(l1); group.add(l2);
   }
+  pDumbbell([1,0,0], 0xb04010, 'orbital_2p');
+  pDumbbell([0,1,0], 0x10a030, 'orbital_2p');
 
-  // 4 pyrrole rings arranged around the porphyrin macrocycle
-  // Ring centres at 0.43 units from origin, at 45°/135°/225°/315°
-  const ringCentres = [
-    [  0.43,  0.43 ],   // top-right    pyrrole A
-    [ -0.43,  0.43 ],   // top-left     pyrrole B
-    [ -0.43, -0.43 ],   // bottom-left  pyrrole C
-    [  0.43, -0.43 ],   // bottom-right pyrrole D
-  ];
-
-  // Pyrrole ring (5-membered: N + 4 C)
-  const pyrroleAtoms = [];
-  ringCentres.forEach(([cx, cy], ri) => {
-    const ringA = [];
-    for (let i = 0; i < 5; i++) {
-      const angle = (i / 5) * Math.PI * 2 - Math.PI / 2;
-      const x = cx + Math.cos(angle) * 0.22;
-      const z = cy + Math.sin(angle) * 0.22;
-      const type = i === 0 ? "N" : "C";
-      const a = atom(type, x, 0, z);
-      ringA.push(new THREE.Vector3(x, 0, z));
-    }
-    // Close ring bonds
-    for (let i = 0; i < 5; i++) {
-      bond(ringA[i], ringA[(i+1)%5]);
-    }
-    pyrroleAtoms.push(ringA);
+  // sp2 hybrid lobes (pure 2pz ⊥, plus 3 in-plane hybrids)
+  const sp2Mat = mat(0x6080c0, { transparent:true, opacity:0.14, roughness:0.7, side:THREE.DoubleSide,
+                                  emissive:0x304060, ei:0.12 });
+  [0, 120, 240].forEach(deg => {
+    const rad = deg * Math.PI/180;
+    const lobe = new THREE.Mesh(new THREE.SphereGeometry(0.055,14,10), sp2Mat.clone());
+    lobe.position.set(Math.cos(rad)*0.065, 0, Math.sin(rad)*0.065);
+    lobe.scale.set(1.4, 0.5, 1.4);
+    info(lobe,'sp2_hybrid'); group.add(lobe);
   });
+  // pure 2pz (perpendicular)
+  pDumbbell([0,0,1], 0x8040b0, 'orbital_2p');
 
-  // Central Mg
-  const mg = atom("Mg", 0, 0, 0);
-
-  // Connect Mg to all 4 N atoms
-  [0,1,2,3].forEach(ri => {
-    bond(new THREE.Vector3(0,0,0), pyrroleAtoms[ri][0]);
-  });
-
-  // Methine bridge C atoms between rings
-  const bridges = [
-    [ringCentres[0][0]/2 + ringCentres[1][0]/2, ringCentres[0][1]*0.2],
-    [ringCentres[1][0]*0.2, ringCentres[2][1]/2 + ringCentres[1][1]/2],
-    [ringCentres[2][0]/2 + ringCentres[3][0]/2, ringCentres[2][1]*0.2],
-    [ringCentres[3][0]*0.2, ringCentres[0][1]/2 + ringCentres[3][1]/2],
-  ];
-  const bridgeVecs = [];
-  bridges.forEach(([bx, bz]) => {
-    atom("C", bx, 0, bz);
-    bridgeVecs.push(new THREE.Vector3(bx, 0, bz));
-  });
-
-  // Phytol tail — chain of C atoms extending in -z direction
-  let prev = new THREE.Vector3(0.43, 0, -0.55);
-  atom("O", prev.x, 0, prev.z);
-  for (let i = 0; i < 8; i++) {
-    const nx = prev.x + (i % 2 === 0 ? 0.05 : -0.05);
-    const nz = prev.z - 0.16;
-    atom("C", nx, 0, nz);
-    bond(prev, new THREE.Vector3(nx, 0, nz));
-    prev = new THREE.Vector3(nx, 0, nz);
+  // Energy level annotations (floating text via sprites)
+  function textSprite(txt, pos) {
+    const canvas2 = document.createElement('canvas');
+    canvas2.width = 256; canvas2.height = 48;
+    const ctx = canvas2.getContext('2d');
+    ctx.fillStyle = 'rgba(0,0,0,0)';
+    ctx.fillRect(0,0,256,48);
+    ctx.font = '14px Courier New';
+    ctx.fillStyle = '#3a6a8a';
+    ctx.fillText(txt, 8, 28);
+    const tex = new THREE.CanvasTexture(canvas2);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex, transparent:true, depthWrite:false }));
+    sp.scale.set(0.12, 0.022, 1);
+    sp.position.set(...pos);
+    group.add(sp);
   }
-
-  // Labels
-  addSprite(group, "PORPHYRIN RING", new THREE.Vector3(0, 0.25, 0),   "#20aa40", 9);
-  addSprite(group, "Mg²⁺",          new THREE.Vector3(0.08,0.12, 0),  "#22cc44", 8);
-  addSprite(group, "PHYTOL TAIL",   new THREE.Vector3(0.5, 0.15,-1.2),"#c08020", 8);
-  addSprite(group, "N",             new THREE.Vector3( 0.43, 0.12, 0.35), "#2266cc", 8);
+  textSprite('ε₁s = −305.9 eV', [0.05, 0.032, 0]);
+  textSprite('ε₂p = −11.33 eV', [0.05, 0.072, 0]);
+  textSprite('sp² hybridisation', [0.05, -0.04, 0]);
 }
 
-// ── Level 4: Carbon atom ──────────────────────────────
-function buildCarbonAtom(report, group) {
-  // Nucleus (6 protons + 6 neutrons)
-  const nucGeo = new THREE.SphereGeometry(0.15, 32, 24);
-  const nucMat = new THREE.MeshPhongMaterial({
-    color: 0xaa3010, emissive: 0x401008,
-    shininess: 80,
-  });
-  const nuc = new THREE.Mesh(nucGeo, nucMat);
-  nuc.castShadow = true;
-  nuc.userData.label  = "Carbon Nucleus";
-  nuc.userData.detail = "6 protons · 6 neutrons · 3 fm radius · strong force";
-  group.add(nuc);
-  clickableObjects.push(nuc);
+// ─── Level builder dispatch ────────────────────────────────────────────────────
+const BUILDERS = [buildPlantCell, buildChloroplast, buildThylakoid, buildChlorophyll, buildCarbonAtom];
 
-  addSprite(group, "NUCLEUS\n6p 6n", new THREE.Vector3(0.2, 0.28, 0), "#cc4010", 9);
-
-  // 1s orbital — innermost shell (sphere cloud)
-  buildOrbitalCloud(group, 0.30, 200, 0xff6030, 0.6, "1s (2e⁻)");
-
-  // 2s orbital
-  buildOrbitalCloud(group, 0.65, 300, 0xffa030, 0.45, "2s (2e⁻)");
-
-  // 2p orbitals — three dumbbell shapes
-  const pCols = [0x4080ff, 0x40d0ff, 0x40ffcc];
-  const pAxes = [
-    new THREE.Vector3(1,0,0),
-    new THREE.Vector3(0,1,0),
-    new THREE.Vector3(0,0,1),
-  ];
-  pAxes.forEach((axis, i) => {
-    buildPOrbital(group, axis, pCols[i], i < 2); // 3rd p orbital empty in ground state
-  });
-
-  // Bohr model orbit ring (schematic)
-  [0.32, 0.72].forEach((r, i) => {
-    const torus = new THREE.TorusGeometry(r, 0.008, 8, 60);
-    const mat   = new THREE.MeshBasicMaterial({
-      color: i === 0 ? 0xff6030 : 0x4080ff,
-      transparent: true, opacity: 0.25,
-    });
-    const t = new THREE.Mesh(torus, mat);
-    if (i === 1) t.rotation.x = Math.PI / 3;
-    group.add(t);
-  });
-
-  addSprite(group, "1s ORBITAL",    new THREE.Vector3( 0.38, 0.12, 0), "#ff6030", 8);
-  addSprite(group, "2s ORBITAL",    new THREE.Vector3( 0.72, 0.12, 0), "#ffa030", 8);
-  addSprite(group, "2px ORBITAL",   new THREE.Vector3( 1.15, 0.12, 0), "#4080ff", 8);
-  addSprite(group, "2py ORBITAL",   new THREE.Vector3( 0.0,  1.15, 0), "#40d0ff", 8);
-  addSprite(group, "2pz ORBITAL",   new THREE.Vector3( 0.0,  0.12,1.15),"#40ffcc", 8);
+function loadLevel(idx) {
+  if (currentGroup) { scene.remove(currentGroup); currentGroup.traverse(o => { if (o.isMesh) { o.geometry.dispose(); } }); }
+  drillables = [];
+  controls.autoRotate = true;
+  currentLevel = idx;
+  currentGroup = new THREE.Group();
+  BUILDERS[idx](currentGroup);
+  scene.add(currentGroup);
+  const L = LEVELS[idx];
+  flyCamera(new THREE.Vector3(...L.camPos), new THREE.Vector3(...L.look));
+  updateHUD(idx);
+  document.getElementById('esc-hint').style.display = idx > 0 ? 'block' : 'none';
 }
 
-function buildOrbitalCloud(group, radius, n, color, opacity, _label) {
-  const pts = [];
-  for (let i = 0; i < n; i++) {
-    // Gaussian distribution centred at radius
-    const r = radius + (Math.random() - 0.5) * radius * 0.5;
-    const theta = Math.acos(2 * Math.random() - 1);
-    const phi   = Math.random() * Math.PI * 2;
-    pts.push(
-      r * Math.sin(theta) * Math.cos(phi),
-      r * Math.sin(theta) * Math.sin(phi),
-      r * Math.cos(theta),
-    );
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-  group.add(new THREE.Points(geo, new THREE.PointsMaterial({
-    color, size: 0.022, sizeAttenuation: true,
-    transparent: true, opacity,
-  })));
+// ─── Camera fly animation ──────────────────────────────────────────────────────
+function flyCamera(toPos, toLook, duration=700) {
+  cameraAnim = { fromPos:camera.position.clone(), toPos, fromLook:controls.target.clone(), toLook, t:0, duration };
 }
 
-function buildPOrbital(group, axis, color, filled) {
-  // Two lobes along axis
-  [-1, 1].forEach(sign => {
-    const pts = [];
-    for (let i = 0; i < 150; i++) {
-      const r     = 0.7 + (Math.random() - 0.5) * 0.3;
-      const theta = Math.random() * Math.PI * 0.5;
-      const phi   = Math.random() * Math.PI * 2;
-      const x     = r * Math.sin(theta) * Math.cos(phi);
-      const y     = r * Math.cos(theta) * sign;
-      const z     = r * Math.sin(theta) * Math.sin(phi);
-      const v     = new THREE.Vector3(x, y, z);
-      // Rotate to axis
-      const quat  = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), axis);
-      v.applyQuaternion(quat);
-      pts.push(v.x, v.y, v.z);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-    group.add(new THREE.Points(geo, new THREE.PointsMaterial({
-      color, size: 0.025, sizeAttenuation: true,
-      transparent: true, opacity: filled ? 0.55 : 0.2,
-    })));
-  });
+// ─── HUD update ───────────────────────────────────────────────────────────────
+const SCALE_LABELS = ['20 µm','5 µm','10 nm','1 nm','154 pm'];
+
+function fmtZ(z) {
+  if (z < 1e-9) return (z*1e12).toFixed(0)+' pm';
+  if (z < 1e-6) return (z*1e9).toFixed(2)+' nm';
+  if (z < 1e-3) return (z*1e6).toFixed(2)+' µm';
+  return (z*1e3).toFixed(2)+' mm';
 }
 
-// ── Sprite labels ─────────────────────────────────────
-function addSprite(group, text, pos, color, fontSize) {
-  const c2   = document.createElement("canvas");
-  const lines = text.split("\n");
-  c2.width   = 256;
-  c2.height  = lines.length * (fontSize + 4) + 8;
-  const ctx  = c2.getContext("2d");
-  ctx.font   = `${fontSize}px Courier New`;
-  ctx.fillStyle = color;
-  lines.forEach((line, i) => {
-    ctx.fillText(line, 4, (i + 1) * (fontSize + 2));
-  });
-  const tex = new THREE.CanvasTexture(c2);
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
-  const sp  = new THREE.Sprite(mat);
-  sp.position.copy(pos);
-  const aspect = c2.width / c2.height;
-  sp.scale.set(aspect * 0.28, 0.28, 1);
-  group.add(sp);
-}
-
-// ═══════════════════════════════════════════════════════
-// Level management
-// ═══════════════════════════════════════════════════════
-const BUILDERS = [
-  buildPlantCell,
-  buildChloroplast,
-  buildThylakoid,
-  buildChlorophyll,
-  buildCarbonAtom,
-];
-
-async function loadLevel(idx, skipFetch = false) {
-  if (transitioning) return;
-  transitioning = true;
-
-  const level = LEVELS[idx];
-
-  // Fetch API data (unless we already have it)
-  if (!skipFetch && !apiData[level.id]) {
-    apiData[level.id] = await fetchLayersFor(level);
-  }
-  const report = apiData[level.id];
-
-  // Remove previous level group
-  if (levelGroup) scene.remove(levelGroup);
-  clickableObjects = [];
-
-  // Build new group
-  levelGroup = new THREE.Group();
-  const builder = BUILDERS[idx];
-  if (builder) builder(report, levelGroup);
-  scene.add(levelGroup);
-
-  // Update HUD
-  updateHUD(idx, report);
-
-  // Animate camera to default view for this level
-  const camPos = new THREE.Vector3(0, 0.5 + idx * 0.1, 4.5 - idx * 0.3);
-  controls.target.set(0, 0, 0);
-  animateCameraTo(camPos, new THREE.Vector3(0,0,0));
-
-  currentLevelIdx = idx;
-  transitioning   = false;
-}
-
-function updateHUD(idx, report) {
-  const level  = LEVELS[idx];
-  const layers = report?.layers ?? [];
-  const sp     = report?.scale_profile ?? {};
-
+function updateHUD(idx) {
+  const L = LEVELS[idx];
   // Breadcrumb
-  const crumbs = LEVELS.slice(0, idx + 1).map((l, i) =>
-    i === idx ? `<span>${l.name}</span>` : l.name
-  ).join('<span class="sep">›</span>');
-  document.getElementById("breadcrumb").innerHTML = crumbs;
-
-  document.getElementById("panel-title").textContent = level.name;
-  document.getElementById("p-scale").textContent = level.label;
-  document.getElementById("p-layers").textContent = layers.length;
-  document.getElementById("p-depth").textContent  = `${idx} / ${LEVELS.length - 1}`;
-  document.getElementById("p-cal").textContent    = sp.calibrated ? "YES" : "No";
-  document.getElementById("scalebar-label").textContent = level.label;
-
-  // Synthesis text from layer data
-  const topLabels = layers.slice(0, 4).map(l =>
-    l.label.replace(/^txt:\w+_|^img:/g, "").replace(/_zone.*$/, "")
-  );
-  const synth = `Neural fabric activation at ${level.label} scale:\n` +
-    (topLabels.length
-      ? `Characterised by: ${topLabels.join(", ")}.`
-      : "No specific labels activated at this depth yet.") +
-    (sp.eem_equation_count > 0
-      ? `\nEEM-calibrated: ${sp.eem_equation_count} physics equations matched.`
-      : "\nZ-axis: explicit calibration.");
-  document.getElementById("synthesis").textContent = synth;
-
-  // Layer chips at bottom
-  const bar  = document.getElementById("layer-bar");
-  bar.innerHTML = '<span id="layer-bar-label" class="layer-bar-label">LAYERS</span>';
-  layers.slice(0, 8).forEach((l, i) => {
-    const col   = DEPTH_COLORS[l.depth] ?? new THREE.Color(0x444444);
-    const hexC  = "#" + col.getHexString();
-    const label = l.label.replace(/^txt:\w+_|^img:/g, "").replace(/_zone.*$/, "");
-    const chip  = document.createElement("div");
-    chip.className    = "layer-chip" + (i === 0 ? " active" : "");
-    chip.style.borderColor = hexC;
-    chip.style.color  = hexC;
-    chip.style.background = hexC + "22";
-    chip.textContent  = `D${l.depth}: ${label}`;
-    chip.title        = `z=${fmtZ(l.position.z_est_m)} · conf=${(l.position.z_confidence*100).toFixed(0)}%`;
-    chip.addEventListener("click", () => {
-      document.querySelectorAll(".layer-chip").forEach(c => c.classList.remove("active"));
-      chip.classList.add("active");
-    });
-    bar.appendChild(chip);
-  });
-
-  // Click hint
-  document.getElementById("click-hint").textContent =
-    idx < LEVELS.length - 1 ? level.hint : "Deepest level — right-click or ESC to go back";
+  const bc = document.getElementById('breadcrumb');
+  bc.innerHTML = LEVELS.slice(0,idx+1).map((l,i) =>
+    `${i>0?'<span class="sep">›</span>':''}` +
+    `<span class="${i===idx?'active':'crumb'}">${l.name.toUpperCase()}</span>`
+  ).join('');
+  // Scale badge
+  document.getElementById('level-badge').innerHTML =
+    `LEVEL ${idx} &nbsp;|&nbsp; SCALE <span class="sv">${SCALE_LABELS[idx]}</span> &nbsp;|&nbsp; ` +
+    `<span class="sv">${L.latin}</span>`;
+  // Scale bar
+  document.getElementById('scalebar-text').textContent = SCALE_LABELS[idx];
+  // Panel
+  document.getElementById('p-name').textContent = L.name;
+  document.getElementById('p-latin').textContent = L.latin;
+  const kvs = ENTITY_KVS[L.id] || [];
+  document.getElementById('p-kvs').innerHTML = kvs.map(([k,v]) =>
+    `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+  const syn = ENTITY_SYN[L.id] || '';
+  document.getElementById('syn').textContent = syn;
+  // Layers from API
+  const layers = layerData[L.id] || [];
+  const pl = document.getElementById('p-layers');
+  if (layers.length) {
+    pl.innerHTML = layers.map(l => {
+      const c = DEPTH_COLORS[l.depth] || '#4a6a8a';
+      return `<div class="lr"><div class="ld" style="background:${c}"></div>` +
+             `<span class="ln">${l.label}</span><span class="lz">${fmtZ(l.z)}</span></div>`;
+    }).join('');
+    // layer chips
+    const bar = document.getElementById('layer-bar');
+    bar.innerHTML = `<span id="lbl">Depth Layers</span>` +
+      layers.slice(0,12).map(l => {
+        const c = DEPTH_COLORS[l.depth] || '#4a6a8a';
+        return `<span class="lchip" style="color:${c};border-color:${c}22;">${l.label}</span>`;
+      }).join('');
+  } else {
+    pl.innerHTML = `<div style="font-size:9px;color:#1a2a3a">— awaiting API response —</div>`;
+  }
 }
 
-// ═══════════════════════════════════════════════════════
-// Camera animation
-// ═══════════════════════════════════════════════════════
-const camFrom = new THREE.Vector3();
-const camTo   = new THREE.Vector3();
-let camLerp   = 1;
-
-function animateCameraTo(pos, lookAt) {
-  camFrom.copy(camera.position);
-  camTo.copy(pos);
-  controls.target.copy(lookAt);
-  camLerp = 0;
+// ─── Tooltip ──────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+function showTooltip(mesh, x, y) {
+  const inf = mesh.userData.info || {};
+  if (!inf.name) { hideTooltip(); return; }
+  document.getElementById('tt-name').textContent   = inf.name || '';
+  document.getElementById('tt-latin').textContent  = inf.latin || '';
+  document.getElementById('tt-dim').textContent    = inf.dim   || '';
+  document.getElementById('tt-detail').textContent = inf.detail|| '';
+  const chips = document.getElementById('tt-chips');
+  const layers = layerData[LEVELS[currentLevel].id] || [];
+  chips.innerHTML = layers.slice(0,8).map(l => `<span class="ttc">${l.label}</span>`).join('');
+  tooltip.style.opacity = '1';
+  const tx = x+16, ty = y-10;
+  tooltip.style.left = Math.min(tx, innerWidth-320)+'px';
+  tooltip.style.top  = Math.max(ty, 4)+'px';
 }
+function hideTooltip() { tooltip.style.opacity = '0'; }
 
-// ═══════════════════════════════════════════════════════
-// Raycasting / click interaction
-// ═══════════════════════════════════════════════════════
-const raycaster = new THREE.Raycaster();
-const mouse     = new THREE.Vector2();
-const tip       = document.getElementById("tip");
-let   dragMoved = false;
-let   mouseDown = new THREE.Vector2();
-
-canvas.addEventListener("mousedown", e => {
-  mouseDown.set(e.clientX, e.clientY);
-  dragMoved = false;
+// ─── Interaction ───────────────────────────────────────────────────────────────
+canvas.addEventListener('mousemove', e => {
+  mouse.x = (e.clientX/innerWidth)*2-1;
+  mouse.y = -(e.clientY/innerHeight)*2+1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(drillables, false);
+  if (hits.length) {
+    const m = hits[0].object;
+    if (m !== hoveredMesh) { hoveredMesh = m; canvas.style.cursor='pointer'; }
+    showTooltip(m, e.clientX, e.clientY);
+  } else {
+    if (hoveredMesh) { hoveredMesh=null; canvas.style.cursor='default'; hideTooltip(); }
+    // check non-drillable hover
+    const allMeshes = [];
+    if (currentGroup) currentGroup.traverse(o => { if (o.isMesh && o.userData.info) allMeshes.push(o); });
+    const hits2 = raycaster.intersectObjects(allMeshes, false);
+    if (hits2.length) showTooltip(hits2[0].object, e.clientX, e.clientY);
+    else hideTooltip();
+  }
 });
 
-canvas.addEventListener("mousemove", e => {
-  if (Math.abs(e.clientX - mouseDown.x) > 4 ||
-      Math.abs(e.clientY - mouseDown.y) > 4) dragMoved = true;
-
-  const rect = canvas.getBoundingClientRect();
-  mouse.set(
-    ((e.clientX - rect.left) / rect.width)  * 2 - 1,
-    -((e.clientY - rect.top) / rect.height) * 2 + 1,
-  );
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(clickableObjects, true);
-  if (hits.length) {
-    const obj = hits[0].object;
-    if (obj.userData.label) {
-      tip.style.display = "block";
-      tip.style.left    = (e.clientX + 14) + "px";
-      tip.style.top     = (e.clientY + 14) + "px";
-      tip.innerHTML = `<b style="color:#80a0d0">${obj.userData.label}</b><br>
-        ${obj.userData.detail || ""}
-        ${obj.userData.drillTarget != null && obj.userData.drillTarget >= 0
-          ? `<br><span style="color:#406080">Click → zoom to ${LEVELS[obj.userData.drillTarget]?.name}</span>`
-          : ""}`;
-      canvas.style.cursor = "pointer";
-      controls.autoRotate = false;
-      return;
+canvas.addEventListener('mousedown', e => { mouseDownPos={x:e.clientX, y:e.clientY}; });
+canvas.addEventListener('mouseup', e => {
+  if (!mouseDownPos) return;
+  if (Math.hypot(e.clientX-mouseDownPos.x, e.clientY-mouseDownPos.y) < 5) {
+    if (e.button===0) {
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObjects(drillables, false);
+      if (hits.length) {
+        const tgt = hits[0].object.userData.drillTarget;
+        if (tgt !== undefined) setTimeout(() => loadLevel(tgt), 100);
+      }
+    } else if (e.button===2) {
+      if (currentLevel > 0) loadLevel(currentLevel-1);
     }
   }
-  tip.style.display   = "none";
-  canvas.style.cursor = "default";
-  if (!controls.isLocked) controls.autoRotate = true;
+  mouseDownPos = null;
 });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('keydown', e => { if (e.key==='Escape' && currentLevel>0) loadLevel(currentLevel-1); });
 
-canvas.addEventListener("click", e => {
-  if (dragMoved) return;
-  const rect = canvas.getBoundingClientRect();
-  mouse.set(
-    ((e.clientX - rect.left) / rect.width)  * 2 - 1,
-    -((e.clientY - rect.top) / rect.height) * 2 + 1,
-  );
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(clickableObjects, true);
-  if (hits.length) {
-    const obj    = hits[0].object;
-    const target = obj.userData.drillTarget;
-    if (target != null && target >= 0 && target < LEVELS.length && !transitioning) {
-      // Fly camera toward the clicked point first, then load next level
-      const hitPt = hits[0].point.clone();
-      animateCameraTo(
-        hitPt.clone().add(camera.position.clone().sub(hitPt).normalize().multiplyScalar(1.5)),
-        hitPt,
-      );
-      setTimeout(() => loadLevel(target), 600);
-    }
-  } else if (currentLevelIdx > 0 && !transitioning) {
-    // Click empty space to go back (same as right-click)
-  }
-});
-
-canvas.addEventListener("contextmenu", e => {
-  e.preventDefault();
-  if (currentLevelIdx > 0 && !transitioning) drillOut();
-});
-
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape" && currentLevelIdx > 0) drillOut();
-  if (e.key === "ArrowDown" || e.key === "Enter") {
-    const next = currentLevelIdx + 1;
-    if (next < LEVELS.length && !transitioning) loadLevel(next);
-  }
-  if (e.key === "ArrowUp") {
-    if (currentLevelIdx > 0 && !transitioning) drillOut();
-  }
-});
-
-function drillOut() {
-  loadLevel(currentLevelIdx - 1);
-}
-
-// ═══════════════════════════════════════════════════════
-// Render loop
-// ═══════════════════════════════════════════════════════
-let prevTime = performance.now();
-
+// ─── Animation loop ────────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
-
-  const now = performance.now();
-  const dt  = (now - prevTime) / 1000;
-  prevTime  = now;
-
-  // Camera lerp
-  if (camLerp < 1) {
-    camLerp = Math.min(1, camLerp + dt * 2.5);
-    const t = 1 - Math.pow(1 - camLerp, 3); // ease-out cubic
-    camera.position.lerpVectors(camFrom, camTo, t);
+  const dt = clock.getDelta();
+  // Camera animation
+  if (cameraAnim) {
+    cameraAnim.t += dt*1000;
+    const p = Math.min(cameraAnim.t/cameraAnim.duration, 1);
+    const e = p<0.5 ? 2*p*p : -1+(4-2*p)*p;
+    camera.position.lerpVectors(cameraAnim.fromPos, cameraAnim.toPos, e);
+    controls.target.lerpVectors(cameraAnim.fromLook, cameraAnim.toLook, e);
+    controls.update();
+    if (p>=1) cameraAnim=null;
+  } else {
+    controls.update();
   }
-
-  // Animate electron cloud at atomic level
-  if (currentLevelIdx === 4 && levelGroup) {
-    levelGroup.rotation.y += dt * 0.15;
-  }
-
-  // Animate thylakoid electron flow particles (gentle bob)
-  if (currentLevelIdx === 2 && levelGroup) {
-    levelGroup.children.forEach(child => {
-      if (child.isPoints) {
-        child.rotation.y += dt * 0.4;
+  // Animate plastoquinone carriers (level 2)
+  if (currentGroup && currentLevel===2) {
+    currentGroup.traverse(o => {
+      if (o.isMesh && o.userData.animPQ) {
+        o.userData.animPQ.t += dt * o.userData.animPQ.speed;
+        o.position.x += Math.sin(o.userData.animPQ.t)*0.0008;
+        o.position.z += Math.cos(o.userData.animPQ.t*0.7)*0.0006;
+        if (o.position.x > 1.0) o.position.x -= 2.0;
+        if (o.position.x < -1.0) o.position.x += 2.0;
       }
     });
   }
+  composer.render();
+}
+animate();
 
-  controls.update();
+// ─── API integration ───────────────────────────────────────────────────────────
+const ENTITY_LABELS = {
+  plant_cell:  ['mesophyll','chloroplast','mitochondria','nucleus','vacuole','cell_wall','cytoplasm','tonoplast','plasmalemma'],
+  chloroplast: ['chloroplast','thylakoid','grana','stroma','envelope','ftsz','nucleoid','plastoglobule'],
+  thylakoid:   ['thylakoid','photosystem','psii','psi','cytochrome','atp_synthase','plastoquinone','lhcii','electron_transport'],
+  chlorophyll: ['chlorophyll','porphyrin','magnesium','tetrapyrrole','phytol','pyrrole','biosynthesis','soret'],
+  carbon_atom: ['carbon','orbital','electron','sp2','hybridisation','nucleus','eigenvalue','wavefunction'],
+};
 
-  // Resize
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (canvas.width !== w || canvas.height !== h) {
-    renderer.setSize(w, h, false);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-  }
-
-  renderer.render(scene, camera);
+async function fetchLayersFor(id) {
+  const labels = ENTITY_LABELS[id];
+  try {
+    const res = await fetch(`http://${HOST}/overlay/layers`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ entities:[{
+        entity_id: id,
+        active_labels: labels,
+        phenotype: id,
+        position: [0.5,0.5],
+        size_estimate: 0.1,
+        label_scores: Object.fromEntries(labels.map(l => [l,1.0]))
+      }]})
+    });
+    const data = await res.json();
+    const result = (data.results||[])[0];
+    if (result && result.layers) {
+      layerData[id] = result.layers.sort((a,b) => a.depth-b.depth).slice(0,12);
+    }
+  } catch(e) { /* node offline */ }
 }
 
-// ═══════════════════════════════════════════════════════
-// Init
-// ═══════════════════════════════════════════════════════
-async function init() {
-  animate(); // start render loop immediately
-
-  try {
-    await registerCalibrations();
-    await loadLevel(0);
-    document.getElementById("loading").style.opacity = "0";
-    setTimeout(() => document.getElementById("loading").style.display = "none", 1100);
-  } catch (e) {
-    document.getElementById("loading").textContent =
-      `Error connecting to ${API} — is the node running?`;
+async function calibrateAll() {
+  const SCALES = [['plant_cell',20e-6],['cell_wall',0.5e-6],['chloroplast',5e-6],
+                  ['thylakoid',10e-9],['chlorophyll',1e-9],['carbon_atom',0.154e-9]];
+  for (const [id,m] of SCALES) {
+    try {
+      await fetch(`http://${HOST}/overlay/layers/calibrate`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({entity_type:id, known_scale_m:m})
+      });
+    } catch(e) {}
   }
+}
+
+async function init() {
+  const prog = document.getElementById('loading-progress');
+  const ltxt = document.getElementById('loading-text');
+  prog.style.width = '10%';
+  ltxt.textContent = 'REGISTERING PHYSICAL CALIBRATIONS...';
+  await calibrateAll();
+  prog.style.width = '30%';
+  ltxt.textContent = 'QUERYING NEURAL FABRIC — PLANT CELL...';
+  await fetchLayersFor('plant_cell');
+  prog.style.width = '50%';
+  // Prefetch remaining levels in background
+  Promise.all(['chloroplast','thylakoid','chlorophyll','carbon_atom'].map(fetchLayersFor));
+  prog.style.width = '85%';
+  ltxt.textContent = 'BUILDING ULTRASTRUCTURE...';
+  await new Promise(r => setTimeout(r, 200));
+  prog.style.width = '100%';
+  await new Promise(r => setTimeout(r, 300));
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('hud').style.display = 'block';
+  loadLevel(0);
 }
 
 init();
