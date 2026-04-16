@@ -15,8 +15,11 @@ use crate::wallet::{WalletStore, node_id_from_wallet};
 use anyhow::{Context, Result};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
+use axum::response::sse::{Event, Sse, KeepAlive};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::Stream;
+use std::convert::Infallible;
 use tower_http;
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
@@ -875,6 +878,11 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // GET  /neuro/snapshot — current activation, predictions, and motifs.
         .route("/neuro/train", post(neuro_train))
         .route("/neuro/snapshot", get(neuro_snapshot))
+        // GET  /neuro/stream — Server-Sent Events stream of NeuroSnapshot at ~10 fps.
+        //   Each "snap" event contains the full activation state: active_labels,
+        //   centroids, network_links, surprise, temporal_predictions.
+        //   Clients read this like a video stream — each frame is the neural state.
+        .route("/neuro/stream", get(neuro_state_stream))
         // POST /neuro/record_episode — record a directly-resolved prediction
         //   episode (actual outcome already known; no future-frame resolution needed).
         //   Virtual sensors like the chess training loop call this after each game.
@@ -1827,6 +1835,26 @@ async fn neuro_snapshot(
         StatusCode::OK,
         Json(serde_json::to_value(snap).unwrap_or_default()),
     )
+}
+
+/// GET /neuro/stream
+/// Server-Sent Events stream of NeuroSnapshot frames at ~10 fps.
+/// Each event is named "snap" and contains the full serialised NeuroSnapshot.
+/// Clients connect with `new EventSource("http://.../neuro/stream")` and
+/// receive frames indefinitely — each frame is the live neural activation state.
+/// Because the fabric was trained on real data, reading this stream at the
+/// right sampling rate reconstructs a representation of whatever the net learned.
+async fn neuro_state_stream(
+    State(state): State<ApiState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = futures::stream::unfold(state, |state| async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = state.neuro.snapshot();
+        let json = serde_json::to_string(&snap).unwrap_or_default();
+        let event = Event::default().event("snap").data(json);
+        Some((Ok(event), state))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// POST /neuro/record_episode

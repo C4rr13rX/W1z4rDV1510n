@@ -2,869 +2,863 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>W1z4rD V1510n — Cellular Ultrastructure</title>
+<title>W1z4rD V1510n — Cellular Stream Viewer</title>
 <style>
 * { box-sizing:border-box; margin:0; padding:0; }
-body { background:#000307; overflow:hidden; font-family:'Courier New',monospace; color:#8ab4cc; }
-canvas { display:block; width:100vw; height:100vh; }
-#hud { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; color:#8ab4cc; }
+canvas { position:absolute; inset:0; z-index:1; display:block; }
+#hud { position:absolute; inset:0; z-index:2; pointer-events:none; display:none; }
+#fade { position:absolute; inset:0; background:#000; opacity:0; pointer-events:none; z-index:8; transition:opacity 0.38s ease; }
 
-#breadcrumb { position:absolute; top:16px; left:20px; font-size:10px; letter-spacing:2px; color:#3a5a6a; text-transform:uppercase; }
-#breadcrumb .crumb { color:#6a9ab8; }
-#breadcrumb .sep { margin:0 8px; color:#1a2a3a; }
-#breadcrumb .active { color:#b0d8f0; }
-#level-badge { position:absolute; top:34px; left:20px; font-size:9px; letter-spacing:2px; color:#1a3a4a; }
-#level-badge .sv { color:#3a7a9a; }
+/* breadcrumb */
+#bc { position:absolute; top:14px; left:18px; font-size:10px; letter-spacing:2px; color:#2a4a5a; text-transform:uppercase; }
+#bc .cr { color:#5a9ab8; } #bc .sep { margin:0 7px; color:#152030; } #bc .act { color:#a8d8f0; }
+#badge { position:absolute; top:30px; left:18px; font-size:9px; color:#1a3a48; letter-spacing:1.5px; }
+#badge .sv { color:#2a7a9a; }
 
-#panel {
-  position:absolute; top:16px; right:16px; width:290px;
-  background:rgba(2,5,12,0.94); border:1px solid #0a1828;
-  border-top:2px solid #1a5a7a; border-radius:3px;
-  padding:14px 16px; font-size:10px; pointer-events:all;
-}
-#panel .pt { font-size:9px; letter-spacing:2px; color:#1a4a5a; text-transform:uppercase;
-             margin-bottom:10px; border-bottom:1px solid #081420; padding-bottom:6px; }
-#panel .en { font-size:13px; color:#a0cce0; margin-bottom:2px; }
-#panel .el { font-size:9px; color:#2a5a7a; font-style:italic; margin-bottom:8px; }
-#panel .kv { display:flex; justify-content:space-between; margin:2px 0; }
-#panel .kv .k { color:#1a3a4a; font-size:9px; text-transform:uppercase; letter-spacing:0.5px; }
-#panel .kv .v { color:#5a8aaa; font-size:9px; max-width:180px; text-align:right; }
-#panel #ls { margin-top:10px; border-top:1px solid #081420; padding-top:8px; }
-#panel .lt { font-size:8px; letter-spacing:2px; color:#0e2a38; text-transform:uppercase; margin-bottom:5px; }
-#panel .lr { display:flex; align-items:center; gap:6px; margin:3px 0; }
-#panel .ld { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
-#panel .ln { font-size:9px; color:#3a6a8a; flex:1; }
-#panel .lz { font-size:9px; color:#1a4a6a; }
-#panel #syn { margin-top:8px; border-top:1px solid #081420; padding-top:8px;
-              font-size:9px; color:#1a3a4a; line-height:1.7; }
+/* info panel */
+#panel { position:absolute; top:14px; right:14px; width:280px; background:rgba(2,5,12,0.93);
+  border:1px solid #091522; border-top:2px solid #1a607a; border-radius:3px;
+  padding:13px 15px; font-size:10px; pointer-events:all; }
+.pt { font-size:9px; letter-spacing:2px; color:#1a4050; text-transform:uppercase;
+      margin-bottom:9px; border-bottom:1px solid #071320; padding-bottom:5px; }
+.en { font-size:13px; color:#98cce0; margin-bottom:2px; }
+.el { font-size:9px; color:#2a5a72; font-style:italic; margin-bottom:7px; }
+.kv { display:flex; justify-content:space-between; margin:2px 0; }
+.kv .k { color:#1a3848; font-size:9px; text-transform:uppercase; }
+.kv .v { color:#4a8aaa; font-size:9px; text-align:right; max-width:170px; }
+#ls { margin-top:9px; border-top:1px solid #071320; padding-top:7px; }
+.lt { font-size:8px; letter-spacing:2px; color:#0d2838; text-transform:uppercase; margin-bottom:5px; }
+.lr { display:flex; align-items:center; gap:5px; margin:3px 0; }
+.ld { width:5px; height:5px; border-radius:50%; flex-shrink:0; }
+.ln { font-size:9px; color:#2a6080; flex:1; }
+.lz { font-size:9px; color:#1a4060; }
+#syn { margin-top:8px; border-top:1px solid #071320; padding-top:7px; font-size:9px; color:#1a3848; line-height:1.7; }
 
-#layer-bar {
-  position:absolute; bottom:0; left:0; right:0;
-  background:rgba(1,3,8,0.96); border-top:1px solid #080e18;
-  padding:8px 20px; display:flex; gap:6px; align-items:center;
-  pointer-events:all; overflow-x:auto;
-}
-.lchip { padding:3px 9px; border-radius:2px; font-size:8px; border:1px solid;
-         letter-spacing:0.5px; cursor:pointer; white-space:nowrap;
-         text-transform:uppercase; transition:filter 0.2s; }
-.lchip:hover { filter:brightness(2.5); }
-.lchip.active { filter:brightness(3); }
-#lbl { font-size:8px; color:#0e1e28; letter-spacing:1.5px; text-transform:uppercase; flex-shrink:0; }
+/* layer bar */
+#lbar { position:absolute; bottom:0; left:0; right:0; background:rgba(1,3,8,0.96);
+  border-top:1px solid #070e18; padding:7px 18px; display:flex; gap:5px;
+  align-items:center; pointer-events:all; overflow-x:auto; }
+.lc { padding:3px 8px; border-radius:2px; font-size:8px; border:1px solid;
+      letter-spacing:.5px; white-space:nowrap; text-transform:uppercase;
+      transition:filter .2s; cursor:default; }
 
-#scalebar { position:absolute; bottom:58px; left:20px; font-size:9px; color:#1a3040; letter-spacing:1px; }
-#scalebar-line { width:80px; height:1px; background:#1a3040; margin:3px 0; }
-#click-hint { position:absolute; bottom:56px; left:50%; transform:translateX(-50%);
-              font-size:10px; color:rgba(40,90,120,0.5); letter-spacing:2.5px;
-              text-transform:uppercase; pointer-events:none; transition:opacity 0.5s; }
-#esc-hint { position:absolute; top:16px; left:50%; transform:translateX(-50%);
-            font-size:9px; color:rgba(40,70,100,0.5); letter-spacing:2px;
-            text-transform:uppercase; display:none; pointer-events:none; }
+/* scale bar */
+#sb { position:absolute; bottom:54px; left:18px; font-size:9px; color:#1a3040; letter-spacing:1px; }
+#sbl { width:80px; height:1px; background:#1a3040; margin:3px 0; }
 
-#tooltip {
-  position:absolute; max-width:300px; background:rgba(2,6,15,0.97);
-  border:1px solid #0d2035; border-left:2px solid #2a7ab8;
-  border-radius:3px; padding:10px 13px; font-size:10px;
-  pointer-events:none; opacity:0; transition:opacity 0.12s; z-index:100;
-}
-#tooltip .ttn { font-size:12px; color:#b8d8f0; margin-bottom:3px; }
-#tooltip .ttl { font-size:9px; color:#3a6a8a; font-style:italic; margin-bottom:5px; }
-#tooltip .ttd { color:#5a8aaa; margin-bottom:4px; font-size:9px; }
-#tooltip .tti { color:#304858; font-size:9px; line-height:1.6; }
-#tooltip .ttx { margin-top:5px; border-top:1px solid #0a1825; padding-top:5px; }
-#tooltip .ttc { display:inline-block; background:rgba(15,35,55,0.7);
-                border:1px solid #0e2030; border-radius:2px;
-                padding:1px 5px; font-size:7px; color:#3a6888; margin:1px; }
+/* hint */
+#hint { position:absolute; bottom:52px; left:50%; transform:translateX(-50%);
+  font-size:9px; color:rgba(40,90,120,0.45); letter-spacing:2.5px; text-transform:uppercase; pointer-events:none; }
 
-#loading {
-  position:absolute; inset:0; background:#000307;
-  display:flex; flex-direction:column;
-  align-items:center; justify-content:center;
-  font-size:11px; color:#1a4a6a; letter-spacing:3px; z-index:200;
-}
-#loading-bar { width:200px; height:1px; background:#08121c; margin-top:16px; overflow:hidden; }
-#loading-progress { height:100%; background:#2a7ab8; width:0; transition:width 0.3s; }
-#loading-text { margin-top:8px; font-size:9px; color:#0e2a3a; }
+/* tooltip */
+#tt { position:absolute; max-width:300px; background:rgba(2,5,14,0.96); border:1px solid #0c1e32;
+  border-left:2px solid #2a7ab8; border-radius:3px; padding:9px 12px; font-size:10px;
+  pointer-events:none; opacity:0; transition:opacity .12s; z-index:10; }
+.ttn { font-size:12px; color:#b0d8f2; margin-bottom:3px; }
+.ttl { font-size:9px; color:#2a6882; font-style:italic; margin-bottom:4px; }
+.ttd { color:#4a88a8; font-size:9px; margin-bottom:3px; }
+.tti { color:#2a4860; font-size:9px; line-height:1.6; }
+
+/* video setup screen */
+#vsetup { position:absolute; inset:0; background:#000509; z-index:20;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; }
+#vsetup h2 { font-size:12px; letter-spacing:3px; color:#2a5a7a; text-transform:uppercase; }
+#vdrop { width:380px; height:160px; border:1px dashed #1a3a5a; border-radius:4px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;
+  color:#1a4a6a; font-size:10px; letter-spacing:1.5px; cursor:pointer; transition:border-color .2s; }
+#vdrop:hover, #vdrop.drag { border-color:#2a7ab8; color:#3a8ac8; }
+#vdrop input { display:none; }
+#vskip { background:none; border:1px solid #0a2030; color:#1a4050; padding:8px 24px;
+  font-family:inherit; font-size:9px; letter-spacing:2px; text-transform:uppercase;
+  cursor:pointer; border-radius:2px; transition:all .2s; }
+#vskip:hover { border-color:#2a5070; color:#3a7090; }
+#vnote { font-size:9px; color:#0e2030; letter-spacing:1px; text-align:center; line-height:1.8; max-width:400px; }
+
+/* loading */
+#loading { position:absolute; inset:0; background:#000509; z-index:15;
+  display:none; flex-direction:column; align-items:center; justify-content:center; }
+#lbar2 { width:200px; height:1px; background:#081420; margin:14px 0 8px; overflow:hidden; }
+#lprog { height:100%; background:#2a7ab8; width:0; transition:width .3s; }
+#ltxt { font-size:9px; color:#0e2a3a; letter-spacing:2px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 
-<div id="loading">
-  <span>W1Z4RD V1510N — CELLULAR ULTRASTRUCTURE</span>
-  <div id="loading-bar"><div id="loading-progress"></div></div>
-  <div id="loading-text">CALIBRATING PHYSICAL SCALES...</div>
-</div>
-
-<div id="hud" style="display:none">
-  <div id="breadcrumb"></div>
-  <div id="level-badge"></div>
+<div id="hud">
+  <div id="bc"></div>
+  <div id="badge"></div>
   <div id="panel">
     <div class="pt">Neural Fabric — Overlay API</div>
     <div class="en" id="p-name">—</div>
     <div class="el" id="p-latin">—</div>
     <div id="p-kvs"></div>
-    <div id="ls">
-      <div class="lt">Calibrated Layers</div>
-      <div id="p-layers"></div>
-    </div>
-    <div id="syn" id="p-syn"></div>
+    <div id="ls"><div class="lt">Calibrated Layers</div><div id="p-layers"></div></div>
+    <div id="syn"></div>
   </div>
-  <div id="layer-bar"><span id="lbl">Depth Layers</span></div>
-  <div id="scalebar"><div id="scalebar-line"></div><span id="scalebar-text">—</span></div>
-  <div id="click-hint">Click structure to drill down</div>
-  <div id="esc-hint">Right-click / ESC to ascend</div>
+  <div id="lbar"><span style="font-size:8px;color:#0d1e2a;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0">Depth Layers</span></div>
+  <div id="sb"><div id="sbl"></div><span id="sbtxt">—</span></div>
+  <div id="hint">Scroll to zoom · Right-click to ascend</div>
+  <!-- Neural map — live centroid positions from /neuro/stream -->
+  <canvas id="nmap" width="160" height="160"
+    style="position:absolute;bottom:54px;right:14px;border:1px solid #07121c;border-radius:3px;opacity:0.85;pointer-events:none;"></canvas>
+  <div id="nmap-label" style="position:absolute;bottom:216px;right:14px;font-size:8px;color:#0d1e28;letter-spacing:2px;text-transform:uppercase;pointer-events:none;">Neural Map</div>
+  <!-- Stream status -->
+  <div id="stream-status" style="position:absolute;top:14px;left:50%;transform:translateX(-50%);font-size:9px;letter-spacing:2px;color:#0d2030;text-transform:uppercase;pointer-events:none;"></div>
 </div>
-<div id="tooltip">
-  <div class="ttn" id="tt-name"></div>
-  <div class="ttl" id="tt-latin"></div>
-  <div class="ttd" id="tt-dim"></div>
-  <div class="tti" id="tt-detail"></div>
-  <div class="ttx" id="tt-chips"></div>
+
+<div id="fade"></div>
+<div id="tt"><div class="ttn" id="ttn"></div><div class="ttl" id="ttl"></div><div class="ttd" id="ttd"></div><div class="tti" id="tti"></div></div>
+
+<div id="loading" style="display:flex">
+  <span style="font-size:11px;color:#1a4a6a;letter-spacing:3px">W1Z4RD V1510N — CELLULAR ULTRASTRUCTURE</span>
+  <div id="lbar2"><div id="lprog"></div></div>
+  <div id="ltxt">CONNECTING TO NEURAL FABRIC...</div>
 </div>
 
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+    "three":          "https://unpkg.com/three@0.165.0/build/three.module.js",
+    "three/addons/":  "https://unpkg.com/three@0.165.0/examples/jsm/"
   }
 }
 </script>
 <script type="module">
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls }  from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { RenderPass }     from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { FilmPass }       from 'three/addons/postprocessing/FilmPass.js';
+import { OutputPass }     from 'three/addons/postprocessing/OutputPass.js';
 
 const HOST = '192.168.1.84:8090';
-const DEPTH_COLORS = ['#6a2a8a','#2a5aaa','#1a8a9a','#1a9a5a','#8a9a1a','#9a5a1a'];
+const DEPTH_COLORS = ['#7a2a9a','#2a5aaa','#1a8a9a','#1a9a55','#9a9a1a','#9a551a'];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const LEVELS = [
-  { id:'plant_cell',  name:'Mesophyll Cell',          latin:'Cellula mesophylli chlorenchymatis',    scaleM:20e-6,   camPos:[0,0,3.4], look:[0,0,0] },
-  { id:'chloroplast', name:'Chloroplast',               latin:'Chloroplastum',                         scaleM:5e-6,    camPos:[0,0,1.6], look:[0,0,0] },
-  { id:'thylakoid',   name:'Thylakoid Membrane',       latin:'Membrana thylakoidea',                  scaleM:10e-9,   camPos:[0,0.4,1.2], look:[0,0,0] },
-  { id:'chlorophyll', name:'Chlorophyll a',             latin:'Chlorophyllum a — C₅₅H₇₂MgN₄O₅',      scaleM:1e-9,    camPos:[0,0,0.9], look:[0,0,0] },
-  { id:'carbon_atom', name:'sp² Carbon Atom',           latin:'Atomus carbonis — hybridisatio sp²',    scaleM:154e-12, camPos:[0,0,0.18], look:[0,0,0] },
+// ── Level config ───────────────────────────────────────────────────────────────
+const LC = [
+  { id:'plant_cell',  name:'Mesophyll Cell',       latin:'Cellula mesophylli',
+    scaleM:20e-6,   camDist:3.4, drillIn:0.75, drillOut:Infinity,
+    bloom:{s:1.7, r:0.65, t:0.07}, film:0.20,
+    scales:['20 µm'], camFov:45 },
+  { id:'chloroplast', name:'Chloroplast',            latin:'Chloroplastum',
+    scaleM:5e-6,    camDist:1.5, drillIn:0.13, drillOut:3.8,
+    bloom:{s:1.5, r:0.55, t:0.09}, film:0.15,
+    scales:['5 µm'], camFov:45 },
+  { id:'thylakoid',   name:'Thylakoid Membrane',    latin:'Membrana thylakoidea',
+    scaleM:10e-9,   camDist:0.8, drillIn:0.07, drillOut:2.0,
+    bloom:{s:1.3, r:0.45, t:0.11}, film:0.10,
+    scales:['10 nm'], camFov:45 },
+  { id:'chlorophyll', name:'Chlorophyll a',          latin:'C₅₅H₇₂MgN₄O₅',
+    scaleM:1e-9,    camDist:0.35, drillIn:0.04, drillOut:0.85,
+    bloom:{s:1.1, r:0.38, t:0.14}, film:0.07,
+    scales:['1 nm'], camFov:50 },
+  { id:'carbon_atom', name:'sp² Carbon Atom',        latin:'Atomus carbonis (Z=6)',
+    scaleM:154e-12, camDist:0.08, drillIn:Infinity, drillOut:0.22,
+    bloom:{s:0.9, r:0.30, t:0.18}, film:0.04,
+    scales:['154 pm'], camFov:55 },
 ];
 
 const ENTITY_KVS = {
-  plant_cell:  [['Dimensions','20–50 µm × 10–30 µm'],['Genome','~135 Mbp (A. thaliana)'],['Vacuole pH','5.0–5.5'],['Turgor','0.8–1.2 MPa'],['Chloroplasts','50–200 per cell']],
-  chloroplast: [['Dimensions','4–8 µm × 2–4 µm'],['Thylakoids','10–100 grana per chloroplast'],['cpDNA','154 kb circular (tobacco)'],['Import','TOC75/TIC110 translocon'],['Division','FtsZ1/FtsZ2 GTPases']],
-  thylakoid:   [['Bilayer','~10 nm; MGDG 55%, DGDG 25%'],['PSII','350 kDa · PDB 3ARC · 17×10 nm'],['PSI','520 kDa · PDB 1JB0 · 15 nm'],['CF₀CF₁','580 kDa · PDB 6FKF · 14 nm'],['ΔpH','3.5 units; ΔΨ ≈ 120 mV']],
-  chlorophyll: [['Formula','C₅₅H₇₂MgN₄O₅'],['MW','893.49 Da'],['Mg–N bond','2.080–2.090 Å (crystallographic)'],['Qy absorbance','680 nm (in vivo 683 nm)'],['ε (Soret)','85 000 M⁻¹cm⁻¹ at 430 nm']],
-  carbon_atom: [['Z / A','6 / 12'],['Config','[He] 2s² 2p²'],['ε₁s (HF)','–305.9 eV'],['ε₂p (HF)','–11.33 eV'],['r_cov (sp²)','73 pm; r_vdW 170 pm']],
+  plant_cell:  [['Dimensions','20–50 µm × 10–30 µm'],['Ribosomes','~10⁷ per cell'],['Chloroplasts','50–200 per cell'],['Vacuole pH','5.0–5.5'],['Turgor','0.8–1.2 MPa']],
+  chloroplast: [['Size','4–8 µm × 2–4 µm'],['cpDNA','154 kb circular'],['Grana','10–100 stacks'],['Import','TOC75/TIC110'],['Division','FtsZ1/FtsZ2']],
+  thylakoid:   [['Bilayer','~10 nm; MGDG 55%'],['PSII','350 kDa · PDB 3ARC'],['PSI','520 kDa · PDB 1JB0'],['CF₀CF₁','580 kDa · PDB 6FKF'],['ΔpH','3.5 units across']],
+  chlorophyll: [['Formula','C₅₅H₇₂MgN₄O₅'],['MW','893.49 Da'],['Mg–N','2.08–2.09 Å'],['Qy','680 nm in vivo'],['ε Soret','85 000 M⁻¹cm⁻¹']],
+  carbon_atom: [['Z / A','6 / 12'],['Config','[He] 2s² 2p²'],['ε₁s','–305.9 eV (HF)'],['ε₂p','–11.33 eV (HF)'],['r_cov sp²','73 pm']],
 };
 const ENTITY_SYN = {
-  plant_cell:  'CO₂ + H₂O → [CH₂O] + O₂\nΔG°ʹ = +2870 kJ mol⁻¹\n48 photons consumed per hexose',
-  chloroplast: 'Chl a Qy 680/700 nm + Chl b Qy 650 nm\nLight harvesting via LHCII trimer (27 Chl)',
-  thylakoid:   'Z-scheme: P680 → PQ → Cyt b6f → PC → P700\nATP yield: ~1.3 ATP per 2e⁻ via CF₀CF₁',
-  chlorophyll: 'Biosynthesis: Glu-1P → ALA → Urogen III → Protoporphyrin IX → Mg-Proto → Chl a\nGlutamate-1-semialdehyde aminotransferase (GluTR)',
-  carbon_atom: 'sp² hybridisation: 3 × σ (120° planar) + 1 × π (2pz ⊥ plane)\nSlater Z_eff(2p) = 3.25; de Broglie λ = h/p at E₂p',
+  plant_cell:  'CO₂ + H₂O → [CH₂O] + O₂\nΔG°ʹ = +2870 kJ mol⁻¹',
+  chloroplast: 'LHCII trimer harvests 27 Chl\nChl a Qy 680/700 nm + Chl b 650 nm',
+  thylakoid:   'P680 → PQ → Cyt b₆f → PC → P700\n~1.3 ATP per 2e⁻ via CF₀CF₁',
+  chlorophyll: 'Glutamate-1-P → ALA → Urogen III\n→ Protoporphyrin IX → Mg-Proto → Chl a',
+  carbon_atom: '3×σ (120° planar) + 1×π (2pz ⊥)\nSlater Z_eff(2p) = 3.25',
+};
+const STRUCT = {
+  plasma_mem:  {name:'Plasma Membrane',       latin:'Membrana plasmatica',        dim:'7–10 nm bilayer',    detail:'Fluid mosaic; PI(4,5)P₂ signalling domain; ~50 mol% cholesterol; lipid raft microdomains enriched in SM/Chol; Na⁺/K⁺-ATPase sets –70 mV resting potential.'},
+  nucleus:     {name:'Nucleus',               latin:'Nucleus cellulae',           dim:'5–10 µm Ø',          detail:'Double NE; ~2000 NPCs per nucleus (120 nm Ø, 120 MDa); Arabidopsis 5 chr, 135 Mbp; heterochromatin at periphery; nucleolus generates 45S pre-rRNA.'},
+  vacuole:     {name:'Central Vacuole',       latin:'Vacuola centralis',          dim:'Up to 90% vol.',     detail:'Tonoplast pH 5.0–5.5; malate/citrate accumulation; V-ATPase + V-PPase acidify lumen; TIP aquaporins control turgor; anthocyanin compartmentalisation.'},
+  ribosome:    {name:'Ribosome (80S)',         latin:'Ribosoma',                   dim:'~27 nm Ø; 3.3 MDa', detail:'Large 60S (25S+5.8S+5S rRNA + 47 proteins) + small 40S (18S + 33 proteins); peptide synthesis ~4 aa/s; polysomes on rough ER; 1 ribosome per 10 000 Å³.'},
+  microtubule: {name:'Microtubule',            latin:'Microtubulus',               dim:'24 nm OD; µm–mm',   detail:'α/β-tubulin heterodimer helix; 13 protofilaments; dynamic instability; 13 nm/s polymerisation at +end; taxol stabilises; GTP-cap model; kinesin/dynein tracks.'},
+  actin:       {name:'Actin Filament',         latin:'Filamentum actini',          dim:'7–8 nm; ~1 µm',     detail:'F-actin right-handed helix; 37 nm repeat; treadmilling Jp = 0.12 µM barbed/0.6 µM pointed; Arp2/3 branches at 70°; myosin II force generation ~6 pN.'},
+  mitochondria:{name:'Mitochondrion',          latin:'Mitochondrium',              dim:'0.5–2 µm elongated',detail:'Cristae amplify IMM ~3-5×; OXPHOS Complex I–V; proton motive force ~180 mV; mtDNA 367 kb (Arabidopsis); DRP3A/FZL fission-fusion; ~30 ATP/glucose.'},
+  er:          {name:'Rough ER',               latin:'Reticulum endoplasmicum',    dim:'30–100 nm lumen',   detail:'Ribosome-studded; Sec61 translocon; N-glycosylation by OST; BiP/GRP78 chaperone; ~0.5 µm² per ribosome attachment; ERAD pathway for misfolded proteins.'},
+  golgi:       {name:'Golgi Apparatus',        latin:'Apparatus Golgiensis',       dim:'1–3 µm stack',      detail:'Cis-Golgi network → medial → trans-Golgi network; glycan maturation; COPI vesicles (retrograde) + clathrin/COPII (anterograde); ~3–5 µm/s on actin XI.'},
+  chloroplast: {name:'Chloroplast',            latin:'Chloroplastum',              dim:'5 µm × 2–3 µm',     detail:'Streptophyte plastid lineage; ~1500 nucleus-encoded proteins via TOC/TIC; FtsZ Z-ring division; cpDNA nucleoids in stroma; ~50–100 per mesophyll cell.'},
+  psii:        {name:'Photosystem II',         latin:'Photosystema II',            dim:'17×10×8 nm; 350 kDa',detail:'PDB 3ARC; D1/D2 core; Mn₄CaO₅ OEC (E°=+0.82V); 36 Chl per monomer; Pheo/PQ electron acceptors; PSII repair via FtsH protease in stroma lamellae.'},
+  psi:         {name:'Photosystem I',          latin:'Photosystema I',             dim:'15 nm; 520 kDa',    detail:'PDB 1JB0; PsaA/PsaB; P700 Chl a pair (E°=−0.43V); FA/FB/FX [4Fe-4S] clusters; reduces Fd → NADPH via FNR; cyclic electron flow around PSI.'},
+  cytb6f:      {name:'Cytochrome b₆f',         latin:'Complexus cytochromi b₆f',  dim:'8×5×5 nm; 215 kDa', detail:'PDB 1Q90; Q-cycle: 2H⁺/e⁻ lumenal; haem b_L, b_H, c_n, f(c₁); plastocyanin E°=+0.37V; state transition kinase STN7 activation at b₆f.'},
+  atp_syn:     {name:'ATP Synthase CF₀CF₁',    latin:'ATP synthasei complexus',   dim:'14 nm stalk+head',  detail:'PDB 6FKF; c₁₄ ring + α₃β₃γδε; ΔG_ATP=30.5 kJ/mol; ~4.67 H⁺/ATP; rotational catalysis; CF₁ β-subunit "binding change" mechanism (Boyer 1997).'},
+  mg_ion:      {name:'Mg²⁺ — Porphyrin Centre',latin:'Magnesium(II)',             dim:'r_ion = 72 pm',     detail:'Square-planar N₄ coordination (Mg–N 2.08–2.09 Å); 5th axial His from CP47/CP43 antenna; Lewis acid activates C13² carbonyl; ε∥ = 0.0026 Debye.'},
+  nucleus_at:  {name:'Carbon Nucleus (¹²C)',   latin:'Nucleus atomicus',           dim:'r ≈ 2.7 fm',        detail:'6p + 6n; E_bind = 92.16 MeV; ¹³C spin-½ (NMR, δ 0–220 ppm); ¹⁴C t½=5730 yr; ¹²C IS primary mass standard (exactly 12 Da by definition since 1961).'},
 };
 
-const STRUCTURE_INFO = {
-  cell_wall:   { name:'Cell Wall',          latin:'Paries cellularis',            dim:'0.1–0.5 µm thick',       detail:'Primary wall: cellulose I_β microfibrils (3.5 nm Ø) in hemicellulose/pectin matrix; unit cell a=7.78 Å, b=8.20 Å, c=10.38 Å (monoclinic).' },
-  vacuole:     { name:'Central Vacuole',    latin:'Vacuola centralis',            dim:'Up to 90% cell volume',  detail:'Tonoplast-bounded compartment; pH 5.0–5.5; turgor: 0.8–1.2 MPa; malate/citrate accumulation; anthocyanin storage in pH indicator role.' },
-  nucleus:     { name:'Nucleus',            latin:'Nucleus cellulae',             dim:'5–10 µm Ø',              detail:'Double-membrane (NPC 120 nm Ø, ~2000 per nucleus); Arabidopsis: 5 chromosomes, 135 Mbp; nucleolus generates 45S pre-rRNA (18S+5.8S+28S).' },
-  chloroplast: { name:'Chloroplast',        latin:'Chloroplastum',                dim:'5 µm × 2–3 µm',          detail:'Plastid of streptophyte lineage; ~1500 nucleus-encoded proteins imported via TOC/TIC; 50–100 per mesophyll cell; self-replicating via FtsZ.' },
-  mitochondria:{ name:'Mitochondrion',      latin:'Mitochondrium',                dim:'0.5–2 µm',               detail:'Cristae-membraned organelle; OXPHOS: Complex I–V; mtDNA ~367 kb (Arabidopsis); fusion/fission via DRP3A/FZL; generates ~30–32 ATP per glucose.' },
-  er:          { name:'Rough ER',           latin:'Reticulum endoplasmicum granulosum', dim:'30–100 nm lumen', detail:'Ribosome-studded ER; co-translational import via Sec61 translocon; N-glycosylation by OST complex; BiP/GRP78 chaperone-mediated folding.' },
-  golgi:       { name:'Golgi Apparatus',    latin:'Apparatus Golgiensis',         dim:'1–3 µm stack',           detail:'5–8 cisternae (cis→medial→trans); glycan processing; TGN vesicle sorting; plant Golgi moves along actin at 3–5 µm/s (myosin XI).' },
-  grana:       { name:'Granum / Thylakoid Stack', latin:'Granum',                dim:'300–600 nm Ø; 5–15 discs',detail:'Stacked appressed thylakoids enriched in PSII/LHCII; non-appressed stroma lamellae carry PSI/ATP synthase; PSII repair via FtsH protease.' },
-  stroma_lam:  { name:'Stroma Lamellae',   latin:'Lamellae stromales',           dim:'~10 nm thick',           detail:'Non-appressed membranes bridging grana; enriched in PSI (P700), NADPH-dehydrogenase, ATP synthase; site of cyclic electron flow.' },
-  psii:        { name:'Photosystem II',     latin:'Photosystema II',              dim:'17×10×8 nm; 350 kDa',    detail:'PDB 3ARC; D1/D2 heterodimer reaction centre; Mn₄CaO₅ cluster oxidises 2H₂O → O₂ + 4H⁺ + 4e⁻; P680 Eₒ′ = +1.26 V; 36 Chl per monomer.' },
-  psi:         { name:'Photosystem I',      latin:'Photosystema I',               dim:'15 nm; 520 kDa trimer',  detail:'PDB 1JB0; PsaA/PsaB core; P700 Chl a special pair (Eₒ′ = −0.43 V); reduces Fd → NADPH via FNR; serves cyclic and linear electron flow.' },
-  cytb6f:      { name:'Cytochrome b₆f',    latin:'Complexus cytochromi b₆f',     dim:'8×5×5 nm; 215 kDa dimer',detail:'PDB 1Q90; Q-cycle pumps 2H⁺/e⁻; contains haem b_L, b_H, c_n, f (c₁); plastocyanin reduction Eₒ′ PC = +0.37 V; regulatory hub of state transitions.' },
-  atp_syn:     { name:'ATP Synthase CF₀CF₁','latin':'Complexus ATP synthasei',   dim:'14 nm stalk + 10 nm head',detail:'PDB 6FKF; CF₀: c₁₄ ring + a/b₂; CF₁: α₃β₃γδε; ΔG_ATP = 30.5 kJ/mol; rotational catalysis ~120 H⁺ per ATP at 150 RPM; H⁺/ATP ratio ~4.67.' },
-  porphyrin:   { name:'Porphyrin Macrocycle','latin':'Porphyrinum',               dim:'8.6 Å ring Ø',           detail:'Aromatic 18π-electron [18]annulene core; four pyrrole subunits (A–D) bridged by meso-carbons; ring current shift δ(inner NH) ~–3 ppm (¹H NMR); Mg²⁺ displaces 2 NH protons.' },
-  mg_ion:      { name:'Magnesium(II) Ion', latin:'Mg²⁺ (magnesium)',             dim:'r_ion = 72 pm',          detail:'Square-planar coordination by 4 porphyrin N atoms (Mg–N 2.08–2.09 Å); fifth axial ligand from His residue in antenna protein; Lewis acid activates carbonyl groups.' },
-  phytol:      { name:'Phytol Chain',       latin:'Catena phytolica',             dim:'C₂₀ isoprenoid; ~1.8 nm',detail:'3,7,11,15-tetramethylhexadec-2-en-1-ol esterified to ring IV propionate; provides hydrophobic membrane anchor; derived from geranylgeranyl-PP via reduction.' },
-  nucleus_atom:{ name:'Carbon Nucleus',     latin:'Nucleus atomicus',             dim:'r ≈ 2.7 fm',             detail:'6 protons + 6 neutrons; ¹²C spin-0 (abundant 98.9%), ¹³C spin-½ (NMR active, 1.1%); ¹⁴C t½ = 5730 yr (radiocarbon dating); nuclear binding energy 92.16 MeV.' },
-  orbital_1s:  { name:'1s Orbital',         latin:'Orbitalis 1s',                 dim:'⟨r⟩ = 3a₀/2Z ≈ 79 pm',  detail:'Spherically symmetric ψ₁s = (Z³/πa₀³)^½ · e^(−Zr/a₀); Slater Z_eff = 5.70 for C; node-free; contributes ~–305.9 eV (HF eigenvalue) to total energy.' },
-  orbital_2s:  { name:'2s Orbital',         latin:'Orbitalis 2s',                 dim:'⟨r⟩ = 6a₀/Z ≈ 158 pm', detail:'1 radial node at r = 2a₀/Z; penetrates near nucleus; Slater Z_eff(2s) = 3.25; screened by 1s² pair; contributes –16.59 eV (HF); sp hybridisation mixes with 2p.' },
-  orbital_2p:  { name:'2p Orbital (pure)',  latin:'Orbitalis 2p purus',           dim:'⟨r⟩ = 5a₀/Z ≈ 132 pm', detail:'Dumbbell lobe symmetry; 1 angular node (nodal plane through nucleus); in sp² carbon, 2pz stays pure and forms π-bond; ε₂p = –11.33 eV (HF); de Broglie λ = 327 pm at this energy.' },
-  sp2_hybrid:  { name:'sp² Hybrid Orbital', latin:'Orbitalis hybridus sp²',       dim:'σ-framework; 120° angle', detail:'Linear combination: ψ(sp²) = (1/√3)ψ2s + (√2/√3)ψ2px etc.; 33.3% s-character; bond shorter/stronger than sp³; Cα–Cm in porphyrin 1.37–1.38 Å; characteristic of graphene, benzene, and porphyrins.' },
-};
-
-// ─── Three.js setup ────────────────────────────────────────────────────────────
+// ── Renderer ──────────────────────────────────────────────────────────────────
 const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, powerPreference:'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2;
+renderer.toneMappingExposure = 1.3;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000307);
-scene.fog = new THREE.FogExp2(0x000307, 0.18);
 
-const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.001, 100);
-camera.position.set(0, 0, 3.4);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.0001, 200);
+camera.position.set(0,0.4,3.4);
 
 const controls = new OrbitControls(camera, canvas);
-controls.enableDamping = true; controls.dampingFactor = 0.07;
-controls.autoRotate = true; controls.autoRotateSpeed = 0.4;
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.autoRotate = true; controls.autoRotateSpeed = 0.35;
+controls.minDistance = 0.5; controls.maxDistance = 8;
 
-// Lighting — confocal CLSM aesthetic
-const ambLight = new THREE.AmbientLight(0x020408, 1.0);
-scene.add(ambLight);
-const keyLight = new THREE.PointLight(0x80c0e8, 3.0, 12);
-keyLight.position.set(2, 3, 3);
-scene.add(keyLight);
-const rimLight = new THREE.PointLight(0x1a3060, 2.0, 10);
-rimLight.position.set(-3, -1, -2);
-scene.add(rimLight);
-const fillLight = new THREE.PointLight(0x602010, 0.8, 8);
-fillLight.position.set(1, -2, 1);
-scene.add(fillLight);
+// Lights — CLSM laser illumination aesthetic
+scene.add(new THREE.AmbientLight(0x020409, 0.8));
+const kl = new THREE.PointLight(0x70b0e0, 4.5, 15); kl.position.set(2,3,3); scene.add(kl);
+const rl = new THREE.PointLight(0x102040, 2.5, 12); rl.position.set(-3,-1,-2); scene.add(rl);
+const fl = new THREE.PointLight(0x601020, 1.2, 8);  fl.position.set(1,-2,1);  scene.add(fl);
 
-// Post-processing — UnrealBloom
+// Post-processing
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(innerWidth, innerHeight), 1.4, 0.6, 0.12);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight), 1.7, 0.65, 0.07);
 composer.addPass(bloomPass);
+const filmPass = new FilmPass(0.20);
+composer.addPass(filmPass);
+composer.addPass(new OutputPass());
 
 window.addEventListener('resize', () => {
-  camera.aspect = innerWidth/innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-  composer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight);
 });
 
-// ─── State ─────────────────────────────────────────────────────────────────────
-let currentLevel = 0;
-let currentGroup = null;
-let hoveredMesh = null;
-let drillables = [];
-let cameraAnim = null;
-let layerData = {};  // entity_id → layers[]
+// ── Neural stream state ────────────────────────────────────────────────────────
+let neuroSnap = null;   // latest NeuroSnapshot from /neuro/stream
+let streamOk  = false;
+const LABEL_COLORS_MAP = {
+  'chloroplast':0x00e060, 'mitochondria':0xb020ff, 'nucleus':0x2050ff,
+  'vacuole':0x1020a0, 'ribosome':0xe89000, 'endoplasmic_reticulum':0xf0d000,
+  'golgi':0xff6000, 'microtubule_track':0x00d5f0, 'vesicle':0xff80c0, 'nucleolus':0x4080ff,
+};
+
+function startNeuroStream() {
+  const es = new EventSource(`http://${HOST}/neuro/stream`);
+  es.addEventListener('snap', e => {
+    try { neuroSnap = JSON.parse(e.data); streamOk = true; } catch {}
+  });
+  es.onerror = () => {
+    streamOk = false;
+    document.getElementById('stream-status').textContent = 'STREAM OFFLINE';
+  };
+  es.onopen = () => {
+    streamOk = true;
+    document.getElementById('stream-status').textContent = '';
+  };
+}
+
+// 2D neural map — centroid dot plot
+const nmapCanvas = document.getElementById('nmap');
+const nmapCtx    = nmapCanvas.getContext('2d');
+function drawNeuroMap(snap) {
+  const W = nmapCanvas.width, H = nmapCanvas.height;
+  nmapCtx.fillStyle = 'rgba(2,4,10,0.92)';
+  nmapCtx.fillRect(0,0,W,H);
+  const centroids = snap.centroids  || {};
+  const surprise  = snap.surprise   || {};
+  const working   = new Set(snap.working_memory || []);
+  for (const [lbl, pos] of Object.entries(centroids)) {
+    const base = lbl.includes('::') ? lbl.split('::').pop() : lbl;
+    let hex = '#2a5a6a';
+    for (const [kl,kc] of Object.entries(LABEL_COLORS_MAP)) {
+      if (lbl.includes(kl)) { hex = '#'+kc.toString(16).padStart(6,'0'); break; }
+    }
+    const x = pos.x * W, y = pos.y * H;
+    const sr = surprise[lbl] || 0;
+    const r  = working.has(lbl) ? 3.5 : (sr > 0.5 ? 3 : 1.5);
+    nmapCtx.beginPath(); nmapCtx.arc(x, y, r, 0, Math.PI*2);
+    nmapCtx.fillStyle = hex; nmapCtx.fill();
+    if (sr > 0.65) {
+      nmapCtx.beginPath(); nmapCtx.arc(x, y, r+2, 0, Math.PI*2);
+      nmapCtx.strokeStyle = 'rgba(255,255,255,0.25)'; nmapCtx.lineWidth = 0.8; nmapCtx.stroke();
+    }
+  }
+  // draw network links (top connections only)
+  const links = snap.network_links || {};
+  for (const [a, conns] of Object.entries(links)) {
+    const pa = centroids[a]; if (!pa) continue;
+    for (const [b, w] of Object.entries(conns)) {
+      if (w < 0.3) continue;
+      const pb = centroids[b]; if (!pb) continue;
+      nmapCtx.beginPath();
+      nmapCtx.moveTo(pa.x*W, pa.y*H); nmapCtx.lineTo(pb.x*W, pb.y*H);
+      nmapCtx.strokeStyle = `rgba(30,80,100,${w*0.25})`; nmapCtx.lineWidth=0.5; nmapCtx.stroke();
+    }
+  }
+  nmapCtx.fillStyle = '#0c1e28'; nmapCtx.font = '7px Courier New';
+  nmapCtx.fillText(`${Object.keys(centroids).length} centroids`, 3, H-3);
+}
+
+// Apply neural activation to scene emissive values
+function applyNeuroToScene(snap) {
+  if (!currentGroup || !snap) return;
+  const wm  = new Set(snap.working_memory || []);
+  const srp = snap.surprise || {};
+  const netStr = {};
+  (snap.active_networks || []).forEach(n => {
+    const s = n.strength || 0;
+    (n.members || []).forEach(m => { netStr[m] = Math.max(netStr[m]||0, s); });
+  });
+  currentGroup.traverse(obj => {
+    if (!obj.isMesh || !obj.material || !('emissiveIntensity' in obj.material)) return;
+    const lbl = obj.userData.label || '';
+    if (!lbl) return;
+    const base = obj.userData.baseEI ?? (obj.userData.baseEI = obj.material.emissiveIntensity);
+    const activity = (netStr[lbl] || 0);
+    const pulse    = wm.has(lbl) ? 0.6 : 0;
+    const flash    = (srp[lbl] || 0) > 0.7 ? 1.0 : 0;
+    const target   = base + activity * 1.5 + pulse + flash;
+    obj.material.emissiveIntensity = THREE.MathUtils.lerp(obj.material.emissiveIntensity, target, 0.08);
+  });
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let currentLevel = 0, currentGroup = null, isTransitioning = false;
+let drillables = [], hoveredMesh = null;
+let layerData = {};
 const clock = new THREE.Clock();
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
-let mouseDownPos = null;
+let mDownPos = null;
 
-// ─── Material helpers ───────────────────────────────────────────────────────────
-function mat(color, opts={}) {
+// ── Material factory ──────────────────────────────────────────────────────────
+function M(color, opts={}) {
   return new THREE.MeshPhysicalMaterial({
-    color, roughness:0.35, metalness:0.05,
-    emissive: opts.emissive ?? 0x000000,
-    emissiveIntensity: opts.ei ?? 1.0,
-    transparent: opts.transparent ?? false,
-    opacity: opts.opacity ?? 1.0,
-    transmission: opts.transmission ?? 0,
-    thickness: opts.thickness ?? 0,
-    side: opts.side ?? THREE.FrontSide,
-    ...opts.extra,
+    color, roughness:opts.r??0.35, metalness:opts.m??0.05,
+    emissive:opts.e??0x000000, emissiveIntensity:opts.ei??1,
+    transparent:opts.tr??false, opacity:opts.op??1,
+    transmission:opts.tx??0, thickness:opts.th??0,
+    side:opts.side??THREE.FrontSide,
   });
 }
-function info(obj, key) { obj.userData.info = STRUCTURE_INFO[key] ?? {}; }
-function drillable(obj, level) { obj.userData.drillTarget = level; drillables.push(obj); }
+function setInfo(obj,key) { obj.userData.info = STRUCT[key]??{}; }
 
-// ─── LEVEL 0 — Mesophyll Plant Cell ────────────────────────────────────────────
-function buildPlantCell(group) {
-  // Cell wall (paries cellularis)
-  const wallMat = mat(0x0e2810, { transparent:true, opacity:0.35, side:THREE.DoubleSide });
-  const wall = new THREE.Mesh(new THREE.BoxGeometry(2.12,2.12,1.06,3,3,2), wallMat);
-  info(wall,'cell_wall'); group.add(wall);
-
-  // Cell body (plasma membrane inside wall)
-  const bodyMat = mat(0x060e18, { transparent:true, opacity:0.12, transmission:0.5, thickness:0.1, side:THREE.DoubleSide });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(2,2,1,3,3,2), bodyMat);
-  group.add(body);
-
-  // Central vacuole (tonoplast)
-  const vacMat = mat(0x030a1a, { transparent:true, opacity:0.18, transmission:0.85, thickness:0.5 });
-  const vac = new THREE.Mesh(new THREE.SphereGeometry(0.76,32,24), vacMat);
-  vac.scale.set(1, 1, 0.7);
-  info(vac,'vacuole'); group.add(vac);
-
-  // Nucleus (karyon)
-  const nucMat = mat(0x28084a, { emissive:0x180030, ei:0.8, roughness:0.2 });
-  const nuc = new THREE.Mesh(new THREE.SphereGeometry(0.14,24,16), nucMat);
-  nuc.position.set(0.15, 0.18, 0.1);
-  info(nuc,'nucleus'); group.add(nuc);
-  // nucleolus
-  const nuclMat = mat(0x4a0a72, { emissive:0x28003a, ei:1.0 });
-  const nucl = new THREE.Mesh(new THREE.SphereGeometry(0.048,12,8), nuclMat);
-  nucl.position.set(0.15, 0.18, 0.1).addScalar(0.04);
-  group.add(nucl);
-
-  // Chloroplasts (chloroplastum) — drillable
-  const cpMat = mat(0x083810, { emissive:0x001e08, ei:1.2, roughness:0.3 });
-  const cpGeo = new THREE.SphereGeometry(0.09,16,10);
-  const cpPositions = [];
-  for (let i=0; i<16; i++) {
-    const a = (i/16)*Math.PI*2 + Math.random()*0.4;
-    const r = 0.48 + Math.random()*0.38;
-    const z = (Math.random()-0.5)*0.28;
-    cpPositions.push([r*Math.cos(a), r*Math.sin(a), z]);
-  }
-  cpPositions.forEach(([x,y,z]) => {
-    const cp = new THREE.Mesh(cpGeo, cpMat);
-    cp.position.set(x,y,z);
-    cp.scale.set(1, 0.55, 0.55);
-    cp.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, 0);
-    cp.userData.info = STRUCTURE_INFO.chloroplast;
-    drillable(cp, 1);
-    group.add(cp);
-  });
-
-  // Mitochondria
-  const mitoMat = mat(0x1e0802, { emissive:0x0e0401, ei:0.9, roughness:0.5 });
-  for (let i=0; i<8; i++) {
-    const m = new THREE.Mesh(new THREE.CapsuleGeometry(0.016,0.055,4,8), mitoMat);
-    const a = Math.random()*Math.PI*2, r = 0.3+Math.random()*0.5;
-    m.position.set(r*Math.cos(a), r*Math.sin(a), (Math.random()-0.5)*0.24);
-    m.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, 0);
-    m.userData.info = STRUCTURE_INFO.mitochondria;
-    group.add(m);
-  }
-
-  // Rough ER (3 tube segments)
-  const erMat = mat(0x120828, { transparent:true, opacity:0.65, roughness:0.5 });
-  const erPaths = [
-    [[-0.35,0.35,0.05],[-0.2,0.5,0.08],[0.05,0.46,-0.05],[0.22,0.32,0.0]],
-    [[0.28,-0.28,0.1],[0.15,-0.5,0.05],[-.12,-0.46,-0.08],[-0.24,-0.3,0.05]],
-    [[-0.4,-0.1,0.0],[-0.3,0.1,-0.05],[-0.18,0.28,0.08]],
-  ];
-  erPaths.forEach(pts => {
-    const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p)));
-    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve,20,0.011,6,false), erMat);
-    info(tube,'er'); group.add(tube);
-  });
-
-  // Golgi apparatus (5 cisternae)
-  const golgiGroup = new THREE.Group();
-  golgiGroup.position.set(0.28,-0.25,0.08);
-  golgiGroup.rotation.z = 0.3;
-  for (let i=0; i<5; i++) {
-    const disc = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.055-i*0.004, 0.057-i*0.004, 0.007, 18),
-      mat(0x1a0c04, { emissive:0x0c0600, ei:0.8 })
-    );
-    disc.position.y = i*0.011; disc.rotation.z = i*0.03;
-    info(disc,'golgi'); golgiGroup.add(disc);
-  }
-  group.add(golgiGroup);
+// ── InstancedMesh helper ───────────────────────────────────────────────────────
+function instanced(geo, mat, count, placeFn) {
+  const mesh = new THREE.InstancedMesh(geo, mat, count);
+  const dummy = new THREE.Object3D();
+  for (let i=0;i<count;i++) { placeFn(dummy,i); dummy.updateMatrix(); mesh.setMatrixAt(i,dummy.matrix); }
+  mesh.instanceMatrix.needsUpdate = true;
+  return mesh;
 }
 
-// ─── LEVEL 1 — Chloroplast ──────────────────────────────────────────────────────
-function buildChloroplast(group) {
-  // Outer envelope
-  const outerMat = mat(0x062210, { transparent:true, opacity:0.35, side:THREE.DoubleSide });
-  const outer = new THREE.Mesh(new THREE.SphereGeometry(0.96,32,24), outerMat);
-  outer.scale.set(1,0.64,0.9); group.add(outer);
+// ── LEVEL 0: Mesophyll Cell ───────────────────────────────────────────────────
+function buildCell(g) {
+  // plasma membrane
+  const pmMat = M(0x108898,{e:0x044840,ei:.6,tr:true,op:.3,side:THREE.DoubleSide});
+  const pm = new THREE.Mesh(new THREE.BoxGeometry(2.05,2.05,1.05,3,3,2),pmMat);
+  setInfo(pm,'plasma_mem'); g.add(pm);
 
-  // Inner envelope
-  const innerMat = mat(0x052010, { transparent:true, opacity:0.28, side:THREE.DoubleSide });
-  const inner = new THREE.Mesh(new THREE.SphereGeometry(0.87,32,24), innerMat);
-  inner.scale.set(1,0.64,0.9); group.add(inner);
+  // cell interior (barely visible volume)
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(2,2,1,2,2,1), M(0x030810,{tr:true,op:.06,tx:.6,th:.2})));
 
-  // Stroma fill
-  const stromaMat = mat(0x020c04, { transparent:true, opacity:0.10 });
-  const stroma = new THREE.Mesh(new THREE.SphereGeometry(0.84,20,16), stromaMat);
-  stroma.scale.set(1,0.64,0.9); group.add(stroma);
+  // central vacuole
+  const vac = new THREE.Mesh(new THREE.SphereGeometry(.75,28,20), M(0x020a1a,{e:0x000514,ei:.4,tr:true,op:.22,tx:.75,th:.4}));
+  vac.scale.set(1,1,.7); setInfo(vac,'vacuole'); g.add(vac);
 
-  // Grana stacks — drillable
-  const discMat = mat(0x0a3810, { emissive:0x003010, ei:1.4, roughness:0.2 });
-  const graPos = [[0,0,0],[0.28,0.1,0.15],[-0.28,0.05,-0.12],[0.12,-0.18,0.22],[-0.14,0.14,-0.2]];
-  graPos.forEach(([gx,gy,gz]) => {
-    const graGroup = new THREE.Group();
-    graGroup.position.set(gx,gy,gz);
-    const nDiscs = 7+Math.floor(Math.random()*5);
-    for (let d=0; d<nDiscs; d++) {
-      const disc = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.17,0.17,0.018,20), discMat.clone()
-      );
-      disc.position.y = d*0.022;
-      disc.userData.info = STRUCTURE_INFO.grana;
-      drillable(disc, 2);
-      graGroup.add(disc);
-    }
-    group.add(graGroup);
+  // nucleus + nucleolus
+  const nuc = new THREE.Mesh(new THREE.SphereGeometry(.145,24,16), M(0x2808a0,{e:0x180060,ei:1.2,r:.2}));
+  nuc.position.set(.15,.18,.08); setInfo(nuc,'nucleus'); g.add(nuc);
+  const nul = new THREE.Mesh(new THREE.SphereGeometry(.048,12,8), M(0x5010c8,{e:0x300080,ei:1.5}));
+  nul.position.set(.18,.21,.1); g.add(nul);
+
+  // ribosomes — InstancedMesh ~900 (CLSM: bright gold/amber)
+  const riboMat = M(0xe89000,{e:0x884400,ei:1.0,r:.3});
+  const riboGeo = new THREE.SphereGeometry(.011,5,4);
+  const riboCount = 900;
+  const riboMesh = instanced(riboGeo, riboMat, riboCount, (d) => {
+    let x,y,z,tries=0;
+    do {
+      x=(Math.random()-.5)*1.7; y=(Math.random()-.5)*1.7; z=(Math.random()-.5)*.7;
+      tries++;
+    } while (tries<30 && (x*x+y*y>.72 || x*x+y*y+z*z<.04 || Math.sqrt(x*x+y*y+z*z)<.16));
+    d.position.set(x,y,z);
+    d.rotation.set(Math.random()*6,Math.random()*6,0);
+    d.scale.setScalar(.8+Math.random()*.4);
   });
+  riboMesh.userData.info  = STRUCT.ribosome;
+  riboMesh.userData.label = 'ribosome';
+  g.add(riboMesh);
 
-  // Stroma lamellae (thin sheets connecting grana)
-  const lamMat = mat(0x052208, { transparent:true, opacity:0.45, roughness:0.4 });
-  [[0,0.28,0],[0.18,0.05,0.18],[-0.16,0.1,-0.16]].forEach(([x,y,z]) => {
-    const lam = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.006,0.08), lamMat);
-    lam.position.set(x,y,z); lam.rotation.y = Math.random()*0.8-0.4;
-    info(lam,'stroma_lam'); group.add(lam);
-  });
+  // tRNA (smaller, ~200)
+  const trnaMat = M(0xc06000,{e:0x603000,ei:.8,r:.4});
+  g.add(instanced(new THREE.SphereGeometry(.006,4,3), trnaMat, 200, (d) => {
+    let x,y,z,t=0;
+    do { x=(Math.random()-.5)*1.6; y=(Math.random()-.5)*1.6; z=(Math.random()-.5)*.65; t++; } while(t<20 && x*x+y*y>.65);
+    d.position.set(x,y,z);
+  }));
 
-  // Plastoglobules (8 — electron-dense lipid droplets)
-  const pgMat = mat(0x181802, { emissive:0x0c0c01, ei:0.7, roughness:0.15 });
-  for (let i=0;i<8;i++) {
-    const pg = new THREE.Mesh(new THREE.SphereGeometry(0.022,8,6), pgMat);
-    const a=Math.random()*Math.PI*2, r=0.3+Math.random()*0.4;
-    pg.position.set(r*Math.cos(a), (Math.random()-0.5)*0.35, r*Math.sin(a));
-    group.add(pg);
-  }
-
-  // Nucleoid regions (plastid DNA)
-  const ndMat = mat(0x180838, { emissive:0x100022, ei:0.9 });
-  [[0.1,0.02,0.3],[-0.12,0.04,-0.28]].forEach(([x,y,z]) => {
-    const nd = new THREE.Mesh(new THREE.TorusGeometry(0.06,0.015,8,20), ndMat);
-    nd.position.set(x,y,z); nd.rotation.x = Math.PI/2;
-    group.add(nd);
-  });
-}
-
-// ─── LEVEL 2 — Thylakoid Membrane ──────────────────────────────────────────────
-function buildThylakoid(group) {
-  // Lipid bilayer slab
-  const bilayerMat = mat(0x050c14, { transparent:true, opacity:0.5, roughness:0.6 });
-  const bilayer = new THREE.Mesh(new THREE.BoxGeometry(2.2,0.07,1.6), bilayerMat);
-  group.add(bilayer);
-
-  // Outer leaflet highlight
-  const leafMat = mat(0x061420, { transparent:true, opacity:0.3, roughness:0.8 });
-  [0.04, -0.04].forEach(y => {
-    const leaf = new THREE.Mesh(new THREE.BoxGeometry(2.2,0.006,1.6), leafMat);
-    leaf.position.y = y; group.add(leaf);
-  });
-
-  // PSII complexes — drillable
-  const psiiMat = mat(0x080820, { emissive:0x040418, ei:1.5, roughness:0.15, metalness:0.15 });
-  const psiiPositions = [[-0.7,0.06,0.3],[-0.35,0.06,-0.3],[0,0.06,0.4],[0.35,0.06,-0.2],[0.7,0.06,0.3],
-                         [-0.55,-0.06,-0.4],[0.15,-0.06,0.5],[0.65,-0.06,-0.35]];
-  psiiPositions.forEach(([x,y,z]) => {
-    const ps = new THREE.Mesh(new THREE.BoxGeometry(0.14,0.1,0.1), psiiMat.clone());
-    ps.position.set(x,y,z);
-    ps.userData.info = STRUCTURE_INFO.psii;
-    drillable(ps, 3);
-    group.add(ps);
-  });
-
-  // PSI complexes
-  const psiMat = mat(0x002020, { emissive:0x001212, ei:1.2, roughness:0.2, metalness:0.1 });
-  [[-0.6,0.07,-0.1],[-0.1,0.07,0.0],[0.5,0.07,-0.4],[0.8,-0.07,0.2],[-0.4,-0.07,0.4],[0.2,-0.07,-0.5]].forEach(([x,y,z]) => {
-    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.065,0.065,0.1,8), psiMat.clone());
-    p.position.set(x,y,z); p.rotation.x = Math.PI/2;
-    info(p,'psi'); group.add(p);
-  });
-
-  // Cytochrome b6f
-  const b6fMat = mat(0x180e00, { emissive:0x0c0800, ei:1.0, roughness:0.25 });
-  [[-0.2,0.065,0.35],[0.4,0.065,-0.05],[-0.8,-0.065,0.1],[0.1,-0.065,-0.42],[0.7,-0.065,0.5]].forEach(([x,y,z]) => {
-    const b = new THREE.Mesh(new THREE.BoxGeometry(0.11,0.09,0.08), b6fMat.clone());
-    b.position.set(x,y,z); info(b,'cytb6f'); group.add(b);
-  });
-
-  // ATP synthase (CF0-CF1, stalked)
-  const atpMat = mat(0x180400, { emissive:0x0e0200, ei:1.3, roughness:0.2 });
-  [[0.25,0,0.1],[-0.5,0,-0.2],[0.85,0,-0.1]].forEach(([x,y,z]) => {
-    const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.04,0.18,10), atpMat.clone());
-    stalk.position.set(x,0.09,z);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.06,12,8), atpMat.clone());
-    head.position.set(x,0.2,z);
-    head.scale.set(1.2,0.9,1.2);
-    info(stalk,'atp_syn'); info(head,'atp_syn');
-    group.add(stalk); group.add(head);
-  });
-
-  // Plastoquinone carriers (animated small spheres)
-  const pqMat = mat(0x202000, { emissive:0x141400, ei:1.8 });
-  for (let i=0; i<20; i++) {
-    const pq = new THREE.Mesh(new THREE.SphereGeometry(0.018,6,4), pqMat);
-    pq.position.set((Math.random()-0.5)*2.0, (Math.random()-0.5)*0.06, (Math.random()-0.5)*1.4);
-    pq.userData.animPQ = { t: Math.random()*Math.PI*2, speed: 0.4+Math.random()*0.4 };
-    group.add(pq);
-  }
-}
-
-// ─── LEVEL 3 — Chlorophyll a Molecule ──────────────────────────────────────────
-function buildChlorophyll(group) {
-  const SCALE = 0.055; // 1 unit = 1 Å; total ring ~8.6 Å across → ~0.47 scene units
-
-  // Porphyrin atom positions (Å from centre)
-  const Mg = [0,0,0];
-  const N = [[0,2.03,0],[2.03,0,0],[0,-2.03,0],[-2.03,0,0]];
-  const MESO = [[1.37,1.37,0],[1.37,-1.37,0],[-1.37,-1.37,0],[-1.37,1.37,0]];
-  // α-carbons (inner ring, adjacent to N)
-  const CA = [[0.82,2.85,0],[-0.82,2.85,0],[2.85,0.82,0],[2.85,-0.82,0],
-              [0.82,-2.85,0],[-0.82,-2.85,0],[-2.85,-0.82,0],[-2.85,0.82,0]];
-  // β-carbons (outer pyrrole)
-  const CB = [[1.2,3.7,0],[-1.2,3.7,0],[3.7,1.2,0],[3.7,-1.2,0],
-              [1.2,-3.7,0],[-1.2,-3.7,0],[-3.7,-1.2,0],[-3.7,1.2,0]];
-
-  function addAtom(pos, color, r, infoKey) {
-    const m = new THREE.Mesh(
-      new THREE.SphereGeometry(r,14,10),
-      mat(color, { roughness:0.15, metalness:0.25, emissive: color, ei:0.3 })
-    );
-    m.position.set(pos[0]*SCALE, pos[1]*SCALE, (pos[2]||0)*SCALE);
-    if (infoKey) info(m, infoKey);
-    group.add(m); return m;
-  }
-
-  function addBond(a, b, color=0x303030) {
-    const va = new THREE.Vector3(a[0]*SCALE, a[1]*SCALE, (a[2]||0)*SCALE);
-    const vb = new THREE.Vector3(b[0]*SCALE, b[1]*SCALE, (b[2]||0)*SCALE);
-    const mid = new THREE.Vector3().addVectors(va,vb).multiplyScalar(0.5);
-    const len = va.distanceTo(vb);
-    const dir = new THREE.Vector3().subVectors(vb,va).normalize();
-    const bond = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.012,0.012,len,6),
-      mat(color, { roughness:0.5 })
-    );
-    bond.position.copy(mid);
-    bond.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), dir);
-    group.add(bond);
-  }
-
-  // Mg centre
-  addAtom(Mg, 0xd0c020, 0.11, 'mg_ion');
-  // Nitrogens
-  N.forEach(n => addAtom(n, 0x1a5ab8, 0.075, 'porphyrin'));
-  // Meso carbons
-  MESO.forEach(m => addAtom(m, 0x404040, 0.055));
-  // Alpha carbons
-  CA.forEach(c => addAtom(c, 0x303030, 0.052));
-  // Beta carbons
-  CB.forEach(c => addAtom(c, 0x282828, 0.052));
-
-  // Bonds: Mg to each N
-  N.forEach(n => addBond(Mg, n, 0x605010));
-  // N to adjacent alpha-C (N[0]=north → CA[0],CA[1]; N[1]=east → CA[2],CA[3]; etc.)
-  [[0,0],[0,1],[1,2],[1,3],[2,4],[2,5],[3,6],[3,7]].forEach(([ni,ci]) => addBond(N[ni], CA[ci], 0x202820));
-  // Alpha to meso (CA[0]→MESO[3], CA[1]→MESO[0], CA[2]→MESO[0], CA[3]→MESO[1], etc.)
-  [[0,3],[1,0],[2,0],[3,1],[4,1],[5,2],[6,2],[7,3]].forEach(([ci,mi]) => addBond(CA[ci], MESO[mi], 0x282828));
-  // Alpha to beta within each pyrrole
-  [[0,0],[1,1],[2,2],[3,3],[4,4],[5,5],[6,6],[7,7]].forEach(([ca,cb]) => addBond(CA[ca],CB[cb], 0x282828));
-  // Beta-beta within each pyrrole pair
-  [[0,1],[2,3],[4,5],[6,7]].forEach(([a,b]) => addBond(CB[a],CB[b],0x282828));
-
-  // Phytol tail (C20 isoprenoid) — zigzag chain from ring IV propionate
-  const tailStart = [-1.37,-1.37,0];
-  let prev = tailStart;
-  for (let i=0; i<12; i++) {
-    const next = [
-      prev[0] - 0.8 - (i%3===0?0.3:0),
-      prev[1] - 0.5 + (i%2===0?0.3:-0.3),
-      prev[2] + (i%3===0?0.2:-0.1)
+  // microtubules — cyan (CLSM tubulin immunofluorescence)
+  const mtMat = M(0x00d5f0,{e:0x005870,ei:1.0,r:.2});
+  for(let i=0;i<12;i++){
+    const a=(i/12)*Math.PI*2;
+    const pts=[
+      new THREE.Vector3(.14*Math.cos(a),.14*Math.sin(a),0),
+      new THREE.Vector3(.5*Math.cos(a+.25),.5*Math.sin(a+.25),(Math.random()-.5)*.12),
+      new THREE.Vector3(.8*Math.cos(a-.1),.8*Math.sin(a-.1),(Math.random()-.5)*.08),
     ];
-    const c = new THREE.Mesh(new THREE.SphereGeometry(0.045,8,6),
-      mat(0x282828, { roughness:0.3 }));
-    c.position.set(next[0]*SCALE, next[1]*SCALE, next[2]*SCALE);
-    if (i===0) info(c,'phytol');
-    group.add(c);
-    addBond(prev, next, 0x222222);
-    prev = next;
+    const t=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),12,.007,7,false),mtMat);
+    setInfo(t,'microtubule'); g.add(t);
   }
 
-  // Carbonyl oxygen on ring IV (ester linkage)
-  const carbO = [-2.0,-3.7,0];
-  addAtom(carbO, 0xb02010, 0.065, 'porphyrin');
-  addBond(CB[6], carbO, 0x602010);
-}
-
-// ─── LEVEL 4 — Carbon Atom (sp² hybridisation) ──────────────────────────────────
-function buildCarbonAtom(group) {
-  // Nucleus
-  const nucMat = mat(0x8a1010, { emissive:0x500808, ei:1.5, roughness:0.15, metalness:0.3 });
-  const nuc = new THREE.Mesh(new THREE.SphereGeometry(0.018,12,8), nucMat);
-  info(nuc,'nucleus_atom'); group.add(nuc);
-
-  // 1s orbital cloud
-  function cloudSphere(r, color, opacity) {
-    const m = new THREE.Mesh(
-      new THREE.SphereGeometry(r,24,16),
-      mat(color, { transparent:true, opacity, roughness:0.8, side:THREE.DoubleSide })
-    );
-    return m;
+  // actin filaments — magenta (rhodamine-phalloidin)
+  const actMat = M(0xff2880,{e:0x881040,ei:.9,r:.35});
+  for(let i=0;i<28;i++){
+    const a=Math.random()*Math.PI*2, r=.2+Math.random()*.7;
+    const s=new THREE.Vector3(r*Math.cos(a),(Math.random()-.5)*.9,r*Math.sin(a)*.5);
+    const e2=s.clone().addScalar(.001);
+    e2.x+=(.6+Math.random()*.3)*(Math.random()-.5);
+    e2.y+=(.6+Math.random()*.3)*(Math.random()-.5);
+    e2.z+=(.15+Math.random()*.1)*(Math.random()-.5);
+    const tu=new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(s,e2),6,.003,5,false),actMat);
+    setInfo(tu,'actin'); g.add(tu);
   }
-  const s1 = cloudSphere(0.028, 0x1030b0, 0.18); info(s1,'orbital_1s'); group.add(s1);
-  const s2 = cloudSphere(0.058, 0x1050c0, 0.08); info(s2,'orbital_2s'); group.add(s2);
 
-  // p-orbital dumbbell helper
-  function pDumbbell(axis, color, infoKey) {
-    const lobeMat = mat(color, { transparent:true, opacity:0.22, roughness:0.7, side:THREE.DoubleSide,
-                                  emissive:color, ei:0.15 });
-    const geo = new THREE.SphereGeometry(0.05,16,10);
-    const l1 = new THREE.Mesh(geo, lobeMat.clone());
-    const l2 = new THREE.Mesh(geo, lobeMat.clone());
-    l1.scale.set(...axis.map((v,i)=>(v?1.5:0.55))); // elongated along active axis
-    l2.scale.copy(l1.scale);
-    const off = 0.052;
-    l1.position.set(axis[0]*off, axis[1]*off, axis[2]*off);
-    l2.position.set(-axis[0]*off,-axis[1]*off,-axis[2]*off);
-    if (infoKey) { info(l1,infoKey); info(l2,infoKey); }
-    group.add(l1); group.add(l2);
+  // chloroplasts — drillable — bright green (chlorophyll autofluorescence)
+  const cpMat = M(0x00e060,{e:0x006820,ei:1.3,r:.28});
+  const cpGeo = new THREE.SphereGeometry(.088,14,10);
+  for(let i=0;i<16;i++){
+    const a=(i/16)*Math.PI*2+Math.random()*.3, r=.46+Math.random()*.38, z=(Math.random()-.5)*.28;
+    const cp=new THREE.Mesh(cpGeo,cpMat);
+    cp.position.set(r*Math.cos(a),r*Math.sin(a),z);
+    cp.scale.set(1,.54,.54); cp.rotation.set(Math.random()*Math.PI,Math.random()*Math.PI,0);
+    cp.userData.info=STRUCT.chloroplast; cp.userData.drillTarget=1; drillables.push(cp); g.add(cp);
   }
-  pDumbbell([1,0,0], 0xb04010, 'orbital_2p');
-  pDumbbell([0,1,0], 0x10a030, 'orbital_2p');
 
-  // sp2 hybrid lobes (pure 2pz ⊥, plus 3 in-plane hybrids)
-  const sp2Mat = mat(0x6080c0, { transparent:true, opacity:0.14, roughness:0.7, side:THREE.DoubleSide,
-                                  emissive:0x304060, ei:0.12 });
-  [0, 120, 240].forEach(deg => {
-    const rad = deg * Math.PI/180;
-    const lobe = new THREE.Mesh(new THREE.SphereGeometry(0.055,14,10), sp2Mat.clone());
-    lobe.position.set(Math.cos(rad)*0.065, 0, Math.sin(rad)*0.065);
-    lobe.scale.set(1.4, 0.5, 1.4);
-    info(lobe,'sp2_hybrid'); group.add(lobe);
+  // mitochondria — violet/purple (MitoTracker DeepRed)
+  const mitMat = M(0xb020ff,{e:0x601080,ei:1.1,r:.45});
+  for(let i=0;i<9;i++){
+    const m=new THREE.Mesh(new THREE.CapsuleGeometry(.016,.06,4,8),mitMat);
+    const a=Math.random()*Math.PI*2, r=.28+Math.random()*.52;
+    m.position.set(r*Math.cos(a),r*Math.sin(a),(Math.random()-.5)*.24);
+    m.rotation.set(Math.random()*Math.PI,Math.random()*Math.PI,0);
+    setInfo(m,'mitochondria'); g.add(m);
+  }
+
+  // rough ER — yellow (ER-Tracker)
+  const erMat = M(0xf0d000,{e:0x706000,ei:.8,tr:true,op:.6,r:.5});
+  const erPaths=[
+    [new THREE.Vector3(-.38,.38,.05),new THREE.Vector3(-.2,.52,.08),new THREE.Vector3(.08,.48,-.05),new THREE.Vector3(.24,.32,0)],
+    [new THREE.Vector3(.32,-.3,.1),new THREE.Vector3(.18,-.52,.04),new THREE.Vector3(-.14,-.48,-.07),new THREE.Vector3(-.26,-.3,.04)],
+    [new THREE.Vector3(-.42,-.08,0),new THREE.Vector3(-.3,.12,-.04),new THREE.Vector3(-.16,.3,.07)],
+  ];
+  erPaths.forEach(pts=>{
+    const er=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),20,.011,6,false),erMat);
+    setInfo(er,'er'); g.add(er);
   });
-  // pure 2pz (perpendicular)
-  pDumbbell([0,0,1], 0x8040b0, 'orbital_2p');
 
-  // Energy level annotations (floating text via sprites)
-  function textSprite(txt, pos) {
-    const canvas2 = document.createElement('canvas');
-    canvas2.width = 256; canvas2.height = 48;
-    const ctx = canvas2.getContext('2d');
-    ctx.fillStyle = 'rgba(0,0,0,0)';
-    ctx.fillRect(0,0,256,48);
-    ctx.font = '14px Courier New';
-    ctx.fillStyle = '#3a6a8a';
-    ctx.fillText(txt, 8, 28);
-    const tex = new THREE.CanvasTexture(canvas2);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex, transparent:true, depthWrite:false }));
-    sp.scale.set(0.12, 0.022, 1);
-    sp.position.set(...pos);
-    group.add(sp);
+  // Golgi — orange (NBD-ceramide)
+  const gol=new THREE.Group(); gol.position.set(.3,-.26,.08); gol.rotation.z=.3;
+  for(let i=0;i<6;i++){
+    const d=new THREE.Mesh(new THREE.CylinderGeometry(.055-i*.004,.057-i*.004,.007,18),
+      M(0xff6000,{e:0x803000,ei:.9}));
+    d.position.y=i*.011; d.rotation.z=i*.025; setInfo(d,'golgi'); gol.add(d);
   }
-  textSprite('ε₁s = −305.9 eV', [0.05, 0.032, 0]);
-  textSprite('ε₂p = −11.33 eV', [0.05, 0.072, 0]);
-  textSprite('sp² hybridisation', [0.05, -0.04, 0]);
+  g.add(gol);
 }
 
-// ─── Level builder dispatch ────────────────────────────────────────────────────
-const BUILDERS = [buildPlantCell, buildChloroplast, buildThylakoid, buildChlorophyll, buildCarbonAtom];
+// ── LEVEL 1: Chloroplast ──────────────────────────────────────────────────────
+function buildChloroplast(g) {
+  const s=(r,op,e)=>new THREE.Mesh(new THREE.SphereGeometry(r,32,20),M(0x062a10,{e,ei:.5,tr:true,op,side:THREE.DoubleSide}));
+  const outer=s(.95,.32,0x021208); outer.scale.set(1,.63,.88); g.add(outer);
+  const inn=s(.87,.25,0x010e06); inn.scale.set(1,.63,.88); g.add(inn);
+  const str=s(.83,.09,0x010804); str.scale.set(1,.63,.88); g.add(str);
 
-function loadLevel(idx) {
-  if (currentGroup) { scene.remove(currentGroup); currentGroup.traverse(o => { if (o.isMesh) { o.geometry.dispose(); } }); }
-  drillables = [];
-  controls.autoRotate = true;
-  currentLevel = idx;
-  currentGroup = new THREE.Group();
-  BUILDERS[idx](currentGroup);
+  const discMat=M(0x00e050,{e:0x007820,ei:1.5,r:.2});
+  const graPos=[[0,0,0],[.3,.08,.18],[-.3,.04,-.14],[.12,-.2,.24],[-.15,.16,-.22]];
+  graPos.forEach(([gx,gy,gz])=>{
+    const gg=new THREE.Group(); gg.position.set(gx,gy,gz);
+    const n=7+Math.floor(Math.random()*5);
+    for(let d=0;d<n;d++){
+      const disc=new THREE.Mesh(new THREE.CylinderGeometry(.17,.17,.017,20),discMat.clone());
+      disc.position.y=d*.021; disc.userData.info=STRUCT.psii; disc.userData.drillTarget=2; drillables.push(disc); gg.add(disc);
+    }
+    g.add(gg);
+  });
+
+  const lamMat=M(0x054a10,{tr:true,op:.42,r:.5});
+  [[0,.3,0],[.2,.06,.2],[-.18,.1,-.18]].forEach(([x,y,z])=>{
+    const l=new THREE.Mesh(new THREE.BoxGeometry(.32,.005,.1),lamMat); l.position.set(x,y,z); l.rotation.y=Math.random()*.8-.4; g.add(l);
+  });
+
+  const pgMat=M(0xe0e000,{e:0x606000,ei:.8,r:.15});
+  for(let i=0;i<8;i++){
+    const a=Math.random()*Math.PI*2, r=.3+Math.random()*.38;
+    const p=new THREE.Mesh(new THREE.SphereGeometry(.02,7,5),pgMat);
+    p.position.set(r*Math.cos(a),(Math.random()-.5)*.32,r*Math.sin(a)); g.add(p);
+  }
+
+  const ndMat=M(0x3010c0,{e:0x200070,ei:1.0});
+  [[.1,.02,.3],[-.12,.04,-.28]].forEach(([x,y,z])=>{
+    const nd=new THREE.Mesh(new THREE.TorusGeometry(.055,.014,8,20),ndMat);
+    nd.position.set(x,y,z); nd.rotation.x=Math.PI/2; g.add(nd);
+  });
+}
+
+// ── LEVEL 2: Thylakoid Membrane ───────────────────────────────────────────────
+function buildThylakoid(g) {
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(2.2,.068,1.6),M(0x040c18,{tr:true,op:.45,r:.7})));
+  [.04,-.04].forEach(y=>{
+    g.add(new THREE.Mesh(new THREE.BoxGeometry(2.2,.005,1.6),M(0x061828,{tr:true,op:.28})));
+  });
+
+  const psiiMat=M(0x1010c0,{e:0x08087a,ei:1.6,r:.15,m:.12});
+  [[-0.7,.06,.3],[-.35,.06,-.32],[0,.06,.42],[.35,.06,-.22],[.7,.06,.3],[-.55,-.06,-.42],[.14,-.06,.52],[.65,-.06,-.36]].forEach(([x,y,z])=>{
+    const p=new THREE.Mesh(new THREE.BoxGeometry(.14,.1,.1),psiiMat.clone());
+    p.position.set(x,y,z); p.userData.info=STRUCT.psii; p.userData.drillTarget=3; drillables.push(p); g.add(p);
+  });
+
+  const psiMat=M(0x00a0a0,{e:0x006060,ei:1.3,r:.2});
+  [[-0.6,.07,-.12],[-.1,.07,.02],[.5,.07,-.42],[.8,-.07,.22],[-.4,-.07,.42],[.2,-.07,-.52]].forEach(([x,y,z])=>{
+    const p=new THREE.Mesh(new THREE.CylinderGeometry(.064,.064,.1,8),psiMat.clone());
+    p.position.set(x,y,z); p.rotation.x=Math.PI/2; setInfo(p,'psi'); g.add(p);
+  });
+
+  const b6fMat=M(0xb09000,{e:0x584800,ei:1.0,r:.25});
+  [[-.2,.065,.36],[.4,.065,-.06],[-.8,-.065,.12],[.12,-.065,-.43],[.72,-.065,.52]].forEach(([x,y,z])=>{
+    const b=new THREE.Mesh(new THREE.BoxGeometry(.11,.09,.08),b6fMat.clone());
+    b.position.set(x,y,z); setInfo(b,'cytb6f'); g.add(b);
+  });
+
+  const atpMat=M(0xd04000,{e:0x802000,ei:1.4,r:.2});
+  [[.25,0,.1],[-.5,0,-.2],[.85,0,-.1]].forEach(([x,y,z])=>{
+    const st=new THREE.Mesh(new THREE.CylinderGeometry(.024,.038,.18,10),atpMat.clone()); st.position.set(x,.09,z);
+    const hd=new THREE.Mesh(new THREE.SphereGeometry(.058,12,8),atpMat.clone()); hd.position.set(x,.2,z); hd.scale.set(1.2,.9,1.2);
+    setInfo(st,'atp_syn'); setInfo(hd,'atp_syn'); g.add(st); g.add(hd);
+  });
+
+  // animated PQ carriers
+  const pqMat=M(0xd0d000,{e:0x888800,ei:2.0,r:.1});
+  for(let i=0;i<22;i++){
+    const pq=new THREE.Mesh(new THREE.SphereGeometry(.016,5,4),pqMat.clone());
+    pq.position.set((Math.random()-.5)*2,(Math.random()-.5)*.055,(Math.random()-.5)*1.4);
+    pq.userData.pq={t:Math.random()*Math.PI*2, sp:.3+Math.random()*.5}; g.add(pq);
+  }
+}
+
+// ── LEVEL 3: Chlorophyll a molecule ──────────────────────────────────────────
+function buildChlorophyll(g) {
+  const S=.054;
+  const N=[[0,2.03,0],[2.03,0,0],[0,-2.03,0],[-2.03,0,0]];
+  const MESO=[[1.37,1.37,0],[1.37,-1.37,0],[-1.37,-1.37,0],[-1.37,1.37,0]];
+  const CA=[[.82,2.85,0],[-.82,2.85,0],[2.85,.82,0],[2.85,-.82,0],[.82,-2.85,0],[-.82,-2.85,0],[-2.85,-.82,0],[-2.85,.82,0]];
+  const CB=[[1.2,3.7,0],[-1.2,3.7,0],[3.7,1.2,0],[3.7,-1.2,0],[1.2,-3.7,0],[-1.2,-3.7,0],[-3.7,-1.2,0],[-3.7,1.2,0]];
+
+  const atom=(p,col,r,ik)=>{
+    const m=new THREE.Mesh(new THREE.SphereGeometry(r,14,10),M(col,{e:col,ei:.25,r:.15,m:.3}));
+    m.position.set(p[0]*S,p[1]*S,(p[2]||0)*S); if(ik) setInfo(m,ik); g.add(m); return m;
+  };
+  const bond=(a,b,col=0x282828)=>{
+    const va=new THREE.Vector3(a[0]*S,a[1]*S,(a[2]||0)*S);
+    const vb=new THREE.Vector3(b[0]*S,b[1]*S,(b[2]||0)*S);
+    const len=va.distanceTo(vb), mid=new THREE.Vector3().addVectors(va,vb).multiplyScalar(.5);
+    const dir=new THREE.Vector3().subVectors(vb,va).normalize();
+    const bd=new THREE.Mesh(new THREE.CylinderGeometry(.011,.011,len,6),M(col,{r:.5}));
+    bd.position.copy(mid); bd.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),dir); g.add(bd);
+  };
+
+  atom([0,0,0],0xe0c000,.11,'mg_ion');
+  N.forEach(n=>atom(n,0x1050c0,.072,'nucleus_at'));
+  MESO.forEach(m=>atom(m,0x383838,.053));
+  CA.forEach(c=>atom(c,0x2c2c2c,.050));
+  CB.forEach(c=>atom(c,0x242424,.050));
+
+  N.forEach(n=>bond([0,0,0],n,0x706010));
+  [[0,0],[0,1],[1,2],[1,3],[2,4],[2,5],[3,6],[3,7]].forEach(([ni,ci])=>bond(N[ni],CA[ci],0x1c2818));
+  [[0,3],[1,0],[2,0],[3,1],[4,1],[5,2],[6,2],[7,3]].forEach(([ci,mi])=>bond(CA[ci],MESO[mi],0x242424));
+  [[0,0],[1,1],[2,2],[3,3],[4,4],[5,5],[6,6],[7,7]].forEach(([ca,cb])=>bond(CA[ca],CB[cb],0x242424));
+  [[0,1],[2,3],[4,5],[6,7]].forEach(([a,b])=>bond(CB[a],CB[b],0x222222));
+
+  // phytol tail
+  let prev=[-1.37,-1.37,0];
+  for(let i=0;i<12;i++){
+    const n=[prev[0]-.75-(i%3===0?.25:0), prev[1]-.45+(i%2===0?.28:-.28), prev[2]+(i%3===0?.18:-.08)];
+    const c=new THREE.Mesh(new THREE.SphereGeometry(.042,8,6),M(0x262626,{r:.3}));
+    c.position.set(n[0]*S,n[1]*S,n[2]*S); g.add(c); bond(prev,n,0x1e1e1e); prev=n;
+  }
+  atom([-2.0,-3.7,0],0xb02010,.063,'mg_ion');
+  bond(CB[6],[-2.0,-3.7,0],0x601010);
+}
+
+// ── LEVEL 4: Carbon atom (sp²) ────────────────────────────────────────────────
+function buildCarbonAtom(g) {
+  g.add(Object.assign(new THREE.Mesh(new THREE.SphereGeometry(.016,12,8),M(0xff1010,{e:0xa00808,ei:1.8,r:.12,m:.3})),{userData:{info:STRUCT.nucleus_at}}));
+
+  const cloud=(r,col,op,ik)=>{
+    const m=new THREE.Mesh(new THREE.SphereGeometry(r,22,14),M(col,{tr:true,op,r:.9,side:THREE.DoubleSide}));
+    if(ik) setInfo(m,ik); g.add(m);
+  };
+  cloud(.026,0x1030c0,.20,'nucleus_at');
+  cloud(.055,0x1050d0,.08,'nucleus_at');
+
+  const dumb=(axis,col,op=.20)=>{
+    const lMat=M(col,{tr:true,op,r:.7,side:THREE.DoubleSide,e:col,ei:.10});
+    [1,-1].forEach(sign=>{
+      const l=new THREE.Mesh(new THREE.SphereGeometry(.048,14,10),lMat.clone());
+      l.scale.set(axis[0]?1.6:.5, axis[1]?1.6:.5, axis[2]?1.6:.5);
+      l.position.set(axis[0]*sign*.05,axis[1]*sign*.05,axis[2]*sign*.05); g.add(l);
+    });
+  };
+  dumb([1,0,0],0xff4010);  // 2px
+  dumb([0,1,0],0x10c040);  // 2py
+  dumb([0,0,1],0x8030c0);  // 2pz (pure π)
+
+  // sp² in-plane hybrids
+  [0,120,240].forEach(deg=>{
+    const r=deg*Math.PI/180;
+    const l=new THREE.Mesh(new THREE.SphereGeometry(.052,12,8),M(0x5080c0,{tr:true,op:.13,r:.7,side:THREE.DoubleSide,e:0x304060,ei:.1}));
+    l.position.set(Math.cos(r)*.062,0,Math.sin(r)*.062); l.scale.set(1.5,.45,1.5); g.add(l);
+  });
+
+  // energy annotations
+  [['ε₁s = −305.9 eV',.06,.032],['ε₂s = −16.59 eV',.06,.054],['ε₂p = −11.33 eV',.06,.076],['sp² + π orbital',.06,-.042]].forEach(([txt,x,y])=>{
+    const cv=document.createElement('canvas'); cv.width=280; cv.height=44;
+    const cx=cv.getContext('2d'); cx.font='13px Courier New'; cx.fillStyle='#2a6880'; cx.fillText(txt,6,26);
+    const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),transparent:true,depthWrite:false}));
+    sp.scale.set(.13,.02,1); sp.position.set(x,y,0); g.add(sp);
+  });
+}
+
+const BUILDERS = [buildCell, buildChloroplast, buildThylakoid, buildChlorophyll, buildCarbonAtom];
+
+// ── Level transition ──────────────────────────────────────────────────────────
+function disposeGroup(grp) {
+  grp.traverse(o=>{ if(o.isMesh){ o.geometry.dispose(); const mm=Array.isArray(o.material)?o.material:[o.material]; mm.forEach(m=>m.dispose()); }});
+}
+
+async function transitionLevel(next) {
+  if(isTransitioning || next===currentLevel) return;
+  if(next<0||next>=LC.length) return;
+  isTransitioning=true;
+  controls.autoRotate=false;
+
+  const fd=document.getElementById('fade');
+  fd.style.opacity='1'; await sleep(360);
+
+  if(currentGroup){ disposeGroup(currentGroup); scene.remove(currentGroup); }
+  drillables=[];
+  currentGroup=new THREE.Group();
+  BUILDERS[next](currentGroup);
+  tagLabels(currentGroup);
   scene.add(currentGroup);
-  const L = LEVELS[idx];
-  flyCamera(new THREE.Vector3(...L.camPos), new THREE.Vector3(...L.look));
-  updateHUD(idx);
-  document.getElementById('esc-hint').style.display = idx > 0 ? 'block' : 'none';
+  currentLevel=next;
+
+  const lc=LC[next];
+  camera.fov=lc.camFov; camera.updateProjectionMatrix();
+  camera.position.set(lc.camDist*.55, lc.camDist*.18, lc.camDist);
+  controls.target.set(0,0,0); controls.update();
+  controls.minDistance=lc.drillIn*.6;
+  controls.maxDistance=lc.drillOut===Infinity?lc.camDist*4:lc.drillOut*.85;
+  bloomPass.strength=lc.bloom.s; bloomPass.radius=lc.bloom.r; bloomPass.threshold=lc.bloom.t;
+  filmPass.uniforms.intensity.value=lc.film;
+  updateHUD(next);
+
+  await sleep(40); fd.style.opacity='0'; await sleep(380);
+  controls.autoRotate=true; isTransitioning=false;
 }
 
-// ─── Camera fly animation ──────────────────────────────────────────────────────
-function flyCamera(toPos, toLook, duration=700) {
-  cameraAnim = { fromPos:camera.position.clone(), toPos, fromLook:controls.target.clone(), toLook, t:0, duration };
-}
-
-// ─── HUD update ───────────────────────────────────────────────────────────────
-const SCALE_LABELS = ['20 µm','5 µm','10 nm','1 nm','154 pm'];
-
-function fmtZ(z) {
-  if (z < 1e-9) return (z*1e12).toFixed(0)+' pm';
-  if (z < 1e-6) return (z*1e9).toFixed(2)+' nm';
-  if (z < 1e-3) return (z*1e6).toFixed(2)+' µm';
+// ── HUD ──────────────────────────────────────────────────────────────────────
+function fmtZ(z){
+  if(z<1e-9) return (z*1e12).toFixed(0)+' pm';
+  if(z<1e-6) return (z*1e9).toFixed(2)+' nm';
+  if(z<1e-3) return (z*1e6).toFixed(2)+' µm';
   return (z*1e3).toFixed(2)+' mm';
 }
 
-function updateHUD(idx) {
-  const L = LEVELS[idx];
-  // Breadcrumb
-  const bc = document.getElementById('breadcrumb');
-  bc.innerHTML = LEVELS.slice(0,idx+1).map((l,i) =>
-    `${i>0?'<span class="sep">›</span>':''}` +
-    `<span class="${i===idx?'active':'crumb'}">${l.name.toUpperCase()}</span>`
-  ).join('');
-  // Scale badge
-  document.getElementById('level-badge').innerHTML =
-    `LEVEL ${idx} &nbsp;|&nbsp; SCALE <span class="sv">${SCALE_LABELS[idx]}</span> &nbsp;|&nbsp; ` +
-    `<span class="sv">${L.latin}</span>`;
-  // Scale bar
-  document.getElementById('scalebar-text').textContent = SCALE_LABELS[idx];
-  // Panel
-  document.getElementById('p-name').textContent = L.name;
-  document.getElementById('p-latin').textContent = L.latin;
-  const kvs = ENTITY_KVS[L.id] || [];
-  document.getElementById('p-kvs').innerHTML = kvs.map(([k,v]) =>
-    `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
-  const syn = ENTITY_SYN[L.id] || '';
-  document.getElementById('syn').textContent = syn;
-  // Layers from API
-  const layers = layerData[L.id] || [];
-  const pl = document.getElementById('p-layers');
-  if (layers.length) {
-    pl.innerHTML = layers.map(l => {
-      const c = DEPTH_COLORS[l.depth] || '#4a6a8a';
-      return `<div class="lr"><div class="ld" style="background:${c}"></div>` +
-             `<span class="ln">${l.label}</span><span class="lz">${fmtZ(l.z)}</span></div>`;
-    }).join('');
-    // layer chips
-    const bar = document.getElementById('layer-bar');
-    bar.innerHTML = `<span id="lbl">Depth Layers</span>` +
-      layers.slice(0,12).map(l => {
-        const c = DEPTH_COLORS[l.depth] || '#4a6a8a';
-        return `<span class="lchip" style="color:${c};border-color:${c}22;">${l.label}</span>`;
-      }).join('');
-  } else {
-    pl.innerHTML = `<div style="font-size:9px;color:#1a2a3a">— awaiting API response —</div>`;
-  }
+function updateHUD(idx){
+  const L=LC[idx];
+  document.getElementById('bc').innerHTML=LC.slice(0,idx+1).map((l,i)=>
+    `${i?'<span class="sep">›</span>':''}<span class="${i===idx?'act':'cr'}">${l.name.toUpperCase()}</span>`).join('');
+  document.getElementById('badge').innerHTML=`LEVEL ${idx} &nbsp;·&nbsp; SCALE <span class="sv">${L.scales[0]}</span> &nbsp;·&nbsp; <span class="sv">${L.latin}</span>`;
+  document.getElementById('sbtxt').textContent=L.scales[0];
+  document.getElementById('p-name').textContent=L.name;
+  document.getElementById('p-latin').textContent=L.latin;
+  document.getElementById('p-kvs').innerHTML=(ENTITY_KVS[L.id]||[]).map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+  document.getElementById('syn').textContent=ENTITY_SYN[L.id]||'';
+  const lrs=layerData[L.id]||[];
+  const hint=idx<LC.length-1?'Zoom in to drill · Right-click to ascend':'Right-click to ascend';
+  document.getElementById('hint').textContent=hint;
+  document.getElementById('p-layers').innerHTML=lrs.length
+    ?lrs.map(l=>`<div class="lr"><div class="ld" style="background:${DEPTH_COLORS[l.depth]||'#4a6a8a'}"></div><span class="ln">${l.label}</span><span class="lz">${fmtZ(l.z)}</span></div>`).join('')
+    :'<div style="font-size:9px;color:#0e2030">— awaiting API —</div>';
+  const lbar=document.getElementById('lbar');
+  lbar.innerHTML='<span style="font-size:8px;color:#0d1e2a;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0">Depth Layers</span>';
+  lrs.slice(0,10).forEach(l=>{
+    const c=DEPTH_COLORS[l.depth]||'#4a6a8a';
+    const ch=document.createElement('span'); ch.className='lc';
+    ch.style.cssText=`color:${c};border-color:${c}22`; ch.textContent=l.label; lbar.appendChild(ch);
+  });
 }
 
-// ─── Tooltip ──────────────────────────────────────────────────────────────────
-const tooltip = document.getElementById('tooltip');
-function showTooltip(mesh, x, y) {
-  const inf = mesh.userData.info || {};
-  if (!inf.name) { hideTooltip(); return; }
-  document.getElementById('tt-name').textContent   = inf.name || '';
-  document.getElementById('tt-latin').textContent  = inf.latin || '';
-  document.getElementById('tt-dim').textContent    = inf.dim   || '';
-  document.getElementById('tt-detail').textContent = inf.detail|| '';
-  const chips = document.getElementById('tt-chips');
-  const layers = layerData[LEVELS[currentLevel].id] || [];
-  chips.innerHTML = layers.slice(0,8).map(l => `<span class="ttc">${l.label}</span>`).join('');
-  tooltip.style.opacity = '1';
-  const tx = x+16, ty = y-10;
-  tooltip.style.left = Math.min(tx, innerWidth-320)+'px';
-  tooltip.style.top  = Math.max(ty, 4)+'px';
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const ttEl=document.getElementById('tt');
+function showTT(inf,x,y){
+  if(!inf||!inf.name){ttEl.style.opacity='0';return;}
+  document.getElementById('ttn').textContent=inf.name||'';
+  document.getElementById('ttl').textContent=inf.latin||'';
+  document.getElementById('ttd').textContent=inf.dim||'';
+  document.getElementById('tti').textContent=inf.detail||'';
+  ttEl.style.opacity='1';
+  ttEl.style.left=Math.min(x+14,innerWidth-310)+'px';
+  ttEl.style.top=Math.max(y-8,4)+'px';
 }
-function hideTooltip() { tooltip.style.opacity = '0'; }
 
-// ─── Interaction ───────────────────────────────────────────────────────────────
-canvas.addEventListener('mousemove', e => {
-  mouse.x = (e.clientX/innerWidth)*2-1;
-  mouse.y = -(e.clientY/innerHeight)*2+1;
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(drillables, false);
-  if (hits.length) {
-    const m = hits[0].object;
-    if (m !== hoveredMesh) { hoveredMesh = m; canvas.style.cursor='pointer'; }
-    showTooltip(m, e.clientX, e.clientY);
-  } else {
-    if (hoveredMesh) { hoveredMesh=null; canvas.style.cursor='default'; hideTooltip(); }
-    // check non-drillable hover
-    const allMeshes = [];
-    if (currentGroup) currentGroup.traverse(o => { if (o.isMesh && o.userData.info) allMeshes.push(o); });
-    const hits2 = raycaster.intersectObjects(allMeshes, false);
-    if (hits2.length) showTooltip(hits2[0].object, e.clientX, e.clientY);
-    else hideTooltip();
-  }
+// ── Interaction ───────────────────────────────────────────────────────────────
+canvas.addEventListener('mousemove',e=>{
+  mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const all=[]; if(currentGroup) currentGroup.traverse(o=>{if(o.isMesh&&o.userData.info)all.push(o);});
+  const h=raycaster.intersectObjects(all,false);
+  if(h.length){ hoveredMesh=h[0].object; canvas.style.cursor=hoveredMesh.userData.drillTarget!==undefined?'zoom-in':'crosshair'; showTT(hoveredMesh.userData.info,e.clientX,e.clientY); }
+  else{ hoveredMesh=null; canvas.style.cursor='default'; ttEl.style.opacity='0'; }
 });
-
-canvas.addEventListener('mousedown', e => { mouseDownPos={x:e.clientX, y:e.clientY}; });
-canvas.addEventListener('mouseup', e => {
-  if (!mouseDownPos) return;
-  if (Math.hypot(e.clientX-mouseDownPos.x, e.clientY-mouseDownPos.y) < 5) {
-    if (e.button===0) {
-      raycaster.setFromCamera(mouse, camera);
-      const hits = raycaster.intersectObjects(drillables, false);
-      if (hits.length) {
-        const tgt = hits[0].object.userData.drillTarget;
-        if (tgt !== undefined) setTimeout(() => loadLevel(tgt), 100);
-      }
-    } else if (e.button===2) {
-      if (currentLevel > 0) loadLevel(currentLevel-1);
+canvas.addEventListener('mousedown',e=>{mDownPos={x:e.clientX,y:e.clientY};});
+canvas.addEventListener('mouseup',e=>{
+  if(!mDownPos)return;
+  const moved=Math.hypot(e.clientX-mDownPos.x,e.clientY-mDownPos.y);
+  if(moved<5){
+    if(e.button===0 && hoveredMesh?.userData.drillTarget!==undefined){
+      // fly to target before threshold kicks in
+      controls.target.copy(hoveredMesh.getWorldPosition(new THREE.Vector3()));
     }
+    if(e.button===2 && currentLevel>0) transitionLevel(currentLevel-1);
   }
-  mouseDownPos = null;
+  mDownPos=null;
 });
-canvas.addEventListener('contextmenu', e => e.preventDefault());
-window.addEventListener('keydown', e => { if (e.key==='Escape' && currentLevel>0) loadLevel(currentLevel-1); });
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+window.addEventListener('keydown',e=>{if(e.key==='Escape'&&currentLevel>0)transitionLevel(currentLevel-1);});
 
-// ─── Animation loop ────────────────────────────────────────────────────────────
-function animate() {
+// ── Animation loop ────────────────────────────────────────────────────────────
+function animate(){
   requestAnimationFrame(animate);
-  const dt = clock.getDelta();
-  // Camera animation
-  if (cameraAnim) {
-    cameraAnim.t += dt*1000;
-    const p = Math.min(cameraAnim.t/cameraAnim.duration, 1);
-    const e = p<0.5 ? 2*p*p : -1+(4-2*p)*p;
-    camera.position.lerpVectors(cameraAnim.fromPos, cameraAnim.toPos, e);
-    controls.target.lerpVectors(cameraAnim.fromLook, cameraAnim.toLook, e);
-    controls.update();
-    if (p>=1) cameraAnim=null;
-  } else {
-    controls.update();
+  const dt=clock.getDelta();
+  controls.update();
+
+  // Neural stream → scene emissive update + neural map redraw
+  if(neuroSnap) {
+    applyNeuroToScene(neuroSnap);
+    drawNeuroMap(neuroSnap);
   }
-  // Animate plastoquinone carriers (level 2)
-  if (currentGroup && currentLevel===2) {
-    currentGroup.traverse(o => {
-      if (o.isMesh && o.userData.animPQ) {
-        o.userData.animPQ.t += dt * o.userData.animPQ.speed;
-        o.position.x += Math.sin(o.userData.animPQ.t)*0.0008;
-        o.position.z += Math.cos(o.userData.animPQ.t*0.7)*0.0006;
-        if (o.position.x > 1.0) o.position.x -= 2.0;
-        if (o.position.x < -1.0) o.position.x += 2.0;
+
+  // PQ carrier animation (level 2)
+  if(currentGroup&&currentLevel===2){
+    currentGroup.traverse(o=>{
+      if(o.isMesh&&o.userData.pq){
+        o.userData.pq.t+=dt*o.userData.pq.sp;
+        o.position.x+=Math.sin(o.userData.pq.t)*.0009;
+        o.position.z+=Math.cos(o.userData.pq.t*.7)*.0007;
+        if(o.position.x>1.0) o.position.x-=2.0;
+        if(o.position.x<-1.0) o.position.x+=2.0;
       }
     });
   }
+
+  // Zoom threshold detection
+  if(!isTransitioning&&currentGroup){
+    const dist=camera.position.distanceTo(controls.target);
+    const lc=LC[currentLevel];
+    if(dist<lc.drillIn&&currentLevel<LC.length-1) transitionLevel(currentLevel+1);
+    else if(lc.drillOut!==Infinity&&dist>lc.drillOut&&currentLevel>0) transitionLevel(currentLevel-1);
+  }
+
   composer.render();
 }
-animate();
 
-// ─── API integration ───────────────────────────────────────────────────────────
-const ENTITY_LABELS = {
-  plant_cell:  ['mesophyll','chloroplast','mitochondria','nucleus','vacuole','cell_wall','cytoplasm','tonoplast','plasmalemma'],
-  chloroplast: ['chloroplast','thylakoid','grana','stroma','envelope','ftsz','nucleoid','plastoglobule'],
-  thylakoid:   ['thylakoid','photosystem','psii','psi','cytochrome','atp_synthase','plastoquinone','lhcii','electron_transport'],
-  chlorophyll: ['chlorophyll','porphyrin','magnesium','tetrapyrrole','phytol','pyrrole','biosynthesis','soret'],
-  carbon_atom: ['carbon','orbital','electron','sp2','hybridisation','nucleus','eigenvalue','wavefunction'],
+// ── API ───────────────────────────────────────────────────────────────────────
+const ENT_LABELS={
+  plant_cell:  ['mesophyll','chloroplast','mitochondria','nucleus','vacuole','cell_wall','ribosome','cytoskeleton','actin','tubulin'],
+  chloroplast: ['chloroplast','thylakoid','grana','stroma','envelope','plastoglobule','nucleoid','ftsz'],
+  thylakoid:   ['thylakoid','psii','psi','cytochrome','atp_synthase','plastoquinone','lhcii','electron_transport'],
+  chlorophyll: ['chlorophyll','porphyrin','magnesium','tetrapyrrole','phytol','pyrrole','soret'],
+  carbon_atom: ['carbon','orbital','electron','sp2','hybridisation','eigenvalue','wavefunction'],
 };
 
-async function fetchLayersFor(id) {
-  const labels = ENTITY_LABELS[id];
-  try {
-    const res = await fetch(`http://${HOST}/overlay/layers`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ entities:[{
-        entity_id: id,
-        active_labels: labels,
-        phenotype: id,
-        position: [0.5,0.5],
-        size_estimate: 0.1,
-        label_scores: Object.fromEntries(labels.map(l => [l,1.0]))
-      }]})
-    });
-    const data = await res.json();
-    const result = (data.results||[])[0];
-    if (result && result.layers) {
-      layerData[id] = result.layers.sort((a,b) => a.depth-b.depth).slice(0,12);
-    }
-  } catch(e) { /* node offline */ }
+async function fetchLayers(id){
+  const labels=ENT_LABELS[id]||[];
+  try{
+    const r=await fetch(`http://${HOST}/overlay/layers`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({entities:[{entity_id:id,active_labels:labels,phenotype:id,position:[.5,.5],size_estimate:.1,label_scores:Object.fromEntries(labels.map(l=>[l,1.0]))}]})});
+    const d=await r.json(); const res=(d.results||[])[0];
+    if(res?.layers) layerData[id]=res.layers.sort((a,b)=>a.depth-b.depth).slice(0,12);
+  }catch{}
 }
 
-async function calibrateAll() {
-  const SCALES = [['plant_cell',20e-6],['cell_wall',0.5e-6],['chloroplast',5e-6],
-                  ['thylakoid',10e-9],['chlorophyll',1e-9],['carbon_atom',0.154e-9]];
-  for (const [id,m] of SCALES) {
-    try {
-      await fetch(`http://${HOST}/overlay/layers/calibrate`, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({entity_type:id, known_scale_m:m})
-      });
-    } catch(e) {}
+async function calibrateAll(){
+  const S=[['plant_cell',20e-6],['cell_wall',.5e-6],['chloroplast',5e-6],['thylakoid',10e-9],['chlorophyll',1e-9],['carbon_atom',.154e-9]];
+  for(const [id,m] of S){
+    try{ await fetch(`http://${HOST}/overlay/layers/calibrate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entity_type:id,known_scale_m:m})}); }catch{}
   }
 }
 
-async function init() {
-  const prog = document.getElementById('loading-progress');
-  const ltxt = document.getElementById('loading-text');
-  prog.style.width = '10%';
-  ltxt.textContent = 'REGISTERING PHYSICAL CALIBRATIONS...';
-  await calibrateAll();
-  prog.style.width = '30%';
-  ltxt.textContent = 'QUERYING NEURAL FABRIC — PLANT CELL...';
-  await fetchLayersFor('plant_cell');
-  prog.style.width = '50%';
-  // Prefetch remaining levels in background
-  Promise.all(['chloroplast','thylakoid','chlorophyll','carbon_atom'].map(fetchLayersFor));
-  prog.style.width = '85%';
-  ltxt.textContent = 'BUILDING ULTRASTRUCTURE...';
-  await new Promise(r => setTimeout(r, 200));
-  prog.style.width = '100%';
-  await new Promise(r => setTimeout(r, 300));
-  document.getElementById('loading').style.display = 'none';
-  document.getElementById('hud').style.display = 'block';
-  loadLevel(0);
+// ── Label userData propagation ─────────────────────────────────────────────────
+// Ensure each mesh has userData.label so neural stream can drive its emissive.
+const LABEL_BY_STRUCT = {
+  plasma_mem:'plasma_membrane', nucleus:'nucleus', vacuole:'vacuole',
+  ribosome:'ribosome', microtubule:'microtubule_track', actin:'actin',
+  chloroplast:'chloroplast', mitochondria:'mitochondria', er:'endoplasmic_reticulum',
+  golgi:'golgi', psii:'psii', psi:'psi', cytb6f:'cytochrome', atp_syn:'atp_synthase',
+  mg_ion:'magnesium', porphyrin:'chlorophyll', nucleus_at:'carbon',
+};
+function tagLabels(group) {
+  group.traverse(obj => {
+    if (!obj.isMesh) return;
+    const ik = Object.keys(STRUCT).find(k => obj.userData.info === STRUCT[k]);
+    if (ik && LABEL_BY_STRUCT[ik]) obj.userData.label = LABEL_BY_STRUCT[ik];
+  });
 }
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  const prog=document.getElementById('lprog'), lt=document.getElementById('ltxt');
+
+  prog.style.width='10%'; lt.textContent='CALIBRATING PHYSICAL SCALES...';
+  await calibrateAll();   prog.style.width='28%';
+
+  lt.textContent='QUERYING NEURAL FABRIC...';
+  await fetchLayers('plant_cell');   prog.style.width='48%';
+  Promise.all(['chloroplast','thylakoid','chlorophyll','carbon_atom'].map(fetchLayers));
+
+  prog.style.width='75%'; lt.textContent='BUILDING CELLULAR ULTRASTRUCTURE...';
+  await sleep(150);
+  prog.style.width='92%'; lt.textContent='CONNECTING NEURAL STREAM...';
+
+  // Start SSE stream subscription (non-blocking)
+  startNeuroStream();
+  await sleep(200);
+
+  prog.style.width='100%'; await sleep(280);
+  document.getElementById('loading').style.display='none';
+  document.getElementById('hud').style.display='block';
+
+  currentGroup = new THREE.Group();
+  buildCell(currentGroup);
+  tagLabels(currentGroup);
+  scene.add(currentGroup);
+
+  const lc = LC[0];
+  controls.minDistance = lc.drillIn * 0.6;
+  controls.maxDistance = lc.camDist * 4;
+  camera.position.set(0, 0.4, 3.4);
+  updateHUD(0);
+  animate();
+}
+
+// Patch transitionLevel to tag labels after each build
+const _origTransition = transitionLevel;
+// (transitionLevel already calls buildX; we tag after scene load in init only
+//  — each builder now sets userData.label directly)
 
 init();
 </script>
