@@ -24,7 +24,7 @@ Architecture notes (updated for current build):
     lr_scale here is the base before neuromodulator amplification.
 
 Usage:
-  python train_k12.py [--node http://localhost:8080] [--stages 0,1,2]
+  python train_k12.py [--node http://localhost:8090] [--stages 0,1,2]
   python train_k12.py --stages 0              # toddler only
   python train_k12.py --stages 1,2            # language + full curriculum
   python train_k12.py --max-books 10          # limit books per stage for testing
@@ -939,7 +939,7 @@ def run_stages(node_url: str, stages: list[int], max_books: int | None,
 def main():
     parser = argparse.ArgumentParser(description="K-12 staged training pipeline")
     parser.add_argument("--node", default="http://127.0.0.1:8090",
-                        help="Node API base URL (default: http://localhost:8080)")
+                        help="Node API base URL (default: http://127.0.0.1:8090)")
     parser.add_argument("--stages", default="0,1,2",
                         help="Comma-separated stages to run: 0,1,2 (default: all)")
     parser.add_argument("--max-books", type=int, default=None,

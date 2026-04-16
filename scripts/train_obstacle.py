@@ -18,7 +18,7 @@ learns that "click the red button" + red-button-zone-image + trajectory
 Usage:
     pip install playwright
     playwright install chromium
-    python train_obstacle.py [--node http://localhost:8080] [--reps 8]
+    python train_obstacle.py [--node http://localhost:8090] [--reps 8]
 """
 
 import asyncio
@@ -33,7 +33,7 @@ import httpx
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-NODE_URL   = "http://localhost:8080"
+NODE_URL   = "http://localhost:8090"
 COURSE_URL = Path(__file__).parent / "obstacle_course.html"
 
 TARGETS = {

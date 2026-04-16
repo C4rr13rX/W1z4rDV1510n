@@ -27,7 +27,7 @@ import httpx
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-NODE_URL   = "http://localhost:8080"
+NODE_URL   = "http://localhost:8090"
 COURSE_URL = Path(__file__).parent / "obstacle_course.html"
 
 COMMANDS = [

@@ -234,7 +234,7 @@ def main():
     parser.add_argument("--srt",      default=None,  help="SRT subtitle file (optional)")
     parser.add_argument("--subs",     action="store_true",
                         help="Auto-extract embedded subtitle stream from video")
-    parser.add_argument("--node",     default="http://localhost:8080", help="Node API base URL")
+    parser.add_argument("--node",     default="http://localhost:8090", help="Node API base URL")
     parser.add_argument("--start",    type=float, default=0.0,  help="Start time in seconds")
     parser.add_argument("--end",      type=float, default=None, help="End time in seconds (default: full video)")
     parser.add_argument("--chunk",    type=float, default=1.0,  dest="chunk_secs",

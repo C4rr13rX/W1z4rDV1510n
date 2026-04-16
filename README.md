@@ -423,27 +423,32 @@ W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 
 ## Sensor format
 
-Every data source translates to `EnvironmentSnapshot`:
+Every data source translates to `EnvironmentSnapshot`. When posting to `POST /neuro/train`,
+wrap it in a `snapshot` key:
 
 ```json
 {
-  "timestamp": { "unix": 1712345678 },
-  "bounds": { "x": 8.0, "y": 8.0, "z": 0.0 },
-  "symbols": [
-    {
-      "id": "piece_white_K_e1",
-      "type": "CUSTOM",
-      "position": { "x": 4.0, "y": 0.0, "z": 0.0 },
-      "properties": {
-        "role": "K", "color": "white", "zone": "0,0",
-        "stream": "chess", "result": "1-0"
+  "snapshot": {
+    "timestamp": { "unix": 1712345678 },
+    "bounds": { "x": 8.0, "y": 8.0, "z": 0.0 },
+    "symbols": [
+      {
+        "id": "piece_white_K_e1",
+        "type": "CUSTOM",
+        "position": { "x": 4.0, "y": 0.0, "z": 0.0 },
+        "properties": {
+          "role": "K", "color": "white", "zone": "0,0",
+          "stream": "chess", "result": "1-0"
+        }
       }
-    }
-  ],
-  "metadata": { "stream": "chess", "player_white": "Magnus" },
-  "stack_history": []
+    ],
+    "metadata": { "stream": "chess", "player_white": "Magnus" },
+    "stack_history": []
+  }
 }
 ```
+
+For text, image, audio, and motion data prefer `POST /media/train` — it handles encoding automatically and is the recommended path for all training scripts.
 
 A chess piece, a LiDAR point, a stock tick, a chemical state, a crowd zone — all the same format. The node learns from all of them simultaneously through the same neural fabric.
 
@@ -773,11 +778,11 @@ cd /d/Projects/W1z4rDV1510n
 W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 
 # Verify both APIs are up
-curl http://127.0.0.1:8080/health   # neuro API
+curl http://127.0.0.1:8080/healthz  # neuro API (uses /healthz, not /health)
 curl http://127.0.0.1:8090/health   # node API
 ```
 
-Expected output: `{"status":"OK","node_id":"node-...","uptime_secs":0,...}`
+Expected output for node API: `{"status":"OK","node_id":"node-...","uptime_secs":0,...}`
 
 > **Port note:** Use `:8090` for all training scripts and API calls. The `:8090` node API
 > exposes all routes: `/chat`, `/qa/*`, `/neuro/*`, `/media/*`, `/hypothesis/*`,
@@ -913,7 +918,7 @@ Training scripts call this automatically, but you can trigger it manually:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8090/neuro/checkpoint
-# Returns: {"status":"OK","pool_path":"...","qa_path":"..."}
+# Returns: {"saved":true,"pool_path":"...","qa_path":"..."}
 ```
 
 ---
@@ -959,7 +964,7 @@ curl -s -X POST http://127.0.0.1:8090/neuro/propagate \
 # Generate free-form text from the neuro pool
 curl -s -X POST http://127.0.0.1:8090/neuro/generate \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "photosynthesis", "max_tokens": 30}'
+  -d '{"text": "photosynthesis", "max_tokens": 30}'
 
 # Query the hypothesis queue (questions the node could not answer confidently)
 curl http://127.0.0.1:8090/hypothesis/queue
@@ -967,7 +972,7 @@ curl http://127.0.0.1:8090/hypothesis/queue
 # Resolve a hypothesis (triggers dopamine potentiation)
 curl -s -X POST http://127.0.0.1:8090/hypothesis/resolve \
   -H "Content-Type: application/json" \
-  -d '{"hypothesis_id": "...", "answer": "...", "confidence": 0.85}'
+  -d '{"id": "...", "answer": "...", "confidence": 0.85}'
 ```
 
 ---

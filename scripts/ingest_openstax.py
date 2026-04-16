@@ -20,7 +20,7 @@ Dependencies:
     pip install httpx pymupdf tqdm
 
 Usage:
-    python ingest_openstax.py [--node http://localhost:8080] [--subject biology]
+    python ingest_openstax.py [--node http://localhost:8090] [--subject biology]
     python ingest_openstax.py --subject algebra --pages 1-50
     python ingest_openstax.py --url https://openstax.org/books/...  # direct PDF URL
 
@@ -244,7 +244,7 @@ def parse_page_range(spec: str | None, total: int) -> range:
 
 def main():
     parser = argparse.ArgumentParser(description="Ingest OpenStax PDFs into the W1z4rD node")
-    parser.add_argument("--node",    default="http://localhost:8080", help="Node API base URL")
+    parser.add_argument("--node",    default="http://localhost:8090", help="Node API base URL")
     parser.add_argument("--subject", default="biology2e", choices=list(OPENSTAX_BOOKS),
                         help="OpenStax subject shortcut")
     parser.add_argument("--url",     default=None, help="Direct PDF URL (overrides --subject)")
