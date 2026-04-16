@@ -95,11 +95,15 @@ When the EEM can't explain a label cluster — when something is happening that 
 ┌──────────────────────────────────────────────────────────────────────┐
 │                     w1z4rd_node  (one binary)                        │
 │                                                                      │
-│  :8080  Neuro API ── NeuroRuntime ── EquationMatrix ── QaRuntime    │
+│  :8080  Neuro API ── NeuroRuntime (snapshot reads, propagation)     │
+│  :8090  Node  API ── all training + inference routes:               │
 │         Media API ── /media/train  /media/playback  /neuro/propagate│
 │         Chat API  ── /chat  /neuro/generate                         │
 │         Hyp  API  ── /hypothesis/queue  /hypothesis/resolve         │
-│  :8090  Node  API ── ClusterNode  ── HashRing ── OtpRegistry        │
+│         EEM  API  ── /equations/*  /causal/graph                    │
+│         QA   API  ── /qa/ingest  /qa/query                          │
+│         Cluster   ── ClusterNode  ── HashRing ── OtpRegistry        │
+│         Dist      ── DistributedCoordinator (round-robin, delta sync)│
 │                                                                      │
 │  KnowledgeRuntime ── HierarchicalMotifs ── FabricTrainer            │
 │  P2P Gossip / Data Mesh / Blockchain Layer                           │
@@ -151,27 +155,49 @@ Machine A (coordinator)            Machine B                 Machine C
 | Default port | **51611** — SIGIL in leet speak (5=S, 1=I, 6=G, 1=I, 1=L) |
 | Scale | Unbounded — 2 to N nodes; the ring rebalances on every join/leave |
 
-**Cluster commands:**
+**Cluster commands (via REST API — recommended):**
+
+Start each node normally first (`./bin/w1z4rd_node.exe`), then form the cluster via the HTTP API:
 
 ```bash
-# Machine A — start the cluster on a specific LAN IP, prints a join OTP
+# Machine A — start a new cluster, get the join OTP
+curl -s -X POST http://192.168.1.10:8090/cluster/init \
+  -H "Content-Type: application/json" \
+  -d '{"bind": "0.0.0.0:51611", "otp_ttl_secs": 300}'
+# Returns: {"otp":"EMBER-4821","cluster_id":"..."}
+
+# Machine B — join using the OTP
+curl -s -X POST http://192.168.1.11:8090/cluster/join \
+  -H "Content-Type: application/json" \
+  -d '{"coordinator": "192.168.1.10:51611", "otp": "EMBER-4821", "bind": "0.0.0.0:51611"}'
+
+# Any node — check cluster topology
+curl http://192.168.1.10:8090/cluster/status
+
+# Any node — check distributed training coordinator state
+curl http://192.168.1.10:8090/cluster/sync/status
+```
+
+**Cluster commands (standalone CLI — gossip protocol only, no HTTP API):**
+
+```bash
+# Machine A — start the cluster listener, prints a join OTP
 w1z4rd_node cluster-init --bind 192.168.1.10:51611
 
 # Machine B — join using the OTP printed by machine A
 w1z4rd_node cluster-join --coordinator 192.168.1.10:51611 --otp EMBER-4821
 
-# Any node — print cluster topology and ring status
+# Any node — print cluster topology and ring status via raw TCP
 w1z4rd_node cluster-status --node 192.168.1.10:51611
-
-# Coordinator — generate a fresh OTP for a new joiner (coordinator must be running)
-w1z4rd_node cluster-otp
 ```
 
-**Startup scripts** (in `scripts/`):
-- `start_cluster.bat` — start this machine as coordinator (Windows, prints OTP)
-- `start_worker.ps1` — join an existing cluster (Windows, prompts for OTP)
+> **Note:** The CLI subcommands start the cluster gossip protocol but do **not** start the HTTP API. For distributed training (round-robin routing, weight-delta sync, QA replication) the full node must be running. Use the REST API approach above.
 
-OTPs are single-use and expire in 10 minutes by design. Generate a fresh one with `cluster-otp` or by restarting `cluster-init` before each new worker joins.
+**Startup scripts** (in `scripts/`):
+- `start_cluster.bat` — start node + init cluster as coordinator (Windows, prints OTP)
+- `start_worker.ps1` — start node + join cluster as worker (Windows, prompts for OTP)
+
+OTPs are single-use and expire in 5 minutes by default. Generate a fresh one via `POST /cluster/init` before each new worker joins.
 
 The neural fabric scales horizontally without changing the API. A script POSTing to `/neuro/train` on any node trains the distributed fabric; `/neuro/snapshot` on any node returns the global view.
 
@@ -198,7 +224,7 @@ Every prediction is the result of multiple components voting simultaneously. Und
 | **Classical annealer** | Searches minimum-energy state configurations; temperature is coherence-modulated — confident fabric → fast convergence; uncertain fabric → high-temperature exploration |
 | **Environmental Equation Matrix** | 282 equations across 24 disciplines vote on active sensor labels; matching equations reinforce associated labels; hypothesis gaps suppress confidence when nothing matches |
 | **Surprise-weighted replay** | Persistent mispredictions are replayed at higher frequency — the system applies stronger correction to its worst errors |
-| **Peer node learning** | In cluster mode, neuro snapshots from other nodes train local weights at low learning rate; distributed observations converge into shared knowledge |
+| **Peer node learning** | In cluster mode, incremental weight deltas (label-keyed synapse weights + co-occurrence counts since last sync) are pushed to all peers every 20 training calls and merged with `max(local, remote)` — knowledge only accumulates, never overwrites |
 | **ResourceMonitor** | Under CPU/RAM pressure, batch sizes and update frequency drop — slower adaptation, more conservative predictions |
 
 ---
@@ -350,9 +376,9 @@ Both APIs (`:8080` neuro, `:8090` node) run in either mode. Cluster commands are
 
 ## Node API endpoints
 
-All endpoints are on `:8080`. Start the node with the `api` subcommand:
+All endpoints are on `:8090` (Node API). Start the node with no subcommand:
 ```bash
-./bin/w1z4rd_node --config node_config.json api --addr 0.0.0.0:8080
+W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 ```
 
 | Endpoint | Method | Description |
@@ -362,6 +388,9 @@ All endpoints are on `:8080`. Start the node with the `api` subcommand:
 | `/neuro/snapshot` | GET | Current activation, predictions, motifs, top influences |
 | `/neuro/propagate` | POST | Feed seed labels → returns all labels that fire above threshold; cross-modal inference |
 | `/neuro/generate` | POST | Generate text from the neuro pool using QA gate + pre-computed activation map decode |
+| `/neuro/checkpoint` | POST | Persist neural pool and QA store to disk |
+| `/neuro/sync` | POST | Force-push weight delta to all cluster peers immediately |
+| `/neuro/delta/apply` | POST | Receive incremental weight delta from a peer node (cluster internal) |
 | `/media/train` | POST | Encode and co-train one or more modalities: `image`, `audio`, `text`, `motion`, `action`, `full` |
 | `/media/playback` | POST | Given goal text + optional screenshot → predict action zone (where to move cursor / what to click) |
 | `/chat` | POST | Chat endpoint — dual-memory CLS inference: QA fast path + pool generalization |
@@ -384,6 +413,11 @@ All endpoints are on `:8080`. Start the node with the `api` subcommand:
 | `/threat/ingest` | POST | Ingest behavioral threat data |
 | `/threat/overlay` | GET | Current threat and health overlay |
 | `/metrics` | GET | Node performance metrics |
+| `/cluster/init` | POST | Start this node as cluster coordinator; returns join OTP |
+| `/cluster/join` | POST | Join an existing cluster using coordinator address + OTP |
+| `/cluster/leave` | POST | Leave the cluster and release port 51611 |
+| `/cluster/status` | GET | Cluster topology, ring state, and node list |
+| `/cluster/sync/status` | GET | Distributed training coordinator state: peers, sync step, call counts |
 
 ---
 
@@ -421,7 +455,7 @@ A chess piece, a LiDAR point, a stock tick, a chemical state, a crowd zone — a
 
 - **P2P networking**: libp2p gossipsub + Kademlia + mDNS; rate limits and peer scoring
 - **Data mesh**: manifests, chunking, replication receipts, integrity audits, repair requests, storage rewards
-- **Neural fabric sharing**: `NeuralFabricShare` payloads broadcast motifs and network pattern summaries; peer neuro snapshots train local weights at low learning rate — what one node learns propagates everywhere
+- **Neural fabric sharing**: incremental weight-delta sync every 20 training calls — each node exports only synapses updated since the last sync and pushes them to all peers via `POST /neuro/delta/apply`; peers merge with `max(local, remote)` so knowledge accumulates without overwriting; new workers bootstrap from existing nodes on join
 - **Equation sharing**: `EemPeerPayload` propagates equation discoveries and hypothesis gaps across nodes; peer equations get lower initial confidence and must be corroborated by local sensor data
 - **Local ledger**: validator heartbeats, fee-market scaffolding, audit chain, reward events
 - **Multi-chain bridge**: intent tracking + relayer-quorum proof verification
@@ -745,10 +779,11 @@ curl http://127.0.0.1:8090/health   # node API
 
 Expected output: `{"status":"OK","node_id":"node-...","uptime_secs":0,...}`
 
-> **Port note:** All training scripts default to `:8090` (node API). The `/chat`, `/qa/*`,
-> `/neuro/*` and `/media/*` routes are available on **both** ports.
-> The `:8080` neuro API is the primary training/inference surface.
-> The `:8090` node API adds cluster, wallet, and admin routes.
+> **Port note:** Use `:8090` for all training scripts and API calls. The `:8090` node API
+> exposes all routes: `/chat`, `/qa/*`, `/neuro/*`, `/media/*`, `/hypothesis/*`,
+> `/equations/*`, `/cluster/*`, and admin routes.
+> The `:8080` neuro API is a lighter internal surface (snapshot reads, propagation) —
+> it does **not** expose cluster or media routes.
 
 ---
 
@@ -917,20 +952,20 @@ python scripts/research_agent.py \
 
 ```bash
 # Propagate from seed labels — returns all concept labels that activate
-curl -s -X POST http://127.0.0.1:8080/neuro/propagate \
+curl -s -X POST http://127.0.0.1:8090/neuro/propagate \
   -H "Content-Type: application/json" \
   -d '{"seed_labels": ["txt:word_gravity"], "hops": 2}'
 
 # Generate free-form text from the neuro pool
-curl -s -X POST http://127.0.0.1:8080/neuro/generate \
+curl -s -X POST http://127.0.0.1:8090/neuro/generate \
   -H "Content-Type: application/json" \
   -d '{"prompt": "photosynthesis", "max_tokens": 30}'
 
 # Query the hypothesis queue (questions the node could not answer confidently)
-curl http://127.0.0.1:8080/hypothesis/queue
+curl http://127.0.0.1:8090/hypothesis/queue
 
 # Resolve a hypothesis (triggers dopamine potentiation)
-curl -s -X POST http://127.0.0.1:8080/hypothesis/resolve \
+curl -s -X POST http://127.0.0.1:8090/hypothesis/resolve \
   -H "Content-Type: application/json" \
   -d '{"hypothesis_id": "...", "answer": "...", "confidence": 0.85}'
 ```
@@ -941,18 +976,18 @@ curl -s -X POST http://127.0.0.1:8080/hypothesis/resolve \
 
 ```bash
 # Search equations by keyword
-curl "http://127.0.0.1:8080/equations/search?q=entropy"
+curl "http://127.0.0.1:8090/equations/search?q=entropy"
 
 # Apply equations to active sensor labels
-curl -s -X POST http://127.0.0.1:8080/equations/apply \
+curl -s -X POST http://127.0.0.1:8090/equations/apply \
   -H "Content-Type: application/json" \
   -d '{"labels": ["txt:word_temperature", "txt:word_energy"], "dims": 3}'
 
 # Full report: equation counts by discipline
-curl http://127.0.0.1:8080/equations/report
+curl http://127.0.0.1:8090/equations/report
 
 # Open hypothesis gaps (sorted by cross-node corroboration)
-curl http://127.0.0.1:8080/equations/gaps
+curl http://127.0.0.1:8090/equations/gaps
 ```
 
 ---
@@ -1023,6 +1058,38 @@ Windows convenience scripts: `scripts/start_cluster.bat` (coordinator),
 
 ---
 
+### 16. Distributed training — weight-delta sync across nodes
+
+Once nodes are clustered, the distributed training coordinator runs automatically.
+Training calls are round-robin routed across all nodes (including self), and weight
+deltas are pushed to peers every 20 training calls.
+
+```bash
+# Check distributed sync state on any node
+curl http://127.0.0.1:8090/cluster/sync/status
+# {"peers":["http://192.168.1.x:8090"],"last_sync_step":1240,"calls_since_last_sync":7,...}
+
+# Force an immediate weight-delta push to all peers (useful after a large training batch)
+curl -s -X POST http://127.0.0.1:8090/neuro/sync
+# {"status":"OK","message":"delta sync queued"}
+
+# Bypass round-robin and train locally on this node (x-w1z-local header)
+curl -s -X POST http://127.0.0.1:8090/media/train \
+  -H "Content-Type: application/json" \
+  -H "x-w1z-local: 1" \
+  -d '{"modality":"text","text":"your training text here","lr_scale":1.0}'
+```
+
+**How it works:**
+- Every `POST /media/train` call is routed round-robin across N+1 slots (one per peer + self), so each node trains ~1/(N+1) of all calls
+- Every 20 training calls, the node exports synapses updated since the last sync (weight ≥ 0.005) and co-occurrence pairs involving recently active neurons, then fans out a `POST /neuro/delta/apply` to all peers concurrently
+- Peers merge with `max(local, remote)` — knowledge only accumulates, never overwrites
+- When a new node joins, it triggers peers to push their current delta, seeding it with the cluster's accumulated knowledge
+- Every `POST /qa/ingest` is immediately broadcast to all peers so the QA store stays fully replicated
+- Peers that fail 5 consecutive calls are evicted from the routing list and restored on the next cluster status refresh
+
+---
+
 ### Common troubleshooting
 
 | Symptom | Cause | Fix |
@@ -1032,6 +1099,10 @@ Windows convenience scripts: `scripts/start_cluster.bat` (coordinator),
 | QA returns 0 active neurons | Corrupted `answer_index` | `python scripts/recover_qa_store.py` |
 | Checkpoint saves to AppData | `W1Z4RDV1510N_DATA_DIR` not set | Set env var before launching node |
 | Avira quarantines build artifact | AV false positive | Add `target/` to Windows Defender exclusions |
+| Cluster join returns 409 Conflict | Stale `cluster_state.json` on disk | Delete `~/.w1z4rd/cluster_state.json` (Linux/WSL) or `%APPDATA%\w1z4rd\cluster_state.json` (Windows) |
+| Cluster join OTP "invalid or expired" | Old TCP listener still holding port 51611 | Kill old node process; port is released when the process exits |
+| `127.0.0.1:8090` routes to wrong node (WSL) | WSL relay (`wslrelay.exe`) intercepts `127.0.0.1` | Use the LAN IP of the Windows node (e.g. `192.168.1.84:8090`) instead of `127.0.0.1` |
+| Distributed peers list empty after join | Peer list only populates on first `GET /cluster/status` | Call `/cluster/status` once on each node after join, or wait up to 30 s for the background refresh |
 
 ---
 
