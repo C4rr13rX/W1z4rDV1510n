@@ -221,6 +221,18 @@ pub struct InfluenceRecord {
     pub step: u64,
 }
 
+/// One synapse exported for cross-node weight synchronisation.
+/// Uses label strings rather than local neuron IDs so it is portable
+/// across nodes that may have assigned different IDs to the same concept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SynapseDelta {
+    pub from_label: String,
+    pub to_label:   String,
+    /// Absolute weight (not a diff). Recipients apply max(local, remote).
+    pub weight:     f32,
+    pub inhibitory: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Synapse {
     pub target: u32,
@@ -1503,6 +1515,109 @@ impl NeuronPool {
 
     pub fn step_counter(&self) -> u64 {
         self.step
+    }
+
+    // ── Distributed training: delta export / apply ────────────────────────────
+
+    /// Export all hot-neuron synapses whose source neuron was active at or after
+    /// `since_step`.  Returns `(synapses, cooccur)` using label strings so the
+    /// delta is portable — recipient nodes may have different local IDs for the
+    /// same concepts.
+    pub fn export_delta_since(
+        &self,
+        since_step: u64,
+    ) -> (Vec<SynapseDelta>, Vec<(String, String, f32)>) {
+        let mut synapses = Vec::new();
+        for slot in &self.neurons {
+            let NeuronSlot::Hot(n) = slot else { continue };
+            if n.last_active_step < since_step { continue; }
+            let from_label = match &n.label {
+                Some(l) => l.clone(),
+                None => continue,
+            };
+            for (list, inhibitory) in [(&n.excitatory, false), (&n.inhibitory, true)] {
+                for syn in list {
+                    let to_label = match self.neurons.get(syn.target as usize) {
+                        Some(NeuronSlot::Hot(t)) => match &t.label {
+                            Some(l) => l.clone(),
+                            None => continue,
+                        },
+                        _ => continue,
+                    };
+                    synapses.push(SynapseDelta {
+                        from_label: from_label.clone(),
+                        to_label,
+                        weight: syn.weight,
+                        inhibitory,
+                    });
+                }
+            }
+        }
+        let cooccur = self
+            .cooccur
+            .iter()
+            .map(|((a, b), w)| (a.clone(), b.clone(), *w))
+            .collect();
+        (synapses, cooccur)
+    }
+
+    /// Merge an incoming weight delta into this pool.
+    ///
+    /// Merge strategy: `max(local, remote)` for each synapse weight.  This is
+    /// conservative — knowledge only accumulates, never regresses.  Both the
+    /// forward synapse list and the reverse dendrite mirror are updated.
+    pub fn apply_label_delta(
+        &mut self,
+        synapses: &[SynapseDelta],
+        cooccur: &[(String, String, f32)],
+    ) -> usize {
+        let max_w = self.config.max_weight;
+        let mut applied = 0usize;
+        for sd in synapses {
+            let from_id = self.get_or_create(&sd.from_label);
+            let to_id   = self.get_or_create(&sd.to_label);
+            // Forward synapse
+            if let Some(n) = self.get_hot_mut(from_id as usize) {
+                let list = if sd.inhibitory { &mut n.inhibitory } else { &mut n.excitatory };
+                match list.binary_search_by_key(&to_id, |s| s.target) {
+                    Ok(idx) => {
+                        if sd.weight > list[idx].weight {
+                            list[idx].weight = sd.weight.min(max_w);
+                        }
+                    }
+                    Err(idx) => {
+                        list.insert(idx, Synapse {
+                            target: to_id,
+                            weight: sd.weight.min(max_w),
+                            inhibitory: sd.inhibitory,
+                        });
+                    }
+                }
+            }
+            // Dendrite mirror
+            if let Some(t) = self.get_hot_mut(to_id as usize) {
+                match t.dendrites.binary_search_by_key(&from_id, |d| d.source) {
+                    Ok(idx) => {
+                        if sd.weight > t.dendrites[idx].weight {
+                            t.dendrites[idx].weight = sd.weight.min(max_w);
+                        }
+                    }
+                    Err(idx) => {
+                        t.dendrites.insert(idx, Dendrite {
+                            source: from_id,
+                            weight: sd.weight.min(max_w),
+                        });
+                    }
+                }
+            }
+            applied += 1;
+        }
+        // Co-occurrence: take max rate
+        for (a, b, w) in cooccur {
+            let entry = self.cooccur.entry((a.clone(), b.clone())).or_insert(0.0);
+            if *w > *entry { *entry = *w; }
+        }
+        applied
     }
 }
 
@@ -3255,6 +3370,32 @@ impl NeuroRuntime {
         // e.g. "cell-membrane call" → "osmosis call" → "ATP call" across K-12 pages.
         let fp = call_fingerprint(symbols);
         guard.motifs.observe_label_sequence(&[fp], ts, 1.0);
+    }
+
+    // ── Distributed training helpers ──────────────────────────────────────────
+
+    /// Current training step counter — used to track sync windows.
+    pub fn pool_step(&self) -> u64 {
+        self.inner.lock().pool.step_counter()
+    }
+
+    /// Export synapses modified since `since_step` as a portable label-keyed
+    /// delta.  See [`NeuronPool::export_delta_since`].
+    pub fn export_delta_since(
+        &self,
+        since_step: u64,
+    ) -> (Vec<SynapseDelta>, Vec<(String, String, f32)>) {
+        self.inner.lock().pool.export_delta_since(since_step)
+    }
+
+    /// Merge an incoming weight delta into the local pool.
+    /// Returns the number of synapses applied.
+    pub fn apply_label_delta(
+        &self,
+        synapses: &[SynapseDelta],
+        cooccur: &[(String, String, f32)],
+    ) -> usize {
+        self.inner.lock().pool.apply_label_delta(synapses, cooccur)
     }
 
     // ── Neuromodulator API ────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ mod bridge;
 mod api;
 mod config;
 mod data_mesh;
+mod distributed;
 mod identity;
 mod label_queue;
 mod ledger;

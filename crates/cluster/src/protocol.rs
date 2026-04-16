@@ -70,6 +70,35 @@ pub struct RingEntry {
     pub node_id: NodeId,
 }
 
+// ── Distributed training types ────────────────────────────────────────────────
+
+/// One synapse weight exported for cross-node synchronisation.
+/// Uses label strings rather than local neuron IDs so the delta is portable
+/// across nodes that may have assigned different IDs to the same concept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SynapseDelta {
+    /// Label of the pre-synaptic (source) neuron.
+    pub from_label: String,
+    /// Label of the post-synaptic (target) neuron.
+    pub to_label: String,
+    /// Absolute weight value (not a diff) — recipient takes max(local, remote).
+    pub weight: f32,
+    pub inhibitory: bool,
+}
+
+/// Compact snapshot of weight changes produced by one node since its last sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolDelta {
+    /// Pool step counter at the start of this window.
+    pub from_step: u64,
+    /// Pool step counter at the end of this window.
+    pub to_step: u64,
+    /// Changed synapses.
+    pub synapses: Vec<SynapseDelta>,
+    /// Changed co-occurrence rates: (label_a, label_b, rate).
+    pub cooccur: Vec<(String, String, f32)>,
+}
+
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +157,36 @@ pub enum Message {
         delta:      serde_json::Value,
     },
     ShardWriteAck { request_id: Uuid },
+
+    // ── Distributed training ─────────────────────────────────────────────────
+    /// Coordinator → peer: forward a /media/train payload so the peer trains it.
+    /// Used for round-robin load distribution — each page trains on exactly one
+    /// node; weight sync later propagates the knowledge everywhere.
+    TrainForward {
+        request_id: Uuid,
+        /// Serialised MediaTrainReq JSON body — peer deserialises and trains.
+        payload: serde_json::Value,
+    },
+    /// Peer → coordinator: result of a forwarded training call.
+    TrainForwardAck {
+        request_id: Uuid,
+        success: bool,
+        label_count: usize,
+    },
+
+    /// Node → peers: push weight deltas after a training window.
+    /// Recipients merge using max(local, remote) for each synapse weight so
+    /// knowledge only accumulates — it never regresses.
+    WeightDelta {
+        request_id: Uuid,
+        delta: PoolDelta,
+    },
+    /// Peer → sender: delta received and applied.
+    WeightDeltaAck {
+        request_id: Uuid,
+        /// Number of synapses merged.
+        applied: usize,
+    },
 
     // ── Graceful departure ────────────────────────────────────────────────────
     /// A node tells the coordinator it is leaving cleanly.

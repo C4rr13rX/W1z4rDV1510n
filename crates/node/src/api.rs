@@ -1,4 +1,5 @@
 use crate::config::{KnowledgeConfig, NodeConfig};
+use crate::distributed::DistributedCoordinator;
 use crate::data_mesh::{
     DataIngestRequest, DataMeshEvent, DataMeshHandle, PatternQuery, start_data_mesh,
 };
@@ -105,6 +106,8 @@ struct ApiState {
     /// LAN address to advertise to cluster peers (from network.advertise_addr in config).
     /// When None the bind address is used, which means peers see 0.0.0.0.
     cluster_advertise_addr: Option<std::net::SocketAddr>,
+    /// Distributed training coordinator — manages round-robin routing and weight-delta sync.
+    distributed: Arc<DistributedCoordinator>,
 
     // ── Simulation / entity runtimes ─────────────────────────────────────────
     /// Behavioral substrate: encodes multi-modal entity observations into latent
@@ -792,6 +795,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         cluster: Arc::new(tokio::sync::Mutex::new(None)),
         cluster_advertise_addr: config.network.advertise_addr.as_deref()
             .and_then(|s| s.parse().ok()),
+        distributed: Arc::new(DistributedCoordinator::new()),
         behavior:   Arc::new(Mutex::new(BehaviorSubstrate::new(BehaviorSubstrateConfig::default()))),
         scene:      Arc::new(Mutex::new(SceneRuntime::new(SceneConfig::default()))),
         physiology: Arc::new(Mutex::new(PhysiologyRuntime::new(PhysiologyConfig::default()))),
@@ -916,6 +920,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
         .route("/qa/checkpoint",        post(qa_checkpoint))
+        // ── Distributed training ─────────────────────────────────────────────
+        // POST /neuro/delta/apply — receive a weight delta from a peer and merge
+        // POST /neuro/sync        — force an immediate delta push to all peers
+        // GET  /cluster/sync/status — distributed coordinator state
+        .route("/neuro/delta/apply",    post(neuro_delta_apply))
+        .route("/neuro/sync",           post(neuro_sync))
+        .route("/cluster/sync/status",  get(cluster_sync_status))
         .route("/neuro/motifs",         get(neuro_motifs))
         .route("/neuro/motifs/predict", post(neuro_motifs_predict))
         .route("/neuro/ask",            post(neuro_ask))
@@ -2173,7 +2184,7 @@ struct QaQueryResponse {
 async fn submit_qa_ingest(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(request): Json<QaIngestRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Err(err) = rate_limit(&state, &headers, "knowledge") {
         state.metrics.inc_rate_limit_hit();
@@ -2189,6 +2200,10 @@ async fn submit_qa_ingest(
             Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
         );
     }
+    let request: QaIngestRequest = match serde_json::from_value(body.clone()) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
+    };
     if request.candidates.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2208,6 +2223,15 @@ async fn submit_qa_ingest(
             qa.answer_count(),
         )
     };
+    // Fan-out to peers — skip if this call was already forwarded by a peer
+    // (header x-w1z-local present) to prevent replication loops.
+    if !headers.contains_key("x-w1z-local") {
+        let dist = state.distributed.clone();
+        let broadcast_body = body;
+        tokio::spawn(async move {
+            dist.broadcast_qa_ingest(broadcast_body).await;
+        });
+    }
     (
         StatusCode::OK,
         Json(serde_json::to_value(QaIngestResponse {
@@ -3736,6 +3760,9 @@ async fn cluster_join(
             let s = node.status().await;
             let cluster_id = s.cluster_id.to_string();
             let node_count = s.nodes.len();
+            // Refresh distributed peer list from the cluster roster.
+            let peer_addrs = peer_http_addrs(&s.nodes, &s.local_id);
+            state.distributed.set_peers(peer_addrs).await;
             *state.cluster.lock().await = Some(node);
             tracing::info!("joined cluster {cluster_id} via HTTP API ({node_count} nodes)");
             (StatusCode::OK, Json(serde_json::json!({
@@ -3774,7 +3801,10 @@ async fn cluster_leave(
     match maybe_node {
         None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "not in a cluster" }))),
         Some(node) => match node.leave().await {
-            Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "message": "left cluster — now standalone" }))),
+            Ok(()) => {
+                state.distributed.set_peers(vec![]).await;
+                (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "message": "left cluster — now standalone" })))
+            }
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
         }
     }
@@ -3817,6 +3847,60 @@ async fn node_shutdown(
         std::process::exit(0);
     });
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "message": "shutting down" })))
+}
+
+// ── Distributed training endpoints ────────────────────────────────────────────
+
+/// POST /neuro/delta/apply
+/// Called by the coordinator or peers to push a weight delta to this node.
+/// Merges with max(local, remote) so knowledge only accumulates.
+async fn neuro_delta_apply(
+    State(state): State<ApiState>,
+    Json(req): Json<crate::distributed::DeltaApplyReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let applied = state.neuro.apply_label_delta(&req.synapses, &req.cooccur);
+    tracing::debug!(
+        "delta_apply: merged {} synapses (step {}→{})",
+        applied, req.from_step, req.to_step
+    );
+    (StatusCode::OK, Json(serde_json::json!({ "applied": applied })))
+}
+
+/// POST /neuro/sync
+/// Force an immediate weight-delta push to all cluster peers.
+async fn neuro_sync(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let neuro = state.neuro.clone();
+    state.distributed.force_sync(&*neuro).await;
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "message": "sync pushed to all peers" })))
+}
+
+/// GET /cluster/sync/status
+/// Current state of the distributed training coordinator.
+async fn cluster_sync_status(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let s = state.distributed.status().await;
+    (StatusCode::OK, Json(s))
+}
+
+/// Derive HTTP peer addresses from a cluster roster by replacing the cluster
+/// port (51611) with the node API port (8090).  Excludes the local node.
+fn peer_http_addrs(
+    nodes: &[w1z4rdv1510n_cluster::protocol::NodeInfo],
+    local_id: &w1z4rdv1510n_cluster::protocol::NodeId,
+) -> Vec<String> {
+    nodes.iter()
+        .filter(|n| &n.id != local_id)
+        .filter_map(|n| {
+            // addr format: "ip:port"  (may be IPv6 bracket notation)
+            let colon = n.addr.rfind(':')?;
+            let ip = &n.addr[..colon];
+            if ip.is_empty() { return None; }
+            Some(format!("http://{ip}:8090"))
+        })
+        .collect()
 }
 
 // ── Multimodal media ingestion ─────────────────────────────────────────────────
@@ -3995,8 +4079,31 @@ fn encode_media_labels(
 ///    morpheme recognition with no hand-coded rules.
 async fn media_train(
     State(state): State<ApiState>,
-    Json(req): Json<MediaTrainReq>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Distributed routing: if this call was not already forwarded by a peer,
+    // round-robin it to the next peer in the cluster so training load is spread
+    // across all N nodes.  The x-w1z-local header prevents forwarding loops.
+    if !headers.contains_key("x-w1z-local") {
+        if let Some(peer) = state.distributed.next_train_peer().await {
+            let ok = state.distributed.forward_train(&peer, body.clone()).await;
+            if ok {
+                return (StatusCode::OK, Json(serde_json::json!({
+                    "trained": true,
+                    "distributed": true,
+                    "routed_to": peer,
+                })));
+            }
+            // Peer rejected or unreachable — fall through to local training.
+        }
+    }
+    // Local training path.
+    let req: MediaTrainReq = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
+    };
+
     // Encode labels (co-occurrence pass).
     let labels = match encode_media_labels(
         &req.modality,
@@ -4083,6 +4190,16 @@ async fn media_train(
         // clusters self-organise into concept neurons without hand-coded rules.
         neuro.promote_text_concepts();
     }).await.ok();
+
+    // Schedule weight-delta sync every SYNC_EVERY local training calls.
+    // Fire-and-forget so the HTTP response is not delayed by the sync.
+    {
+        let dist  = state.distributed.clone();
+        let neuro = state.neuro.clone();
+        tokio::spawn(async move {
+            dist.maybe_sync(&*neuro).await;
+        });
+    }
 
     (StatusCode::OK, Json(serde_json::json!({
         "trained": true,
