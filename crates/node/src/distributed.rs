@@ -109,17 +109,22 @@ impl DistributedCoordinator {
     // ── Training routing ──────────────────────────────────────────────────────
 
     /// Return the peer that should handle the next training call, or `None` if
-    /// there are no peers and the caller should train locally.
+    /// this turn belongs to the local node.
     ///
-    /// Round-robins through all known peers so each one receives roughly 1/N
-    /// of the total training load.
+    /// The rotation has N+1 slots — one per peer plus one for self — so every
+    /// node in the cluster trains roughly 1/(N+1) of all calls.  Without self
+    /// in the rotation the coordinator would train 0 % of the load while
+    /// workers accumulate all knowledge, causing the coordinator's neuro pool
+    /// to drift indefinitely.
     pub async fn next_train_peer(&self) -> Option<PeerAddr> {
         let peers = self.peers.read().await;
         if peers.is_empty() {
             return None;
         }
-        let idx = self.rr.fetch_add(1, Ordering::Relaxed) % peers.len();
-        Some(peers[idx].clone())
+        // Slot 0 → train locally; slots 1..=N → forward to peers[slot-1].
+        let total = peers.len() + 1;
+        let idx = self.rr.fetch_add(1, Ordering::Relaxed) % total;
+        if idx == 0 { None } else { Some(peers[idx - 1].clone()) }
     }
 
     /// Forward a raw JSON training body to a specific peer's `/media/train`.
@@ -247,6 +252,35 @@ impl DistributedCoordinator {
                         warn!("qa broadcast to {url} failed: {e}");
                     }
                 });
+            }
+        });
+    }
+
+    // ── New-worker bootstrap ──────────────────────────────────────────────────
+
+    /// Called after a worker joins the cluster.  Asks each known peer to:
+    ///   1. Refresh their own cluster/status (so they add the new worker to
+    ///      their distributed peer list), then
+    ///   2. Push their current weight delta to all peers (including the new
+    ///      worker), seeding it with the cluster's accumulated knowledge.
+    ///
+    /// Fire-and-forget — does not block the join response.
+    pub async fn bootstrap_from_peers(&self) {
+        let peers = self.peers.read().await.clone();
+        if peers.is_empty() { return; }
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            // Short delay so the coordinator's TCP accept loop has registered
+            // the new member before we ask it to push.
+            tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+            for peer in &peers {
+                // Trigger peer's cluster/status so it includes us in its peer list.
+                let _ = client.get(format!("{peer}/cluster/status")).send().await;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+            for peer in &peers {
+                // Ask peer to push its weight delta to all its peers (now including us).
+                let _ = client.post(format!("{peer}/neuro/sync")).send().await;
             }
         });
     }

@@ -102,13 +102,25 @@ if not sync_b.get("peers"):
     fail("Node B has no distributed peers")
 ok(f"Peer lists populated. A->{len(sync_a['peers'])} peers, B->{len(sync_b['peers'])} peers")
 
+# Wait for bootstrap sync to complete (bootstrap_from_peers fires after ~1.2s)
+info("Waiting for bootstrap knowledge sync (1.5s)...")
+time.sleep(1.5)
+# Verify Node B picked up Node A's QA knowledge via bootstrap
+r = post(NODE_B, "/qa/query", {"question": "What is a distributed system?"})
+boot_results = r.get("report", {}).get("results", [])
+if boot_results and boot_results[0].get("answer"):
+    ok(f"Bootstrap sync OK — Node B has pre-existing knowledge (act={boot_results[0].get('activation',0):.3f})")
+else:
+    info("Bootstrap: no prior QA knowledge to seed (clean node or first run — OK)")
+
 # ── 5. Training round-robin test ───────────────────────────────────────────────
 section("6. Round-Robin Training Routing")
-# Send 4 training calls to Node A — round-robin should route 2 to Node B
+# With 1 peer and self-inclusive round-robin (N+1 slots) we expect roughly
+# 50% local and 50% forwarded.  Send 8 calls: expect 4 each (±1 is fine).
 train_local = 0
 train_remote = 0
 
-for i in range(4):
+for i in range(8):
     resp = post(NODE_A, "/media/train", {
         "modality": "text",
         "text": f"distributed training test call number {i} apple banana cherry",
@@ -121,9 +133,13 @@ for i in range(4):
         train_local += 1
         info(f"  Call {i+1}: trained locally")
 
-ok(f"Routed to peer: {train_remote}/4   Trained locally: {train_local}/4")
-if train_remote == 0 and train_local == 4:
-    print("  [WARN] All calls stayed local — check that peer list is populated and node B is reachable")
+ok(f"Routed to peer: {train_remote}/8   Trained locally: {train_local}/8")
+if train_local == 0:
+    fail("Node A trained 0 calls locally — self not included in round-robin rotation")
+if train_remote == 0:
+    fail("0 calls forwarded — peer routing broken")
+if abs(train_local - train_remote) > 2:
+    print(f"  [WARN] Uneven split ({train_local} local / {train_remote} remote) — expected ~4/4")
 
 # ── 6. QA broadcast test ─────────────────────────────────────────────────────
 section("7. QA Broadcast Replication")
@@ -158,37 +174,45 @@ else:
 
 # ── 7. Weight delta sync test ──────────────────────────────────────────────────
 section("8. Weight Delta Sync (force sync)")
-info("Training 5 unique concepts on Node A...")
+# Train concepts directly on Node A (bypass round-robin with x-w1z-local header
+# equivalent: just use /neuro/train which goes straight to the local pool).
+info("Training 5 unique concepts locally on Node A (x-w1z-local bypass)...")
 concepts = ["mitochondria", "photosynthesis", "gravitational_wave", "superconductor", "ribonucleic"]
 for c in concepts:
-    post(NODE_A, "/media/train", {
-        "modality": "text",
-        "text": f"The concept of {c} is fundamental to modern science and understanding of {c} requires careful study.",
-        "lr_scale": 1.0,
-    })
-ok(f"Trained {len(concepts)} concepts on Node A")
+    # x-w1z-local: 1 skips round-robin so training is guaranteed local on Node A.
+    r = httpx.post(f"{NODE_A}/media/train",
+        headers={"x-w1z-local": "1"},
+        json={
+            "modality": "text",
+            "text": f"The concept of {c} is fundamental to modern science. Understanding {c} requires careful study of {c}.",
+            "lr_scale": 1.5,
+        },
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+ok(f"Trained {len(concepts)} concepts locally on Node A")
 
-info("Forcing sync to Node B...")
+info("Forcing sync from Node A to Node B...")
 r = post(NODE_A, "/neuro/sync")
 ok(f"Sync: {r.get('message','?')}")
-time.sleep(1)
+time.sleep(1.5)
 
-info("Checking Node B propagation for 'mitochondria'...")
+info("Checking Node B has mitochondria via /neuro/propagate...")
 r = post(NODE_B, "/neuro/propagate", {"seed_labels": ["txt:mitochondria"], "hops": 2})
 activated = r.get("activated", {})
 mito_keys = [k for k in activated if "mitochond" in k.lower()]
 if mito_keys:
-    ok(f"Node B has mitochondria neurons after sync: {mito_keys[:3]}")
+    ok(f"Node B has mitochondria neurons after delta sync: {mito_keys[:3]}")
 else:
     top5 = list(activated.items())[:5] if isinstance(activated, dict) else list(activated)[:5]
     info(f"Propagation result (top 5): {top5}")
-    print("  [WARN] mitochondria not yet in Node B propagation — delta may need more training")
+    print("  [WARN] mitochondria not in Node B propagation — may need higher lr_scale")
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 section("Test Complete")
 ok("All core distributed paths exercised.")
 print(f"""
-  Routing:    {train_remote} of 4 training calls forwarded to peer
+  Routing:    {train_remote} of 8 training calls forwarded to peer, {train_local} trained locally
   Replication: QA pair broadcast Node A -> Node B
   Sync:        Weight delta force-pushed to Node B
   Endpoints:   /neuro/delta/apply, /neuro/sync, /cluster/sync/status all responded

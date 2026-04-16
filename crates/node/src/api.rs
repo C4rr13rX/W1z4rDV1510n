@@ -832,6 +832,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let app_hypothesis_queue = Arc::clone(&state.hypothesis_queue);
     let app_neuro = Arc::clone(&state.neuro);
     let app_qa = Arc::clone(&state.qa_runtime);
+    // Pre-clone for the background peer-refresh task (state is consumed by with_state below).
+    let bg_cluster = state.cluster.clone();
+    let bg_dist    = state.distributed.clone();
     let app = Router::new()
         .route("/health", get(get_health))
         .route("/ready", get(get_ready))
@@ -978,6 +981,32 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             let qa_arc = app_qa.clone();
             tokio::spawn(async move {
                 hypothesis_research_loop(hq, neuro, qa_arc).await;
+            });
+        }
+        // ── Background peer-list refresh ──────────────────────────────────────
+        // Keep the distributed coordinator in sync with the live cluster
+        // membership roster.  Without this, the coordinator's peer list is
+        // only updated when /cluster/status is explicitly polled, so a newly
+        // joined worker would be invisible to the coordinator until someone
+        // called that endpoint manually.
+        {
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(30),
+                );
+                interval.set_missed_tick_behavior(
+                    tokio::time::MissedTickBehavior::Skip,
+                );
+                loop {
+                    interval.tick().await;
+                    let guard = bg_cluster.lock().await;
+                    if let Some(node) = guard.as_ref() {
+                        let s = node.status().await;
+                        let addrs = peer_http_addrs(&s.nodes, &s.local_id);
+                        drop(guard);
+                        bg_dist.set_peers(addrs).await;
+                    }
+                }
             });
         }
         let listener = tokio::net::TcpListener::bind(addr)
@@ -3766,6 +3795,8 @@ async fn cluster_join(
             // Refresh distributed peer list from the cluster roster.
             let peer_addrs = peer_http_addrs(&s.nodes, &s.local_id);
             state.distributed.set_peers(peer_addrs).await;
+            // Seed this node with knowledge from existing peers (fire-and-forget).
+            state.distributed.bootstrap_from_peers().await;
             *state.cluster.lock().await = Some(node);
             tracing::info!("joined cluster {cluster_id} via HTTP API ({node_count} nodes)");
             (StatusCode::OK, Json(serde_json::json!({
