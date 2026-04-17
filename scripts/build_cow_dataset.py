@@ -798,34 +798,39 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
         print(f'  Searching YouTube CC: "{query}"')
         import subprocess
         try:
+            # Skip webpage extraction to bypass JS challenge (works without deno)
             if _yt_python == 'api':
-                # Use yt-dlp Python API directly
                 import yt_dlp as _yt
-                ydl_opts = {
-                    'format': 'bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]',
-                    'merge_output_format': 'mp4',
+                _yt_opts = {
+                    'format': 'best[height<=480][ext=mp4]/best[height<=480]',
                     'outtmpl': str(vid_dir / '%(id)s.%(ext)s'),
-                    'max_downloads': 3,
-                    'noplaylist': True,
-                    'quiet': True,
-                    'writeinfojson': True,
+                    'max_downloads': 3, 'noplaylist': True, 'quiet': True,
+                    'ignoreerrors': True, 'writeinfojson': True,
+                    'extractor_args': {'youtube': {'skip': ['webpage']}},
                 }
-                with _yt.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([f'ytsearch5:{query}'])
+                try:
+                    _yt.YoutubeDL(_yt_opts).download([f'ytsearch5:{query}'])
+                except _yt.utils.MaxDownloadsReached:
+                    pass
             else:
                 # Inject roaming site-packages so yt_dlp is importable from C:\Python313
                 _ytdlp_site2 = r'C:\Users\Adam\AppData\Roaming\Python\Python313\site-packages'
-                _yt_inline = (
-                    f'import sys; sys.path.insert(0, {_ytdlp_site2!r}); '
-                    f'import yt_dlp; '
-                    f'ydl_opts = {{'
-                    f'"format": "bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]", '
-                    f'"merge_output_format": "mp4", '
-                    f'"outtmpl": {str(vid_dir / "%(id)s.%(ext)s")!r}, '
-                    f'"max_downloads": 3, "noplaylist": True, "quiet": True, '
-                    f'"writeinfojson": True}}; '
-                    f'yt_dlp.YoutubeDL(ydl_opts).download(["ytsearch5:{query}"])'
-                )
+                _outtmpl = str(vid_dir / '%(id)s.%(ext)s').replace('\\', '/')
+                _yt_inline = '\n'.join([
+                    f'import sys; sys.path.insert(0, {_ytdlp_site2!r})',
+                    'import yt_dlp',
+                    'opts = {',
+                    f'  "format": "best[height<=480][ext=mp4]/best[height<=480]",',
+                    f'  "outtmpl": {_outtmpl!r},',
+                    '  "max_downloads": 3, "noplaylist": True, "quiet": True,',
+                    '  "ignoreerrors": True, "writeinfojson": True,',
+                    '  "extractor_args": {"youtube": {"skip": ["webpage"]}},',
+                    '}',
+                    'try:',
+                    f'  yt_dlp.YoutubeDL(opts).download(["ytsearch5:{query}"])',
+                    'except yt_dlp.utils.MaxDownloadsReached:',
+                    '  pass',
+                ])
                 subprocess.run([_yt_python, '-c', _yt_inline],
                                capture_output=True, text=True, timeout=180)
 
