@@ -641,6 +641,8 @@ def fetch_wikimedia_histology(out_dir: Path,
     items = []
 
     API = 'https://commons.wikimedia.org/w/api.php'
+    # Wikimedia requires a descriptive User-Agent; bots without one get 403
+    UA = 'W1z4rDV1510n-DatasetBuilder/1.0 (https://github.com/C4rr13rX/W1z4rDV1510n; adamedsall@gmail.com)'
 
     for cat in tqdm(categories, desc='Wikimedia histology'):
         params = {
@@ -650,7 +652,8 @@ def fetch_wikimedia_histology(out_dir: Path,
         }
         url = API + '?' + urllib.parse.urlencode(params)
         try:
-            with urllib.request.urlopen(url, timeout=10) as r:
+            req = urllib.request.Request(url, headers={'User-Agent': UA})
+            with urllib.request.urlopen(req, timeout=10) as r:
                 data = json.loads(r.read())
             members = data.get('query', {}).get('categorymembers', [])
 
@@ -667,7 +670,8 @@ def fetch_wikimedia_histology(out_dir: Path,
                 }
                 img_url = API + '?' + urllib.parse.urlencode(img_params)
                 try:
-                    with urllib.request.urlopen(img_url, timeout=10) as r:
+                    img_req = urllib.request.Request(img_url, headers={'User-Agent': UA})
+                    with urllib.request.urlopen(img_req, timeout=10) as r:
                         idata = json.loads(r.read())
                     pages = idata.get('query', {}).get('pages', {})
                     for pid, page in pages.items():
@@ -682,7 +686,8 @@ def fetch_wikimedia_histology(out_dir: Path,
                         fname = out_dir / (hashlib.sha1(dl_url.encode()).hexdigest()[:12] + '.jpg')
                         if not fname.exists():
                             try:
-                                with urllib.request.urlopen(dl_url, timeout=15) as r:
+                                dl_req = urllib.request.Request(dl_url, headers={'User-Agent': UA})
+                                with urllib.request.urlopen(dl_req, timeout=15) as r:
                                     raw = r.read()
                                 fname.write_bytes(raw)
                             except Exception:
@@ -791,19 +796,24 @@ def fetch_pdb_structures(out_dir: Path, pdb_ids: list[tuple]) -> list[dict]:
 def ingest_item(item: dict, node_host: str) -> bool:
     """Post one curriculum item to the appropriate node API endpoint."""
     modality = item.get('modality', 'text')
+    item_type = item.get('type', '')
 
-    if item.get('type') == 'text' and modality == 'text':
-        # /media/train with text modality
+    # Image/page/video_frame with b64 payload — send as image
+    if modality in ('image', 'page', 'video_frame') and item.get('b64'):
         payload = {
-            'modality': 'text',
-            'text': item.get('text', ''),
+            'modality': 'image',
+            'data_b64': item['b64'],
+            'text': item.get('title', '') or item.get('label', '') or item.get('source', ''),
             'lr_scale': 1.0,
         }
-    elif modality in ('image', 'page') and item.get('b64'):
+    elif modality == 'text' or item_type in ('text', 'protein_structure', 'pmc_article'):
+        # Text-only or structured text (PDB/PMC): route through /media/train text
+        text = item.get('text') or item.get('abstract', '') or item.get('title', '')
+        if not text:
+            return False
         payload = {
-            'modality': modality,
-            'data_b64': item['b64'],
-            'text': item.get('title', '') or item.get('label', ''),
+            'modality': 'text',
+            'text': text[:6000],   # cap to avoid oversized payloads
             'lr_scale': 1.0,
         }
     else:
