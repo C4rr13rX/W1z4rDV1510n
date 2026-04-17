@@ -55,7 +55,7 @@ This means:
 | QA retrieval accuracy | **0.951** | Hebbian Q&A fabric, `POST /qa/query` |
 | Chat / generate quality | **0.630** | `POST /chat`, `POST /neuro/generate` |
 
-The chat/generate score reflects the current training corpus. Both endpoints use the dual-memory (CLS) architecture: QA store for high-confidence fast retrieval, neuro pool for generalization.
+These scores are corpus-dependent — they shift as more training data is ingested. Both endpoints use the dual-memory (CLS) architecture: QA store for high-confidence fast retrieval, neuro pool for generalization. Expect QA accuracy to improve significantly with a larger domain-specific Q&A corpus.
 
 ---
 
@@ -862,8 +862,9 @@ python scripts/train_foundation.py \
 ### 5. K-12 full curriculum training
 
 Trains through all three stages — toddler (Stage 0), introductory textbooks (Stage 1),
-and full K-12 curriculum (Stage 2). Requires LibreTexts PDFs in a textbooks directory
-(default `D:\Projects\StateOfLoci\textbooks`).
+and full K-12 curriculum (Stage 2). Requires LibreTexts PDFs placed in `textbooks/`
+inside the project root (i.e. `D:\Projects\W1z4rDV1510n\textbooks\`).
+Use `--textbooks` to point to any other directory.
 
 ```bash
 # Run all stages (long-running — hours)
@@ -875,6 +876,9 @@ python scripts/train_k12.py \
 
 # Run only Stage 0 (toddler concepts)
 python scripts/train_k12.py --node http://127.0.0.1:8090 --stages 0
+
+# Override textbooks directory (default is textbooks/ inside the project root)
+python scripts/train_k12.py --node http://127.0.0.1:8090 --textbooks D:\path\to\textbooks --stages 1,2
 
 # Limit to 10 books per stage (useful for quick testing)
 python scripts/train_k12.py --node http://127.0.0.1:8090 --stages 1,2 --max-books 10
@@ -888,7 +892,48 @@ python scripts/train_k12.py --node http://127.0.0.1:8090 --clear-progress
 
 ---
 
-### 6. QA store query and ingest
+### 6. Bovine anatomy training pipeline
+
+`scripts/build_cow_dataset.py` builds a multi-modal bovine anatomy dataset and ingests it directly into the node. This is the primary training pipeline for the W1z4rD V1510n bovine perception system. It runs six stages:
+
+| Stage | Type | Approx. items | Source |
+|-------|------|---------------|--------|
+| 0 | Synthetic visual primitives | 500 | PIL-generated shapes with anatomy zone labels |
+| 1 | Text corpus | ~138 | PubMed Central articles + embedded anatomy knowledge base |
+| 2 | Video frames | Variable | YouTube CC-licensed bovine videos (yt_dlp, 2 fps) |
+| 3 | MRI/CT cross-sections | ~400 | 16 anatomical levels × 3 modalities × 8 noise variants + text docs |
+| 4 | Histology images | ~32 | Wikimedia Commons histology categories |
+| 5 | Protein structures | ~15 | PDB records (bovine-relevant proteins) |
+
+```bash
+pip install pillow requests yt-dlp
+
+# Run all stages
+python scripts/build_cow_dataset.py \
+  --node localhost:8090 \
+  --data-dir D:/w1z4rdv1510n-data/training
+
+# Run individual stages
+python scripts/build_cow_dataset.py --stages 0 --node localhost:8090 --data-dir D:/w1z4rdv1510n-data/training
+python scripts/build_cow_dataset.py --stages 3 --node localhost:8090 --data-dir D:/w1z4rdv1510n-data/training
+
+# Download only (skip ingestion into node)
+python scripts/build_cow_dataset.py --download-only --stages 2 --node localhost:8090 --data-dir D:/w1z4rdv1510n-data/training
+```
+
+Stage 3 generates synthetic MRI/CT images using PIL — no external imaging data required. Stage 2 requires `yt-dlp` to be installed and uses the `extractor_args: {youtube: {skip: [webpage]}}` bypass for the YouTube n-challenge.
+
+After running, query the node on bovine anatomy topics:
+
+```bash
+curl -s -X POST http://127.0.0.1:8090/chat \
+  -H "Content-Type: application/json" \
+  -d '{"text": "What is the function of the rumen?", "hops": 2, "top_k": 5}'
+```
+
+---
+
+### 7. QA store query and ingest
 
 ```bash
 # Query the Hebbian QA fabric directly (returns raw activation scores)
@@ -911,7 +956,7 @@ curl -s -X POST http://127.0.0.1:8090/qa/ingest \
 
 ---
 
-### 7. Checkpoint (save pool + QA store to disk)
+### 8. Checkpoint (save pool + QA store to disk)
 
 The node accumulates learning in RAM. Checkpoint persists it.
 Training scripts call this automatically, but you can trigger it manually:
@@ -923,7 +968,7 @@ curl -s -X POST http://127.0.0.1:8090/neuro/checkpoint
 
 ---
 
-### 8. Recover QA store after corruption
+### 9. Recover QA store after corruption
 
 If the QA store's `answer_index` becomes corrupted (e.g. after manual surgery),
 re-ingest all pairs from the intact `pairs` dict in the JSON file:
@@ -939,7 +984,7 @@ python scripts/recover_qa_store.py --dry-run
 
 ---
 
-### 9. Autonomous research agent
+### 10. Autonomous research agent
 
 Polls the hypothesis queue, fetches Wikipedia + ArXiv answers, ingests them,
 and resolves each hypothesis with a dopamine reward signal.
@@ -953,7 +998,7 @@ python scripts/research_agent.py \
 
 ---
 
-### 10. Neural propagation and inference
+### 11. Neural propagation and inference
 
 ```bash
 # Propagate from seed labels — returns all concept labels that activate
@@ -977,7 +1022,7 @@ curl -s -X POST http://127.0.0.1:8090/hypothesis/resolve \
 
 ---
 
-### 11. Environmental Equation Matrix
+### 12. Environmental Equation Matrix
 
 ```bash
 # Search equations by keyword
@@ -997,7 +1042,7 @@ curl http://127.0.0.1:8090/equations/gaps
 
 ---
 
-### 12. Obstacle course — screen navigation from natural language
+### 13. Obstacle course — screen navigation from natural language
 
 Teaches the node to predict cursor targets from plain English instructions.
 
@@ -1016,7 +1061,7 @@ python scripts/playback_obstacle.py --auto
 
 ---
 
-### 13. Chess training
+### 14. Chess training
 
 ```bash
 # Terminal 1: node
@@ -1032,7 +1077,7 @@ python scripts/live_viz_server.py \
 
 ---
 
-### 14. Dashboard GUI
+### 15. Dashboard GUI
 
 ```bash
 ./bin/w1z4rd_dashboard.exe    # Windows
@@ -1042,7 +1087,7 @@ python scripts/live_viz_server.py \
 
 ---
 
-### 15. Cluster — join multiple nodes into one virtual brain
+### 16. Cluster — join multiple nodes into one virtual brain
 
 ```bash
 # Machine A — start coordinator (prints a join OTP)
@@ -1063,7 +1108,7 @@ Windows convenience scripts: `scripts/start_cluster.bat` (coordinator),
 
 ---
 
-### 16. Distributed training — weight-delta sync across nodes
+### 17. Distributed training — weight-delta sync across nodes
 
 Once nodes are clustered, the distributed training coordinator runs automatically.
 Training calls are round-robin routed across all nodes (including self), and weight

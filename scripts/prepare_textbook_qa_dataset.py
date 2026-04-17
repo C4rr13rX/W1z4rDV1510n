@@ -70,10 +70,7 @@ def normalize_book_id(name: str) -> str:
 def detect_input_root(explicit: Optional[str]) -> Path:
     if explicit:
         return Path(explicit).expanduser()
-    candidate = ROOT.parent / "StateOfLoci" / "textbooks"
-    if candidate.exists():
-        return candidate
-    return ROOT / "data" / "textbooks" / "raw"
+    return ROOT / "textbooks"
 
 
 def ensure_dir(path: Path) -> None:

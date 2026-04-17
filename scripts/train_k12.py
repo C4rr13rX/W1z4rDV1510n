@@ -65,7 +65,7 @@ except ImportError:
         print()
 
 ROOT = Path(__file__).resolve().parents[1]
-TEXTBOOKS_DIR = ROOT.parent / "StateOfLoci" / "textbooks"
+TEXTBOOKS_DIR = ROOT / "textbooks"
 PROGRESS_FILE = ROOT / "data" / "k12_progress.json"
 
 # -- PDF rendering --------------------------------------------------------------
