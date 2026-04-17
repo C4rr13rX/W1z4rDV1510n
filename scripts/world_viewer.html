@@ -99,6 +99,32 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
 #xhair::before { width:1px; height:100%; left:50%; top:0; }
 #xhair::after  { width:100%; height:1px; top:50%; left:0; }
 
+/* VIDEO mode button */
+#video-btn { position:absolute; bottom:52px; right:570px; z-index:5;
+  background:none; border:1px solid #0a2030; color:#1a4050; padding:5px 12px;
+  font-family:inherit; font-size:8px; letter-spacing:2px; text-transform:uppercase;
+  cursor:pointer; border-radius:2px; pointer-events:all; transition:all 0.2s; }
+#video-btn:hover  { border-color:#a06000; color:#e09020; }
+#video-btn.active { border-color:#d08010; color:#ffcc44; }
+
+/* VIDEO quality HUD */
+#vq-hud { display:none; position:absolute; top:14px; right:14px; z-index:9;
+  font-size:9px; letter-spacing:1.5px; text-transform:uppercase;
+  background:rgba(2,4,10,0.88); border:1px solid #1a2a10; border-radius:3px;
+  padding:8px 14px; pointer-events:none; }
+#vq-hud .vqr { display:flex; justify-content:space-between; gap:18px; margin:2px 0; }
+#vq-hud .vqk { color:#1a3020; }
+#vq-hud .vqv { color:#60cc40; }
+#vq-hud .vqv.warn { color:#cc8020; }
+#vq-hud .vqv.crit { color:#cc2020; }
+
+/* Crosshair (reused for video walk mode) */
+#xhair2 { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  width:10px; height:10px; pointer-events:none; display:none; }
+#xhair2::before,#xhair2::after { content:''; position:absolute; background:rgba(255,220,80,0.6); }
+#xhair2::before { width:1px; height:100%; left:50%; top:0; }
+#xhair2::after  { width:100%; height:1px; top:50%; left:0; }
+
 /* Loading */
 #loading { position:absolute; inset:0; background:#000509; z-index:15;
   display:none; flex-direction:column; align-items:center; justify-content:center; }
@@ -132,8 +158,16 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
   <div id="xhair"></div>
 </div>
 
+<button id="video-btn" onclick="toggleVideoMode()">◈ VIDEO</button>
 <button id="scene-btn" onclick="toggleSceneMode()">◈ SCENE</button>
 <button id="fps-btn" onclick="toggleFPS()">⊕ FPS MODE</button>
+<div id="vq-hud">
+  <div class="vqr"><span class="vqk">FPS</span><span class="vqv" id="vq-fps">--</span></div>
+  <div class="vqr"><span class="vqk">QUALITY</span><span class="vqv" id="vq-qual">--</span></div>
+  <div class="vqr"><span class="vqk">TRIS</span><span class="vqv" id="vq-pts">--</span></div>
+  <div class="vqr"><span class="vqk">FRAME</span><span class="vqv" id="vq-frame">--</span></div>
+</div>
+<div id="xhair2"></div>
 <div id="scene-toast" onclick="activateSceneMode()">Anatomy / scene stream detected — click to switch to SCENE mode</div>
 <div id="fade"></div>
 <div id="tt"><div class="ttn" id="ttn"></div><div class="ttl" id="ttl"></div><div class="ttd" id="ttd"></div><div class="tti" id="tti"></div></div>
@@ -436,6 +470,285 @@ function startNeuroStream() {
     document.getElementById('ns').textContent = '';
   };
 }
+// ── VIDEO mode — photorealistic depth mesh + billboard ─────────────────────────
+const FRAME_HOST = 'localhost:9001';
+
+// Quality levels: stride = vertex sampling step (1=every px, 8=every 8th)
+const VQ = [
+  { stride:1, label:'ULTRA',   color:'#00ffcc' },
+  { stride:2, label:'HIGH',    color:'#80ff40' },
+  { stride:3, label:'MEDIUM',  color:'#c0e020' },
+  { stride:4, label:'NORMAL',  color:'#60cc40' },
+  { stride:6, label:'LOW',     color:'#cc8020' },
+  { stride:8, label:'MINIMAL', color:'#cc2020' },
+];
+let vqIdx  = 2;    // start at MEDIUM (stride=3)
+let videoMode     = false;
+let depthMesh     = null;  // THREE.Mesh  (depth-displaced textured mesh)
+let videoBill     = null;  // THREE.Mesh  (full-res billboard background)
+let videoTex      = null;  // THREE.CanvasTexture (shared by both mesh & billboard)
+let lastVFrame    = -1;
+let vfpsHistory   = [];
+let vLastAnimMs   = performance.now();
+let vFetchTimer   = null;
+let vPtCount      = 0;    // triangle count
+
+// Offscreen canvases for JPEG decoding without DOM insertion
+const _vImgCvs = document.createElement('canvas');
+const _vDepCvs = document.createElement('canvas');
+const _vImgCtx = _vImgCvs.getContext('2d', { willReadFrequently: true });
+const _vDepCtx = _vDepCvs.getContext('2d', { willReadFrequently: true });
+
+function _decodeImg(b64) {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.src = 'data:image/jpeg;base64,' + b64;
+  });
+}
+
+async function _fetchAndRebuild() {
+  if (!videoMode) return;
+  let data;
+  try {
+    const r = await fetch(`http://${FRAME_HOST}/frame`);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  if (data.frame_num === lastVFrame) return;
+  lastVFrame = data.frame_num;
+
+  const W = data.w, H = data.h;
+  const stride = VQ[vqIdx].stride;
+
+  // Decode both images in parallel
+  const [imgEl, depEl] = await Promise.all(
+    [_decodeImg(data.image), _decodeImg(data.depth)]
+  );
+
+  // Update offscreen canvases
+  _vImgCvs.width = W; _vImgCvs.height = H;
+  _vDepCvs.width = W; _vDepCvs.height = H;
+  _vImgCtx.drawImage(imgEl, 0, 0);
+  _vDepCtx.drawImage(depEl, 0, 0);
+
+  const colPx = _vImgCtx.getImageData(0, 0, W, H).data;
+  const depPx = _vDepCtx.getImageData(0, 0, W, H).data;
+
+  // Parallax displacement model: flat grid, each vertex displaced in Z by depth.
+  // Far objects (d=0) stay at z=0; close objects (d=1) pushed toward camera at z=+MAX_DISP.
+  // Camera at z=CAM_Z looking at z=0. No perspective-correct unprojection means
+  // no deformation artifacts — the image always looks like the source video,
+  // just with correct 3D parallax as the camera moves.
+  const aspect   = W / H;
+  const FOVY_RAD = 60.0 * Math.PI / 180;           // must match Three.js camera FOV
+  const CAM_Z    = 4.0;
+  const PLANE_H  = 2.0 * CAM_Z * Math.tan(FOVY_RAD / 2);   // fills screen exactly at z=0
+  const PLANE_W  = PLANE_H * aspect;
+  const MAX_DISP = 1.0;    // max Z displacement toward camera (close objects)
+  const SEAM     = 0.62;   // clip only hard sky/background seams; solid elsewhere
+
+  // ── Build vertex arrays ──────────────────────────────────────────────────
+  const cols  = Math.ceil(W / stride);
+  const rows  = Math.ceil(H / stride);
+  const N     = cols * rows;
+  const posA  = new Float32Array(N * 3);
+  const uvA   = new Float32Array(N * 2);
+  const depV  = new Float32Array(N);   // depth per vertex (for seam detection)
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const vi = row * cols + col;
+      const px = Math.min(col * stride, W - 1);
+      const py = Math.min(row * stride, H - 1);
+      const pi = (py * W + px) * 4;
+      const d  = depPx[pi] / 255;        // 0 = far, 1 = close
+      const u  = px / (W - 1);
+      const v  = 1.0 - py / (H - 1);    // Three.js UV: Y flipped
+      posA[vi*3]   = (u - 0.5) * PLANE_W;
+      posA[vi*3+1] = (v - 0.5) * PLANE_H;
+      posA[vi*3+2] = d * MAX_DISP;       // push close pixels toward camera
+      uvA[vi*2]    = u;
+      uvA[vi*2+1]  = v;
+      depV[vi]     = d;
+    }
+  }
+
+  // ── Build index array, skipping depth-seam triangles ────────────────────
+  const maxTris = (cols - 1) * (rows - 1) * 6;
+  const tmpIdx  = new Uint32Array(maxTris);
+  let qi = 0;
+  for (let row = 0; row < rows - 1; row++) {
+    for (let col = 0; col < cols - 1; col++) {
+      const tl = row * cols + col;
+      const tr = tl + 1;
+      const bl = tl + cols;
+      const br = bl + 1;
+      const dtl = depV[tl], dtr = depV[tr], dbl = depV[bl], dbr = depV[br];
+      // Tri 1: tl-bl-tr
+      if (Math.max(Math.abs(dtl-dbl), Math.abs(dtl-dtr), Math.abs(dbl-dtr)) < SEAM) {
+        tmpIdx[qi++] = tl; tmpIdx[qi++] = bl; tmpIdx[qi++] = tr;
+      }
+      // Tri 2: tr-bl-br
+      if (Math.max(Math.abs(dtr-dbl), Math.abs(dtr-dbr), Math.abs(dbl-dbr)) < SEAM) {
+        tmpIdx[qi++] = tr; tmpIdx[qi++] = bl; tmpIdx[qi++] = br;
+      }
+    }
+  }
+  const idxA = tmpIdx.slice(0, qi);
+  vPtCount   = qi / 3;   // triangle count
+
+  // ── Create or update depth mesh ──────────────────────────────────────────
+  if (!depthMesh) {
+    // First frame: create texture + mesh + billboard
+    videoTex = new THREE.CanvasTexture(_vImgCvs);
+    videoTex.minFilter = THREE.LinearFilter;
+    videoTex.magFilter = THREE.LinearFilter;
+    videoTex.encoding  = THREE.LinearEncoding;
+
+    // Depth mesh: video texture mapped onto depth-displaced geometry
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(posA.slice(), 3));
+    geo.setAttribute('uv',       new THREE.BufferAttribute(uvA.slice(),  2));
+    geo.setIndex(new THREE.BufferAttribute(idxA.slice(), 1));
+    const mat = new THREE.MeshBasicMaterial({
+      map: videoTex, side: THREE.FrontSide,
+      depthWrite: true, depthTest: true,
+    });
+    depthMesh = new THREE.Mesh(geo, mat);
+    depthMesh.frustumCulled = false;
+    scene.add(depthMesh);
+
+    // Billboard: same texture on a back-plane at z=0 (the "far" depth plane).
+    // Exactly fills the camera FOV, fills seam holes when camera moves laterally.
+    const bgeo = new THREE.PlaneGeometry(PLANE_W, PLANE_H);
+    const bmat = new THREE.MeshBasicMaterial({
+      map: videoTex, depthWrite: false, depthTest: false,
+    });
+    videoBill = new THREE.Mesh(bgeo, bmat);
+    videoBill.position.set(0, 0, -0.05);  // just behind far (z=0) vertices
+    videoBill.renderOrder = -1;
+    scene.add(videoBill);
+
+  } else {
+    // Subsequent frames: update in place or rebuild if vertex count changed
+    const geo   = depthMesh.geometry;
+    const prevN = geo.attributes.position.count;
+    if (prevN !== N) {
+      geo.setAttribute('position', new THREE.BufferAttribute(posA.slice(), 3));
+      geo.setAttribute('uv',       new THREE.BufferAttribute(uvA.slice(),  2));
+    } else {
+      geo.attributes.position.array.set(posA);
+      geo.attributes.uv.array.set(uvA);
+      geo.attributes.position.needsUpdate = true;
+      geo.attributes.uv.needsUpdate       = true;
+    }
+    geo.setIndex(new THREE.BufferAttribute(idxA.slice(), 1));
+    geo.computeBoundingSphere();
+    if (videoTex) videoTex.needsUpdate = true;
+  }
+}
+
+function _clearVideoObjects() {
+  if (depthMesh) { scene.remove(depthMesh); depthMesh.geometry.dispose(); depthMesh.material.dispose(); depthMesh = null; }
+  if (videoBill) { scene.remove(videoBill); videoBill.geometry.dispose(); videoBill.material.dispose(); videoBill = null; }
+  if (videoTex)  { videoTex.dispose(); videoTex = null; }
+}
+
+// Adaptive quality: called every animation frame
+function _videoAdapt() {
+  const now = performance.now();
+  const dt  = now - vLastAnimMs;
+  vLastAnimMs = now;
+  vfpsHistory.push(dt);
+  if (vfpsHistory.length > 90) vfpsHistory.shift();
+
+  // Update HUD
+  const avgMs  = vfpsHistory.reduce((a,b)=>a+b,0) / vfpsHistory.length;
+  const curFPS = 1000 / avgMs;
+  const qEl    = document.getElementById('vq-fps');
+  if (qEl) {
+    qEl.textContent = curFPS.toFixed(0);
+    qEl.className   = 'vqv' + (curFPS < 20 ? ' crit' : curFPS < 35 ? ' warn' : '');
+  }
+  const ql = document.getElementById('vq-qual');
+  if (ql) { ql.textContent = VQ[vqIdx].label; ql.style.color = VQ[vqIdx].color; }
+  const pl = document.getElementById('vq-pts');
+  if (pl) pl.textContent = (vPtCount/1000).toFixed(1) + 'kt';
+  const fl = document.getElementById('vq-frame');
+  if (fl) fl.textContent = String(lastVFrame);
+
+  // Allow URL override: ?vq=0..5 locks quality (useful for screenshots)
+  const _vqLock = new URLSearchParams(location.search).get('vq');
+  if (_vqLock !== null) { vqIdx = Math.max(0, Math.min(5, parseInt(_vqLock))); return; }
+
+  // Adapt quality every ~30 frames
+  if (vfpsHistory.length % 30 !== 0) return;
+  if (curFPS < 22 && vqIdx < VQ.length - 1) vqIdx++;
+  else if (curFPS > 42 && vqIdx > 0)        vqIdx--;
+}
+
+function toggleVideoMode() {
+  videoMode = !videoMode;
+  const btn = document.getElementById('video-btn');
+
+  if (videoMode) {
+    // Disable other modes cleanly
+    if (sceneMode) toggleSceneMode();
+    if (fpsMode)   toggleFPS();
+    if (currentGroup) currentGroup.visible = false;
+
+    btn.classList.add('active'); btn.textContent = '◈ VIDEO ✓';
+    ['bc','badge','panel','lbar','sb'].forEach(id =>
+      document.getElementById(id).style.display = 'none');
+    document.getElementById('vq-hud').style.display  = 'block';
+    document.getElementById('xhair2').style.display  = 'block';
+    document.getElementById('hint').textContent =
+      'CLICK CANVAS TO LOCK MOUSE  ·  WASD = WALK  ·  MOUSE = LOOK  ·  ESC = UNLOCK';
+
+    // Camera: far enough so near mesh surface (~0.3 from origin) is comfortably in frame
+    camera.position.set(0, 0, 4.0);
+    camera.lookAt(0, 0, 0);
+    camera.near = 0.05; camera.updateProjectionMatrix();
+
+    // Post-processing disabled in video mode (raw render for true colours)
+    bloomPass.strength = 0.0;
+    filmPass.uniforms.intensity.value = 0.0;
+
+    // Start at MEDIUM quality (stride=3) and adapt dynamically
+    vfpsHistory = []; vqIdx = 2; lastVFrame = -1;
+    vFetchTimer = setInterval(_fetchAndRebuild, 40);
+
+    // Enable pointer lock on canvas click
+    canvas.addEventListener('click', _lockPointer);
+
+  } else {
+    clearInterval(vFetchTimer); vFetchTimer = null;
+    _clearVideoObjects();
+    canvas.removeEventListener('click', _lockPointer);
+    if (plc.isLocked) plc.unlock();
+
+    btn.classList.remove('active'); btn.textContent = '◈ VIDEO';
+    ['bc','badge','panel','lbar','sb'].forEach(id =>
+      document.getElementById(id).style.display = '');
+    document.getElementById('vq-hud').style.display  = 'none';
+    document.getElementById('xhair2').style.display  = 'none';
+    if (currentGroup) currentGroup.visible = true;
+
+    const lc = LC[currentLevel];
+    bloomPass.strength = lc.bloom.s; bloomPass.radius = lc.bloom.r;
+    bloomPass.threshold = lc.bloom.t;
+    filmPass.uniforms.intensity.value = lc.film;
+    camera.near = 0.01; camera.updateProjectionMatrix();
+    document.getElementById('hint').textContent =
+      'DRAG · ORBIT   SCROLL · ZOOM   WASD · PAN   RIGHT-CLICK · ASCEND';
+  }
+}
+
+function _lockPointer() { if (videoMode && !plc.isLocked) plc.lock(); }
+
+// ── Neural map canvas ─────────────────────────────────────────────────────────
 const nmapCanvas = document.getElementById('nmap');
 const nmapCtx    = nmapCanvas.getContext('2d');
 function drawNeuroMap(snap) {
@@ -1231,8 +1544,23 @@ function animate(){
   requestAnimationFrame(animate);
   const dt=clock.getDelta();
 
-  // FPS movement
-  if(fpsMode){
+  // Video mode: adaptive quality runs every frame; movement only when locked
+  if(videoMode){
+    _videoAdapt();
+    if(plc.isLocked){
+      const spd = 1.8 * dt * (fpsKeys['ShiftLeft']||fpsKeys['ShiftRight'] ? 3 : 1);
+      const fwd = Number(fpsKeys['KeyW']||fpsKeys['ArrowUp'])   - Number(fpsKeys['KeyS']||fpsKeys['ArrowDown']);
+      const rt  = Number(fpsKeys['KeyD']||fpsKeys['ArrowRight'])- Number(fpsKeys['KeyA']||fpsKeys['ArrowLeft']);
+      const up  = Number(fpsKeys['Space']) - Number(fpsKeys['ControlLeft']||fpsKeys['ControlRight']);
+      plc.moveForward(fwd * spd);
+      plc.moveRight(rt * spd);
+      camera.position.y += up * spd;
+      camera.position.y = Math.max(-1.5, Math.min(3.0, camera.position.y));
+    }
+  }
+
+  // FPS movement (cell viewer)
+  if(fpsMode && !videoMode){
     const spd=0.30*(fpsKeys['ShiftLeft']||fpsKeys['ShiftRight']?3:1);
     const fwd=Number(fpsKeys['KeyW']||fpsKeys['ArrowUp'])-Number(fpsKeys['KeyS']||fpsKeys['ArrowDown']);
     const rt =Number(fpsKeys['KeyD']||fpsKeys['ArrowRight'])-Number(fpsKeys['KeyA']||fpsKeys['ArrowLeft']);
@@ -1242,22 +1570,19 @@ function animate(){
     plc.moveForward(-fpsVel.z*dt); plc.moveRight(-fpsVel.x*dt);
     camera.position.y+=up*spd*dt;
     camera.position.y=Math.max(-2.0,Math.min(5,camera.position.y));
-  } else {
-    orbitCtrl.update();
   }
 
-  if(neuroSnap){
+  if(!videoMode && !fpsMode) orbitCtrl.update();
+
+  if(!videoMode && neuroSnap){
     drawNeuroMap(neuroSnap);
     if(sceneMode){
-      // Only use centroid layer when no live symbols are streaming.
-      // Live symbol positions are physical; centroid positions are abstract
-      // neural topology — mixing them creates noise.
       if(liveSymObjs.size === 0) rebuildSceneObjects(neuroSnap);
     } else {
       applyNeuroToScene(neuroSnap);
     }
   }
-  if(sceneMode) animateLiveSymbols();
+  if(sceneMode && !videoMode) animateLiveSymbols();
 
   // PQ animation
   if(currentGroup&&(currentLevel===4||currentLevel===5)){
@@ -1268,8 +1593,8 @@ function animate(){
     }});
   }
 
-  // Zoom threshold (orbit mode)
-  if(!isTransitioning&&currentGroup&&!fpsMode){
+  // Zoom threshold (orbit mode — disabled in videoMode)
+  if(!videoMode&&!isTransitioning&&currentGroup&&!fpsMode){
     const dist=camera.position.distanceTo(orbitCtrl.target);
     const lc=LC[currentLevel];
     if(dist<lc.drillIn&&currentLevel<LC.length-1) transitionLevel(currentLevel+1);
@@ -1283,7 +1608,8 @@ function animate(){
     if(hits.length&&hits[0].distance<0.18&&currentLevel<LC.length-1) transitionLevel(currentLevel+1);
   }
 
-  composer.render();
+  // Video mode: bypass all post-processing for true photorealistic colours
+  if(videoMode) { renderer.render(scene,camera); } else { composer.render(); }
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
@@ -1333,13 +1659,17 @@ async function init(){
   camera.position.set(0,.4,3.4);
   updateHUD(0); animate();
 
-  // Auto-switch to SCENE mode if a live simulation is already running
+  // Auto-activate VIDEO mode if frame server is live — highest priority
+  try {
+    const rv = await fetch(`http://${FRAME_HOST}/health`, { signal: AbortSignal.timeout(800) });
+    if (rv.ok) { toggleVideoMode(); return; }
+  } catch {}
+
+  // Otherwise auto-switch to SCENE mode if live symbols exist
   try {
     const r = await fetch(`http://${HOST}/neuro/symbols/live`);
     const d = await r.json();
-    if ((d.symbols||[]).length > 0) {
-      toggleSceneMode();
-    }
+    if ((d.symbols||[]).length > 0) toggleSceneMode();
   } catch {}
 }
 init();
