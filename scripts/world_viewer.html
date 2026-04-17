@@ -359,6 +359,26 @@ let layerData={};
 const clock=new THREE.Clock(), raycaster=new THREE.Raycaster(), mouse=new THREE.Vector2();
 let mDownPos=null;
 
+// Hover highlight state
+let hlMesh=null, hlOrigEI=0, hlOrigScaleX=1, hlOrigScaleY=1, hlOrigScaleZ=1;
+function highlightDrillable(mesh) {
+  if(hlMesh===mesh) return;
+  unhighlightDrillable();
+  if(!mesh||mesh.isInstancedMesh||!mesh.material||Array.isArray(mesh.material)) return;
+  hlMesh=mesh;
+  hlOrigEI=mesh.material.emissiveIntensity;
+  hlOrigScaleX=mesh.scale.x; hlOrigScaleY=mesh.scale.y; hlOrigScaleZ=mesh.scale.z;
+  mesh.material.emissiveIntensity=Math.min(hlOrigEI*2.4+0.9,4.5);
+  mesh.scale.set(hlOrigScaleX*1.07,hlOrigScaleY*1.07,hlOrigScaleZ*1.07);
+}
+function unhighlightDrillable() {
+  if(!hlMesh) return;
+  if(hlMesh.material&&!Array.isArray(hlMesh.material))
+    hlMesh.material.emissiveIntensity=hlOrigEI;
+  hlMesh.scale.set(hlOrigScaleX,hlOrigScaleY,hlOrigScaleZ);
+  hlMesh=null;
+}
+
 // ── Material / helpers ────────────────────────────────────────────────────────
 function M(color,opts={}) {
   return new THREE.MeshPhysicalMaterial({
@@ -679,11 +699,14 @@ function tagLabels(g){g.traverse(o=>{if(!o.isMesh||o.userData.label)return;const
 
 // ── Transition ────────────────────────────────────────────────────────────────
 function disposeGroup(grp){grp.traverse(o=>{if(o.isMesh){o.geometry.dispose();const mm=Array.isArray(o.material)?o.material:[o.material];mm.forEach(m=>m.dispose());}});}
-async function transitionLevel(next) {
+async function transitionLevel(next,fast=false) {
   if(isTransitioning||next===currentLevel||next<0||next>=LC.length) return;
   isTransitioning=true; orbitCtrl.autoRotate=false;
+  unhighlightDrillable();
   const fd=document.getElementById('fade');
-  fd.style.opacity='1'; await sleep(360);
+  const fadeOut=fast?130:360, fadeIn=fast?160:380;
+  fd.style.transition=`opacity ${fast?'0.11':'0.38'}s ease`;
+  fd.style.opacity='1'; await sleep(fadeOut);
   if(currentGroup){disposeGroup(currentGroup);scene.remove(currentGroup);}
   drillables=[]; currentGroup=new THREE.Group();
   BUILDERS[next](currentGroup); tagLabels(currentGroup); scene.add(currentGroup);
@@ -699,8 +722,36 @@ async function transitionLevel(next) {
   bloomPass.strength=lc.bloom.s; bloomPass.radius=lc.bloom.r; bloomPass.threshold=lc.bloom.t;
   filmPass.uniforms.intensity.value=lc.film;
   updateHUD(next);
-  await sleep(40); fd.style.opacity='0'; await sleep(380);
+  await sleep(fast?20:40); fd.style.opacity='0'; await sleep(fadeIn);
   orbitCtrl.autoRotate=!fpsMode; isTransitioning=false; pendingDrillTarget=null;
+}
+
+// ── Click-to-drill: zoom camera toward target, then fast-transition ───────────
+async function zoomAndDrill(targetMesh) {
+  if(isTransitioning) return;
+  const wp=targetMesh.getWorldPosition(new THREE.Vector3());
+  const startCamPos=camera.position.clone();
+  const startTarget=orbitCtrl.target.clone();
+  // End position: pull back to 70% of drillIn threshold along current viewing direction
+  const dir=startCamPos.clone().sub(wp).normalize();
+  const endDist=Math.max(LC[currentLevel].drillIn*0.72,0.04);
+  const endCamPos=wp.clone().addScaledVector(dir,endDist);
+  const duration=400;
+  await new Promise(resolve=>{
+    const t0=performance.now();
+    function step(){
+      const raw=(performance.now()-t0)/duration;
+      const t=Math.min(raw,1);
+      const e=1-Math.pow(1-t,3); // cubic ease-out
+      camera.position.lerpVectors(startCamPos,endCamPos,e);
+      orbitCtrl.target.lerpVectors(startTarget,wp,e);
+      orbitCtrl.update();
+      if(t<1) requestAnimationFrame(step);
+      else resolve();
+    }
+    step();
+  });
+  transitionLevel(currentLevel+1,true);
 }
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
@@ -742,16 +793,27 @@ function showTT(inf,x,y){
 // ── Interaction ───────────────────────────────────────────────────────────────
 canvas.addEventListener('mousemove',e=>{
   mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1;
-  if(fpsMode) return; // skip hover in FPS (crosshair navigation)
+  if(fpsMode) return;
   raycaster.setFromCamera(mouse,camera);
   const all=[]; if(currentGroup)currentGroup.traverse(o=>{if(o.isMesh&&(o.userData.info||o.userData.drillTarget!==undefined))all.push(o);});
   const h=raycaster.intersectObjects(all,false);
   if(h.length){
     hoveredMesh=h[0].object;
-    if(hoveredMesh.userData.drillTarget!==undefined){pendingDrillTarget=hoveredMesh;canvas.style.cursor='zoom-in';}
-    else canvas.style.cursor='crosshair';
+    if(hoveredMesh.userData.drillTarget!==undefined){
+      pendingDrillTarget=hoveredMesh;
+      canvas.style.cursor='zoom-in';
+      highlightDrillable(hoveredMesh);
+    } else {
+      canvas.style.cursor='crosshair';
+      unhighlightDrillable();
+    }
     showTT(hoveredMesh.userData.info,e.clientX,e.clientY);
-  } else {hoveredMesh=null;canvas.style.cursor='default';ttEl.style.opacity='0';}
+  } else {
+    hoveredMesh=null;
+    canvas.style.cursor='default';
+    ttEl.style.opacity='0';
+    unhighlightDrillable();
+  }
 });
 canvas.addEventListener('wheel',e=>{
   if(e.deltaY>=0||isTransitioning) return;
@@ -766,9 +828,9 @@ canvas.addEventListener('mouseup',e=>{
   const moved=Math.hypot(e.clientX-mDownPos.x,e.clientY-mDownPos.y);
   if(moved<5){
     if(e.button===0&&hoveredMesh?.userData.drillTarget!==undefined){
-      const wp=hoveredMesh.getWorldPosition(new THREE.Vector3()); orbitCtrl.target.copy(wp); orbitCtrl.update();
+      zoomAndDrill(hoveredMesh);
     }
-    if(e.button===2&&currentLevel>0) transitionLevel(currentLevel-1);
+    if(e.button===2&&currentLevel>0) transitionLevel(currentLevel-1,true);
   }
   mDownPos=null;
 });
