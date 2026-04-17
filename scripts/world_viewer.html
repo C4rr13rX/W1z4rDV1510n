@@ -74,6 +74,24 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
 #fps-btn:hover { border-color:#2a6080; color:#3a8090; }
 #fps-btn.active { border-color:#2a9060; color:#3ab080; }
 
+/* SCENE mode toggle */
+#scene-btn { position:absolute; bottom:52px; right:430px; z-index:5;
+  background:none; border:1px solid #0a2030; color:#1a4050; padding:5px 12px;
+  font-family:inherit; font-size:8px; letter-spacing:2px; text-transform:uppercase;
+  cursor:pointer; border-radius:2px; pointer-events:all; transition:all 0.2s; }
+#scene-btn:hover { border-color:#5a3080; color:#8a50c0; }
+#scene-btn.active { border-color:#8a40c0; color:#c080ff; }
+
+/* Scene mode suggest toast */
+#scene-toast { position:absolute; top:52px; left:50%; transform:translateX(-50%);
+  background:rgba(30,10,50,0.94); border:1px solid #5a30a0; border-radius:3px;
+  padding:7px 16px; font-size:9px; color:#b080f0; letter-spacing:1.5px;
+  text-transform:uppercase; pointer-events:all; cursor:pointer;
+  display:none; z-index:12; white-space:nowrap; }
+
+/* Scene link lines */
+.scene-link { opacity:0.5; }
+
 /* Crosshair for FPS mode */
 #xhair { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
   width:14px; height:14px; pointer-events:none; display:none; }
@@ -114,7 +132,9 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
   <div id="xhair"></div>
 </div>
 
+<button id="scene-btn" onclick="toggleSceneMode()">◈ SCENE</button>
 <button id="fps-btn" onclick="toggleFPS()">⊕ FPS MODE</button>
+<div id="scene-toast" onclick="activateSceneMode()">Anatomy / scene stream detected — click to switch to SCENE mode</div>
 <div id="fade"></div>
 <div id="tt"><div class="ttn" id="ttn"></div><div class="ttl" id="ttl"></div><div class="ttd" id="ttd"></div><div class="tti" id="tti"></div></div>
 
@@ -299,7 +319,10 @@ const LABEL_COLORS_MAP = {
 function startNeuroStream() {
   const es = new EventSource(`http://${HOST}/neuro/stream`);
   es.addEventListener('snap', e => {
-    try { neuroSnap = JSON.parse(e.data); streamOk = true; } catch {}
+    try {
+      neuroSnap = JSON.parse(e.data); streamOk = true;
+      checkSceneSuggestion(neuroSnap);
+    } catch {}
   });
   es.onerror = () => {
     streamOk = false;
@@ -350,6 +373,254 @@ function applyNeuroToScene(snap) {
     const target=base+(netStr[lbl]||0)*1.5+(wm.has(lbl)?0.6:0)+((srp[lbl]||0)>0.7?1.0:0);
     obj.material.emissiveIntensity=THREE.MathUtils.lerp(obj.material.emissiveIntensity,target,0.08);
   });
+}
+
+// ── SCENE reconstruction mode ─────────────────────────────────────────────────
+// Builds 3D geometry at neural centroid positions — one mesh per learned label.
+// Activated when anatomy/field/histology labels are detected in the stream.
+
+const SCENE_ANATOMY_LABELS = new Set([
+  'brain','cerebral_cortex','frontal_lobe','parietal_lobe','temporal_lobe','occipital_lobe',
+  'cerebellum','brainstem','thalamus','hippocampus','amygdala','corpus_callosum',
+  'heart','left_ventricle','right_ventricle','left_atrium','right_atrium','myocardium',
+  'lung','liver','kidney','spleen','pancreas','stomach','gallbladder',
+  'ascending_aorta','aortic_arch','descending_aorta','pulmonary_artery',
+  'cardiomyocyte','hepatocyte','podocyte','glomerulus','osteon','haversian_canal',
+  'pyramidal_neuron_III','pyramidal_neuron_V','astrocyte','oligodendrocyte',
+  'type_I_pneumocyte','type_II_pneumocyte','alveolar_macrophage',
+]);
+
+// label → {geo(), mat, sx, sy, sz}
+const SCENE_RENDERERS = {
+  // ── Whole organs ──
+  brain:            {geo:()=>new THREE.SphereGeometry(0.20,18,12),         col:0xf4c8b0, em:0x301010, ei:0.8},
+  cerebral_cortex:  {geo:()=>new THREE.SphereGeometry(0.19,16,10),         col:0xf4c0a8, em:0x300808, ei:0.6},
+  cerebellum:       {geo:()=>new THREE.SphereGeometry(0.10,12,8),          col:0xd8b0a0, em:0x280808, ei:0.6, sx:1.4,sy:0.7,sz:1.0},
+  brainstem:        {geo:()=>new THREE.CapsuleGeometry(0.030,0.12,4,8),    col:0xd0a090, em:0x280808, ei:0.7},
+  thalamus:         {geo:()=>new THREE.SphereGeometry(0.040,10,8),         col:0xe0b090, em:0x300808, ei:0.9},
+  hippocampus:      {geo:()=>new THREE.CapsuleGeometry(0.020,0.08,4,8),    col:0xd8b080, em:0x280808, ei:0.8, sx:1.0,sy:0.5,sz:1.0},
+  heart:            {geo:()=>new THREE.SphereGeometry(0.14,14,10),         col:0xc02020, em:0x600808, ei:1.4, sx:1.0,sy:1.2,sz:0.9},
+  left_ventricle:   {geo:()=>new THREE.SphereGeometry(0.09,12,8),          col:0xd03030, em:0x700808, ei:1.3},
+  right_ventricle:  {geo:()=>new THREE.SphereGeometry(0.08,12,8),          col:0xc83030, em:0x680808, ei:1.2},
+  left_atrium:      {geo:()=>new THREE.SphereGeometry(0.06,10,8),          col:0xb82828, em:0x600808, ei:1.1},
+  right_atrium:     {geo:()=>new THREE.SphereGeometry(0.06,10,8),          col:0xb02828, em:0x580808, ei:1.1},
+  myocardium:       {geo:()=>new THREE.SphereGeometry(0.13,12,8),          col:0xa82020, em:0x500808, ei:0.9, sx:1.0,sy:1.2,sz:0.9},
+  lung:             {geo:()=>new THREE.SphereGeometry(0.18,12,8),          col:0xf0a090, em:0x501020, ei:0.6, sx:0.7,sy:1.3,sz:0.8},
+  liver:            {geo:()=>new THREE.SphereGeometry(0.18,12,8),          col:0x802010, em:0x400808, ei:0.7, sx:1.5,sy:0.7,sz:1.0},
+  kidney:           {geo:()=>new THREE.SphereGeometry(0.07,10,8),          col:0x8b2510, em:0x400808, ei:0.7, sx:0.7,sy:1.3,sz:0.6},
+  spleen:           {geo:()=>new THREE.SphereGeometry(0.07,10,8),          col:0x6a1580, em:0x300840, ei:0.7},
+  pancreas:         {geo:()=>new THREE.CapsuleGeometry(0.025,0.10,4,8),    col:0xf0c070, em:0x504000, ei:0.7, sx:2.0,sy:0.6,sz:1.0},
+  stomach:          {geo:()=>new THREE.SphereGeometry(0.10,10,8),          col:0xd09060, em:0x482000, ei:0.6, sx:1.2,sy:0.9,sz:0.8},
+  gallbladder:      {geo:()=>new THREE.SphereGeometry(0.04,8,6),           col:0x70a030, em:0x304010, ei:0.7},
+  urinary_bladder:  {geo:()=>new THREE.SphereGeometry(0.07,10,8),          col:0xa0c0d0, em:0x204050, ei:0.6},
+  skull:            {geo:()=>new THREE.SphereGeometry(0.24,14,10),         col:0xf0e8c0, em:0x201808, ei:0.3, sx:1.0,sy:1.1,sz:1.0},
+  // ── Vessels ──
+  ascending_aorta:  {geo:()=>new THREE.CapsuleGeometry(0.020,0.10,4,8),   col:0xe03030, em:0x601010, ei:1.0},
+  aortic_arch:      {geo:()=>new THREE.TorusGeometry(0.06,0.016,8,14,Math.PI),col:0xe03030,em:0x601010,ei:1.0},
+  descending_aorta: {geo:()=>new THREE.CapsuleGeometry(0.018,0.22,4,8),   col:0xe03030, em:0x601010, ei:1.0},
+  pulmonary_artery: {geo:()=>new THREE.CapsuleGeometry(0.016,0.10,4,8),   col:0x4060e0, em:0x101040, ei:0.9},
+  // ── Vertebrae / bone ──
+  cervical_vertebra:{geo:()=>new THREE.CylinderGeometry(0.022,0.022,0.020,8),col:0xf5f0e0,em:0x201808,ei:0.3},
+  thoracic_vertebra:{geo:()=>new THREE.CylinderGeometry(0.024,0.024,0.022,8),col:0xf5f0e0,em:0x201808,ei:0.3},
+  lumbar_vertebra:  {geo:()=>new THREE.CylinderGeometry(0.028,0.028,0.026,8),col:0xf5f0e0,em:0x201808,ei:0.3},
+  femoral_head:     {geo:()=>new THREE.SphereGeometry(0.046,10,8),         col:0xf0e8d0, em:0x201808, ei:0.3},
+  ilium:            {geo:()=>new THREE.SphereGeometry(0.10,10,8),          col:0xf0e8d0, em:0x201808, ei:0.3, sx:1.4,sy:0.5,sz:1.2},
+  // ── Histology cells ──
+  cardiomyocyte:    {geo:()=>new THREE.CapsuleGeometry(0.008,0.040,4,6),   col:0xd04040, em:0x501010, ei:1.2},
+  hepatocyte:       {geo:()=>new THREE.SphereGeometry(0.012,8,6),          col:0xa06020, em:0x402010, ei:0.9},
+  podocyte:         {geo:()=>new THREE.SphereGeometry(0.004,6,4),          col:0x80c0ff, em:0x102040, ei:1.1},
+  glomerulus:       {geo:()=>new THREE.SphereGeometry(0.10,12,8),          col:0xf0a0a0, em:0x501010, ei:1.0},
+  osteon:           {geo:()=>new THREE.CylinderGeometry(0.13,0.13,0.05,12),col:0xf0e8d0, em:0x201808, ei:0.5},
+  pyramidal_neuron_III:{geo:()=>new THREE.ConeGeometry(0.010,0.022,8),     col:0xffd070, em:0x503000, ei:1.3},
+  pyramidal_neuron_V:  {geo:()=>new THREE.ConeGeometry(0.015,0.035,8),     col:0xffe080, em:0x604000, ei:1.5},
+  astrocyte:        {geo:()=>new THREE.OctahedronGeometry(0.006),          col:0x80d0a0, em:0x103020, ei:1.0},
+  // ── Field scene ──
+  cow:              {geo:()=>new THREE.CapsuleGeometry(0.12,0.32,6,8),     col:0xd0a060, em:0x302010, ei:0.5, sx:1.0,sy:0.6,sz:0.5},
+  horse:            {geo:()=>new THREE.CapsuleGeometry(0.14,0.40,6,8),     col:0x8b6030, em:0x302010, ei:0.5, sx:1.0,sy:0.6,sz:0.5},
+  person:           {geo:()=>new THREE.CapsuleGeometry(0.10,0.40,6,8),     col:0xf0c090, em:0x403020, ei:0.6},
+  sheep:            {geo:()=>new THREE.SphereGeometry(0.10,8,6),           col:0xf0f0f0, em:0x303030, ei:0.4},
+  dog:              {geo:()=>new THREE.CapsuleGeometry(0.06,0.20,4,8),     col:0xb07030, em:0x302010, ei:0.5, sx:1.0,sy:0.5,sz:0.5},
+  bird:             {geo:()=>new THREE.SphereGeometry(0.04,6,4),           col:0x606080, em:0x101020, ei:0.6},
+  tree:             {geo:()=>new THREE.ConeGeometry(0.18,0.50,8),          col:0x206020, em:0x103010, ei:0.6},
+  sky_region:       {geo:()=>new THREE.SphereGeometry(2.0,12,8),           col:0x0a1828, em:0x040c14, ei:0.3, side:'back'},
+  ground_region:    {geo:()=>new THREE.PlaneGeometry(4.0,4.0),             col:0x203010, em:0x0c1808, ei:0.3},
+  // ── Fallback ──
+  _default:         {geo:()=>new THREE.OctahedronGeometry(0.05,0),         col:0x2a8080, em:0x103030, ei:1.0},
+};
+
+let sceneMode   = false;
+let sceneObjs   = new Map();   // label → {mesh, ring, frame}
+let sceneLinks  = null;        // THREE.LineSegments
+let sceneFrame  = 0;
+const SCENE_WORLD_SCALE = 2.2; // map centroid 0-1 → world -1.1 to +1.1
+
+// Labels that trigger scene-mode suggestion
+const ANATOMY_TRIGGER = ['brain','heart','lung','liver','kidney','cardiomyocyte',
+  'hepatocyte','glomerulus','pyramidal_neuron','cerebral_cortex','cortex_layer'];
+
+function _sceneRenderer(label) {
+  if (SCENE_RENDERERS[label]) return SCENE_RENDERERS[label];
+  // Partial match
+  for (const [k,v] of Object.entries(SCENE_RENDERERS)) {
+    if (k !== '_default' && label.includes(k)) return v;
+  }
+  return SCENE_RENDERERS._default;
+}
+
+function _makeMesh(label) {
+  const r   = _sceneRenderer(label);
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: r.col, emissive: r.em ?? r.col,
+    emissiveIntensity: r.ei ?? 0.8,
+    roughness: 0.45, metalness: 0.05,
+    transparent: true, opacity: 0.0,
+    side: r.side === 'back' ? THREE.BackSide : THREE.FrontSide,
+  });
+  const mesh = new THREE.Mesh(r.geo(), mat);
+  if (r.sx||r.sy||r.sz) mesh.scale.set(r.sx??1, r.sy??1, r.sz??1);
+  mesh.userData.label = label;
+  mesh.userData.baseEI = r.ei ?? 0.8;
+  // Working-memory pulse ring
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.08, 0.10, 16),
+    new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0, side:THREE.DoubleSide})
+  );
+  ring.rotation.x = -Math.PI/2;
+  mesh.add(ring);
+  return {mesh, ring};
+}
+
+function rebuildSceneObjects(snap) {
+  if (!snap || !snap.centroids) return;
+  sceneFrame++;
+  const centroids = snap.centroids;
+  const wm  = new Set(snap.working_memory || []);
+  const srp = snap.surprise || {};
+  const netStr = {};
+  (snap.active_networks||[]).forEach(n=>{
+    const s=n.strength||0;(n.members||[]).forEach(m=>{netStr[m]=Math.max(netStr[m]||0,s);});
+  });
+
+  // Create or update
+  for (const [lbl, pos] of Object.entries(centroids)) {
+    let entry = sceneObjs.get(lbl);
+    if (!entry) {
+      const {mesh, ring} = _makeMesh(lbl);
+      scene.add(mesh);
+      entry = {mesh, ring, frame: sceneFrame};
+      sceneObjs.set(lbl, entry);
+    }
+    entry.frame = sceneFrame;
+    const m = entry.mesh;
+    // Map centroid 0-1 to world space
+    const tx = (pos.x - 0.5) * SCENE_WORLD_SCALE;
+    const ty = (pos.y - 0.5) * SCENE_WORLD_SCALE;
+    const tz = ((pos.z||0.5) - 0.5) * SCENE_WORLD_SCALE;
+    m.position.lerp(new THREE.Vector3(tx, ty, tz), 0.05);
+    // Fade in
+    m.material.opacity = Math.min(m.material.opacity + 0.04, 0.95);
+    // Emissive drive from neural strength
+    const base = m.userData.baseEI;
+    const targetEI = base + (netStr[lbl]||0)*1.8 + (wm.has(lbl)?0.9:0) + ((srp[lbl]||0)>0.6?1.2:0);
+    m.material.emissiveIntensity = THREE.MathUtils.lerp(m.material.emissiveIntensity, targetEI, 0.07);
+    // Working memory pulse ring
+    const ring = entry.ring;
+    if (wm.has(lbl)) {
+      const pulse = 0.12 + 0.06 * Math.sin(clock.getElapsedTime() * 3.5);
+      ring.material.opacity = 0.55 + 0.35 * Math.sin(clock.getElapsedTime() * 3.5);
+      ring.scale.setScalar(pulse / 0.09);
+    } else {
+      ring.material.opacity = Math.max(0, ring.material.opacity - 0.05);
+    }
+  }
+
+  // Fade out + remove stale entries
+  for (const [lbl, entry] of sceneObjs) {
+    if (entry.frame < sceneFrame) {
+      entry.mesh.material.opacity -= 0.025;
+      if (entry.mesh.material.opacity <= 0) {
+        scene.remove(entry.mesh);
+        entry.mesh.geometry.dispose();
+        entry.mesh.material.dispose();
+        sceneObjs.delete(lbl);
+      }
+    }
+  }
+
+  // Rebuild network link lines
+  if (sceneLinks) { scene.remove(sceneLinks); sceneLinks.geometry.dispose(); sceneLinks=null; }
+  const linkPts = [], linkCols = [];
+  const links = snap.network_links || {};
+  for (const [a, conns] of Object.entries(links)) {
+    const ea = sceneObjs.get(a); if(!ea) continue;
+    for (const [b, w] of Object.entries(conns)) {
+      if (w < 0.25) continue;
+      const eb = sceneObjs.get(b); if(!eb) continue;
+      linkPts.push(ea.mesh.position.clone(), eb.mesh.position.clone());
+      const alpha = Math.min(w * 0.5, 0.6);
+      linkCols.push(0.1, 0.5+w*0.4, 0.7, alpha, 0.1, 0.5+w*0.4, 0.7, alpha);
+    }
+  }
+  if (linkPts.length) {
+    const geo = new THREE.BufferGeometry().setFromPoints(linkPts);
+    const colArr = new Float32Array(linkCols);
+    geo.setAttribute('color', new THREE.BufferAttribute(colArr, 4));
+    sceneLinks = new THREE.LineSegments(geo,
+      new THREE.LineBasicMaterial({vertexColors:true, transparent:true, opacity:0.6}));
+    scene.add(sceneLinks);
+  }
+}
+
+function clearSceneObjects() {
+  for (const [, entry] of sceneObjs) {
+    scene.remove(entry.mesh);
+    entry.mesh.geometry.dispose();
+    entry.mesh.material.dispose();
+  }
+  sceneObjs.clear();
+  if (sceneLinks) { scene.remove(sceneLinks); sceneLinks.geometry.dispose(); sceneLinks=null; }
+}
+
+function activateSceneMode() {
+  document.getElementById('scene-toast').style.display='none';
+  if (!sceneMode) toggleSceneMode();
+}
+
+function toggleSceneMode() {
+  sceneMode = !sceneMode;
+  const btn = document.getElementById('scene-btn');
+  if (sceneMode) {
+    btn.classList.add('active'); btn.textContent='◈ SCENE ✓';
+    // Hide cell geometry
+    if (currentGroup) currentGroup.visible = false;
+    orbitCtrl.target.set(0,0,0);
+    camera.position.set(0, 0.2, 3.0);
+    orbitCtrl.update();
+    bloomPass.strength=1.5; bloomPass.radius=0.6; bloomPass.threshold=0.08;
+    document.getElementById('hint').textContent =
+      'DRAG · ORBIT   SCROLL · ZOOM   LABELS = LEARNED NEURAL CENTROIDS';
+  } else {
+    btn.classList.remove('active'); btn.textContent='◈ SCENE';
+    clearSceneObjects();
+    if (currentGroup) currentGroup.visible = true;
+    const lc = LC[currentLevel];
+    bloomPass.strength=lc.bloom.s; bloomPass.radius=lc.bloom.r; bloomPass.threshold=lc.bloom.t;
+    document.getElementById('hint').textContent =
+      'DRAG · ORBIT   SCROLL · ZOOM   WASD · PAN   RIGHT-CLICK · ASCEND';
+  }
+}
+
+// Auto-detect anatomy/scene labels and suggest SCENE mode
+function checkSceneSuggestion(snap) {
+  if (sceneMode) return;
+  const labels = Object.keys(snap.centroids||{});
+  const isScene = ANATOMY_TRIGGER.some(t => labels.some(l => l.includes(t)));
+  if (isScene) {
+    const toast = document.getElementById('scene-toast');
+    toast.style.display = 'block';
+    clearTimeout(toast._hide);
+    toast._hide = setTimeout(() => { toast.style.display='none'; }, 12000);
+  }
 }
 
 // ── Scene state ───────────────────────────────────────────────────────────────
@@ -860,7 +1131,11 @@ function animate(){
     orbitCtrl.update();
   }
 
-  if(neuroSnap){applyNeuroToScene(neuroSnap);drawNeuroMap(neuroSnap);}
+  if(neuroSnap){
+    drawNeuroMap(neuroSnap);
+    if(sceneMode) rebuildSceneObjects(neuroSnap);
+    else applyNeuroToScene(neuroSnap);
+  }
 
   // PQ animation
   if(currentGroup&&(currentLevel===4||currentLevel===5)){
