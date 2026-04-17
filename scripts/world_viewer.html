@@ -2928,6 +2928,12 @@ async function init(){
   camera.position.set(0,.4,3.4);
   updateHUD(0); animate();
 
+  // URL param: ?neural=1 auto-enables neural mode (used by index.html launcher)
+  if (new URLSearchParams(location.search).get('neural') === '1') {
+    setTimeout(() => { if (!neuralMode) toggleNeuralMode(); }, 400);
+    return;
+  }
+
   // Auto-activate VIDEO mode if frame server is live — highest priority
   try {
     const rv = await fetch(`http://${FRAME_HOST}/health`, { signal: AbortSignal.timeout(800) });

@@ -805,12 +805,10 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
                     'format': 'bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]',
                     'merge_output_format': 'mp4',
                     'outtmpl': str(vid_dir / '%(id)s.%(ext)s'),
-                    'max_downloads': 2,
+                    'max_downloads': 3,
                     'noplaylist': True,
                     'quiet': True,
                     'writeinfojson': True,
-                    'match_filter': _yt.utils.match_filter_func(
-                        'license = "Creative Commons Attribution licence (reuse allowed)"'),
                 }
                 with _yt.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([f'ytsearch5:{query}'])
@@ -824,16 +822,14 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
                     f'"format": "bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]", '
                     f'"merge_output_format": "mp4", '
                     f'"outtmpl": {str(vid_dir / "%(id)s.%(ext)s")!r}, '
-                    f'"max_downloads": 2, "noplaylist": True, "quiet": True, '
-                    f'"writeinfojson": True, '
-                    f'"match_filter": yt_dlp.utils.match_filter_func('
-                    f'"license = \\"Creative Commons Attribution licence (reuse allowed)\\"")}}; '
+                    f'"max_downloads": 3, "noplaylist": True, "quiet": True, '
+                    f'"writeinfojson": True}}; '
                     f'yt_dlp.YoutubeDL(ydl_opts).download(["ytsearch5:{query}"])'
                 )
                 subprocess.run([_yt_python, '-c', _yt_inline],
                                capture_output=True, text=True, timeout=180)
 
-            downloaded += 2
+            downloaded += 3
         except Exception as e:
             print(f'  [WARN] yt-dlp failed for query "{query}": {e}')
             continue

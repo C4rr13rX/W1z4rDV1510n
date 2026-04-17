@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>W1z4rD V1510n — Neural OS</title>
+<style>
+/* ── Reset & base ───────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#000;color:#8ab4cc;font-family:'Courier New',monospace;overflow-x:hidden}
+
+/* ── Home page ──────────────────────────────────────────────────── */
+#home{
+  min-height:100vh;
+  display:flex;
+  flex-direction:column;
+  padding:20px 16px 40px;
+}
+
+/* Header */
+#hdr{
+  text-align:center;
+  padding:24px 0 28px;
+  flex-shrink:0;
+}
+#hdr h1{
+  font-size:clamp(18px,5vw,28px);
+  letter-spacing:6px;
+  text-transform:uppercase;
+  color:#b0d8f0;
+  text-shadow:0 0 30px rgba(80,160,220,0.35);
+}
+#hdr .sub{
+  font-size:clamp(9px,2.5vw,11px);
+  letter-spacing:3px;
+  color:#1a4a60;
+  margin-top:6px;
+  text-transform:uppercase;
+}
+#hdr .sub span{color:#2a7a9a}
+#hdr .tagline{
+  font-size:clamp(9px,2.5vw,11px);
+  color:#0d2a38;
+  margin-top:10px;
+  letter-spacing:1px;
+  line-height:1.6;
+  max-width:480px;
+  margin-left:auto;
+  margin-right:auto;
+}
+
+/* ── Card grid (mobile-first: single column) ─────────────────────── */
+#cards{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:14px;
+  width:100%;
+  max-width:920px;
+  margin:0 auto;
+}
+@media(min-width:560px){#cards{grid-template-columns:1fr 1fr}}
+@media(min-width:900px){#cards{grid-template-columns:1fr 1fr 1fr 1fr}}
+
+/* Card */
+.card{
+  background:rgba(4,10,18,0.95);
+  border:1px solid #0c1e2e;
+  border-top:2px solid #1a5070;
+  border-radius:4px;
+  padding:16px 14px 14px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  transition:border-color 0.2s,box-shadow 0.2s;
+}
+.card:hover{
+  border-color:#2a7090;
+  box-shadow:0 0 18px rgba(30,100,140,0.15);
+}
+.card-badge{
+  font-size:8px;
+  letter-spacing:2.5px;
+  text-transform:uppercase;
+  color:#1a4a5a;
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+.card-badge .dot{
+  width:5px;height:5px;border-radius:50%;
+  background:#1a6080;flex-shrink:0;
+}
+.card h2{
+  font-size:clamp(12px,3vw,14px);
+  letter-spacing:2px;
+  text-transform:uppercase;
+  color:#90cce8;
+  line-height:1.3;
+}
+.card .desc{
+  font-size:clamp(9px,2.3vw,10px);
+  color:#2a5a72;
+  line-height:1.8;
+  flex:1;
+}
+.card .desc strong{color:#3a7a9a}
+
+/* Architecture tag */
+.arch-tag{
+  font-size:8px;
+  letter-spacing:1.5px;
+  color:#0d2838;
+  text-transform:uppercase;
+  background:#060e18;
+  border:1px solid #0c1e28;
+  border-radius:2px;
+  padding:3px 7px;
+  display:inline-block;
+}
+
+/* Launch button */
+.launch-btn{
+  width:100%;
+  background:rgba(10,30,50,0.8);
+  border:1px solid #1a4060;
+  color:#4a9ab8;
+  font-family:'Courier New',monospace;
+  font-size:10px;
+  letter-spacing:3px;
+  text-transform:uppercase;
+  padding:10px 8px;
+  cursor:pointer;
+  border-radius:3px;
+  transition:all 0.15s;
+  margin-top:4px;
+}
+.launch-btn:hover{
+  background:rgba(20,60,90,0.9);
+  border-color:#3a7090;
+  color:#7ac0d8;
+}
+.launch-btn:active{background:rgba(20,60,90,1)}
+
+/* ── Viewer overlay (fullscreen iframe) ─────────────────────────── */
+#viewer{
+  position:fixed;
+  inset:0;
+  z-index:100;
+  display:none;
+  flex-direction:column;
+  background:#000;
+}
+#viewer.open{display:flex}
+
+/* Top bar */
+#vbar{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:8px 14px;
+  background:rgba(0,2,8,0.98);
+  border-bottom:1px solid #0c1e2a;
+  flex-shrink:0;
+  z-index:101;
+}
+#back-btn{
+  background:none;
+  border:1px solid #1a3040;
+  color:#2a6080;
+  font-family:'Courier New',monospace;
+  font-size:9px;
+  letter-spacing:2px;
+  text-transform:uppercase;
+  padding:5px 12px;
+  cursor:pointer;
+  border-radius:2px;
+  flex-shrink:0;
+  transition:all 0.15s;
+}
+#back-btn:hover{border-color:#c03030;color:#e05050}
+#vbar-title{
+  font-size:11px;
+  letter-spacing:3px;
+  text-transform:uppercase;
+  color:#70b0cc;
+  flex:1;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+/* Arch info strip */
+#vbar-arch{
+  font-size:8px;
+  letter-spacing:1.5px;
+  text-transform:uppercase;
+  color:#1a4050;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  max-width:220px;
+}
+@media(max-width:480px){#vbar-arch{display:none}}
+
+/* Info card overlay on viewer */
+#vinfo{
+  position:absolute;
+  bottom:60px;
+  left:14px;
+  max-width:min(340px,calc(100vw - 28px));
+  background:rgba(2,5,14,0.93);
+  border:1px solid #0c1e32;
+  border-left:2px solid #2a7ab8;
+  border-radius:3px;
+  padding:10px 13px;
+  font-size:9px;
+  z-index:102;
+  pointer-events:none;
+  transition:opacity 0.3s;
+}
+#vinfo .vi-title{
+  font-size:11px;color:#90cce8;letter-spacing:2px;
+  text-transform:uppercase;margin-bottom:4px;
+}
+#vinfo .vi-body{color:#2a5a72;line-height:1.8}
+#vinfo .vi-body strong{color:#3a7a9a}
+#vinfo .vi-dismiss{
+  display:block;
+  margin-top:8px;
+  font-size:8px;
+  color:#0d2838;
+  letter-spacing:1.5px;
+  text-transform:uppercase;
+  pointer-events:all;
+  cursor:pointer;
+  text-align:right;
+}
+#vinfo.hidden{opacity:0;pointer-events:none}
+
+/* iframe */
+#vframe{
+  flex:1;
+  width:100%;
+  border:none;
+  display:block;
+  position:relative;
+  z-index:100;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────── */
+#footer{
+  text-align:center;
+  padding:24px 0 8px;
+  font-size:8px;
+  letter-spacing:2px;
+  text-transform:uppercase;
+  color:#071520;
+}
+#footer span{color:#1a3848}
+</style>
+</head>
+<body>
+
+<!-- ──────────────── HOME ──────────────────────────────────────── -->
+<div id="home">
+  <div id="hdr">
+    <h1>W1z4rD V1510n</h1>
+    <div class="sub">Distributed Neural OS &nbsp;·&nbsp; <span>C4rr13rX</span></div>
+    <div class="tagline">
+      Multi-scale biological perception — from herd to carbon atom.
+      Hebbian-learned anatomy, live video projection, hierarchical drill-down.
+    </div>
+  </div>
+
+  <div id="cards">
+
+    <!-- Card 1: Cow Anatomy Viewer -->
+    <div class="card">
+      <div class="card-badge"><span class="dot"></span>Stage 1 · Visual</div>
+      <h2>Cow Anatomy</h2>
+      <div class="desc">
+        Photorealistic 3D bovine mesh with <strong>hover anatomy labels</strong> and
+        click drill-down from whole animal → organ → tissue → molecular structure.
+        Loaded with MRI/CT cross-sections, histology plates, and PDB protein data.
+      </div>
+      <span class="arch-tag">crates/core · neuro fabric</span>
+      <button class="launch-btn" onclick="launch('world_viewer.html','Cow Anatomy Viewer','Visual perception pipeline: 3D mesh renders Hebbian-weighted anatomy zones. Hover to label, click to drill down to atomic level.')">
+        ◈ LAUNCH
+      </button>
+    </div>
+
+    <!-- Card 2: Neural Cow -->
+    <div class="card">
+      <div class="card-badge"><span class="dot"></span>Stage 2 · Hebbian</div>
+      <h2>Neural Cow</h2>
+      <div class="desc">
+        Live <strong>Hebbian co-activation</strong> fabric — surface colours reflect
+        real-time neural firing patterns from the perception pipeline.
+        ◈ PROJ mode paints live video frames onto the mesh via a screen-space shader.
+      </div>
+      <span class="arch-tag">crates/core · hebbian + /neuro/world3d</span>
+      <button class="launch-btn" onclick="launch('world_viewer.html?neural=1','Neural Cow — Hebbian Fabric','Enable Neural Mode (top-right) then PROJ to see live video projected onto the mesh surface. Colors encode co-activation strength across body zones.')">
+        ◈ LAUNCH
+      </button>
+    </div>
+
+    <!-- Card 3: Plant Cell -->
+    <div class="card">
+      <div class="card-badge"><span class="dot"></span>Stage 3 · Cellular</div>
+      <h2>Plant Cell</h2>
+      <div class="desc">
+        Hierarchical <strong>cell biology explorer</strong>: whole cell → organelle →
+        macromolecule → carbon atom. Demonstrates the same multi-scale drill-down
+        model applied at the cellular level — same engine, different scale.
+      </div>
+      <span class="arch-tag">crates/core · scale-invariant perception</span>
+      <button class="launch-btn" onclick="launch('cell_viewer.html','Plant Cell — Hierarchical Explorer','Click any structure to zoom in one level. Drill from cell membrane to carbon atoms. Same perception architecture as the cow viewer, just 10⁶× smaller.')">
+        ◈ LAUNCH
+      </button>
+    </div>
+
+    <!-- Card 4: Layer Viewer -->
+    <div class="card">
+      <div class="card-badge"><span class="dot"></span>Stage 4 · Layers</div>
+      <h2>Layer Viewer</h2>
+      <div class="desc">
+        Multi-layer <strong>physiology stack</strong> with EEM-calibrated z-axis,
+        spatial entity profiles, and Three.js rendering. Select any anatomical
+        layer to inspect tissue composition and cross-scale relationships.
+      </div>
+      <span class="arch-tag">crates/core · layered physiology API</span>
+      <button class="launch-btn" onclick="launch('layer_viewer.html','Layer Viewer — Physiology Stack','Layers correspond to anatomical depth levels (skin → fascia → muscle → bone). Entity profiles pull live data from /neuro/layers. EEM-calibrated z-spacing.')">
+        ◈ LAUNCH
+      </button>
+    </div>
+
+  </div><!-- /cards -->
+
+  <div id="footer">
+    Node API <span>localhost:8090</span> &nbsp;·&nbsp;
+    Neuro API <span>localhost:8080</span> &nbsp;·&nbsp;
+    Cluster <span>:51611</span>
+  </div>
+</div><!-- /home -->
+
+
+<!-- ──────────────── VIEWER OVERLAY ─────────────────────────────── -->
+<div id="viewer">
+  <div id="vbar">
+    <button id="back-btn" onclick="goHome()">← BACK</button>
+    <div id="vbar-title">—</div>
+    <div id="vbar-arch">—</div>
+  </div>
+  <div id="vinfo">
+    <div class="vi-title" id="vi-title">—</div>
+    <div class="vi-body" id="vi-body">—</div>
+    <span class="vi-dismiss" onclick="document.getElementById('vinfo').classList.add('hidden')">
+      [ tap to dismiss ]
+    </span>
+  </div>
+  <iframe id="vframe" src="about:blank" allow="autoplay; camera; microphone"></iframe>
+</div>
+
+
+<script>
+const home   = document.getElementById('home');
+const viewer = document.getElementById('viewer');
+const vframe = document.getElementById('vframe');
+const vbarTitle = document.getElementById('vbar-title');
+const vbarArch  = document.getElementById('vbar-arch');
+const viTitle   = document.getElementById('vi-title');
+const viBody    = document.getElementById('vi-body');
+const vinfo     = document.getElementById('vinfo');
+
+function launch(src, title, infoText) {
+  // Load frame first
+  vframe.src = src;
+  // Populate info
+  vbarTitle.textContent = title;
+  const archPart = infoText.split('.')[0];
+  vbarArch.textContent = archPart;
+  viTitle.textContent  = title;
+  viBody.innerHTML     = infoText;
+  vinfo.classList.remove('hidden');
+  // Show overlay
+  home.style.display = 'none';
+  viewer.classList.add('open');
+  document.title = title + ' — W1z4rD V1510n';
+}
+
+function goHome() {
+  viewer.classList.remove('open');
+  home.style.display = '';
+  document.title = 'W1z4rD V1510n — Neural OS';
+  // Blank the frame after transition to free resources
+  setTimeout(() => { vframe.src = 'about:blank'; }, 300);
+}
+
+// Keyboard: Escape returns home
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && viewer.classList.contains('open')) goHome();
+});
+
+// Deep-link: ?view=world_viewer.html auto-launches
+(function(){
+  const p = new URLSearchParams(location.search);
+  const v = p.get('view');
+  if (v) {
+    const card = [...document.querySelectorAll('.launch-btn')]
+      .find(b => b.getAttribute('onclick').includes(v));
+    if (card) card.click();
+  }
+})();
+</script>
+</body>
+</html>
