@@ -438,12 +438,12 @@ def build_snapshot(structs, prev_pos, t, phase, scan_y):
             'position': {'x': round(x, 5), 'y': round(y, 5), 'z': round(z, 5)},
             'velocity': {'x': vx, 'y': vy, 'z': vz},
             'properties': {
-                'label':       label,
-                'scale_m':     str(size_m),
-                'diameter_m':  str(size_m),
-                'depth_class': _depth(system),
-                'track_id':    sid,
-                'system':      system,
+                'label':    label,
+                'system':   system,
+                'track_id': sid,
+                # Numerics — skipped by label extractor
+                'scale_m':   size_m,
+                'diameter_m': size_m,
             }
         })
     return {
@@ -451,14 +451,9 @@ def build_snapshot(structs, prev_pos, t, phase, scan_y):
         'bounds':    {'x': 1.0, 'y': 1.0, 'z': 1.0},
         'symbols':   symbols,
         'metadata':  {
-            'context':       'ct_body_scan',
-            'modality':      'ct_simulated',
-            'frame_t':       str(round(t, 3)),
-            'scan_phase':    phase,
-            'scan_y':        str(round(scan_y, 3)),
-            'symbol_count':  str(len(symbols)),
-            'cardiac_bpm':   str(CARDIAC_BPM),
-            'resp_rate':     str(RESP_RATE),
+            'context':    'ct_body_scan',
+            'modality':   'ct_simulated',
+            'scan_phase': phase,
         }
     }
 

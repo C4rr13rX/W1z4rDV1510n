@@ -427,13 +427,13 @@ def build_snapshot(tissue_name, layout, stage, t, prev_pos):
             'position': {'x': nx, 'y': ny, 'z': nz},
             'velocity': {'x': vx, 'y': vy, 'z': 0.0},
             'properties': {
-                'label':       e['label'],
-                'scale_m':     str(round(e['size_m'], 9)),
-                'diameter_m':  str(round(e['size_m'], 9)),
-                'depth_class': e['depth'],
-                'track_id':    uid,
-                'tissue':      tissue_name,
-                'fov_um':      str(spec['fov_um']),
+                'label':    e['label'],
+                'tissue':   tissue_name,
+                'track_id': uid,
+                # Numerics — skipped by label extractor
+                'scale_m':   e['size_m'],
+                'diameter_m': e['size_m'],
+                'fov_um':    spec['fov_um'],
             }
         })
 
@@ -442,15 +442,9 @@ def build_snapshot(tissue_name, layout, stage, t, prev_pos):
         'bounds':    BOUNDS,
         'symbols':   symbols,
         'metadata':  {
-            'context':       spec['context'],
-            'modality':      'virtual_microscopy',
-            'frame_t':       str(round(t, 3)),
-            'tissue':        tissue_name,
-            'fov_um':        str(spec['fov_um']),
-            'stage_x_um':    str(round(stage.x_um, 1)),
-            'stage_y_um':    str(round(stage.y_um, 1)),
-            'z_focus':       str(round(stage.z_focus, 4)),
-            'symbol_count':  str(len(symbols)),
+            'context':  spec['context'],
+            'modality': 'virtual_microscopy',
+            'tissue':   tissue_name,
         }
     }
 

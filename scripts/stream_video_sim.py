@@ -221,12 +221,15 @@ def build_snapshot(objs, t, scene_name='field'):
                 'z': round(o.get('vz', 0.0), 6),
             },
             'properties': {
-                'label':       o['label'],
-                'scale_m':     str(o['diam_m']),
-                'diameter_m':  str(o['diam_m']),
-                'depth_class': depth_class(o['label']),
-                'track_id':    o['id'],
-                'scene':       scene_name,
+                # Only string values that should become neural labels
+                'label':    o['label'],
+                'scene':    scene_name,
+                # Numeric values are ignored by the label extractor
+                'scale_m':    o['diam_m'],
+                'diameter_m': o['diam_m'],
+                # track_id kept for world viewer identification (string but prefixed
+                # with entity id so it won't match any SCENE_RENDERERS key)
+                'track_id': o['id'],
             }
         })
 
@@ -235,11 +238,8 @@ def build_snapshot(objs, t, scene_name='field'):
         'bounds':    BOUNDS,
         'symbols':   symbols,
         'metadata': {
-            'context':        scene_name,
-            'modality':       'video_stream_simulated',
-            'frame_t':        str(round(t, 3)),
-            # Scale hint: field of view ~100m wide
-            'scene_width_m':  '100',
+            'context':  scene_name,
+            'modality': 'video_stream_simulated',
         }
     }
 

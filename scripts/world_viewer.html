@@ -322,11 +322,10 @@ function _liveSymMesh(sym) {
     emissiveIntensity: (r.ei ?? 0.8) + 0.6,
     roughness: 0.3, metalness: 0.0, transparent: true, opacity: 0.0,
   });
-  // Live dots are noticeably smaller than centroid meshes
-  const geo   = r.geo();
-  const mesh  = new THREE.Mesh(geo, mat);
-  const scl   = Math.min((r.sx||1), (r.sy||1), (r.sz||1)) * 0.5;
-  mesh.scale.setScalar(scl);
+  // Use the renderer's natural scale — same size as centroid objects
+  const geo  = r.geo();
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.scale.set(r.sx ?? 1, r.sy ?? 1, r.sz ?? 1);
   mesh.userData.liveId = sym.track_id || sym.id;
   // Bright outline ring so live objects pop above centroid layer
   const halo = new THREE.Mesh(
@@ -695,20 +694,30 @@ function toggleSceneMode() {
   const btn = document.getElementById('scene-btn');
   if (sceneMode) {
     btn.classList.add('active'); btn.textContent='◈ SCENE ✓';
-    // Hide cell geometry
     if (currentGroup) currentGroup.visible = false;
-    orbitCtrl.target.set(0,0,0);
-    camera.position.set(0, 0.2, 3.0);
+    // Hide cell HUD elements — they're meaningless in scene context
+    document.getElementById('bc').style.display    = 'none';
+    document.getElementById('badge').style.display = 'none';
+    document.getElementById('panel').style.display = 'none';
+    document.getElementById('lbar').style.display  = 'none';
+    document.getElementById('sb').style.display    = 'none';
+    orbitCtrl.target.set(0, 0, 0);
+    camera.position.set(0, 0.4, 3.2);
     orbitCtrl.update();
-    bloomPass.strength=1.5; bloomPass.radius=0.6; bloomPass.threshold=0.08;
+    bloomPass.strength=1.8; bloomPass.radius=0.7; bloomPass.threshold=0.06;
     document.getElementById('hint').textContent =
-      'DRAG · ORBIT   SCROLL · ZOOM   LABELS = LEARNED CENTROIDS · TEAL RINGS = LIVE ENTITIES';
+      'DRAG · ORBIT   SCROLL · ZOOM   GLOWING SHAPES = LIVE ENTITIES FROM STREAM';
     startLiveSymPoll();
   } else {
     btn.classList.remove('active'); btn.textContent='◈ SCENE';
     clearSceneObjects();
     clearLiveSymbols();
     if (currentGroup) currentGroup.visible = true;
+    document.getElementById('bc').style.display    = '';
+    document.getElementById('badge').style.display = '';
+    document.getElementById('panel').style.display = '';
+    document.getElementById('lbar').style.display  = '';
+    document.getElementById('sb').style.display    = '';
     const lc = LC[currentLevel];
     bloomPass.strength=lc.bloom.s; bloomPass.radius=lc.bloom.r; bloomPass.threshold=lc.bloom.t;
     document.getElementById('hint').textContent =
@@ -1239,8 +1248,14 @@ function animate(){
 
   if(neuroSnap){
     drawNeuroMap(neuroSnap);
-    if(sceneMode) rebuildSceneObjects(neuroSnap);
-    else applyNeuroToScene(neuroSnap);
+    if(sceneMode){
+      // Only use centroid layer when no live symbols are streaming.
+      // Live symbol positions are physical; centroid positions are abstract
+      // neural topology — mixing them creates noise.
+      if(liveSymObjs.size === 0) rebuildSceneObjects(neuroSnap);
+    } else {
+      applyNeuroToScene(neuroSnap);
+    }
   }
   if(sceneMode) animateLiveSymbols();
 
@@ -1317,6 +1332,15 @@ async function init(){
   orbitCtrl.minDistance=lc.drillIn*.5; orbitCtrl.maxDistance=lc.camDist*4.5;
   camera.position.set(0,.4,3.4);
   updateHUD(0); animate();
+
+  // Auto-switch to SCENE mode if a live simulation is already running
+  try {
+    const r = await fetch(`http://${HOST}/neuro/symbols/live`);
+    const d = await r.json();
+    if ((d.symbols||[]).length > 0) {
+      toggleSceneMode();
+    }
+  } catch {}
 }
 init();
 </script>
