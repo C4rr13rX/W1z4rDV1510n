@@ -32,10 +32,10 @@ import cv2
 import numpy as np
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-DEFAULT_VIDEO  = 'D:/w1z4rdv1510n-data/videos/cow_clean.f135.mp4'
+DEFAULT_VIDEO  = 'D:/w1z4rdv1510n-data/videos/cow_field.webm'
 DEFAULT_NEURO  = 'localhost:8090'
 FRAME_PORT     = 9001
-TARGET_W       = 854
+TARGET_W       = 640
 TARGET_H       = 480
 STREAM_FPS     = 25
 
