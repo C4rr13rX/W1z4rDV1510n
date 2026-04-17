@@ -1312,6 +1312,34 @@ MRI_CT_ANATOMY_LEVELS = [
             ('gastrocnemius',       0.5,  0.78, 0.24, 0.20, 0,   80, 100, 120),
         ],
     },
+    {
+        'name': 'Tail / Sacrococcygeal (transverse — Co3 level)',
+        'label': 'tail_coccygeal',
+        'desc': (
+            'Transverse MRI/CT through the third coccygeal vertebra of the bovine tail. '
+            'The coccygeal vertebra is a small rounded bone centrally, with the '
+            'caudal arteries (paired median caudal artery and veins) ventral. '
+            'Coccygeal muscles (caudal flexors and extensors) are thin concentric layers '
+            'around the vertebra. Skin is the outermost layer — bovine tail skin is '
+            'relatively thick with coarse hair follicles. '
+            'On CT: coccygeal vertebral cortex HU ~700, central marrow fat HU -80. '
+            'T2-MRI: caudal vessels are T2-bright (flowing blood or slow flow); '
+            'muscle is intermediate signal. Useful landmark for tail-head temperature '
+            'monitoring and caudal epidural injection site planning.'
+        ),
+        'tissues': [
+            ('skin',                0.5,  0.5,  0.70, 0.72, 0,  150, 120, 120),
+            ('tail_extensor',       0.5,  0.28, 0.22, 0.18, 0,   80, 100, 120),
+            ('tail_flexor',         0.5,  0.70, 0.22, 0.18, 0,   80, 100, 120),
+            ('lateral_muscle_L',    0.28, 0.50, 0.14, 0.22, 0,   80, 100, 120),
+            ('lateral_muscle_R',    0.72, 0.50, 0.14, 0.22, 0,   80, 100, 120),
+            ('coccygeal_vertebra',  0.5,  0.50, 0.16, 0.14, 0,  160,  30, 240),
+            ('coccygeal_marrow',    0.5,  0.50, 0.08, 0.07, 0,  200,  80,  50),
+            ('caudal_artery',       0.5,  0.65, 0.04, 0.04, 0,   30, 200,  90),
+            ('caudal_vein_L',       0.42, 0.65, 0.03, 0.03, 0,   30, 250,  90),
+            ('caudal_vein_R',       0.58, 0.65, 0.03, 0.03, 0,   30, 250,  90),
+        ],
+    },
 ]
 
 
@@ -1756,7 +1784,7 @@ def main():
         print('\n[Stage 3] Medical imaging — synthetic MRI/CT cross-sections')
         items3 = generate_mri_ct_data(
             train_dir / 'stage3_mri_ct',
-            n_noise_levels=3,
+            n_noise_levels=8,
         )
         all_items[3] = items3
 
