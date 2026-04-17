@@ -346,6 +346,213 @@ Mitochondria in bovine cells have an outer membrane and a folded inner membrane 
 Bovine cells have approximately 20,000–25,000 protein-coding genes (similar to humans). Post-translational modifications (phosphorylation, ubiquitination, acetylation, glycosylation) enormously expand the functional proteome diversity. The bovine proteome Atlas is available from UniProt and contains >10,000 reviewed entries.''',
         'tags': ['cell biology', 'nucleus', 'mitochondria', 'ER', 'Golgi', 'ribosome', 'genome', 'DNA', 'protein'],
     },
+    {
+        'title': 'Bovine MRI Neuroanatomy — Brain and Spinal Cord',
+        'text': '''On T1-weighted MRI, bovine brain white matter appears hyperintense relative to grey matter (due to myelin lipid content). Major landmarks: cerebral hemispheres (frontal, parietal, temporal, occipital lobes), corpus callosum (white matter bridge), cerebellum with well-defined folia, brainstem (pons, medulla, midbrain), and the 4th ventricle. The olfactory bulbs are proportionally larger in cattle than in humans, reflecting enhanced olfaction.
+
+On T2-weighted MRI, cerebrospinal fluid (CSF) in the lateral ventricles and subarachnoid space is hyperintense. White matter lesions (e.g., from polioencephalomalacia or listeriosis) show T2-hyperintensity. The cerebral cortex shows 6-layer neocortical organisation similar to other mammals but with reduced gyrification compared to carnivores.
+
+The bovine spinal cord terminates at approximately S2–S3 in the sacral region (the conus medullaris). The dural sac extends further caudally. Epidural anaesthesia in cattle is performed at the sacrococcygeal (S5–Co1) junction, which corresponds to a palpable notch caudal to the last fixed spinal segment. On sagittal MRI, the cord shows a normal cervical enlargement (C5–T1) and lumbosacral enlargement (L4–S2) where the brachial and lumbosacral plexuses originate.
+
+Skull CT Hounsfield units: frontal sinus air -1000 HU, frontal bone cortex 700–900 HU, frontal bone diploe 200–400 HU, brain parenchyma 30–40 HU.''',
+        'tags': ['neurology', 'brain', 'spinal cord', 'MRI', 'CT', 'neuroanatomy', 'bovine', 'CSF'],
+    },
+    {
+        'title': 'Bovine CT Thorax — Lung, Heart, and Great Vessels',
+        'text': '''CT of the bovine thorax in lung window (W:1500, L:-600) reveals lung parenchyma HU -700 to -900 for aerated lung, -100 to +20 for atelectasis/consolidation. The normal bovine lung has a well-developed interlobular septa pattern visible on CT, more prominent than in horses, due to the complete lobulation characteristic of ruminants. This lobulation is clinically significant as pneumonia tends to remain segmental longer than in less-lobulated species.
+
+The bovine heart is positioned left-of-midline with the cardiac apex pointing caudoventrally. On CT angiography, the main pulmonary artery arises from the right ventricle and bifurcates into left and right pulmonary arteries. The coronary arteries (left circumflex, left anterior descending, right coronary) are visible on ECG-gated CT as enhancing vessels. Cardiac chamber dimensions: LV end-diastolic diameter ≈ 8–10 cm, wall thickness ≈ 1.5–2.5 cm in adult cattle.
+
+The aorta exits the LV, ascends as the ascending aorta, curves as the aortic arch, then descends as the thoracic and abdominal aorta. The brachiocephalic trunk is the first branch off the arch in cattle (unlike the separate right subclavian in humans), providing the right and left subclavian arteries and the bicarotid trunk. The caudal vena cava returns venous blood from the hindlimb and abdominal organs. Normal CT aortic diameter: 3.5–4.5 cm at the diaphragm level.''',
+        'tags': ['thorax', 'CT', 'lung', 'heart', 'aorta', 'bovine', 'thoracic imaging', 'pulmonary'],
+    },
+    {
+        'title': 'Bovine Abdominal CT — Rumen Reticulum Omasum Abomasum',
+        'text': '''Bovine CT abdomen (soft tissue window W:400, L:40) shows the four-compartment forestomach system. The rumen is the largest organ, occupying the left 60–70% of the abdominal cavity. On CT, rumen contents show stratified layers: a dorsal gas cap (-900 HU, seen as black), a floating fibre mat (-100 to +50 HU), and a ventral liquid pool (+10 to +30 HU). The rumen wall is thin (5–8 mm) with prominent papillae.
+
+The reticulum is cranioventral, in contact with the diaphragm and pericardium. Its honeycomb mucosal pattern is not visible on CT but its position anterior to the rumen is characteristic. Hardware disease (traumatic reticuloperitonitis) from ingested ferromagnetic objects is diagnosed on radiographs or CT by detecting a metallic density foreign body in the reticulum.
+
+The omasum is right-lateral to the rumen, between the reticulum and abomasum. Its many leaves (laminae) trap large particles for further digestion. The abomasum (true stomach) is on the right ventral floor of the abdomen, adjacent to the liver. Right displacement of the abomasum (RDA) is diagnosed by finding the fluid-filled gas-capped abomasum on the right body wall on CT or auscultation (the "ping").
+
+The bovine liver is right-sided (unlike the midline human liver), occupying the right cranial abdomen. Its CT density is +50 to +70 HU. The gallbladder, common bile duct, and portal vein are identifiable. Hepatic lipidosis (fatty liver of periparturient cows) shows reduced CT attenuation (-20 to +20 HU compared to normal +50–70).''',
+        'tags': ['abdomen', 'CT', 'rumen', 'ruminant', 'digestive', 'liver', 'abomasum', 'bovine imaging'],
+    },
+    {
+        'title': 'Bovine Limb MRI — Soft Tissue and Cartilage',
+        'text': '''High-field MRI (1.5T or 3T) of bovine limbs provides detailed assessment of tendons, ligaments, and articular cartilage. T1-weighted sequences: tendons and ligaments appear dark (low signal, dense collagen fibres arranged parallel to the field). T2*-weighted gradient echo sequences: cartilage appears bright; subchondral bone is dark; bone marrow fat is hyperintense.
+
+The digital flexor tendon apparatus: deep digital flexor tendon (DDFT) inserts on the distal phalanx (P3), the superficial digital flexor tendon (SDFT) inserts on P1 and P2. The DDFT is covered by a synovial sheath (digital flexor tendon sheath, DFTS) from the proximal pastern to the navicular bone. Inflammation of this sheath (tenosynovitis) shows T2-hyperintense fluid on MRI.
+
+The navicular bone (distal sesamoid) of the bovine digit is analogous to the equine navicular. The navicular bursa (podotrochlear bursa) between the DDFT and navicular bone is a common site of inflammation. On MRI, bone marrow oedema appears as T2-hyperintensity and T1-hypointensity within the medullary cavity — an early indicator of osteitis before visible changes on radiographs.
+
+Hoof cartilage (ungular cartilage) forms the lateral and medial cartilages of the hoof. These fibrocartilaginous extensions of P3 are better visualised on MRI than CT. Sidebone (ossification of ungular cartilage) is visible on CT as increased HU within what should be cartilage (-50 to +50 HU normal, +400+ HU ossified).''',
+        'tags': ['limb', 'MRI', 'tendon', 'ligament', 'cartilage', 'hoof', 'digital', 'soft tissue'],
+    },
+    {
+        'title': 'Bovine Histology — Integument (Skin and Hoof)',
+        'text': '''Bovine skin histology: the epidermis consists of 4–5 layers: stratum germinativum (basal layer, mitotically active cuboidal keratinocytes on basement membrane), stratum spinosum (polygonal cells with desmosomes), stratum granulosum (cells containing keratohyalin granules), and stratum corneum (anucleate, keratinised squames). Cattle skin lacks a stratum lucidum except over hooves. Skin thickness varies from 2–3 mm over the trunk to 4–5 mm over the neck.
+
+Bovine hair follicles are compound: 1 primary follicle flanked by 2–6 secondary follicles, all opening into a common infundibulum. Sebaceous glands open into the follicular canal. Eccrine sweat glands are numerous in cattle (unlike horses which sweat mainly from apocrine glands) and are important for thermoregulation.
+
+The hoof (ungula) is a modified epidermis. Histological zones: perioplic corium (periople), coronary corium and coronary epidermis (tubular horn formation), lamellar corium (interdigitating primary and secondary dermal laminae with epidermal counterparts), and the sole/white line corium. The dermal-epidermal interface in the laminar dermis provides mechanical attachment of the hoof capsule to P3 via the interdigitating laminae. Laminitis in cattle disrupts this interface, allowing P3 to rotate within the hoof capsule under weight-bearing.
+
+Melanocytes are located in the basal layer and determine coat colour. Breed pigmentation patterns: Holstein (black and white); Hereford (red with white face); Angus (black); Limousin (tan). Coat colour is determined by MC1R (extension locus) and ASIP (agouti), among other genes.''',
+        'tags': ['histology', 'skin', 'hoof', 'epidermis', 'dermis', 'keratinocyte', 'melanocyte', 'integument'],
+    },
+    {
+        'title': 'Bovine Histology — Skeletal Muscle Ultrastructure',
+        'text': '''Skeletal muscle in cattle is organised into hierarchical levels: muscle belly → fascicles (endomysium-wrapped fibre bundles) → individual fibres (20–100 µm diameter, multinucleate syncytia) → myofibrils (1–2 µm diameter) → sarcomeres (repeating functional units, 2.0–2.5 µm at rest length).
+
+The sarcomere boundaries are Z-lines (dense protein discs of α-actinin + actin anchor). I-bands (actin filaments, thin, appearing light on TEM) flank the Z-line. The A-band (myosin thick filaments, 15 nm diameter, 1.6 µm long) appears dark. The H-zone within the A-band contains no actin; the M-line bisects the H-zone and holds myosin thick filaments in register.
+
+Fibre types in bovine skeletal muscle: Type I (slow twitch, oxidative, red, fatigue-resistant, high mitochondrial density, relies on oxidative phosphorylation) and Type IIA (fast twitch, oxidative-glycolytic) predominate in postural muscles like longissimus. Type IIB (fast-glycolytic, white, fatigable) predominate in sprinting muscles. The longissimus dorsi of beef cattle has been bred towards Type IIB abundance for faster growth and larger muscle fibre diameter.
+
+The neuromuscular junction (NMJ) is where the motor nerve terminal synapses onto the muscle fibre. The presynaptic terminal contains dense-core vesicles of acetylcholine (ACh). ACh binds to nicotinic ACh receptors in the postjunctional folds, triggering depolarisation, Ca2+ release from sarcoplasmic reticulum via the T-tubule/RYR1 system, and cross-bridge cycling of myosin heads along actin.''',
+        'tags': ['histology', 'muscle', 'sarcomere', 'myosin', 'actin', 'Z-line', 'NMJ', 'fibre type'],
+    },
+    {
+        'title': 'Bovine Histology — Bone Microstructure and Remodelling',
+        'text': '''Bovine cortical bone consists of osteons (Haversian systems): concentric lamellae (3–7 µm thick) of mineralised collagen surrounding a central Haversian canal (containing a capillary and nerve). Adjacent osteons are separated by interstitial lamellae (remnants of old osteons). The cement lines (reversal lines) around osteons are hypermineralised and stain intensely with Villanueva stain.
+
+Bone mineral is predominantly carbonated hydroxyapatite [Ca10(PO4)6(OH)2], with Ca/P molar ratio ≈ 1.65 (stoichiometric = 1.67). Crystals are plate-shaped, 2–4 nm thick, 30–50 nm wide. The organic matrix (osteoid) is 90% type I collagen, 10% non-collagenous proteins (osteocalcin, osteopontin, BSP). Osteocalcin contains γ-carboxyglutamic acid residues that bind calcium; serum osteocalcin is a marker of bone formation.
+
+Bone remodelling is coupled: osteoclasts (TRAP-positive, multinucleate, from monocyte lineage) excavate resorption lacunae (Howship's lacunae) via H+ secretion and metalloproteinase/cathepsin K activity. Osteoblasts (alkaline phosphatase-positive, from mesenchymal stem cells) refill with osteoid which mineralises within 7–10 days. The RANKL/OPG/RANK axis governs osteoclastogenesis — RANKL from osteoblasts and stromal cells activates RANK on osteoclast precursors; OPG is a decoy receptor.
+
+Bone density in mature Holstein cows measured by dual-energy X-ray absorptiometry (DXA): L2–L4 BMD ≈ 1.1–1.4 g/cm², similar to humans. Transition cow mobilisation of bone calcium begins in early lactation when demand exceeds dietary supply.''',
+        'tags': ['histology', 'bone', 'osteon', 'osteoclast', 'osteoblast', 'hydroxyapatite', 'remodelling', 'collagen'],
+    },
+    {
+        'title': 'Bovine Vascular System — Arteries and Veins',
+        'text': '''The bovine aorta gives rise to: (1) coronary arteries, (2) brachiocephalic trunk (dividing into bicarotid trunk → bilateral common carotid arteries, and bilateral subclavian arteries), (3) intercostal arteries, (4) coeliac artery (liver, spleen, stomach), (5) cranial mesenteric artery (small intestine), (6) caudal mesenteric (large intestine), (7) renal arteries, (8) ovarian/testicular arteries, (9) bilateral iliac arteries (external iliac → femoral; internal iliac → pelvic viscera).
+
+The jugular vein is the primary venous access site in cattle for blood collection and intravenous therapy. The external jugular runs in the jugular groove between the sternocephalicus and brachiocephalicus muscles. The milk vein (subcutaneous abdominal vein, "spur vein") is prominent in high-producing dairy cows, draining the udder cranially through the inguinal canal into the thoracic cavity.
+
+The bovine lymphatic system has numerous discrete lymph nodes: prescapular, prefemoral (sublumbar), inguinal, retropharyngeal, parotid, mediastinal, and mesenteric (dairy-cow jejunal lymph nodes form a row of conspicuous discrete nodes along the jejunum). The mammary lymph node (supramammary lymph node) is palpable at the base of the udder and is examined for evidence of mastitis-related lymphadenopathy.
+
+Blood volume in cattle: approximately 8% of body weight. A 600 kg cow has approximately 48 litres of blood. Normal haematocrit 24–46%. RBC lifespan 135–150 days (longer than humans). Bovine RBCs lack sialic acid on their surface compared to human RBCs, making them less sticky and affecting blood rheology.''',
+        'tags': ['vascular', 'artery', 'vein', 'aorta', 'jugular', 'lymph', 'circulation', 'bovine anatomy'],
+    },
+    {
+        'title': 'Bovine Respiratory Anatomy — Trachea, Bronchi, Alveoli',
+        'text': '''The bovine trachea has 50–60 cartilaginous rings and extends from the larynx to the tracheal bifurcation (carina) at the level of the 5th rib. Diameter: 5–7 cm in adult cattle. A tracheal bronchus is present in approximately 65% of cattle — an accessory bronchus arising from the right tracheal wall that ventilates the cranial right lung lobe directly from the trachea. This anatomical variant increases susceptibility to aspiration pneumonia of the cranial right lobe.
+
+The bovine lung has complete lobulation with thick interlobular septa of connective tissue — each primary lobule (50–200 µm) is separated from its neighbours, unlike the partially-fused lobules of horses. This structural feature limits collateral ventilation (pores of Kohn are absent or rare) and means that once a lobule collapses or consolidates, it cannot be recruited by ventilation from adjacent lobules. This is why bovine pneumonia tends to show sharp lobular boundaries on necropsy.
+
+The alveolar unit: type I pneumocytes (squamous, covering 95% of the surface area) provide the thin gas-exchange membrane. Type II pneumocytes (cuboidal, 5% of surface) produce pulmonary surfactant (dipalmitoylphosphatidylcholine, SP-A, SP-B, SP-C, SP-D) that reduces alveolar surface tension. Respiratory distress syndrome in neonatal calves (analogous to NRDS) involves surfactant deficiency.
+
+Bovine lung capacity: approximately 30–35 litres in a 600 kg cow. Tidal volume at rest: 3–5 L. Respiratory rate: 12–30 breaths/min. Dead space (anatomic): approximately 2.0–2.5 L. Gas exchange: pO2 arterial ≈ 100 mmHg, pCO2 arterial ≈ 38–44 mmHg at sea level.''',
+        'tags': ['respiratory', 'lung', 'trachea', 'bronchi', 'alveoli', 'surfactant', 'pneumonia', 'bovine'],
+    },
+    {
+        'title': 'Bovine Immune System — Lymph Nodes and Innate Immunity',
+        'text': '''The bovine immune system has evolved to cope with a high pathogen load from environmental exposure (soil, faeces, feed contamination). Innate immunity is particularly robust: neutrophils are the predominant response to acute bacterial infection (mastitis, pneumonia). Bovine neutrophils have higher baseline activity than human neutrophils and show enhanced oxidative burst.
+
+Toll-like receptors (TLRs) on bovine macrophages and dendritic cells recognise pathogen-associated molecular patterns (PAMPs): TLR4 recognises LPS from gram-negative bacteria (E. coli), TLR2 recognises gram-positive cell wall components, TLR9 recognises bacterial CpG DNA. TLR gene variants in cattle are associated with resistance/susceptibility to mastitis.
+
+The bovine thymus involutes after puberty (similar to other mammals) but has distinctive histology in calves: large cortex packed with thymocytes (CD4+CD8+ double-positive), and medulla with Hassall corpuscles (concentrically arranged epithelial cells). Thymic dendritic cells and macrophages mediate negative selection (deletion of self-reactive T-cells).
+
+The bovine spleen has a well-developed trabecular meshwork of smooth muscle (erythroid spleen type), allowing forceful contraction to release stored erythrocytes during exercise or hypoxia. White pulp (periarterial lymphatic sheaths + germinal centres) is surrounded by red pulp (sinusoids + splenic cords). Bovine spleen CT HU: +45 to +65 (compared to liver +50–70, muscle +40–60).''',
+        'tags': ['immune', 'lymph nodes', 'neutrophil', 'TLR', 'thymus', 'spleen', 'innate immunity', 'bovine'],
+    },
+    {
+        'title': 'Bovine Reproductive Anatomy — Uterus Ovary Cervix',
+        'text': '''The bovine uterus is bicornuate (bipartite): two uterine horns join at the body. In the cow, the uterine body is only 2–4 cm long; the horns are 25–40 cm long in adults and curl ventrally ("ram's horn" configuration). The uterus is supported by the broad ligament. Caruncles (70–100 raised, non-glandular structures) are arranged in 4 rows on the endometrial surface; during pregnancy they interdigitate with cotyledons on the placenta to form placentomes.
+
+The cervix of the cow is 8–10 cm long, fibrous, and has 3–5 distinct annular rings (interlocking rings/annuli). These rings prevent easy passage of instruments (making intrauterine insemination more difficult in cattle than in sheep). The cervix is palpable per rectum and is used as a landmark for rectal palpation of the reproductive tract.
+
+Ovaries: approximately 3 × 2 × 1.5 cm in cyclic cows. The dominant follicle grows to 12–20 mm before ovulation. Ultrasonographic ovarian evaluation by transrectal B-mode shows follicles as anechoic (fluid-filled) structures and corpora lutea as hypoechoic/isoechoic structures. The corpus haemorrhagicum (immediately post-ovulation) has a distinctive sunflower-like ultrasound pattern from the central clot.
+
+Bovine oestrous cycle: 21 days (range 18–24). Follicular phase 4–6 days; luteal phase 15–18 days. Progesterone from the CL: 4–10 ng/mL in mid-luteal phase. Oestradiol from the pre-ovulatory follicle: 5–15 pg/mL at oestrus. Gestation length: 280–285 days (range 274–292). Twinning rate: 1–5% in dairy breeds (3–4× higher than in beef breeds).''',
+        'tags': ['reproduction', 'uterus', 'ovary', 'cervix', 'oestrus', 'gestation', 'cattle', 'bovine'],
+    },
+    {
+        'title': 'Bovine Udder — Mammary Gland Anatomy and Lactation Physiology',
+        'text': '''The bovine udder consists of four mammary quarters, each with an independent gland cistern, teat cistern, and teat canal (streak canal). The four quarters are separated by a medial suspensory ligament (elastic tissue, a branch of the abdominal tunica) and lateral suspensory ligaments (fibrous, from the subcutaneous fascia). The medial ligament bears the primary weight of milk; its failure leads to udder drop in old or high-producing cows.
+
+Milk secretion: secretory epithelium (lactocytes) in alveoli undergo continuous synthesis and apocrine secretion of milk. Each alveolus is surrounded by a basket of myoepithelial cells that contract in response to oxytocin (released by posterior pituitary in response to suckling/milking stimulus) to eject milk into the ducts → cisterns → teat. Oxytocin half-life: 3–5 minutes; let-down reflex lasts 5–8 minutes.
+
+Bovine milk composition: water 87%, fat 3.5–5%, protein 3.2% (casein 2.5%, whey 0.7%), lactose 4.7%, minerals 0.7%. Holstein milk averages 3.5–4% fat; Jersey 4.5–5.5%. Casein micelles (80–300 nm diameter) are the dominant protein; their calcium-phosphate-nanoclusters coordinate through casein phosphoserines. Fat globules are 1–10 µm, coated by a milk fat globule membrane (MFGM) of phospholipids, glycoproteins, and butyrophilin.
+
+Mastitis: inflammation of the mammary gland, the most economically costly disease in dairy cattle. On MRI, acute mastitis shows T2-hyperintense oedema and enlarged supramammary lymph nodes. The glandular parenchyma enhances with gadolinium in inflammatory mastitis. Chronic mastitis shows fibrosis (T1 and T2 hypointensity) and loss of normal alveolar architecture.''',
+        'tags': ['udder', 'mammary', 'lactation', 'milk', 'mastitis', 'oxytocin', 'casein', 'bovine'],
+    },
+    {
+        'title': 'Bovine Gastrointestinal Histology — Rumen to Abomasum',
+        'text': '''Rumen wall histology: the mucosa is lined by stratified squamous non-glandular epithelium (similar to oesophageal epithelium). The epithelium is keratinised on its luminal surface. Rumen papillae (1–10 mm tall, finger-like projections) vastly increase surface area for VFA absorption. Each papilla has a core of lamina propria with a capillary loop. Subepithelial blood flow removes absorbed VFAs (acetate, propionate, butyrate) for portal hepatic metabolism.
+
+Reticulum: honeycombed mucosal folds, same non-glandular stratified squamous epithelium as rumen. The reticular groove (oesophageal groove) is a muscular fold in young calves that directs milk past the rumen into the abomasum — closure is stimulated by suckling reflex (serotonin + gastrin mediated).
+
+Omasum ("Bible tripes"): 100–200 muscular laminae (leaves) lined by stratified squamous epithelium with short papillae. Function: water absorption and fine-particle trapping. The laminae expand surface area to ~10 m² — more than 10× the omasal luminal surface.
+
+Abomasum (true glandular stomach): glandular mucosa with oxyntic (fundic) glands containing parietal cells (HCl secretion, H+/K+-ATPase), chief cells (pepsinogen), and G-cells (gastrin). Surface mucous cells secrete bicarbonate-laden mucus. Abomasal histology resembles the human fundic stomach. pH 2.0–4.0 in fasted cows; rises to 5.0–6.0 post-feeding as secretion buffers ingesta. Abomasal displacement shows gas-fluid interface on CT (inverted U-shape of gas-filled abomasum).''',
+        'tags': ['gastrointestinal', 'rumen', 'ruminant', 'abomasum', 'histology', 'VFA', 'papillae', 'digestion'],
+    },
+    {
+        'title': 'Bovine Endocrine System — Pituitary, Thyroid, Adrenal',
+        'text': '''The bovine pituitary gland (hypophysis) weighs 2–3 g and is situated in the sella turcica of the sphenoid bone. Adenohypophysis (anterior pituitary): acidophils secrete GH (somatotropin, 190 aa, bovine recombinant = rbST used in dairy production) and prolactin. Basophils secrete LH, FSH, ACTH, TSH. The hypothalamic-pituitary-gonadal axis regulates bovine reproduction via GnRH → LH/FSH → oestradiol/progesterone feedback.
+
+Thyroid gland: two lobes connected by an isthmus at the laryngeal-tracheal junction. Follicular cells synthesise T4 (thyroxine) and T3 (triiodothyronine) from tyrosine residues within thyroglobulin. Bovine T3 is biologically 3–4× more potent than T4 (T3 is the active form after peripheral deiodination). C-cells (parafollicular cells) secrete calcitonin — important in calcium homeostasis in lactating cows (calcitonin inhibits osteoclast activity and reduces Ca2+ resorption from bone).
+
+Bovine adrenal gland anatomy: retroperitoneal, cranial to each kidney. Cortex zones: glomerulosa (aldosterone — Na+ retention), fasciculata (cortisol — stress, glucose metabolism), reticularis (androgens). Medulla: chromaffin cells secrete adrenaline (80%) and noradrenaline (20%) in response to sympathetic stimulation. Milk ejection failure under stress is partly mediated by adrenaline causing peripheral vasoconstriction and reduced oxytocin delivery to udder.
+
+Pancreas: both exocrine (acinar cells secreting digestive enzymes) and endocrine (islets of Langerhans: α-cells/glucagon, β-cells/insulin, δ-cells/somatostatin). Bovine insulin was the first protein hormone to be sequenced (Sanger, 1953); bovine insulin differs from human insulin at 3 amino acid positions and was used therapeutically in humans before recombinant human insulin.''',
+        'tags': ['endocrine', 'pituitary', 'thyroid', 'adrenal', 'pancreas', 'insulin', 'cortisol', 'bovine'],
+    },
+    {
+        'title': 'Bovine Renal System — Kidney Anatomy and Physiology',
+        'text': '''Bovine kidneys are multilobed (lobulated surface), unlike the smooth surface in horses. Each lobe corresponds to one cortical pyramid draining to a minor calyx. The bovine kidney has 18–24 lobes; the cortex, multiple medullary pyramids, and a single renal pelvis (no true renal pelvis sinus as in horses — instead multiple minor calyces drain to a major calyx system). On CT, the cortex is HU +30 to +50 (enhancement peak HU +130 with iodinated contrast), and the medullary pyramids are slightly less dense.
+
+The nephron is the functional unit: glomerulus (filtration, ~120 mL/min GFR total in adult cow), proximal tubule (60–70% Na+/glucose/amino acid/HCO3- reabsorption), loop of Henle (countercurrent multiplication for urine concentration), distal tubule (aldosterone-regulated Na+/K+ exchange, ADH-regulated water permeability), and collecting duct (final concentration, urine osmolality 1000–2500 mOsm/kg in dehydrated animals).
+
+The juxtaglomerular apparatus (JGA): JG cells (modified smooth muscle of afferent arteriole) secrete renin → angiotensin I → ACE → angiotensin II → aldosterone axis. This RAAS is important in sodium/water balance of dairy cattle during high-salt diets and during heat stress.
+
+Daily urine output: 10–30 litres in adult dairy cattle, depending on water intake and lactation stage. Urine composition: urea (major nitrogen excretion product, as in all ureotelic mammals), creatinine (proportional to muscle mass, stable), hippurate (from aromatic amino acid catabolism). Polyuria/polydipsia in cattle may indicate diabetes insipidus, renal insufficiency, or hypercalcaemia.''',
+        'tags': ['renal', 'kidney', 'nephron', 'glomerulus', 'RAAS', 'urine', 'CT', 'bovine anatomy'],
+    },
+    {
+        'title': 'Bovine Embryology and Fetal Development',
+        'text': '''Bovine fertilisation occurs in the ampullary-isthmic junction of the oviduct, approximately 12 hours after ovulation. First cleavage at 24–30 hours post-fertilisation. The 8-cell stage (day 3) is when embryonic genome activation occurs in cattle (unlike mice where it occurs at the 2-cell stage). Blastocyst: inner cell mass (ICM, future embryo proper) surrounded by trophoblast at day 7. Hatching from the zona pellucida occurs days 9–11.
+
+Embryonic attachment in cattle is a slow process of apposition and adhesion (synepitheliochorial placentation, not invasive). Binucleate cells (giant cells) in the trophoblast migrate into the endometrial epithelium to form fetomaternal hybrid cells (trinucleate cells in cattle). Placentome formation begins day 20–25; mature placentomes are present by day 40. The interdigitating cotyledon-caruncle structure allows nutrient and gas exchange without breach of the endometrial epithelium.
+
+Fetal sex differentiation: the gonadal ridge forms day 30. Testes in males secrete AMH (anti-Müllerian hormone, causing regression of Müllerian ducts) and testosterone (promoting Wolffian duct development: epididymis, vas deferens, seminal vesicles). In females, ovaries passively develop; oocytes enter meiotic prophase I arrest (dictyotene) by day 100.
+
+Major organogenesis landmarks in bovine fetal development: cardiac tube (day 20), limb buds (day 26), neural tube closure (day 28), external genitalia differentiation visible (day 50), palatal fusion (day 60), eye opening (day 225–250). Crown-rump length correlates with gestational age: 2 cm ≈ day 40, 10 cm ≈ day 70, 30 cm ≈ day 110, 50 cm ≈ day 140.''',
+        'tags': ['embryology', 'fetal development', 'placenta', 'fertilisation', 'organogenesis', 'bovine', 'reproduction'],
+    },
+    {
+        'title': 'Bovine Biomechanics and Gait Analysis',
+        'text': '''The bovine walk is a 4-beat gait with a lateral sequence: LH→LF→RH→RF (or RH→RF→LH→LF). At a slow walk, the support polygon includes 3 limbs simultaneously (tripodal stance), providing excellent stability — important for heavy ruminants that must remain standing for long periods. At a fast walk, periods of bipedal lateral support occur.
+
+The trot is rare in cattle; they transition to a gallop (3-beat asymmetric) or a run. Cattle reach a maximum speed of approximately 8–9 m/s (29–32 km/h). The trot-gallop transition occurs at a Froude number of approximately 0.5 (Fr = v²/gL, where L = leg length). Cattle have a shorter relative leg length than horses, shifting their preferred trot-gallop transition speed to lower velocities.
+
+Ground reaction forces in cattle: peak vertical GRF approximately 1.5–2.0× body weight during walking. The hindlimb peak GRF occurs slightly later in the stance phase than the forelimb. Hoof-ground contact time: 350–550 ms at a walk. Digital pulse (palpable increase in digital artery pulse amplitude) is detectable in laminitic cows due to increased blood flow and hoof capsule temperature.
+
+Kinematic hoof analysis: the hoof angle (angle of the dorsal hoof wall to the ground) should be 45–55° in the forefeet and 50–60° in the hindlimb lateral claws. Overgrowth of the toe leads to a broken-forward hoof angle; excessive heel growth causes a broken-backward angle. Both alter biomechanics and predispose to lameness. Cow comfort scoring and locomotion scoring (1–5 scale) assess gait symmetry and back curvature.''',
+        'tags': ['biomechanics', 'gait', 'locomotion', 'hoof', 'ground reaction force', 'kinematic', 'lameness', 'bovine'],
+    },
+    {
+        'title': 'Bovine Biochemistry — Volatile Fatty Acids and Energy Metabolism',
+        'text': '''Bovine energy metabolism is fundamentally different from monogastric species due to rumen fermentation. Dietary carbohydrates (cellulose, starch, pectin) are fermented by rumen microbiota to volatile fatty acids (VFAs): acetate (60–65%), propionate (15–20%), and butyrate (10–15%). These VFAs are absorbed across the rumen wall and serve as the primary energy substrates.
+
+Acetate is the main substrate for peripheral fatty acid synthesis and oxidation; it enters the TCA cycle after conversion to acetyl-CoA. Propionate is gluconeogenic — it is converted in the liver to succinyl-CoA → oxaloacetate → glucose (cattle derive 95% of their blood glucose from hepatic gluconeogenesis, not intestinal absorption, because most glucose is fermented in the rumen before reaching the duodenum). Butyrate is the primary fuel for rumen epithelial cells and is converted to β-hydroxybutyrate (ketone body) and acetoacetate.
+
+Negative energy balance (NEB) in periparturient dairy cows: milk energy output exceeds dietary energy intake in early lactation. Body fat is mobilised → elevated plasma NEFA (non-esterified fatty acids) → hepatic uptake exceeds oxidative capacity → triacylglycerol accumulation in hepatocytes (fatty liver) → reduced gluconeogenesis capacity → subclinical and clinical ketosis.
+
+Normal bovine blood glucose: 2.8–4.4 mmol/L (50–80 mg/dL) — lower than humans (4.0–6.0 mmol/L) because glucose is continuously consumed by rumen epithelium. Insulin concentrations are also chronically lower in ruminants. The glucose transporter GLUT1 (erythrocyte/brain) is more important than GLUT4 (insulin-responsive) in bovine peripheral tissues.''',
+        'tags': ['biochemistry', 'VFA', 'ketosis', 'glucose', 'NEB', 'rumen fermentation', 'energy metabolism', 'bovine'],
+    },
+    {
+        'title': 'Bovine Nociception and Pain Pathways',
+        'text': '''Nociception in cattle involves the same peripheral and central mechanisms as in other mammals. Primary afferent nociceptors: Aδ-fibres (myelinated, 5–30 m/s, "fast pain", mechanical and thermal nociception) and C-fibres (unmyelinated, 0.5–2.0 m/s, "slow pain", polymodal chemical, mechanical, thermal). In the bovine hoof, free nerve endings in the dermis of the corium respond to laminar separation, tissue damage, and inflammation.
+
+Spinal cord dorsal horn processing: the superficial laminae (I and II, substantia gelatinosa) receive primary C-fibre input via substance P and CGRP neurotransmitters. Lamina V receives Aδ and deep Aβ input. Ascending pathways: spinothalamic tract to contralateral thalamus → somatosensory cortex. Wind-up (temporal summation) occurs in dorsal horn wide dynamic range (WDR) neurons via NMDA receptor activation — relevant to chronic pain in laminitic cows where sensitisation amplifies hoof pain.
+
+Opioid receptors (µ, κ, δ) are present throughout bovine nociceptive pathways. Butorphanol (κ-agonist/µ-antagonist) is commonly used in cattle for analgesia. NSAIDs (flunixin meglumine, meloxicam) inhibit COX-1 and COX-2, reducing prostaglandin synthesis at the site of inflammation. Local anaesthesia: lidocaine (2%) blocks Na+ channels on nerve axons, abolishing action potential propagation — used for ring block, IV regional anaesthesia (Bier block), cornual nerve block, epidural.
+
+Pain assessment in cattle uses composite pain scales including behaviours: ear position (folded forward = pain indicator), facial expression (Bovine Pain Scale with orbital tightening, tension above eye, strained chewing), posture (arched back, weight shifting, reduced weight bearing), and physiological indices (HR, RR, cortisol, substance P).''',
+        'tags': ['nociception', 'pain', 'analgesia', 'nerve', 'NSAID', 'local anaesthesia', 'welfare', 'bovine'],
+    },
 ]
 
 # ── Synthetic visual primitives generator (Stage 0) ──────────────────────────
