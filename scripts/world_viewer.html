@@ -337,7 +337,12 @@ plc.addEventListener('unlock', () => {
   document.getElementById('xhair').style.display = 'none';
   document.getElementById('hint').textContent = 'DRAG · ORBIT  ·  SCROLL · ZOOM  ·  WASD · PAN  ·  RIGHT-CLICK · ASCEND';
 });
-window.toggleFPS = () => { if (fpsMode) plc.unlock(); else plc.lock(); };
+window.toggleFPS         = () => { if (fpsMode) plc.unlock(); else plc.lock(); };
+// Expose toggle functions to global scope (needed by inline onclick attributes)
+window.toggleVideoMode   = () => toggleVideoMode();
+window.toggleNeuralMode  = () => toggleNeuralMode();
+window.toggleSceneMode   = () => toggleSceneMode();
+window.activateSceneMode = () => activateSceneMode();
 
 document.addEventListener('keydown', e => { fpsKeys[e.code] = true; });
 document.addEventListener('keyup',   e => { fpsKeys[e.code] = false; });
@@ -745,9 +750,15 @@ function _boneMesh(pA, pB, r, col) {
   const len = dir.length();
   if (len < 0.005) return null;
   const geo = new THREE.CylinderGeometry(r, r, len, 10, 1);
-  const mat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.82, metalness: 0.04 });
+  // depthTest:false — neural cow is an AR overlay; always draws on top of depth mesh.
+  // transparent + opacity 0.92 gives a faint "ghost" quality that separates it visually
+  // from the photorealistic background without fully occluding it.
+  const mat = new THREE.MeshStandardMaterial({
+    color: col, roughness: 0.55, metalness: 0.10,
+    transparent: true, opacity: 0.92, depthTest: false,
+  });
   const m = new THREE.Mesh(geo, mat);
-  m.castShadow = true;
+  m.renderOrder = 10;
   m.position.copy(pA).addScaledVector(dir.clone().normalize(), len * 0.5);
   m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
   return m;
@@ -768,17 +779,21 @@ function _buildNeuralCow(cmap) {
     const a = cmap[la];
     if (!a) continue;
     const geo = new THREE.SphereGeometry(r, 14, 10);
-    const mat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.80, metalness: 0.04 });
+    const mat = new THREE.MeshStandardMaterial({
+      color: col, roughness: 0.55, metalness: 0.10,
+      transparent: true, opacity: 0.92, depthTest: false,
+    });
     const m = new THREE.Mesh(geo, mat);
-    m.castShadow = true;
+    m.renderOrder = 10;
     m.position.copy(_cw(a.x, a.y, a.z));
     g.add(m);
   }
 
-  // Add a ground-shadow disc so the cow looks planted
+  // Ground-shadow disc
   const discGeo = new THREE.CircleGeometry(0.55, 24);
-  const discMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22 });
+  const discMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22, depthTest: false });
   const disc = new THREE.Mesh(discGeo, discMat);
+  disc.renderOrder = 9;
   disc.rotation.x = -Math.PI / 2;
   disc.position.set(0, 0.004, 0);
   g.add(disc);
@@ -795,6 +810,25 @@ let neuralMode      = false;
 let neuralCow       = null;
 let _neuralTimer    = null;
 let _neuralAnimT    = 0;     // time accumulator for idle sway
+
+// Dedicated lights added only while NEURAL mode is active
+let _neuralLights   = [];
+function _addNeuralLights() {
+  // Sun from above-front: warm white, strong enough to reveal Hereford colouring
+  const sun = new THREE.DirectionalLight(0xfff8e8, 3.5);
+  sun.position.set(2.5, 4.0, 3.0);
+  // Fill from left: cool neutral to separate shadows
+  const fill = new THREE.DirectionalLight(0xd0e8ff, 1.2);
+  fill.position.set(-3.0, 1.5, 2.0);
+  // Broad ambient so dark joints are still readable
+  const amb = new THREE.AmbientLight(0xffffff, 0.7);
+  _neuralLights = [sun, fill, amb];
+  _neuralLights.forEach(l => scene.add(l));
+}
+function _removeNeuralLights() {
+  _neuralLights.forEach(l => scene.remove(l));
+  _neuralLights = [];
+}
 
 async function _fetchNeuralCow() {
   if (!neuralMode) return;
@@ -817,10 +851,14 @@ async function _fetchNeuralCow() {
   if (neuralCow) { scene.remove(neuralCow); neuralCow.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); neuralCow = null; }
   neuralCow = _buildNeuralCow(cmap);
 
-  // Place cow inside the depth-mesh video scene.
-  // Video camera is at z=4 looking at z=0; depth mesh spans z=0..1.
-  // z=0.5 puts the cow at the mid-depth of the scene, correctly overlaying the video.
-  neuralCow.position.set(0, 0, 0.5);
+  // Place cow inside the video scene.
+  // Camera is at z=4 looking at z=0; depth mesh spans z=0..1.
+  // Training Z convention: z=1=nose, z=0=rear — _cw maps nose to -z (away from camera).
+  // Rotate 180° on Y so nose faces the camera for a natural frontal view.
+  neuralCow.rotation.y = Math.PI;
+  // z=2.0 — in front of the depth mesh (z=0..1), well visible from camera at z=4.
+  // depthTest:false on all materials means the skeleton always draws on top.
+  neuralCow.position.set(0, 0, 2.0);
   scene.add(neuralCow);
 
   // Derive current pose from centroid geometry
@@ -854,14 +892,15 @@ function toggleNeuralMode() {
     document.getElementById('neural-hud').style.display = 'block';
     document.getElementById('vq-hud').style.display = 'none';  // hide video HUD
 
-    // Camera: angled side-front view inside the video scene.
-    // Video mesh is at z=0..1; cow group sits at z=0.5.
-    // Camera at (1.8, 1.4, 3.8) → side-elevated angle, stays well in front of mesh.
-    camera.position.set(1.8, 1.4, 3.8);
-    camera.lookAt(0, 0.7, 0.5);          // look at cow centre
+    // Keep camera at z=4 (correct for depth mesh), but tilt it to look at the cow's
+    // centre of mass rather than the origin — cow centre is at (0, 0.7, 2.0).
+    camera.position.set(0, 0, 4.0);
+    camera.lookAt(0, 0.7, 2.0);
+    orbitCtrl.target.set(0, 0.7, 2.0);
+    orbitCtrl.update();
 
-    // Bright ambient light so cow anatomy is clearly lit
-    scene.traverse(o => { if (o.isAmbientLight) o.intensity = 1.2; });
+    // Add dedicated lights so Hereford colouring is visible over video background
+    _addNeuralLights();
 
     // Poll at 300ms — near-real-time response to live video sensor updates
     _neuralTimer = setInterval(_fetchNeuralCow, 300);
@@ -875,7 +914,7 @@ function toggleNeuralMode() {
       neuralCow = null;
     }
     if (videoMode) toggleVideoMode();
-    scene.traverse(o => { if (o.isAmbientLight) o.intensity = 0.4; });
+    _removeNeuralLights();
     document.getElementById('neural-hud').style.display = 'none';
     btn.classList.remove('active'); btn.textContent = '◈ NEURAL';
   }
