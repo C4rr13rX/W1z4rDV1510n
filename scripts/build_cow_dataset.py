@@ -13,12 +13,13 @@ stages from free, open-access sources:
   Stage 3  — Medical imaging    (MRI/CT cross-sections, CT-BEAST / OpenVetAnatomy, ~800 items)
   Stage 4  — Histology images   (Wikimedia Commons histology plates, ~600 items)
   Stage 5  — Molecular data     (PDB protein structures as text + imagery, ~300 items)
+  Stage 6  — Bovine Q&A pairs   (embedded domain Q&A for /chat capability, ~300 pairs)
 
 All items are structured into D:/w1z4rdv1510n-data/training/ and posted to
 the W1z4rD node API for ingestion.
 
 Usage:
-  python build_cow_dataset.py [--stages 0,1,2,3,4,5] [--node localhost:8090]
+  python build_cow_dataset.py [--stages 0,1,2,3,4,5,6] [--node localhost:8090]
                               [--data-dir D:/w1z4rdv1510n-data]
                               [--download-only] [--ingest-only] [--workers 4]
 
@@ -94,6 +95,7 @@ STAGES = {
     3: 'Medical imaging    — MRI/CT cross-sections',
     4: 'Histology images   — tissue plates from Wikimedia',
     5: 'Molecular data     — PDB structures + molecular imagery',
+    6: 'Bovine Q&A pairs   — embedded domain Q&A for chat capability',
 }
 
 # ── PubMed Central search terms for bovine anatomy ───────────────────────────
@@ -1625,6 +1627,341 @@ def fetch_pdb_structures(out_dir: Path, pdb_ids: list[tuple]) -> list[dict]:
     return items
 
 
+# ── Stage 6: Bovine Q&A dataset ─────────────────────────────────────────────
+# ~300 question-answer pairs covering all major bovine anatomy / physiology systems.
+# Ingested via /qa/ingest to enable accurate /chat responses about cow anatomy.
+
+BOVINE_QA_PAIRS: list[tuple[str, str]] = [
+    # ── Musculoskeletal ───────────────────────────────────────────────────────
+    ("How many bones does a bovine skeleton have?",
+     "The bovine skeleton consists of approximately 210 bones."),
+    ("What is the vertebral formula of cattle?",
+     "The bovine vertebral formula is C7, T13, L6, S5, Co18-20 (7 cervical, 13 thoracic, 6 lumbar, 5 sacral, 18-20 coccygeal vertebrae)."),
+    ("What is the cannon bone in cattle?",
+     "The cannon bone is the fused third and fourth metacarpal (MC3+MC4) bone in the forelimb, or the fused third and fourth metatarsal (MT3+MT4) in the hindlimb. Fusion of these two bones is characteristic of bovine cloven-hoofed locomotion."),
+    ("How many phalanges does each bovine digit have?",
+     "Each bovine digit has three phalanges: the proximal phalanx (P1), the middle phalanx (P2), and the distal phalanx (P3, also called the pedal bone or coffin bone)."),
+    ("What is the largest muscle in cattle?",
+     "The longissimus dorsi is the largest single muscle mass in cattle. It runs along the back from the lumbar vertebrae to the ribs and is the source of the ribeye cut. It is used in body condition scoring."),
+    ("What percentage of body weight do bovine forelimbs bear?",
+     "Approximately 55-60% of body weight is borne by the forelimbs, and 40-45% by the hindlimbs in a standing bovine."),
+    ("Which bovine hoof claw is more prone to sole ulcers and why?",
+     "The lateral claw of the hindfoot bears approximately 60-70% of the load (compared to the medial claw), predisposing it to sole ulcers and white line disease."),
+    ("What are the three zones of the bovine hoof capsule?",
+     "The bovine hoof capsule consists of the wall (dorsal stratum), the sole, and the white line—a zone of soft horn at the junction of wall and sole that is the most common site of white line disease."),
+    ("What are epaxial muscles in cattle?",
+     "Epaxial muscles are dorsal trunk muscles including the longissimus, iliocostalis, and spinalis. They extend the vertebral column and are positioned above the transverse processes of the vertebrae."),
+    ("What is the function of hypaxial muscles in cattle?",
+     "Hypaxial muscles (psoas, external and internal obliques, rectus abdominis) support the ventral trunk, flex the vertebral column, and support the abdominal viscera."),
+    ("What bones form the bovine forelimb?",
+     "The bovine forelimb (thoracic limb) consists of the scapula, humerus, radius, ulna, carpals, metacarpals (fused MC3+MC4 cannon bone), and two phalanges per digit (P1, P2, P3)."),
+    ("What is bovine body condition scoring?",
+     "Body condition scoring (BCS) is a system for evaluating subcutaneous fat and muscle cover in cattle, scored 1-5 (thin to obese) by palpating and visually assessing the loin, ribs, and rump. BCS 2.5-3.5 is ideal for dairy cows at calving."),
+    ("What is the function of the bovine scapula?",
+     "The scapula (shoulder blade) is a flat bone forming the shoulder joint with the humerus (glenohumeral joint). It anchors muscles of the forelimb including the supraspinatus, infraspinatus, subscapularis, and deltoid."),
+    ("What joint connects the femur to the tibia in cattle?",
+     "The stifle joint (equivalent to the human knee) connects the femur to the tibia. It contains medial and lateral menisci, cruciate ligaments, and collateral ligaments. The patella (kneecap) articulates on the cranial surface of the femur."),
+    ("What is the fetlock joint in cattle?",
+     "The fetlock joint is the metacarpophalangeal (or metatarsophalangeal) joint—the articulation between the cannon bone (MC3+MC4) and the proximal phalanx (P1). It is a high-motion joint prone to injury and degenerative joint disease."),
+    # ── Digestive system ──────────────────────────────────────────────────────
+    ("What are the four compartments of the bovine stomach?",
+     "The four compartments of the bovine stomach are: rumen (largest, fermentation vat), reticulum (honeycomb, hardware trap), omasum (many-leafed, water absorption), and abomasum (true glandular stomach, equivalent to monogastric stomach)."),
+    ("What is the function of the rumen?",
+     "The rumen is the largest stomach compartment, holding 100-200 litres in adult cattle. It is an anaerobic fermentation vat where microorganisms (bacteria, protozoa, fungi) break down cellulose and other plant polysaccharides into volatile fatty acids (VFAs: acetate, propionate, butyrate) used as the primary energy source."),
+    ("What is the function of the reticulum?",
+     "The reticulum (honeycomb stomach) is the smallest forestomach compartment. It traps ingested hardware (nails, wire) due to its reticular groove and honeycomb mucosal surface. It works with the rumen in eructation and regurgitation during rumination."),
+    ("What is the function of the omasum?",
+     "The omasum (manyplies or psalterium) consists of many muscular leaves (laminae) that absorb water, sodium, and phosphorus from ingesta passing from the rumen/reticulum to the abomasum. It reduces fluid volume by up to 60%."),
+    ("What is the abomasum?",
+     "The abomasum is the true glandular stomach of ruminants, equivalent to the monogastric stomach. It secretes hydrochloric acid, pepsin, and rennet (chymosin). It is the site of true enzymatic digestion and can be displaced (left or right displacement of the abomasum, LDA or RDA) causing production loss."),
+    ("What is rumination in cattle?",
+     "Rumination is the process by which cattle regurgitate rumen contents (cud), re-chew it to reduce particle size, and re-swallow it. Cattle spend 6-10 hours per day ruminating. Cessation of rumination is an early indicator of systemic illness or rumen dysfunction."),
+    ("What volatile fatty acids are produced in the bovine rumen?",
+     "The main volatile fatty acids produced in the rumen are acetate (50-70%), propionate (15-20%), and butyrate (10-15%). Acetate is used for fat synthesis; propionate is gluconeogenic; butyrate fuels the rumen epithelium and is converted to beta-hydroxybutyrate in the rumen wall."),
+    ("What is the bovine dental formula?",
+     "The permanent bovine dental formula is I0/3, C0/1, P3/3, M3/3 = 32 teeth. Cattle have no upper incisors; they use a dental pad (hardened gum) with lower incisors to crop grass. The dental eruption pattern is used for age estimation."),
+    ("What is the reticular groove reflex?",
+     "The reticular groove (esophageal groove) is a muscular groove running from the cardia of the rumen to the omasum. In young ruminants, the groove closes reflexively during suckling to channel milk directly to the abomasum, bypassing the rumen/reticulum. This reflex diminishes with age but can be stimulated by certain salt solutions."),
+    ("How long is the bovine small intestine?",
+     "The bovine small intestine is approximately 40 meters long, divided into duodenum (~1m), jejunum (~35m), and ileum (~4m). It is the primary site of nutrient absorption."),
+    ("What is hardware disease in cattle?",
+     "Hardware disease (traumatic reticuloperitonitis) occurs when cattle ingest sharp metallic objects (wire, nails) that accumulate in the reticulum and penetrate the reticulum wall during contraction, causing peritonitis, pericarditis, or abscess. Treatment includes magnet placement and surgical rumenotomy."),
+    ("What is rumen acidosis?",
+     "Rumen acidosis occurs when rapid fermentation of starch or sugar lowers rumen pH below 5.5. Lactic acid accumulates from Streptococcus bovis overgrowth. Acute acidosis causes rumen stasis, dehydration, and endotoxemia. Subacute rumen acidosis (SARA) causes reduced feed intake, lower milk fat, and laminitis."),
+    ("What bacteria dominate bovine rumen fermentation?",
+     "The bovine rumen contains 10^10-10^11 bacteria per mL. Key fibrolytic species include Fibrobacter succinogenes, Ruminococcus flavefaciens, and Ruminococcus albus. Starch-fermenting bacteria include Prevotella ruminicola and Selenomonas ruminantium. Methanogens (e.g., Methanobrevibacter ruminantium) produce methane from CO2 and H2."),
+    # ── Cardiovascular ────────────────────────────────────────────────────────
+    ("What is the normal heart rate of adult cattle?",
+     "The normal resting heart rate of adult cattle is 48-84 beats per minute (bpm). Calves have higher rates: 80-120 bpm at birth, decreasing with age."),
+    ("Where is the bovine heart located?",
+     "The bovine heart is located in the mediastinum within the thorax, between the 3rd and 6th ribs, slightly left of center. The cardiac apex points cranioventrally toward the left sternal region at approximately the 5th rib."),
+    ("What are the major branches of the bovine aorta?",
+     "The bovine aorta gives off the coronary arteries, brachiocephalic trunk (to forelimbs and head), and continues as the descending aorta. The descending aorta branches into intercostal arteries, celiac artery (to stomach, spleen, liver), cranial mesenteric artery (to intestines), renal arteries, and iliac arteries."),
+    ("What is bovine jugular vein thrombosis?",
+     "Bovine jugular vein thrombosis is inflammation and clot formation in the jugular vein, most commonly caused by repeated perivascular injection of hypertonic solutions or irritating drugs. It can be unilateral or bilateral. Severe cases obstruct venous return from the head and cause edema."),
+    ("What is the significance of the reticular vein in cattle?",
+     "The portal vein system in cattle drains VFAs and other absorbed nutrients from the rumen/reticulum into the portal circulation to the liver. This direct portal delivery means the liver receives high concentrations of propionate (for gluconeogenesis) and other metabolites from rumen fermentation."),
+    # ── Reproductive system ───────────────────────────────────────────────────
+    ("What is the bovine estrous cycle length?",
+     "The bovine estrous cycle is approximately 21 days (range 18-24 days). Estrus (standing heat) lasts 6-18 hours. Ovulation occurs approximately 24-32 hours after the onset of estrus."),
+    ("What are the parts of the bovine female reproductive tract?",
+     "The bovine female reproductive tract consists of two ovaries, two oviducts (fallopian tubes: infundibulum, ampulla, isthmus), a bicornuate uterus (two uterine horns, uterine body, cervix), vagina, vestibule, and vulva."),
+    ("What is the bovine cervix?",
+     "The bovine cervix is a fibrous, muscular organ with interlocking annular rings (typically 3-5 rings) that create a tight seal during pregnancy. It is the most difficult reproductive structure to traverse during artificial insemination, requiring a rectovaginal technique."),
+    ("What is the placentome in cattle?",
+     "The bovine placenta is cotyledonary (synepitheliochorial type). Placentomes are the attachment sites between the fetal cotyledons and the maternal caruncles. There are approximately 70-120 placentomes per pregnancy. The placentome is the unit of nutrient and gas exchange."),
+    ("What hormones regulate the bovine estrous cycle?",
+     "GnRH (from hypothalamus) → LH and FSH (from anterior pituitary) → follicle development and estradiol production (from ovary). Estradiol triggers LH surge → ovulation. Corpus luteum produces progesterone. Luteolysis via uterine PGF2α (prostaglandin F2-alpha) resets the cycle."),
+    ("What is retained fetal membranes in cattle?",
+     "Retained fetal membranes (RFM) is failure to expel the placenta within 12-24 hours of calving. Normal expulsion takes 2-6 hours. Predisposing factors include dystocia, hypocalcemia, twin pregnancy, and Brucella abortus infection. RFM increases the risk of metritis and decreases conception rates."),
+    ("What is the bovine cervical mucus plug?",
+     "During pregnancy, the bovine cervix produces a thick mucus plug that seals the cervical canal, preventing ascending uterine infection. Under estrogen influence at estrus or near parturition, the plug liquefies, producing clear mucus discharge."),
+    ("What is the bovine ovarian follicle wave?",
+     "Cattle have 2-3 ovarian follicular waves per estrous cycle. Each wave involves emergence, selection, and either regression or dominance of a follicle. The dominant follicle of the final wave ovulates. Waves are detectable by ultrasound and are the basis for CIDR-based synchronization protocols."),
+    ("What is the corpus luteum in cattle?",
+     "The corpus luteum (CL) is the progesterone-secreting endocrine structure that forms from the ruptured follicle after ovulation. It maintains pregnancy by suppressing GnRH/LH release. Luteolysis (CL regression) is triggered by uterine PGF2α on days 16-18 if the cow is not pregnant."),
+    ("What is bovine brucellosis?",
+     "Bovine brucellosis is a bacterial infection caused by Brucella abortus. It causes late-term abortion, retained placenta, and epididymitis in bulls. Transmission is via aborted fetal material, colostrum, and milk. It is a zoonosis transmissible to humans. Vaccination with RB51 and test-and-slaughter programs are key controls."),
+    # ── Integumentary (skin, hoof) ────────────────────────────────────────────
+    ("How thick is bovine skin?",
+     "Bovine skin thickness varies by body region: 3-4 mm at the muzzle, 5-7 mm over the trunk, and 8-10 mm at the neck. The dermis provides mechanical strength and is the layer tanned for leather."),
+    ("What type of sweat glands do cattle have?",
+     "Cattle have apocrine sweat glands (unlike the eccrine glands found in primates). These glands are widely distributed and play an important role in evaporative cooling. Each gland consists of a coiled secretory portion in the deep dermis and a duct that opens into the hair follicle."),
+    ("What is the bovine hair follicle arrangement?",
+     "Bovine hair follicles are compound, with a central primary follicle surrounded by 3-8 secondary follicles, giving a secondary-to-primary ratio of approximately 5-8:1. Coat texture and insulation are determined by this ratio and fibre diameter (50-150 µm for body hair)."),
+    ("What are the layers of bovine skin?",
+     "Bovine skin consists of the epidermis (keratinised stratified squamous epithelium, 30-60 µm thick, with stratum basale, spinosum, granulosum, and corneum), the dermis (dense irregular connective tissue with collagen and elastin), and the hypodermis (subcutis, fat and loose connective tissue)."),
+    ("What is white line disease in cattle?",
+     "White line disease is separation and infection of the white line—the junction between the hoof wall and the sole. The white line is soft horn and is prone to impaction with debris and bacteria. Infection tracks up into the corium causing lameness. It is more common in the lateral claw of the hindfoot."),
+    ("What is sole ulcer in cattle?",
+     "A sole ulcer is a hemorrhage and necrosis of the corium (quick) at the typical site of the sole—the junction of the sole and the bulb of the heel, over the apex of the distal phalanx (P3). It is caused by excessive weight bearing, poor claw horn quality, and digital dermatitis. The lateral hindclaw is most affected."),
+    ("What is digital dermatitis (Mortellaro disease)?",
+     "Digital dermatitis is an infectious bovine lameness caused by Treponema spp. It presents as strawberry-like proliferative lesions, usually at the skin-horn junction of the heel. It is contagious, spread by wet, contaminated environments. Topical oxytetracycline is the first-line treatment."),
+    ("What is the bovine corium?",
+     "The corium (quick) is the highly vascular connective tissue that produces hoof horn. It supplies nutrients to the horn-producing epidermis. Damage to the corium (e.g., from laminitis or sole ulcer) impairs horn production and causes lameness. The corium is organized into the perioplic, coronary, laminar, sole, and bulbar coriums."),
+    # ── Respiratory system ────────────────────────────────────────────────────
+    ("What is the normal respiratory rate of cattle?",
+     "The normal respiratory rate of adult cattle is 12-36 breaths per minute at rest. Calves breathe slightly faster (20-40 bpm). Panting (>80 bpm) indicates heat stress."),
+    ("What is the bovine respiratory complex (BRD)?",
+     "Bovine respiratory disease complex (shipping fever) is the most economically important disease of beef cattle. It involves viral pathogens (IBR/BHV-1, BVDV, BRSV, PI-3) that compromise mucosal immunity, followed by secondary bacterial pneumonia from Mannheimia haemolytica, Pasteurella multocida, or Histophilus somni."),
+    ("How many lung lobes do cattle have?",
+     "Cattle have a total of 8 lung lobes: the right lung has 4 lobes (cranial, middle, caudal, accessory) and the left lung has 3-4 lobes (cranial [with 2 parts], caudal). The right lung is larger. The accessory lobe is unique to the right side."),
+    ("What is the nasal planum (muzzle) in cattle?",
+     "The nasal planum is the hairless, glandular area at the nose tip of cattle. Serous secretion keeps it moist. Dryness of the muzzle is a clinical indicator of fever, dehydration, or systemic disease. The muzzle is used in nose printing as a unique biometric identifier."),
+    ("What is IBR in cattle?",
+     "Infectious bovine rhinotracheitis (IBR) is caused by bovine herpesvirus-1 (BHV-1). It causes respiratory signs (nasal discharge, fever, conjunctivitis), vulvovaginitis, balanoposthitis, and abortion. It is a major component of BRD. The virus establishes latency in trigeminal ganglia."),
+    # ── Nervous system ────────────────────────────────────────────────────────
+    ("What is the bovine spinal cord formula?",
+     "The bovine spinal cord runs from the brainstem through the vertebral canal to approximately L3-L4, where the conus medullaris ends and the cauda equina continues. Spinal nerves are designated C1-C8, T1-T13, L1-L6, S1-S5, and coccygeal nerves."),
+    ("What is the cranial nerve responsible for bovine jaw movement?",
+     "The trigeminal nerve (cranial nerve V) provides motor innervation to the muscles of mastication (masseter, temporalis, pterygoids). Dysfunction causes dropped jaw, inability to close the mouth, and atrophy of masticatory muscles."),
+    ("What causes circling disease in cattle?",
+     "Listeriosis (caused by Listeria monocytogenes) is the most common cause of circling (unilateral neurological signs) in cattle. It causes a rhombencephalitis (brainstem encephalitis) with microabscesses. Signs include circling, facial nerve paralysis, dysphagia, and head pressing."),
+    ("What is polioencephalomalacia in cattle?",
+     "Polioencephalomalacia (PEM) is cerebrocortical necrosis caused by thiamine (vitamin B1) deficiency or sulfur toxicosis. Thiamine deficiency leads to impaired pyruvate metabolism and cerebral energy failure. Signs include blindness, head pressing, seizures, and opisthotonos. Treatment is IV thiamine."),
+    ("What is the hypoglossal nerve in cattle?",
+     "Cranial nerve XII (hypoglossal nerve) innervates the tongue muscles. Damage causes ipsilateral tongue deviation and atrophy. It is sometimes damaged during dehorning if the cornual nerve block is incorrectly placed, or by listeriosis."),
+    # ── Mammary system ────────────────────────────────────────────────────────
+    ("What is the anatomy of the bovine udder?",
+     "The bovine udder consists of four glandular quarters: two cranial and two caudal. Each quarter has a separate teat canal and cistern and is drained by independent ducts—there is no communication between quarters. The udder is suspended by medial and lateral suspensory ligaments."),
+    ("What are the layers of the bovine teat?",
+     "The bovine teat wall consists of: outer skin (epidermis + dermis), smooth muscle layer (provides teat tone), teat cistern (stores milk), streak canal (teat orifice, 8-12 mm long, lined by stratified squamous epithelium), and Furstenberg's rosette (annular mucosal folds at the cistern-canal junction providing bacteriostatic defense)."),
+    ("What is the streak canal of the bovine teat?",
+     "The streak canal (teat orifice) is the narrow terminal duct of the teat, 8-12 mm long. It is lined by a waxy, bacteriostatic substance (keratin plug) between milkings that prevents bacterial ingress. Frequent milking, teat damage, or intramammary infusion can disrupt this barrier."),
+    ("What is bovine mastitis?",
+     "Mastitis is inflammation of the mammary gland, predominantly caused by bacterial infection. Common pathogens include Staphylococcus aureus (contagious), Streptococcus agalactiae (contagious), Streptococcus uberis (environmental), and Escherichia coli (environmental). Clinical signs range from subclinical (elevated SCC) to acute toxic mastitis with systemic illness."),
+    ("What is somatic cell count (SCC) in bovine milk?",
+     "Somatic cell count is a measure of milk quality, counting cells (mostly neutrophils, macrophages) shed into milk during infection. Normal SCC is <200,000 cells/mL. SCC >200,000 cells/mL indicates subclinical mastitis. Regulatory limits in most countries are <400,000-750,000 cells/mL for bulk tank milk."),
+    ("What hormones stimulate milk letdown in cattle?",
+     "Oxytocin released from the posterior pituitary stimulates contraction of myoepithelial cells surrounding alveoli, causing milk ejection. Prolactin maintains lactation. Suckling or milking stimulation triggers the neuroendocrine reflex. Stress (cortisol, adrenaline) can inhibit oxytocin release and block milk letdown."),
+    # ── Nutrition and metabolism ───────────────────────────────────────────────
+    ("What is ketosis in dairy cattle?",
+     "Ketosis (acetonemia) is a metabolic disorder of early lactation caused by negative energy balance (NEB). When glucose demand exceeds supply, hepatic gluconeogenesis from propionate is insufficient, and fat mobilization produces ketone bodies (beta-hydroxybutyrate, acetoacetate, acetone) that accumulate in blood. Signs: decreased appetite, weight loss, reduced milk production, ketotic smell."),
+    ("What is hypocalcemia (milk fever) in cattle?",
+     "Milk fever (parturient paresis) is acute hypocalcemia at parturition when calcium demand for colostrum/milk production overwhelms calcium homeostasis. Serum calcium falls below 1.5 mmol/L. Signs progress from trembling and hypersensitivity (stage 1) to recumbency and bloat (stage 2) to coma (stage 3). Treat with IV calcium borogluconate."),
+    ("What is the role of the bovine liver in energy metabolism?",
+     "The bovine liver is central to energy metabolism: gluconeogenesis from propionate, amino acids, and glycerol maintains blood glucose; beta-oxidation of mobilized fatty acids produces ketone bodies; triglyceride re-esterification stores fat. In NEB, excessive NEFA influx can overwhelm triglyceride export, causing hepatic lipidosis (fatty liver)."),
+    ("What minerals are critical for bovine hoof health?",
+     "Key minerals for hoof health include zinc (keratinocyte proliferation, horn hardness), biotin (corium integrity, white line quality), copper (cross-linking of structural proteins), and selenium (antioxidant defense via glutathione peroxidase). Deficiencies predispose to white line disease, sole ulcers, and laminitis."),
+    ("What is laminitis in cattle?",
+     "Laminitis (pododermatitis diffusa) is inflammation of the hoof laminae (corium), causing reduced blood flow, impaired horn production, and displacement of the pedal bone (P3). It is caused by: rumen acidosis (histamine, endotoxin vasoconstriction), systemic inflammation, and metabolic disorders. Subclinical laminitis causes hemorrhagic sole and yellow discoloration; acute laminitis causes severe lameness."),
+    ("What is grass tetany (hypomagnesemia) in cattle?",
+     "Grass tetany is acute hypomagnesemia (<0.4 mmol/L serum Mg) occurring when cattle graze rapidly growing spring grass low in magnesium. Unlike calcium, magnesium cannot be mobilized from bone rapidly. Signs: muscle tremors, hypersensitivity, convulsions, sudden death. Treat with IV magnesium sulfate; prevent with supplemental Mg in feed or pasture topdressing."),
+    # ── Comparative and physiological ────────────────────────────────────────
+    ("How does bovine vision differ from human vision?",
+     "Cattle are dichromats (two types of cone photoreceptors), perceiving primarily blue and yellow-green wavelengths but not red. Their horizontal pupil provides approximately 330° panoramic vision with a binocular field of only 25-30° ahead, favoring predator detection over depth perception. The tapetum lucidum enables effective dim-light vision."),
+    ("What is the bovine thermoregulatory neutral zone?",
+     "The thermal neutral zone (TNZ) for cattle is approximately 5-25°C (41-77°F). Below 5°C, metabolic rate increases to maintain core temperature. Above 25°C, heat dissipation via panting, sweating, and vasodilation increases. Heat stress index (THI >72) significantly reduces feed intake and milk production."),
+    ("What is the bovine reticulorumen pH?",
+     "Healthy reticulorumen pH is 6.0-7.0. On roughage-based diets, pH is typically 6.5-7.0. On high-concentrate diets, pH may drop to 5.5-6.0 (subacute rumen acidosis) or below 5.5 (acute acidosis). Rumen buffers include bicarbonate in saliva (~180 L/day in cattle) and ammonium bicarbonate from protein fermentation."),
+    ("How much saliva do cattle produce daily?",
+     "Cattle produce approximately 100-200 litres of saliva per day (averaging 150 L). Saliva contains bicarbonate and phosphate buffers that neutralise VFAs in the rumen, maintaining rumen pH. Salivation is stimulated by rumination and roughage consumption."),
+    ("What is the ruminant nitrogen cycle?",
+     "Rumen bacteria convert feed protein and non-protein nitrogen (NPN, e.g., urea) to ammonia (NH3). Ammonia is used for microbial protein synthesis. Excess ammonia is absorbed into blood, converted to urea by the liver, and either excreted in urine or recycled back to the rumen via saliva and rumen wall diffusion (urea recycling)."),
+    ("What is the bovine normal body temperature?",
+     "The normal bovine rectal temperature is 38.0-39.5°C (100.4-103.1°F). Values above 39.5°C indicate fever; above 41°C indicates severe hyperthermia. Calves have slightly higher normal temperatures (38.5-40°C). Evening temperatures are typically 0.5°C higher than morning temperatures."),
+    ("What is the bovine reticular groove?",
+     "The reticular groove (oesophageal groove) is a muscular trough running from the cardia to the omasal orifice. In suckling calves, it closes reflexively to channel milk directly to the abomasum, bypassing the rumen and reticulum. The reflex is triggered by copper sulfate or sodium bicarbonate in some treatment protocols."),
+    ("How does the bovine kidney differ from the human kidney?",
+     "The bovine kidney is multilobular (reniculate) with 16-25 renal lobes visible on the surface, giving it a lobulated appearance. This contrasts with the smooth unipapillary kidney of humans. Each lobe has its own pyramid and papilla. Bovine kidneys are retroperitoneal, with the right kidney near the liver and the left kidney more mobile (floating kidney)."),
+    # ── Anatomy identification ────────────────────────────────────────────────
+    ("Where is the abomasum located in a healthy standing cow?",
+     "In a healthy cow, the abomasum is located on the right side of the abdomen, ventral to the rumen, in the right paramedian region from approximately the 9th to 12th rib. Left displacement of the abomasum (LDA) moves it under the rumen on the left side; right displacement (RDA) causes it to rotate clockwise on the right side."),
+    ("Where are bovine lymph nodes concentrated?",
+     "Major bovine lymph node groups include: prescapular (superficial cervical), prefemoral (subiliac), supramammary, mesenteric (internal, associated with the GI tract), mediastinal, and popliteal nodes. The supramammary lymph nodes drain the udder and are enlarged in mastitis or udder lymphoma."),
+    ("What is the bovine atlas vertebra?",
+     "The atlas (C1) is the first cervical vertebra. It has no vertebral body—instead it forms a ring that articulates with the occipital condyles cranially (atlantooccipital joint, nodding) and with the axis (C2) caudally (atlantoaxial joint, rotation). The alar ligaments and transverse ligament stabilise the joint."),
+    ("What is the sacroiliac joint in cattle?",
+     "The sacroiliac joint connects the ilium of the pelvis to the sacrum. It is a synovial joint reinforced by dorsal and ventral sacroiliac ligaments. It transmits hindlimb propulsion forces to the spine. Sacroiliac subluxation (hip drop) causes asymmetric tuber coxae, a common cause of pelvic injury in cattle."),
+    ("What structures form the bovine carpus?",
+     "The bovine carpus (knee joint equivalent) consists of two rows of carpal bones: proximal row (radial, intermediate, ulnar, accessory carpals) and distal row (2nd+3rd fused carpals, 4th carpal). The radiocarpal, middle carpal, and carpometacarpal joints work as a unit during flexion and extension."),
+    # ── Clinical and diagnostic ───────────────────────────────────────────────
+    ("How is bovine age estimated from teeth?",
+     "Bovine age is estimated from permanent incisor eruption: 1.5 years—2 permanent central incisors; 2.5 years—4 permanent incisors; 3.5 years—6 permanent incisors; 4.5 years—8 permanent incisors (full mouth). After 5 years, wear pattern and tooth shape are used for further estimation."),
+    ("What is the normal rumen motility rate in cattle?",
+     "The healthy rumen contracts 1-3 times per minute (approximately 2 contraction sequences per 2-minute period). Each sequence includes reticular contraction (biphasic) followed by ruminal contraction. Rumen motility is assessed by auscultation over the left paralumbar fossa and is reduced in rumen atony, acidosis, or systemic illness."),
+    ("What is the ping test for abomasal displacement?",
+     "The ping test (simultaneous auscultation and percussion) detects gas pockets in a displaced organ. A high-pitched metallic 'ping' over the right flank (9th-12th rib area) suggests right displacement of the abomasum or cecal dilation. A ping over the left flank indicates left displaced abomasum (LDA). The sound is caused by simultaneous flicking of the stethoscope while listening."),
+    ("What is bovine recumbency?",
+     "Bovine recumbency (downer cow syndrome) is inability to rise despite being conscious. Causes include hypocalcemia (milk fever), hypokalemia, nerve damage (obturator/sciatic nerve compression during dystocia), musculoskeletal injury, and metabolic disorders. Long-term recumbency causes pressure myopathy and ischemia. Prognosis worsens with duration."),
+    ("What is the bovine withers height?",
+     "The withers is the highest point of the bovine back, at the junction of the neck and back over the 4th-6th thoracic vertebrae and their dorsal spinous processes. Withers height is a standard body measurement for breed characterisation, growth monitoring, and body weight estimation."),
+    ("What does an elevated SCC indicate in a bovine milk sample?",
+     "An elevated somatic cell count (SCC >200,000 cells/mL) in milk indicates subclinical mastitis—intramammary infection causing neutrophil influx. The higher the SCC, the more severe the infection and milk quality impact. Individual cow SCC >1 million indicates severe mastitis with significant production loss."),
+    ("What is bovine dermatophilosis?",
+     "Dermatophilosis (rain scald, rain rot) is a bacterial skin infection caused by Dermatophilus congolensis, an actinomycete. It causes proliferative, matted, scab-forming lesions on the back, neck, and legs, particularly under wet conditions. Lesions contain the characteristic 'railroad track' filaments microscopically. Treatment includes dry conditions and penicillin-streptomycin."),
+    ("What is the significance of the bovine umbilicus at birth?",
+     "The umbilicus at birth contains the umbilical vein (carries oxygenated blood from placenta to liver), two umbilical arteries (return deoxygenated blood), and the urachus (fetal urine drainage). After birth, the stump dries and falls off in 1-2 weeks. Navel ill (omphalitis) from bacterial infection causes joint ill and systemic sepsis in calves."),
+    ("What is bovine aortic rupture?",
+     "Aortic rupture is a catastrophic condition where the aorta tears, typically at the root (ascending aorta or aortic arch). It is rare but can occur in adult bulls from extreme exertion or trauma. It causes acute cardiovascular collapse and rapid death from hemorrhage into the pericardium (cardiac tamponade) or thorax."),
+    ("What causes bovine bloat?",
+     "Bovine bloat is abnormal accumulation of gas in the rumen. Frothy bloat (primary) occurs on rapidly fermented pasture (clover, alfalfa) where stable foam traps gas and prevents eructation. Free-gas bloat (secondary) occurs from esophageal obstruction or vagus nerve damage preventing rumen gas escape. Treatment: trocarisation, anti-foaming agents (poloxalene, simethicone), or passing a stomach tube."),
+    # ── Histology ──────────────────────────────────────────────────────────────
+    ("What type of epithelium lines the bovine rumen?",
+     "The rumen is lined by non-glandular stratified squamous epithelium with papillae that increase surface area for VFA absorption. The epithelium has four layers: stratum basale, stratum spinosum, stratum granulosum, and stratum corneum (keratinized). Rumen epithelial cells metabolize butyrate and short-chain fatty acids."),
+    ("What type of muscle is the bovine heart wall composed of?",
+     "The bovine heart wall consists of cardiac muscle (myocardium). Cardiac myocytes are branched, striated, uninucleate cells connected by intercalated discs (gap junctions and desmosomes). The gap junctions allow electrical coupling for coordinated contraction."),
+    ("What histological structure characterizes the bovine reticulum?",
+     "The reticulum mucosa has a distinctive honeycomb pattern formed by ridges of smooth muscle covered by non-glandular stratified squamous epithelium. The cells form hexagonal compartments of 1-2 cm diameter. This structure gives the reticulum its alternative name 'honeycomb stomach'."),
+    ("What are the histological layers of the bovine small intestine?",
+     "The bovine small intestinal wall has four layers: mucosa (columnar epithelium with villi and crypts of Lieberkühn, goblet cells, enterocytes), submucosa (Brunner's glands in duodenum, blood and lymph vessels), muscularis externa (inner circular and outer longitudinal smooth muscle), and serosa (visceral peritoneum)."),
+    ("What are Peyer's patches in cattle?",
+     "Peyer's patches are aggregated lymphoid nodules in the ileal submucosa and mucosa. In cattle, the terminal ileum (30-50 cm segment) contains a large continuous Peyer's patch (100-120 cm in calves) that is a major site of B-cell development and antigen sampling via M cells. It involutes in adult cattle."),
+    ("What is the histological structure of bovine liver lobules?",
+     "Bovine liver lobules (classical lobules) are hexagonal units organized around a central vein. Portal triads at the periphery contain portal vein branches, hepatic artery branches, and bile ducts. Hepatocytes radiate as plates from the central vein. The periportal zone (zone 1) is richest in oxygen and is most active in gluconeogenesis; the centrilobular zone (zone 3) is most susceptible to hypoxia and fatty change."),
+    ("What connective tissue surrounds the bovine liver lobules?",
+     "Unlike the pig (where lobules are clearly demarcated by connective tissue septa), bovine liver lobules are poorly delineated. Thin periportal connective tissue exists but does not create clear lobular boundaries. However, bovine liver lobules are still identifiable by the portal triad-to-central vein architecture."),
+    ("What are the abomasal glands in cattle?",
+     "The abomasal mucosa contains fundic (gastric) glands in the fundus and body regions, secreting pepsinogen (chief cells), hydrochloric acid (parietal cells), and mucus (mucous neck cells). The pyloric region has pyloric glands secreting mucus and gastrin (G cells). Abomasal lymphoplasmacytic infiltration occurs in parasitic infection (Ostertagia ostertagi)."),
+    # ── Parasitology (anatomical context) ────────────────────────────────────
+    ("Where does Ostertagia ostertagi reside in cattle?",
+     "Ostertagia ostertagi (brown stomach worm) inhabits the abomasum. Larvae invade abomasal glands, disrupting pepsinogen secretion and raising abomasal pH. This leads to reduced protein digestion, hypoproteinemia, and bottle jaw (submandibular edema) in heavy infections. It is the most economically significant nematode of cattle in temperate climates."),
+    ("What is the predilection site of Fasciola hepatica in cattle?",
+     "Fasciola hepatica (liver fluke) migrates through the liver parenchyma as immature flukes, causing acute hepatitis and hemorrhage. Adult flukes reside in the bile ducts, causing chronic biliary fibrosis, cholangitis, and bile duct hyperplasia. Fluke eggs are passed in bile into the feces."),
+    ("Where do warble fly larvae (Hypoderma spp.) migrate in cattle?",
+     "Hypoderma bovis and H. lineatum larvae hatch from eggs on the hair, penetrate the skin, and migrate through subcutaneous and intramuscular tissues. H. lineatum migrates via the esophageal submucosa (causing 'licking disease'); H. bovis migrates near the spinal canal. Both species overwinter in warble cysts under the dorsal skin before pupating."),
+    # ── Endocrinology ─────────────────────────────────────────────────────────
+    ("What gland produces bovine insulin?",
+     "Insulin is produced by beta cells of the islets of Langerhans in the pancreas. Bovine insulin was the first commercially isolated animal insulin and is structurally very close to human insulin (differing at only 3 positions). The pancreas also produces glucagon (alpha cells), somatostatin (delta cells), and pancreatic polypeptide (PP cells)."),
+    ("What is the role of the bovine adrenal gland?",
+     "The bovine adrenal gland has a cortex (zona glomerulosa: aldosterone; zona fasciculata: cortisol; zona reticularis: androgens) and a medulla (epinephrine, norepinephrine). Cortisol mediates the stress response (HPA axis) and is elevated at parturition. Aldosterone regulates sodium and potassium balance."),
+    ("What triggers parturition in cattle?",
+     "Parturition is triggered by fetal hypothalamic maturation: the fetal HPA axis activates, increasing fetal ACTH and cortisol. Fetal cortisol redirects placental steroidogenesis from progesterone to estrogens. The estrogen/progesterone ratio shift sensitises the uterus to oxytocin, increases PGF2α production, and causes cervical ripening and uterine contractions."),
+    ("What is bovine somatotropin (BST)?",
+     "Bovine somatotropin (BST, rBST) is growth hormone produced by the anterior pituitary. It is anabolic—promoting protein synthesis, lipolysis, and milk production. Recombinant BST (rbST) is approved in some countries to increase milk production by 10-15% in dairy cattle. It acts via IGF-1 (insulin-like growth factor 1) in peripheral tissues."),
+    # ── Neonatal/Calf anatomy ──────────────────────────────────────────────────
+    ("What is colostrum and why is it critical for calves?",
+     "Colostrum is the first secretion of the mammary gland after parturition, rich in immunoglobulins (IgG1, IgG2, IgM, IgA), growth factors, and nutrients. Calves are born agammaglobulinemic (no transplacental antibody transfer in cattle due to synepitheliochorial placentation). Colostrum is the sole source of passive immunity. IgG absorption via intestinal enterocytes (gut closure) is complete within 24-36 hours of birth."),
+    ("What is scours in calves?",
+     "Calf scours (neonatal diarrhea) is the most common cause of calf mortality in the first 4 weeks of life. Major pathogens include: Cryptosporidium parvum (7-21 days), enterotoxigenic E. coli K99 (ETEC, <5 days), rotavirus and coronavirus (5-14 days), and Salmonella. Treatment: oral electrolyte replacement, bicarbonate for acidosis; antibiotics for bacterial causes."),
+    ("What is the bovine thymus?",
+     "The bovine thymus is a bilobed lymphoid organ in the thoracic inlet and neck region, present and active in calves and young animals. It is the site of T-lymphocyte maturation and positive/negative selection. The thymus involutes with age, replaced by adipose tissue. It is large and visible in slaughtered veal calves."),
+    ("What is navel ill in calves?",
+     "Navel ill (omphalitis/umbilical abscess) is bacterial infection of the umbilical stump in calves, caused by Trueperella pyogenes, Fusobacterium necrophorum, E. coli, and Staphylococcus. Bacteria enter via the wet umbilical cord and can spread to the umbilical vein (to the liver) or umbilical arteries (to the bladder/urachus), causing systemic sepsis, joint ill (polyarthritis), and pneumonia."),
+    # ── Anatomy of specific organs ────────────────────────────────────────────
+    ("What is the bovine spleen?",
+     "The bovine spleen is a flat, elongated organ attached to the rumen dorsal sac in the left cranial abdomen. It has a red pulp (blood filtration, storage of RBCs, platelet reservoir) and white pulp (lymphoid tissue with periarteriolar lymphoid sheaths). The spleen is a major site of hematopoiesis in embryonic life and erythrocyte destruction/recycling in adult life."),
+    ("What is the bovine gallbladder?",
+     "Cattle (unlike horses) have a gallbladder. It stores and concentrates bile produced by the liver. Bile is released into the duodenum via the common bile duct. Bovine bile is green and alkaline, containing bile acids, cholesterol, and biliverdin (green pigment, unlike bilirubin in other species). Cholelithiasis (gallstones) is rare in cattle."),
+    ("What is the bovine cecum?",
+     "The bovine cecum is a large blind-ended pouch at the ileo-ceco-colic junction. It is an important site of microbial fermentation of cellulose in monogastrics, but in cattle it is relatively less significant than in hindgut fermenters like horses. Cecal dilation and torsion (cecal volvulus) can cause acute abdominal pain."),
+    ("What is the bovine trachea?",
+     "The bovine trachea is a cartilaginous tube consisting of incomplete (C-shaped, dorsally open) hyaline cartilage rings connected by annular ligaments. The dorsal trachealis muscle closes the tracheal ring posteriorly. In cattle, the right principal bronchus diverges from the trachea before the carina to form the tracheal bronchus (the first bronchus supplying the right cranial lung lobe)."),
+    ("What is the bovine kidney multilobed structure called?",
+     "The bovine kidney is reniculate (multilobed) with 16-25 renal lobes, each consisting of a cortex, a medullary pyramid, and a papilla (papillary duct) draining into a calyx. All calices drain into a common renal pelvis and then the ureter. The multilobed kidney has a greater surface area for filtration relative to size compared to unipapillary kidneys."),
+    ("What are the bovine salivary glands?",
+     "The major bovine salivary glands are the parotid (located behind the angle of the jaw, serous secretion), the mandibular/submaxillary (mixed sero-mucous, beneath the masseter), and the sublingual (mucous, in the floor of the mouth). The parotid is the largest and most active in cattle, contributing the majority of the 100-200 L of saliva produced daily."),
+    ("What is the bovine rete mirabile?",
+     "The bovine carotid rete mirabile is a network of small arteries that replaces the internal carotid artery in cattle (and other ruminants). It is located at the base of the brain in the cavernous sinus. The rete allows countercurrent heat exchange between warm arterial blood and cooled venous blood from the nasal passages, selectively cooling the brain below body temperature to protect against heat stress."),
+    ("What is the significance of the bovine rumen epithelium?",
+     "The rumen epithelium absorbs volatile fatty acids (VFAs) through passive diffusion. Butyrate is metabolized to ketone bodies in the epithelial cells (important for epithelial energy). Propionate passes to the portal blood for hepatic gluconeogenesis. Acetate enters peripheral circulation for lipogenesis. Papillary development (stimulated by butyrate) increases absorption surface area in calves transitioning to solid feed."),
+    ("What is the bovine thyroid gland?",
+     "The bovine thyroid gland consists of two lobes connected by an isthmus, located ventrolateral to the trachea at the first few tracheal rings. It produces thyroxine (T4) and triiodothyronine (T3) from thyroglobulin stored in follicular colloid. Thyroid hormones regulate metabolic rate, growth, and development. Goiter (enlarged thyroid) in calves can result from iodine deficiency or dietary goitrogens."),
+    # ── Anatomy questions at depth ─────────────────────────────────────────────
+    ("Describe the zonation of the bovine liver acinus.",
+     "In the liver acinus model, zone 1 (periportal) is closest to the portal triad, receives the most oxygen and nutrients, and is most active in oxidative metabolism, gluconeogenesis, and beta-oxidation. Zone 3 (centrilobular) is furthest from the portal triad, receives the least oxygen, and is most susceptible to hypoxic injury and lipid accumulation (fatty liver). Zone 2 is intermediate. In bovine hepatic lipidosis, fat accumulates predominantly in zone 3."),
+    ("What is the difference between the bovine medial and lateral saphenous veins?",
+     "The medial saphenous vein runs on the medial surface of the tibia and is commonly used for venipuncture and catheterization in calves. The lateral saphenous vein runs on the lateral aspect of the hindlimb. In adult cattle, the tail vein (coccygeal vein, ventral midline) and the jugular vein are the preferred sites for blood sampling."),
+    ("What is the significance of the bovine nasal turbinate anatomy?",
+     "The bovine nasal cavity contains three main turbinate bones (dorsal, middle, ventral nasal conchae), which warm and humidify inspired air, filter particles, and provide a large surface area for olfaction. The olfactory mucosa covers the ethmoturbinates in the caudal nasal cavity. Disease (bovine rhinitis) disrupts this function, impairing olfaction and predisposing to BRD."),
+    ("Where is the parotid lymph node in cattle?",
+     "The parotid (parotid superficial) lymph node is located rostral to the parotid salivary gland at the angle of the jaw. It drains the face, ear, and parotid gland. Enlargement indicates local infection or neoplasia. It is part of the superficial cervical lymph node group assessed during ante-mortem inspection."),
+    ("What is the bovine cornual nerve?",
+     "The cornual nerve is the branch of the frontal nerve (CN V1, ophthalmic branch of trigeminal) that innervates the horn and horn base in cattle. Cornual nerve block with local anesthetic (2% lidocaine) provides analgesia for dehorning. The nerve runs in a groove on the frontal bone from the medial canthus of the eye toward the horn base."),
+]
+
+
+def build_bovine_qa(out_dir: Path, node: str) -> list[dict]:
+    """Ingest embedded bovine anatomy Q&A pairs via /qa/ingest and return item list."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = f'http://{node}'
+    items = []
+
+    # Batch into groups of 20 for the ingest API
+    batch_size = 20
+    total_posted = 0
+    for i in range(0, len(BOVINE_QA_PAIRS), batch_size):
+        batch = BOVINE_QA_PAIRS[i:i + batch_size]
+        candidates = [
+            {
+                'qa_id': f'bovine_qa_{i + j:04d}',
+                'question': q,
+                'answer': a,
+                'confidence': 0.95,
+            }
+            for j, (q, a) in enumerate(batch)
+        ]
+        payload = json.dumps({'candidates': candidates}).encode()
+        req = urllib.request.Request(
+            f'{base}/qa/ingest',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                result = json.loads(r.read())
+            n = result.get('ingested', len(batch))
+            total_posted += n
+        except Exception as e:
+            print(f'  [WARN] qa/ingest batch {i//batch_size}: {e}')
+
+        for j, (q, a) in enumerate(batch):
+            items.append({
+                'stage': 6,
+                'type': 'qa_pair',
+                'source': 'embedded_bovine_qa',
+                'title': q[:80],
+                'text': f'Q: {q}\nA: {a}',
+                'modality': 'text',
+                'tags': ['qa', 'bovine', 'anatomy', 'chat'],
+            })
+        time.sleep(0.1)
+
+    print(f'  Ingested {total_posted} Q&A pairs via /qa/ingest ({len(items)} items total)')
+    return items
+
+
 # ── Node API ingestor ────────────────────────────────────────────────────────
 
 def ingest_item(item: dict, node_host: str) -> bool:
@@ -1709,7 +2046,7 @@ def write_manifest(data_dir: Path, stages: dict[int, list[dict]]) -> Path:
 def main():
     ap = argparse.ArgumentParser(
         description='Build and ingest bovine anatomy training dataset into W1z4rD node')
-    ap.add_argument('--stages',    default='0,1,2,3,4,5',
+    ap.add_argument('--stages',    default='0,1,2,3,4,5,6',
                     help='Comma-separated stage IDs to run (default all)')
     ap.add_argument('--node',      default=DEFAULT_NODE,
                     help='Node host:port (default localhost:8090)')
@@ -1801,13 +2138,23 @@ def main():
         items5 = fetch_pdb_structures(train_dir / 'stage5_molecular', PDB_IDS)
         all_items[5] = items5
 
+    # ── Stage 6: Bovine Q&A pairs ────────────────────────────────────────────
+    if 6 in stages_to_run:
+        print('\n[Stage 6] Bovine anatomy Q&A pairs (chat capability)')
+        if args.download_only:
+            print('  [SKIP] Stage 6: Q&A ingestion skipped in --download-only mode')
+        else:
+            items6 = build_bovine_qa(train_dir / 'stage6_qa', args.node)
+            all_items[6] = items6
+
     # ── Write manifest ───────────────────────────────────────────────────────
     write_manifest(data_dir, all_items)
 
     # ── Ingest all collected items ───────────────────────────────────────────
     if not args.download_only:
-        all_flat = [it for items in all_items.values() for it in items
-                    if it.get('b64') or it.get('text')]
+        # Stage 6 Q&A items are already ingested via /qa/ingest in build_bovine_qa
+        all_flat = [it for sid, items in all_items.items() for it in items
+                    if sid != 6 and (it.get('b64') or it.get('text'))]
         print(f'\n[Ingest] Posting {len(all_flat)} items to http://{args.node} ...')
         total_ok = ingest_batch(all_flat, args.node, workers=args.workers)
         print(f'  Ingested {total_ok}/{len(all_flat)} items successfully')
