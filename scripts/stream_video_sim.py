@@ -11,8 +11,8 @@ Two built-in scenes:
   --scene cell    : (use stream_cell_activity.py for this instead)
 
 The pipeline is identical to what a real video stream would use:
-  Video frame → detect regions → extract (id, x, y, velocity, label, scale_m)
-  → POST /neuro/train
+  Video frame -> detect regions -> extract (id, x, y, velocity, label, scale_m)
+  -> POST /neuro/train
 
 After training, GET /neuro/stream returns centroid positions that reconstruct
 the spatial layout — positions ARE learned from the stream, not echoed.
@@ -231,7 +231,7 @@ def build_snapshot(objs, t, scene_name='field'):
         })
 
     return {
-        'timestamp': int(t * 1000),
+        'timestamp': {'unix': int(t * 1000)},
         'bounds':    BOUNDS,
         'symbols':   symbols,
         'metadata': {
@@ -287,8 +287,8 @@ def main():
     spec = SCENES[args.scene]
     print(f'Connected. Starting [{args.scene}] simulation.', flush=True)
     print(f'  {len(spec)} tracked entities', flush=True)
-    print(f'  {args.fps} fps → POST /neuro/train each frame', flush=True)
-    print(f'  GET /neuro/stream → world_viewer.html reads this live', flush=True)
+    print(f'  {args.fps} fps -> POST /neuro/train each frame', flush=True)
+    print(f'  GET /neuro/stream -> world_viewer.html reads this live', flush=True)
     print('Press Ctrl+C to stop.', flush=True)
 
     objs     = make_objects(spec)

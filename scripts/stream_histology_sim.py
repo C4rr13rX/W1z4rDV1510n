@@ -325,7 +325,7 @@ def generate_tissue_layout(tissue_name: str, slide_um: float):
     # Tile cells across the slide
     for cell in spec['cells']:
         lbl, n_fov, w_um, h_um, z_mean, depth, system = cell
-        # Density: n_fov cells per FOV area → scale to full slide
+        # Density: n_fov cells per FOV area -> scale to full slide
         fov_area   = fov_um ** 2
         slide_area = slide_um ** 2
         count      = int(n_fov * slide_area / fov_area * random.uniform(0.7, 1.3))
@@ -438,7 +438,7 @@ def build_snapshot(tissue_name, layout, stage, t, prev_pos):
         })
 
     return {
-        'timestamp': int(t * 1000),
+        'timestamp': {'unix': int(t * 1000)},
         'bounds':    BOUNDS,
         'symbols':   symbols,
         'metadata':  {
@@ -497,7 +497,7 @@ def main():
         print('Node not reachable. Start the node first.', flush=True)
         sys.exit(1)
     print('Connected. Starting histology stream.', flush=True)
-    print(f'  Tissues: {" → ".join(TISSUE_ORDER)} ({args.duration}s each)', flush=True)
+    print(f'  Tissues: {" -> ".join(TISSUE_ORDER)} ({args.duration}s each)', flush=True)
     if args.tissue:
         print(f'  Locked to: {args.tissue}', flush=True)
     print('Press Ctrl+C to stop.', flush=True)
@@ -522,7 +522,7 @@ def main():
             tissue_name = TISSUE_ORDER[idx]
 
         if tissue_name != cur_tissue:
-            print(f'\n  → Switching to: {tissue_name}', flush=True)
+            print(f'\n  -> Switching to: {tissue_name}', flush=True)
             print(f'    {TISSUES[tissue_name]["description"]}', flush=True)
             spec        = TISSUES[tissue_name]
             layout      = generate_tissue_layout(tissue_name, spec['slide_um'])

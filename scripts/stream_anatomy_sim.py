@@ -5,14 +5,14 @@ Human Anatomy CT Stream Simulator
 Simulates a virtual CT scanner doing continuous fly-throughs of human anatomy
 and streams EnvironmentSnapshot frames into the neural fabric at 10 fps.
 
-120+ anatomical structures span skull→femoral heads in accurate 3-D body
+120+ anatomical structures span skull->femoral heads in accurate 3-D body
 coordinates:
-  x  0 = patient left  →  1 = patient right
-  y  0 = feet          →  1 = top of head
-  z  0 = anterior      →  1 = posterior
+  x  0 = patient left  ->  1 = patient right
+  y  0 = feet          ->  1 = top of head
+  z  0 = anterior      ->  1 = posterior
 
 Four scan phases cycle automatically:
-  full_body  (120 s) — axial sweep head→feet→head, ±6% y-slab
+  full_body  (120 s) — axial sweep head->feet->head, ±6% y-slab
   cardiac    ( 60 s) — heart + great vessels + lung bases zoomed
   brain      ( 60 s) — full cranial contents
   abdomen    ( 60 s) — liver, kidneys, gut, retroperitoneum
@@ -447,7 +447,7 @@ def build_snapshot(structs, prev_pos, t, phase, scan_y):
             }
         })
     return {
-        'timestamp': int(t * 1000),
+        'timestamp': {'unix': int(t * 1000)},
         'bounds':    {'x': 1.0, 'y': 1.0, 'z': 1.0},
         'symbols':   symbols,
         'metadata':  {
@@ -505,7 +505,7 @@ def main():
         sys.exit(1)
     print('Connected. Starting anatomy CT stream.', flush=True)
     print(f'  {len(STRUCTURES)} structures  |  {args.fps} fps', flush=True)
-    print(f'  Phases: {" → ".join(n for n,_ in PHASE_SCHEDULE)} (cycling every {PHASE_TOTAL}s)', flush=True)
+    print(f'  Phases: {" -> ".join(n for n,_ in PHASE_SCHEDULE)} (cycling every {PHASE_TOTAL}s)', flush=True)
     if args.phase:
         print(f'  Locked to phase: {args.phase}', flush=True)
     print('Press Ctrl+C to stop.', flush=True)

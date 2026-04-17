@@ -309,6 +309,110 @@ window.addEventListener('resize', () => {
   renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight);
 });
 
+// ── Live symbol layer (real-time EnvironmentSnapshot positions) ───────────────
+// Polls /neuro/symbols/live at ~10fps when in SCENE mode.
+// Renders a small bright sphere per tracked entity, moving at its actual x/y/z.
+let liveSymObjs = new Map();  // track_id → {mesh, labelSprite}
+let liveSymTimer = null;
+
+function _liveSymMesh(sym) {
+  const r   = SCENE_RENDERERS[sym.label] || SCENE_RENDERERS._default;
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: r.col, emissive: r.em ?? r.col,
+    emissiveIntensity: (r.ei ?? 0.8) + 0.6,
+    roughness: 0.3, metalness: 0.0, transparent: true, opacity: 0.0,
+  });
+  // Live dots are noticeably smaller than centroid meshes
+  const geo   = r.geo();
+  const mesh  = new THREE.Mesh(geo, mat);
+  const scl   = Math.min((r.sx||1), (r.sy||1), (r.sz||1)) * 0.5;
+  mesh.scale.setScalar(scl);
+  mesh.userData.liveId = sym.track_id || sym.id;
+  // Bright outline ring so live objects pop above centroid layer
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(0.065, 0.082, 16),
+    new THREE.MeshBasicMaterial({color:0x00ffcc, transparent:true, opacity:0.55, side:THREE.DoubleSide})
+  );
+  halo.rotation.x = -Math.PI/2;
+  mesh.add(halo);
+  return {mesh, halo};
+}
+
+function _liveWorldPos(sym) {
+  // EnvironmentSnapshot positions are in 0-1 space (same convention as centroids)
+  const p = sym.position || {};
+  return new THREE.Vector3(
+    ((p.x||0.5) - 0.5) * SCENE_WORLD_SCALE,
+    ((p.y||0.5) - 0.5) * SCENE_WORLD_SCALE,
+    ((p.z||0.5) - 0.5) * SCENE_WORLD_SCALE,
+  );
+}
+
+async function pollLiveSymbols() {
+  if (!sceneMode) return;
+  try {
+    const resp = await fetch(`http://${HOST}/neuro/symbols/live`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const symbols = data.symbols || [];
+    const seen = new Set();
+
+    for (const sym of symbols) {
+      const id = (sym.properties?.track_id) || sym.id;
+      seen.add(id);
+      let entry = liveSymObjs.get(id);
+      if (!entry) {
+        // sym.type is the SymbolType enum ("CUSTOM","PERSON","ANIMAL",…)
+        // sym.properties.label holds the actual entity label ("cow","cardiomyocyte",…)
+        const lbl = (sym.properties?.label) || sym.type || 'unknown';
+        sym.label = lbl.toLowerCase().replace(/\s+/g,'_');
+        const {mesh, halo} = _liveSymMesh(sym);
+        scene.add(mesh);
+        entry = {mesh, halo, label: sym.label, targetPos: _liveWorldPos(sym)};
+        liveSymObjs.set(id, entry);
+      }
+      entry.targetPos = _liveWorldPos(sym);
+      // Fade in
+      entry.mesh.material.opacity = Math.min(entry.mesh.material.opacity + 0.12, 0.92);
+    }
+
+    // Fade out + remove entities that disappeared
+    for (const [id, entry] of liveSymObjs) {
+      if (!seen.has(id)) {
+        entry.mesh.material.opacity -= 0.06;
+        if (entry.mesh.material.opacity <= 0) {
+          scene.remove(entry.mesh);
+          entry.mesh.geometry.dispose();
+          entry.mesh.material.dispose();
+          liveSymObjs.delete(id);
+        }
+      }
+    }
+  } catch {}
+}
+
+function animateLiveSymbols() {
+  // Called once per animation frame to lerp meshes toward their target positions
+  for (const [, entry] of liveSymObjs) {
+    entry.mesh.position.lerp(entry.targetPos, 0.12);
+  }
+}
+
+function clearLiveSymbols() {
+  if (liveSymTimer) { clearInterval(liveSymTimer); liveSymTimer = null; }
+  for (const [, entry] of liveSymObjs) {
+    scene.remove(entry.mesh);
+    entry.mesh.geometry.dispose();
+    entry.mesh.material.dispose();
+  }
+  liveSymObjs.clear();
+}
+
+function startLiveSymPoll() {
+  clearLiveSymbols();
+  liveSymTimer = setInterval(pollLiveSymbols, 100);
+}
+
 // ── Neural stream ─────────────────────────────────────────────────────────────
 let neuroSnap = null, streamOk = false;
 const LABEL_COLORS_MAP = {
@@ -598,10 +702,12 @@ function toggleSceneMode() {
     orbitCtrl.update();
     bloomPass.strength=1.5; bloomPass.radius=0.6; bloomPass.threshold=0.08;
     document.getElementById('hint').textContent =
-      'DRAG · ORBIT   SCROLL · ZOOM   LABELS = LEARNED NEURAL CENTROIDS';
+      'DRAG · ORBIT   SCROLL · ZOOM   LABELS = LEARNED CENTROIDS · TEAL RINGS = LIVE ENTITIES';
+    startLiveSymPoll();
   } else {
     btn.classList.remove('active'); btn.textContent='◈ SCENE';
     clearSceneObjects();
+    clearLiveSymbols();
     if (currentGroup) currentGroup.visible = true;
     const lc = LC[currentLevel];
     bloomPass.strength=lc.bloom.s; bloomPass.radius=lc.bloom.r; bloomPass.threshold=lc.bloom.t;
@@ -1136,6 +1242,7 @@ function animate(){
     if(sceneMode) rebuildSceneObjects(neuroSnap);
     else applyNeuroToScene(neuroSnap);
   }
+  if(sceneMode) animateLiveSymbols();
 
   // PQ animation
   if(currentGroup&&(currentLevel===4||currentLevel===5)){

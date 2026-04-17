@@ -159,6 +159,9 @@ struct ApiState {
     prediction_experiment: Arc<Mutex<PredictionExperimentRuntime>>,
     /// Hierarchical structural decomposition: layers inside entities from experience.
     layered_physiology: Arc<Mutex<LayeredPhysiologyRuntime>>,
+    /// Most recent EnvironmentSnapshot received via /neuro/train.
+    /// Served by GET /neuro/symbols/live for real-time world viewer animation.
+    live_snapshot: Arc<Mutex<Option<EnvironmentSnapshot>>>,
 }
 
 /// Minimum peak `txt:word_*` activation required to emit an answer.
@@ -840,6 +843,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         chaos_model:          Arc::new(Mutex::new(ChaosWorldModel::new(ChaosWorldConfig::default()))),
         prediction_experiment: Arc::new(Mutex::new(PredictionExperimentRuntime::new(PredictionExperimentConfig::default()))),
         layered_physiology:   Arc::new(Mutex::new(LayeredPhysiologyRuntime::new(LayeredPhysiologyConfig::default()))),
+        live_snapshot:        Arc::new(Mutex::new(None)),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -972,6 +976,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/motifs/predict", post(neuro_motifs_predict))
         .route("/neuro/ask",            post(neuro_ask))
         .route("/neuro/generate",       post(neuro_generate))
+        .route("/neuro/symbols/live",   get(neuro_symbols_live))
         .route("/chat",                 post(neuro_ask))
         // ── Hypothesis queue ──────────────────────────────────────────────────
         // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
@@ -1767,6 +1772,9 @@ async fn neuro_train(
     // temporal pattern accumulation internally.
     state.neuro.observe_snapshot(&request.snapshot);
 
+    // Cache the most recent snapshot so /neuro/symbols/live can serve it.
+    *state.live_snapshot.lock().expect("live_snapshot") = Some(request.snapshot.clone());
+
     // Also feed the sensor labels directly into the EEM so equations gain
     // evidence from every training frame — not just explicit /equations/apply calls.
     // Extract labels from symbol properties (type + property values).
@@ -1813,6 +1821,39 @@ async fn neuro_train(
             symbols_observed: n_symbols,
         }).unwrap_or_default()),
     )
+}
+
+/// GET /neuro/symbols/live
+/// Returns the symbols array from the most recent EnvironmentSnapshot posted
+/// via /neuro/train. The world viewer polls this at ~10 fps to animate entity
+/// positions in real-time SCENE mode, overlaid on the Hebbian centroid geometry.
+async fn neuro_symbols_live(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "neuro") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    let guard = state.live_snapshot.lock().expect("live_snapshot");
+    match &*guard {
+        Some(snap) => {
+            let payload = serde_json::json!({
+                "timestamp": snap.timestamp,
+                "bounds": snap.bounds,
+                "symbols": snap.symbols,
+                "metadata": snap.metadata,
+            });
+            (StatusCode::OK, Json(payload))
+        }
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "symbols": [], "metadata": {} })),
+        ),
+    }
 }
 
 /// GET /neuro/snapshot
