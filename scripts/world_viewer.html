@@ -182,6 +182,7 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
   border-radius:3px;padding:10px 14px;font-size:10px;min-width:140px;">
   <div style="font-size:7.5px;letter-spacing:2px;color:#005030;text-transform:uppercase;margin-bottom:6px;border-bottom:1px solid #002818;padding-bottom:4px;">NEURAL COW MODEL</div>
   <div style="display:flex;justify-content:space-between;margin:3px 0"><span style="color:#003820;font-size:8px">CENTROIDS</span><span style="color:#40ffa0;font-size:8px" id="neural-status">--</span></div>
+  <div style="display:flex;justify-content:space-between;margin:3px 0"><span style="color:#003820;font-size:8px">POSE</span><span style="color:#40ffa0;font-size:8px" id="neural-pose">--</span></div>
   <div style="display:flex;justify-content:space-between;margin:3px 0"><span style="color:#003820;font-size:8px">SOURCE</span><span style="color:#30cc80;font-size:8px">Hebbian fabric</span></div>
   <div style="display:flex;justify-content:space-between;margin:3px 0"><span style="color:#003820;font-size:8px">SPECIES</span><span style="color:#30cc80;font-size:8px">Bos taurus</span></div>
   <div style="font-size:7px;color:#002010;margin-top:6px;line-height:1.5">Click canvas · WASD walk<br>Mouse look · ESC unlock</div>
@@ -815,11 +816,27 @@ async function _fetchNeuralCow() {
 
   if (neuralCow) { scene.remove(neuralCow); neuralCow.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); neuralCow = null; }
   neuralCow = _buildNeuralCow(cmap);
-  neuralCow.position.set(0, 0, -2.0);   // in front of camera, over video ground plane
+
+  // Place cow inside the depth-mesh video scene.
+  // Video camera is at z=4 looking at z=0; depth mesh spans z=0..1.
+  // z=0.5 puts the cow at the mid-depth of the scene, correctly overlaying the video.
+  neuralCow.position.set(0, 0, 0.5);
   scene.add(neuralCow);
+
+  // Derive current pose from centroid geometry
+  const head   = cmap['cow_head'],   muzzle = cmap['cow_muzzle'];
+  const back   = cmap['cow_back'],   withers = cmap['cow_withers'];
+  let pose = 'standing';
+  if (head && back) {
+    if (head.y < back.y * 0.65) pose = 'grazing';          // head dropped well below back
+    else if (withers && muzzle && Math.abs(withers.y - muzzle.y) < 0.06) pose = 'walking';
+  }
+
   // Update HUD
-  const el = document.getElementById('neural-status');
+  const el  = document.getElementById('neural-status');
   if (el) el.textContent = `${Object.keys(cmap).length} centroids`;
+  const pel = document.getElementById('neural-pose');
+  if (pel) pel.textContent = pose;
 }
 
 function toggleNeuralMode() {
@@ -837,14 +854,17 @@ function toggleNeuralMode() {
     document.getElementById('neural-hud').style.display = 'block';
     document.getElementById('vq-hud').style.display = 'none';  // hide video HUD
 
-    // Camera: side-front view, good angle to see the whole cow
-    camera.position.set(2.8, 1.0, 1.0);
-    camera.lookAt(0, 0.7, -2.0);
+    // Camera: angled side-front view inside the video scene.
+    // Video mesh is at z=0..1; cow group sits at z=0.5.
+    // Camera at (1.8, 1.4, 3.8) → side-elevated angle, stays well in front of mesh.
+    camera.position.set(1.8, 1.4, 3.8);
+    camera.lookAt(0, 0.7, 0.5);          // look at cow centre
 
     // Bright ambient light so cow anatomy is clearly lit
     scene.traverse(o => { if (o.isAmbientLight) o.intensity = 1.2; });
 
-    _neuralTimer = setInterval(_fetchNeuralCow, 1500);
+    // Poll at 300ms — near-real-time response to live video sensor updates
+    _neuralTimer = setInterval(_fetchNeuralCow, 300);
     _fetchNeuralCow();
 
   } else {
