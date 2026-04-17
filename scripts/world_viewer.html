@@ -5,106 +5,123 @@
 <title>W1z4rD V1510n — Neural World Viewer</title>
 <style>
 * { box-sizing:border-box; margin:0; padding:0; }
-body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; color:#8ab4cc; }
 canvas { position:absolute; inset:0; z-index:1; display:block; }
+#hud { position:absolute; inset:0; z-index:2; pointer-events:none; }
+#fade { position:absolute; inset:0; background:#000; opacity:0; pointer-events:none; z-index:8; transition:opacity 0.38s ease; }
 
-/* Crosshair (FPS mode only) */
+#bc { position:absolute; top:14px; left:18px; font-size:10px; letter-spacing:2px; color:#2a4a5a; text-transform:uppercase; }
+#bc .cr { color:#5a9ab8; } #bc .sep { margin:0 7px; color:#152030; } #bc .act { color:#a8d8f0; }
+#badge { position:absolute; top:30px; left:18px; font-size:9px; color:#1a3a48; letter-spacing:1.5px; }
+#badge .sv { color:#2a7a9a; }
+
+#panel { position:absolute; top:14px; right:14px; width:260px; background:rgba(2,5,12,0.93);
+  border:1px solid #091522; border-top:2px solid #1a607a; border-radius:3px;
+  padding:12px 14px; font-size:10px; pointer-events:all; }
+.pt { font-size:8px; letter-spacing:2px; color:#1a4050; text-transform:uppercase;
+      margin-bottom:8px; border-bottom:1px solid #071320; padding-bottom:4px; }
+.en { font-size:13px; color:#98cce0; margin-bottom:2px; }
+.el { font-size:9px; color:#2a5a72; font-style:italic; margin-bottom:6px; }
+.kv { display:flex; justify-content:space-between; margin:2px 0; }
+.kv .k { color:#1a3848; font-size:8px; text-transform:uppercase; }
+.kv .v { color:#4a8aaa; font-size:8px; text-align:right; max-width:160px; }
+#ls { margin-top:8px; border-top:1px solid #071320; padding-top:6px; }
+.lt { font-size:7px; letter-spacing:2px; color:#0d2838; text-transform:uppercase; margin-bottom:4px; }
+.lr { display:flex; align-items:center; gap:5px; margin:2px 0; }
+.ld { width:4px; height:4px; border-radius:50%; flex-shrink:0; }
+.ln { font-size:8px; color:#2a6080; flex:1; }
+.lz { font-size:8px; color:#1a4060; }
+#syn { margin-top:7px; border-top:1px solid #071320; padding-top:6px; font-size:8.5px; color:#1a3848; line-height:1.7; }
+
+/* Neural map */
+#nmap-wrap { position:absolute; bottom:52px; right:14px; pointer-events:none; }
+#nmap { border:1px solid #07121c; border-radius:3px; opacity:0.85; display:block; }
+#nmap-lbl { font-size:7px; color:#0d1e28; letter-spacing:2px; text-transform:uppercase; margin-bottom:3px; text-align:right; }
+
+/* Scale bar */
+#sb { position:absolute; bottom:52px; left:18px; font-size:9px; color:#1a3040; letter-spacing:1px; }
+#sbl { width:70px; height:1px; background:#1a3040; margin:3px 0; }
+
+/* Nav hint */
+#hint { position:absolute; bottom:52px; left:50%; transform:translateX(-50%);
+  font-size:8.5px; color:rgba(40,90,120,0.5); letter-spacing:2px; text-transform:uppercase; pointer-events:none; text-align:center; white-space:nowrap; }
+
+/* Tooltip */
+#tt { position:absolute; max-width:280px; background:rgba(2,5,14,0.96); border:1px solid #0c1e32;
+  border-left:2px solid #2a7ab8; border-radius:3px; padding:8px 11px; font-size:9px;
+  pointer-events:none; opacity:0; transition:opacity .12s; z-index:10; }
+.ttn { font-size:12px; color:#b0d8f2; margin-bottom:2px; }
+.ttl { font-size:8px; color:#2a6882; font-style:italic; margin-bottom:3px; }
+.ttd { color:#4a88a8; font-size:8px; margin-bottom:3px; }
+.tti { color:#2a4860; font-size:8.5px; line-height:1.6; }
+
+/* Layer bar */
+#lbar { position:absolute; bottom:0; left:0; right:0; background:rgba(1,3,8,0.97);
+  border-top:1px solid #070e18; padding:6px 18px; display:flex; gap:5px;
+  align-items:center; pointer-events:all; overflow-x:auto; }
+.lc { padding:3px 7px; border-radius:2px; font-size:7.5px; border:1px solid;
+      letter-spacing:.5px; white-space:nowrap; text-transform:uppercase; cursor:default; }
+
+/* Stream status */
+#ns { position:absolute; top:14px; left:50%; transform:translateX(-50%);
+  font-size:8px; color:#0d2030; letter-spacing:2px; text-transform:uppercase; pointer-events:none; }
+
+/* FPS toggle */
+#fps-btn { position:absolute; bottom:52px; right:298px; z-index:5;
+  background:none; border:1px solid #0a2030; color:#1a4050; padding:5px 12px;
+  font-family:inherit; font-size:8px; letter-spacing:2px; text-transform:uppercase;
+  cursor:pointer; border-radius:2px; pointer-events:all; transition:all 0.2s; }
+#fps-btn:hover { border-color:#2a6080; color:#3a8090; }
+#fps-btn.active { border-color:#2a9060; color:#3ab080; }
+
+/* Crosshair for FPS mode */
 #xhair { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-  width:16px; height:16px; z-index:5; pointer-events:none; display:none; }
-#xhair::before,#xhair::after { content:''; position:absolute; background:rgba(120,220,200,0.7); }
+  width:14px; height:14px; pointer-events:none; display:none; }
+#xhair::before,#xhair::after { content:''; position:absolute; background:rgba(100,210,180,0.7); }
 #xhair::before { width:1px; height:100%; left:50%; top:0; }
 #xhair::after  { width:100%; height:1px; top:50%; left:0; }
 
-/* Top-left: title + stream state */
-#hud-tl { position:absolute; top:14px; left:14px; z-index:5; pointer-events:none; }
-#hud-tl .title { font-size:9px; letter-spacing:3px; color:#1a6a8a; text-transform:uppercase; margin-bottom:5px; }
-#stream-dot { display:inline-block; width:5px; height:5px; border-radius:50%;
-  background:#1a2a38; margin-right:5px; vertical-align:middle; }
-#stream-txt { font-size:8px; color:#1a3a4a; letter-spacing:1.5px; }
-#entity-count { font-size:8px; color:#0d2030; letter-spacing:1px; margin-top:3px; }
-
-/* Left panel: active networks */
-#fire-panel { position:absolute; top:60px; left:14px; z-index:5; pointer-events:none;
-  min-width:180px; }
-#fire-panel .ph { font-size:7px; letter-spacing:2px; color:#0d2030; text-transform:uppercase;
-  margin-bottom:5px; border-bottom:1px solid #061018; padding-bottom:3px; }
-.fire-row { display:flex; align-items:center; gap:5px; margin:2px 0; }
-.fire-dot { width:4px; height:4px; border-radius:50%; flex-shrink:0; }
-.fire-lbl { color:#1a4a5a; font-size:8px; }
-.fire-str { color:#0d2a38; font-size:7.5px; margin-left:auto; }
-.fire-wm  { color:#2a8a50; font-size:7px; }
-.fire-srp { color:#b04020; font-size:7px; }
-
-/* Right panel: nearest entity */
-#ent-panel { position:absolute; top:14px; right:14px; width:240px; z-index:5;
-  background:rgba(2,6,14,0.90); border:1px solid #0a1826; border-top:2px solid #1a5870;
-  border-radius:3px; padding:10px 12px; font-size:9px; pointer-events:none; }
-#ent-panel .ph { font-size:7px; letter-spacing:2px; color:#0d2838; text-transform:uppercase;
-  margin-bottom:7px; border-bottom:1px solid #061018; padding-bottom:4px; }
-#ent-name { font-size:12px; color:#6ab8d8; margin-bottom:2px; }
-#ent-sub  { font-size:8px; color:#1a4a60; font-style:italic; margin-bottom:5px; }
-.ekv { display:flex; justify-content:space-between; margin:1.5px 0; }
-.ekv .k { color:#0d2030; font-size:8px; text-transform:uppercase; }
-.ekv .v { color:#2a6070; font-size:8px; }
-
-/* Bottom: controls */
-#controls-bar { position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
-  font-size:8px; color:rgba(25,70,95,0.7); letter-spacing:2px; text-transform:uppercase;
-  z-index:5; pointer-events:none; text-align:center; white-space:nowrap; }
-
-/* FPS toggle button */
-#fps-btn { position:absolute; bottom:14px; right:14px; z-index:5;
-  background:none; border:1px solid #0a2030; color:#1a4050; padding:6px 14px;
-  font-family:inherit; font-size:8px; letter-spacing:2px; text-transform:uppercase;
-  cursor:pointer; transition:all 0.2s; border-radius:2px; }
-#fps-btn:hover { border-color:#2a6080; color:#3a80a0; }
-#fps-btn.active { border-color:#1a9060; color:#2ab080; }
-
-/* Proximity label */
-#prox-label { position:absolute; top:53%; left:50%; transform:translateX(-50%);
-  font-size:8px; color:rgba(40,180,120,0); letter-spacing:2.5px; text-transform:uppercase;
-  pointer-events:none; z-index:5; transition:color 0.3s; white-space:nowrap; }
-
-/* Fade */
-#fade { position:absolute; inset:0; background:#000; opacity:0; pointer-events:none; z-index:9; transition:opacity 0.4s; }
-
-/* Loading bar (initial) */
-#loading { position:absolute; bottom:40px; left:50%; transform:translateX(-50%);
-  z-index:6; text-align:center; }
-#loading-txt { font-size:8px; color:#1a4a6a; letter-spacing:2px; text-transform:uppercase; margin-bottom:6px; }
-#loading-bar { width:160px; height:1px; background:#061018; overflow:hidden; }
-#loading-prog { height:100%; background:#1a6a8a; width:0; transition:width 0.5s; }
+/* Loading */
+#loading { position:absolute; inset:0; background:#000509; z-index:15;
+  display:none; flex-direction:column; align-items:center; justify-content:center; }
+#lbar2 { width:200px; height:1px; background:#081420; margin:14px 0 8px; overflow:hidden; }
+#lprog { height:100%; background:#2a7ab8; width:0; transition:width .3s; }
+#ltxt  { font-size:9px; color:#0e2a3a; letter-spacing:2px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 
-<!-- HUD always visible -->
-<div id="hud-tl">
-  <div class="title">W1z4rD V1510n — Neural World</div>
-  <div><span id="stream-dot"></span><span id="stream-txt">CONNECTING...</span></div>
-  <div id="entity-count">0 entities</div>
+<div id="hud">
+  <div id="bc"></div>
+  <div id="badge"></div>
+  <div id="panel">
+    <div class="pt">Neural Fabric — Active State</div>
+    <div class="en" id="p-name">—</div>
+    <div class="el" id="p-latin">—</div>
+    <div id="p-kvs"></div>
+    <div id="ls"><div class="lt">Calibrated Layers</div><div id="p-layers"></div></div>
+    <div id="syn"></div>
+  </div>
+  <div id="nmap-wrap">
+    <div id="nmap-lbl">Neural Map</div>
+    <canvas id="nmap" width="160" height="160"></canvas>
+  </div>
+  <div id="lbar"><span style="font-size:7.5px;color:#0d1e2a;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0">Depth Layers</span></div>
+  <div id="sb"><div id="sbl"></div><span id="sbtxt">—</span></div>
+  <div id="hint">DRAG · ORBIT &nbsp;·&nbsp; SCROLL · ZOOM &nbsp;·&nbsp; WASD · PAN &nbsp;·&nbsp; RIGHT-CLICK · ASCEND</div>
+  <div id="ns"></div>
+  <div id="xhair"></div>
 </div>
-<div id="fire-panel">
-  <div class="ph">Active Networks</div>
-  <div id="fire-list"><div style="font-size:8px;color:#0d1820">— awaiting stream —</div></div>
-</div>
-<div id="ent-panel">
-  <div class="ph">Nearest Entity</div>
-  <div id="ent-name">—</div>
-  <div id="ent-sub">—</div>
-  <div id="ent-kvs"></div>
-</div>
-<div id="controls-bar">
-  DRAG · ORBIT &nbsp;|&nbsp; SCROLL · ZOOM &nbsp;|&nbsp; WASD · STRAFE &nbsp;|&nbsp; E · INSPECT NEAREST
-</div>
-<button id="fps-btn" onclick="toggleFPS()">FPS MODE</button>
-<div id="xhair"></div>
-<div id="prox-label">PRESS E TO INSPECT</div>
+
+<button id="fps-btn" onclick="toggleFPS()">⊕ FPS MODE</button>
 <div id="fade"></div>
-<div id="loading">
-  <div id="loading-txt">LOADING NEURAL FABRIC...</div>
-  <div id="loading-bar"><div id="loading-prog"></div></div>
+<div id="tt"><div class="ttn" id="ttn"></div><div class="ttl" id="ttl"></div><div class="ttd" id="ttd"></div><div class="tti" id="tti"></div></div>
+
+<div id="loading" style="display:flex">
+  <span style="font-size:11px;color:#1a4a6a;letter-spacing:3px">W1Z4RD V1510N — NEURAL WORLD</span>
+  <div id="lbar2"><div id="lprog"></div></div>
+  <div id="ltxt">BUILDING CELLULAR ULTRASTRUCTURE...</div>
 </div>
 
 <script type="importmap">
@@ -117,538 +134,747 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
 </script>
 <script type="module">
 import * as THREE from 'three';
-import { OrbitControls }      from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls }       from 'three/addons/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { EffectComposer }      from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass }          from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass }     from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { FilmPass }            from 'three/addons/postprocessing/FilmPass.js';
 import { OutputPass }          from 'three/addons/postprocessing/OutputPass.js';
 
-const HOST        = '192.168.1.84:8090';
-const WORLD_SCALE = 28;
-const BASE_SPD    = 7.0;
-const INSPECT_DIST= 3.5;
+const HOST  = '192.168.1.84:8090';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const DEPTH_COLORS = ['#7a2a9a','#2a5aaa','#1a8a9a','#1a9a55','#9a9a1a','#9a551a'];
 
-// ── Per-label visual config ───────────────────────────────────────────────────
-const LCONF = {
-  chloroplast:           { col:0x00e060, em:0x005830, h:1.0, sc:0.7,  sub:'Chloroplastum' },
-  mitochondria:          { col:0xb020ff, em:0x701090, h:0.7, sc:0.45, sub:'Mitochondrium' },
-  nucleus:               { col:0x3060ff, em:0x1830c0, h:1.3, sc:0.9,  sub:'Nucleus cellulae' },
-  vacuole:               { col:0x2030d0, em:0x101870, h:0.8, sc:1.2,  sub:'Vacuola centralis' },
-  ribosome:              { col:0xe89000, em:0x984800, h:0.4, sc:0.18, sub:'Ribosoma (80S)' },
-  endoplasmic_reticulum: { col:0xf0d000, em:0x807000, h:0.7, sc:0.55, sub:'Reticulum endoplasmicum' },
-  golgi:                 { col:0xff6000, em:0x903000, h:0.8, sc:0.5,  sub:'Apparatus Golgiensis' },
-  microtubule_track:     { col:0x00d5f0, em:0x006880, h:0.5, sc:0.25, sub:'Microtubulus' },
-  vesicle:               { col:0xff80c0, em:0x983060, h:0.5, sc:0.22, sub:'Vesicula' },
-  nucleolus:             { col:0x5090ff, em:0x284890, h:1.4, sc:0.4,  sub:'Nucleolus' },
-  centrosome:            { col:0xff4040, em:0xa02020, h:1.1, sc:0.3,  sub:'Centrosome' },
-  cow_body:              { col:0xa05020, em:0x602010, h:1.8, sc:2.0,  sub:'Bovine corpus' },
-  cow_head:              { col:0x904018, em:0x581008, h:2.5, sc:1.0,  sub:'Caput bovinum' },
-  cow_leg:               { col:0x805018, em:0x501008, h:0.5, sc:0.3,  sub:'Crus bovinum' },
-  cow_eye:               { col:0x202020, em:0x181818, h:2.6, sc:0.1,  sub:'Oculus bovinum' },
-  grass:                 { col:0x30a830, em:0x185818, h:0.2, sc:0.35, sub:'Gramen' },
-  tree:                  { col:0x208820, em:0x104410, h:3.5, sc:1.4,  sub:'Arbor' },
-  sky:                   { col:0x2060c0, em:0x103060, h:9.0, sc:3.5,  sub:'Caelum' },
-  ground:                { col:0x3a6020, em:0x1c3010, h:0.05,sc:5.0,  sub:'Terra' },
-  bird:                  { col:0x304060, em:0x182030, h:5.0, sc:0.15, sub:'Avis' },
-  default:               { col:0x4070a0, em:0x203850, h:0.6, sc:0.5,  sub:'Unknown label' },
+// ── 9-level config (same as cell_viewer) ──────────────────────────────────────
+const LC = [
+  { id:'plant_cell',         name:'Mesophyll Cell',         latin:'Cellula mesophylli',
+    scaleM:20e-6,   camDist:3.4,  drillIn:0.68, drillOut:Infinity,
+    bloom:{s:1.7,r:0.65,t:0.07}, film:0.20, camFov:45, scales:['20 µm'] },
+  { id:'chloroplast_surface',name:'Chloroplast Envelope',   latin:'Involucrum chloroplasti',
+    scaleM:5e-6,    camDist:1.9,  drillIn:0.22, drillOut:4.2,
+    bloom:{s:1.6,r:0.60,t:0.08}, film:0.18, camFov:45, scales:['5 µm'] },
+  { id:'chloroplast_stroma', name:'Chloroplast Stroma',     latin:'Stroma chloroplasti',
+    scaleM:3e-6,    camDist:1.5,  drillIn:0.13, drillOut:3.5,
+    bloom:{s:1.5,r:0.55,t:0.09}, film:0.16, camFov:45, scales:['3 µm'] },
+  { id:'grana_stack',        name:'Grana Stack',            latin:'Granum thylakoideum',
+    scaleM:500e-9,  camDist:0.90, drillIn:0.075,drillOut:2.1,
+    bloom:{s:1.4,r:0.50,t:0.10}, film:0.13, camFov:45, scales:['500 nm'] },
+  { id:'thylakoid',          name:'Thylakoid Membrane',     latin:'Membrana thylakoidea',
+    scaleM:100e-9,  camDist:0.65, drillIn:0.052,drillOut:1.7,
+    bloom:{s:1.3,r:0.45,t:0.11}, film:0.10, camFov:45, scales:['100 nm'] },
+  { id:'lipid_bilayer',      name:'Lipid Bilayer',          latin:'Stratum lipidicum duplex',
+    scaleM:20e-9,   camDist:0.40, drillIn:0.030,drillOut:0.90,
+    bloom:{s:1.2,r:0.40,t:0.13}, film:0.08, camFov:48, scales:['20 nm'] },
+  { id:'psii_complex',       name:'Photosystem II',         latin:'Photosystema II (PDB:3ARC)',
+    scaleM:8e-9,    camDist:0.28, drillIn:0.020,drillOut:0.62,
+    bloom:{s:1.1,r:0.38,t:0.14}, film:0.07, camFov:50, scales:['8 nm'] },
+  { id:'chlorophyll',        name:'Chlorophyll a',          latin:'C₅₅H₇₂MgN₄O₅',
+    scaleM:1e-9,    camDist:0.35, drillIn:0.032,drillOut:0.75,
+    bloom:{s:1.0,r:0.35,t:0.15}, film:0.06, camFov:50, scales:['1 nm'] },
+  { id:'carbon_atom',        name:'sp² Carbon Atom',        latin:'Atomus carbonis (Z=6)',
+    scaleM:154e-12, camDist:0.08, drillIn:Infinity,drillOut:0.20,
+    bloom:{s:0.9,r:0.30,t:0.18}, film:0.04, camFov:55, scales:['154 pm'] },
+];
+
+// ── Entity data (same as cell_viewer) ─────────────────────────────────────────
+const ENTITY_KVS = {
+  plant_cell:         [['Dimensions','20–50 µm × 10–30 µm'],['Ribosomes','~10⁷ per cell'],['Chloroplasts','50–200 per cell'],['Vacuole pH','5.0–5.5'],['Turgor','0.8–1.2 MPa']],
+  chloroplast_surface:[['Outer Envelope','~8 nm bilayer'],['TOC75/TIC110','Translocon channels'],['IMS','10–20 nm'],['Import','~3000 nuclear-encoded'],['cpDNA','154 kb circular']],
+  chloroplast_stroma: [['Size','4–8 µm × 2–4 µm'],['Grana','10–100 stacks'],['RuBisCO','250 mg/mL stroma'],['Ribosomes','~10 000 per stroma'],['cpDNA','154 kb circular']],
+  grana_stack:        [['Discs','10–20 per granum'],['Disc Ø','300–600 nm'],['Stacking','3.5–4.0 nm lumen gap'],['PSII density','~35 000/µm²'],['Appressed','Grana margins']],
+  thylakoid:          [['Bilayer','~10 nm; MGDG 55%'],['PSII','350 kDa · PDB 3ARC'],['PSI','520 kDa · PDB 1JB0'],['CF₀CF₁','580 kDa · PDB 6FKF'],['ΔpH','3.5 units across']],
+  lipid_bilayer:      [['Total thickness','6–8 nm'],['MGDG','55 mol%'],['DGDG','27 mol%'],['PG','10 mol% anionic'],['Packing','~1.5 lipids/nm²']],
+  psii_complex:       [['MW','700 kDa (dimer)'],['Subunits','D1,D2,CP43,CP47 + 17'],['Chl/monomer','36'],['OEC','Mn₄CaO₅ cluster'],['E°(P680)','+1.17 V vs NHE']],
+  chlorophyll:        [['Formula','C₅₅H₇₂MgN₄O₅'],['MW','893.49 Da'],['Mg–N','2.08–2.09 Å'],['Qy','680 nm in vivo'],['ε Soret','85 000 M⁻¹cm⁻¹']],
+  carbon_atom:        [['Z / A','6 / 12'],['Config','[He] 2s² 2p²'],['ε₁s','–305.9 eV (HF)'],['ε₂p','–11.33 eV (HF)'],['r_cov sp²','73 pm']],
 };
-function lconf(lbl) {
-  const l = lbl.toLowerCase();
-  for (const [k, v] of Object.entries(LCONF)) {
-    if (l.includes(k)) return v;
-  }
-  return LCONF.default;
-}
-function colHex(col) { return '#' + col.toString(16).padStart(6,'0'); }
+const ENTITY_SYN = {
+  plant_cell:         'CO₂ + H₂O → [CH₂O] + O₂\nΔG°ʹ = +2870 kJ mol⁻¹',
+  chloroplast_surface:'2 closely-apposed 8 nm bilayers\nTOC75 β-barrel pore; TIC110 channel',
+  chloroplast_stroma: 'RuBisCO: CO₂ + RuBP → 2×3-PGA\nkcat ≈ 3 s⁻¹; KM(CO₂) ≈ 9 µM',
+  grana_stack:        'LHCII trimer: 27 Chl a/b\nPSII:PSI ratio ≈ 2:1 in grana',
+  thylakoid:          'P680→PQ→Cyt b₆f→PC→P700\n~1.3 ATP per 2e⁻ via CF₀CF₁',
+  lipid_bilayer:      'MGDG forms type II lipid phase\nCurvature stress activates Cytb6f',
+  psii_complex:       'OEC: 2H₂O → O₂ + 4H⁺ + 4e⁻\nS-state cycle S₀→S₁→S₂→S₃→S₄',
+  chlorophyll:        'Glutamate-1-P → ALA → Urogen III\n→ Protoporphyrin IX → Chl a',
+  carbon_atom:        '3×σ (120° planar) + 1×π (2pz ⊥)\nSlater Z_eff(2p) = 3.25',
+};
+const STRUCT = {
+  plasma_mem:  {name:'Plasma Membrane',    latin:'Membrana plasmatica',     dim:'7–10 nm bilayer',   detail:'Fluid mosaic; lipid raft microdomains; Na⁺/K⁺-ATPase sets –70 mV potential; PI(4,5)P₂ signalling.'},
+  nucleus:     {name:'Nucleus',            latin:'Nucleus cellulae',        dim:'5–10 µm Ø',         detail:'Double NE; ~2000 NPCs (120 MDa); Arabidopsis 5 chr 135 Mbp; heterochromatin periphery; 45S pre-rRNA synthesis.'},
+  vacuole:     {name:'Central Vacuole',    latin:'Vacuola centralis',       dim:'Up to 90% vol.',    detail:'Tonoplast pH 5.0–5.5; V-ATPase + V-PPase acidify lumen; TIP aquaporins turgor control; anthocyanin storage.'},
+  ribosome:    {name:'Ribosome (80S)',      latin:'Ribosoma',               dim:'~27 nm; 3.3 MDa',   detail:'60S + 40S subunits; ~4 aa/s synthesis; polysomes on rough ER; 1 per 10 000 Å³ cytoplasm.'},
+  microtubule: {name:'Microtubule',         latin:'Microtubulus',           dim:'24 nm OD',          detail:'α/β-tubulin 13 protofilaments; dynamic instability; 13 nm/s polymerisation +end; GTP-cap model.'},
+  actin:       {name:'Actin Filament',      latin:'Filamentum actini',      dim:'7–8 nm',            detail:'F-actin right-handed helix; 37 nm repeat; treadmilling; myosin XI drives cytoplasmic streaming.'},
+  mitochondria:{name:'Mitochondrion',       latin:'Mitochondrium',          dim:'0.5–2 µm elongated',detail:'Cristae OXPHOS Complex I–V; PMF ~180 mV; mtDNA 367 kb; DRP3A/FZL fission-fusion; ~30 ATP/glucose.'},
+  er:          {name:'Rough ER',            latin:'Reticulum endoplasmicum',dim:'30–100 nm lumen',   detail:'Sec61 translocon; N-glycosylation; BiP/GRP78 chaperone; ~0.5 µm² per ribosome; ERAD pathway.'},
+  golgi:       {name:'Golgi Apparatus',     latin:'Apparatus Golgiensis',   dim:'1–3 µm stack',      detail:'cis→medial→trans; glycan maturation; COPI retrograde; clathrin/COPII anterograde; ~3–5 µm/s on actin XI.'},
+  chloroplast: {name:'Chloroplast',         latin:'Chloroplastum',          dim:'5 µm × 2–3 µm',     detail:'~1500 nuclear-encoded proteins via TOC/TIC; FtsZ ring division; cpDNA nucleoids; ~50–100 per mesophyll cell.'},
+  chloroplast_env:{name:'Chloroplast Envelope',latin:'Involucrum chloroplasti',dim:'2 × 8 nm bilayer',detail:'Outer envelope: porins + TOC75; inner envelope: TIC110; 10–20 nm IMS; distinct phospho/sulfolipid composition.'},
+  grana:       {name:'Grana Stack',         latin:'Granum thylakoideum',    dim:'300–600 nm Ø',      detail:'Appressed thylakoid discs; PSII + LHCII enriched; PSI/ATPsynthase excluded; stroma lamellae interconnect.'},
+  rubisco:     {name:'RuBisCO',             latin:'Ribulose-1,5-bisphosphate carboxylase',dim:'~540 kDa L₈S₈',detail:'CO₂ fixation kcat ≈ 3 s⁻¹; oxygenase side-reaction (photorespiration); Mg²⁺; activase required.'},
+  psii:        {name:'Photosystem II',       latin:'Photosystema II',        dim:'17×10×8 nm; 350 kDa',detail:'PDB 3ARC; D1/D2 core; Mn₄CaO₅ OEC (E°=+0.82V); 36 Chl per monomer; Pheo/PQ acceptors.'},
+  psi:         {name:'Photosystem I',        latin:'Photosystema I',         dim:'15 nm; 520 kDa',   detail:'PDB 1JB0; PsaA/PsaB; P700 Chl a pair (E°=−0.43V); [4Fe-4S] FA/FB/FX; reduces Fd→NADPH.'},
+  cytb6f:      {name:'Cytochrome b₆f',       latin:'Complexus cytochromi b₆f',dim:'8×5×5 nm; 215 kDa',detail:'PDB 1Q90; Q-cycle 2H⁺/e⁻ lumenal; haem b_L,b_H,c_n,f; PC E°=+0.37V; STN7 kinase activation.'},
+  atp_syn:     {name:'ATP Synthase CF₀CF₁',  latin:'ATP synthasei complexus',dim:'14 nm stalk+head',  detail:'PDB 6FKF; c₁₄ ring; ~4.67 H⁺/ATP; rotational catalysis; Boyer binding-change mechanism 1997.'},
+  lipid_mgdg:  {name:'MGDG Lipid',           latin:'Monogalactosyldiacylglycerol',dim:'~2 nm',        detail:'55 mol% of thylakoid lipid; type II cone shape; C16:3/C18:3 tails; drives membrane curvature at grana edges.'},
+  mg_ion:      {name:'Mg²⁺ Porphyrin',       latin:'Magnesium(II)',          dim:'r_ion = 72 pm',     detail:'Square-planar N₄; Mg–N 2.08–2.09 Å; 5th axial His from CP47/CP43; Lewis acid activates C13² carbonyl.'},
+  nucleus_at:  {name:'Carbon Nucleus (¹²C)', latin:'Nucleus atomicus',       dim:'r ≈ 2.7 fm',        detail:'6p+6n; E_bind=92.16 MeV; ¹³C NMR δ 0–220 ppm; ¹⁴C t½=5730 yr; mass standard 12 Da exactly.'},
+};
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, powerPreference:'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
-renderer.toneMapping  = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.3;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x010810);
-scene.fog = new THREE.FogExp2(0x020c18, 0.018);
+scene.background = new THREE.Color(0x000307);
 
-const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.05, 400);
-camera.position.set(0, 4, 18);
-camera.lookAt(0, 1, 0);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.0001, 200);
+camera.position.set(0, 0.4, 3.4);
+
+// OrbitControls (default — always works)
+const orbitCtrl = new OrbitControls(camera, canvas);
+orbitCtrl.enableDamping = true; orbitCtrl.dampingFactor = 0.08;
+orbitCtrl.autoRotate = true; orbitCtrl.autoRotateSpeed = 0.3;
+orbitCtrl.minDistance = 0.5; orbitCtrl.maxDistance = 8;
+
+// PointerLockControls (optional FPS mode)
+const plc = new PointerLockControls(camera, document.body);
+let fpsMode = false;
+const fpsKeys = {};
+const fpsVel  = new THREE.Vector3();
+
+plc.addEventListener('lock', () => {
+  fpsMode = true; orbitCtrl.enabled = false;
+  document.getElementById('fps-btn').classList.add('active');
+  document.getElementById('fps-btn').textContent = '⊗ EXIT FPS';
+  document.getElementById('xhair').style.display = 'block';
+  document.getElementById('hint').textContent = 'WASD · MOVE  ·  SPACE/CTRL · UP/DOWN  ·  SHIFT · RUN  ·  RIGHT-CLICK · ASCEND  ·  ESC · EXIT FPS';
+});
+plc.addEventListener('unlock', () => {
+  fpsMode = false; orbitCtrl.enabled = true;
+  document.getElementById('fps-btn').classList.remove('active');
+  document.getElementById('fps-btn').textContent = '⊕ FPS MODE';
+  document.getElementById('xhair').style.display = 'none';
+  document.getElementById('hint').textContent = 'DRAG · ORBIT  ·  SCROLL · ZOOM  ·  WASD · PAN  ·  RIGHT-CLICK · ASCEND';
+});
+window.toggleFPS = () => { if (fpsMode) plc.unlock(); else plc.lock(); };
+
+document.addEventListener('keydown', e => { fpsKeys[e.code] = true; });
+document.addEventListener('keyup',   e => { fpsKeys[e.code] = false; });
+
+// Lights
+scene.add(new THREE.AmbientLight(0x020409, 0.8));
+const kl = new THREE.PointLight(0x70b0e0, 4.5, 15); kl.position.set(2,3,3); scene.add(kl);
+const rl = new THREE.PointLight(0x102040, 2.5, 12); rl.position.set(-3,-1,-2); scene.add(rl);
+const fl = new THREE.PointLight(0x601020, 1.2, 8);  fl.position.set(1,-2,1);  scene.add(fl);
 
 // Post-processing
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.3, 0.70, 0.04);
-composer.addPass(bloom);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight), 1.7, 0.65, 0.07);
+composer.addPass(bloomPass);
+const filmPass = new FilmPass(0.20);
+composer.addPass(filmPass);
 composer.addPass(new OutputPass());
 
 window.addEventListener('resize', () => {
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight);
+  renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight);
 });
-
-// Lights
-scene.add(new THREE.AmbientLight(0x0a1828, 1.5));
-const kl1 = new THREE.DirectionalLight(0x3060a0, 1.5); kl1.position.set(5, 20, 8); scene.add(kl1);
-const kl2 = new THREE.PointLight(0x204060, 8.0, 80);  kl2.position.set(0, 15, 0);  scene.add(kl2);
-const kl3 = new THREE.PointLight(0x1a3050, 4.0, 40);  kl3.position.set(-10, 5, -10); scene.add(kl3);
-
-// ── Environment ───────────────────────────────────────────────────────────────
-// Ground
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(200, 200, 1, 1),
-  new THREE.MeshStandardMaterial({ color:0x060e18, roughness:1 })
-);
-ground.rotation.x = -Math.PI/2;
-scene.add(ground);
-
-// Grid
-const grid = new THREE.GridHelper(160, 100, 0x0a2030, 0x061018);
-grid.position.y = 0.01;
-scene.add(grid);
-
-// Horizon ring glow
-const ringGeo = new THREE.TorusGeometry(50, 0.08, 4, 80);
-const ringMat = new THREE.MeshBasicMaterial({ color:0x1a4060, transparent:true, opacity:0.3 });
-const ring = new THREE.Mesh(ringGeo, ringMat);
-ring.rotation.x = Math.PI/2; ring.position.y = 0.5;
-scene.add(ring);
-
-// Ambient particle field
-{
-  const g = new THREE.BufferGeometry();
-  const v = new Float32Array(2400);
-  for (let i = 0; i < 2400; i += 3) {
-    v[i]   = (Math.random() - 0.5) * 160;
-    v[i+1] = Math.random() * 30;
-    v[i+2] = (Math.random() - 0.5) * 160;
-  }
-  g.setAttribute('position', new THREE.BufferAttribute(v, 3));
-  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color:0x2a5070, size:0.06, transparent:true, opacity:0.7 })));
-}
-
-// Vertical axis marker at origin
-{
-  const axGeo = new THREE.CylinderGeometry(0.03, 0.03, 10, 6);
-  const axMat = new THREE.MeshBasicMaterial({ color:0x1a4060, transparent:true, opacity:0.4 });
-  scene.add(new THREE.Mesh(axGeo, axMat));
-}
-
-// Offline message sprite (shown when stream is offline)
-const offlineSprite = (() => {
-  const cv = document.createElement('canvas'); cv.width = 640; cv.height = 80;
-  const ctx = cv.getContext('2d');
-  ctx.fillStyle = 'rgba(2,8,20,0.9)'; ctx.fillRect(0,0,640,80);
-  ctx.strokeStyle = '#1a3a5a'; ctx.lineWidth = 1; ctx.strokeRect(0.5,0.5,639,79);
-  ctx.font = '18px Courier New'; ctx.fillStyle = '#2a6a8a';
-  ctx.fillText('NEURAL STREAM OFFLINE — START NODE + STREAM SCRIPT', 12, 30);
-  ctx.font = '13px Courier New'; ctx.fillStyle = '#1a3a50';
-  ctx.fillText('python3 scripts/stream_cell_activity.py  OR  stream_video_sim.py', 12, 56);
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false }));
-  sp.scale.set(12, 1.5, 1);
-  sp.position.set(0, 3.5, 0);
-  scene.add(sp);
-  return sp;
-})();
-
-// ── Controls — OrbitControls (default, works immediately) ────────────────────
-const orbitCtrl = new OrbitControls(camera, canvas);
-orbitCtrl.enableDamping   = true;
-orbitCtrl.dampingFactor   = 0.07;
-orbitCtrl.minDistance     = 2;
-orbitCtrl.maxDistance     = 80;
-orbitCtrl.target.set(0, 1, 0);
-orbitCtrl.autoRotate      = true;
-orbitCtrl.autoRotateSpeed = 0.3;
-
-// ── PointerLock (optional FPS mode) ──────────────────────────────────────────
-const plc = new PointerLockControls(camera, document.body);
-let fpsMode = false;
-
-plc.addEventListener('lock', () => {
-  fpsMode = true;
-  orbitCtrl.enabled = false;
-  document.getElementById('fps-btn').classList.add('active');
-  document.getElementById('fps-btn').textContent = 'EXIT FPS';
-  document.getElementById('xhair').style.display = 'block';
-  document.getElementById('controls-bar').textContent = 'WASD · MOVE  |  SPACE/CTRL · UP/DOWN  |  SHIFT · RUN  |  E · INSPECT  |  ESC · EXIT FPS';
-});
-plc.addEventListener('unlock', () => {
-  fpsMode = false;
-  orbitCtrl.enabled = true;
-  document.getElementById('fps-btn').classList.remove('active');
-  document.getElementById('fps-btn').textContent = 'FPS MODE';
-  document.getElementById('xhair').style.display = 'none';
-  document.getElementById('controls-bar').textContent = 'DRAG · ORBIT  |  SCROLL · ZOOM  |  WASD · STRAFE  |  E · INSPECT NEAREST';
-  // Restore orbit camera to current camera state
-  orbitCtrl.target.set(
-    camera.position.x + Math.sin(camera.rotation.y),
-    camera.position.y,
-    camera.position.z + Math.cos(camera.rotation.y) * -1,
-  );
-  orbitCtrl.update();
-});
-
-window.toggleFPS = () => {
-  if (fpsMode) plc.unlock();
-  else         plc.lock();
-};
-
-// Movement state
-const keys = {};
-document.addEventListener('keydown', e => { keys[e.code] = true; });
-document.addEventListener('keyup',   e => { keys[e.code] = false; });
-const vel = new THREE.Vector3();
 
 // ── Neural stream ─────────────────────────────────────────────────────────────
-let neuroSnap  = null;
-let streamOk   = false;
-let frameCount = 0;
-
-const dot = document.getElementById('stream-dot');
-const stxt = document.getElementById('stream-txt');
-
-function startStream() {
+let neuroSnap = null, streamOk = false;
+const LABEL_COLORS_MAP = {
+  'chloroplast':0x00e060,'mitochondria':0xb020ff,'nucleus':0x2050ff,'vacuole':0x1020a0,
+  'ribosome':0xe89000,'endoplasmic_reticulum':0xf0d000,'golgi':0xff6000,
+  'microtubule_track':0x00d5f0,'vesicle':0xff80c0,'nucleolus':0x4080ff,
+};
+function startNeuroStream() {
   const es = new EventSource(`http://${HOST}/neuro/stream`);
-  es.addEventListener('snap', ev => {
-    try {
-      neuroSnap  = JSON.parse(ev.data);
-      streamOk   = true;
-      frameCount++;
-      dot.style.background  = '#2ab080';
-      stxt.style.color      = '#2a8060';
-      stxt.textContent      = `STREAM LIVE — ${frameCount} FRAMES`;
-      offlineSprite.material.opacity = 0;
-    } catch {}
+  es.addEventListener('snap', e => {
+    try { neuroSnap = JSON.parse(e.data); streamOk = true; } catch {}
   });
   es.onerror = () => {
     streamOk = false;
-    dot.style.background = '#8a3020';
-    stxt.style.color     = '#6a2018';
-    stxt.textContent     = 'STREAM OFFLINE';
-    offlineSprite.material.opacity = 0.9;
+    document.getElementById('ns').textContent = 'STREAM OFFLINE';
+  };
+  es.onopen = () => {
+    streamOk = true;
+    document.getElementById('ns').textContent = '';
   };
 }
-startStream();
-
-// ── Entity management ─────────────────────────────────────────────────────────
-const entities = {};
-
-class NeuralEntity {
-  constructor(id, label) {
-    this.id       = id;
-    this.label    = label;
-    this.cfg      = lconf(label);
-    this.pos      = new THREE.Vector3(0, this.cfg.h, 0);
-    this.targetP  = this.pos.clone();
-    this.strength = 0;
-    this.inWM     = false;
-    this.surprise = 0;
-    this.age      = 0;
-    this._labelDirty = true;
-
-    // Core sphere
-    this.mat = new THREE.MeshPhysicalMaterial({
-      color:            this.cfg.col,
-      emissive:         this.cfg.em,
-      emissiveIntensity:0.6,
-      roughness: 0.25,
-      metalness: 0.1,
-      transparent: true,
-      opacity: 0.0,
-    });
-    this.mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), this.mat);
-    this.mesh.scale.setScalar(0.001);
-    scene.add(this.mesh);
-
-    // Soft shell
-    this.shellMat = new THREE.MeshBasicMaterial({
-      color: this.cfg.col, transparent: true, opacity: 0.0, side: THREE.BackSide,
-    });
-    this.shell = new THREE.Mesh(new THREE.SphereGeometry(1.22, 10, 8), this.shellMat);
-    this.shell.scale.setScalar(0.001);
-    scene.add(this.shell);
-
-    // Billboard label
-    this.labelCv  = document.createElement('canvas');
-    this.labelCv.width = 512; this.labelCv.height = 72;
-    this.labelCtx = this.labelCv.getContext('2d');
-    this.labelTex = new THREE.CanvasTexture(this.labelCv);
-    this.sprite   = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: this.labelTex, transparent: true, depthWrite: false,
-    }));
-    this.sprite.scale.set(3.2, 0.45, 1);
-    scene.add(this.sprite);
-
-    this._drawLabel();
+const nmapCanvas = document.getElementById('nmap');
+const nmapCtx    = nmapCanvas.getContext('2d');
+function drawNeuroMap(snap) {
+  const W=nmapCanvas.width, H=nmapCanvas.height;
+  nmapCtx.fillStyle='rgba(2,4,10,0.92)'; nmapCtx.fillRect(0,0,W,H);
+  const centroids=snap.centroids||{}, surprise=snap.surprise||{}, wm=new Set(snap.working_memory||[]);
+  for (const [lbl,pos] of Object.entries(centroids)) {
+    let hex='#2a5a6a';
+    for (const [kl,kc] of Object.entries(LABEL_COLORS_MAP)) {
+      if(lbl.includes(kl)){hex='#'+kc.toString(16).padStart(6,'0');break;}
+    }
+    const x=pos.x*W, y=pos.y*H, sr=surprise[lbl]||0;
+    const r=wm.has(lbl)?3.5:(sr>0.5?3:1.5);
+    nmapCtx.beginPath(); nmapCtx.arc(x,y,r,0,Math.PI*2); nmapCtx.fillStyle=hex; nmapCtx.fill();
+    if(sr>0.65){nmapCtx.beginPath();nmapCtx.arc(x,y,r+2,0,Math.PI*2);nmapCtx.strokeStyle='rgba(255,255,255,0.25)';nmapCtx.lineWidth=0.8;nmapCtx.stroke();}
   }
-
-  _drawLabel() {
-    const ctx = this.labelCtx;
-    const W = 512, H = 72;
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(1,4,12,0.88)'; ctx.fillRect(0, 0, W, H);
-    const borderCol = colHex(this.cfg.col);
-    ctx.strokeStyle = borderCol + '55'; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, W-1, H-1);
-    ctx.font = 'bold 18px Courier New';
-    ctx.fillStyle = borderCol;
-    const displayName = this.label.replace(/_/g,' ').toUpperCase().slice(0, 30);
-    ctx.fillText(displayName, 10, 24);
-    ctx.font = '13px Courier New';
-    ctx.fillStyle = '#2a5a6a';
-    ctx.fillText(this.cfg.sub, 10, 44);
-    ctx.font = '11px Courier New';
-    ctx.fillStyle = '#1a3040';
-    const s = (this.strength * 100).toFixed(0);
-    ctx.fillText(`STR:${s}%  WM:${this.inWM?'YES':'–'}  SRP:${(this.surprise*100).toFixed(0)}%`, 10, 62);
-    this.labelTex.needsUpdate = true;
-    this._labelDirty = false;
-  }
-
-  update(dt, targetPos, strength, inWM, surprise) {
-    this.age += dt;
-    const changed = strength !== this.strength || inWM !== this.inWM;
-    this.strength = strength; this.inWM = inWM; this.surprise = surprise;
-    if (changed && this.age > 0.5) this._labelDirty = true;
-    if (this._labelDirty && this.age % 2 < dt * 2) this._drawLabel(); // throttle redraws
-
-    if (targetPos) this.targetP.copy(targetPos);
-    this.pos.lerp(this.targetP, dt * 2.8);
-
-    const baseSc  = this.cfg.sc * (0.6 + strength * 1.4 + (inWM ? 0.5 : 0));
-    const clampSc = Math.max(0.001, Math.min(baseSc, this.cfg.sc * 4));
-    const curSc   = this.mesh.scale.x;
-    const newSc   = THREE.MathUtils.lerp(curSc, clampSc, dt * 3.5);
-    this.mesh.scale.setScalar(newSc);
-    this.shell.scale.setScalar(newSc);
-    this.mesh.position.copy(this.pos);
-    this.shell.position.copy(this.pos);
-    this.sprite.position.set(this.pos.x, this.pos.y + newSc + 0.6, this.pos.z);
-
-    // Opacity fade-in
-    const targetOp = Math.min(0.80 + strength * 0.2, 0.95);
-    this.mat.opacity      = THREE.MathUtils.lerp(this.mat.opacity, targetOp, dt * 2.5);
-    this.shellMat.opacity = this.mat.opacity * 0.18;
-    this.sprite.material.opacity = Math.min(this.mat.opacity * 1.2, 1.0);
-
-    // Emissive
-    const baseEI  = 0.4 + strength * 2.2 + (inWM ? 1.0 : 0);
-    const flashEI = surprise > 0.65 ? Math.abs(Math.sin(Date.now() * 0.009)) * 2.5 : 0;
-    this.mat.emissiveIntensity = THREE.MathUtils.lerp(this.mat.emissiveIntensity, baseEI + flashEI, dt * 5);
-  }
-
-  dispose() {
-    scene.remove(this.mesh);  this.mesh.geometry.dispose();  this.mat.dispose();
-    scene.remove(this.shell); this.shell.geometry.dispose(); this.shellMat.dispose();
-    scene.remove(this.sprite); this.sprite.material.dispose(); this.labelTex.dispose();
-  }
-}
-
-// ── Network links pool ────────────────────────────────────────────────────────
-const MAX_LINKS = 150;
-const linkLines = [];
-for (let i = 0; i < MAX_LINKS; i++) {
-  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-  const mat = new THREE.LineBasicMaterial({ color:0x1a4a5a, transparent:true, opacity:0 });
-  const ln  = new THREE.Line(geo, mat);
-  scene.add(ln);
-  linkLines.push({ ln, geo, mat });
-}
-
-function updateLinks(snap) {
-  const links = snap.network_links || {};
-  let li = 0;
-  outer: for (const [a, conns] of Object.entries(links)) {
-    const ea = entities[a]; if (!ea) continue;
-    for (const [b, w] of Object.entries(conns)) {
-      if (w < 0.22 || li >= MAX_LINKS) continue outer;
-      const eb = entities[b]; if (!eb) continue;
-      const L = linkLines[li];
-      const pos = L.geo.attributes.position;
-      pos.setXYZ(0, ea.pos.x, ea.pos.y, ea.pos.z);
-      pos.setXYZ(1, eb.pos.x, eb.pos.y, eb.pos.z);
-      pos.needsUpdate = true;
-      L.mat.opacity = w * 0.35;
-      li++;
+  const links=snap.network_links||{};
+  for (const [a,conns] of Object.entries(links)) {
+    const pa=centroids[a]; if(!pa) continue;
+    for (const [b,w] of Object.entries(conns)) {
+      if(w<0.3) continue;
+      const pb=centroids[b]; if(!pb) continue;
+      nmapCtx.beginPath(); nmapCtx.moveTo(pa.x*W,pa.y*H); nmapCtx.lineTo(pb.x*W,pb.y*H);
+      nmapCtx.strokeStyle=`rgba(30,80,100,${w*0.25})`; nmapCtx.lineWidth=0.5; nmapCtx.stroke();
     }
   }
-  for (let i = li; i < MAX_LINKS; i++) linkLines[i].mat.opacity = 0;
+  nmapCtx.fillStyle='#0c1e28'; nmapCtx.font='7px Courier New';
+  nmapCtx.fillText(`${Object.keys(centroids).length} centroids`,3,H-3);
 }
-
-// ── Update world from neural snapshot ────────────────────────────────────────
-function updateWorld(snap) {
-  const centroids = snap.centroids || {};
-  const wm        = new Set(snap.working_memory || []);
-  const surp      = snap.surprise || {};
-  const netStr    = {};
-  (snap.active_networks || []).forEach(n => {
-    const s = n.strength || 0;
-    (n.members || []).forEach(m => { netStr[m] = Math.max(netStr[m] || 0, s); });
+function applyNeuroToScene(snap) {
+  if(!currentGroup||!snap) return;
+  const wm=new Set(snap.working_memory||[]), srp=snap.surprise||{}, netStr={};
+  (snap.active_networks||[]).forEach(n=>{const s=n.strength||0;(n.members||[]).forEach(m=>{netStr[m]=Math.max(netStr[m]||0,s);});});
+  currentGroup.traverse(obj=>{
+    if(!obj.isMesh||!obj.material||!('emissiveIntensity' in obj.material)) return;
+    const lbl=obj.userData.label||''; if(!lbl) return;
+    const base=obj.userData.baseEI??(obj.userData.baseEI=obj.material.emissiveIntensity);
+    const target=base+(netStr[lbl]||0)*1.5+(wm.has(lbl)?0.6:0)+((srp[lbl]||0)>0.7?1.0:0);
+    obj.material.emissiveIntensity=THREE.MathUtils.lerp(obj.material.emissiveIntensity,target,0.08);
   });
-
-  // Create / update entities
-  for (const [lbl, pos] of Object.entries(centroids)) {
-    const cfg = lconf(lbl);
-    const wp  = new THREE.Vector3(
-      (pos.x - 0.5) * WORLD_SCALE,
-      cfg.h,
-      (pos.y - 0.5) * WORLD_SCALE
-    );
-    if (!entities[lbl]) {
-      const e = new NeuralEntity(lbl, lbl);
-      e.pos.copy(wp); e.targetP.copy(wp);
-      entities[lbl] = e;
-    }
-    entities[lbl]._tgt  = wp;
-    entities[lbl]._str  = netStr[lbl] || 0;
-    entities[lbl]._inWM = wm.has(lbl);
-    entities[lbl]._srp  = surp[lbl] || 0;
-  }
-
-  // Fade out stale
-  for (const [id, ent] of Object.entries(entities)) {
-    if (!centroids[id]) {
-      ent._str = Math.max(0, (ent._str || 0) - 0.02);
-      if ((ent._str || 0) <= 0 && ent.age > 5) {
-        ent.dispose(); delete entities[id];
-      }
-    }
-  }
-
-  updateLinks(snap);
-  updateFireList(netStr, wm, surp);
-  document.getElementById('entity-count').textContent = `${Object.keys(entities).length} entities`;
 }
 
-// ── Fire list ─────────────────────────────────────────────────────────────────
-function updateFireList(netStr, wm, surp) {
-  const sorted = Object.entries(netStr).sort((a,b)=>b[1]-a[1]).slice(0,12);
-  document.getElementById('fire-list').innerHTML = sorted.length
-    ? sorted.map(([lbl,s]) => {
-        const c = colHex(lconf(lbl).col);
-        return `<div class="fire-row">
-          <div class="fire-dot" style="background:${c}"></div>
-          <span class="fire-lbl">${lbl.replace(/_/g,' ').slice(0,20)}</span>
-          ${wm.has(lbl) ? '<span class="fire-wm">●WM</span>' : ''}
-          ${(surp[lbl]||0)>0.6 ? '<span class="fire-srp">⚡</span>' : ''}
-          <span class="fire-str">${(s*100).toFixed(0)}%</span>
-        </div>`;
-      }).join('')
-    : '<div style="font-size:8px;color:#0d1820">— awaiting stream —</div>';
+// ── Scene state ───────────────────────────────────────────────────────────────
+let currentLevel=0, currentGroup=null, isTransitioning=false;
+let drillables=[], hoveredMesh=null, pendingDrillTarget=null;
+let layerData={};
+const clock=new THREE.Clock(), raycaster=new THREE.Raycaster(), mouse=new THREE.Vector2();
+let mDownPos=null;
+
+// ── Material / helpers ────────────────────────────────────────────────────────
+function M(color,opts={}) {
+  return new THREE.MeshPhysicalMaterial({
+    color, roughness:opts.r??0.35, metalness:opts.m??0.05,
+    emissive:opts.e??0x000000, emissiveIntensity:opts.ei??1,
+    transparent:opts.tr??false, opacity:opts.op??1,
+    transmission:opts.tx??0, thickness:opts.th??0,
+    side:opts.side??THREE.FrontSide,
+  });
+}
+function setInfo(obj,key){ obj.userData.info=STRUCT[key]??{}; }
+function setLabel(obj,lbl){ obj.userData.label=lbl; }
+function instanced(geo,mat,count,placeFn){
+  const mesh=new THREE.InstancedMesh(geo,mat,count);
+  const dummy=new THREE.Object3D();
+  for(let i=0;i<count;i++){placeFn(dummy,i);dummy.updateMatrix();mesh.setMatrixAt(i,dummy.matrix);}
+  mesh.instanceMatrix.needsUpdate=true; return mesh;
+}
+function makeDrillable(mesh,nextLevel){ mesh.userData.drillTarget=nextLevel; drillables.push(mesh); }
+
+// ── All 9 level builders (full quality) ──────────────────────────────────────
+
+function buildCell(g) {
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(2.05,2.05,1.05,3,3,2),M(0x108898,{e:0x044840,ei:.6,tr:true,op:.3,side:THREE.DoubleSide})));
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(2,2,1,2,2,1),M(0x030810,{tr:true,op:.06,tx:.6,th:.2})));
+  const vac=new THREE.Mesh(new THREE.SphereGeometry(.72,28,20),M(0x020a1a,{e:0x000514,ei:.4,tr:true,op:.22,tx:.75,th:.4}));
+  vac.scale.set(1,1,.7); setInfo(vac,'vacuole'); g.add(vac);
+  const nuc=new THREE.Mesh(new THREE.SphereGeometry(.145,24,16),M(0x2808a0,{e:0x180060,ei:1.2,r:.2}));
+  nuc.position.set(.15,.18,.08); setInfo(nuc,'nucleus'); setLabel(nuc,'nucleus'); makeDrillable(nuc,1); g.add(nuc);
+  const nul=new THREE.Mesh(new THREE.SphereGeometry(.048,12,8),M(0x5010c8,{e:0x300080,ei:1.5}));
+  nul.position.set(.18,.21,.1); g.add(nul);
+  const riboMesh=instanced(new THREE.SphereGeometry(.011,5,4),M(0xe89000,{e:0x884400,ei:1.0,r:.3}),900,(d)=>{
+    let x,y,z,t=0; do{x=(Math.random()-.5)*1.7;y=(Math.random()-.5)*1.7;z=(Math.random()-.5)*.7;t++;}while(t<30&&(x*x+y*y>.72||Math.sqrt(x*x+y*y+z*z)<.16));
+    d.position.set(x,y,z); d.scale.setScalar(.8+Math.random()*.4);
+  });
+  riboMesh.userData.info=STRUCT.ribosome; setLabel(riboMesh,'ribosome'); g.add(riboMesh);
+  g.add(instanced(new THREE.SphereGeometry(.006,4,3),M(0xc06000,{e:0x603000,ei:.8,r:.4}),200,(d)=>{
+    let x,y,z,t=0; do{x=(Math.random()-.5)*1.6;y=(Math.random()-.5)*1.6;z=(Math.random()-.5)*.65;t++;}while(t<20&&x*x+y*y>.65);
+    d.position.set(x,y,z);
+  }));
+  const mtMat=M(0x00d5f0,{e:0x005870,ei:1.0,r:.2});
+  for(let i=0;i<12;i++){
+    const a=(i/12)*Math.PI*2;
+    const pts=[new THREE.Vector3(.14*Math.cos(a),.14*Math.sin(a),0),new THREE.Vector3(.5*Math.cos(a+.25),.5*Math.sin(a+.25),(Math.random()-.5)*.12),new THREE.Vector3(.8*Math.cos(a-.1),.8*Math.sin(a-.1),(Math.random()-.5)*.08)];
+    const t=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),12,.007,7,false),mtMat);
+    setInfo(t,'microtubule'); setLabel(t,'microtubule_track'); g.add(t);
+  }
+  const actMat=M(0xff2880,{e:0x881040,ei:.9,r:.35});
+  for(let i=0;i<28;i++){
+    const a=Math.random()*Math.PI*2, r=.2+Math.random()*.7;
+    const s=new THREE.Vector3(r*Math.cos(a),(Math.random()-.5)*.9,r*Math.sin(a)*.5);
+    const e2=s.clone(); e2.x+=(.6+Math.random()*.3)*(Math.random()-.5); e2.y+=(.6+Math.random()*.3)*(Math.random()-.5); e2.z+=(.15+Math.random()*.1)*(Math.random()-.5);
+    const tu=new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(s,e2),6,.003,5,false),actMat);
+    setInfo(tu,'actin'); setLabel(tu,'actin'); g.add(tu);
+  }
+  const cpMat=M(0x00e060,{e:0x006820,ei:1.3,r:.28});
+  for(let i=0;i<18;i++){
+    const a=(i/18)*Math.PI*2+Math.random()*.25, r=.44+Math.random()*.40, z=(Math.random()-.5)*.30;
+    const cp=new THREE.Mesh(new THREE.SphereGeometry(.088,14,10),cpMat);
+    cp.position.set(r*Math.cos(a),r*Math.sin(a),z); cp.scale.set(1,.54,.54);
+    setInfo(cp,'chloroplast'); setLabel(cp,'chloroplast'); makeDrillable(cp,1); g.add(cp);
+  }
+  const mitMat=M(0xb020ff,{e:0x601080,ei:1.1,r:.45});
+  for(let i=0;i<10;i++){
+    const m=new THREE.Mesh(new THREE.CapsuleGeometry(.016,.06,4,8),mitMat);
+    const a=Math.random()*Math.PI*2, r=.28+Math.random()*.55;
+    m.position.set(r*Math.cos(a),r*Math.sin(a),(Math.random()-.5)*.26);
+    m.rotation.set(Math.random()*Math.PI,Math.random()*Math.PI,0);
+    setInfo(m,'mitochondria'); setLabel(m,'mitochondria'); makeDrillable(m,1); g.add(m);
+  }
+  const erMat=M(0xf0d000,{e:0x706000,ei:.8,tr:true,op:.6,r:.5});
+  [[-.38,.38,.05,.2,.52,.08,.08,.48,-.05,.24,.32,0],[.32,-.3,.1,.18,-.52,.04,-.14,-.48,-.07,-.26,-.3,.04]].forEach(c=>{
+    const pts=[new THREE.Vector3(c[0],c[1],c[2]),new THREE.Vector3(c[3],c[4],c[5]),new THREE.Vector3(c[6],c[7],c[8]),new THREE.Vector3(c[9],c[10],c[11])];
+    const er=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),20,.011,6,false),erMat);
+    setInfo(er,'er'); setLabel(er,'endoplasmic_reticulum'); g.add(er);
+  });
+  const gol=new THREE.Group(); gol.position.set(.3,-.26,.08); gol.rotation.z=.3;
+  for(let i=0;i<6;i++){
+    const d=new THREE.Mesh(new THREE.CylinderGeometry(.055-i*.004,.057-i*.004,.007,18),M(0xff6000,{e:0x803000,ei:.9}));
+    d.position.y=i*.011; setInfo(d,'golgi'); setLabel(d,'golgi'); gol.add(d);
+  }
+  g.add(gol);
 }
 
-// ── Nearest entity + proximity indicator ─────────────────────────────────────
-let nearestEnt = null;
-const proxLabel = document.getElementById('prox-label');
-
-function updateNearest() {
-  let minD = Infinity, nearest = null;
-  for (const ent of Object.values(entities)) {
-    const d = camera.position.distanceTo(ent.pos);
-    if (d < minD) { minD = d; nearest = ent; }
+function buildChloroplastSurface(g) {
+  const outerEnv=new THREE.Mesh(new THREE.SphereGeometry(.95,32,22),M(0x0a2810,{e:0x041408,ei:.3,tr:true,op:.28,side:THREE.DoubleSide}));
+  outerEnv.scale.set(1,.62,.88); g.add(outerEnv);
+  const innerEnv=new THREE.Mesh(new THREE.SphereGeometry(.88,32,22),M(0x0d3a18,{e:0x061c0c,ei:.4,tr:true,op:.20,side:THREE.DoubleSide}));
+  innerEnv.scale.set(1,.62,.88); setInfo(innerEnv,'chloroplast_env'); setLabel(innerEnv,'chloroplast');
+  makeDrillable(innerEnv,2); g.add(innerEnv);
+  for(let i=0;i<40;i++){
+    const a=Math.random()*Math.PI*2, b=Math.acos(2*Math.random()-1);
+    const toc=new THREE.Mesh(new THREE.SphereGeometry(.012,5,4),M(0x60d0ff,{e:0x30a0e0,ei:1.8}));
+    toc.position.set(.96*Math.sin(b)*Math.cos(a),.96*Math.cos(b)*.62,.96*Math.sin(b)*Math.sin(a)*.88); g.add(toc);
   }
-  nearestEnt = nearest;
-  const isClose = nearest && minD < INSPECT_DIST + nearest.cfg.sc * 2;
-  const alpha = isClose ? Math.max(0, 1 - minD / (INSPECT_DIST + nearest.cfg.sc * 2)) : 0;
-  proxLabel.style.color = `rgba(40,180,120,${alpha})`;
-  proxLabel.textContent = isClose
-    ? `PRESS E — ${nearest.label.replace(/_/g,' ').toUpperCase()}`
-    : 'PRESS E TO INSPECT';
-
-  if (nearest) {
-    document.getElementById('ent-name').textContent = nearest.label.replace(/_/g,' ').toUpperCase();
-    document.getElementById('ent-sub').textContent  = nearest.cfg.sub;
-    document.getElementById('ent-kvs').innerHTML = [
-      ['Distance', minD.toFixed(1) + ' units'],
-      ['Strength', ((nearest._str||0)*100).toFixed(1) + '%'],
-      ['Working Mem', nearest._inWM ? 'YES' : 'no'],
-      ['Surprise',  ((nearest._srp||0)*100).toFixed(1) + '%'],
-      ['Age', nearest.age.toFixed(0) + ' s'],
-    ].map(([k,v]) => `<div class="ekv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
-  }
-}
-
-// ── E key: inspect ────────────────────────────────────────────────────────────
-document.addEventListener('keydown', e => {
-  if (e.code === 'KeyE' && nearestEnt) {
-    const cellTypes = ['chloroplast','mitochondria','nucleus','ribosome','vacuole','golgi','endoplasmic','thylakoid','lipid'];
-    if (cellTypes.some(t => nearestEnt.label.includes(t))) {
-      const fd = document.getElementById('fade');
-      fd.style.opacity = '1';
-      setTimeout(() => { window.open('cell_viewer.html','_blank'); fd.style.opacity='0'; }, 400);
+  const discMat=M(0x00e050,{e:0x007a20,ei:1.4,r:.2});
+  for(let gi=0;gi<12;gi++){
+    const a=(gi/12)*Math.PI*2+0.3, r=0.22+Math.random()*0.30;
+    const gx=r*Math.cos(a), gy=(Math.random()-.5)*0.28, gz=r*Math.sin(a)*0.75;
+    for(let d=0;d<(7+Math.floor(Math.random()*5));d++){
+      const disc=new THREE.Mesh(new THREE.CylinderGeometry(.10,.10,.012,16),discMat);
+      disc.position.set(gx,gy+d*0.015,gz); g.add(disc);
     }
   }
-  // Auto-rotate off when user moves
-  if (['KeyW','KeyA','KeyS','KeyD'].includes(e.code)) orbitCtrl.autoRotate = false;
+  const riboMesh=instanced(new THREE.SphereGeometry(.018,5,4),M(0xe89000,{e:0x884400,ei:.9,r:.3}),380,(d,i)=>{
+    let x,y,z,t=0; do{x=(Math.random()-.5)*2.8;y=(Math.random()-.5)*1.8;z=(Math.random()-.5)*2.0;t++;}while(t<20&&((x/0.95)**2+(y/0.59)**2+(z/0.84)**2)<1.3);
+    d.position.set(x,y,z);
+  });
+  riboMesh.userData.info=STRUCT.ribosome; setLabel(riboMesh,'ribosome'); g.add(riboMesh);
+  const mitMat=M(0xb020ff,{e:0x601080,ei:1.1,r:.45});
+  for(let i=0;i<5;i++){
+    const a=(i/5)*Math.PI*2+0.7;
+    const m=new THREE.Mesh(new THREE.CapsuleGeometry(.042,.16,4,8),mitMat);
+    m.position.set(1.35*Math.cos(a),(Math.random()-.5)*0.6,1.05*Math.sin(a));
+    setInfo(m,'mitochondria'); setLabel(m,'mitochondria'); g.add(m);
+  }
+}
+
+function buildChloroplastStroma(g) {
+  const env=new THREE.Mesh(new THREE.SphereGeometry(.94,28,18),M(0x061a0a,{tr:true,op:.12,side:THREE.DoubleSide}));
+  env.scale.set(1,.62,.88); g.add(env);
+  const discMat=M(0x00e050,{e:0x008030,ei:1.4,r:.2});
+  for(let gi=0;gi<30;gi++){
+    const a=(gi/30)*Math.PI*2+Math.random()*.3, r=0.12+Math.random()*0.52, gy=(Math.random()-.5)*0.32;
+    const grp=new THREE.Group(); grp.position.set(r*Math.cos(a),gy,r*Math.sin(a)*0.75);
+    const nD=8+Math.floor(Math.random()*7);
+    const drillDisc=new THREE.Mesh(new THREE.CylinderGeometry(.10,.10,.012,16),discMat.clone());
+    drillDisc.position.y=nD*0.014/2; setInfo(drillDisc,'grana'); setLabel(drillDisc,'chloroplast'); makeDrillable(drillDisc,3); grp.add(drillDisc);
+    for(let d=0;d<nD;d++){const disc=new THREE.Mesh(new THREE.CylinderGeometry(.10,.10,.012,16),discMat);disc.position.y=d*0.015;grp.add(disc);}
+    g.add(grp);
+  }
+  const riboM=instanced(new THREE.SphereGeometry(.010,5,4),M(0xe89000,{e:0x884400,ei:.9,r:.3}),500,(d,i)=>{
+    let x,y,z,t=0; do{x=(Math.random()-.5)*1.6;y=(Math.random()-.5)*1.0;z=(Math.random()-.5)*1.4;t++;}while(t<20&&((x/0.92)**2+(y/0.57)**2+(z/0.82)**2)>0.88);
+    d.position.set(x,y,z); d.scale.setScalar(.7+Math.random()*.5);
+  });
+  riboM.userData.info=STRUCT.ribosome; setLabel(riboM,'ribosome'); g.add(riboM);
+  const rubMat=M(0xd08820,{e:0x805010,ei:.7,r:.3});
+  for(let i=0;i<50;i++){
+    let x,y,z,t=0; do{x=(Math.random()-.5)*1.4;y=(Math.random()-.5)*0.8;z=(Math.random()-.5)*1.2;t++;}while(t<20&&((x/0.9)**2+(y/0.55)**2+(z/0.8)**2)>0.8);
+    const rb=new THREE.Mesh(new THREE.SphereGeometry(.022,7,5),rubMat);
+    rb.position.set(x,y,z); setInfo(rb,'rubisco'); g.add(rb);
+  }
+  const pgMat=M(0xe0e000,{e:0x606000,ei:.8,r:.15});
+  for(let i=0;i<14;i++){
+    const a=Math.random()*Math.PI*2, r=.25+Math.random()*.42;
+    const p=new THREE.Mesh(new THREE.SphereGeometry(.016+Math.random()*.010,7,5),pgMat);
+    p.position.set(r*Math.cos(a),(Math.random()-.5)*.35,r*Math.sin(a)*.78); g.add(p);
+  }
+  [[.12,.04,.18],[-.18,.02,-.16],[.22,-.05,-.12],[-.10,.06,.22]].forEach(([x,y,z])=>{
+    const nd=new THREE.Mesh(new THREE.SphereGeometry(.035,10,7),M(0x3010c0,{e:0x1808a0,ei:1.2,r:.4,tr:true,op:.75}));
+    nd.position.set(x,y,z); nd.scale.set(1.4,.7,1.2); g.add(nd);
+  });
+}
+
+function buildGranaStack(g) {
+  const N=20, DR=0.42, DH=0.026, DG=0.004, STEP=DH+DG, TOT=N*STEP, Y0=-TOT/2;
+  const discMat=M(0x051e0a,{e:0x022008,ei:.4,tr:true,op:.85,r:.5});
+  for(let d=0;d<N;d++){
+    const disc=new THREE.Mesh(new THREE.CylinderGeometry(DR,DR,DH,28),discMat.clone());
+    disc.position.y=Y0+d*STEP; g.add(disc);
+  }
+  const psiiMat=M(0x1010c0,{e:0x08087a,ei:1.6,r:.15,m:.12});
+  const psiiMesh=instanced(new THREE.BoxGeometry(.056,.022,.044),psiiMat,N*32,(d,i)=>{
+    const disc=Math.floor(i/32), idx=i%32;
+    const a=(idx/32)*Math.PI*2+(idx*0.618)*Math.PI*2, r=0.06+(idx%4)*0.08;
+    const face=disc%2===0?DH/2+0.011:-DH/2-0.011;
+    d.position.set(r*Math.cos(a),Y0+disc*STEP+face,r*Math.sin(a)); d.rotation.y=a;
+  });
+  psiiMesh.userData.info=STRUCT.psii; setLabel(psiiMesh,'psii'); makeDrillable(psiiMesh,4); g.add(psiiMesh);
+  g.add(instanced(new THREE.SphereGeometry(.020,6,5),M(0x00c040,{e:0x007020,ei:1.3,r:.25}),N*60,(d,i)=>{
+    const disc=Math.floor(i/60), idx=i%60, trimer=Math.floor(idx/3), ti=idx%3;
+    const a=(trimer/20)*Math.PI*2+(ti/3)*Math.PI*2+(trimer*0.5), r=0.05+(trimer%5)*0.072;
+    d.position.set(r*Math.cos(a),Y0+disc*STEP+(disc%2===0?1:-1)*(DH/2+0.022),r*Math.sin(a));
+  }));
+  const atpMat=M(0xd04000,{e:0x802000,ei:1.4,r:.2});
+  for(let i=0;i<5;i++){
+    const a=(i/5)*Math.PI*2, r=0.12+(i%3)*0.09;
+    const st=new THREE.Mesh(new THREE.CylinderGeometry(.022,.034,.12,8),atpMat);
+    st.position.set(r*Math.cos(a),Y0+TOT+0.06,r*Math.sin(a));
+    const hd=new THREE.Mesh(new THREE.SphereGeometry(.052,10,7),atpMat.clone());
+    hd.position.set(r*Math.cos(a),Y0+TOT+0.14,r*Math.sin(a)); hd.scale.set(1.2,.9,1.2);
+    setInfo(st,'atp_syn'); g.add(st); g.add(hd);
+  }
+}
+
+function buildThylakoidMembrane(g) {
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(2.4,.072,1.7),M(0x040c18,{tr:true,op:.45,r:.7})));
+  [.042,-.042].forEach(y=>g.add(new THREE.Mesh(new THREE.BoxGeometry(2.4,.006,1.7),M(0x061828,{tr:true,op:.30}))));
+  const psiiMat=M(0x1010c0,{e:0x08087a,ei:1.6,r:.15,m:.12});
+  [[-0.75,.06,.32],[-.38,.06,-.34],[0.05,.06,.44],[.42,.06,-.24],[.78,.06,.32],[-.58,-.06,-.44],[.16,-.06,.54],[.68,-.06,-.38],[-.90,-.06,.18],[.55,-.06,.60]].forEach(([x,y,z])=>{
+    const p=new THREE.Mesh(new THREE.BoxGeometry(.14,.10,.10),psiiMat.clone());
+    p.position.set(x,y,z); setInfo(p,'psii'); setLabel(p,'psii'); makeDrillable(p,5); g.add(p);
+  });
+  [[-0.62,.07,-.14],[-.12,.07,.04],[.52,.07,-.44],[.82,-.07,.24],[-.42,-.07,.44],[.22,-.07,-.54]].forEach(([x,y,z])=>{
+    const p=new THREE.Mesh(new THREE.CylinderGeometry(.062,.062,.10,8),M(0x00a0a0,{e:0x006060,ei:1.3,r:.2}));
+    p.position.set(x,y,z); p.rotation.x=Math.PI/2; setInfo(p,'psi'); g.add(p);
+  });
+  [[-.22,.065,.38],[.42,.065,-.08],[-.82,-.065,.14],[.14,-.065,-.45],[.74,-.065,.54]].forEach(([x,y,z])=>{
+    const b=new THREE.Mesh(new THREE.BoxGeometry(.11,.09,.08),M(0xb09000,{e:0x584800,ei:1.0,r:.25}));
+    b.position.set(x,y,z); setInfo(b,'cytb6f'); g.add(b);
+  });
+  [[.28,0,.12],[-.52,0,-.22],[.88,0,-.12]].forEach(([x,y,z])=>{
+    const st=new THREE.Mesh(new THREE.CylinderGeometry(.022,.036,.18,10),M(0xd04000,{e:0x802000,ei:1.4,r:.2})); st.position.set(x,.09,z);
+    const hd=new THREE.Mesh(new THREE.SphereGeometry(.056,12,8),M(0xd04000,{e:0x802000,ei:1.4})); hd.position.set(x,.20,z);
+    setInfo(st,'atp_syn'); g.add(st); g.add(hd);
+  });
+  const pqMat=M(0xd0d000,{e:0x888800,ei:2.0,r:.1});
+  for(let i=0;i<30;i++){
+    const pq=new THREE.Mesh(new THREE.SphereGeometry(.015,5,4),pqMat.clone());
+    pq.position.set((Math.random()-.5)*2.2,(Math.random()-.5)*.058,(Math.random()-.5)*1.5);
+    pq.userData.pq={t:Math.random()*Math.PI*2,sp:.2+Math.random()*.6}; g.add(pq);
+  }
+}
+
+function buildLipidBilayer(g) {
+  const NX=26,NZ=18,DX=2.0/NX,DZ=1.4/NZ,HY=0.094,TY=0.040,TL=0.072;
+  const upH=M(0x3060e0,{e:0x1030a0,ei:.6,r:.3}),loH=M(0x4050d8,{e:0x182090,ei:.6,r:.3});
+  const uT=M(0x0e2218,{r:.55}),lT=M(0x0e1c14,{r:.55});
+  const place=(d,i,y,jxi,jzi)=>{
+    const ix=Math.floor(i/NZ),iz=i%NZ;
+    d.position.set(-1.0+ix*DX+(iz%2)*DX*0.5+((ix*jxi+iz*13)%7)*.001,y,-0.70+iz*DZ+((ix*11+iz*jzi)%5)*.001);
+  };
+  g.add(instanced(new THREE.SphereGeometry(.018,6,5),upH,NX*NZ,(d,i)=>place(d,i,HY,37,41)));
+  g.add(instanced(new THREE.CylinderGeometry(.005,.003,TL,4),uT,NX*NZ,(d,i)=>place(d,i,TY,37,41)));
+  g.add(instanced(new THREE.SphereGeometry(.018,6,5),loH,NX*NZ,(d,i)=>place(d,i,-HY,23,31)));
+  g.add(instanced(new THREE.CylinderGeometry(.005,.003,TL,4),lT,NX*NZ,(d,i)=>place(d,i,-TY,23,31)));
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(2.0,.040,1.4),M(0x0a1a10,{tr:true,op:.18,tx:.5})));
+  const psiiMat=M(0x1020a0,{e:0x080860,ei:1.0,r:.25});
+  [[-0.6,0,.2],[.0,0,-.3],[.55,0,.35],[-.3,0,.55],[.75,0,-.42]].forEach(([x,y,z],idx)=>{
+    const grp=new THREE.Group(); grp.position.set(x,y,z);
+    [[-0.03,0,-0.03],[.03,0,-.03],[.03,0,.03],[-.03,0,.03],[.00,0,.00]].forEach(([hx,,hz])=>{
+      grp.add(new THREE.Mesh(new THREE.CylinderGeometry(.010,.010,.22,6),psiiMat.clone()));
+    });
+    const cap=new THREE.Mesh(new THREE.SphereGeometry(.05,8,6),M(0x2030b0,{e:0x101870,ei:1.1}));
+    cap.position.y=0.14; setInfo(cap,'psii'); setLabel(cap,'psii'); grp.add(cap);
+    if(idx===2) makeDrillable(cap,6);
+    g.add(grp);
+  });
+  g.add(instanced(new THREE.SphereGeometry(.008,5,4),M(0x8090ff,{e:0x304090,ei:.4,r:.4,tr:true,op:.55}),200,(d,i)=>{
+    d.position.set((Math.random()-.5)*1.8,(i<100?1:-1)*(HY+0.015+Math.random()*.04),(Math.random()-.5)*1.2);
+  }));
+}
+
+function buildPSIIComplex(g) {
+  const d1M=M(0x1030c0,{e:0x081880,ei:.9,r:.25}), d2M=M(0x104020,{e:0x082010,ei:.9,r:.25});
+  const cp43M=M(0x7010a0,{e:0x380860,ei:.8,r:.25}), cp47M=M(0x008080,{e:0x004040,ei:.8,r:.25});
+  [[-0.08,0,-0.04],[-0.12,0,0.04],[-0.06,0,0.10],[0.02,0,0.08],[0.00,0,-0.02]].forEach(([x,y,z])=>
+    g.add(new THREE.Mesh(new THREE.CylinderGeometry(.012,.012,.20,8),d1M.clone()).position.set(x,y,z)||g.children[g.children.length-1]));
+  [[0.08,0,-0.04],[0.12,0,0.04],[0.06,0,0.10],[-0.02,0,0.08],[0.00,0,0.02]].forEach(([x,y,z])=>
+    g.add(Object.assign(new THREE.Mesh(new THREE.CylinderGeometry(.012,.012,.20,8),d2M.clone()),{position:new THREE.Vector3(x,y,z)})));
+  for(let i=0;i<6;i++){const a=(i/6)*Math.PI*2-0.3,r=0.22;const h=new THREE.Mesh(new THREE.CylinderGeometry(.011,.011,.18,6),cp43M.clone());h.position.set(r*Math.cos(a)-.15,0,r*Math.sin(a));g.add(h);}
+  for(let i=0;i<6;i++){const a=(i/6)*Math.PI*2+0.3,r=0.22;const h=new THREE.Mesh(new THREE.CylinderGeometry(.011,.011,.18,6),cp47M.clone());h.position.set(r*Math.cos(a)+.15,0,r*Math.sin(a));g.add(h);}
+  const chlMat=M(0x00e040,{e:0x008820,ei:1.4,r:.2});
+  [[0,.11,.005],[.008,.09,.012],[-.014,.09,-.020],[.022,.09,-.018],
+   ...Array.from({length:32},(_,i)=>{const a=(i/32)*Math.PI*2+(i*0.618)*Math.PI*2,r=0.08+((i%4))*0.055;return[r*Math.cos(a)*(i<16?-.8:0.8),.095-((i*7)%5)*.008,r*Math.sin(a)];})
+  ].slice(0,36).forEach(([x,y,z],idx)=>{
+    const chl=new THREE.Mesh(new THREE.SphereGeometry(.018,8,6),chlMat.clone());
+    chl.position.set(x,y,z); if(idx===0)makeDrillable(chl,7); setInfo(chl,'chloroplast'); g.add(chl);
+  });
+  const oecMat=M(0xff6010,{e:0xff3000,ei:2.5,m:.4,r:.15});
+  [[-0.012,.13,-.030],[-.028,.12,-.035],[-.022,.10,-.050],[.005,.14,-.042]].forEach(([x,y,z])=>
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(.014,8,6),oecMat.clone()).position.set(x,y,z)||g.children[g.children.length-1]));
+  const ca2=new THREE.Mesh(new THREE.SphereGeometry(.012,8,6),M(0xc0c0ff,{e:0x808080,ei:1.5}));
+  ca2.position.set(.008,.115,-.038); g.add(ca2);
+  [[.012,.065,.022],[-.015,.065,-.018]].forEach(([x,y,z])=>{
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(.014,7,5),M(0xd0d000,{e:0x888800,ei:1.8})).position.set(x,y,z)||g.children[g.children.length-1]);
+  });
+}
+
+function buildChlorophyll(g) {
+  const S=.054;
+  const N=[[0,2.03,0],[2.03,0,0],[0,-2.03,0],[-2.03,0,0]];
+  const MESO=[[1.37,1.37,0],[1.37,-1.37,0],[-1.37,-1.37,0],[-1.37,1.37,0]];
+  const CA=[[.82,2.85,0],[-.82,2.85,0],[2.85,.82,0],[2.85,-.82,0],[.82,-2.85,0],[-.82,-2.85,0],[-2.85,-.82,0],[-2.85,.82,0]];
+  const CB=[[1.2,3.7,0],[-1.2,3.7,0],[3.7,1.2,0],[3.7,-1.2,0],[1.2,-3.7,0],[-1.2,-3.7,0],[-3.7,-1.2,0],[-3.7,1.2,0]];
+  const atom=(p,col,r,ik)=>{const m=new THREE.Mesh(new THREE.SphereGeometry(r,14,10),M(col,{e:col,ei:.25,r:.15,m:.3}));m.position.set(p[0]*S,p[1]*S,(p[2]||0)*S);if(ik)setInfo(m,ik);g.add(m);return m;};
+  const bond=(a,b,col=0x282828)=>{
+    const va=new THREE.Vector3(a[0]*S,a[1]*S,(a[2]||0)*S),vb=new THREE.Vector3(b[0]*S,b[1]*S,(b[2]||0)*S);
+    const len=va.distanceTo(vb),mid=new THREE.Vector3().addVectors(va,vb).multiplyScalar(.5);
+    const bd=new THREE.Mesh(new THREE.CylinderGeometry(.011,.011,len,6),M(col,{r:.5}));
+    bd.position.copy(mid);bd.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),new THREE.Vector3().subVectors(vb,va).normalize());g.add(bd);
+  };
+  atom([0,0,0],0xe0c000,.11,'mg_ion'); N.forEach(n=>atom(n,0x1050c0,.072,'nucleus_at'));
+  MESO.forEach(m=>atom(m,0x383838,.053)); CA.forEach(c=>atom(c,0x2c2c2c,.050));
+  CB.forEach(c=>{const a=atom(c,0x242424,.050); makeDrillable(a,8);});
+  N.forEach(n=>bond([0,0,0],n,0x706010));
+  [[0,0],[0,1],[1,2],[1,3],[2,4],[2,5],[3,6],[3,7]].forEach(([ni,ci])=>bond(N[ni],CA[ci],0x1c2818));
+  [[0,3],[1,0],[2,0],[3,1],[4,1],[5,2],[6,2],[7,3]].forEach(([ci,mi])=>bond(CA[ci],MESO[mi],0x242424));
+  [[0,0],[1,1],[2,2],[3,3],[4,4],[5,5],[6,6],[7,7]].forEach(([ca,cb])=>bond(CA[ca],CB[cb],0x242424));
+  [[0,1],[2,3],[4,5],[6,7]].forEach(([a,b])=>bond(CB[a],CB[b],0x222222));
+  let prev=[-1.37,-1.37,0]; for(let i=0;i<12;i++){
+    const n=[prev[0]-.75-(i%3===0?.25:0),prev[1]-.45+(i%2===0?.28:-.28),prev[2]+(i%3===0?.18:-.08)];
+    const c=new THREE.Mesh(new THREE.SphereGeometry(.042,8,6),M(0x262626,{r:.3}));
+    c.position.set(n[0]*S,n[1]*S,n[2]*S);g.add(c);bond(prev,n,0x1e1e1e);prev=n;
+  }
+}
+
+function buildCarbonAtom(g) {
+  g.add(Object.assign(new THREE.Mesh(new THREE.SphereGeometry(.016,12,8),M(0xff1010,{e:0xa00808,ei:1.8,r:.12,m:.3})),{userData:{info:STRUCT.nucleus_at}}));
+  const cloud=(r,col,op)=>{g.add(new THREE.Mesh(new THREE.SphereGeometry(r,22,14),M(col,{tr:true,op,r:.9,side:THREE.DoubleSide})));};
+  cloud(.026,0x1030c0,.20); cloud(.055,0x1050d0,.08);
+  const dumb=(axis,col)=>{[1,-1].forEach(s=>{const l=new THREE.Mesh(new THREE.SphereGeometry(.048,14,10),M(col,{tr:true,op:.20,r:.7,side:THREE.DoubleSide,e:col,ei:.10}));l.scale.set(axis[0]?1.6:.5,axis[1]?1.6:.5,axis[2]?1.6:.5);l.position.set(axis[0]*s*.05,axis[1]*s*.05,axis[2]*s*.05);g.add(l);});};
+  dumb([1,0,0],0xff4010); dumb([0,1,0],0x10c040); dumb([0,0,1],0x8030c0);
+  [0,120,240].forEach(deg=>{const r=deg*Math.PI/180;const l=new THREE.Mesh(new THREE.SphereGeometry(.052,12,8),M(0x5080c0,{tr:true,op:.13,r:.7,side:THREE.DoubleSide}));l.position.set(Math.cos(r)*.062,0,Math.sin(r)*.062);l.scale.set(1.5,.45,1.5);g.add(l);});
+}
+
+const BUILDERS=[buildCell,buildChloroplastSurface,buildChloroplastStroma,buildGranaStack,buildThylakoidMembrane,buildLipidBilayer,buildPSIIComplex,buildChlorophyll,buildCarbonAtom];
+
+// ── Label mapping ─────────────────────────────────────────────────────────────
+const LABEL_BY_STRUCT={
+  plasma_mem:'plasma_membrane',nucleus:'nucleus',vacuole:'vacuole',ribosome:'ribosome',
+  microtubule:'microtubule_track',actin:'actin',chloroplast:'chloroplast',chloroplast_env:'chloroplast',
+  grana:'chloroplast',rubisco:'ribosome',mitochondria:'mitochondria',er:'endoplasmic_reticulum',
+  golgi:'golgi',psii:'psii',psi:'psi',cytb6f:'cytochrome',atp_syn:'atp_synthase',
+  mg_ion:'magnesium',nucleus_at:'carbon',
+};
+function tagLabels(g){g.traverse(o=>{if(!o.isMesh||o.userData.label)return;const ik=Object.keys(STRUCT).find(k=>o.userData.info===STRUCT[k]);if(ik&&LABEL_BY_STRUCT[ik])o.userData.label=LABEL_BY_STRUCT[ik];});}
+
+// ── Transition ────────────────────────────────────────────────────────────────
+function disposeGroup(grp){grp.traverse(o=>{if(o.isMesh){o.geometry.dispose();const mm=Array.isArray(o.material)?o.material:[o.material];mm.forEach(m=>m.dispose());}});}
+async function transitionLevel(next) {
+  if(isTransitioning||next===currentLevel||next<0||next>=LC.length) return;
+  isTransitioning=true; orbitCtrl.autoRotate=false;
+  const fd=document.getElementById('fade');
+  fd.style.opacity='1'; await sleep(360);
+  if(currentGroup){disposeGroup(currentGroup);scene.remove(currentGroup);}
+  drillables=[]; currentGroup=new THREE.Group();
+  BUILDERS[next](currentGroup); tagLabels(currentGroup); scene.add(currentGroup);
+  currentLevel=next;
+  const lc=LC[next];
+  camera.fov=lc.camFov; camera.updateProjectionMatrix();
+  if(!fpsMode){
+    camera.position.set(lc.camDist*.55,lc.camDist*.18,lc.camDist);
+    orbitCtrl.target.set(0,0,0); orbitCtrl.update();
+    orbitCtrl.minDistance=lc.drillIn*.5;
+    orbitCtrl.maxDistance=lc.drillOut===Infinity?lc.camDist*4.5:lc.drillOut*.9;
+  }
+  bloomPass.strength=lc.bloom.s; bloomPass.radius=lc.bloom.r; bloomPass.threshold=lc.bloom.t;
+  filmPass.uniforms.intensity.value=lc.film;
+  updateHUD(next);
+  await sleep(40); fd.style.opacity='0'; await sleep(380);
+  orbitCtrl.autoRotate=!fpsMode; isTransitioning=false; pendingDrillTarget=null;
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+function fmtZ(z){if(z<1e-9)return (z*1e12).toFixed(0)+' pm';if(z<1e-6)return (z*1e9).toFixed(2)+' nm';if(z<1e-3)return (z*1e6).toFixed(2)+' µm';return (z*1e3).toFixed(2)+' mm';}
+function updateHUD(idx){
+  const L=LC[idx];
+  document.getElementById('bc').innerHTML=LC.slice(0,idx+1).map((l,i)=>`${i?'<span class="sep">›</span>':''}<span class="${i===idx?'act':'cr'}">${l.name.toUpperCase()}</span>`).join('');
+  document.getElementById('badge').innerHTML=`LEVEL ${idx}/8 &nbsp;·&nbsp; <span class="sv">${L.scales[0]}</span> &nbsp;·&nbsp; <span class="sv">${L.latin}</span>`;
+  document.getElementById('sbtxt').textContent=L.scales[0];
+  document.getElementById('p-name').textContent=L.name;
+  document.getElementById('p-latin').textContent=L.latin;
+  document.getElementById('p-kvs').innerHTML=(ENTITY_KVS[L.id]||[]).map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+  document.getElementById('syn').textContent=ENTITY_SYN[L.id]||'';
+  const lrs=layerData[L.id]||[];
+  document.getElementById('p-layers').innerHTML=lrs.length
+    ?lrs.map(l=>`<div class="lr"><div class="ld" style="background:${DEPTH_COLORS[l.depth]||'#4a6a8a'}"></div><span class="ln">${l.label}</span><span class="lz">${fmtZ(l.z)}</span></div>`).join('')
+    :'<div style="font-size:8px;color:#0e2030">— awaiting API —</div>';
+  const lbar=document.getElementById('lbar');
+  lbar.innerHTML='<span style="font-size:7.5px;color:#0d1e2a;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0">Depth Layers</span>';
+  lrs.slice(0,10).forEach(l=>{
+    const c=DEPTH_COLORS[l.depth]||'#4a6a8a';
+    const ch=document.createElement('span');ch.className='lc';ch.style.cssText=`color:${c};border-color:${c}22`;ch.textContent=l.label;lbar.appendChild(ch);
+  });
+}
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const ttEl=document.getElementById('tt');
+function showTT(inf,x,y){
+  if(!inf||!inf.name){ttEl.style.opacity='0';return;}
+  document.getElementById('ttn').textContent=inf.name||'';
+  document.getElementById('ttl').textContent=inf.latin||'';
+  document.getElementById('ttd').textContent=inf.dim||'';
+  document.getElementById('tti').textContent=inf.detail||'';
+  ttEl.style.opacity='1';
+  ttEl.style.left=Math.min(x+14,innerWidth-290)+'px';
+  ttEl.style.top=Math.max(y-8,4)+'px';
+}
+
+// ── Interaction ───────────────────────────────────────────────────────────────
+canvas.addEventListener('mousemove',e=>{
+  mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1;
+  if(fpsMode) return; // skip hover in FPS (crosshair navigation)
+  raycaster.setFromCamera(mouse,camera);
+  const all=[]; if(currentGroup)currentGroup.traverse(o=>{if(o.isMesh&&(o.userData.info||o.userData.drillTarget!==undefined))all.push(o);});
+  const h=raycaster.intersectObjects(all,false);
+  if(h.length){
+    hoveredMesh=h[0].object;
+    if(hoveredMesh.userData.drillTarget!==undefined){pendingDrillTarget=hoveredMesh;canvas.style.cursor='zoom-in';}
+    else canvas.style.cursor='crosshair';
+    showTT(hoveredMesh.userData.info,e.clientX,e.clientY);
+  } else {hoveredMesh=null;canvas.style.cursor='default';ttEl.style.opacity='0';}
+});
+canvas.addEventListener('wheel',e=>{
+  if(e.deltaY>=0||isTransitioning) return;
+  if(pendingDrillTarget){
+    const wp=pendingDrillTarget.getWorldPosition(new THREE.Vector3());
+    orbitCtrl.target.lerp(wp,0.18); orbitCtrl.update();
+  }
+},{passive:true});
+canvas.addEventListener('mousedown',e=>{mDownPos={x:e.clientX,y:e.clientY};});
+canvas.addEventListener('mouseup',e=>{
+  if(!mDownPos) return;
+  const moved=Math.hypot(e.clientX-mDownPos.x,e.clientY-mDownPos.y);
+  if(moved<5){
+    if(e.button===0&&hoveredMesh?.userData.drillTarget!==undefined){
+      const wp=hoveredMesh.getWorldPosition(new THREE.Vector3()); orbitCtrl.target.copy(wp); orbitCtrl.update();
+    }
+    if(e.button===2&&currentLevel>0) transitionLevel(currentLevel-1);
+  }
+  mDownPos=null;
+});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+window.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&currentLevel>0&&!fpsMode) transitionLevel(currentLevel-1);
+  if(e.key==='ArrowLeft'&&currentLevel>0&&!fpsMode) transitionLevel(currentLevel-1);
 });
 
-// ── Clock + animation ─────────────────────────────────────────────────────────
-const clock = new THREE.Clock();
-let frameN = 0;
-
-// Progress bar for initial load feedback
-const prog = document.getElementById('loading-prog');
-let loadPct = 0;
-const loadIntvl = setInterval(() => {
-  loadPct = Math.min(loadPct + 8, 90);
-  prog.style.width = loadPct + '%';
-  if (loadPct >= 90) {
-    clearInterval(loadIntvl);
-    setTimeout(() => { document.getElementById('loading').style.display = 'none'; }, 600);
-    prog.style.width = '100%';
-  }
-}, 200);
-
-function animate() {
+// ── Animate ───────────────────────────────────────────────────────────────────
+function animate(){
   requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
-  frameN++;
+  const dt=clock.getDelta();
 
   // FPS movement
-  if (fpsMode) {
-    const speed = BASE_SPD * (keys['ShiftLeft'] || keys['ShiftRight'] ? 2.5 : 1.0);
-    const fwd   = Number(keys['KeyW'] || keys['ArrowUp'])    - Number(keys['KeyS'] || keys['ArrowDown']);
-    const right = Number(keys['KeyD'] || keys['ArrowRight']) - Number(keys['KeyA'] || keys['ArrowLeft']);
-    const up    = Number(keys['Space']) - Number(keys['ControlLeft'] || keys['ControlRight']);
-    vel.z -= fwd   * speed * dt * 10;
-    vel.x -= right * speed * dt * 10;
-    const drag = Math.exp(-9 * dt);
-    vel.x *= drag; vel.z *= drag;
-    plc.moveForward(-vel.z * dt);
-    plc.moveRight(-vel.x * dt);
-    camera.position.y += up * speed * dt;
-    camera.position.y = Math.max(0.5, Math.min(40, camera.position.y));
+  if(fpsMode){
+    const spd=0.30*(fpsKeys['ShiftLeft']||fpsKeys['ShiftRight']?3:1);
+    const fwd=Number(fpsKeys['KeyW']||fpsKeys['ArrowUp'])-Number(fpsKeys['KeyS']||fpsKeys['ArrowDown']);
+    const rt =Number(fpsKeys['KeyD']||fpsKeys['ArrowRight'])-Number(fpsKeys['KeyA']||fpsKeys['ArrowLeft']);
+    const up =Number(fpsKeys['Space'])-Number(fpsKeys['ControlLeft']||fpsKeys['ControlRight']);
+    fpsVel.z-=fwd*spd*dt*12; fpsVel.x-=rt*spd*dt*12;
+    const drag=Math.exp(-9*dt); fpsVel.x*=drag; fpsVel.z*=drag;
+    plc.moveForward(-fpsVel.z*dt); plc.moveRight(-fpsVel.x*dt);
+    camera.position.y+=up*spd*dt;
+    camera.position.y=Math.max(-2.0,Math.min(5,camera.position.y));
   } else {
-    // WASD strafe in orbit mode
-    if (keys['KeyW'] || keys['KeyA'] || keys['KeyS'] || keys['KeyD']) {
-      const spd = 0.08;
-      if (keys['KeyW']) orbitCtrl.target.z -= spd;
-      if (keys['KeyS']) orbitCtrl.target.z += spd;
-      if (keys['KeyA']) orbitCtrl.target.x -= spd;
-      if (keys['KeyD']) orbitCtrl.target.x += spd;
-    }
     orbitCtrl.update();
   }
 
-  // Update world from neural stream
-  if (neuroSnap) updateWorld(neuroSnap);
+  if(neuroSnap){applyNeuroToScene(neuroSnap);drawNeuroMap(neuroSnap);}
 
-  // Animate each entity
-  for (const ent of Object.values(entities)) {
-    ent.update(dt, ent._tgt, ent._str || 0, ent._inWM || false, ent._srp || 0);
+  // PQ animation
+  if(currentGroup&&(currentLevel===4||currentLevel===5)){
+    currentGroup.traverse(o=>{if(o.isMesh&&o.userData.pq){
+      o.userData.pq.t+=dt*o.userData.pq.sp;
+      o.position.x+=Math.sin(o.userData.pq.t)*.0008; o.position.z+=Math.cos(o.userData.pq.t*.7)*.0007;
+      if(o.position.x>1.1)o.position.x-=2.2; if(o.position.x<-1.1)o.position.x+=2.2;
+    }});
   }
 
-  // Nearest entity check (every 8 frames)
-  if (frameN % 8 === 0) updateNearest();
+  // Zoom threshold (orbit mode)
+  if(!isTransitioning&&currentGroup&&!fpsMode){
+    const dist=camera.position.distanceTo(orbitCtrl.target);
+    const lc=LC[currentLevel];
+    if(dist<lc.drillIn&&currentLevel<LC.length-1) transitionLevel(currentLevel+1);
+    else if(lc.drillOut!==Infinity&&dist>lc.drillOut&&currentLevel>0) transitionLevel(currentLevel-1);
+  }
+
+  // FPS proximity drill-in
+  if(!isTransitioning&&currentGroup&&fpsMode){
+    raycaster.setFromCamera(new THREE.Vector2(0,0),camera);
+    const hits=raycaster.intersectObjects(drillables,false);
+    if(hits.length&&hits[0].distance<0.18&&currentLevel<LC.length-1) transitionLevel(currentLevel+1);
+  }
 
   composer.render();
 }
 
-animate();
+// ── API calls ─────────────────────────────────────────────────────────────────
+const ENT_LABELS={
+  plant_cell:['mesophyll','chloroplast','mitochondria','nucleus','vacuole','ribosome','actin','tubulin'],
+  chloroplast_surface:['chloroplast','envelope','toc','tic'],
+  chloroplast_stroma:['stroma','grana','rubisco','ftsz','nucleoid'],
+  grana_stack:['grana','thylakoid','psii','lhcii','psi','atp_synthase'],
+  thylakoid:['thylakoid','psii','psi','cytochrome','atp_synthase','plastoquinone'],
+  lipid_bilayer:['lipid','mgdg','dgdg','bilayer'],
+  psii_complex:['psii','d1','d2','cp43','cp47','oec','chlorophyll'],
+  chlorophyll:['chlorophyll','porphyrin','magnesium','tetrapyrrole'],
+  carbon_atom:['carbon','orbital','electron','sp2'],
+};
+async function fetchLayers(id){
+  const labels=ENT_LABELS[id]||[];
+  try{
+    const r=await fetch(`http://${HOST}/overlay/layers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entities:[{entity_id:id,active_labels:labels,phenotype:id,position:[.5,.5],size_estimate:.1,label_scores:Object.fromEntries(labels.map(l=>[l,1.0]))}]})});
+    const d=await r.json(); const res=(d.results||[])[0];
+    if(res?.layers) layerData[id]=res.layers.sort((a,b)=>a.depth-b.depth).slice(0,12);
+  }catch{}
+}
+async function calibrateAll(){
+  for(const [id,m] of [['plant_cell',20e-6],['chloroplast',5e-6],['thylakoid',10e-9],['lipid_bilayer',7e-9],['chlorophyll',1e-9],['carbon_atom',.154e-9]]){
+    try{await fetch(`http://${HOST}/overlay/layers/calibrate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entity_type:id,known_scale_m:m})});}catch{}
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init(){
+  const prog=document.getElementById('lprog'),lt=document.getElementById('ltxt');
+  prog.style.width='12%'; lt.textContent='CALIBRATING SCALES...';
+  await calibrateAll(); prog.style.width='28%';
+  lt.textContent='QUERYING NEURAL FABRIC...';
+  await fetchLayers('plant_cell'); prog.style.width='45%';
+  Promise.all(Object.keys(ENT_LABELS).filter(k=>k!=='plant_cell').map(fetchLayers));
+  prog.style.width='72%'; lt.textContent='BUILDING ULTRASTRUCTURE...';
+  await sleep(150);
+  prog.style.width='90%'; lt.textContent='CONNECTING NEURAL STREAM...';
+  startNeuroStream(); await sleep(200);
+  prog.style.width='100%'; await sleep(280);
+  document.getElementById('loading').style.display='none';
+  currentGroup=new THREE.Group();
+  buildCell(currentGroup); tagLabels(currentGroup); scene.add(currentGroup);
+  const lc=LC[0];
+  orbitCtrl.minDistance=lc.drillIn*.5; orbitCtrl.maxDistance=lc.camDist*4.5;
+  camera.position.set(0,.4,3.4);
+  updateHUD(0); animate();
+}
+init();
 </script>
 </body>
 </html>
