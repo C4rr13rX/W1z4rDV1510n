@@ -798,14 +798,19 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
         print(f'  Searching YouTube CC: "{query}"')
         import subprocess
         try:
-            # Skip webpage extraction to bypass JS challenge (works without deno)
+            # Skip webpage extraction to bypass JS challenge (works without deno).
+            # Prefer smallest viable format (≤360p) and cap file size at 80MB
+            # so frame extraction stays fast and disk-friendly.
+            _FMT = 'worstvideo[height>=240]+worstaudio/worst[height>=240]/worst'
             if _yt_python == 'api':
                 import yt_dlp as _yt
                 _yt_opts = {
-                    'format': 'best[height<=480][ext=mp4]/best[height<=480]',
+                    'format': _FMT,
                     'outtmpl': str(vid_dir / '%(id)s.%(ext)s'),
                     'max_downloads': 3, 'noplaylist': True, 'quiet': True,
                     'ignoreerrors': True, 'writeinfojson': True,
+                    'max_filesize': 80 * 1024 * 1024,   # 80 MB hard cap
+                    'match_filter': _yt.utils.match_filter_func('duration < 600'),
                     'extractor_args': {'youtube': {'skip': ['webpage']}},
                 }
                 try:
@@ -820,10 +825,12 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
                     f'import sys; sys.path.insert(0, {_ytdlp_site2!r})',
                     'import yt_dlp',
                     'opts = {',
-                    f'  "format": "best[height<=480][ext=mp4]/best[height<=480]",',
+                    f'  "format": "worstvideo[height>=240]+worstaudio/worst[height>=240]/worst",',
                     f'  "outtmpl": {_outtmpl!r},',
                     '  "max_downloads": 3, "noplaylist": True, "quiet": True,',
                     '  "ignoreerrors": True, "writeinfojson": True,',
+                    f'  "max_filesize": {80 * 1024 * 1024},',
+                    '  "match_filter": yt_dlp.utils.match_filter_func("duration < 600"),',
                     '  "extractor_args": {"youtube": {"skip": ["webpage"]}},',
                     '}',
                     'try:',
@@ -1114,14 +1121,206 @@ MRI_CT_ANATOMY_LEVELS = [
             ('interosseous_space',0.5,  0.50, 0.04, 0.18, 0,   80, 100, 100),
         ],
     },
+    {
+        'name': 'Digit / Hoof (transverse — pastern level)',
+        'label': 'digit_pastern',
+        'desc': (
+            'Transverse MRI/CT through the bovine pastern (proximal phalanx P1). '
+            'The paired digits (dewclaws absent at this level) show two proximal phalanges '
+            'side by side. Cortical bone (HU 1100–1400) surrounds the medullary cavity. '
+            'Deep digital flexor and superficial digital flexor tendons flank each digit. '
+            'The digital annular ligament and collateral ligaments are present. '
+            'T2-MRI shows the digital tendon sheaths as hyperintense rings. '
+            'Dorsal: common extensor tendons. Plantar: DDFT sheath fluid. '
+            'Minimal subcutaneous tissue and thick hoof wall capsule (high CT density).'
+        ),
+        'tissues': [
+            ('hoof_wall',           0.5,  0.5,  0.78, 0.80, 0,  150, 100, 200),
+            ('p1_cortex_L',         0.34, 0.48, 0.14, 0.18, 0,  160,  30, 240),
+            ('p1_marrow_L',         0.34, 0.48, 0.07, 0.10, 0,  200,  80,  50),
+            ('p1_cortex_R',         0.66, 0.48, 0.14, 0.18, 0,  160,  30, 240),
+            ('p1_marrow_R',         0.66, 0.48, 0.07, 0.10, 0,  200,  80,  50),
+            ('ddft_sheath_L',       0.30, 0.68, 0.10, 0.12, 0,   30, 250,  90),
+            ('ddft_sheath_R',       0.70, 0.68, 0.10, 0.12, 0,   30, 250,  90),
+            ('ddft_L',              0.30, 0.68, 0.06, 0.08, 0,  140,  60, 100),
+            ('ddft_R',              0.70, 0.68, 0.06, 0.08, 0,  140,  60, 100),
+            ('extensor_tendon_L',   0.34, 0.28, 0.07, 0.10, 0,  140,  60, 100),
+            ('extensor_tendon_R',   0.66, 0.28, 0.07, 0.10, 0,  140,  60, 100),
+            ('interdigital_skin',   0.5,  0.5,  0.04, 0.30, 0,  140, 120, 110),
+        ],
+    },
+    {
+        'name': 'Udder (transverse — gland parenchyma level)',
+        'label': 'udder_parenchyma',
+        'desc': (
+            'Transverse MRI/CT through the bovine udder at the level of the mammary '
+            'gland parenchyma. Four gland quarters are separated by the median suspensory '
+            'ligament (medially) and lateral suspensory ligaments. The glandular parenchyma '
+            'appears heterogeneous — active lactating tissue is T2-hyperintense (high water). '
+            'The cisterns (T2-bright milk pools) are visible at the base of each quarter. '
+            'On CT the glandular tissue is ~20–40 HU (similar to water/fat mix). '
+            'The median ligament is low-signal on T1 and T2 (fibrous). '
+            'Teat orifices are visible ventrally. Subcutaneous fat is T1-bright.'
+        ),
+        'tissues': [
+            ('subcutan_fat',        0.5,  0.5,  0.96, 0.90, 0,  220, 160,  55),
+            ('median_lig',          0.5,  0.5,  0.03, 0.60, 0,  100,  60, 110),
+            ('gland_q1',            0.25, 0.40, 0.30, 0.40, 0,  110, 150,  70),
+            ('gland_q2',            0.75, 0.40, 0.30, 0.40, 0,  110, 150,  70),
+            ('gland_q3',            0.25, 0.65, 0.30, 0.35, 0,  110, 150,  70),
+            ('gland_q4',            0.75, 0.65, 0.30, 0.35, 0,  110, 150,  70),
+            ('cistern_q1',          0.25, 0.72, 0.10, 0.08, 0,   30, 250,  30),
+            ('cistern_q2',          0.75, 0.72, 0.10, 0.08, 0,   30, 250,  30),
+            ('lat_lig_L',           0.08, 0.5,  0.04, 0.50, 0,  100,  60, 110),
+            ('lat_lig_R',           0.92, 0.5,  0.04, 0.50, 0,  100,  60, 110),
+        ],
+    },
+    {
+        'name': 'Rumen-Reticulum Junction (transverse)',
+        'label': 'rumen_reticulum',
+        'desc': (
+            'Transverse MRI/CT at the cranial rumen / reticulum junction level. '
+            'The reticulum (honeycomb stomach) is cranioventral — its mucosa shows '
+            'characteristic reticular folds on high-resolution MRI. The rumen cranial '
+            'sac lies caudal. Both contain ingesta (heterogeneous T2 signal) with a '
+            'gas cap dorsally (hypointense on MRI, ~-900 HU on CT). '
+            'The liver is right dorsal. The diaphragm is cranial. '
+            'Abdominal wall muscles (external/internal obliques, transversus) '
+            'form the lateral and ventral boundary. '
+            'Hardware disease risk: metallic densities on CT within the reticulum.'
+        ),
+        'tissues': [
+            ('abdom_wall',          0.5,  0.5,  0.96, 0.88, 0,   90, 110, 115),
+            ('rumen_gas',           0.42, 0.28, 0.28, 0.18, 0,    0,   0,   0),
+            ('rumen_ingesta',       0.42, 0.52, 0.30, 0.28, 0,   80,  90, 100),
+            ('reticulum_wall',      0.30, 0.68, 0.16, 0.14, 0,   90, 100, 120),
+            ('reticulum_lumen',     0.30, 0.68, 0.10, 0.10, 0,   60,  90,  90),
+            ('liver',               0.72, 0.38, 0.22, 0.20, 0,  120, 100, 140),
+            ('gallbladder',         0.68, 0.46, 0.06, 0.08, 0,   30, 250,  30),
+            ('diaphragm',           0.5,  0.20, 0.80, 0.08, 0,   90, 100, 120),
+            ('peritoneal_fat',      0.5,  0.5,  0.90, 0.80, 0,  210, 155,  55),
+        ],
+    },
+    {
+        'name': 'Heart at Apex (transverse — T9 level)',
+        'label': 'heart_apex',
+        'desc': (
+            'Transverse MRI/CT at the cardiac apex level (T9 vertebra). '
+            'The apex of the left ventricle is visible as a blunt cone of myocardium '
+            '(T1: intermediate, T2: intermediate). The pericardial sac surrounds the '
+            'heart (thin low-signal line). The pericardial fluid layer is T2-bright. '
+            'Both lungs flank the heart. The caudal vena cava is visible right-dorsally. '
+            'The descending aorta is adjacent to the vertebral body. '
+            'CT: myocardium HU 50–80, pericardial fluid HU 15–30, '
+            'lung ~-750 HU, vertebral cortex ~700 HU.'
+        ),
+        'tissues': [
+            ('lung_L',              0.18, 0.50, 0.30, 0.52, 0,   20,  20,   5),
+            ('lung_R',              0.82, 0.50, 0.30, 0.52, 0,   20,  20,   5),
+            ('pericardium',         0.46, 0.55, 0.16, 0.18, 0,  100, 110, 130),
+            ('pericardial_fluid',   0.46, 0.55, 0.13, 0.15, 0,   30, 250,  30),
+            ('lv_apex',             0.46, 0.55, 0.09, 0.11, 0,  100, 110, 130),
+            ('lv_lumen_apex',       0.46, 0.55, 0.04, 0.05, 0,   30, 250,  90),
+            ('t9_vertebra',         0.5,  0.22, 0.14, 0.12, 0,  160,  30, 240),
+            ('spinal_cord',         0.5,  0.22, 0.04, 0.04, 0,  100, 120, 120),
+            ('descend_aorta',       0.44, 0.26, 0.04, 0.04, 0,   30, 250,  90),
+            ('caudal_vena_cava',    0.54, 0.30, 0.05, 0.05, 0,   30, 250,  90),
+            ('intercostal_muscles', 0.5,  0.5,  0.94, 0.90, 0,   85, 105, 120),
+        ],
+    },
+    {
+        'name': 'Brain Stem (sagittal — midline)',
+        'label': 'brain_stem_sagittal',
+        'desc': (
+            'Sagittal MRI section through the bovine brainstem midline. '
+            'From cranial to caudal: olfactory bulbs, cerebral cortex (gyri and sulci), '
+            'corpus callosum (white matter bridge), thalamus, midbrain (mesencephalon), '
+            'pons, medulla oblongata, and cerebellar vermis. '
+            'The fourth ventricle is T2-hyperintense (CSF). '
+            'The pituitary gland sits in the sella turcica (T1-bright due to posterior '
+            'pituitary fat content). The spinal cord continues caudally. '
+            'T1-MRI: white matter brighter than grey matter; '
+            'T2-MRI: CSF=250, white matter=90, grey matter=100. '
+            'CT: bone of calvarium HU 700, brain parenchyma HU 30–40.'
+        ),
+        'tissues': [
+            ('calvarium',           0.5,  0.5,  0.72, 0.88, 0,  150,  30, 230),
+            ('cerebral_cortex',     0.5,  0.38, 0.55, 0.55, 0,  110, 100, 130),
+            ('white_matter',        0.5,  0.42, 0.40, 0.35, 0,  140,  90, 130),
+            ('corpus_callosum',     0.5,  0.48, 0.30, 0.04, 0,  140,  90, 130),
+            ('thalamus',            0.5,  0.52, 0.14, 0.10, 0,  100, 100, 130),
+            ('midbrain',            0.5,  0.60, 0.10, 0.10, 0,  100, 100, 130),
+            ('pons',                0.5,  0.68, 0.12, 0.10, 0,  100, 100, 130),
+            ('medulla',             0.5,  0.76, 0.10, 0.10, 0,  100, 100, 130),
+            ('cerebellum',          0.5,  0.60, 0.20, 0.18, 15,  105, 105, 130),
+            ('fourth_ventricle',    0.5,  0.66, 0.06, 0.06, 0,   30, 250,  30),
+            ('pituitary',           0.5,  0.58, 0.04, 0.04, 0,  180, 100, 120),
+            ('spinal_cord_c1',      0.5,  0.84, 0.04, 0.06, 0,  100, 120, 120),
+        ],
+    },
+    {
+        'name': 'Elbow Joint (transverse — olecranon level)',
+        'label': 'elbow_olecranon',
+        'desc': (
+            'Transverse MRI/CT through the bovine elbow at the olecranon process of '
+            'the ulna. The distal humerus articular condyles are visible. '
+            'The elbow joint space contains synovial fluid (T2-hyperintense). '
+            'Lateral collateral, medial collateral, and annular ligaments are present. '
+            'The extensor and flexor muscle groups surround the joint. '
+            'The radial and ulnar nerves travel along the medial and lateral aspects. '
+            'CT: olecranon cortex HU 1000+, cancellous ~250, synovial fluid ~30 HU. '
+            'T2-MRI: joint effusion, if present, clearly hyperintense.'
+        ),
+        'tissues': [
+            ('skin_fat',            0.5,  0.5,  0.88, 0.85, 0,  210, 155,  58),
+            ('triceps_brachii',     0.5,  0.22, 0.30, 0.24, 0,   80, 100, 120),
+            ('olecranon',           0.5,  0.30, 0.14, 0.18, 0,  160,  30, 240),
+            ('olecranon_marrow',    0.5,  0.30, 0.07, 0.10, 0,  200,  80,  50),
+            ('humerus_condyle_L',   0.34, 0.58, 0.16, 0.14, 0,  160,  30, 240),
+            ('humerus_condyle_R',   0.66, 0.58, 0.16, 0.14, 0,  160,  30, 240),
+            ('joint_fluid',         0.5,  0.55, 0.20, 0.08, 0,   30, 250,  30),
+            ('extensor_group_L',    0.22, 0.65, 0.18, 0.28, 0,   80, 100, 120),
+            ('extensor_group_R',    0.78, 0.65, 0.18, 0.28, 0,   80, 100, 120),
+            ('flexor_group',        0.5,  0.72, 0.22, 0.22, 0,   80, 100, 120),
+        ],
+    },
+    {
+        'name': 'Stifle Joint (transverse — patella level)',
+        'label': 'stifle_patella',
+        'desc': (
+            'Transverse MRI/CT at the patella level of the bovine stifle (femorotibial '
+            'joint, equivalent to human knee). The patella is an oval sesamoid embedded in '
+            'the quadriceps tendon cranially. The patellar ligament inserts on the tibial '
+            'tuberosity. Medial and lateral femoral condyles, menisci (fibrocartilage, '
+            'intermediate signal), cruciate ligaments, and collateral ligaments are present. '
+            'The stifle joint is the most complex bovine joint. '
+            'T2: menisci intermediate, cruciate low-signal, joint fluid very bright. '
+            'CT: condyle cortex HU 800+, articular cartilage 50–100 HU.'
+        ),
+        'tissues': [
+            ('skin_fat',            0.5,  0.5,  0.92, 0.90, 0,  210, 155,  58),
+            ('quadriceps',          0.5,  0.20, 0.28, 0.22, 0,   80, 100, 120),
+            ('patella',             0.5,  0.28, 0.12, 0.08, 0,  160,  30, 240),
+            ('patellar_lig',        0.5,  0.36, 0.07, 0.18, 0,  130,  60, 110),
+            ('femur_condyle_L',     0.30, 0.54, 0.20, 0.18, 0,  160,  30, 240),
+            ('femur_condyle_R',     0.70, 0.54, 0.20, 0.18, 0,  160,  30, 240),
+            ('joint_fluid',         0.5,  0.54, 0.24, 0.06, 0,   30, 250,  30),
+            ('meniscus_L',          0.30, 0.58, 0.07, 0.06, 0,  110,  80, 120),
+            ('meniscus_R',          0.70, 0.58, 0.07, 0.06, 0,  110,  80, 120),
+            ('biceps_femoris_L',    0.18, 0.60, 0.18, 0.28, 0,   80, 100, 120),
+            ('biceps_femoris_R',    0.82, 0.60, 0.18, 0.28, 0,   80, 100, 120),
+            ('gastrocnemius',       0.5,  0.78, 0.24, 0.20, 0,   80, 100, 120),
+        ],
+    },
 ]
 
 
-def generate_mri_ct_data(out_dir: Path, n_noise_levels: int = 3) -> list[dict]:
+def generate_mri_ct_data(out_dir: Path, n_noise_levels: int = 8) -> list[dict]:
     """
     Generate synthetic bovine MRI/CT cross-section images and accompanying text.
-    Produces 3 modalities × 8 anatomical levels × n_noise_levels = 72 images,
-    plus 8 detailed text documents (one per anatomical level).
+    Produces 3 modalities × 16 anatomical levels × n_noise_levels images,
+    plus 16 detailed text documents (one per anatomical level).
+    Default n_noise_levels=8 gives 384 images + 16 text = 400 items.
     """
     if not HAS_PIL:
         print('[SKIP] Stage 3: Pillow not available')
