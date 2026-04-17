@@ -766,14 +766,16 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
     except ImportError:
         pass
     if _yt_python is None:
-        for _py in [r'C:\Python313\python.exe', r'C:\Users\Adam\AppData\Roaming\Python\Python313\Scripts\yt-dlp.exe']:
+        # yt_dlp installed in roaming user site-packages — needs path injection
+        _ytdlp_site = r'C:\Users\Adam\AppData\Roaming\Python\Python313\site-packages'
+        _chk_script = f'import sys; sys.path.insert(0, {_ytdlp_site!r}); import yt_dlp'
+        for _py in [r'C:\Python313\python.exe']:
             try:
                 import subprocess as _sp
-                _sp.run([_py, '--version'] if _py.endswith('.exe') and 'yt-dlp' in _py
-                        else [_py, '-c', 'import yt_dlp'],
-                        capture_output=True, check=True)
-                _yt_python = _py
-                break
+                r = _sp.run([_py, '-c', _chk_script], capture_output=True, timeout=10)
+                if r.returncode == 0:
+                    _yt_python = _py
+                    break
             except Exception:
                 continue
     if _yt_python is None:
@@ -813,16 +815,23 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
                 with _yt.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([f'ytsearch5:{query}'])
             else:
-                subprocess.run([
-                    _yt_python, '-m', 'yt_dlp',
-                    f'ytsearch5:{query}',
-                    '--match-filter', 'license = "Creative Commons Attribution licence (reuse allowed)"',
-                    '--format', 'bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]',
-                    '--merge-output-format', 'mp4',
-                    '--output', str(vid_dir / '%(id)s.%(ext)s'),
-                    '--max-downloads', '2',
-                    '--no-playlist', '--quiet', '--write-info-json',
-                ], capture_output=True, text=True, timeout=120)
+                # Inject roaming site-packages so yt_dlp is importable from C:\Python313
+                _ytdlp_site2 = r'C:\Users\Adam\AppData\Roaming\Python\Python313\site-packages'
+                _yt_inline = (
+                    f'import sys; sys.path.insert(0, {_ytdlp_site2!r}); '
+                    f'import yt_dlp; '
+                    f'ydl_opts = {{'
+                    f'"format": "bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]", '
+                    f'"merge_output_format": "mp4", '
+                    f'"outtmpl": {str(vid_dir / "%(id)s.%(ext)s")!r}, '
+                    f'"max_downloads": 2, "noplaylist": True, "quiet": True, '
+                    f'"writeinfojson": True, '
+                    f'"match_filter": yt_dlp.utils.match_filter_func('
+                    f'"license = \\"Creative Commons Attribution licence (reuse allowed)\\"")}}; '
+                    f'yt_dlp.YoutubeDL(ydl_opts).download(["ytsearch5:{query}"])'
+                )
+                subprocess.run([_yt_python, '-c', _yt_inline],
+                               capture_output=True, text=True, timeout=180)
 
             downloaded += 2
         except Exception as e:
