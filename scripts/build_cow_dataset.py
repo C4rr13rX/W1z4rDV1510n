@@ -141,15 +141,24 @@ MERCK_VET_PAGES = [
 ]
 
 # ── Wikimedia Commons histology categories ───────────────────────────────────
+# Verified 2026-04 against commons.wikimedia.org — these category names exist
+# and contain microscopy image files.
 WIKIMEDIA_HISTOLOGY_CATEGORIES = [
-    'Skeletal_muscle_histology',
-    'Bone_histology',
-    'Cartilage_histology',
-    'Adipose_tissue_histology',
-    'Connective_tissue_histology',
-    'Skin_histology',
-    'Nerve_histology',
-    'Tendon_histology',
+    'Histology_of_muscles',
+    'Histology_of_bone',
+    'Histology_of_skin',
+    'Histology_of_loose_connective_tissue',
+    'Histology_of_dense_connective_tissues',
+    'Histology_of_nerves',
+    'Histology_of_mammal_nerves',
+    'Skeletal_muscle',
+    'Bovine_anatomy',
+    'Cattle',
+    'Muscle_tissue',
+    'Cardiac_muscle',
+    'Gomori_trichrome_stain',
+    'Muscle_fibers',
+    'Histology_of_bone_marrow',
 ]
 
 # ── PDB IDs relevant to bovine structural biology ────────────────────────────
@@ -542,10 +551,25 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
     out_dir.mkdir(parents=True, exist_ok=True)
     items = []
 
+    # Try yt-dlp via Python API first, then fall back to subprocess on C:\Python313
+    _yt_python = None
     try:
-        import subprocess
-        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
-    except Exception:
+        import yt_dlp as _yt_module  # noqa: F401
+        _yt_python = 'api'
+    except ImportError:
+        pass
+    if _yt_python is None:
+        for _py in [r'C:\Python313\python.exe', r'C:\Users\Adam\AppData\Roaming\Python\Python313\Scripts\yt-dlp.exe']:
+            try:
+                import subprocess as _sp
+                _sp.run([_py, '--version'] if _py.endswith('.exe') and 'yt-dlp' in _py
+                        else [_py, '-c', 'import yt_dlp'],
+                        capture_output=True, check=True)
+                _yt_python = _py
+                break
+            except Exception:
+                continue
+    if _yt_python is None:
         print('[SKIP] Stage 2: yt-dlp not available (pip install yt-dlp)')
         return []
 
@@ -565,18 +589,33 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
         print(f'  Searching YouTube CC: "{query}"')
         import subprocess
         try:
-            result = subprocess.run([
-                'yt-dlp',
-                f'ytsearch5:{query}',
-                '--match-filter', 'license = "Creative Commons Attribution licence (reuse allowed)"',
-                '--format', 'bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]',
-                '--merge-output-format', 'mp4',
-                '--output', str(vid_dir / '%(id)s.%(ext)s'),
-                '--max-downloads', '2',
-                '--no-playlist',
-                '--quiet',
-                '--write-info-json',
-            ], capture_output=True, text=True, timeout=120)
+            if _yt_python == 'api':
+                # Use yt-dlp Python API directly
+                import yt_dlp as _yt
+                ydl_opts = {
+                    'format': 'bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]',
+                    'merge_output_format': 'mp4',
+                    'outtmpl': str(vid_dir / '%(id)s.%(ext)s'),
+                    'max_downloads': 2,
+                    'noplaylist': True,
+                    'quiet': True,
+                    'writeinfojson': True,
+                    'match_filter': _yt.utils.match_filter_func(
+                        'license = "Creative Commons Attribution licence (reuse allowed)"'),
+                }
+                with _yt.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([f'ytsearch5:{query}'])
+            else:
+                subprocess.run([
+                    _yt_python, '-m', 'yt_dlp',
+                    f'ytsearch5:{query}',
+                    '--match-filter', 'license = "Creative Commons Attribution licence (reuse allowed)"',
+                    '--format', 'bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]',
+                    '--merge-output-format', 'mp4',
+                    '--output', str(vid_dir / '%(id)s.%(ext)s'),
+                    '--max-downloads', '2',
+                    '--no-playlist', '--quiet', '--write-info-json',
+                ], capture_output=True, text=True, timeout=120)
 
             downloaded += 2
         except Exception as e:
@@ -629,6 +668,357 @@ def download_youtube_cc(out_dir: Path, queries: list[str],
         cap.release()
 
     print(f'  Extracted {len(items)} video frames')
+    return items
+
+
+# ── Medical imaging: synthetic MRI/CT cross-sections (Stage 3) ───────────────
+# Generates synthetic medical imaging data approximating bovine MRI/CT:
+#   • 3 modality types: T1-weighted MRI, T2-weighted MRI, CT (Hounsfield)
+#   • 8 anatomical levels: head, neck, shoulder/brachium, thorax, abdomen,
+#                          pelvis, thigh/stifle, cannon/metatarsus
+#   • Each level × modality = 1 synthetic cross-section image + 1 text document
+#
+# Tissue gray values (0-255) per modality:
+#   T1   fat=220, muscle=80, bone=160, marrow=210, fluid=30, air=0
+#   T2   fat=160, muscle=100, bone=30, marrow=80, fluid=250, air=0
+#   CT   bone=255, cortex=240, muscle=120, fat=60, fluid=90, air=0  (HU mapped 0-255)
+
+MRI_CT_ANATOMY_LEVELS = [
+    {
+        'name': 'Head (transverse — orbital level)',
+        'label': 'head_orbital',
+        'desc': (
+            'Transverse MRI/CT at the mid-orbital level of the bovine head. '
+            'The section reveals the paired orbital cones (retro-orbital fat, optic nerve, '
+            'rectus muscles), the frontal sinuses laterally, the nasal passages centrally, '
+            'the turbinate bones (scroll-like conchae), and the masseter muscles '
+            'flanking the zygomatic arches. On T1-MRI retro-orbital fat appears bright; '
+            'on T2-MRI, the vitreous humor is hyperintense. CT clearly delineates the '
+            'orbital walls and turbinate bone structure (HU 400-700 cortical bone, '
+            'HU -100 to -50 retro-orbital fat).'
+        ),
+        'tissues': [  # (name, center_x, center_y, w, h, angle, gray_T1, gray_T2, gray_CT)
+            ('cortical_bone',    0.5, 0.5, 0.85, 0.70, 0,   160, 30,  240),
+            ('frontal_sinus_L',  0.2, 0.3, 0.12, 0.10, 15,   0,  0,   0),
+            ('frontal_sinus_R',  0.8, 0.3, 0.12, 0.10, -15,  0,  0,   0),
+            ('nasal_passage',    0.5, 0.5, 0.08, 0.20, 0,    0,  0,   0),
+            ('retroorb_fat_L',   0.22, 0.48, 0.16, 0.14, 0, 220, 160,  60),
+            ('retroorb_fat_R',   0.78, 0.48, 0.16, 0.14, 0, 220, 160,  60),
+            ('masseter_L',       0.12, 0.62, 0.18, 0.22, 20,  80, 100, 120),
+            ('masseter_R',       0.88, 0.62, 0.18, 0.22, -20, 80, 100, 120),
+            ('vitreous_L',       0.30, 0.45, 0.08, 0.08, 0,   30, 250,  90),
+            ('vitreous_R',       0.70, 0.45, 0.08, 0.08, 0,   30, 250,  90),
+            ('brain_frontal',    0.5, 0.30, 0.22, 0.14, 0,  130,  90, 130),
+        ],
+    },
+    {
+        'name': 'Neck (transverse — C4 level)',
+        'label': 'neck_c4',
+        'desc': (
+            'Transverse MRI/CT at cervical vertebra C4. The vertebral body is central with '
+            'the spinous process dorsal. The spinal cord occupies the vertebral canal. '
+            'The trachea is ventral (air-filled lumen), the oesophagus is left-lateral. '
+            'Bilateral splenius, semispinalis capitis, and multifidus muscles surround '
+            'the vertebral column. The jugular veins and carotid arteries are visible '
+            'in the neurovascular bundle on each side. Subcutaneous fat and skin form '
+            'the outer boundary. CT HU: vertebral cortex ~700, cancellous ~250, '
+            'tracheal air -1000, muscle 40–60, fat -100 to -50.'
+        ),
+        'tissues': [
+            ('skin_fat',         0.5, 0.5, 0.90, 0.85, 0,   200, 150,  55),
+            ('splenius_L',       0.22, 0.40, 0.20, 0.28, 15,  80, 100, 120),
+            ('splenius_R',       0.78, 0.40, 0.20, 0.28, -15, 80, 100, 120),
+            ('multifidus',       0.5,  0.30, 0.18, 0.20, 0,   80, 100, 120),
+            ('vertebra_body',    0.5,  0.58, 0.18, 0.16, 0,  160,  30, 240),
+            ('vertebral_canal',  0.5,  0.52, 0.06, 0.06, 0,   30,  90,  90),
+            ('spinal_cord',      0.5,  0.52, 0.04, 0.04, 0,  100, 120, 120),
+            ('trachea',          0.5,  0.78, 0.10, 0.08, 0,    0,   0,   0),
+            ('jugular_L',        0.30, 0.70, 0.04, 0.06, 0,   30, 250,  90),
+            ('jugular_R',        0.70, 0.70, 0.04, 0.06, 0,   30, 250,  90),
+        ],
+    },
+    {
+        'name': 'Shoulder / Brachium (transverse — scapular level)',
+        'label': 'shoulder_scapular',
+        'desc': (
+            'Transverse MRI at the level of the scapula and shoulder joint. The '
+            'scapular body (triangular bone) is visible dorsally. The glenohumeral '
+            'joint space contains synovial fluid (T2-hyperintense). The deltoid, '
+            'supraspinatus, infraspinatus, and subscapularis muscles are identifiable '
+            'by their positions and signal intensities. The brachial plexus and '
+            'subclavian vessels are medially placed. On CT the scapular cortex (HU 700+) '
+            'contrasts strongly with the adjacent musculature (HU 40-60).'
+        ),
+        'tissues': [
+            ('skin_fat',          0.5, 0.5, 0.90, 0.88, 0,  210, 155,  58),
+            ('scapula',           0.5, 0.28, 0.40, 0.12, 0,  160,  30, 240),
+            ('supraspinatus',     0.5, 0.20, 0.28, 0.14, 0,   80, 100, 120),
+            ('infraspinatus',     0.5, 0.40, 0.28, 0.18, 0,   80, 100, 120),
+            ('deltoid_L',         0.22, 0.55, 0.18, 0.30, 20,  80, 100, 120),
+            ('deltoid_R',         0.78, 0.55, 0.18, 0.30, -20, 80, 100, 120),
+            ('humerus_head_L',    0.28, 0.60, 0.14, 0.14, 0,  160,  30, 240),
+            ('humerus_head_R',    0.72, 0.60, 0.14, 0.14, 0,  160,  30, 240),
+            ('joint_fluid_L',     0.28, 0.60, 0.06, 0.06, 0,   30, 250,  90),
+            ('joint_fluid_R',     0.72, 0.60, 0.06, 0.06, 0,   30, 250,  90),
+            ('subcutan_fat',      0.5, 0.85, 0.60, 0.08, 0,  220, 160,  55),
+        ],
+    },
+    {
+        'name': 'Thorax (transverse — T6 level, mid-heart)',
+        'label': 'thorax_t6',
+        'desc': (
+            'Transverse MRI/CT at the 6th thoracic vertebra level, showing the cardiac '
+            'silhouette. The heart occupies the left-of-centre thoracic cavity. Cardiac '
+            'chambers: left ventricle (thick-walled, LV myocardium T1=medium), left atrium, '
+            'right ventricle and right atrium. Both lungs flank the mediastinum. On T2, '
+            'intracardiac blood pools are bright. On CT, the mediastinal fat (HU -80), '
+            'lung parenchyma (HU -700 to -800), pleural fluid if present (HU +15), '
+            'aortic arch and pulmonary vessels. Ribs and thoracic vertebra surround the section.'
+        ),
+        'tissues': [
+            ('lung_L',            0.18, 0.50, 0.32, 0.50, 0,   20,  20,   5),
+            ('lung_R',            0.82, 0.50, 0.32, 0.50, 0,   20,  20,   5),
+            ('lv_myocardium',     0.44, 0.52, 0.20, 0.22, 0,  100, 110, 130),
+            ('lv_lumen',          0.44, 0.52, 0.10, 0.12, 0,   30, 250,  90),
+            ('rv_chamber',        0.54, 0.44, 0.18, 0.16, 15,  30, 250,  90),
+            ('thoracic_vertebra', 0.5,  0.25, 0.14, 0.12, 0,  160,  30, 240),
+            ('spinal_cord',       0.5,  0.25, 0.04, 0.04, 0,  100, 120, 120),
+            ('ribs_L',            0.22, 0.45, 0.04, 0.30, 30, 160,  30, 240),
+            ('ribs_R',            0.78, 0.45, 0.04, 0.30, -30,160,  30, 240),
+            ('mediastinal_fat',   0.5,  0.50, 0.08, 0.14, 0,  220, 160,  55),
+            ('aorta',             0.42, 0.28, 0.05, 0.05, 0,   30, 250,  90),
+            ('skin_muscle',       0.5,  0.5,  0.94, 0.90, 0,  100, 110, 100),
+        ],
+    },
+    {
+        'name': 'Abdomen (transverse — L2 level, rumen)',
+        'label': 'abdomen_rumen',
+        'desc': (
+            'Transverse MRI/CT at the second lumbar vertebra level in a bovine, showing the '
+            'large ruminant forestomachs. The rumen occupies the left 60% of the abdominal '
+            'cavity — its gas cap appears dark on all sequences. Reticulum, omasum, and '
+            'abomasum occupy the right ventral area. Liver is right dorsal, spleen is '
+            'left lateral. Both kidneys flank the lumbar spine. The lumbar muscles '
+            '(longissimus dorsi, iliopsoas) are large and well-defined. On T2-MRI, '
+            'rumen ingesta shows heterogeneous signal. CT: rumen gas (-900 HU), liver (+55 HU), '
+            'spleen (+50 HU), kidney cortex (+30 HU), retroperitoneal fat (-80 HU).'
+        ),
+        'tissues': [
+            ('skin_fat',          0.5,  0.5,  0.96, 0.92, 0,  210, 155,  58),
+            ('longissimus_L',     0.35, 0.25, 0.20, 0.22, 0,   80, 100, 120),
+            ('longissimus_R',     0.65, 0.25, 0.20, 0.22, 0,   80, 100, 120),
+            ('lumbar_vertebra',   0.5,  0.22, 0.14, 0.12, 0,  160,  30, 240),
+            ('rumen_gas',         0.38, 0.42, 0.30, 0.26, 0,    0,   0,   0),
+            ('rumen_ingesta',     0.40, 0.60, 0.32, 0.20, 0,   80,  90, 100),
+            ('liver',             0.72, 0.38, 0.22, 0.20, 0,  120, 100, 140),
+            ('spleen',            0.20, 0.50, 0.10, 0.16, 0,  110, 100, 135),
+            ('kidney_L',          0.36, 0.30, 0.08, 0.10, 0,  100, 110, 120),
+            ('kidney_R',          0.68, 0.30, 0.08, 0.10, 0,  100, 110, 120),
+            ('retro_fat',         0.5,  0.28, 0.30, 0.12, 0,  210, 155,  55),
+            ('abomasum',          0.62, 0.70, 0.14, 0.10, 0,   30, 200,  90),
+        ],
+    },
+    {
+        'name': 'Pelvis (transverse — sacral level)',
+        'label': 'pelvis_sacral',
+        'desc': (
+            'Transverse MRI/CT at the sacral level of the bovine pelvis. The sacrum is '
+            'dorsal-central; the iliac wings form the lateral walls of the pelvic inlet. '
+            'The pelvic canal contains the rectum (filled with faeces), bladder '
+            '(T2-hyperintense urine), and in females the uterus and ovaries. The '
+            'gluteal muscle group (gluteus medius, biceps femoris) is prominent. '
+            'The caudal aorta and iliac vessels are visible medially. On CT the '
+            'sacral foramina are identifiable (HU 600-700 cortical), and the '
+            'sciatic nerve is in the sciatic notch.'
+        ),
+        'tissues': [
+            ('skin_fat',          0.5,  0.5,  0.96, 0.90, 0,  210, 155,  58),
+            ('gluteus_medius_L',  0.22, 0.38, 0.22, 0.32, 15,  80, 100, 120),
+            ('gluteus_medius_R',  0.78, 0.38, 0.22, 0.32, -15, 80, 100, 120),
+            ('biceps_femoris_L',  0.20, 0.65, 0.18, 0.28, 0,   80, 100, 120),
+            ('biceps_femoris_R',  0.80, 0.65, 0.18, 0.28, 0,   80, 100, 120),
+            ('sacrum',            0.5,  0.25, 0.20, 0.14, 0,  160,  30, 240),
+            ('sacral_canal',      0.5,  0.26, 0.04, 0.04, 0,   30,  90,  90),
+            ('bladder',           0.5,  0.62, 0.14, 0.12, 0,   30, 250,  90),
+            ('rectum',            0.5,  0.42, 0.08, 0.10, 0,   60,  70, 100),
+            ('ilium_L',           0.28, 0.28, 0.14, 0.10, 20, 160,  30, 240),
+            ('ilium_R',           0.72, 0.28, 0.14, 0.10, -20,160,  30, 240),
+            ('iliopsoas_L',       0.34, 0.42, 0.10, 0.14, 0,   80, 100, 120),
+            ('iliopsoas_R',       0.66, 0.42, 0.10, 0.14, 0,   80, 100, 120),
+        ],
+    },
+    {
+        'name': 'Thigh / Stifle (transverse — mid-femoral)',
+        'label': 'thigh_femur',
+        'desc': (
+            'Transverse MRI/CT at mid-femoral level. The femur shaft (cortical ring with '
+            'medullary canal) is central. The quadriceps group (rectus femoris, vastus '
+            'lateralis/medialis/intermedius) occupies the cranial compartment. Caudally '
+            'the biceps femoris and semitendinosus form the hamstrings. The femoral '
+            'artery and vein occupy the medial aspect. The femoral nerve branch travels '
+            'with the vessels. On T1-MRI, yellow marrow in the medullary canal appears '
+            'bright (fat-signal). On CT, femoral cortex HU 1000-1200, medullary fat '
+            'HU -100, surrounding muscle HU 40-60.'
+        ),
+        'tissues': [
+            ('skin_fat',          0.5,  0.5,  0.90, 0.88, 0,  210, 155,  58),
+            ('rectus_femoris',    0.5,  0.30, 0.18, 0.20, 0,   80, 100, 120),
+            ('vastus_lat_L',      0.26, 0.40, 0.18, 0.24, 0,   80, 100, 120),
+            ('vastus_med_R',      0.74, 0.40, 0.18, 0.24, 0,   80, 100, 120),
+            ('biceps_femoris',    0.5,  0.68, 0.22, 0.20, 0,   80, 100, 120),
+            ('femur_cortex',      0.5,  0.50, 0.22, 0.22, 0,  160,  30, 240),
+            ('femur_marrow',      0.5,  0.50, 0.12, 0.12, 0,  210,  80, 60),
+            ('femoral_vessel',    0.36, 0.55, 0.04, 0.06, 0,   30, 250,  90),
+            ('semitendinosus',    0.60, 0.65, 0.14, 0.18, 0,   80, 100, 120),
+        ],
+    },
+    {
+        'name': 'Cannon Bone / Metatarsus (transverse)',
+        'label': 'cannon_metatarsus',
+        'desc': (
+            'Transverse MRI/CT through the bovine cannon bone (fused third and fourth '
+            'metatarsals in the hindlimb). The fused metatarsal cortex forms a '
+            'characteristic figure-eight cross-section outline. The medullary cavity '
+            'of each component is visible (T1-bright yellow marrow). Surrounding tissues: '
+            'digital extensor tendons dorsally, deep digital flexor tendon palmarly, '
+            'the digital flexor tendon sheath (T2-bright synovial fluid), and thin skin '
+            'with minimal subcutaneous fat. CT: cortex HU 1100-1400, marrow HU -80, '
+            'tendons HU 70-100 (fibrous), tendon sheath fluid HU +10.'
+        ),
+        'tissues': [
+            ('skin',              0.5,  0.5,  0.78, 0.82, 0,  160, 120, 110),
+            ('extensor_tendon',   0.5,  0.22, 0.10, 0.12, 0,  140,  60, 100),
+            ('flexor_tendon',     0.5,  0.75, 0.10, 0.14, 0,  140,  60, 100),
+            ('tendon_sheath',     0.5,  0.72, 0.14, 0.18, 0,   30, 250,  90),
+            ('mt3_cortex',        0.40, 0.50, 0.18, 0.22, 0,  160,  30, 240),
+            ('mt3_marrow',        0.40, 0.50, 0.10, 0.14, 0,  210,  80,  60),
+            ('mt4_cortex',        0.60, 0.50, 0.18, 0.22, 0,  160,  30, 240),
+            ('mt4_marrow',        0.60, 0.50, 0.10, 0.14, 0,  210,  80,  60),
+            ('interosseous_space',0.5,  0.50, 0.04, 0.18, 0,   80, 100, 100),
+        ],
+    },
+]
+
+
+def generate_mri_ct_data(out_dir: Path, n_noise_levels: int = 3) -> list[dict]:
+    """
+    Generate synthetic bovine MRI/CT cross-section images and accompanying text.
+    Produces 3 modalities × 8 anatomical levels × n_noise_levels = 72 images,
+    plus 8 detailed text documents (one per anatomical level).
+    """
+    if not HAS_PIL:
+        print('[SKIP] Stage 3: Pillow not available')
+        return []
+
+    import io as _io
+    out_dir.mkdir(parents=True, exist_ok=True)
+    items = []
+    SIZE = 512
+
+    MODALITIES = [
+        ('T1', 6),   # T1-weighted MRI, index into tissue gray tuple
+        ('T2', 7),   # T2-weighted MRI
+        ('CT', 8),   # CT Hounsfield (mapped 0-255)
+    ]
+
+    rng = np.random.default_rng(42)
+
+    for level in MRI_CT_ANATOMY_LEVELS:
+        label = level['label']
+
+        # ── Text document ────────────────────────────────────────────────────
+        full_text = (
+            f"BOVINE MRI/CT ATLAS — {level['name']}\n\n"
+            f"{level['desc']}\n\n"
+            "Tissue composition at this level:\n"
+        )
+        for t in level['tissues']:
+            hu_t1, hu_t2, hu_ct = t[6], t[7], t[8]
+            # Map HU 0-255 scale back to approximate Hounsfield for CT
+            hu_approx = int(hu_ct / 255 * 1400 - 200)
+            full_text += (
+                f"  {t[0].replace('_',' ')}: T1={hu_t1}/255  T2={hu_t2}/255  "
+                f"CT≈{hu_approx} HU\n"
+            )
+
+        txt_fname = out_dir / f'{label}.txt'
+        txt_fname.write_text(full_text, encoding='utf-8')
+        items.append({
+            'stage': 3, 'type': 'text', 'source': 'synthetic_mri_atlas',
+            'title': f'Bovine MRI/CT Atlas — {level["name"]}',
+            'text': full_text, 'file': str(txt_fname),
+            'modality': 'text',
+            'tags': ['mri', 'ct', 'medical_imaging', 'bovine_anatomy', label],
+        })
+
+        # ── Synthetic cross-section images ───────────────────────────────────
+        for mod_name, gray_idx in MODALITIES:
+            for noise_seed in range(n_noise_levels):
+                # Build image as float array
+                img_f = np.zeros((SIZE, SIZE), dtype=np.float32)
+
+                # Draw tissues from back to front (painter's algorithm)
+                for tissue in level['tissues']:
+                    tname, cx_n, cy_n, w_n, h_n, angle_deg = tissue[:6]
+                    gray = tissue[gray_idx]
+
+                    cx = int(cx_n * SIZE); cy = int(cy_n * SIZE)
+                    w  = int(w_n  * SIZE / 2); h  = int(h_n  * SIZE / 2)
+
+                    # Create mask via PIL (handles rotation cleanly)
+                    mask = Image.new('L', (SIZE, SIZE), 0)
+                    mdraw = ImageDraw.Draw(mask)
+                    bbox = [(cx - w, cy - h), (cx + w, cy + h)]
+                    mdraw.ellipse(bbox, fill=255)
+
+                    if abs(angle_deg) > 0.5:
+                        mask = mask.rotate(-angle_deg, center=(cx, cy))
+
+                    mask_a = np.array(mask, dtype=np.float32) / 255.0
+                    img_f = img_f * (1 - mask_a) + gray * mask_a
+
+                # Add spatially-correlated noise (blurred Gaussian)
+                noise = rng.standard_normal((SIZE, SIZE)).astype(np.float32)
+                # Smooth noise to simulate MRI texture / CT grain
+                noise_img = Image.fromarray(
+                    np.clip(noise * 8 + 128, 0, 255).astype(np.uint8), 'L')
+                noise_img = noise_img.filter(ImageFilter.GaussianBlur(radius=2))
+                noise_a = (np.array(noise_img, dtype=np.float32) - 128) * (
+                    0.04 + noise_seed * 0.03)
+                img_f = np.clip(img_f + noise_a, 0, 255)
+
+                # Add circular field-of-view boundary (MRI FOV circle)
+                cy2, cx2 = SIZE // 2, SIZE // 2
+                ys, xs = np.ogrid[:SIZE, :SIZE]
+                outside = ((xs - cx2) ** 2 + (ys - cy2) ** 2) > (SIZE // 2 - 8) ** 2
+                img_f[outside] = 0
+
+                img_u8 = img_f.astype(np.uint8)
+                pil_img = Image.fromarray(img_u8, 'L').convert('RGB')
+
+                # Annotate modality in corner
+                ann_draw = ImageDraw.Draw(pil_img)
+                ann_draw.text((10, 10), f'{mod_name} | {level["name"]}', fill=(180, 180, 180))
+
+                buf = _io.BytesIO()
+                pil_img.save(buf, 'JPEG', quality=88)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+
+                fname = out_dir / f'{label}_{mod_name}_{noise_seed}.jpg'
+                fname.write_bytes(buf.getvalue())
+
+                items.append({
+                    'stage': 3, 'type': 'mri_ct_slice', 'source': 'synthetic_mri_atlas',
+                    'title': f'{mod_name} {level["name"]} (noise={noise_seed})',
+                    'label': label, 'modality_type': mod_name,
+                    'file': str(fname), 'b64': b64,
+                    'modality': 'image',
+                    'tags': ['mri', 'ct', mod_name.lower(), 'medical_imaging', 'bovine_anatomy', label],
+                })
+
+    print(f'  Generated {len(items)} MRI/CT items '
+          f'({len(MRI_CT_ANATOMY_LEVELS)} levels × {len(MODALITIES)} modalities × '
+          f'{n_noise_levels} noise variants + {len(MRI_CT_ANATOMY_LEVELS)} text docs)')
     return items
 
 
@@ -945,26 +1335,14 @@ def main():
             max_videos=args.yt_videos, fps_extract=2)
         all_items[2] = items2
 
-    # ── Stage 3: Medical imaging (placeholder — requires free CT/MRI datasets) ─
+    # ── Stage 3: Medical imaging — synthetic MRI/CT cross-sections ──────────────
     if 3 in stages_to_run:
-        print('\n[Stage 3] Medical imaging (MRI/CT)')
-        print('  NOTE: Bovine MRI/CT datasets require registration at:')
-        print('    - MorphoSource (morphosource.org): 3D scans of bovine specimens')
-        print('    - DICOM Library (dicomlibrary.com): anonymised veterinary DICOM')
-        print('    - OpenVetAnatomy (github.com/mhalle/anatomy-atlases): CC-BY atlas')
-        print('  After downloading, place DICOM/NIfTI files in:')
-        print(f'    {train_dir / "stage3_mri_ct"}')
-        print('  Then run: python ingest_dicom.py --dir <above> --node', args.node)
-        # Create placeholder README
-        s3_dir = train_dir / 'stage3_mri_ct'
-        s3_dir.mkdir(exist_ok=True)
-        readme = s3_dir / 'README.txt'
-        readme.write_text(
-            'Place bovine MRI/CT DICOM or NIfTI files here.\n'
-            'Sources: MorphoSource, DICOM Library, OpenVetAnatomy.\n'
-            'Run: python scripts/ingest_dicom.py --dir . --node localhost:8090\n'
+        print('\n[Stage 3] Medical imaging — synthetic MRI/CT cross-sections')
+        items3 = generate_mri_ct_data(
+            train_dir / 'stage3_mri_ct',
+            n_noise_levels=3,
         )
-        all_items[3] = []
+        all_items[3] = items3
 
     # ── Stage 4: Histology images ────────────────────────────────────────────
     if 4 in stages_to_run:
