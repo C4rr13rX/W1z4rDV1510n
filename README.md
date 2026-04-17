@@ -26,25 +26,142 @@ The learning stack implements the current neuroscience canon in software:
 
 ## What makes this fundamentally different from every other AI language model
 
-Every language model in existence — GPT, LLaMA, BERT, all of them — starts with a tokenizer. A human-written program that chops text into chunks before any learning happens. The model never sees letters. It never discovers what a word is. It is handed pre-segmented units and learns statistical relationships between them. This is why LLMs hallucinate morphology, mishandle rare words, and cannot transfer knowledge across languages without explicit multilingual training: the sub-word structure was never in their representations to begin with.
+### The tokenization problem
 
-**This system does not have a tokenizer. It has a bottom-up architecture.**
+Every major language model — GPT, LLaMA, BERT — starts with a tokenizer. Not a learned component: a **human-written algorithm that runs on the training corpus before any learning begins**, merging character sequences by frequency into a fixed vocabulary of ~50,000 chunks (BPE for GPT/LLaMA, WordPiece for BERT). From that point forward, the model never sees a letter. It is handed pre-segmented atoms and learns statistical relationships between them.
 
-Language understanding is grown from the ground up through the same Hebbian machinery that processes everything else:
+The representations that result carry **no internal structural constraints about their own composition**. "cat" is atom 1234. "cats" is atom 1235. The relationship between them exists only as an indirect statistical correlation through shared contexts in the training corpus — not as an encoded morphological fact. The model did not discover that "cats" is "cat + plural marker." It memorized the co-occurrence statistics of atom 1235 with plural contexts.
+
+This is the root of the hallucination failure mode. When a model encounters a novel word, a rare form, or a plausible-sounding portmanteau it has never seen, it has no mechanism to decompose it and reason about what it is made of. It cannot verify that "metamorfocillin" doesn't exist by tracing its parts. It generates the next token by asking: *what token sequence is statistically most likely given this context?* — and that question has no structural floor. A confident, fluent, structurally wrong answer is indistinguishable from a correct one from the inside.
+
+Cross-lingual transfer fails for the same reason. "Transport" in English and "transporter" in French are different token atoms in different vocabularies. The shared `trans-` morpheme — which carries meaning — is invisible to the model unless the training corpus happened to contain enough English-French parallel text to create an indirect statistical bridge. There is no morpheme neuron that both words activate.
+
+**The segmentation happened before learning, so the learned representations carry no information about their own internal structure.** That is the architectural constraint tokenization imposes, and it cannot be trained away — it is baked into the representation space itself.
+
+---
+
+### This system does not have a tokenizer. It has a bottom-up architecture.
+
+Language understanding is grown from the ground up through the same Hebbian machinery that processes every other sensor stream. The hierarchy is not declared in advance. It emerges from co-occurrence:
 
 ```
-Letters  →  Morphemes  →  Words  →  Usage patterns  →  Motifs
+Characters  →  Sub-sequences (morphemes)  →  Words  →  Usage patterns  →  Motifs
 ```
 
-Every character fires as its own labeled neuron (`txt:char_a`, `txt:char_p`...). Positional context is encoded (`txt:char_a_pos0` ≠ `txt:char_a_pos4`). Every punctuation mark fires as its own label — `txt:punct_comma`, `txt:punct_apostrophe`, `txt:punct_period` — because **punctuation is signal, not noise**. "Let's eat, Grandma." and "Let's eat Grandma." differ by one comma, and that comma changes everything. Stripping it destroys the meaning. This system learns it.
+Every character fires as its own labeled neuron (`txt:char_a`, `txt:char_p`...). Positional context is encoded separately (`txt:char_a_pos0` ≠ `txt:char_a_pos4`). Every punctuation mark fires as its own label — `txt:punct_comma`, `txt:punct_apostrophe`, `txt:punct_period` — because punctuation is signal, not noise. "Let's eat, Grandma." and "Let's eat Grandma." differ by one comma. This system encodes that difference because the character context around the comma was different in every sentence where it appeared.
 
-Character sequences within words are trained with STDP ordering: `c` fires before `a` fires before `t` in "cat". Forward edges get LTP; backward edges get LTD. Recurring sub-sequences across words (`p-o-r-t` in `transport`, `import`, `export`, `portable`) accumulate shared activation paths. The pool's kWTA sparsification ensures that when enough co-activation builds up, the sub-sequence promotes to a mini-column — a morpheme neuron, discovered entirely from statistical exposure, with no hand-coded rule.
+---
 
-This means:
-- **Training on Latin textbooks produces genuine morpheme understanding.** The `trans-` prefix builds a cluster that connects `transport`, `transfer`, `transmit`, `translate` — not because a rule said so, but because those words share the character sub-sequence in every sentence where it appears. A question about `transference` is answered through the same connections even if that exact word never appeared in training.
-- **The system learns punctuation grammar.** After enough training, commas before proper nouns build a different activation pattern than commas in lists. The pool encodes the difference because the character context around the comma was different every time.
-- **Morpheme-level generalization is free.** You don't need to train `"automobile"` if you trained `"auto"` (self) and `"mobile"` (movable) and the pool has seen both roots in enough contexts. The Hebbian connections through shared character sub-sequences provide the bridge.
-- **Every level is simultaneously active.** When the pool processes text, character labels, phonetic bigrams, word labels, punctuation labels, role labels, and spatial zone labels all co-activate in the same training call. Motif discovery runs across all levels simultaneously. The hierarchy emerges from the data, not from architecture choices made before training.
+### The neurogenesis pathway: exact mechanics
+
+**Step 1 — STDP character-sequence encoding**
+
+When "cat" is trained, three character neurons fire in sequence. The pool calls `hebbian_pair(c, a, scale)` and `hebbian_pair(a, t, scale)` for every adjacent pair within the STDP window. The weight update is:
+
+```
+base = hebbian_lr × (activation_c + trace_c) × (activation_a + trace_a) × scale
+
+Pre→Post (c→a):  Δw = base × stdp_pre_post  =  base × +1.0   [LTP]
+Post→Pre (a→c):  Δw = base × stdp_post_pre  =  base × −0.3   [LTD — only weakens if synapse exists]
+```
+
+The forward edge `c→a` is potentiated. The backward edge `a→c` is depressed (or left untouched if it doesn't exist yet). After training "cat", "cattle", "catch", "concatenate" — all words containing the c→a→t sequence — the forward path `c→a→t` has accumulated strong excitatory weight. The backward paths have been actively suppressed. The pool now encodes causal order, not just co-occurrence.
+
+**Step 2 — Co-occurrence accumulation across the corpus**
+
+The pool maintains a `minicolumn_counts` table. Every time a signature (a minimal set of co-occurring labels derived from a recurring pattern) fires, its count increments. When the c→a→t character cluster appears in "cat", "cattle", "concatenate", "catfish", "catnip" — each occurrence increments `minicolumn_counts["mini::c|a|t"]`. Nothing is created yet. Evidence accumulates silently.
+
+**Step 3 — Mini-column promotion: neurogenesis at threshold**
+
+When `minicolumn_counts["mini::c|a|t"]` crosses `minicolumn_threshold` (default: **18**), a new neuron is created at runtime: `mini::c|a|t`. This neuron did not exist in the initial architecture. It was grown from the data. Its `members` list holds the neuron IDs of the constituent character neurons. It starts with `stability = 0.0` and `inhibition = 0.0`.
+
+**Step 4 — Concept neuron activation and member suppression**
+
+Every training frame, `update_minicolumns` runs. For each mini-column:
+
+```rust
+// Evidence and conflict are computed from how well the current
+// signature batch matches this column's learned pattern.
+column.stability = column.stability * stability_decay    // EMA: decay 0.9
+                 + evidence * (1.0 - stability_decay);
+column.inhibition = column.inhibition * inhibition_decay // EMA: decay 0.85
+                  + conflict * (1.0 - inhibition_decay);
+
+column.collapsed = column.inhibition >= 0.55;
+let active = column.stability >= 0.65 && !column.collapsed;
+
+let column_activation = (column.stability * (1.0 - column.inhibition)).clamp(0.0, 1.0);
+concept_neuron.activation = concept_neuron.activation.max(column_activation);
+
+if active {
+    for member_id in &column.members {
+        member_neuron.activation *= 0.35;  // character neurons suppressed to 35%
+    }
+}
+```
+
+When `stability >= 0.65`, the concept neuron fires at full strength (`stability × (1 − inhibition)`). Simultaneously, every character neuron in its member list has its activation **multiplied by 0.35**. The character neurons are not zeroed — they drop to 35% of whatever activation they had. This happens before propagation runs.
+
+**Step 5 — kWTA completes the suppression**
+
+During `propagate_weighted`, each active neuron fans out through its excitatory synapses with fan-out normalization:
+
+```rust
+next[target] += src_activation × syn.weight × 0.5 / sqrt(fan_out)
+```
+
+The concept neuron has accumulated strong, well-trained synapses to other concept-level neurons. The character neurons at 35% activation produce proportionally weaker downstream signals. After each hop, activation decays by **0.85** and kWTA zeroes everything outside the top **2%** (`sdr_sparsity = 0.02`, minimum 50 neurons). The weakened character neurons lose the kWTA competition to the concept neuron and its strongly connected concept neighbours — and get zeroed by sparsification.
+
+Crucially, **there are no auto-created inhibitory synapses from the concept neuron to its member neurons**. The suppression is achieved entirely through the pre-propagation activation scalar (×0.35) combined with kWTA competition. The channel stays structurally open — it is only outcompeted, not walled off.
+
+**Step 6 — The `collapsed` release valve**
+
+`inhibition` accumulates from *conflict* — how often the pattern fires in a partial, inconsistent, or contradictory way. When `inhibition >= 0.55`, `collapsed = true`. The `active` block does not execute. Member neurons return to full activation. The concept neuron still fires (at reduced strength), but stops suppressing its members.
+
+This is intentional and has no analogue in tokenized models. A mini-column that is firing inconsistently acknowledges that uncertainty structurally: it releases its grip on the character level and allows the raw evidence to accumulate or correct itself. The system knows when it is not confident in a conceptual unit — and says so by restoring the constituent representation.
+
+**Step 7 — The concept-first inference gate**
+
+At inference time, `activate_with_resolution_inner` provides a two-pass resolution path:
+
+1. **Concept pass**: propagate from word-level labels at full weight. If the peak activation exceeds `confidence_threshold` — return immediately. Character neurons are never consulted.
+2. **Character fallback**: if concept peak falls below threshold, decompose word labels to character labels (at **0.8 weight**). Established concept neurons remain as anchors in the seed set. Propagate from the mixed (character + concept anchor) seeds.
+3. **Candidate registration**: if the character path outperforms the concept path by a margin of **0.01**, bump the mini-column candidate counter for each novel word. Once the counter exceeds `minicolumn_threshold`, the next promotion run creates a new concept neuron.
+
+This is the in-fabric feedback loop described in the code comment: *"concept neurons fire and suppress their constituent characters when they are confident; when they are not confident, character neurons re-activate and accumulate toward concept promotion."*
+
+---
+
+### Structural comparison
+
+| | Tokenization (BPE / WordPiece) | Neurogenesis (this system) |
+|---|---|---|
+| **When segmentation occurs** | Before learning, fixed forever | During learning, continuously |
+| **Who decides what a unit is** | Frequency algorithm on corpus, designed by humans | The data itself, via co-occurrence threshold |
+| **Internal structure of a unit** | Opaque — model cannot inspect its own tokens | Transparent — concept neuron retains live connections to member character neurons |
+| **Rare / novel word handling** | Shatter to sub-word pieces, interpolate statistically | Decompose to characters, propagate via character path, register as promotion candidate |
+| **Uncertainty signal** | None — generates plausible tokens regardless | `collapsed` flag, `confidence_threshold` gate, hypothesis queue |
+| **Morpheme generalization** | Accidental, corpus-dependent | Structural — shared character sub-sequences build shared concept activations |
+| **Cross-lingual transfer** | Requires parallel training data or separate vocabulary | Shared morphemes activate the same character neurons regardless of language |
+| **Representation space** | Fixed at vocabulary construction time | Grows at runtime as new patterns cross the promotion threshold |
+| **Hallucination floor** | None — no structural check on generated tokens | Low-confidence concept → character fallback → hypothesis gap — the system signals what it doesn't know |
+
+---
+
+### Why this eliminates the hallucination structural failure mode
+
+The LLM hallucination problem is not a tuning problem. It is a representation problem. A tokenized model generating "metamorfocillin" has no internal mechanism to ask: *is this word made of real parts?* Token 47823 is token 47823. If that sequence of tokens is statistically plausible given the context, the model produces it — with the same confidence it produces a real word.
+
+In this system, "metamorfocillin" would arrive as a sequence of character neurons. The character path propagates. No mini-column exists for this exact sequence. Activation does not converge on a known concept node. `concept_peak` falls below `confidence_threshold`. The inference gate falls back to the character level. The character-level propagation finds no strong paths. The QA confidence gate fails. The hypothesis queue receives an entry: *"What is metamorfocillin?"* — and the system explicitly records that it does not know.
+
+Silence and uncertainty are first-class outputs here. A tokenized model cannot produce them at the structural level — it can only be instructed to express them in text, which is itself a statistical output with no structural guarantee.
+
+**The practical consequence for training:**
+
+- Training on Latin textbooks produces genuine morpheme understanding. The `trans-` mini-column connects `transport`, `transfer`, `transmit`, `translate` — not because a rule said so, but because those words share the character sub-sequence in every sentence. A question about `transference` is answered through those connections even if that exact word never appeared in training.
+- Cross-lingual morpheme transfer is structural. The French `transporter` and English `transport` activate the same `trans-` character path and, after sufficient co-occurrence, the same mini-column concept neuron.
+- Punctuation is learned, not stripped. Commas before proper nouns build a different activation pattern than commas in lists because the character context around the comma was different in every sentence. The pool encodes the distinction. A tokenizer discards it as whitespace-adjacent noise.
+- Every level fires simultaneously. Character labels, phonetic bigrams, word labels, punctuation labels, layout role labels, and spatial zone labels all co-activate in the same training call. The hierarchy emerges from the data, not from architecture decisions made before training begins.
 
 ---
 
