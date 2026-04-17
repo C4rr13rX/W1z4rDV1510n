@@ -119,28 +119,35 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
                    bg_sub: cv2.BackgroundSubtractor | None = None) -> list:
     """
     Detect cow body parts in the frame and return them as EnvironmentSnapshot
-    symbols.  Each body part that can be located is posted with its estimated
-    3-D position (X = left/right, Y = height, Z = depth).
+    symbols with correct 3-D coordinates for a side-view camera.
 
     Coordinate convention matches train_cow_anatomy.py:
-      X ∈ [0,1]  left=0, right=1
-      Y ∈ [0,1]  ground=0, top=1
-      Z ∈ [0,1]  rear=0, front/nose=1
+      X ∈ [0,1]  bilateral: left=0, right=1  (0.5 = midline)
+      Y ∈ [0,1]  height: ground=0, top=1
+      Z ∈ [0,1]  front-back: rear=0, nose=1
+
+    SIDE-VIEW MAPPING
+    ─────────────────
+    In a side-view video the camera looks along the cow's bilateral X axis.
+    The observable image axes are:
+      • image horizontal (pixel_x) → cow Z (front-back)  [directly measurable]
+      • image vertical   (pixel_y) → cow Y (height)      [directly measurable]
+      • bilateral X → NOT observable from the side; use anatomy prior offsets
+
+    The bilateral X offset is fixed per body part (0.5 for midline, ±0.12–0.15
+    for bilateral pairs) so the video sensor only updates Y and Z.
     """
     f   = frame_bgr.astype(np.float32) / 255.0
     R, G, B = f[:, :, 2], f[:, :, 1], f[:, :, 0]
     symbols = []
 
     # ── Cow body: brown / warm colours ────────────────────────────────────
-    # Both Holstein (black+white) and Hereford (brown) covered.
     warm_mask  = ((R - B) > 0.14) & (R > 0.22) & (G > 0.12) & (G < 0.80)
-    black_mask = (R < 0.18) & (G < 0.18) & (B < 0.18)          # Holstein black
-    white_mask = (R > 0.72) & (G > 0.72) & (B > 0.72)           # Holstein / face white
+    black_mask = (R < 0.18) & (G < 0.18) & (B < 0.18)   # Holstein black
     cow_mask   = warm_mask | black_mask
 
     ys, xs = np.where(cow_mask)
     if len(xs) < 400:
-        # No cow found — post environment symbols only
         _add_env_symbols(symbols, f, R, G, B, W, H)
         return symbols
 
@@ -151,70 +158,59 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
     if bw < 20 or bh < 20:
         return symbols
 
-    cx_img   = (x1 + x2) / 2 / W    # image-space normalised [0,1]
-    cy_img   = (y1 + y2) / 2 / H
+    cx_img    = (x1 + x2) / 2 / W
+    cy_img    = (y1 + y2) / 2 / H
     area_frac = len(xs) / (W * H)
 
-    # Depth estimate: larger cow → closer
-    depth_z  = float(np.clip(0.70 - area_frac * 4.0, 0.15, 0.90))
+    # ── Facing direction: which end has the head? ─────────────────────────
+    # The head end of a cow is narrower at the top (poll/muzzle protrude less
+    # horizontally than the broad rump). Detect by comparing top-half pixel
+    # density in left vs right thirds of the bounding box.
+    th = max(1, bh // 2)
+    left_third  = int(np.sum(cow_mask[y1:y1+th, x1        : x1+bw//3]))
+    right_third = int(np.sum(cow_mask[y1:y1+th, x1+2*bw//3: x2      ]))
+    # Skew of overall mass also helps:
+    left_mass   = int(np.sum(cow_mask[:, :W//2]))
+    right_mass  = int(np.sum(cow_mask[:, W//2:]))
+    # Head is on the lighter / narrower side at top
+    if left_third < right_third * 0.80:
+        facing = 'left'    # head on LEFT side of image
+    elif right_third < left_third * 0.80:
+        facing = 'right'   # head on RIGHT side of image
+    elif left_mass > right_mass * 1.25:
+        facing = 'right'
+    elif right_mass > left_mass * 1.25:
+        facing = 'left'
+    else:
+        facing = 'right'   # default assumption
 
-    # ── Pose estimation ────────────────────────────────────────────────────
-    # Separate "warm pixels" in upper vs lower half of bounding box
-    upper_mask = cow_mask[:H // 2, :]
-    lower_mask = cow_mask[H // 2:, :]
-    n_upper    = int(np.sum(upper_mask))
-    n_lower    = int(np.sum(lower_mask))
-    head_low   = n_lower > n_upper * 1.6   # most mass in lower half -> grazing
-    pose       = 'grazing' if head_low else 'standing'
+    # ── Coordinate converters ─────────────────────────────────────────────
+    # to_z: image pixel_x (0–W) → neural Z (rear=0, nose=1)
+    if facing == 'right':
+        def to_z(px): return float(np.clip(px / W, 0.0, 1.0))
+    else:
+        def to_z(px): return float(np.clip(1.0 - px / W, 0.0, 1.0))
 
-    # Estimate facing direction from horizontal distribution skew
-    left_mass  = int(np.sum(cow_mask[:, :W // 2]))
-    right_mass = int(np.sum(cow_mask[:, W // 2:]))
-    facing     = 'left' if left_mass > right_mass * 1.3 else (
-                 'right' if right_mass > left_mass * 1.3 else 'camera')
+    def to_y(py): return float(np.clip(1.0 - py / H, 0.0, 1.0))
 
-    # ── Locate key body regions ────────────────────────────────────────────
-    def _region_centroid(mask_region, col_offset, row_offset, fw, fh):
+    # ── Region centroid helpers (returns absolute pixel coords) ───────────
+    def _centroid_px(mask_region, col_off, row_off):
+        """Returns (mean_px_x, mean_px_y) in frame pixels, or None."""
         ry, rx = np.where(mask_region)
         if len(rx) < 20:
             return None
-        return ((rx.mean() + col_offset) / W,
-                1.0 - (ry.mean() + row_offset) / H)   # Y flipped: image top=far=low in world
+        return (float(rx.mean()) + col_off, float(ry.mean()) + row_off)
 
-    # Head region: top 35% of bounding box
-    head_h   = max(1, int(bh * 0.35))
-    head_roi = cow_mask[y1:y1 + head_h, x1:x2]
-    head_pos = _region_centroid(head_roi, x1, y1, W, H)
-
-    # Neck region: next 15%
-    neck_h   = max(1, int(bh * 0.15))
-    neck_roi = cow_mask[y1 + head_h:y1 + head_h + neck_h, x1:x2]
-    neck_pos = _region_centroid(neck_roi, x1, y1 + head_h, W, H)
-
-    # Body region: middle 40%
-    body_y1  = y1 + int(bh * 0.30)
-    body_y2  = y1 + int(bh * 0.70)
-    body_roi = cow_mask[body_y1:body_y2, x1:x2]
-    body_pos = _region_centroid(body_roi, x1, body_y1, W, H)
-
-    # Leg / hoof region: bottom 25%
-    leg_y1   = y1 + int(bh * 0.75)
-    leg_roi  = cow_mask[leg_y1:y2, x1:x2]
-    # Split into left-front / right-rear hooves if wide enough
-    half     = (x1 + x2) // 2
-    llroi    = cow_mask[leg_y1:y2, x1:half]
-    rlroi    = cow_mask[leg_y1:y2, half:x2]
-    lhoof_pos = _region_centroid(llroi, x1,   leg_y1, W, H)
-    rhoof_pos = _region_centroid(rlroi, half, leg_y1, W, H)
-
-    # Foreground motion mask → detect leg motion (walking cue)
-    motion = 0.0
+    # ── Pose estimation ───────────────────────────────────────────────────
+    upper_n = int(np.sum(cow_mask[:H//2, :]))
+    lower_n = int(np.sum(cow_mask[H//2:, :]))
+    head_low   = lower_n > upper_n * 1.6
+    motion     = 0.0
+    leg_y1     = y1 + int(bh * 0.75)
     if bg_sub is not None:
-        fg = bg_sub.apply(frame_bgr).astype(np.float32) / 255.0
+        fg     = bg_sub.apply(frame_bgr).astype(np.float32) / 255.0
         motion = float(fg[leg_y1:, x1:x2].mean())
-    walking = motion > 0.12
-
-    # Determine current behaviour label
+    walking    = motion > 0.12
     if walking:
         behaviour = 'walking_a'
     elif head_low:
@@ -222,66 +218,119 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
     else:
         behaviour = 'standing'
 
-    # ── Emit body-part symbols ─────────────────────────────────────────────
-    # Z-depth is shared for the whole cow (we can only estimate one depth
-    # without stereo/lidar). X/Y come from the colour-region centroids above.
+    # ── Locate body regions in pixel space ────────────────────────────────
+    # The bounding box horizontal axis = cow front-back.
+    # Split into zones by fraction of bbox width:
+    #   head zone:    forward 25% (nearest nose end)
+    #   neck zone:    next 15%
+    #   body zone:    middle 40%
+    #   rump zone:    rear 20%
+    # "Forward" = right side of bbox if facing right, left side if facing left.
 
-    def sym_if(key: str, pos, y_world: float | None = None):
-        if pos is None:
-            return
-        px, py = pos
-        y_out  = py if y_world is None else y_world
-        symbols.append(_sym(f'cow_{key}', px, y_out, depth_z,
+    if facing == 'right':
+        head_x1 = x1 + int(bw * 0.75);  head_x2 = x2
+        neck_x1 = x1 + int(bw * 0.60);  neck_x2 = x1 + int(bw * 0.75)
+        body_x1 = x1 + int(bw * 0.25);  body_x2 = x1 + int(bw * 0.65)
+        rump_x1 = x1;                   rump_x2 = x1 + int(bw * 0.25)
+        # Front legs = forward half of leg region; rear = back half
+        front_leg_x1 = (x1 + x2)//2;    front_leg_x2 = x2
+        rear_leg_x1  = x1;              rear_leg_x2  = (x1 + x2)//2
+    else:  # facing left
+        head_x1 = x1;                   head_x2 = x1 + int(bw * 0.25)
+        neck_x1 = x1 + int(bw * 0.25);  neck_x2 = x1 + int(bw * 0.40)
+        body_x1 = x1 + int(bw * 0.35);  body_x2 = x1 + int(bw * 0.75)
+        rump_x1 = x1 + int(bw * 0.75);  rump_x2 = x2
+        front_leg_x1 = x1;              front_leg_x2 = (x1 + x2)//2
+        rear_leg_x1  = (x1 + x2)//2;   rear_leg_x2  = x2
+
+    # Vertical zones (shared)
+    head_y1  = y1;               head_y2  = y1 + int(bh * 0.60)
+    upper_y1 = y1;               upper_y2 = y1 + int(bh * 0.35)
+    body_y1_ = y1 + int(bh*0.20); body_y2_ = y1 + int(bh * 0.75)
+    leg_y2   = y2
+
+    head_c  = _centroid_px(cow_mask[head_y1:head_y2,   head_x1:head_x2],  head_x1, head_y1)
+    neck_c  = _centroid_px(cow_mask[upper_y1:upper_y2, neck_x1:neck_x2],  neck_x1, upper_y1)
+    body_c  = _centroid_px(cow_mask[body_y1_:body_y2_, body_x1:body_x2],  body_x1, body_y1_)
+    rump_c  = _centroid_px(cow_mask[upper_y1:upper_y2, rump_x1:rump_x2],  rump_x1, upper_y1)
+    fhoof_c = _centroid_px(cow_mask[leg_y1:leg_y2, front_leg_x1:front_leg_x2], front_leg_x1, leg_y1)
+    rhoof_c = _centroid_px(cow_mask[leg_y1:leg_y2, rear_leg_x1:rear_leg_x2],   rear_leg_x1,  leg_y1)
+
+    # ── Build symbol for a midline part ───────────────────────────────────
+    def emit_mid(key, px, py, x_bilateral=0.50):
+        z = to_z(px); y = to_y(py)
+        symbols.append(_sym(f'cow_{key}', x_bilateral, y, z,
                             {'label': f'cow_{key}', 'pose': behaviour,
                              'type_label': 'body_part', 'scale_m': 1.4}))
 
-    # Core skeleton from observed regions
-    if head_pos:
-        # Head top = poll, centre = head, bottom of head region = muzzle
-        hx, hy = head_pos
-        symbols.append(_sym('cow_head',    hx,        hy,        depth_z,
-                            {'label': 'cow_head', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_muzzle',  hx,        max(0, hy - 0.12), depth_z,
-                            {'label': 'cow_muzzle', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_poll',    hx,        min(1, hy + 0.08), depth_z,
-                            {'label': 'cow_poll', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_eye_L',   max(0, hx - 0.05), hy + 0.02, depth_z,
-                            {'label': 'cow_eye_L', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_eye_R',   min(1, hx + 0.05), hy + 0.02, depth_z,
-                            {'label': 'cow_eye_R', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
+    def emit_pair(key_l, key_r, px, py, xl=0.37, xr=0.63):
+        z = to_z(px); y = to_y(py)
+        symbols.append(_sym(f'cow_{key_l}', xl, y, z,
+                            {'label': f'cow_{key_l}', 'pose': behaviour,
+                             'type_label': 'body_part', 'scale_m': 1.4}))
+        symbols.append(_sym(f'cow_{key_r}', xr, y, z,
+                            {'label': f'cow_{key_r}', 'pose': behaviour,
+                             'type_label': 'body_part', 'scale_m': 1.4}))
 
-    sym_if('neck',         neck_pos)
-    sym_if('withers',      neck_pos,    (neck_pos[1] + 0.06) if neck_pos else None)
+    # ── HEAD ──────────────────────────────────────────────────────────────
+    if head_c:
+        hpx, hpy = head_c
+        emit_mid('head',   hpx, hpy)
+        emit_mid('muzzle', hpx, hpy + bh * 0.10)   # muzzle: slightly lower in image
+        emit_mid('poll',   hpx, hpy - bh * 0.06)   # poll: slightly higher
+        emit_pair('eye_L', 'eye_R', hpx, hpy, xl=0.45, xr=0.55)
+        emit_pair('ear_L', 'ear_R', hpx, hpy - bh * 0.04, xl=0.37, xr=0.63)
 
-    if body_pos:
-        bx, by = body_pos
-        symbols.append(_sym('cow_back',   bx, by + 0.10, depth_z,
-                            {'label': 'cow_back', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_belly',  bx, max(0, by - 0.14), depth_z,
-                            {'label': 'cow_belly', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_body_centre', bx, by, depth_z,
-                            {'label': 'cow_body_centre', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_centre_of_mass', bx, max(0, by - 0.04), depth_z,
-                            {'label': 'cow_centre_of_mass', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        # Rump / tail on opposite Z side
-        symbols.append(_sym('cow_rump',   bx, by + 0.06, max(0.05, depth_z - 0.20),
-                            {'label': 'cow_rump', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
+    # ── NECK / WITHERS ────────────────────────────────────────────────────
+    if neck_c:
+        npx, npy = neck_c
+        emit_mid('neck',    npx, npy)
+        emit_mid('withers', npx, npy - bh * 0.05)   # withers: top of shoulders, just above neck line
+        emit_pair('shoulder_L', 'shoulder_R', npx, npy + bh * 0.06)
 
-    if lhoof_pos:
-        lx, _ = lhoof_pos
-        symbols.append(_sym('cow_front_hoof_L', lx, 0.04, depth_z,
-                            {'label': 'cow_front_hoof_L', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_shoulder_L', lx, (body_pos[1] + 0.05) if body_pos else 0.75, depth_z,
-                            {'label': 'cow_shoulder_L', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-    if rhoof_pos:
-        rx, _ = rhoof_pos
-        symbols.append(_sym('cow_front_hoof_R', rx, 0.04, depth_z,
-                            {'label': 'cow_front_hoof_R', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
-        symbols.append(_sym('cow_shoulder_R', rx, (body_pos[1] + 0.05) if body_pos else 0.75, depth_z,
-                            {'label': 'cow_shoulder_R', 'pose': behaviour, 'type_label': 'body_part', 'scale_m': 1.4}))
+    # ── BODY (back / belly / brisket) ─────────────────────────────────────
+    if body_c:
+        bpx, bpy = body_c
+        emit_mid('back',          bpx, bpy - bh * 0.08)   # back is near top of body
+        emit_mid('belly',         bpx, bpy + bh * 0.10)   # belly hangs lower
+        emit_mid('body_centre',   bpx, bpy)
+        emit_mid('centre_of_mass',bpx, bpy + bh * 0.03)
+        emit_mid('loin',          bpx, bpy - bh * 0.06)
+        # Brisket: lower-front of body (same Z as neck, lower Y)
+        if neck_c:
+            emit_mid('brisket', neck_c[0], bpy + bh * 0.08)
 
-    # Top-level cow entity at detected centre
-    symbols.append(_sym('cow', cx_img, 1.0 - cy_img, depth_z,
+    # ── RUMP / TAIL ───────────────────────────────────────────────────────
+    if rump_c:
+        rpx, rpy = rump_c
+        emit_mid('rump',      rpx, rpy)
+        emit_mid('tail_root', rpx, rpy + bh * 0.06)
+        emit_mid('tail_mid',  rpx, rpy + bh * 0.15)
+        emit_pair('hip_L', 'hip_R', rpx, rpy, xl=0.37, xr=0.63)
+
+    # ── FRONT HOOVES ──────────────────────────────────────────────────────
+    if fhoof_c:
+        fpx, _ = fhoof_c
+        emit_pair('front_hoof_L',   'front_hoof_R',   fpx, y2 - 2, xl=0.36, xr=0.64)
+        emit_pair('front_cannon_L', 'front_cannon_R', fpx, y2 - bh*0.22, xl=0.36, xr=0.64)
+        emit_pair('elbow_L',        'elbow_R',        fpx, y2 - bh*0.42, xl=0.35, xr=0.65)
+
+    # ── REAR HOOVES ───────────────────────────────────────────────────────
+    if rhoof_c:
+        rpx2, _ = rhoof_c
+        emit_pair('rear_hoof_L',   'rear_hoof_R',   rpx2, y2 - 2, xl=0.37, xr=0.63)
+        emit_pair('rear_cannon_L', 'rear_cannon_R', rpx2, y2 - bh*0.22, xl=0.37, xr=0.63)
+        emit_pair('hock_L',        'hock_R',        rpx2, y2 - bh*0.42, xl=0.37, xr=0.63)
+        if rump_c:
+            emit_pair('stifle_L',  'stifle_R',      rpx2, y2 - bh*0.54, xl=0.37, xr=0.63)
+
+    # ── Udder (lower middle-rear of body) ─────────────────────────────────
+    if body_c and rump_c:
+        udder_px = (body_c[0] + rump_c[0]) / 2
+        emit_mid('udder', udder_px, y2 - bh * 0.15)
+
+    # ── Top-level cow entity ───────────────────────────────────────────────
+    symbols.append(_sym('cow', 0.50, to_y(y1 + bh//2), to_z(cx_img * W),
                         {'label': 'cow', 'pose': behaviour, 'behaviour': behaviour,
                          'facing': facing, 'type_label': 'animal',
                          'scale_m': 2.4, 'motion': float(motion)}))

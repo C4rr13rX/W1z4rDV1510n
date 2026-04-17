@@ -73,6 +73,38 @@ with sync_playwright() as pw:
     time.sleep(5)
     shoot(page, '05_final')
 
+    # ── NEURAL mode: click ◈ NEURAL button and capture the 3D cow ─────────
+    print('\nSwitching to NEURAL mode...')
+    neural_btn = page.query_selector('#neural-btn')
+    if neural_btn:
+        neural_btn.click()
+        time.sleep(2)
+        shoot(page, '06_neural_init')
+
+        # Wait for cow geometry to fetch and render
+        time.sleep(6)
+        shoot(page, '07_neural_cow')
+
+        # Check HUD info
+        for hud_id in ('neural-status', 'neural-pose'):
+            el = page.query_selector(f'#{hud_id}')
+            if el: print(f'  {hud_id}: {el.inner_text()}')
+
+        # Orbit slightly: drag horizontally to see cow from a 3/4 view
+        canvas = page.query_selector('canvas')
+        if canvas:
+            bb = canvas.bounding_box()
+            cx = bb['x'] + bb['width'] / 2
+            cy = bb['y'] + bb['height'] / 2
+            page.mouse.move(cx, cy)
+            page.mouse.down()
+            page.mouse.move(cx - 120, cy - 30)
+            page.mouse.up()
+            time.sleep(1)
+            shoot(page, '08_neural_orbit')
+    else:
+        print('  neural-btn not found')
+
     if errors:
         print(f'\nConsole errors ({len(errors)}):')
         for e in errors[:10]: print(f'  {e}')

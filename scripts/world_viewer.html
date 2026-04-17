@@ -406,11 +406,12 @@ function _liveWorldPos(sym) {
 }
 
 async function pollLiveSymbols() {
-  if (!sceneMode) return;
+  if (!sceneMode || neuralMode) return;
   try {
     const resp = await fetch(`http://${HOST}/neuro/symbols/live`);
     if (!resp.ok) return;
     const data = await resp.json();
+    if (!sceneMode || neuralMode) return;   // re-check after async gap
     const symbols = data.symbols || [];
     const seen = new Set();
 
@@ -477,9 +478,13 @@ const LABEL_COLORS_MAP = {
   'ribosome':0xe89000,'endoplasmic_reticulum':0xf0d000,'golgi':0xff6000,
   'microtubule_track':0x00d5f0,'vesicle':0xff80c0,'nucleolus':0x4080ff,
 };
+let _neuroES = null;   // keep reference so NEURAL mode can pause it
 function startNeuroStream() {
+  if (_neuroES) { _neuroES.close(); _neuroES = null; }
   const es = new EventSource(`http://${HOST}/neuro/stream`);
+  _neuroES = es;
   es.addEventListener('snap', e => {
+    if (neuralMode) return;   // block scene-stream additions while in NEURAL world
     try {
       neuroSnap = JSON.parse(e.data); streamOk = true;
       checkSceneSuggestion(neuroSnap);
@@ -623,6 +628,10 @@ async function _fetchAndRebuild() {
   const idxA = tmpIdx.slice(0, qi);
   vPtCount   = qi / 3;   // triangle count
 
+  // Re-check after all awaits — videoMode may have been cleared in the interim
+  // (e.g. NEURAL mode activated while this fetch was in-flight).
+  if (!videoMode) return;
+
   // ── Create or update depth mesh ──────────────────────────────────────────
   if (!depthMesh) {
     // First frame: create texture + mesh + billboard
@@ -680,155 +689,206 @@ function _clearVideoObjects() {
   if (videoTex)  { videoTex.dispose(); videoTex = null; }
 }
 
-// ── NEURAL mode — 3D cow reconstructed from neural fabric anatomy ─────────────
-// The neural fabric has learned full cow anatomy (50+ body-part centroids),
-// behaviours, biology, and lifecycle from the training corpus. This mode
-// renders that learned model as a solid 3D mesh — the source of truth is the
-// fabric, not the pixels. The video stream plays as background context only.
+// ── NEURAL mode — full 3D cow world driven by neural fabric centroids ────────
+// The fabric has learned 70+ body-part positions from a scientific anatomy
+// corpus (train_cow_anatomy.py). The video stream is a live SENSOR only —
+// it posts per-frame body-part observations to /neuro/train, driving Hebbian
+// centroid updates. We render those centroids as a solid 3D cow in a real
+// world scene. No depth mesh. No topology map. Just the cow from the vectors.
 
 const NODE_HOST = 'localhost:8090';
-
-// Bone segments: [centroid_A, centroid_B, radius_metres, hex_colour]
-// Colours follow Hereford coat: brown body, white face/chest, black hooves
-const _COW_BONES = [
-  ['cow_muzzle',        'cow_head',           0.095, 0xD8CDB0],
-  ['cow_head',          'cow_neck',           0.125, 0x8B5E3C],
-  ['cow_neck',          'cow_withers',        0.135, 0x7A4E2C],
-  ['cow_withers',       'cow_back',           0.210, 0x6B4020],
-  ['cow_back',          'cow_loin',           0.200, 0x6B4020],
-  ['cow_loin',          'cow_rump',           0.190, 0x6B4020],
-  ['cow_rump',          'cow_tail_root',      0.078, 0x6B4020],
-  ['cow_tail_root',     'cow_tail_switch',    0.032, 0x3A2010],
-  ['cow_withers',       'cow_brisket',        0.225, 0x5A3810],
-  ['cow_brisket',       'cow_belly',          0.245, 0x5A3810],
-  ['cow_belly',         'cow_navel',          0.205, 0x5A3810],
-  ['cow_shoulder_L',    'cow_elbow_L',        0.072, 0x7A4828],
-  ['cow_elbow_L',       'cow_front_cannon_L', 0.052, 0x7A4828],
-  ['cow_front_cannon_L','cow_front_hoof_L',   0.042, 0x181008],
-  ['cow_shoulder_R',    'cow_elbow_R',        0.072, 0x7A4828],
-  ['cow_elbow_R',       'cow_front_cannon_R', 0.052, 0x7A4828],
-  ['cow_front_cannon_R','cow_front_hoof_R',   0.042, 0x181008],
-  ['cow_hip_L',         'cow_stifle_L',       0.082, 0x7A4828],
-  ['cow_stifle_L',      'cow_hock_L',         0.062, 0x7A4828],
-  ['cow_hock_L',        'cow_rear_cannon_L',  0.050, 0x7A4828],
-  ['cow_rear_cannon_L', 'cow_rear_hoof_L',    0.042, 0x181008],
-  ['cow_hip_R',         'cow_stifle_R',       0.082, 0x7A4828],
-  ['cow_stifle_R',      'cow_hock_R',         0.062, 0x7A4828],
-  ['cow_hock_R',        'cow_rear_cannon_R',  0.050, 0x7A4828],
-  ['cow_rear_cannon_R', 'cow_rear_hoof_R',    0.042, 0x181008],
-];
-
-// Sphere nodes: [centroid, radius_m, hex_colour]
-const _COW_NODES = [
-  ['cow_head',          0.210, 0xD8CDB0],  // light Hereford face
-  ['cow_muzzle',        0.105, 0xEEDDCC],
-  ['cow_poll',          0.085, 0x6B4020],
-  ['cow_eye_L',         0.030, 0x1A0E08],
-  ['cow_eye_R',         0.030, 0x1A0E08],
-  ['cow_ear_L',         0.058, 0xC4A888],
-  ['cow_ear_R',         0.058, 0xC4A888],
-  ['cow_udder',         0.145, 0xF0C0A0],
-  ['cow_front_hoof_L',  0.050, 0x181008],
-  ['cow_front_hoof_R',  0.050, 0x181008],
-  ['cow_rear_hoof_L',   0.050, 0x181008],
-  ['cow_rear_hoof_R',   0.050, 0x181008],
-];
-
-// Convert normalised centroid (x,y,z ∈ [0,1]) to Three.js world coords.
-// Cow scale: 2.4m long × 1.4m tall × 1.0m wide.
 const _CW = { x: 1.0, y: 1.4, z: 2.4 };
+
 function _cw(cx, cy, cz) {
+  // Normalised centroid [0,1]^3 → Three.js world metres.
+  // Cow is 1.0m wide × 1.4m tall × 2.4m long.
+  // Z-flip: fabric z=1=nose → Three.js +z (toward default camera).
   return new THREE.Vector3(
     (cx - 0.5) * _CW.x,
     cy          * _CW.y,
-    (0.5 - cz)  * _CW.z    // flip Z: fabric z=1=nose, Three.js +z = toward camera
+    (cz - 0.5)  * _CW.z   // nose at +z, rump at -z
   );
 }
 
-function _boneMesh(pA, pB, r, col) {
-  const dir = new THREE.Vector3().subVectors(pB, pA);
-  const len = dir.length();
-  if (len < 0.005) return null;
-  const geo = new THREE.CylinderGeometry(r, r, len, 10, 1);
-  // depthTest:false — neural cow is an AR overlay; always draws on top of depth mesh.
-  // transparent + opacity 0.92 gives a faint "ghost" quality that separates it visually
-  // from the photorealistic background without fully occluding it.
-  const mat = new THREE.MeshStandardMaterial({
-    color: col, roughness: 0.55, metalness: 0.10,
-    transparent: true, opacity: 0.92, depthTest: false,
-  });
-  const m = new THREE.Mesh(geo, mat);
-  m.renderOrder = 10;
-  m.position.copy(pA).addScaledVector(dir.clone().normalize(), len * 0.5);
-  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+// ── cow mesh builder ──────────────────────────────────────────────────────────
+function _tube(pts, r, col, segs = 16) {
+  if (pts.length < 2) return null;
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const geo   = new THREE.TubeGeometry(curve, Math.max(pts.length * 6, 12), r, segs, false);
+  const mat   = new THREE.MeshStandardMaterial({ color: col, roughness: 0.62, metalness: 0.04 });
+  const m     = new THREE.Mesh(geo, mat);
+  m.castShadow = m.receiveShadow = true;
+  m.userData._neural = true;
+  return m;
+}
+
+function _sphere(pos, r, col, sx = 1, sy = 1, sz = 1) {
+  const geo = new THREE.SphereGeometry(r, 20, 14);
+  const mat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.62, metalness: 0.04 });
+  const m   = new THREE.Mesh(geo, mat);
+  m.castShadow = true;
+  m.scale.set(sx, sy, sz);
+  m.position.copy(pos);
+  m.userData._neural = true;
   return m;
 }
 
 function _buildNeuralCow(cmap) {
-  // cmap: { cow_head: {x,y,z}, cow_neck: {x,y,z}, ... }
-  const g = new THREE.Group();
-  g.name = 'neural_cow';
+  const g   = new THREE.Group();
+  g.name    = 'neural_cow';
+  const pt  = k => { const c = cmap[k]; return c ? _cw(c.x, c.y, c.z) : null; };
+  const get = (...keys) => keys.map(pt).filter(Boolean);
 
-  for (const [la, lb, r, col] of _COW_BONES) {
-    const a = cmap[la], b = cmap[lb];
-    if (!a || !b) continue;
-    const m = _boneMesh(_cw(a.x, a.y, a.z), _cw(b.x, b.y, b.z), r, col);
-    if (m) g.add(m);
+  // ── Body: smooth tube along full spine + underline ──────────────────────
+  const spine = get('cow_brisket','cow_withers','cow_back','cow_loin','cow_rump');
+  const belly = get('cow_brisket','cow_belly','cow_navel','cow_udder');
+  if (spine.length >= 2) g.add(_tube(spine, 0.30, 0x7B3F00, 12));
+  if (belly.length >= 2) g.add(_tube(belly, 0.22, 0x5A3010, 10));
+
+  // ── Neck: withers → neck → head ─────────────────────────────────────────
+  const neck = get('cow_withers','cow_neck','cow_head');
+  if (neck.length >= 2) g.add(_tube(neck, 0.16, 0x8B4513, 10));
+
+  // ── Head ─────────────────────────────────────────────────────────────────
+  const hp = pt('cow_head'), mp = pt('cow_muzzle');
+  if (hp) g.add(_sphere(hp, 0.21, 0xD8CDB0));          // cranium (light Hereford face)
+  if (mp) {
+    const mm = _sphere(mp, 0.13, 0xEEDDCC, 1.0, 0.75, 1.4);  // elongated muzzle
+    if (mm) g.add(mm);
   }
-  for (const [la, r, col] of _COW_NODES) {
-    const a = cmap[la];
-    if (!a) continue;
-    const geo = new THREE.SphereGeometry(r, 14, 10);
-    const mat = new THREE.MeshStandardMaterial({
-      color: col, roughness: 0.55, metalness: 0.10,
-      transparent: true, opacity: 0.92, depthTest: false,
-    });
-    const m = new THREE.Mesh(geo, mat);
-    m.renderOrder = 10;
-    m.position.copy(_cw(a.x, a.y, a.z));
-    g.add(m);
+  const pollP = pt('cow_poll');
+  if (pollP) g.add(_sphere(pollP, 0.09, 0x6B4020));
+
+  // Eyes (small dark spheres)
+  for (const ek of ['cow_eye_L','cow_eye_R']) {
+    const ep = pt(ek); if (!ep) continue;
+    g.add(_sphere(ep, 0.032, 0x080402));
+  }
+  // Ears
+  for (const ek of ['cow_ear_L','cow_ear_R']) {
+    const ep = pt(ek); if (!ep) continue;
+    g.add(_sphere(ep, 0.065, 0xC4A888, 0.55, 1.0, 1.3));
   }
 
-  // Ground-shadow disc
-  const discGeo = new THREE.CircleGeometry(0.55, 24);
-  const discMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22, depthTest: false });
-  const disc = new THREE.Mesh(discGeo, discMat);
-  disc.renderOrder = 9;
-  disc.rotation.x = -Math.PI / 2;
-  disc.position.set(0, 0.004, 0);
+  // ── Front legs ───────────────────────────────────────────────────────────
+  for (const side of ['L','R']) {
+    const lp = get(`cow_shoulder_${side}`,`cow_elbow_${side}`,
+                   `cow_front_cannon_${side}`,`cow_front_hoof_${side}`);
+    if (lp.length >= 2) g.add(_tube(lp, 0.068, 0x7A4828, 8));
+    const hoof = pt(`cow_front_hoof_${side}`);
+    if (hoof) g.add(_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2));
+  }
+
+  // ── Rear legs ────────────────────────────────────────────────────────────
+  for (const side of ['L','R']) {
+    const lp = get(`cow_hip_${side}`,`cow_stifle_${side}`,
+                   `cow_hock_${side}`,`cow_rear_cannon_${side}`,`cow_rear_hoof_${side}`);
+    if (lp.length >= 2) g.add(_tube(lp, 0.072, 0x7A4828, 8));
+    const hoof = pt(`cow_rear_hoof_${side}`);
+    if (hoof) g.add(_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2));
+  }
+
+  // ── Tail ─────────────────────────────────────────────────────────────────
+  const tail = get('cow_rump','cow_tail_root','cow_tail_switch');
+  if (tail.length >= 2) g.add(_tube(tail, 0.028, 0x3A2010, 6));
+
+  // ── Udder ────────────────────────────────────────────────────────────────
+  const up = pt('cow_udder');
+  if (up) g.add(_sphere(up, 0.17, 0xF0C0A0, 1.25, 0.65, 1.25));
+
+  // Ground shadow disc
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(0.65, 32),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.18 })
+  );
+  disc.rotation.x = -Math.PI / 2; disc.position.y = 0.003;
   g.add(disc);
 
-  // Shift so hooves sit on y=0
-  const hooves = ['cow_front_hoof_L','cow_front_hoof_R','cow_rear_hoof_L','cow_rear_hoof_R'];
-  const ys = hooves.map(k => cmap[k]).filter(Boolean).map(c => c.y * _CW.y);
-  if (ys.length) g.position.y = -Math.min(...ys);
+  // Shift group so hooves sit at y=0
+  const hoofYs = ['cow_front_hoof_L','cow_front_hoof_R','cow_rear_hoof_L','cow_rear_hoof_R']
+    .map(k => cmap[k]).filter(Boolean).map(c => c.y * _CW.y);
+  // Shift group so hoof sphere BOTTOMS sit on grass (centre is at y=0 + hoof_radius)
+  if (hoofYs.length) g.position.y = -Math.min(...hoofYs) + 0.065;
 
   return g;
 }
 
-let neuralMode      = false;
-let neuralCow       = null;
-let _neuralTimer    = null;
-let _neuralAnimT    = 0;     // time accumulator for idle sway
+// ── 3D world environment (grass field + sky) ──────────────────────────────────
+let _neuralWorldObjs = [];
+let _hiddenSceneObjs = [];   // pre-existing scene objects hidden during NEURAL mode
 
-// Dedicated lights added only while NEURAL mode is active
-let _neuralLights   = [];
-function _addNeuralLights() {
-  // Sun from above-front: warm white, strong enough to reveal Hereford colouring
-  const sun = new THREE.DirectionalLight(0xfff8e8, 3.5);
-  sun.position.set(2.5, 4.0, 3.0);
-  // Fill from left: cool neutral to separate shadows
-  const fill = new THREE.DirectionalLight(0xd0e8ff, 1.2);
-  fill.position.set(-3.0, 1.5, 2.0);
-  // Broad ambient so dark joints are still readable
-  const amb = new THREE.AmbientLight(0xffffff, 0.7);
-  _neuralLights = [sun, fill, amb];
-  _neuralLights.forEach(l => scene.add(l));
+function _buildNeuralWorld() {
+  _clearNeuralWorld();
+
+  // Physically remove currentGroup from scene — visibility alone is unreliable
+  // when the bloom pass samples the scene at certain camera angles in the same frame.
+  if (currentGroup) scene.remove(currentGroup);
+
+  // Hide ALL other pre-existing meshes/groups/points in the scene so scene-stream
+  // objects and any other direct scene children don't bleed through.
+  _hiddenSceneObjs = [];
+  scene.traverse(o => {
+    if (o === scene) return;
+    if ((o.isMesh || o.isGroup || o.isPoints || o.isLine || o.isSprite) && o.visible) {
+      o.visible = false;
+      _hiddenSceneObjs.push(o);
+    }
+  });
+
+  // Grass ground
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(200, 200),
+    new THREE.MeshLambertMaterial({ color: 0x3d6b25 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  ground.userData._neural = true;
+  scene.add(ground); _neuralWorldObjs.push(ground);
+
+  // Sky colour + light fog for depth
+  scene.background = new THREE.Color(0x7ec8e3);
+  scene.fog        = new THREE.FogExp2(0x9fd8ef, 0.018);
+
+  // Sun (casts shadows)
+  const sun = new THREE.DirectionalLight(0xfff4d0, 2.8);
+  sun.position.set(6, 12, 8);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.near  = 0.5; sun.shadow.camera.far = 60;
+  sun.shadow.camera.left  = -8;  sun.shadow.camera.right  = 8;
+  sun.shadow.camera.top   =  8;  sun.shadow.camera.bottom = -8;
+  scene.add(sun); _neuralWorldObjs.push(sun);
+
+  // Sky hemisphere
+  const hemi = new THREE.HemisphereLight(0x7ec8e3, 0x3d6b25, 1.1);
+  scene.add(hemi); _neuralWorldObjs.push(hemi);
+
+  // Soft fill from front-left
+  const fill = new THREE.DirectionalLight(0xd0e8ff, 0.6);
+  fill.position.set(-4, 3, 5);
+  scene.add(fill); _neuralWorldObjs.push(fill);
 }
-function _removeNeuralLights() {
-  _neuralLights.forEach(l => scene.remove(l));
-  _neuralLights = [];
+
+function _clearNeuralWorld() {
+  _neuralWorldObjs.forEach(o => {
+    scene.remove(o);
+    if (o.geometry) o.geometry.dispose();
+    if (o.material)  o.material.dispose();
+  });
+  _neuralWorldObjs = [];
+  // Restore all pre-existing scene objects
+  _hiddenSceneObjs.forEach(o => { o.visible = true; });
+  _hiddenSceneObjs = [];
+  // Re-attach currentGroup that was removed in _buildNeuralWorld
+  if (currentGroup) scene.add(currentGroup);
+  scene.background = new THREE.Color(0x000307);
+  scene.fog        = null;
 }
+
+// ── fetch & rebuild ───────────────────────────────────────────────────────────
+let neuralMode   = false;
+let neuralCow    = null;
+let _neuralTimer = null;
 
 async function _fetchNeuralCow() {
   if (!neuralMode) return;
@@ -839,8 +899,7 @@ async function _fetchNeuralCow() {
     snap = await r.json();
   } catch { return; }
 
-  // Strip 'id::' prefix, keep only cow_* keys
-  const raw = snap.centroids || {};
+  const raw  = snap.centroids || {};
   const cmap = {};
   for (const [k, v] of Object.entries(raw)) {
     const c = k.startsWith('id::') ? k.slice(4) : k;
@@ -848,33 +907,27 @@ async function _fetchNeuralCow() {
   }
   if (Object.keys(cmap).length < 10) return;
 
-  if (neuralCow) { scene.remove(neuralCow); neuralCow.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); neuralCow = null; }
+  if (neuralCow) {
+    scene.remove(neuralCow);
+    neuralCow.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    neuralCow = null;
+  }
   neuralCow = _buildNeuralCow(cmap);
-
-  // Place cow inside the video scene.
-  // Camera is at z=4 looking at z=0; depth mesh spans z=0..1.
-  // Training Z convention: z=1=nose, z=0=rear — _cw maps nose to -z (away from camera).
-  // Rotate 180° on Y so nose faces the camera for a natural frontal view.
-  neuralCow.rotation.y = Math.PI;
-  // z=2.0 — in front of the depth mesh (z=0..1), well visible from camera at z=4.
-  // depthTest:false on all materials means the skeleton always draws on top.
-  neuralCow.position.set(0, 0, 2.0);
+  neuralCow.position.set(0, 0, 0);   // centred in world, hooves on grass
   scene.add(neuralCow);
 
-  // Derive current pose from centroid geometry
-  const head   = cmap['cow_head'],   muzzle = cmap['cow_muzzle'];
-  const back   = cmap['cow_back'],   withers = cmap['cow_withers'];
+  // Pose detection from centroid geometry
+  const head = cmap['cow_head'], back = cmap['cow_back'], withers = cmap['cow_withers'], muzzle = cmap['cow_muzzle'];
   let pose = 'standing';
   if (head && back) {
-    if (head.y < back.y * 0.65) pose = 'grazing';          // head dropped well below back
+    if (head.y < back.y * 0.65)                                       pose = 'grazing';
     else if (withers && muzzle && Math.abs(withers.y - muzzle.y) < 0.06) pose = 'walking';
   }
 
-  // Update HUD
-  const el  = document.getElementById('neural-status');
-  if (el) el.textContent = `${Object.keys(cmap).length} centroids`;
-  const pel = document.getElementById('neural-pose');
-  if (pel) pel.textContent = pose;
+  const el = document.getElementById('neural-status');
+  if (el)  el.textContent  = `${Object.keys(cmap).length} centroids`;
+  const pl = document.getElementById('neural-pose');
+  if (pl)  pl.textContent  = pose;
 }
 
 function toggleNeuralMode() {
@@ -883,26 +936,35 @@ function toggleNeuralMode() {
 
   if (neuralMode) {
     if (sceneMode) toggleSceneMode();
+    if (videoMode) toggleVideoMode();   // kill depth-mesh — video is sensor-only
     if (fpsMode)   toggleFPS();
+    if (currentGroup) currentGroup.visible = false;
+    clearLiveSymbols();   // stop live-symbol timer and purge all scene.add() meshes
+    // Dismiss any lingering scene-suggestion toast
+    const _st = document.getElementById('scene-toast');
+    if (_st) { _st.style.display = 'none'; clearTimeout(_st._hide); }
 
-    // Video stream provides the photorealistic background scene
-    if (!videoMode) toggleVideoMode();
+    _buildNeuralWorld();
 
     btn.classList.add('active'); btn.textContent = '◈ NEURAL ✓';
     document.getElementById('neural-hud').style.display = 'block';
-    document.getElementById('vq-hud').style.display = 'none';  // hide video HUD
+    ['bc','badge','panel','lbar','sb','vq-hud'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.style.display = 'none';
+    });
 
-    // Keep camera at z=4 (correct for depth mesh), but tilt it to look at the cow's
-    // centre of mass rather than the origin — cow centre is at (0, 0.7, 2.0).
-    camera.position.set(0, 0, 4.0);
-    camera.lookAt(0, 0.7, 2.0);
-    orbitCtrl.target.set(0, 0.7, 2.0);
+    // Turn off sci-fi post-processing — clean natural render
+    bloomPass.strength = 0.0;
+    filmPass.uniforms.intensity.value = 0.0;
+    camera.near = 0.05; camera.updateProjectionMatrix();
+
+    // Classic side-profile view: camera to the right, at eye level, looking at cow centre.
+    // Cow is 2.4m long (z ≈ -1.2 to +1.2) and 1.4m tall (y 0 to 1.4).
+    // At x=5, y=1.0 looking at x=0, y=0.7, z=0 — clean broadside silhouette.
+    camera.position.set(5.0, 1.0, 0.0);
+    camera.lookAt(0, 0.7, 0);
+    orbitCtrl.target.set(0, 0.7, 0);
     orbitCtrl.update();
 
-    // Add dedicated lights so Hereford colouring is visible over video background
-    _addNeuralLights();
-
-    // Poll at 300ms — near-real-time response to live video sensor updates
     _neuralTimer = setInterval(_fetchNeuralCow, 300);
     _fetchNeuralCow();
 
@@ -913,10 +975,18 @@ function toggleNeuralMode() {
       neuralCow.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
       neuralCow = null;
     }
-    if (videoMode) toggleVideoMode();
-    _removeNeuralLights();
-    document.getElementById('neural-hud').style.display = 'none';
+    _clearNeuralWorld();
+
     btn.classList.remove('active'); btn.textContent = '◈ NEURAL';
+    document.getElementById('neural-hud').style.display = 'none';
+    ['bc','badge','panel','lbar','sb'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.style.display = ''; });
+    if (currentGroup) currentGroup.visible = true;
+
+    const lc = LC[currentLevel];
+    bloomPass.strength = lc.bloom.s; bloomPass.radius = lc.bloom.r; bloomPass.threshold = lc.bloom.t;
+    filmPass.uniforms.intensity.value = lc.film;
+    camera.near = 0.01; camera.updateProjectionMatrix();
   }
 }
 
@@ -1304,7 +1374,7 @@ function toggleSceneMode() {
 
 // Auto-detect anatomy/scene labels and suggest SCENE mode
 function checkSceneSuggestion(snap) {
-  if (sceneMode) return;
+  if (sceneMode || neuralMode || videoMode) return;
   const labels = Object.keys(snap.centroids||{});
   const isScene = ANATOMY_TRIGGER.some(t => labels.some(l => l.includes(t)));
   if (isScene) {
@@ -1838,7 +1908,7 @@ function animate(){
 
   if(!videoMode && !fpsMode) orbitCtrl.update();
 
-  if(!videoMode && neuroSnap){
+  if(!videoMode && !neuralMode && neuroSnap){
     drawNeuroMap(neuroSnap);
     if(sceneMode){
       if(liveSymObjs.size === 0) rebuildSceneObjects(neuroSnap);
@@ -1846,7 +1916,7 @@ function animate(){
       applyNeuroToScene(neuroSnap);
     }
   }
-  if(sceneMode && !videoMode) animateLiveSymbols();
+  if(sceneMode && !videoMode && !neuralMode) animateLiveSymbols();
 
   // PQ animation
   if(currentGroup&&(currentLevel===4||currentLevel===5)){
@@ -1857,8 +1927,8 @@ function animate(){
     }});
   }
 
-  // Zoom threshold (orbit mode — disabled in videoMode)
-  if(!videoMode&&!isTransitioning&&currentGroup&&!fpsMode){
+  // Zoom threshold (orbit mode — disabled in videoMode and neuralMode)
+  if(!videoMode&&!neuralMode&&!isTransitioning&&currentGroup&&!fpsMode){
     const dist=camera.position.distanceTo(orbitCtrl.target);
     const lc=LC[currentLevel];
     if(dist<lc.drillIn&&currentLevel<LC.length-1) transitionLevel(currentLevel+1);
