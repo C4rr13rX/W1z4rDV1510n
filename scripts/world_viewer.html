@@ -55,6 +55,55 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
 .ttd { color:#4a88a8; font-size:8px; margin-bottom:3px; }
 .tti { color:#2a4860; font-size:8.5px; line-height:1.6; }
 
+/* ── Anatomy drill-down modal ─────────────────────────────────── */
+#drill-modal {
+  position:fixed; inset:0; z-index:100;
+  background:rgba(0,4,10,0.97);
+  display:none; flex-direction:column;
+  font-family:'Courier New',monospace;
+}
+#drill-modal.open { display:flex; }
+#drill-header {
+  display:flex; align-items:center; gap:12px;
+  padding:10px 18px; border-bottom:1px solid #0c2030;
+  background:rgba(0,2,8,0.98); flex-shrink:0;
+}
+#drill-title { font-size:13px; color:#90d0f0; letter-spacing:2px; text-transform:uppercase; flex:1; }
+#drill-latin { font-size:9px; color:#2a5870; font-style:italic; }
+#drill-breadcrumb { font-size:8px; color:#1a4060; letter-spacing:2px; text-transform:uppercase; }
+#drill-close { background:none; border:1px solid #1a3040; color:#2a6080; padding:4px 12px;
+  font-family:inherit; font-size:9px; letter-spacing:2px; text-transform:uppercase;
+  cursor:pointer; border-radius:2px; }
+#drill-close:hover { border-color:#c03030; color:#e05050; }
+#drill-body { display:flex; flex:1; overflow:hidden; }
+#drill-canvas-wrap { flex:1; position:relative; }
+#drill-canvas { display:block; width:100%; height:100%; }
+#drill-sidebar {
+  width:300px; background:rgba(0,2,8,0.98); border-left:1px solid #0a1e2e;
+  padding:16px; overflow-y:auto; flex-shrink:0;
+}
+#drill-level-title { font-size:11px; color:#6ab8e0; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px; }
+#drill-level-desc { font-size:8.5px; color:#2a5870; line-height:1.7; margin-bottom:10px; }
+#drill-kv-list { font-size:8px; margin-bottom:12px; }
+.dkv { display:flex; justify-content:space-between; margin:2px 0; border-bottom:1px solid #081828; padding-bottom:2px; }
+.dkv .dk { color:#1a3848; text-transform:uppercase; }
+.dkv .dv { color:#4a8ab0; text-align:right; max-width:160px; }
+#drill-tissue-list { margin-bottom:12px; }
+.dtis { display:flex; align-items:center; gap:6px; margin:3px 0; cursor:pointer; padding:3px 5px; border-radius:2px; }
+.dtis:hover { background:rgba(20,60,90,0.3); }
+.dtis-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.dtis-name { font-size:9px; color:#3a7090; flex:1; }
+.dtis-mm { font-size:8px; color:#1a3848; }
+.dtis-cell { font-size:7.5px; color:#1a3060; }
+#drill-nav { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+.dnav-btn { background:none; border:1px solid #0c2030; color:#1a4060; padding:5px 10px;
+  font-family:inherit; font-size:8px; letter-spacing:1.5px; text-transform:uppercase;
+  cursor:pointer; border-radius:2px; flex:1; min-width:80px; }
+.dnav-btn:hover { border-color:#2a6080; color:#3a90b0; }
+.dnav-btn.active { border-color:#2a9060; color:#40d090; }
+#drill-scale { font-size:8px; color:#1a3040; letter-spacing:1px; margin-top:8px; text-align:center; }
+#drill-hint { font-size:8px; color:#0d2030; text-align:center; letter-spacing:1.5px; text-transform:uppercase; margin-top:6px; }
+
 /* Layer bar */
 #lbar { position:absolute; bottom:0; left:0; right:0; background:rgba(1,3,8,0.97);
   border-top:1px solid #070e18; padding:6px 18px; display:flex; gap:5px;
@@ -189,6 +238,36 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
 </div>
 <div id="scene-toast" onclick="activateSceneMode()">Anatomy / scene stream detected — click to switch to SCENE mode</div>
 <div id="fade"></div>
+
+<!-- ── Anatomy drill-down modal ─────────────────────────────────── -->
+<div id="drill-modal">
+  <div id="drill-header">
+    <div>
+      <div id="drill-title">—</div>
+      <div id="drill-latin">—</div>
+    </div>
+    <div id="drill-breadcrumb">—</div>
+    <button id="drill-close" onclick="closeDrillModal()">✕ CLOSE</button>
+  </div>
+  <div id="drill-body">
+    <div id="drill-canvas-wrap">
+      <canvas id="drill-canvas"></canvas>
+    </div>
+    <div id="drill-sidebar">
+      <div id="drill-level-title">—</div>
+      <div id="drill-level-desc">—</div>
+      <div id="drill-kv-list"></div>
+      <div id="drill-tissue-list"></div>
+      <div id="drill-nav">
+        <button class="dnav-btn" id="dnav-in"  onclick="drillIn()">▼ DRILL IN</button>
+        <button class="dnav-btn" id="dnav-out" onclick="drillOut()">▲ DRILL OUT</button>
+      </div>
+      <div id="drill-scale">—</div>
+      <div id="drill-hint">SCROLL TO ZOOM · DRAG TO ROTATE</div>
+    </div>
+  </div>
+</div>
+
 <div id="tt"><div class="ttn" id="ttn"></div><div class="ttl" id="ttl"></div><div class="ttd" id="ttd"></div><div class="tti" id="tti"></div></div>
 
 <div id="loading" style="display:flex">
@@ -758,6 +837,215 @@ function _fabricColor(objMap, label, fallback = 0x7B3F00) {
 // cmap: { label → {x,y,z} }  (centroids from /neuro/snapshot)
 // objMap: { label → world3d object }  (from /neuro/world3d, may be empty {} if
 //          endpoint not yet populated — falls back to hardcoded colors)
+// ── Bovine anatomy data ────────────────────────────────────────────────────────
+const BOVINE_ANATOMY = {
+  cow_head: {
+    name:'Head', latin:'Caput bovinum', scale_m:0.35,
+    desc:'The bovine head houses the brain, sensory organs, and masticatory apparatus. The masseter muscle is one of the most powerful relative to body weight in ruminants.',
+    tissues:[
+      {name:'Skin & Epidermis',  mm:4,  cell:'keratinocyte',   hex:'#c8a870'},
+      {name:'Subcutaneous fat',  mm:8,  cell:'adipocyte',      hex:'#f5e6c0'},
+      {name:'Masseter muscle',   mm:40, cell:'skeletal myocyte',hex:'#c03030'},
+      {name:'Frontal bone',      mm:12, cell:'osteocyte',       hex:'#f0f0e0'},
+      {name:'Brain (cerebrum)',  mm:80, cell:'pyramidal neuron',hex:'#e8d0a0'},
+    ],
+    kv:{'Brain mass':'410–500 g','Eye diameter':'35 mm','Masseter force':'~600 N','Olfactory area':'5× human','Horn growth':'~2.5 cm/yr'},
+  },
+  cow_neck: {
+    name:'Neck', latin:'Collum', scale_m:0.40,
+    desc:'The neck contains the cervical vertebrae (C1–C7), trachea, oesophagus, and powerful splenius/brachiocephalic muscles that enable grazing posture.',
+    tissues:[
+      {name:'Hide',              mm:5,  cell:'keratinocyte',    hex:'#c09060'},
+      {name:'Splenius muscle',   mm:55, cell:'skeletal myocyte', hex:'#b83030'},
+      {name:'Cervical vertebra', mm:15, cell:'osteocyte',        hex:'#f0f0e0'},
+      {name:'Trachea wall',      mm:4,  cell:'chondrocyte',      hex:'#b0d8f0'},
+      {name:'Oesophagus',        mm:5,  cell:'smooth myocyte',   hex:'#e0a080'},
+    ],
+    kv:{'Vertebrae':'C1–C7 (7)','Trachea rings':'~50 cartilage rings','Jugular vein':'paired external jugulars'},
+  },
+  cow_withers: {
+    name:'Withers', latin:'Garrocha / Interscapulium', scale_m:0.30,
+    desc:'The highest point of the bovine dorsum, formed by the dorsal spinous processes of T1–T4 and overlying trapezius and rhomboid muscles.',
+    tissues:[
+      {name:'Hide',              mm:6,  cell:'keratinocyte',    hex:'#b08050'},
+      {name:'Trapezius',         mm:35, cell:'skeletal myocyte', hex:'#b83030'},
+      {name:'Thoracic spinous',  mm:18, cell:'osteocyte',        hex:'#f0f0e0'},
+      {name:'Supraspinous lig.', mm:8,  cell:'fibroblast',       hex:'#d4c888'},
+    ],
+    kv:{'Height ref':'standard conformation measurement point','Spinous processes':'T1–T4, up to 18 cm'},
+  },
+  cow_back: {
+    name:'Back / Dorsum', latin:'Dorsum', scale_m:1.0,
+    desc:'The dorsal trunk supports the thoracolumbar spine (T13–L6). The longissimus dorsi muscle—the ribeye in carcass grading—runs the full length.',
+    tissues:[
+      {name:'Hide',              mm:6,  cell:'keratinocyte',    hex:'#b07040'},
+      {name:'Longissimus dorsi', mm:90, cell:'skeletal myocyte', hex:'#c03030'},
+      {name:'Subcutaneous fat',  mm:12, cell:'adipocyte',        hex:'#f5e6c0'},
+      {name:'Thoracic/lumbar vertebra',mm:20,cell:'osteocyte',  hex:'#f0f0e0'},
+      {name:'Spinal cord',       mm:12, cell:'motor neuron',     hex:'#e8d0b0'},
+    ],
+    kv:{'Longissimus length':'~90 cm','Lumbar vertebrae':'L1–L6','SubQ fat depth (BCS 5)':'~18 mm','Ribeye area (grade)':'65–85 cm²'},
+  },
+  cow_loin: {
+    name:'Loin', latin:'Lumbus', scale_m:0.55,
+    desc:'The lumbar region carrying L1–L6 vertebrae. Striploin and tenderloin originate here.',
+    tissues:[
+      {name:'Hide',              mm:5,  cell:'keratinocyte',    hex:'#b07040'},
+      {name:'Longissimus lumborum',mm:75,cell:'skeletal myocyte',hex:'#c03030'},
+      {name:'Psoas major',       mm:40, cell:'skeletal myocyte', hex:'#b82828'},
+      {name:'Lumbar vertebra',   mm:22, cell:'osteocyte',        hex:'#f0f0e0'},
+    ],
+    kv:{'Psoas (tenderloin) wt':'~1.5 kg/side','Intervertebral disc':'fibrocartilage, ~2 cm thick'},
+  },
+  cow_rump: {
+    name:'Rump / Hindquarters', latin:'Regio glutaea', scale_m:0.60,
+    desc:'The rump is dominated by the gluteal muscle group (gluteus medius, biceps femoris) and the sacro-iliac joint. Pin bones (tuber ischii) are visible landmarks.',
+    tissues:[
+      {name:'Hide',              mm:6,  cell:'keratinocyte',    hex:'#a06030'},
+      {name:'Gluteus medius',    mm:80, cell:'skeletal myocyte', hex:'#c03030'},
+      {name:'Ilium / sacrum',    mm:25, cell:'osteocyte',        hex:'#f0f0e0'},
+      {name:'SubQ fat',          mm:14, cell:'adipocyte',        hex:'#f5e6c0'},
+    ],
+    kv:{'Gluteus medius wt':'~4 kg','Pin bone spread':'12–18 cm','Tail head angle':'<45° desirable'},
+  },
+  cow_belly: {
+    name:'Belly / Abdomen', latin:'Abdomen', scale_m:0.85,
+    desc:'The ventral abdomen contains the forestomachs (rumen, reticulum, omasum), abomasum, intestines, and reproductive organs—critical for ruminant digestion.',
+    tissues:[
+      {name:'Hide',              mm:4,  cell:'keratinocyte',    hex:'#b08060'},
+      {name:'External abdominal oblique',mm:20,cell:'skeletal myocyte',hex:'#c03030'},
+      {name:'Transversalis fascia',mm:3,cell:'fibroblast',       hex:'#d4c090'},
+      {name:'Rumen wall',        mm:6,  cell:'smooth myocyte',   hex:'#d09060'},
+      {name:'Peritoneum',        mm:1,  cell:'mesothelial cell', hex:'#e8e0d0'},
+    ],
+    kv:{'Rumen capacity':'~150 L','Rumen pH':'5.8–6.8','Reticular groove reflex':'closure in calves','Daily VFA output':'~3 mol acetate'},
+  },
+  cow_brisket: {
+    name:'Brisket / Sternum', latin:'Pectus / Regio sternalis', scale_m:0.45,
+    desc:'The brisket is the sternal/pectoral region. The deep pectoral and superficial pectoral muscles originate here and contribute to locomotion.',
+    tissues:[
+      {name:'Hide',              mm:7,  cell:'keratinocyte',    hex:'#a07050'},
+      {name:'Deep pectoral',     mm:50, cell:'skeletal myocyte', hex:'#c03030'},
+      {name:'Sternum',           mm:18, cell:'osteocyte',        hex:'#f0f0e0'},
+      {name:'SubQ fat',          mm:15, cell:'adipocyte',        hex:'#f5e6c0'},
+    ],
+    kv:{'Brisket edema':'early sign of congestive heart failure','Sternum segments':'sternebrae 1–7'},
+  },
+  cow_shoulder_L: {name:'Left Shoulder',latin:'Articulatio humeri sinister',scale_m:0.30,
+    desc:'Shoulder joint (scapulohumeral) with infraspinatus, supraspinatus, and subscapularis rotator muscles.',
+    tissues:[{name:'Hide',mm:5,cell:'keratinocyte',hex:'#b08050'},{name:'Infraspinatus',mm:45,cell:'skeletal myocyte',hex:'#c03030'},{name:'Scapula',mm:14,cell:'osteocyte',hex:'#f0f0e0'},{name:'Joint capsule',mm:3,cell:'chondrocyte',hex:'#b0d8f0'}],
+    kv:{'ROM abduction':'~45°','Common injury':'infraspinatus atrophy'}},
+  cow_shoulder_R: {name:'Right Shoulder',latin:'Articulatio humeri dexter',scale_m:0.30,
+    desc:'Mirror of the left shoulder. Rotator cuff equivalent supports the scapulohumeral joint.',
+    tissues:[{name:'Hide',mm:5,cell:'keratinocyte',hex:'#b08050'},{name:'Infraspinatus',mm:45,cell:'skeletal myocyte',hex:'#c03030'},{name:'Scapula',mm:14,cell:'osteocyte',hex:'#f0f0e0'},{name:'Joint capsule',mm:3,cell:'chondrocyte',hex:'#b0d8f0'}],
+    kv:{'ROM abduction':'~45°'}},
+  cow_elbow_L: {name:'Left Elbow',latin:'Articulatio cubiti sinister',scale_m:0.18,
+    desc:'The elbow (cubital joint) between humerus and radius/ulna. Triceps brachii extends the joint for weight-bearing.',
+    tissues:[{name:'Hide',mm:4,cell:'keratinocyte',hex:'#a07040'},{name:'Triceps brachii',mm:50,cell:'skeletal myocyte',hex:'#c03030'},{name:'Olecranon (ulna)',mm:20,cell:'osteocyte',hex:'#f0f0e0'},{name:'Hyaline cartilage',mm:2,cell:'chondrocyte',hex:'#c0e8f8'}],
+    kv:{'Load':'~300 kg at stance'}},
+  cow_elbow_R: {name:'Right Elbow',latin:'Articulatio cubiti dexter',scale_m:0.18,
+    desc:'Mirror of left elbow. Supports ~300 kg during standing.',
+    tissues:[{name:'Hide',mm:4,cell:'keratinocyte',hex:'#a07040'},{name:'Triceps brachii',mm:50,cell:'skeletal myocyte',hex:'#c03030'},{name:'Olecranon (ulna)',mm:20,cell:'osteocyte',hex:'#f0f0e0'},{name:'Hyaline cartilage',mm:2,cell:'chondrocyte',hex:'#c0e8f8'}],
+    kv:{}},
+  cow_front_hoof_L: {name:'Left Front Hoof',latin:'Ungula pedis anterior sinister',scale_m:0.12,
+    desc:'Bovine hooves are cloven (two digits per foot). The hoof capsule is keratin, grown continuously ~6 mm/month.',
+    tissues:[{name:'Hoof capsule (keratin)',mm:8,cell:'keratinocyte (modified)',hex:'#402810'},{name:'Corium (dermis)',mm:4,cell:'fibroblast',hex:'#d04030'},{name:'Pedal bone (PIII)',mm:30,cell:'osteocyte',hex:'#f0f0e0'},{name:'Digital flexor tendon',mm:10,cell:'tenocyte',hex:'#f8e8a0'}],
+    kv:{'Claw growth':'~6 mm/month','Trim interval':'6 months','Lameness prevalence':'~25% dairy herds'}},
+  cow_front_hoof_R: {name:'Right Front Hoof',latin:'Ungula pedis anterior dexter',scale_m:0.12,
+    desc:'Mirror of left front hoof. Lateral claw of rear feet most susceptible to sole ulcers.',
+    tissues:[{name:'Hoof capsule',mm:8,cell:'keratinocyte',hex:'#402810'},{name:'Corium',mm:4,cell:'fibroblast',hex:'#d04030'},{name:'Pedal bone',mm:30,cell:'osteocyte',hex:'#f0f0e0'},{name:'Flexor tendon',mm:10,cell:'tenocyte',hex:'#f8e8a0'}],
+    kv:{}},
+  cow_rear_hoof_L:  {name:'Left Rear Hoof', latin:'Ungula pedis posterior sinister',scale_m:0.12,
+    desc:'Rear hoof carries greater load; lateral claw is most prone to laminar disruption.',
+    tissues:[{name:'Hoof capsule',mm:8,cell:'keratinocyte',hex:'#402810'},{name:'Corium',mm:4,cell:'fibroblast',hex:'#d04030'},{name:'Pedal bone',mm:30,cell:'osteocyte',hex:'#f0f0e0'},{name:'Flexor tendon',mm:10,cell:'tenocyte',hex:'#f8e8a0'}],
+    kv:{'Lateral/medial load':'70/30% rear'}},
+  cow_rear_hoof_R:  {name:'Right Rear Hoof',latin:'Ungula pedis posterior dexter',scale_m:0.12,
+    desc:'Mirror of left rear hoof. Rear hooves bear ~60% of total body weight during standing.',
+    tissues:[{name:'Hoof capsule',mm:8,cell:'keratinocyte',hex:'#402810'},{name:'Corium',mm:4,cell:'fibroblast',hex:'#d04030'},{name:'Pedal bone',mm:30,cell:'osteocyte',hex:'#f0f0e0'},{name:'Flexor tendon',mm:10,cell:'tenocyte',hex:'#f8e8a0'}],
+    kv:{}},
+  cow_front_cannon_L:{name:'Left Front Cannon',latin:'Os metacarpi III+IV sinister',scale_m:0.20,desc:'The fused MC3+MC4 metacarpal (cannon bone) of the front leg, covered by flexor/extensor tendons.',
+    tissues:[{name:'Hide',mm:3,cell:'keratinocyte',hex:'#a07040'},{name:'Extensor tendons',mm:6,cell:'tenocyte',hex:'#f8e8a0'},{name:'Cannon bone',mm:25,cell:'osteocyte',hex:'#f0f0e0'},{name:'Flexor tendons',mm:8,cell:'tenocyte',hex:'#f8e8b0'}],kv:{'Length':'~22 cm'}},
+  cow_front_cannon_R:{name:'Right Front Cannon',latin:'Os metacarpi III+IV dexter',scale_m:0.20,desc:'Mirror of left front cannon.',tissues:[{name:'Hide',mm:3,cell:'keratinocyte',hex:'#a07040'},{name:'Extensor tendons',mm:6,cell:'tenocyte',hex:'#f8e8a0'},{name:'Cannon bone',mm:25,cell:'osteocyte',hex:'#f0f0e0'},{name:'Flexor tendons',mm:8,cell:'tenocyte',hex:'#f8e8b0'}],kv:{}},
+  cow_rear_cannon_L: {name:'Left Rear Cannon',latin:'Os metatarsi III+IV sinister',scale_m:0.22,desc:'Fused MT3+MT4 metatarsal of rear leg, longer than the front cannon.',tissues:[{name:'Hide',mm:3,cell:'keratinocyte',hex:'#a07040'},{name:'Tendons',mm:7,cell:'tenocyte',hex:'#f8e8a0'},{name:'MT cannon bone',mm:26,cell:'osteocyte',hex:'#f0f0e0'}],kv:{'Length':'~26 cm'}},
+  cow_rear_cannon_R: {name:'Right Rear Cannon',latin:'Os metatarsi III+IV dexter',scale_m:0.22,desc:'Mirror of left rear cannon.',tissues:[{name:'Hide',mm:3,cell:'keratinocyte',hex:'#a07040'},{name:'Tendons',mm:7,cell:'tenocyte',hex:'#f8e8a0'},{name:'MT cannon bone',mm:26,cell:'osteocyte',hex:'#f0f0e0'}],kv:{}},
+  cow_hock_L: {name:'Left Hock',latin:'Articulatio tarsi sinister',scale_m:0.18,desc:'The tarsal (hock) joint is the equivalent of the human ankle. Most common site of tarsal bursitis ("capped hock") from hard flooring.',tissues:[{name:'Hide',mm:3,cell:'keratinocyte',hex:'#907030'},{name:'Gastrocnemius tendon',mm:12,cell:'tenocyte',hex:'#f8e8a0'},{name:'Tibiotarsal joint',mm:5,cell:'chondrocyte',hex:'#c0e8f8'},{name:'Tarsal bones',mm:30,cell:'osteocyte',hex:'#f0f0e0'}],kv:{'Flexion ROM':'~140°','Bursitis prevalence':'30%+ confined housing'}},
+  cow_hock_R: {name:'Right Hock',latin:'Articulatio tarsi dexter',scale_m:0.18,desc:'Mirror of left hock.',tissues:[{name:'Hide',mm:3,cell:'keratinocyte',hex:'#907030'},{name:'Gastrocnemius tendon',mm:12,cell:'tenocyte',hex:'#f8e8a0'},{name:'Tibiotarsal joint',mm:5,cell:'chondrocyte',hex:'#c0e8f8'},{name:'Tarsal bones',mm:30,cell:'osteocyte',hex:'#f0f0e0'}],kv:{}},
+  cow_stifle_L:{name:'Left Stifle',latin:'Articulatio genus sinister',scale_m:0.22,desc:'The stifle (femorotibial + femoropatellar) is the largest joint in the bovine limb. Equivalent to the human knee.',tissues:[{name:'Hide',mm:4,cell:'keratinocyte',hex:'#a07040'},{name:'Quadriceps',mm:60,cell:'skeletal myocyte',hex:'#c03030'},{name:'Femoral condyles',mm:8,cell:'chondrocyte',hex:'#c0e8f8'},{name:'Femur',mm:35,cell:'osteocyte',hex:'#f0f0e0'}],kv:{'Patella':'present, dorsal to joint','Common injury':'cruciate ligament rupture'}},
+  cow_stifle_R:{name:'Right Stifle',latin:'Articulatio genus dexter',scale_m:0.22,desc:'Mirror of left stifle.',tissues:[{name:'Hide',mm:4,cell:'keratinocyte',hex:'#a07040'},{name:'Quadriceps',mm:60,cell:'skeletal myocyte',hex:'#c03030'},{name:'Femoral condyles',mm:8,cell:'chondrocyte',hex:'#c0e8f8'},{name:'Femur',mm:35,cell:'osteocyte',hex:'#f0f0e0'}],kv:{}},
+  cow_hip_L:{name:'Left Hip',latin:'Articulatio coxae sinister',scale_m:0.25,desc:'The coxofemoral joint is a ball-and-socket formed by the femoral head and the acetabulum of the pelvis.',tissues:[{name:'Hide',mm:5,cell:'keratinocyte',hex:'#a07040'},{name:'Gluteus medius',mm:80,cell:'skeletal myocyte',hex:'#c03030'},{name:'Femoral head cartilage',mm:3,cell:'chondrocyte',hex:'#c0e8f8'},{name:'Ilium',mm:22,cell:'osteocyte',hex:'#f0f0e0'}],kv:{'ROM extension':'~130°','Hip dislocation':'5th most common bovine fracture'}},
+  cow_hip_R:{name:'Right Hip',latin:'Articulatio coxae dexter',scale_m:0.25,desc:'Mirror of left hip.',tissues:[{name:'Hide',mm:5,cell:'keratinocyte',hex:'#a07040'},{name:'Gluteus medius',mm:80,cell:'skeletal myocyte',hex:'#c03030'},{name:'Femoral head cartilage',mm:3,cell:'chondrocyte',hex:'#c0e8f8'},{name:'Ilium',mm:22,cell:'osteocyte',hex:'#f0f0e0'}],kv:{}},
+  cow_udder:{name:'Udder / Mammary Gland',latin:'Mamma bovina',scale_m:0.40,desc:'The bovine mammary gland has 4 quarters, each drained by a teat canal. Milk synthesis occurs in alveolar epithelial cells.',tissues:[{name:'Skin',mm:3,cell:'keratinocyte',hex:'#f0d0b0'},{name:'Secretory alveoli',mm:60,cell:'mammary epithelial',hex:'#f8e8f0'},{name:'Stroma / Connective',mm:20,cell:'fibroblast',hex:'#d0c0a0'},{name:'Cistern epithelium',mm:2,cell:'cuboid epithelial',hex:'#e8d8f0'}],kv:{'Daily yield (HF)':'25–40 L','Alveoli count':'~3×10⁸/quarter','Somatic cell count (healthy)':'<200,000/mL','Teat canal length':'~10 mm'}},
+  cow_tail_root:{name:'Tail Root',latin:'Radix caudae',scale_m:0.12,desc:'The proximal coccygeal vertebrae (Co1–Co3) and overlying coccygeus muscle form the tail root.',tissues:[{name:'Hide',mm:5,cell:'keratinocyte',hex:'#a07040'},{name:'Coccygeus muscle',mm:15,cell:'skeletal myocyte',hex:'#c03030'},{name:'Coccygeal vertebrae',mm:12,cell:'osteocyte',hex:'#f0f0e0'}],kv:{'Vertebrae':'~18–20 coccygeal total','Temperature':'often measured here for fever detection'}},
+  cow_muzzle:{name:'Muzzle / Rostrum',latin:'Planum nasolabiale',scale_m:0.18,desc:'The bovine muzzle is a specialised hairless sweat gland region used for thermoregulation and tactile sensing while grazing.',tissues:[{name:'Muzzle epidermis',mm:2,cell:'keratinocyte (hairless)',hex:'#d0a880'},{name:'Dermis',mm:4,cell:'fibroblast',hex:'#c08060'},{name:'Nasal cartilage',mm:4,cell:'chondrocyte',hex:'#c0e8f8'},{name:'Orbicularis oris',mm:12,cell:'skeletal myocyte',hex:'#c03030'}],kv:{'Sweat glands':'eccrine (thermoregulation)','Nasal disc':'>95% moisture = normal hydration'}},
+  cow_poll:{name:'Poll',latin:'Vertex cranii',scale_m:0.12,desc:'The top of the bovine skull between the ears. Horn buds are located here in horned breeds; dehorning targets the corium of this region.',tissues:[{name:'Hide',mm:4,cell:'keratinocyte',hex:'#b09070'},{name:'Frontalis muscle',mm:8,cell:'skeletal myocyte',hex:'#c03030'},{name:'Frontal bone',mm:14,cell:'osteocyte',hex:'#f0f0e0'},{name:'Frontal sinus',mm:30,cell:'ciliated epithelial',hex:'#d0e8f8'}],kv:{'Horn sheath composition':'α-keratin','Frontal sinus':'large in cattle—pneumatises entire horn core'}},
+  cow_eye_L:{name:'Left Eye',latin:'Oculus sinister',scale_m:0.04,desc:'Bovine eyes are large (35 mm diameter) with horizontal pupils providing ~330° panoramic vision. Tapetum lucidum enables night grazing.',tissues:[{name:'Cornea',mm:1,cell:'corneal epithelial',hex:'#d0e8f8'},{name:'Iris & ciliary body',mm:3,cell:'melanocyte/smooth myocyte',hex:'#5080a0'},{name:'Retina',mm:0.3,cell:'rod photoreceptor',hex:'#402810'},{name:'Tapetum lucidum',mm:0.5,cell:'iridocyte (reflective)',hex:'#80d0a0'}],kv:{'Visual field':'~330° (monocular)','Binocular zone':'~25–30°','Colour vision':'dichromat (blue+green)'}},
+  cow_eye_R:{name:'Right Eye',latin:'Oculus dexter',scale_m:0.04,desc:'Mirror of left eye.',tissues:[{name:'Cornea',mm:1,cell:'corneal epithelial',hex:'#d0e8f8'},{name:'Iris',mm:3,cell:'melanocyte',hex:'#5080a0'},{name:'Retina',mm:0.3,cell:'rod photoreceptor',hex:'#402810'},{name:'Tapetum lucidum',mm:0.5,cell:'iridocyte',hex:'#80d0a0'}],kv:{}},
+  cow_ear_L:{name:'Left Ear',latin:'Auris sinister',scale_m:0.15,desc:'The pinna (ear) acts as a directional acoustic funnel and radiates body heat via auricular vasculature—useful for temperature monitoring.',tissues:[{name:'Ear skin',mm:3,cell:'keratinocyte',hex:'#c0a070'},{name:'Auricular cartilage',mm:4,cell:'elastic chondrocyte',hex:'#c8e8d0'},{name:'Auricular mm.',mm:12,cell:'skeletal myocyte',hex:'#c03030'}],kv:{'Ear tag site':'standard ID location','Temperature probe':'~38.5°C normal'}},
+  cow_ear_R:{name:'Right Ear',latin:'Auris dexter',scale_m:0.15,desc:'Mirror of left ear.',tissues:[{name:'Ear skin',mm:3,cell:'keratinocyte',hex:'#c0a070'},{name:'Auricular cartilage',mm:4,cell:'elastic chondrocyte',hex:'#c8e8d0'},{name:'Auricular mm.',mm:12,cell:'skeletal myocyte',hex:'#c03030'}],kv:{}},
+  cow_body_centre:{name:'Body Centre / Trunk',latin:'Truncus', scale_m:1.2,desc:'The central trunk contains the thoracolumbar spine, ribcage, and abdominal viscera. The largest anatomical region.',tissues:[{name:'Hide',mm:6,cell:'keratinocyte',hex:'#b07040'},{name:'Back muscle complex',mm:85,cell:'skeletal myocyte',hex:'#c03030'},{name:'Ribs + intercostals',mm:15,cell:'osteocyte',hex:'#f0f0e0'},{name:'Lung / pleurae',mm:100,cell:'type II pneumocyte',hex:'#e8d0c0'},{name:'Rumen',mm:10,cell:'smooth myocyte',hex:'#c8a080'}],kv:{'Ribcage pairs':'13','Lung volume':'~25 L','Rumen fill':'~150 L'}},
+  cow_centre_of_mass:{name:'Centre of Mass',latin:'Centrum gravitatis',scale_m:0.5,desc:'Estimated centre of gravity, approximately at the xiphoid/L1 level, 55–60% of dorsal height.',tissues:[{name:'Abdominal viscera',mm:120,cell:'smooth myocyte',hex:'#c8a080'},{name:'Paraxial muscle',mm:80,cell:'skeletal myocyte',hex:'#c03030'}],kv:{'Location':'~55% dorsal height','Shifts':'posterior-ventrally in late gestation'}},
+};
+
+// ── Hover + click state for NEURAL mode ───────────────────────────────────────
+const _neuralRaycaster = new THREE.Raycaster();
+const _mouseNorm = new THREE.Vector2(-99, -99);
+let   _hoveredMesh = null;
+const _ttEl = document.getElementById('tt');
+
+renderer.domElement.addEventListener('mousemove', e => {
+  if (!neuralMode) { if (_ttEl) _ttEl.style.opacity='0'; return; }
+  const rect = renderer.domElement.getBoundingClientRect();
+  _mouseNorm.set(
+    ((e.clientX - rect.left) / rect.width)  *  2 - 1,
+   -((e.clientY - rect.top)  / rect.height) *  2 + 1
+  );
+  // Update tooltip position
+  if (_ttEl) { _ttEl.style.left=(e.clientX+14)+'px'; _ttEl.style.top=(e.clientY-10)+'px'; }
+});
+
+renderer.domElement.addEventListener('click', e => {
+  if (!neuralMode) return;
+  // Re-cast at current mouse position
+  _neuralRaycaster.setFromCamera(_mouseNorm, camera);
+  if (!neuralCow) return;
+  const hits = _neuralRaycaster.intersectObjects(neuralCow.children, false);
+  const hit = hits.find(h => h.object.userData.label);
+  if (hit) openDrillModal(hit.object.userData.label, hit.object.userData.info);
+});
+
+function _updateNeuralHover() {
+  if (!neuralMode || !neuralCow || _mouseNorm.x === -99) {
+    if (_ttEl) _ttEl.style.opacity = '0';
+    return;
+  }
+  _neuralRaycaster.setFromCamera(_mouseNorm, camera);
+  const hits = _neuralRaycaster.intersectObjects(neuralCow.children, false);
+  const hit = hits.find(h => h.object.userData.label);
+  if (hit) {
+    const info = hit.object.userData.info;
+    const label = hit.object.userData.label;
+    if (_ttEl) {
+      _ttEl.innerHTML = `
+        <div class="ttn">${info ? info.name : label}</div>
+        <div class="ttl">${info ? info.latin : ''}</div>
+        <div class="ttd">${info ? info.desc.slice(0,120)+'…' : ''}</div>
+        <div class="tti">Click to inspect ↓ atomic level</div>`;
+      _ttEl.style.opacity = '1';
+    }
+    if (_hoveredMesh !== hit.object) {
+      if (_hoveredMesh && _hoveredMesh.material) _hoveredMesh.material.emissive && (_hoveredMesh.material.emissive.set(0x000000));
+      _hoveredMesh = hit.object;
+      if (_hoveredMesh.material && _hoveredMesh.material.emissive)
+        _hoveredMesh.material.emissive.set(0x003020);
+    }
+  } else {
+    if (_ttEl) _ttEl.style.opacity = '0';
+    if (_hoveredMesh && _hoveredMesh.material && _hoveredMesh.material.emissive)
+      _hoveredMesh.material.emissive.set(0x000000);
+    _hoveredMesh = null;
+  }
+}
+
 function _buildNeuralCow(cmap, objMap = {}) {
   const g   = new THREE.Group();
   g.name    = 'neural_cow';
@@ -767,62 +1055,73 @@ function _buildNeuralCow(cmap, objMap = {}) {
   // bovine even while the fabric is still accumulating training data.
   const fc  = (k, fb) => _fabricColor(objMap, k, fb);
 
-  // ── Body: smooth tube along full spine + underline ──────────────────────
+  // ── Body ────────────────────────────────────────────────────────────────────
   const spine = get('cow_brisket','cow_withers','cow_back','cow_loin','cow_rump');
   const belly = get('cow_brisket','cow_belly','cow_navel','cow_udder');
-  if (spine.length >= 2) g.add(_tube(spine, 0.30, fc('cow_back',    0x7B3F00), 12));
-  if (belly.length >= 2) g.add(_tube(belly, 0.22, fc('cow_belly',   0x5A3010), 10));
+  const spineM = _tube(spine, 0.30, fc('cow_back', 0x7B3F00), 12);
+  const bellyM = _tube(belly, 0.22, fc('cow_belly', 0x5A3010), 10);
+  if (spineM) { spineM.userData.label='cow_back'; spineM.userData.info=BOVINE_ANATOMY.cow_back; g.add(spineM); }
+  if (bellyM) { bellyM.userData.label='cow_belly'; bellyM.userData.info=BOVINE_ANATOMY.cow_belly; g.add(bellyM); }
 
-  // ── Neck: withers → neck → head ─────────────────────────────────────────
-  const neck = get('cow_withers','cow_neck','cow_head');
-  if (neck.length >= 2) g.add(_tube(neck, 0.16, fc('cow_neck', 0x8B4513), 10));
+  const neckPts = get('cow_withers','cow_neck','cow_head');
+  const neckM = _tube(neckPts, 0.16, fc('cow_neck', 0x8B4513), 10);
+  if (neckM) { neckM.userData.label='cow_neck'; neckM.userData.info=BOVINE_ANATOMY.cow_neck; g.add(neckM); }
 
-  // ── Head ─────────────────────────────────────────────────────────────────
+  // HEAD
   const hp = pt('cow_head'), mp = pt('cow_muzzle');
-  if (hp) g.add(_sphere(hp, 0.21, fc('cow_head',   0xD8CDB0)));
-  if (mp) {
-    const mm = _sphere(mp, 0.13, fc('cow_muzzle', 0xEEDDCC), 1.0, 0.75, 1.4);
-    if (mm) g.add(mm);
-  }
   const pollP = pt('cow_poll');
-  if (pollP) g.add(_sphere(pollP, 0.09, fc('cow_poll', 0x6B4020)));
+  const headM  = hp ? _sphere(hp, 0.21, fc('cow_head', 0xD8CDB0)) : null;
+  if (headM)  { headM.userData.label='cow_head';   headM.userData.info=BOVINE_ANATOMY.cow_head;   g.add(headM); }
+  const muzzM  = mp ? _sphere(mp, 0.13, fc('cow_muzzle', 0xEEDDCC), 1.0, 0.75, 1.4) : null;
+  if (muzzM)  { muzzM.userData.label='cow_muzzle'; muzzM.userData.info=BOVINE_ANATOMY.cow_muzzle; g.add(muzzM); }
+  const pollM  = pollP ? _sphere(pollP, 0.09, fc('cow_poll', 0x6B4020)) : null;
+  if (pollM)  { pollM.userData.label='cow_poll';   pollM.userData.info=BOVINE_ANATOMY.cow_poll;   g.add(pollM); }
 
-  // Eyes (small dark spheres — always dark, ignore learned color)
-  for (const ek of ['cow_eye_L','cow_eye_R']) {
+  for (const [ek, lk] of [['cow_eye_L','cow_eye_L'],['cow_eye_R','cow_eye_R']]) {
     const ep = pt(ek); if (!ep) continue;
-    g.add(_sphere(ep, 0.032, 0x080402));
+    const em = _sphere(ep, 0.032, 0x080402);
+    em.userData.label=lk; em.userData.info=BOVINE_ANATOMY[lk]; g.add(em);
   }
-  // Ears
-  for (const ek of ['cow_ear_L','cow_ear_R']) {
+  for (const [ek] of [['cow_ear_L'],['cow_ear_R']]) {
     const ep = pt(ek); if (!ep) continue;
-    g.add(_sphere(ep, 0.065, fc(ek, 0xC4A888), 0.55, 1.0, 1.3));
+    const em = _sphere(ep, 0.065, fc(ek, 0xC4A888), 0.55, 1.0, 1.3);
+    em.userData.label=ek; em.userData.info=BOVINE_ANATOMY[ek]; g.add(em);
   }
 
-  // ── Front legs ───────────────────────────────────────────────────────────
+  // FRONT LEGS
   for (const side of ['L','R']) {
-    const lp = get(`cow_shoulder_${side}`,`cow_elbow_${side}`,
-                   `cow_front_cannon_${side}`,`cow_front_hoof_${side}`);
-    if (lp.length >= 2) g.add(_tube(lp, 0.068, fc(`cow_front_cannon_${side}`, 0x7A4828), 8));
+    const lp = get(`cow_shoulder_${side}`,`cow_elbow_${side}`,`cow_front_cannon_${side}`,`cow_front_hoof_${side}`);
+    const lm = _tube(lp, 0.068, fc(`cow_front_cannon_${side}`, 0x7A4828), 8);
+    if (lm) { lm.userData.label=`cow_front_cannon_${side}`; lm.userData.info=BOVINE_ANATOMY[`cow_front_cannon_${side}`]||BOVINE_ANATOMY.cow_back; g.add(lm); }
     const hoof = pt(`cow_front_hoof_${side}`);
-    if (hoof) g.add(_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2));
+    if (hoof) { const hm=_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2); hm.userData.label=`cow_front_hoof_${side}`; hm.userData.info=BOVINE_ANATOMY[`cow_front_hoof_${side}`]; g.add(hm); }
   }
 
-  // ── Rear legs ────────────────────────────────────────────────────────────
+  // REAR LEGS
   for (const side of ['L','R']) {
-    const lp = get(`cow_hip_${side}`,`cow_stifle_${side}`,
-                   `cow_hock_${side}`,`cow_rear_cannon_${side}`,`cow_rear_hoof_${side}`);
-    if (lp.length >= 2) g.add(_tube(lp, 0.072, fc(`cow_rear_cannon_${side}`, 0x7A4828), 8));
+    const lp = get(`cow_hip_${side}`,`cow_stifle_${side}`,`cow_hock_${side}`,`cow_rear_cannon_${side}`,`cow_rear_hoof_${side}`);
+    const lm = _tube(lp, 0.072, fc(`cow_rear_cannon_${side}`, 0x7A4828), 8);
+    if (lm) { lm.userData.label=`cow_rear_cannon_${side}`; lm.userData.info=BOVINE_ANATOMY[`cow_rear_cannon_${side}`]||BOVINE_ANATOMY.cow_back; g.add(lm); }
     const hoof = pt(`cow_rear_hoof_${side}`);
-    if (hoof) g.add(_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2));
+    if (hoof) { const hm=_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2); hm.userData.label=`cow_rear_hoof_${side}`; hm.userData.info=BOVINE_ANATOMY[`cow_rear_hoof_${side}`]; g.add(hm); }
   }
 
-  // ── Tail ─────────────────────────────────────────────────────────────────
-  const tail = get('cow_rump','cow_tail_root','cow_tail_switch');
-  if (tail.length >= 2) g.add(_tube(tail, 0.028, fc('cow_tail_root', 0x3A2010), 6));
+  // TAIL
+  const tailPts = get('cow_rump','cow_tail_root','cow_tail_switch');
+  const tailM = _tube(tailPts, 0.028, fc('cow_tail_root', 0x3A2010), 6);
+  if (tailM) { tailM.userData.label='cow_tail_root'; tailM.userData.info=BOVINE_ANATOMY.cow_tail_root; g.add(tailM); }
 
-  // ── Udder ────────────────────────────────────────────────────────────────
+  // UDDER
   const up = pt('cow_udder');
-  if (up) g.add(_sphere(up, 0.17, fc('cow_udder', 0xF0C0A0), 1.25, 0.65, 1.25));
+  if (up) { const um=_sphere(up, 0.17, fc('cow_udder', 0xF0C0A0), 1.25, 0.65, 1.25); um.userData.label='cow_udder'; um.userData.info=BOVINE_ANATOMY.cow_udder; g.add(um); }
+
+  // RUMP
+  const rumpP = pt('cow_rump');
+  if (rumpP) { const rm=_sphere(rumpP, 0.22, fc('cow_rump', 0x8B4513), 1.1, 0.9, 0.9); rm.userData.label='cow_rump'; rm.userData.info=BOVINE_ANATOMY.cow_rump; g.add(rm); }
+
+  // WITHERS / BACK indicators
+  const wp2 = pt('cow_withers');
+  if (wp2) { const wm=_sphere(wp2, 0.18, fc('cow_withers', 0x7B4015), 1.1, 0.8, 1.0); wm.userData.label='cow_withers'; wm.userData.info=BOVINE_ANATOMY.cow_withers; g.add(wm); }
 
   // Ground shadow disc
   const disc = new THREE.Mesh(
@@ -1026,6 +1325,364 @@ function _updateVisualZoneCloud(world3d) {
   scene.add(_vzCloud);
   _neuralWorldObjs.push(_vzCloud);
 }
+
+// ── Anatomy drill-down modal ─────────────────────────────────────────────────
+// 8 levels from body part → tissue → histology → cell → organelle →
+// macromolecule → amino-acid → atom.  Uses a separate Three.js renderer
+// in the modal canvas so the main scene stays live behind it.
+
+const DRILL_LEVELS = [
+  { name:'Body Part',         scale:'cm',  hint:'Exterior anatomy overview' },
+  { name:'Tissue Cross-Section',scale:'mm',hint:'Tissue layers from skin to bone' },
+  { name:'Histology',         scale:'µm',  hint:'100 µm cross-section — fiber bundles' },
+  { name:'Cell',              scale:'10µm',hint:'Single cell detailed structure' },
+  { name:'Organelle',         scale:'1µm', hint:'Mitochondria, nucleus, ER, ribosomes' },
+  { name:'Macromolecule',     scale:'10nm',hint:'Actin/myosin/collagen filaments' },
+  { name:'Amino Acid Chain',  scale:'1nm', hint:'Polypeptide backbone ribbon' },
+  { name:'Atomic Structure',  scale:'1Å',  hint:'Van der Waals spheres — C/H/O/N atoms' },
+];
+
+const CELL_TYPES = {
+  'skeletal myocyte':   { color:0xc03030, emissive:0x200808, elongated:true,  organelles:['sarcomere','mitochondria','SR','T-tubule','nucleus'] },
+  'osteocyte':          { color:0xf0e8c0, emissive:0x100808, elongated:false, organelles:['lacuna','canaliculi','nucleus','mitochondria'] },
+  'chondrocyte':        { color:0xb0d8f0, emissive:0x081020, elongated:false, organelles:['lacuna','nucleus','rough ER','Golgi'] },
+  'keratinocyte':       { color:0xe8c8a0, emissive:0x180c04, elongated:false, organelles:['tonofibrils','nucleus','desmosome'] },
+  'fibroblast':         { color:0xd0c890, emissive:0x100c04, elongated:true,  organelles:['rough ER','Golgi','nucleus','collagen vesicles'] },
+  'adipocyte':          { color:0xf8f0c0, emissive:0x0c0c04, elongated:false, organelles:['lipid droplet','nucleus','mitochondria'] },
+  'smooth myocyte':     { color:0xe09070, emissive:0x180808, elongated:true,  organelles:['dense bodies','mitochondria','SR','nucleus'] },
+  'tenocyte':           { color:0xf8e8a0, emissive:0x100c00, elongated:true,  organelles:['collagen bundles','nucleus','rough ER'] },
+  'mammary epithelial': { color:0xf8e8f0, emissive:0x100808, elongated:false, organelles:['secretory vesicles','rough ER','Golgi','nucleus'] },
+  'pyramidal neuron':   { color:0xe8d0a0, emissive:0x180c04, elongated:true,  organelles:['axon','dendrites','nucleus','Nissl body'] },
+  'motor neuron':       { color:0xe0c890, emissive:0x180c04, elongated:true,  organelles:['axon','myelin sheath','nucleus','Nissl body'] },
+  'rod photoreceptor':  { color:0x402810, emissive:0x080400, elongated:true,  organelles:['outer segment','mitochondria','synaptic terminal'] },
+  'iridocyte (reflective)':{color:0x80d0a0,emissive:0x004020,elongated:false, organelles:['reflecting platelets','nucleus'] },
+  'corneal epithelial': { color:0xd0e8f8, emissive:0x081018, elongated:false, organelles:['tight junctions','nucleus','mitochondria'] },
+};
+const DEFAULT_CELL = { color:0xc09060, emissive:0x100804, elongated:false, organelles:['nucleus','mitochondria','ER'] };
+
+let drillRenderer = null, drillScene = null, drillCamera = null,
+    drillOrbit = null, drillGroup = null, drillTimer = null,
+    _curDrillLevel = 0, _curDrillInfo = null, _curDrillLabel = '';
+
+function openDrillModal(label, info) {
+  _curDrillLabel = label;
+  _curDrillInfo  = info || { name: label, latin:'', desc:'', tissues:[], kv:{} };
+  _curDrillLevel = 0;
+  document.getElementById('drill-modal').classList.add('open');
+  document.getElementById('drill-title').textContent  = _curDrillInfo.name.toUpperCase();
+  document.getElementById('drill-latin').textContent  = _curDrillInfo.latin || '';
+
+  // Init drill renderer on first open
+  const canvas = document.getElementById('drill-canvas');
+  if (!drillRenderer) {
+    drillRenderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+    drillRenderer.shadowMap.enabled = true;
+    drillRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    drillCamera = new THREE.PerspectiveCamera(45, 1, 0.001, 500);
+    drillCamera.position.set(0, 0, 3);
+    drillOrbit = new OrbitControls(drillCamera, canvas);
+    drillOrbit.enableDamping = true;
+    drillOrbit.autoRotate = true; drillOrbit.autoRotateSpeed = 0.6;
+    drillOrbit.dampingFactor = 0.08;
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      if (e.deltaY < 0) drillIn(); else drillOut();
+    }, {passive:false});
+    drillTimer = setInterval(_animateDrill, 1000/60);
+  }
+  _buildDrillLevel(0);
+}
+
+function closeDrillModal() {
+  document.getElementById('drill-modal').classList.remove('open');
+}
+
+function drillIn()  { if (_curDrillLevel < DRILL_LEVELS.length-1) _buildDrillLevel(_curDrillLevel+1); }
+function drillOut() { if (_curDrillLevel > 0)                      _buildDrillLevel(_curDrillLevel-1); }
+
+function _animateDrill() {
+  if (!document.getElementById('drill-modal').classList.contains('open')) return;
+  const canvas = document.getElementById('drill-canvas');
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (drillRenderer.domElement.width !== W || drillRenderer.domElement.height !== H) {
+    drillRenderer.setSize(W, H, false);
+    drillCamera.aspect = W / H;
+    drillCamera.updateProjectionMatrix();
+  }
+  drillOrbit.update();
+  drillRenderer.render(drillScene, drillCamera);
+}
+
+function _buildDrillLevel(level) {
+  _curDrillLevel = level;
+  const lvl = DRILL_LEVELS[level];
+  const info = _curDrillInfo;
+
+  // Sidebar
+  document.getElementById('drill-breadcrumb').textContent =
+    DRILL_LEVELS.slice(0, level+1).map(l=>l.name).join(' › ');
+  document.getElementById('drill-level-title').textContent = lvl.name.toUpperCase() + ' — ' + lvl.hint;
+  document.getElementById('drill-level-desc').textContent  =
+    level === 0 ? info.desc :
+    level === 1 ? 'Tissue layers from outer skin to inner bone/core. Thickness in mm.' :
+    level === 2 ? 'Histological cross-section at ~100 µm. Individual fibres and cell profiles visible.' :
+    level === 3 ? 'Single ' + (_curCellType||'cell') + ' at cellular resolution (~10 µm).' :
+    level === 4 ? 'Major organelles of the ' + (_curCellType||'cell') + '.' :
+    level === 5 ? 'Structural macromolecules: filaments, membranes, and fibres at ~10 nm.' :
+    level === 6 ? 'Polypeptide backbone — α-helix and β-sheet secondary structure.' :
+    'Van der Waals atomic spheres. C=grey, H=white, O=red, N=blue, Ca=green, P=orange.';
+  document.getElementById('drill-scale').textContent = '1 unit = ' + lvl.scale;
+
+  // KV
+  const kvEl = document.getElementById('drill-kv-list');
+  kvEl.innerHTML = '';
+  const kv = level === 0 ? (info.kv||{}) : {};
+  for (const [k,v] of Object.entries(kv)) {
+    kvEl.innerHTML += `<div class="dkv"><span class="dk">${k}</span><span class="dv">${v}</span></div>`;
+  }
+
+  // Tissue list (level 0–1)
+  const tisEl = document.getElementById('drill-tissue-list');
+  tisEl.innerHTML = '';
+  if (level <= 1 && info.tissues) {
+    for (const t of info.tissues) {
+      tisEl.innerHTML += `<div class="dtis" onclick="_buildDrillLevel(2)">
+        <div class="dtis-dot" style="background:${t.hex}"></div>
+        <div class="dtis-name">${t.name}</div>
+        <div class="dtis-mm">${t.mm}mm</div>
+        <div class="dtis-cell">${t.cell}</div>
+      </div>`;
+    }
+  }
+
+  document.getElementById('dnav-in').classList.toggle('active', level < DRILL_LEVELS.length-1);
+  document.getElementById('dnav-out').classList.toggle('active', level > 0);
+
+  // Build Three.js scene
+  if (drillScene) {
+    drillScene.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+  }
+  drillScene = new THREE.Scene();
+  drillScene.background = new THREE.Color(0x000408);
+  drillScene.add(new THREE.AmbientLight(0x304060, 1.5));
+  const dl = new THREE.DirectionalLight(0xffffff, 2.0);
+  dl.position.set(3, 5, 4); dl.castShadow = true; drillScene.add(dl);
+  const dl2 = new THREE.DirectionalLight(0x204080, 0.8);
+  dl2.position.set(-3,-2,2); drillScene.add(dl2);
+
+  drillGroup = new THREE.Group();
+  drillScene.add(drillGroup);
+
+  if (level === 0) _buildDrillL0(info);
+  else if (level === 1) _buildDrillL1(info);
+  else if (level === 2) _buildDrillL2(info);
+  else if (level === 3) _buildDrillL3(info);
+  else if (level === 4) _buildDrillL4(info);
+  else if (level === 5) _buildDrillL5(info);
+  else if (level === 6) _buildDrillL6(info);
+  else                  _buildDrillL7(info);
+
+  // Camera reset
+  const dist = [3.5, 2.8, 2.0, 1.5, 0.8, 0.3, 0.15, 0.06][level];
+  drillCamera.position.set(0, dist*0.3, dist);
+  drillOrbit.target.set(0, 0, 0);
+  drillOrbit.update();
+}
+
+let _curCellType = 'skeletal myocyte';
+
+// Level 0: spinning body part (use simplified cow geometry for the part)
+function _buildDrillL0(info) {
+  const sc = (info.scale_m||0.3) * 2;
+  const geo = new THREE.SphereGeometry(sc, 32, 24);
+  const mat = new THREE.MeshStandardMaterial({ color:0x9a6030, roughness:0.7, metalness:0.0 });
+  const m = new THREE.Mesh(geo, mat); m.castShadow=true;
+  drillGroup.add(m);
+}
+
+// Level 1: tissue cross-section (concentric cylinders = layers)
+function _buildDrillL1(info) {
+  const tissues = info.tissues || [{name:'Tissue',mm:20,cell:'cell',hex:'#808080'}];
+  let r = 0.05;
+  const totalMm = tissues.reduce((s,t)=>s+t.mm,0);
+  for (const t of tissues) {
+    const dr = (t.mm / totalMm) * 0.9;
+    const geo = new THREE.CylinderGeometry(r+dr, r+dr, 1.8, 32, 1, true);
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(t.hex), roughness:0.65, metalness:0.05,
+      side: THREE.DoubleSide, transparent:true, opacity:0.82,
+    });
+    drillGroup.add(new THREE.Mesh(geo, mat));
+    r += dr;
+  }
+  // Cap disc (cross-section reveal)
+  const capGeo = new THREE.CircleGeometry(r, 64);
+  const capMat = new THREE.MeshStandardMaterial({ color:0x101820, roughness:0.8 });
+  const cap = new THREE.Mesh(capGeo, capMat); cap.rotation.x=-Math.PI/2; cap.position.y=-0.9;
+  drillGroup.add(cap);
+  // Pick first cell type for deeper levels
+  if (tissues[0]) _curCellType = tissues[0].cell;
+}
+
+// Level 2: histological — dense instanced fibres
+function _buildDrillL2(info) {
+  const ct = info.tissues?.[0] || {hex:'#c03030', cell:'myocyte'};
+  _curCellType = ct.cell;
+  const count = 200;
+  const geo = new THREE.CapsuleGeometry(0.025, 0.6, 4, 8);
+  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ct.hex), roughness:0.7 });
+  const im = new THREE.InstancedMesh(geo, mat, count);
+  const dummy = new THREE.Object3D();
+  for (let i=0;i<count;i++) {
+    dummy.position.set((Math.random()-0.5)*2,(Math.random()-0.5)*2,(Math.random()-0.5)*0.3);
+    dummy.rotation.set(0,0,Math.random()*0.3-0.15);
+    dummy.updateMatrix(); im.setMatrixAt(i, dummy.matrix);
+  }
+  drillGroup.add(im);
+  // Nuclei (dark ellipsoids)
+  const nGeo = new THREE.SphereGeometry(0.04, 8, 6);
+  const nMat = new THREE.MeshStandardMaterial({color:0x201028, roughness:0.5, metalness:0.1});
+  const ni = new THREE.InstancedMesh(nGeo, nMat, count);
+  for (let i=0;i<count;i++) {
+    dummy.position.set((Math.random()-0.5)*2,(Math.random()-0.5)*2,(Math.random()-0.5)*0.3);
+    dummy.rotation.set(0,0,0); dummy.updateMatrix(); ni.setMatrixAt(i,dummy.matrix);
+  }
+  drillGroup.add(ni);
+}
+
+// Level 3: single cell
+function _buildDrillL3(info) {
+  const ct = CELL_TYPES[_curCellType] || DEFAULT_CELL;
+  const sc = ct.elongated ? 1.0 : 0.75;
+  const geo = ct.elongated
+    ? new THREE.CapsuleGeometry(0.28, sc, 8, 16)
+    : new THREE.SphereGeometry(0.65, 24, 18);
+  const mat = new THREE.MeshStandardMaterial({color:ct.color,emissive:ct.emissive,roughness:0.6,metalness:0.02,transparent:true,opacity:0.75,side:THREE.DoubleSide});
+  drillGroup.add(new THREE.Mesh(geo, mat));
+  // Nucleus
+  const nGeo = new THREE.SphereGeometry(0.22, 16, 12);
+  const nMat = new THREE.MeshStandardMaterial({color:0x1a0a30,emissive:0x050010,roughness:0.4,metalness:0.1});
+  drillGroup.add(new THREE.Mesh(nGeo, nMat));
+  // Mitochondria (6)
+  const mGeo = new THREE.CapsuleGeometry(0.04, 0.12, 4, 8);
+  const mMat = new THREE.MeshStandardMaterial({color:0xa02010,emissive:0x200400,roughness:0.5});
+  for (let i=0;i<6;i++) {
+    const mm = new THREE.Mesh(mGeo, mMat);
+    const a = i/6*Math.PI*2; const r=0.4;
+    mm.position.set(Math.cos(a)*r*0.7, (Math.random()-0.5)*0.3, Math.sin(a)*r);
+    mm.rotation.set(0,a,Math.random()*0.4-0.2);
+    drillGroup.add(mm);
+  }
+}
+
+// Level 4: organelle detail
+function _buildDrillL4(info) {
+  // Mitochondrion as central object with cristae
+  const outerGeo = new THREE.SphereGeometry(0.6, 24, 18);
+  const outerMat = new THREE.MeshStandardMaterial({color:0x801808,roughness:0.5,transparent:true,opacity:0.5,side:THREE.DoubleSide});
+  drillGroup.add(new THREE.Mesh(outerGeo, outerMat));
+  // Cristae (stacked discs)
+  const crGeo = new THREE.TorusGeometry(0.38, 0.04, 8, 24);
+  const crMat = new THREE.MeshStandardMaterial({color:0xc04020,emissive:0x200800,roughness:0.4});
+  for (let i=0;i<5;i++) {
+    const cr = new THREE.Mesh(crGeo, crMat);
+    cr.position.y = (i-2)*0.12; cr.rotation.x=Math.PI/2; drillGroup.add(cr);
+  }
+  // Matrix (inner sphere)
+  const mxGeo = new THREE.SphereGeometry(0.32, 16, 12);
+  const mxMat = new THREE.MeshStandardMaterial({color:0x401808,roughness:0.8,transparent:true,opacity:0.6});
+  drillGroup.add(new THREE.Mesh(mxGeo, mxMat));
+  // ATP synthase knobs
+  const atpGeo = new THREE.SphereGeometry(0.032, 6, 5);
+  const atpMat = new THREE.MeshStandardMaterial({color:0xf8c030,emissive:0x301800,roughness:0.3,metalness:0.3});
+  for (let i=0;i<16;i++) {
+    const a=i/16*Math.PI*2; const atp=new THREE.Mesh(atpGeo, atpMat);
+    atp.position.set(Math.cos(a)*0.62,0,Math.sin(a)*0.62); drillGroup.add(atp);
+  }
+}
+
+// Level 5: macromolecule — actin double helix
+function _buildDrillL5(info) {
+  const N=40, helR=0.18;
+  const actMat = new THREE.MeshStandardMaterial({color:0x3060d0,emissive:0x040818,roughness:0.4,metalness:0.1});
+  const mGeo = new THREE.SphereGeometry(0.06, 8, 6);
+  for (let s=0;s<2;s++) {
+    const off = s*Math.PI;
+    for (let i=0;i<N;i++) {
+      const t=i/N*Math.PI*6; const y=(i/N-0.5)*3.2;
+      const m=new THREE.Mesh(mGeo,actMat);
+      m.position.set(Math.cos(t+off)*helR, y, Math.sin(t+off)*helR);
+      drillGroup.add(m);
+    }
+  }
+  // Tropomyosin strand
+  const curve=new THREE.CatmullRomCurve3(
+    Array.from({length:20},(_,i)=>{const t=i/19*Math.PI*4;return new THREE.Vector3(Math.cos(t)*0.26,(i/19-0.5)*3.2,Math.sin(t)*0.26);}));
+  const tGeo=new THREE.TubeGeometry(curve,40,0.018,8,false);
+  drillGroup.add(new THREE.Mesh(tGeo,new THREE.MeshStandardMaterial({color:0xd06020,emissive:0x200800,roughness:0.5})));
+}
+
+// Level 6: amino acid backbone
+function _buildDrillL6(info) {
+  const AA=['G','A','V','L','I','P','F','W','M','S','T','C','Y','H','D','E','N','Q','K','R'];
+  const COLORS={G:0xe0e0e0,A:0xd0d0d0,V:0xa0c0a0,L:0x80b080,I:0x80b080,P:0xc0a0b0,F:0x9080c0,W:0x6060b0,M:0xe0d060,S:0xff8080,T:0xff6060,C:0xf0e060,Y:0xb080c0,H:0x8080c0,D:0xe06060,E:0xe05050,N:0x60c080,Q:0x50b080,K:0x6060e0,R:0x4050e0};
+  const seq = Array.from({length:22},()=>AA[Math.floor(Math.random()*AA.length)]);
+  // α-helix
+  for (let i=0;i<seq.length;i++) {
+    const t=i/seq.length*Math.PI*4;
+    const pos=new THREE.Vector3(Math.cos(t)*0.22,(i/seq.length-0.5)*2.8,Math.sin(t)*0.22);
+    const geo=new THREE.SphereGeometry(0.09,8,6);
+    const mat=new THREE.MeshStandardMaterial({color:COLORS[seq[i]]||0xa0a0a0,roughness:0.4,metalness:0.05});
+    const m=new THREE.Mesh(geo,mat); m.position.copy(pos); drillGroup.add(m);
+    if (i>0) {
+      const prev=new THREE.Vector3(Math.cos((i-1)/seq.length*Math.PI*4)*0.22,((i-1)/seq.length-0.5)*2.8,Math.sin((i-1)/seq.length*Math.PI*4)*0.22);
+      const bGeo=new THREE.CylinderGeometry(0.018,0.018,pos.distanceTo(prev),4,1);
+      const bm=new THREE.Mesh(bGeo,new THREE.MeshStandardMaterial({color:0x404040}));
+      bm.position.copy(prev).lerp(pos,0.5);
+      bm.lookAt(pos); bm.rotateX(Math.PI/2); drillGroup.add(bm);
+    }
+  }
+}
+
+// Level 7: atomic structure — van der Waals spheres
+function _buildDrillL7(info) {
+  const ATOMS = [
+    {el:'C',r:0.077,col:0x404040,n:8},{el:'H',r:0.053,col:0xffffff,n:12},
+    {el:'O',r:0.073,col:0xdd2222,n:4},{el:'N',r:0.075,col:0x3333ee,n:3},
+    {el:'Ca',r:0.099,col:0x22bb22,n:1},{el:'P',r:0.110,col:0xff8800,n:1},
+  ];
+  for (const a of ATOMS) {
+    for (let i=0;i<a.n;i++) {
+      const geo=new THREE.SphereGeometry(a.r*3, 16, 12);
+      const mat=new THREE.MeshStandardMaterial({color:a.col,roughness:0.35,metalness:0.1});
+      const m=new THREE.Mesh(geo,mat);
+      m.position.set((Math.random()-0.5)*2.2,(Math.random()-0.5)*2.2,(Math.random()-0.5)*2.2);
+      drillGroup.add(m);
+      // Electron cloud (transparent shell)
+      const eGeo=new THREE.SphereGeometry(a.r*3*1.35,12,9);
+      const eMat=new THREE.MeshStandardMaterial({color:a.col,transparent:true,opacity:0.08,side:THREE.DoubleSide});
+      const ec=new THREE.Mesh(eGeo,eMat); ec.position.copy(m.position); drillGroup.add(ec);
+    }
+  }
+  // Bonds (random short connections)
+  const bondMat=new THREE.MeshStandardMaterial({color:0x606060,roughness:0.5});
+  const children=[...drillGroup.children].filter(c=>c.isMesh && c.geometry.type==='SphereGeometry');
+  for (let i=0;i<children.length-1;i+=2) {
+    const a=children[i].position, b=children[i+1].position;
+    if (a.distanceTo(b)<1.5) {
+      const bGeo=new THREE.CylinderGeometry(0.025,0.025,a.distanceTo(b),6,1);
+      const bm=new THREE.Mesh(bGeo,bondMat);
+      bm.position.copy(a).lerp(b,0.5); bm.lookAt(b); bm.rotateX(Math.PI/2); drillGroup.add(bm);
+    }
+  }
+}
+
+// Expose drill functions to global scope (used by inline onclick in modal HTML)
+window.closeDrillModal = closeDrillModal;
+window.drillIn         = drillIn;
+window.drillOut        = drillOut;
+window.openDrillModal  = openDrillModal;
+window._buildDrillLevel = _buildDrillLevel;
 
 function toggleNeuralMode() {
   neuralMode = !neuralMode;
@@ -2038,6 +2695,9 @@ function animate(){
     const hits=raycaster.intersectObjects(drillables,false);
     if(hits.length&&hits[0].distance<0.18&&currentLevel<LC.length-1) transitionLevel(currentLevel+1);
   }
+
+  // Neural mode hover detection
+  if (neuralMode) _updateNeuralHover();
 
   // Video mode: bypass all post-processing for true photorealistic colours
   if(videoMode) { renderer.render(scene,camera); } else { composer.render(); }
