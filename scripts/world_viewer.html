@@ -711,6 +711,10 @@ function _cw(cx, cy, cz) {
 }
 
 // ── cow mesh builder ──────────────────────────────────────────────────────────
+// Colors are supplied by the caller — derived from Hebbian network_links to
+// img:h* (hue-bin) labels so they reflect what the fabric actually learned,
+// not hardcoded browns.  Default fallback: warm Holstein brown.
+
 function _tube(pts, r, col, segs = 16) {
   if (pts.length < 2) return null;
   const curve = new THREE.CatmullRomCurve3(pts);
@@ -733,33 +737,57 @@ function _sphere(pos, r, col, sx = 1, sy = 1, sz = 1) {
   return m;
 }
 
-function _buildNeuralCow(cmap) {
+// Resolve fabric-learned color for a label from the /neuro/world3d objects map.
+// Falls back to a default if the fabric hasn't learned colour associations yet.
+function _fabricColor(objMap, label, fallback = 0x7B3F00) {
+  const o = objMap[label] || objMap['id::' + label];
+  if (!o) return fallback;
+  const [r, g, b] = o.color_rgb;
+  // Blend 70% learned color + 30% fallback warm brown so the cow looks
+  // recognisably bovine even when the fabric is still training
+  const fr = ((fallback >> 16) & 0xff) / 255;
+  const fg = ((fallback >> 8)  & 0xff) / 255;
+  const fb = ( fallback        & 0xff) / 255;
+  const mr = r * 0.7 + fr * 0.3;
+  const mg = g * 0.7 + fg * 0.3;
+  const mb = b * 0.7 + fb * 0.3;
+  return new THREE.Color(mr, mg, mb);
+}
+
+// Build a neural cow from centroid map + world3d object map.
+// cmap: { label → {x,y,z} }  (centroids from /neuro/snapshot)
+// objMap: { label → world3d object }  (from /neuro/world3d, may be empty {} if
+//          endpoint not yet populated — falls back to hardcoded colors)
+function _buildNeuralCow(cmap, objMap = {}) {
   const g   = new THREE.Group();
   g.name    = 'neural_cow';
   const pt  = k => { const c = cmap[k]; return c ? _cw(c.x, c.y, c.z) : null; };
   const get = (...keys) => keys.map(pt).filter(Boolean);
+  // Fabric-derived colors — blend learned hue with fallback so the cow looks
+  // bovine even while the fabric is still accumulating training data.
+  const fc  = (k, fb) => _fabricColor(objMap, k, fb);
 
   // ── Body: smooth tube along full spine + underline ──────────────────────
   const spine = get('cow_brisket','cow_withers','cow_back','cow_loin','cow_rump');
   const belly = get('cow_brisket','cow_belly','cow_navel','cow_udder');
-  if (spine.length >= 2) g.add(_tube(spine, 0.30, 0x7B3F00, 12));
-  if (belly.length >= 2) g.add(_tube(belly, 0.22, 0x5A3010, 10));
+  if (spine.length >= 2) g.add(_tube(spine, 0.30, fc('cow_back',    0x7B3F00), 12));
+  if (belly.length >= 2) g.add(_tube(belly, 0.22, fc('cow_belly',   0x5A3010), 10));
 
   // ── Neck: withers → neck → head ─────────────────────────────────────────
   const neck = get('cow_withers','cow_neck','cow_head');
-  if (neck.length >= 2) g.add(_tube(neck, 0.16, 0x8B4513, 10));
+  if (neck.length >= 2) g.add(_tube(neck, 0.16, fc('cow_neck', 0x8B4513), 10));
 
   // ── Head ─────────────────────────────────────────────────────────────────
   const hp = pt('cow_head'), mp = pt('cow_muzzle');
-  if (hp) g.add(_sphere(hp, 0.21, 0xD8CDB0));          // cranium (light Hereford face)
+  if (hp) g.add(_sphere(hp, 0.21, fc('cow_head',   0xD8CDB0)));
   if (mp) {
-    const mm = _sphere(mp, 0.13, 0xEEDDCC, 1.0, 0.75, 1.4);  // elongated muzzle
+    const mm = _sphere(mp, 0.13, fc('cow_muzzle', 0xEEDDCC), 1.0, 0.75, 1.4);
     if (mm) g.add(mm);
   }
   const pollP = pt('cow_poll');
-  if (pollP) g.add(_sphere(pollP, 0.09, 0x6B4020));
+  if (pollP) g.add(_sphere(pollP, 0.09, fc('cow_poll', 0x6B4020)));
 
-  // Eyes (small dark spheres)
+  // Eyes (small dark spheres — always dark, ignore learned color)
   for (const ek of ['cow_eye_L','cow_eye_R']) {
     const ep = pt(ek); if (!ep) continue;
     g.add(_sphere(ep, 0.032, 0x080402));
@@ -767,14 +795,14 @@ function _buildNeuralCow(cmap) {
   // Ears
   for (const ek of ['cow_ear_L','cow_ear_R']) {
     const ep = pt(ek); if (!ep) continue;
-    g.add(_sphere(ep, 0.065, 0xC4A888, 0.55, 1.0, 1.3));
+    g.add(_sphere(ep, 0.065, fc(ek, 0xC4A888), 0.55, 1.0, 1.3));
   }
 
   // ── Front legs ───────────────────────────────────────────────────────────
   for (const side of ['L','R']) {
     const lp = get(`cow_shoulder_${side}`,`cow_elbow_${side}`,
                    `cow_front_cannon_${side}`,`cow_front_hoof_${side}`);
-    if (lp.length >= 2) g.add(_tube(lp, 0.068, 0x7A4828, 8));
+    if (lp.length >= 2) g.add(_tube(lp, 0.068, fc(`cow_front_cannon_${side}`, 0x7A4828), 8));
     const hoof = pt(`cow_front_hoof_${side}`);
     if (hoof) g.add(_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2));
   }
@@ -783,18 +811,18 @@ function _buildNeuralCow(cmap) {
   for (const side of ['L','R']) {
     const lp = get(`cow_hip_${side}`,`cow_stifle_${side}`,
                    `cow_hock_${side}`,`cow_rear_cannon_${side}`,`cow_rear_hoof_${side}`);
-    if (lp.length >= 2) g.add(_tube(lp, 0.072, 0x7A4828, 8));
+    if (lp.length >= 2) g.add(_tube(lp, 0.072, fc(`cow_rear_cannon_${side}`, 0x7A4828), 8));
     const hoof = pt(`cow_rear_hoof_${side}`);
     if (hoof) g.add(_sphere(hoof, 0.065, 0x181008, 1.2, 0.55, 1.2));
   }
 
   // ── Tail ─────────────────────────────────────────────────────────────────
   const tail = get('cow_rump','cow_tail_root','cow_tail_switch');
-  if (tail.length >= 2) g.add(_tube(tail, 0.028, 0x3A2010, 6));
+  if (tail.length >= 2) g.add(_tube(tail, 0.028, fc('cow_tail_root', 0x3A2010), 6));
 
   // ── Udder ────────────────────────────────────────────────────────────────
   const up = pt('cow_udder');
-  if (up) g.add(_sphere(up, 0.17, 0xF0C0A0, 1.25, 0.65, 1.25));
+  if (up) g.add(_sphere(up, 0.17, fc('cow_udder', 0xF0C0A0), 1.25, 0.65, 1.25));
 
   // Ground shadow disc
   const disc = new THREE.Mesh(
@@ -876,6 +904,7 @@ function _clearNeuralWorld() {
     if (o.material)  o.material.dispose();
   });
   _neuralWorldObjs = [];
+  _vzCloud = null;  // was disposed above via _neuralWorldObjs
   // Restore all pre-existing scene objects
   _hiddenSceneObjs.forEach(o => { o.visible = true; });
   _hiddenSceneObjs = [];
@@ -889,16 +918,25 @@ function _clearNeuralWorld() {
 let neuralMode   = false;
 let neuralCow    = null;
 let _neuralTimer = null;
+let _vzCloud     = null;   // visual-zone particle cloud (neural mode only)
 
 async function _fetchNeuralCow() {
   if (!neuralMode) return;
-  let snap;
+
+  // Fetch both /neuro/snapshot (centroids) and /neuro/world3d (learned colors)
+  // in parallel. world3d may fail gracefully if the node is old/not yet built.
+  let snap, world3d = null;
   try {
-    const r = await fetch(`http://${NODE_HOST}/neuro/snapshot`);
-    if (!r.ok) return;
-    snap = await r.json();
+    const [rSnap, rW3d] = await Promise.all([
+      fetch(`http://${NODE_HOST}/neuro/snapshot`),
+      fetch(`http://${NODE_HOST}/neuro/world3d`).catch(() => null),
+    ]);
+    if (!rSnap.ok) return;
+    snap   = await rSnap.json();
+    if (rW3d && rW3d.ok) world3d = await rW3d.json();
   } catch { return; }
 
+  // Build centroid map: strip "id::" prefix, keep all cow_* parts
   const raw  = snap.centroids || {};
   const cmap = {};
   for (const [k, v] of Object.entries(raw)) {
@@ -907,14 +945,25 @@ async function _fetchNeuralCow() {
   }
   if (Object.keys(cmap).length < 10) return;
 
+  // Build object map from world3d for learned-color lookup
+  const objMap = {};
+  if (world3d && world3d.objects) {
+    for (const o of world3d.objects) {
+      objMap[o.id] = o;
+    }
+  }
+
   if (neuralCow) {
     scene.remove(neuralCow);
     neuralCow.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
     neuralCow = null;
   }
-  neuralCow = _buildNeuralCow(cmap);
+  neuralCow = _buildNeuralCow(cmap, objMap);
   neuralCow.position.set(0, 0, 0);   // centred in world, hooves on grass
   scene.add(neuralCow);
+
+  // Add visual-zone particle haze if world3d has zone centroids (img:z* labels)
+  _updateVisualZoneCloud(world3d);
 
   // Pose detection from centroid geometry
   const head = cmap['cow_head'], back = cmap['cow_back'], withers = cmap['cow_withers'], muzzle = cmap['cow_muzzle'];
@@ -925,9 +974,57 @@ async function _fetchNeuralCow() {
   }
 
   const el = document.getElementById('neural-status');
-  if (el)  el.textContent  = `${Object.keys(cmap).length} centroids`;
+  if (el) {
+    const nObj = world3d ? world3d.total_centroids : Object.keys(cmap).length;
+    const nAct = world3d ? world3d.active_count    : '-';
+    el.textContent = `${nObj} centroids  ${nAct} active`;
+  }
   const pl = document.getElementById('neural-pose');
   if (pl)  pl.textContent  = pose;
+}
+
+// ── Visual-zone particle cloud ────────────────────────────────────────────────
+// Represent img:z* and img:h* centroids as a subtle coloured point cloud in the
+// scene so you can see which visual zones the fabric is currently attending to.
+// Points are placed at the zone's learned 3-D position (from the centroid map)
+// and coloured by the zone's learned hue, fading with low confidence.
+function _updateVisualZoneCloud(world3d) {
+  // Remove old cloud
+  if (_vzCloud) {
+    scene.remove(_vzCloud);
+    _vzCloud.geometry.dispose(); _vzCloud.material.dispose();
+    _vzCloud = null;
+  }
+  if (!world3d || !world3d.objects) return;
+
+  const zones = world3d.objects.filter(o =>
+    o.category === 'visual_zone' && o.confidence > 0.15
+  );
+  if (zones.length === 0) return;
+
+  const positions = new Float32Array(zones.length * 3);
+  const colors    = new Float32Array(zones.length * 3);
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i];
+    // Map zone centroid [0,1]^3 into world metres (same scale as the cow)
+    positions[i*3]   = (z.position.x - 0.5) * 8.0;    // wider than the cow
+    positions[i*3+1] =  z.position.y        * 3.5 + 0.3;
+    positions[i*3+2] = (z.position.z - 0.5) * 8.0;
+    const [r, g, b]  = z.color_rgb || [0.2, 0.5, 0.7];
+    const alpha      = Math.min(z.confidence * 0.6, 0.55);
+    colors[i*3]   = r * alpha; colors[i*3+1] = g * alpha; colors[i*3+2] = b * alpha;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
+  const mat = new THREE.PointsMaterial({
+    size: 0.12, vertexColors: true, transparent: true, opacity: 0.55,
+    depthWrite: false, sizeAttenuation: true,
+  });
+  _vzCloud = new THREE.Points(geo, mat);
+  _vzCloud.userData._neural = true;
+  scene.add(_vzCloud);
+  _neuralWorldObjs.push(_vzCloud);
 }
 
 function toggleNeuralMode() {

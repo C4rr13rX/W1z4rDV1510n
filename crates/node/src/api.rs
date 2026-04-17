@@ -977,6 +977,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/ask",            post(neuro_ask))
         .route("/neuro/generate",       post(neuro_generate))
         .route("/neuro/symbols/live",   get(neuro_symbols_live))
+        // GET /neuro/world3d — structured 3-D scene for Three.js neural renderer.
+        // Returns centroid positions grouped by category (body parts, env, visual
+        // zones) enriched with learned colour hints from Hebbian connections to
+        // img:h* labels, confidence from prediction_confidence, and visual
+        // associations so the renderer can colour each body part with what the
+        // fabric actually learned from the video, not hard-coded browns.
+        .route("/neuro/world3d",        get(neuro_world3d))
         .route("/chat",                 post(neuro_ask))
         // ── Hypothesis queue ──────────────────────────────────────────────────
         // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
@@ -1740,13 +1747,21 @@ async fn submit_knowledge_vote(
 // ─── Neuro sensor stream endpoints ────────────────────────────────────────────
 
 /// POST /neuro/train
-/// Body: `{ "snapshot": <EnvironmentSnapshot> }`
+/// Body: `{ "snapshot": <EnvironmentSnapshot>, "extra_labels": [...] }`
 /// Observes the snapshot through the neural fabric — updates Hebbian weights
 /// for every symbol co-occurrence in this sensor frame, connects spatial and
 /// temporal context, and accumulates motif patterns over time.
+///
+/// `extra_labels` (optional) are co-trained with the snapshot in the same
+/// request. Use this to inject raw perceptual features (e.g. image_bits
+/// zone/colour/edge tokens like "img:z3_2", "img:h5", "img:edgeV_z3_2")
+/// alongside structured body-part observations so the fabric learns that
+/// "warm hue in zone 7_2 = cow_head" — the visual→world-model link.
 #[derive(Deserialize)]
 struct NeuroTrainRequest {
     snapshot: EnvironmentSnapshot,
+    #[serde(default)]
+    extra_labels: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1771,6 +1786,14 @@ async fn neuro_train(
     // observe_snapshot handles all label extraction, Hebbian updates, and
     // temporal pattern accumulation internally.
     state.neuro.observe_snapshot(&request.snapshot);
+
+    // Co-train raw perceptual labels (e.g. image_bits tokens: "img:z3_2",
+    // "img:h5", "img:edgeV_z3_2") in the same request as the body-part
+    // snapshot so Hebbian connections form between visual features and body
+    // positions — the visual→world-model link that enables 3-D from 2-D.
+    if !request.extra_labels.is_empty() {
+        state.neuro.train_weighted(&request.extra_labels, 1.0, false);
+    }
 
     // Cache the most recent snapshot so /neuro/symbols/live can serve it.
     *state.live_snapshot.lock().expect("live_snapshot") = Some(request.snapshot.clone());
@@ -1875,6 +1898,163 @@ async fn neuro_snapshot(
     (
         StatusCode::OK,
         Json(serde_json::to_value(snap).unwrap_or_default()),
+    )
+}
+
+/// GET /neuro/world3d
+/// Returns a structured 3-D scene description derived from the neural fabric's
+/// current Hebbian centroid map.  Designed for the Three.js NEURAL renderer so
+/// it can build geometry and colours from what the fabric actually learned
+/// rather than using hardcoded cow anatomy primitives.
+///
+/// Response JSON:
+/// ```json
+/// {
+///   "objects": [
+///     {
+///       "id": "cow_head",
+///       "position": {"x": 0.87, "y": 0.72, "z": 0.85},
+///       "category": "cow_body",          // "cow_body" | "env" | "visual_zone"
+///       "color_rgb": [0.72, 0.38, 0.12], // derived from linked img:h* bins
+///       "confidence": 0.91,              // from prediction_confidence
+///       "active": true,                  // in current active_labels
+///       "predicted": {"x":..., "y":..., "z":...},  // temporal prediction
+///       "visual_labels": ["img:h2","img:edgeV_z7_2"]  // top linked percept tokens
+///     }
+///   ],
+///   "total_centroids": 73,
+///   "active_count": 42
+/// }
+/// ```
+async fn neuro_world3d(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(err) = rate_limit(&state, &headers, "neuro") {
+        state.metrics.inc_rate_limit_hit();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
+        );
+    }
+    let snap = state.neuro.snapshot();
+
+    // ── Hue-bin → linear RGB lookup ───────────────────────────────────────────
+    // image_bits uses 16 hue bins (0-15) covering the colour wheel [0°, 360°).
+    // Convert each bin centre to RGB so the renderer can apply it as a tint.
+    fn hue_bin_to_rgb(bin: usize, bins: usize) -> [f32; 3] {
+        let h = (bin as f32 + 0.5) / bins as f32 * 360.0; // degrees
+        // HSV→RGB (S=0.7, V=0.85) — vivid but not saturated
+        let c = 0.7f32 * 0.85;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = 0.85 - c;
+        let (r1, g1, b1) = if h < 60.0 { (c, x, 0.0) }
+            else if h < 120.0 { (x, c, 0.0) }
+            else if h < 180.0 { (0.0, c, x) }
+            else if h < 240.0 { (0.0, x, c) }
+            else if h < 300.0 { (x, 0.0, c) }
+            else              { (c, 0.0, x) };
+        [r1 + m, g1 + m, b1 + m]
+    }
+
+    // ── Build per-object colour from Hebbian links to img:h* labels ───────────
+    // network_links: label → {connected_label → weight}.
+    // For each centroid label, sum hue-bin weights from all connected img:h* labels
+    // and return the weighted-average RGB.
+    fn derive_color(label: &str, links: &HashMap<String, HashMap<String, f32>>) -> [f32; 3] {
+        let Some(connected) = links.get(label) else {
+            return [0.55, 0.35, 0.15]; // fallback warm brown (cow default)
+        };
+        let mut r_sum = 0.0f32; let mut g_sum = 0.0f32; let mut b_sum = 0.0f32;
+        let mut w_sum = 0.0f32;
+        for (conn_label, &w) in connected {
+            // Match "img:h<N>" labels (16 bins)
+            if let Some(rest) = conn_label.strip_prefix("img:h") {
+                if let Ok(bin) = rest.parse::<usize>() {
+                    let rgb = hue_bin_to_rgb(bin, 16);
+                    r_sum += rgb[0] * w; g_sum += rgb[1] * w; b_sum += rgb[2] * w;
+                    w_sum += w;
+                }
+            }
+        }
+        if w_sum < 0.01 {
+            return [0.55, 0.35, 0.15]; // fallback
+        }
+        [r_sum / w_sum, g_sum / w_sum, b_sum / w_sum]
+    }
+
+    // ── Top linked visual tokens for a label ─────────────────────────────────
+    fn top_visual_labels(label: &str, links: &HashMap<String, HashMap<String, f32>>, n: usize)
+        -> Vec<String>
+    {
+        let Some(connected) = links.get(label) else { return vec![]; };
+        let mut vis: Vec<(&str, f32)> = connected.iter()
+            .filter(|(l, _)| l.starts_with("img:"))
+            .map(|(l, &w)| (l.as_str(), w))
+            .collect();
+        vis.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        vis.truncate(n);
+        vis.into_iter().map(|(l, _)| l.to_string()).collect()
+    }
+
+    let centroids   = &snap.centroids;
+    let links       = &snap.network_links;
+    let active      = &snap.active_labels;
+    let confidence  = &snap.prediction_confidence;
+    let predictions = &snap.temporal_predictions;
+
+    let mut objects: Vec<serde_json::Value> = Vec::with_capacity(centroids.len());
+
+    for (label, pos) in centroids {
+        // Skip internal composite markers
+        if label.starts_with("comp::") || label.starts_with("stream::") { continue; }
+
+        let category = if label.starts_with("cow_") || label.starts_with("id::cow") {
+            "cow_body"
+        } else if label.starts_with("env_") {
+            "env"
+        } else if label.starts_with("img:z") {
+            "visual_zone"
+        } else if label.starts_with("img:") {
+            "visual_feature"
+        } else {
+            "other"
+        };
+
+        // Strip the "id::" prefix that the fabric sometimes adds
+        let clean_id = label.strip_prefix("id::").unwrap_or(label);
+
+        let color = derive_color(label, links);
+        let conf  = confidence.get(label).copied().unwrap_or(0.5);
+        let pred  = predictions.get(label);
+        let vis   = top_visual_labels(label, links, 8);
+        let is_active = active.contains(label);
+
+        let mut obj = serde_json::json!({
+            "id":           clean_id,
+            "position":     { "x": pos.x, "y": pos.y, "z": pos.z },
+            "category":     category,
+            "color_rgb":    color,
+            "confidence":   conf,
+            "active":       is_active,
+            "visual_labels": vis,
+        });
+        if let Some(p) = pred {
+            obj["predicted"] = serde_json::json!({ "x": p.x, "y": p.y, "z": p.z });
+        }
+        objects.push(obj);
+    }
+
+    let total = centroids.len();
+    let active_count = objects.iter().filter(|o| o["active"].as_bool().unwrap_or(false)).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "objects":          objects,
+            "total_centroids":  total,
+            "active_count":     active_count,
+        })),
     )
 }
 

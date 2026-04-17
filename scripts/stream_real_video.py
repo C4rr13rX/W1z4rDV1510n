@@ -94,6 +94,96 @@ def estimate_depth(frame_bgr: np.ndarray,
     return depth8       # shape (H, W)  dtype uint8
 
 
+# ── Image-bits encoder — Python mirror of ImageBitsEncoder in image_bits.rs ───
+#
+# Converts a BGR frame into label tokens that the neural fabric understands:
+#   img:zX_Y         spatial zone X,Y in an 8×8 grid
+#   img:hN           hue bin N  (16 bins, colour wheel)
+#   img:sN           saturation bin N  (8 bins)
+#   img:vN           value (brightness) bin N  (8 bins)
+#   img:hN_zX_Y      colour+zone composite (fabric learns "blue in top-left")
+#   img:edgeH_zX_Y   horizontal Sobel edge in zone X,Y
+#   img:edgeV_zX_Y   vertical edge
+#   img:edgeD1_zX_Y  diagonal / edge
+#   img:edgeD2_zX_Y  diagonal \ edge
+#
+# These are co-trained with body-part observations in the same /neuro/train
+# call so the fabric builds Hebbian connections: "warm hue in zone 7_2 → cow_head".
+# Over time the fabric can PREDICT body-part positions just from visual tokens.
+
+def encode_image_bits(frame_bgr: np.ndarray,
+                      grid_x: int = 8, grid_y: int = 8,
+                      hue_bins: int = 16, sat_bins: int = 8, val_bins: int = 8,
+                      salience_threshold: int = 20, sample_rate: float = 0.25,
+                      tag: str = 'img') -> list[str]:
+    """
+    Python mirror of ImageBitsEncoder::encode_rgb() (image_bits.rs).
+    Works on a down-sampled frame (64×64 target) for speed.
+    Returns a deduplicated sorted list of label strings.
+    """
+    # Down-sample to a small fixed size — enough for zone/colour/edge statistics
+    small = cv2.resize(frame_bgr, (64, 64), interpolation=cv2.INTER_AREA)
+    H, W = small.shape[:2]
+
+    # Greyscale for salience + edge detection
+    grey_f = np.zeros((H, W), dtype=np.float32)
+    grey_f = (0.299 * small[:, :, 2].astype(np.float32)
+              + 0.587 * small[:, :, 1].astype(np.float32)
+              + 0.114 * small[:, :, 0].astype(np.float32))
+    bright = grey_f.astype(np.uint8)
+
+    # Convert to HSV (cv2: H∈[0,180], S∈[0,255], V∈[0,255])
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV).astype(np.float32)
+    H_ch = hsv[:, :, 0] / 180.0   # → [0, 1)
+    S_ch = hsv[:, :, 1] / 255.0
+    V_ch = hsv[:, :, 2] / 255.0
+
+    stride_x = W / grid_x
+    stride_y = H / grid_y
+    sample_every = max(1, round(1.0 / sample_rate))
+
+    # Salience mask + sub-sample
+    ys, xs = np.where(bright >= salience_threshold)
+    sel    = np.arange(len(ys))[::sample_every]
+    ys_s   = ys[sel]; xs_s = xs[sel]
+
+    labels: set[str] = set()
+
+    # Vectorised zone + colour bins
+    zx_arr = np.minimum((xs_s / stride_x).astype(int), grid_x - 1)
+    zy_arr = np.minimum((ys_s / stride_y).astype(int), grid_y - 1)
+    h_arr  = np.minimum((H_ch[ys_s, xs_s] * hue_bins).astype(int), hue_bins - 1)
+    s_arr  = np.minimum((S_ch[ys_s, xs_s] * sat_bins).astype(int), sat_bins - 1)
+    v_arr  = np.minimum((V_ch[ys_s, xs_s] * val_bins).astype(int), val_bins - 1)
+
+    for zx, zy, h, s, v in zip(zx_arr, zy_arr, h_arr, s_arr, v_arr):
+        labels.add(f'{tag}:z{zx}_{zy}')
+        labels.add(f'{tag}:h{h}')
+        labels.add(f'{tag}:s{s}')
+        labels.add(f'{tag}:v{v}')
+        labels.add(f'{tag}:h{h}_z{zx}_{zy}')   # colour+zone composite
+
+    # Sobel edge detection (matches Rust sobel_x/sobel_y, threshold=30/255 on grey)
+    gx = cv2.Sobel(grey_f, cv2.CV_32F, 1, 0, ksize=3)
+    gy_cv = cv2.Sobel(grey_f, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx * gx + gy_cv * gy_cv)
+
+    ey, ex = np.where((mag > 30.0) & (bright >= salience_threshold))
+    sel_e  = np.arange(len(ey))[::sample_every]
+    for i in sel_e:
+        y, x = ey[i], ex[i]
+        zx = min(int(x / stride_x), grid_x - 1)
+        zy = min(int(y / stride_y), grid_y - 1)
+        angle = abs(np.degrees(np.arctan2(gy_cv[y, x], gx[y, x]))) % 180.0
+        if   angle < 22.5 or angle >= 157.5: ek = 'H'
+        elif angle < 67.5:                   ek = 'D1'
+        elif angle < 112.5:                  ek = 'V'
+        else:                                ek = 'D2'
+        labels.add(f'{tag}:edge{ek}_z{zx}_{zy}')
+
+    return sorted(labels)
+
+
 # ── Per-frame cow sensor: drives the neural fabric with body-part observations ─
 #
 # Every video frame is treated as a sensor reading.  Computer-vision heuristics
@@ -404,14 +494,24 @@ def _run_http():
 
 
 # ── Neuro poster ──────────────────────────────────────────────────────────────
-def _post_neuro(neuro_host: str, symbols: list) -> bool:
+def _post_neuro(neuro_host: str, symbols: list,
+                extra_labels: list | None = None) -> bool:
+    """Post an EnvironmentSnapshot + raw image_bits labels to /neuro/train.
+
+    extra_labels (e.g. img:z3_2, img:h5, img:edgeV_z3_2) are co-trained with
+    the body-part snapshot so Hebbian connections form between visual features
+    and body-part positions — the visual→world-model link.
+    """
     snapshot = {
         'timestamp': {'unix': int(time.time() * 1000)},
         'bounds':    {'x': 1.0, 'y': 1.0, 'z': 1.0},
         'symbols':   symbols,
         'metadata':  {'context': 'field', 'modality': 'video_stream'},
     }
-    body = json.dumps({'snapshot': snapshot}).encode()
+    payload: dict = {'snapshot': snapshot}
+    if extra_labels:
+        payload['extra_labels'] = extra_labels
+    body = json.dumps(payload).encode()
     req  = urllib.request.Request(
         f'http://{neuro_host}/neuro/train', data=body,
         headers={'Content-Type': 'application/json'},
@@ -484,11 +584,17 @@ def capture_loop(video_path: str, neuro_host: str, fps: int,
         with _state.lock:
             _state.payload = payload
 
-        # Post to neuro every 6 frames
+        # Post to neuro every 6 frames.
+        # 1. Detect structured body-part symbols (positions in 3-D anatomy space).
+        # 2. Extract raw image_bits tokens (visual zone/colour/edge labels) from
+        #    the current frame — co-trained with body-part symbols so the fabric
+        #    learns that "warm hue in zone 7_2 = cow_head at (0.87, 0.72, 0.85)".
         if frame_num % 6 == 0:
-            syms     = detect_objects(frame, target_w, target_h, bg_sub)
+            syms = detect_objects(frame, target_w, target_h, bg_sub)
+            bits = encode_image_bits(frame)
             if syms:
-                neuro_ok = _post_neuro(neuro_host, syms)
+                neuro_ok = _post_neuro(neuro_host, syms,
+                                       extra_labels=bits if bits else None)
 
         # Progress log every 5 seconds
         if frame_num % (fps * 5) == 0:
