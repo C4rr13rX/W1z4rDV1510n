@@ -150,6 +150,12 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
 
 /* VIDEO mode button */
 /* NEURAL mode button */
+#proj-btn { position:absolute; bottom:52px; right:860px; z-index:5;
+  background:none; border:1px solid #0a2020; color:#1a4030; padding:5px 12px;
+  font-family:inherit; font-size:8px; letter-spacing:2px; text-transform:uppercase;
+  cursor:pointer; border-radius:2px; pointer-events:all; transition:all 0.2s; display:none; }
+#proj-btn:hover  { border-color:#006050; color:#00d0a0; }
+#proj-btn.active { border-color:#00c0a0; color:#40ffe0; }
 #neural-btn { position:absolute; bottom:52px; right:730px; z-index:5;
   background:none; border:1px solid #0a2820; color:#1a4838; padding:5px 12px;
   font-family:inherit; font-size:8px; letter-spacing:2px; text-transform:uppercase;
@@ -215,6 +221,7 @@ canvas { position:absolute; inset:0; z-index:1; display:block; }
   <div id="xhair"></div>
 </div>
 
+<button id="proj-btn" onclick="toggleNeuralProj()">◈ PROJ</button>
 <button id="neural-btn" onclick="toggleNeuralMode()">◈ NEURAL</button>
 <button id="video-btn" onclick="toggleVideoMode()">◈ VIDEO</button>
 <button id="scene-btn" onclick="toggleSceneMode()">◈ SCENE</button>
@@ -1060,8 +1067,8 @@ function _buildNeuralCow(cmap, objMap = {}) {
   const belly = get('cow_brisket','cow_belly','cow_navel','cow_udder');
   const spineM = _tube(spine, 0.30, fc('cow_back', 0x7B3F00), 12);
   const bellyM = _tube(belly, 0.22, fc('cow_belly', 0x5A3010), 10);
-  if (spineM) { spineM.userData.label='cow_back'; spineM.userData.info=BOVINE_ANATOMY.cow_back; g.add(spineM); }
-  if (bellyM) { bellyM.userData.label='cow_belly'; bellyM.userData.info=BOVINE_ANATOMY.cow_belly; g.add(bellyM); }
+  if (spineM) { spineM.userData.label='cow_back';  spineM.userData.info=BOVINE_ANATOMY.cow_back;  spineM.userData.breathe=true; g.add(spineM); }
+  if (bellyM) { bellyM.userData.label='cow_belly'; bellyM.userData.info=BOVINE_ANATOMY.cow_belly; bellyM.userData.breathe=true; g.add(bellyM); }
 
   const neckPts = get('cow_withers','cow_neck','cow_head');
   const neckM = _tube(neckPts, 0.16, fc('cow_neck', 0x8B4513), 10);
@@ -1109,7 +1116,7 @@ function _buildNeuralCow(cmap, objMap = {}) {
   // TAIL
   const tailPts = get('cow_rump','cow_tail_root','cow_tail_switch');
   const tailM = _tube(tailPts, 0.028, fc('cow_tail_root', 0x3A2010), 6);
-  if (tailM) { tailM.userData.label='cow_tail_root'; tailM.userData.info=BOVINE_ANATOMY.cow_tail_root; g.add(tailM); }
+  if (tailM) { tailM.userData.label='cow_tail_root'; tailM.userData.info=BOVINE_ANATOMY.cow_tail_root; tailM.userData.tailSway=true; g.add(tailM); }
 
   // UDDER
   const up = pt('cow_udder');
@@ -1216,8 +1223,11 @@ function _clearNeuralWorld() {
 // ── fetch & rebuild ───────────────────────────────────────────────────────────
 let neuralMode   = false;
 let neuralCow    = null;
-let _neuralTimer = null;
-let _vzCloud     = null;   // visual-zone particle cloud (neural mode only)
+let _neuralTimer      = null;
+let _vzCloud          = null;   // visual-zone particle cloud (neural mode only)
+let _projBlend        = 0.0;    // 0=off, 0.1-1.0=video projection strength
+let _projMat          = null;   // cached ShaderMaterial for projection
+let _neuralFrameTimer = null;   // silent frame-fetch interval for neural proj
 
 async function _fetchNeuralCow() {
   if (!neuralMode) return;
@@ -1259,7 +1269,11 @@ async function _fetchNeuralCow() {
   }
   neuralCow = _buildNeuralCow(cmap, objMap);
   neuralCow.position.set(0, 0, 0);   // centred in world, hooves on grass
+  neuralCow._baseY = neuralCow.position.y;  // anchor for breathing animation
   scene.add(neuralCow);
+
+  // Re-apply projection if it was active before a centroid refresh
+  if (_projBlend > 0) _applyProjMat(_projBlend);
 
   // Add visual-zone particle haze if world3d has zone centroids (img:z* labels)
   _updateVisualZoneCloud(world3d);
@@ -1324,6 +1338,135 @@ function _updateVisualZoneCloud(world3d) {
   _vzCloud.userData._neural = true;
   scene.add(_vzCloud);
   _neuralWorldObjs.push(_vzCloud);
+}
+
+// ── Video texture projection onto neural cow ─────────────────────────────────
+// Screen-space projection: samples the live video frame (shared _vImgCvs) at
+// clip-space UV so the video image appears painted onto the 3D cow surface.
+// When the stream server is running, this makes the cow look photorealistic.
+// The projection blends with the Hebbian-derived base colour at _projBlend (0–1).
+
+function _makeNeuralProjMat(baseColor, blend) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      videoTex:  { value: videoTex || null },
+      baseColor: { value: new THREE.Color(baseColor) },
+      blend:     { value: blend },
+    },
+    vertexShader: `
+      varying vec4 vClipPos;
+      varying vec3 vNormal;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vClipPos = gl_Position;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D videoTex;
+      uniform vec3 baseColor;
+      uniform float blend;
+      varying vec4 vClipPos;
+      varying vec3 vNormal;
+      void main() {
+        // Screen-space UV from clip position
+        vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+        // Lambertian diffuse from a sun-like direction
+        float nDotL = max(0.28, dot(vNormal, normalize(vec3(1.0, 2.0, 1.5))));
+        vec3 litBase = baseColor * nDotL;
+        if (blend > 0.001) {
+          vec4 vid = texture2D(videoTex, screenUV);
+          vec3 col = mix(litBase, vid.rgb * nDotL, blend);
+          gl_FragColor = vec4(col, 1.0);
+        } else {
+          gl_FragColor = vec4(litBase, 1.0);
+        }
+      }
+    `,
+    side: THREE.FrontSide,
+  });
+}
+
+function _applyProjMat(blend) {
+  if (!neuralCow) return;
+  _projBlend = blend;
+  neuralCow.traverse(m => {
+    if (!m.isMesh || !m.userData._neural) return;
+    if (blend <= 0) {
+      // Restore original standard material
+      if (m.userData._origMat) {
+        m.material.dispose();
+        m.material = m.userData._origMat;
+        delete m.userData._origMat;
+      }
+    } else {
+      if (!m.userData._origMat) m.userData._origMat = m.material;
+      const baseColor = m.userData._origMat.color || new THREE.Color(0x7B3F00);
+      m.material = _makeNeuralProjMat(baseColor, blend);
+    }
+  });
+}
+
+// Silent frame fetch: updates _vImgCvs + videoTex for neural projection.
+// Runs at ~15fps when projection mode is on. Skips if already in VIDEO mode
+// (which has its own 40ms timer). Lightweight: no depth mesh computation.
+async function _neuralFrameFetch() {
+  if (!neuralMode) return;
+  if (videoMode)  return;   // VIDEO mode already updating _vImgCvs
+  try {
+    const r = await fetch(`http://${FRAME_HOST}/frame`, { signal: AbortSignal.timeout(500) });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data.image) return;
+    const img = await new Promise(res => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => res(null);
+      i.src = 'data:image/jpeg;base64,' + data.image;
+    });
+    if (!img || !neuralMode) return;
+    const W = data.w || img.naturalWidth, H = data.h || img.naturalHeight;
+    if (_vImgCvs.width !== W || _vImgCvs.height !== H) {
+      _vImgCvs.width = W; _vImgCvs.height = H;
+    }
+    _vImgCtx.drawImage(img, 0, 0);
+    if (!videoTex) {
+      // Create a shared canvas texture so the projection shader can use it
+      // even when the VIDEO depth mesh is not active.
+      // We deliberately write to the same videoTex global so _makeNeuralProjMat
+      // picks it up automatically on next frame.
+      videoTex = new THREE.CanvasTexture(_vImgCvs);
+      videoTex.minFilter = THREE.LinearFilter;
+      videoTex.magFilter = THREE.LinearFilter;
+      videoTex.encoding  = THREE.LinearEncoding;
+    } else {
+      videoTex.needsUpdate = true;
+    }
+    // Patch uniform on all active projection materials
+    if (neuralCow) {
+      neuralCow.traverse(m => {
+        if (m.isMesh && m.material && m.material.uniforms && m.material.uniforms.videoTex) {
+          m.material.uniforms.videoTex.value = videoTex;
+        }
+      });
+    }
+  } catch {}
+}
+
+function toggleNeuralProj() {
+  const btn = document.getElementById('proj-btn');
+  if (_projBlend > 0) {
+    // Turn off: restore base materials, stop silent fetch
+    _applyProjMat(0);
+    clearInterval(_neuralFrameTimer); _neuralFrameTimer = null;
+    if (btn) { btn.classList.remove('active'); btn.textContent = '◈ PROJ'; }
+  } else {
+    // Turn on: start silent frame fetch and apply projection
+    _neuralFrameTimer = setInterval(_neuralFrameFetch, 66);   // 15fps
+    _neuralFrameFetch();   // immediate first frame
+    _applyProjMat(0.65);
+    if (btn) { btn.classList.add('active'); btn.textContent = '◈ PROJ ✓'; }
+  }
 }
 
 // ── Anatomy drill-down modal ─────────────────────────────────────────────────
@@ -1678,11 +1821,12 @@ function _buildDrillL7(info) {
 }
 
 // Expose drill functions to global scope (used by inline onclick in modal HTML)
-window.closeDrillModal = closeDrillModal;
-window.drillIn         = drillIn;
-window.drillOut        = drillOut;
-window.openDrillModal  = openDrillModal;
+window.closeDrillModal  = closeDrillModal;
+window.drillIn          = drillIn;
+window.drillOut         = drillOut;
+window.openDrillModal   = openDrillModal;
 window._buildDrillLevel = _buildDrillLevel;
+window.toggleNeuralProj = toggleNeuralProj;
 
 function toggleNeuralMode() {
   neuralMode = !neuralMode;
@@ -1722,8 +1866,25 @@ function toggleNeuralMode() {
     _neuralTimer = setInterval(_fetchNeuralCow, 300);
     _fetchNeuralCow();
 
+    // Show PROJ button
+    const projBtn = document.getElementById('proj-btn');
+    if (projBtn) projBtn.style.display = '';
+
   } else {
     clearInterval(_neuralTimer); _neuralTimer = null;
+
+    // Tear down projection
+    if (_projBlend > 0) {
+      _applyProjMat(0);
+      clearInterval(_neuralFrameTimer); _neuralFrameTimer = null;
+    }
+    const projBtn = document.getElementById('proj-btn');
+    if (projBtn) {
+      projBtn.style.display = 'none';
+      projBtn.classList.remove('active');
+      projBtn.textContent = '◈ PROJ';
+    }
+
     if (neuralCow) {
       scene.remove(neuralCow);
       neuralCow.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
@@ -2698,6 +2859,23 @@ function animate(){
 
   // Neural mode hover detection
   if (neuralMode) _updateNeuralHover();
+
+  // Neural idle animation: breathing + tail sway
+  if (neuralMode && neuralCow) {
+    const t = performance.now() * 0.001;
+    // Chest/belly breathing: 0.9 Hz, ±1.2% scale in Y
+    const breathScale = 1.0 + Math.sin(t * 0.9 * Math.PI * 2) * 0.012;
+    // Tail sway: 1.1 Hz, ±7° in Z
+    const tailAngle = Math.sin(t * 1.1 * Math.PI * 2) * 0.12;
+    neuralCow.traverse(m => {
+      if (!m.isMesh) return;
+      if (m.userData.breathe)  m.scale.y = breathScale;
+      if (m.userData.tailSway) m.rotation.z = tailAngle;
+    });
+    // Also gently bob the whole group like a breathing animal
+    neuralCow.position.y = Math.sin(t * 0.9 * Math.PI * 2) * 0.004 +
+                           (neuralCow._baseY !== undefined ? neuralCow._baseY : 0);
+  }
 
   // Video mode: bypass all post-processing for true photorealistic colours
   if(videoMode) { renderer.render(scene,camera); } else { composer.render(); }
