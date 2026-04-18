@@ -2674,8 +2674,8 @@ def build_mesh_training(out_dir: Path, node: str,
             json.loads(r.read())
 
     def _train_text(text):
-        body = json.dumps({'modality': 'text', 'text': text}).encode()
-        req  = urllib.request.Request(f'{base}/train', data=body,
+        body = json.dumps({'modality': 'text', 'text': text[:6000]}).encode()
+        req  = urllib.request.Request(f'{base}/media/train', data=body,
                headers={'Content-Type': 'application/json'}, method='POST')
         with urllib.request.urlopen(req, timeout=8) as r:
             json.loads(r.read())
