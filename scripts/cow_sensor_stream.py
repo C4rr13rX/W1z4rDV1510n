@@ -65,11 +65,19 @@ def _check_pil() -> bool:
     return _PIL_AVAILABLE
 
 
+def _median(vals):
+    s = sorted(vals)
+    n = len(s)
+    return s[n // 2] if n else 0
+
+
 def detect_cows_pil(frame_path: Path) -> list:
     """
-    Detect cow bounding boxes via colour segmentation on a down-sampled frame.
-    Returns a list of {cx, cy, w, h, area} dicts with coordinates normalised to [0,1].
-    Requires Pillow; returns [] gracefully if unavailable.
+    Row-median deviation detector.  For each pixel, compare it to the median
+    colour of its own row.  Pixels that differ significantly from the row
+    median are foreground (entities), because each row is mostly background.
+    Works on any grass/sky colour.
+    Returns {cx,cy,w,h,area} dicts normalised to [0,1].
     """
     if not _check_pil():
         return []
@@ -81,79 +89,104 @@ def detect_cows_pil(frame_path: Path) -> list:
             .convert("RGB")
             .resize((DETECT_W, DETECT_H), Image.BILINEAR)
         )
+        pixels = list(img.getdata())
 
-        # Binary mask: True = potential cow pixel (not grass, not sky)
-        mask = bytearray(DETECT_W * DETECT_H)
+        # ── Per-row median background ──────────────────────────────────────
+        row_med = []
         for y in range(DETECT_H):
+            row = [pixels[y * DETECT_W + x] for x in range(DETECT_W)]
+            row_med.append((
+                _median([p[0] for p in row]),
+                _median([p[1] for p in row]),
+                _median([p[2] for p in row]),
+            ))
+
+        # Exclude fixed top 15% (sky) and bottom 10% (ground edges)
+        sky_end   = int(DETECT_H * 0.15)
+        gnd_start = int(DETECT_H * 0.90)
+        DEVIATION = 42   # L1 distance to call a pixel foreground
+
+        mask = bytearray(DETECT_W * DETECT_H)
+        for y in range(sky_end, gnd_start):
+            mr, mg, mb = row_med[y]
             for x in range(DETECT_W):
-                r, g, b = img.getpixel((x, y))
-                # Green grass: green channel dominant
-                is_grass = g > r + 14 and g > b + 8 and g > 50
-                # Sky/bright top region: cool bright pixels in top third
-                is_sky = y < DETECT_H // 3 and (
-                    b > 140 or (r > 185 and g > 185 and b > 185)
-                )
-                if not is_grass and not is_sky:
+                r, g, b = pixels[y * DETECT_W + x]
+                if abs(r - mr) + abs(g - mg) + abs(b - mb) > DEVIATION:
                     mask[y * DETECT_W + x] = 1
 
-        sky_end = DETECT_H // 4
-        # Column projection: count non-grass pixels per column (below sky)
+        # ── Column projection ──────────────────────────────────────────────
+        active_h = gnd_start - sky_end
         col_profile = [
-            sum(mask[y * DETECT_W + x] for y in range(sky_end, DETECT_H))
+            sum(mask[y * DETECT_W + x] for y in range(sky_end, gnd_start))
             for x in range(DETECT_W)
         ]
+        THRESH = max(3, active_h // 9)
 
-        THRESH = max(4, (DETECT_H - sky_end) // 8)
-
-        # Find horizontal runs of "active" columns
+        # ── Horizontal runs with small-gap merging ─────────────────────────
+        MAX_GAP = 3
         runs: list[tuple[int, int]] = []
         in_run = False
+        gap = 0
         for x, cnt in enumerate(col_profile):
             if cnt >= THRESH:
                 if not in_run:
-                    run_start = x
-                    in_run = True
+                    run_start = x; in_run = True
+                gap = 0
             else:
                 if in_run:
-                    runs.append((run_start, x - 1))
-                    in_run = False
+                    gap += 1
+                    if gap > MAX_GAP:
+                        runs.append((run_start, x - gap)); in_run = False; gap = 0
         if in_run:
             runs.append((run_start, DETECT_W - 1))
 
-        results = []
+        # ── Split wide blobs at local column-profile minima ────────────────
+        split_runs: list[tuple[int, int]] = []
         for x0, x1 in runs:
-            if x1 - x0 < 4:
+            if x1 - x0 + 1 > DETECT_W * 0.55:
+                prof = col_profile[x0:x1 + 1]
+                splits = [x0]
+                for i in range(2, len(prof) - 2):
+                    if prof[i] <= min(prof[i-1], prof[i-2], prof[i+1], prof[i+2]) \
+                            and prof[i] < THRESH * 2.0:
+                        splits.append(x0 + i)
+                splits.append(x1 + 1)
+                for a, b in zip(splits, splits[1:]):
+                    if b - a >= 4:
+                        split_runs.append((a, b - 1))
+            else:
+                split_runs.append((x0, x1))
+
+        # ── Build bboxes ───────────────────────────────────────────────────
+        results = []
+        for x0, x1 in split_runs:
+            if x1 - x0 < 3:
                 continue
-            y_coords = [
-                y
-                for y in range(sky_end, DETECT_H)
+            y_set = [
+                y for y in range(sky_end, gnd_start)
                 for x in range(x0, x1 + 1)
                 if mask[y * DETECT_W + x]
             ]
-            if not y_coords:
+            if not y_set:
                 continue
-            y_min, y_max = min(y_coords), max(y_coords)
+            y_min, y_max = min(y_set), max(y_set)
             w_px = x1 - x0 + 1
             h_px = y_max - y_min + 1
-            if h_px < 4:
+            if h_px < 3:
                 continue
             aspect = w_px / max(h_px, 1)
-            if aspect > 6.0 or aspect < 0.15:
+            if aspect > 8.0 or aspect < 0.10:
                 continue
-            cx = (x0 + x1) / 2.0 / DETECT_W
-            cy = (y_min + y_max) / 2.0 / DETECT_H
-            results.append(
-                {
-                    "cx": cx,
-                    "cy": cy,
-                    "w": w_px / DETECT_W,
-                    "h": h_px / DETECT_H,
-                    "area": w_px * h_px,
-                }
-            )
+            results.append({
+                "cx":   (x0 + x1) / 2.0 / DETECT_W,
+                "cy":   (y_min + y_max) / 2.0 / DETECT_H,
+                "w":    min(w_px / DETECT_W, 0.80),
+                "h":    min(h_px / DETECT_H, 0.80),
+                "area": w_px * h_px,
+            })
 
         results.sort(key=lambda r: -r["area"])
-        return results[:4]
+        return results[:5]
     except Exception:
         return []
 

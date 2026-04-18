@@ -121,7 +121,7 @@ function detectHardwareTier() {
 
 // ─── Scene ─────────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x8fafb8, 0.018);
+scene.fog = new THREE.FogExp2(0xb8d4e8, 0.012);
 
 // ─── Camera ────────────────────────────────────────────────────────────────
 const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.001, 400);
@@ -156,7 +156,7 @@ function updateBackground() {
 }
 
 // ─── Lighting ─────────────────────────────────────────────────────────────
-scene.add(new THREE.AmbientLight(0xffffff, 0.90));
+scene.add(new THREE.AmbientLight(0xffffff, 1.15));
 const sun = new THREE.DirectionalLight(0xfffce0, 0.55);
 sun.position.set(20, 40, 10);
 scene.add(sun);
@@ -198,9 +198,13 @@ const cowShader = {
                  * smoothstep(0.0,0.04,v)*smoothstep(1.0,0.96,v);
       float su = uTexOffU + u * uTexScaleU;
       float sv = uTexOffV + v * uTexScaleV;
-      vec4 tex = texture2D(tVideo, vec2(su,sv));
-      gl_FragColor = mix(vec4(uFallback,1.0), tex, inB*edge);
-      gl_FragColor.a *= uOpacity;
+      vec4 tex = texture2D(tVideo, vec2(su, sv));
+      // Suppress grass-coloured pixels (bleed-through when bbox spans a herd)
+      float gDom = max(0.0, tex.g - max(tex.r, tex.b) - 0.03);
+      float notGrass = 1.0 - smoothstep(0.04, 0.22, gDom) * step(0.28, tex.g);
+      // Grass → transparent; non-grass inside bbox → video texture; outside → transparent
+      float alpha = inB * edge * notGrass * uOpacity;
+      gl_FragColor = vec4(tex.rgb, alpha);
     }
   `,
 };
@@ -209,7 +213,7 @@ function makeCowMat() {
     uniforms: THREE.UniformsUtils.clone(cowShader.uniforms),
     vertexShader: cowShader.vertexShader,
     fragmentShader: cowShader.fragmentShader,
-    side: THREE.DoubleSide, transparent: true,
+    side: THREE.DoubleSide, transparent: true, depthWrite: false,
   });
 }
 
