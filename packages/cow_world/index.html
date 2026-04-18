@@ -232,8 +232,8 @@ async function buildNeuralCow(entityColor) {
         geo.computeBoundingBox();
         const bb = geo.boundingBox;
         const dims = new THREE.Vector3().subVectors(bb.max, bb.min);
-        const maxDim = Math.max(dims.x, dims.y, dims.z);
-        const sf = maxDim > 0 ? 1.8 / maxDim : 1.0;
+        // Normalize by height (Y), not max-dim — keeps correct bovine proportions
+        const sf = dims.y > 0 ? 1.42 / dims.y : 1.0;
         const mx = new THREE.Matrix4().makeScale(sf, sf, sf);
         mx.setPosition(
           -(bb.min.x + bb.max.x) * 0.5 * sf,
@@ -291,6 +291,7 @@ function bboxToTexOff(cx, cy, w, h) {
 }
 
 function syncCowShader(entry) {
+  if (!entry.mesh.userData.mats) return;
   entry.mesh.updateMatrixWorld(true);
   const inv = new THREE.Matrix4().copy(entry.mesh.matrixWorld).invert();
   for (const mat of entry.mesh.userData.mats) {
@@ -303,13 +304,14 @@ function syncCowShader(entry) {
 }
 
 function setEntityOpacity(entry, opacity) {
+  if (!entry.mesh.userData.mats) return;
   for (const mat of entry.mesh.userData.mats) {
     mat.uniforms.uOpacity.value = opacity;
   }
 }
 
 function applyEntityColor(mesh, rgb) {
-  if (!rgb) return;
+  if (!rgb || !mesh.userData.mats) return;
   const fb = new THREE.Color(rgb[0]/255, rgb[1]/255, rgb[2]/255);
   for (const mat of mesh.userData.mats) mat.uniforms.uFallback.value.copy(fb);
 }
@@ -418,21 +420,29 @@ async function fetchNeuralMesh(query, minAct = 0.04) {
     const resp = await fetch(`${NODE_API}/mesh/synthesize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, hops: 2, min_activation: minAct, format: 'json' }),
+      body: JSON.stringify({ query, hops: 3, min_activation: minAct, categories: ['id'] }),
     });
     const d = await resp.json();
-    if (!d.verts || d.verts.length < 4) return null;
-    const pos = new Float32Array(d.verts.flat());
-    const idx = new Uint32Array(d.faces.flat());
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setIndex(new THREE.BufferAttribute(idx, 1));
-    if (d.normals?.length) {
-      geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(d.normals.flat()), 3));
-    } else { geo.computeVertexNormals(); }
-    if (d.colors?.length) {
-      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(d.colors.flat()), 3));
+
+    // Parse OBJ string returned by the endpoint
+    if (!d.obj) return null;
+    const verts = [], indices = [];
+    for (const line of d.obj.split('\n')) {
+      const p = line.trim().split(/\s+/);
+      if (p[0] === 'v') {
+        verts.push(parseFloat(p[1]), parseFloat(p[2]), parseFloat(p[3]));
+      } else if (p[0] === 'f') {
+        // OBJ face: f v/vt/vn v/vt/vn v/vt/vn  (1-indexed)
+        const vi = (s) => parseInt(s.split('/')[0], 10) - 1;
+        indices.push(vi(p[1]), vi(p[2]), vi(p[3]));
+      }
     }
+    if (verts.length < 12) return null;
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+    geo.computeVertexNormals();
     return geo;
   } catch (_) { return null; }
 }
