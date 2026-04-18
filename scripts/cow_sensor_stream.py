@@ -308,94 +308,99 @@ def call_media_train(frame_path: Path, text: str, node: str) -> dict:
         return {}
 
 # ── 3D spatial observation training ──────────────────────────────────────────
-# World-space constants (must match packages/cow_world/index.html)
-_ZOOM_DIST = 7.5
-_H_TAN     = 0.869  # tan(camera HFOV/2)
+import random as _random
 
 def _bbox_to_3d_parts(cow: dict) -> list:
     """
-    Project a detected entity's 2D bounding box to a dense 3D point cloud.
+    Map a detected entity to canonical body-relative 3D anatomy positions.
 
-    Each sample point's label encodes its region in the entity's body so the
-    neural fabric learns the 3D spatial layout from repeated real-video
-    observations.  Points are grid-sampled across the visible silhouette +
-    inferred depth (Z = lateral spread proportional to entity width).
+    Coordinate system matches train_cow_3d_anatomy.py exactly:
+      X = head-to-tail axis  (snout ≈ +1.62, tail_tip ≈ -1.55)
+      Y = height             (hooves = 0, withers ≈ 1.42)
+      Z = lateral left/right (shoulders ≈ ±0.32)
+
+    All positions are body-centred (not world-space).  This lets the neural
+    fabric learn the correct anatomy regardless of where the cow appears in the
+    video frame.  Small Gaussian jitter per frame simulates natural pose variation.
 
     Returns list of (symbol_id, x, y, z) tuples.
     """
-    cx = cow["cx"]
-    bw = cow["w"];  bh = cow["h"]
+    # Canonical bovine proportions (metres, withers = 1.42 m)
+    WITHER_H = 1.42
+    HALF_L   = 1.585  # (snout 1.62 + tail_tip 1.55) / 2
+    HALF_W   = 0.32   # shoulder half-width
 
-    half_world_w = _ZOOM_DIST * _H_TAN       # ≈ 6.52 m
-    wz_centre    = (0.5 - cx) * half_world_w * 2
-
-    world_h = min(bh * 2.2, 1.8)             # entity world height
-    half_l  = world_h * 0.88                 # half body-length (nose→tail)
-    half_w  = world_h * 0.30                 # half lateral width (depth)
+    # Per-frame jitter magnitude — simulates natural pose/size variation
+    j = 0.025
+    def jit():
+        return _random.gauss(0, j)
 
     pts = []
 
-    # ── Dense surface grid on the visible silhouette (Y–Z plane) ─────────────
-    # Grid: NZ columns (Z axis = nose–tail) × NY rows (Y axis = height)
-    # Each point represents one observed surface location on the entity.
-    NZ, NY = 14, 10
-    for iz in range(NZ):
-        tz = iz / (NZ - 1)          # 0 = head end, 1 = tail end
-        z  = wz_centre + half_l * (1.0 - 2*tz)   # Z in world space
+    # ── Dense surface grid in canonical body-relative space ───────────────────
+    # X axis = head-to-tail (NX columns), Y axis = height (NY rows)
+    NX, NY = 14, 10
+    for ix in range(NX):
+        tx = ix / (NX - 1)         # 0 = head end, 1 = tail end
+        x  = HALF_L * (1.0 - 2*tx) + jit()   # head = +HALF_L, tail = -HALF_L
         for iy in range(NY):
-            ty = iy / (NY - 1)      # 0 = top (back), 1 = bottom (ground)
-            y  = world_h * (1.0 - ty)
+            ty = iy / (NY - 1)     # 0 = top, 1 = bottom (ground)
+            y  = WITHER_H * (1.0 - ty) + jit()
 
-            # Region label encodes semantic zone at this grid cell
-            region_z = "head" if tz < 0.20 else "front" if tz < 0.45 else "mid" if tz < 0.65 else "rear" if tz < 0.88 else "tail"
+            region_x = "head" if tx < 0.20 else "front" if tx < 0.45 else "mid" if tx < 0.65 else "rear" if tx < 0.88 else "tail"
             region_y = "top" if ty < 0.15 else "upper" if ty < 0.40 else "mid" if ty < 0.65 else "lower" if ty < 0.85 else "ground"
-            label = f"cow_surf_{region_y}_{region_z}"
+            label = f"cow_surf_{region_y}_{region_x}"
 
-            # Left side (positive Z lateral)
-            pts.append((label + "_L", 0.0, max(0.0, y), z + half_w * 0.9))
-            # Right side
-            pts.append((label + "_R", 0.0, max(0.0, y), z - half_w * 0.9))
-            # Centre line
-            pts.append((label, 0.0, max(0.0, y), z))
+            pts.append((label + "_L", x, max(0.0, y), +HALF_W * 0.9 + jit()))
+            pts.append((label + "_R", x, max(0.0, y), -HALF_W * 0.9 + jit()))
+            pts.append((label,        x, max(0.0, y),  0.0           + jit()))
 
-    # ── Semantic landmark points (low jitter, high density via repetition) ───
-    h = world_h; hl = half_l; hw = half_w; wz = wz_centre
+    # ── Named anatomy landmarks (matching anatomy atlas label names) ──────────
     pts += [
-        ("cow_head",       0.0, h*0.84, wz + hl*0.72),
-        ("cow_snout",      0.0, h*0.70, wz + hl*0.94),
-        ("cow_neck",       0.0, h*0.88, wz + hl*0.52),
-        ("cow_withers",    0.0, h*0.98, wz + hl*0.28),
-        ("cow_spine",      0.0, h*0.94, wz),
-        ("cow_rump",       0.0, h*0.88, wz - hl*0.52),
-        ("cow_tail",       0.0, h*0.76, wz - hl*0.85),
-        ("cow_body",       0.0, h*0.64, wz),
-        ("cow_chest",      0.0, h*0.56, wz + hl*0.40),
-        ("cow_belly",      0.0, h*0.22, wz),
-        ("cow_udder",      0.0, h*0.18, wz - hl*0.18),
-        # Limbs — left (+Z) and right (-Z)
-        ("cow_shoulder_L", 0.0, h*0.80, wz + hl*0.46 + hw),
-        ("cow_shoulder_R", 0.0, h*0.80, wz + hl*0.46 - hw),
-        ("cow_elbow_L",    0.0, h*0.55, wz + hl*0.50 + hw),
-        ("cow_elbow_R",    0.0, h*0.55, wz + hl*0.50 - hw),
-        ("cow_knee_FL",    0.0, h*0.35, wz + hl*0.50 + hw),
-        ("cow_knee_FR",    0.0, h*0.35, wz + hl*0.50 - hw),
-        ("cow_hoof_FL",    0.0, 0.00,   wz + hl*0.50 + hw),
-        ("cow_hoof_FR",    0.0, 0.00,   wz + hl*0.50 - hw),
-        ("cow_hip_L",      0.0, h*0.80, wz - hl*0.48 + hw),
-        ("cow_hip_R",      0.0, h*0.80, wz - hl*0.48 - hw),
-        ("cow_stifle_L",   0.0, h*0.55, wz - hl*0.50 + hw),
-        ("cow_stifle_R",   0.0, h*0.55, wz - hl*0.50 - hw),
-        ("cow_hock_L",     0.0, h*0.35, wz - hl*0.50 + hw),
-        ("cow_hock_R",     0.0, h*0.35, wz - hl*0.50 - hw),
-        ("cow_hoof_BL",    0.0, 0.00,   wz - hl*0.50 + hw),
-        ("cow_hoof_BR",    0.0, 0.00,   wz - hl*0.50 - hw),
+        ("cow_head",       1.40+jit(), 1.05+jit(),  0.00+jit()),
+        ("cow_snout",      1.62+jit(), 0.90+jit(),  0.00+jit()),
+        ("cow_brain",      1.36+jit(), 1.22+jit(),  0.00+jit()),
+        ("cow_jaw",        1.52+jit(), 0.84+jit(),  0.00+jit()),
+        ("cow_neck_upper", 1.08+jit(), 1.18+jit(),  0.00+jit()),
+        ("cow_withers",    0.55+jit(), 1.42+jit(),  0.00+jit()),
+        ("cow_spine_T",    0.10+jit(), 1.32+jit(),  0.00+jit()),
+        ("cow_spine_L",   -0.30+jit(), 1.30+jit(),  0.00+jit()),
+        ("cow_sacrum",    -0.68+jit(), 1.20+jit(),  0.00+jit()),
+        ("cow_rump",      -0.80+jit(), 1.18+jit(),  0.00+jit()),
+        ("cow_tail_root", -1.10+jit(), 1.12+jit(),  0.00+jit()),
+        ("cow_tail_tip",  -1.55+jit(), 0.78+jit(),  0.00+jit()),
+        # Trunk
+        ("cow_sternum",    0.50+jit(), 0.68+jit(),  0.00+jit()),
+        ("cow_belly",     -0.08+jit(), 0.55+jit(),  0.00+jit()),
+        ("cow_udder",     -0.34+jit(), 0.28+jit(),  0.00+jit()),
         # Organs
-        ("cow_heart",      0.0, h*0.72, wz + hl*0.30),
-        ("cow_rumen",      0.0, h*0.62, wz - hl*0.12 + hw*0.5),
-        ("cow_lung_L",     0.0, h*0.75, wz + hl*0.24 + hw*0.6),
-        ("cow_lung_R",     0.0, h*0.75, wz + hl*0.24 - hw*0.6),
-        ("cow_liver",      0.0, h*0.68, wz + hl*0.06 - hw*0.4),
-        ("cow_brain",      0.0, h*0.94, wz + hl*0.85),
+        ("cow_heart",      0.62+jit(), 1.10+jit(),  0.00+jit()),
+        ("cow_lung_L",     0.45+jit(), 1.16+jit(), +0.24+jit()),
+        ("cow_lung_R",     0.45+jit(), 1.16+jit(), -0.24+jit()),
+        ("cow_rumen",     -0.28+jit(), 0.92+jit(), +0.24+jit()),
+        ("cow_liver",      0.15+jit(), 0.94+jit(), -0.26+jit()),
+        # Front limbs
+        ("cow_shoulder_L", 0.76+jit(), 1.12+jit(), +0.32+jit()),
+        ("cow_shoulder_R", 0.76+jit(), 1.12+jit(), -0.32+jit()),
+        ("cow_elbow_L",    0.80+jit(), 0.74+jit(), +0.28+jit()),
+        ("cow_elbow_R",    0.80+jit(), 0.74+jit(), -0.28+jit()),
+        ("cow_knee_FL",    0.80+jit(), 0.44+jit(), +0.24+jit()),
+        ("cow_knee_FR",    0.80+jit(), 0.44+jit(), -0.24+jit()),
+        ("cow_hoof_FL",    0.80+jit(), 0.00,       +0.22+jit()),
+        ("cow_hoof_FR",    0.80+jit(), 0.00,       -0.22+jit()),
+        # Hind limbs
+        ("cow_hip_L",     -0.80+jit(), 1.12+jit(), +0.33+jit()),
+        ("cow_hip_R",     -0.80+jit(), 1.12+jit(), -0.33+jit()),
+        ("cow_stifle_L",  -0.76+jit(), 0.76+jit(), +0.28+jit()),
+        ("cow_stifle_R",  -0.76+jit(), 0.76+jit(), -0.28+jit()),
+        ("cow_hock_L",    -0.80+jit(), 0.44+jit(), +0.24+jit()),
+        ("cow_hock_R",    -0.80+jit(), 0.44+jit(), -0.24+jit()),
+        ("cow_hoof_BL",   -0.80+jit(), 0.00,       +0.21+jit()),
+        ("cow_hoof_BR",   -0.80+jit(), 0.00,       -0.21+jit()),
+        ("cow_cannon_FL",  0.80+jit(), 0.28+jit(), +0.23+jit()),
+        ("cow_cannon_FR",  0.80+jit(), 0.28+jit(), -0.23+jit()),
+        ("cow_cannon_BL", -0.80+jit(), 0.28+jit(), +0.22+jit()),
+        ("cow_cannon_BR", -0.80+jit(), 0.28+jit(), -0.22+jit()),
     ]
     return pts
 

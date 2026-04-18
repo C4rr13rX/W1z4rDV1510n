@@ -125,6 +125,17 @@ BOVINE_ANATOMY = [
     ("cow_flank_R",      -0.22, 0.82,-0.40),
     ("cow_back",          0.00, 1.40, 0.00),
     ("cow_hide_dorsal",   0.00, 1.44, 0.00),
+
+    # ─ Alias / shorthand labels (legacy sensor-stream names — reset to correct canonical pos) ─
+    ("cow_body",          0.00, 0.80, 0.00),   # body centroid
+    ("cow_spine",         0.00, 1.30, 0.00),   # spine midpoint
+    ("cow_neck",          1.04, 1.10, 0.00),   # neck midpoint
+    ("cow_tail",         -1.35, 0.98, 0.00),   # tail midpoint
+    ("cow_chest",         0.50, 0.68, 0.00),   # chest / sternum
+    ("cow_leg_FL",        0.80, 0.55, 0.23),   # front-left leg mid
+    ("cow_leg_FR",        0.80, 0.55,-0.23),   # front-right leg mid
+    ("cow_leg_BL",       -0.80, 0.55, 0.22),   # back-left leg mid
+    ("cow_leg_BR",       -0.80, 0.55,-0.22),   # back-right leg mid
 ]
 
 # ── Text labels co-trained with each frame ────────────────────────────────
