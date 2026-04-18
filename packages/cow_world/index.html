@@ -7,37 +7,37 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #000; overflow: hidden; font-family: monospace; }
 canvas { display: block; }
-
 #overlay {
   position: fixed; top: 12px; right: 12px;
-  display: flex; flex-direction: column; gap: 6px;
-  pointer-events: none; z-index: 10;
+  display: flex; flex-direction: column; gap: 5px;
+  pointer-events: none; z-index: 10; width: 220px;
 }
-#video-feed {
-  width: 240px; height: 135px; object-fit: cover;
-  border: 1px solid rgba(0,255,80,0.5);
-  background: #000;
+#feed-wrap {
+  width: 220px; height: 124px; overflow: hidden;
+  border: 1px solid rgba(0,255,80,0.5); background: #111;
+  position: relative;
+}
+#feed-wrap img { width: 100%; height: 100%; object-fit: cover; }
+#feed-label {
+  position: absolute; bottom: 3px; left: 4px;
+  color: rgba(0,255,80,0.7); font-size: 9px; letter-spacing: 1px;
 }
 #status-box {
-  background: rgba(0,0,0,0.65); padding: 6px 8px;
-  border: 1px solid rgba(0,255,80,0.3);
-  font-size: 11px; line-height: 1.6;
+  background: rgba(0,0,0,0.7); padding: 5px 8px;
+  border: 1px solid rgba(0,255,80,0.3); font-size: 11px; line-height: 1.7;
 }
-.s-label { color: #0f8; }
-.s-val   { color: #cfc; }
-.s-anim  { color: #ff0; font-weight: bold; }
-.s-dim   { color: #666; }
+.sl { color: #0f8; } .sv { color: #cfc; } .sa { color: #ff0; font-weight: bold; }
+.sd { color: #555; }
 #labels-box {
-  background: rgba(0,0,0,0.55); padding: 5px 8px;
+  background: rgba(0,0,0,0.6); padding: 4px 8px;
   border: 1px solid rgba(0,255,80,0.2);
-  font-size: 10px; line-height: 1.7; max-height: 120px; overflow: hidden;
+  font-size: 10px; line-height: 1.7; display: none;
 }
-.lbl { color: #0c8; }
+.lbl { color: #0d9; }
 #narrative-box {
-  background: rgba(0,0,0,0.6); padding: 5px 8px;
-  border: 1px solid rgba(0,200,255,0.3);
-  font-size: 10px; color: #8ef; line-height: 1.5; max-width: 240px;
-  display: none;
+  background: rgba(0,0,0,0.6); padding: 4px 8px;
+  border: 1px solid rgba(60,180,255,0.3);
+  font-size: 10px; color: #8ef; line-height: 1.5; display: none;
 }
 #crosshair {
   position: fixed; top: 50%; left: 50%;
@@ -48,38 +48,32 @@ canvas { display: block; }
 #hint {
   position: fixed; bottom: 14px; left: 50%;
   transform: translateX(-50%);
-  color: rgba(255,255,255,0.4); font-size: 12px;
-  font-family: monospace; pointer-events: none;
+  color: rgba(255,255,255,0.35); font-size: 12px; pointer-events: none;
 }
 #lod-badge {
   position: fixed; bottom: 14px; right: 14px;
-  color: rgba(0,255,80,0.4); font-size: 11px;
-  font-family: monospace; pointer-events: none;
+  color: rgba(0,255,80,0.35); font-size: 11px; pointer-events: none;
 }
 </style>
 </head>
 <body>
-
 <div id="overlay">
-  <img id="video-feed" alt="Neural sensor feed">
+  <div id="feed-wrap">
+    <img id="video-feed" alt="">
+    <div id="feed-label">NEURAL SENSOR FEED</div>
+  </div>
   <div id="status-box">
-    <span class="s-label">STATE </span><span id="s-anim" class="s-anim">connecting</span><br>
-    <span class="s-label">CONF  </span><span id="s-conf" class="s-val">—</span><br>
-    <span class="s-label">SPEED </span><span id="s-spd"  class="s-val">—</span><br>
-    <span class="s-label">FPS   </span><span id="s-fps"  class="s-val">—</span>
+    <span class="sl">STATE </span><span id="s-anim" class="sa">connecting</span><br>
+    <span class="sl">CONF  </span><span id="s-conf" class="sv">—</span><br>
+    <span class="sl">SPEED </span><span id="s-spd"  class="sv">—</span><br>
+    <span class="sl">FPS   </span><span id="s-fps"  class="sv">—</span>
   </div>
-  <div id="labels-box" style="display:none">
-    <div class="s-dim">NEURAL CONCEPTS</div>
-    <div id="label-list"></div>
-  </div>
-  <div id="narrative-box" id="narrative-box">
-    <span id="narrative-text"></span>
-  </div>
+  <div id="labels-box"><div class="sd">FABRIC CONCEPTS</div><div id="label-list"></div></div>
+  <div id="narrative-box"><span id="narrative-text"></span></div>
 </div>
-
 <div id="crosshair">+</div>
 <div id="hint">Click to enter free-roam · WASD move · Shift sprint · Esc exit</div>
-<div id="lod-badge">LOD:HIGH</div>
+<div id="lod-badge">LOD: HIGH</div>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
 <script>
@@ -88,258 +82,336 @@ canvas { display: block; }
 // ─── Renderer ──────────────────────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 // ─── Scene ─────────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x7ab8d8);
-scene.fog = new THREE.FogExp2(0x7ab8d8, 0.012);
 
 // ─── Camera ────────────────────────────────────────────────────────────────
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 600);
-camera.position.set(0, 3, 10);
-let camYaw = 0, camPitch = 0;
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 500);
+// Side-view starting position — approximates the video camera angle
+camera.position.set(12, 2.2, 3);
+let camYaw = -1.3, camPitch = -0.1;
+camera.rotation.order = 'YXZ';
+camera.rotation.y = camYaw;
+camera.rotation.x = camPitch;
+
+// ─── Shared video texture ──────────────────────────────────────────────────
+const videoTexture = new THREE.Texture();
+videoTexture.minFilter = THREE.LinearFilter;
+videoTexture.magFilter = THREE.LinearFilter;
+const videoImg = new Image();
+videoImg.onload = () => {
+  videoTexture.image = videoImg;
+  videoTexture.needsUpdate = true;
+};
+
+function updateVideoTexture(dataURL) {
+  videoImg.src = dataURL;
+}
+
+// ─── Background plane (fills viewport with the video frame) ───────────────
+const bgGeo = new THREE.PlaneGeometry(1, 1);
+const bgMat = new THREE.MeshBasicMaterial({ map: videoTexture, depthWrite: false });
+const bgPlane = new THREE.Mesh(bgGeo, bgMat);
+bgPlane.renderOrder = -1;
+scene.add(bgPlane);
+
+function updateBackground() {
+  const dist  = 80;
+  const ahead = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  bgPlane.position.copy(camera.position).addScaledVector(ahead, dist);
+  bgPlane.lookAt(camera.position);
+  const h = 2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  bgPlane.scale.set(h * camera.aspect, h, 1);
+}
 
 // ─── Lighting ──────────────────────────────────────────────────────────────
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const sun = new THREE.DirectionalLight(0xfffacc, 1.1);
+scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+const sun = new THREE.DirectionalLight(0xfffce0, 0.9);
 sun.position.set(30, 60, 20);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.near = 1;
-sun.shadow.camera.far  = 200;
-sun.shadow.camera.left = sun.shadow.camera.bottom = -80;
-sun.shadow.camera.right = sun.shadow.camera.top = 80;
+sun.shadow.camera.left = sun.shadow.camera.bottom = -60;
+sun.shadow.camera.right = sun.shadow.camera.top = 60;
 scene.add(sun);
-const fill = new THREE.DirectionalLight(0xb0d8ff, 0.3);
-fill.position.set(-20, 10, -15);
-scene.add(fill);
 
 // ─── Ground ────────────────────────────────────────────────────────────────
-(function buildGround() {
-  // Grass texture via canvas
+(function() {
   const c = document.createElement('canvas');
   c.width = c.height = 256;
   const ctx = c.getContext('2d');
-  ctx.fillStyle = '#3d7a35';
+  ctx.fillStyle = '#3a6e32';
   ctx.fillRect(0, 0, 256, 256);
-  // Subtle variation
-  for (let i = 0; i < 2000; i++) {
-    const x = Math.random() * 256, y = Math.random() * 256;
-    const g = Math.floor(Math.random() * 30);
-    ctx.fillStyle = `rgb(${45+g},${100+g},${40+g})`;
-    ctx.fillRect(x, y, 2, 3);
+  for (let i = 0; i < 3000; i++) {
+    const g = Math.floor(Math.random() * 25);
+    ctx.fillStyle = `rgb(${40+g},${90+g},${36+g})`;
+    ctx.fillRect(Math.random()*256, Math.random()*256, 2, 3);
   }
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(80, 80);
-
-  const geo = new THREE.PlaneGeometry(600, 600);
-  const mat = new THREE.MeshLambertMaterial({ map: tex });
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(500, 500),
+    new THREE.MeshLambertMaterial({ map: tex })
+  );
   mesh.rotation.x = -Math.PI / 2;
   mesh.receiveShadow = true;
   scene.add(mesh);
 })();
 
-// ─── Procedural cow builder ────────────────────────────────────────────────
-const MAT = {
-  white:  new THREE.MeshLambertMaterial({ color: 0xf0ede4 }),
-  black:  new THREE.MeshLambertMaterial({ color: 0x1a1a1a }),
-  pink:   new THREE.MeshLambertMaterial({ color: 0xf5a89a }),
-  hoof:   new THREE.MeshLambertMaterial({ color: 0x2a1a0a }),
-  udder:  new THREE.MeshLambertMaterial({ color: 0xf0b8a0 }),
-  horn:   new THREE.MeshLambertMaterial({ color: 0xe0c870 }),
+// ─── World-space video projection shader ──────────────────────────────────
+// Projects the video frame onto the cow mesh using the cow's local coordinate
+// system so the texture always maps: head→right, tail→left, top→up regardless
+// of the cow's world orientation.  The fragment shader receives the cow root's
+// inverse world matrix and maps each fragment to the 2D side-projection UV.
+const cowShader = {
+  uniforms: {
+    tVideo:      { value: videoTexture },
+    uInvCow:     { value: new THREE.Matrix4() },  // inverse of cowRoot.matrixWorld
+    uCowMinX:    { value: -1.4 },  // tail end in cow-local X
+    uCowSpanX:   { value:  3.0 },  // total length
+    uCowMinY:    { value:  0.0 },  // ground (hooves)
+    uCowSpanY:   { value:  2.4 },  // total height to head tip
+    // Texture crop: which portion of the frame corresponds to the cow
+    uTexOffU:    { value: 0.05 },   // left margin
+    uTexScaleU:  { value: 0.90 },   // horizontal extent
+    uTexOffV:    { value: 0.08 },   // bottom margin (ground)
+    uTexScaleV:  { value: 0.82 },   // vertical extent (up to sky)
+    uFallback:   { value: new THREE.Color(0xe8e4db) }, // off-white for clipped areas
+  },
+  vertexShader: `
+    varying vec4 vWorldPos;
+    void main() {
+      vWorldPos = modelMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * viewMatrix * vWorldPos;
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tVideo;
+    uniform mat4  uInvCow;
+    uniform float uCowMinX, uCowSpanX;
+    uniform float uCowMinY, uCowSpanY;
+    uniform float uTexOffU, uTexScaleU;
+    uniform float uTexOffV, uTexScaleV;
+    uniform vec3  uFallback;
+    varying vec4 vWorldPos;
+
+    void main() {
+      // Transform fragment to cow-root local space
+      vec3 local = (uInvCow * vWorldPos).xyz;
+
+      // Map cow local coords to [0,1] UV
+      float u = (local.x - uCowMinX) / uCowSpanX;   // 0=tail, 1=head
+      float v = (local.y - uCowMinY) / uCowSpanY;   // 0=hooves, 1=top
+
+      // Clamp to valid range; blend to fallback at edges
+      float inBounds = step(0.0, u) * step(u, 1.0) * step(0.0, v) * step(v, 1.0);
+      float edgeFade = smoothstep(0.0, 0.04, u) * smoothstep(1.0, 0.96, u)
+                     * smoothstep(0.0, 0.04, v) * smoothstep(1.0, 0.96, v);
+
+      // Map to the cow's region in the video frame
+      float su = uTexOffU + u * uTexScaleU;
+      float sv = uTexOffV + v * uTexScaleV;
+
+      vec4 texColor = texture2D(tVideo, vec2(su, sv));
+      vec4 fallback  = vec4(uFallback, 1.0);
+
+      gl_FragColor = mix(fallback, texColor, inBounds * edgeFade);
+    }
+  `,
 };
 
-function box(w, h, d, mat) {
-  return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+function makeCowMat() {
+  return new THREE.ShaderMaterial({
+    uniforms:       THREE.UniformsUtils.clone(cowShader.uniforms),
+    vertexShader:   cowShader.vertexShader,
+    fragmentShader: cowShader.fragmentShader,
+    side:           THREE.DoubleSide,
+  });
 }
-function cyl(rt, rb, h, segs, mat) {
-  return new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, segs), mat);
-}
-function sphere(r, segs, mat) {
-  return new THREE.Mesh(new THREE.SphereGeometry(r, segs, segs), mat);
-}
+
+// ─── Cow builder ──────────────────────────────────────────────────────────
+const HOOF_MAT = new THREE.MeshLambertMaterial({ color: 0x2a1a08 });
+const PINK_MAT = new THREE.MeshLambertMaterial({ color: 0xf5a898 });
+const EYE_MAT  = new THREE.MeshLambertMaterial({ color: 0x0a0a0a });
 
 function buildCow(lod) {
-  // lod: 'high' | 'med' | 'low'
-  const segs = lod === 'low' ? 4 : lod === 'med' ? 5 : 7;
+  const segs = lod === 'low' ? 5 : lod === 'med' ? 7 : 12;
   const root = new THREE.Group();
+  const mat  = makeCowMat();
 
-  // Body
-  const body = box(2.5, 1.05, 1.15, MAT.white);
+  function mesh(geo) {
+    const m = new THREE.Mesh(geo, mat);
+    m.castShadow = true;
+    return m;
+  }
+
+  // ── Body (elongated sphere) ────────────────────────────────────────────
+  const body = mesh(new THREE.SphereGeometry(1.0, segs * 2, segs));
+  body.scale.set(1.22, 0.54, 0.68);
   body.position.y = 1.62;
-  body.castShadow = true;
   root.add(body);
 
-  // Holstein black patches (thin overlay quads)
-  function patch(bx, by, bz, w, d) {
-    const m = box(w, 0.02, d, MAT.black);
-    m.position.set(bx, by + 0.535, bz);
-    body.add(m);
-  }
-  patch( 0.3,  0,  0.1,  0.7, 0.55);   // big dorsal patch
-  patch(-0.45, 0, -0.2,  0.5, 0.45);   // rear dorsal
-  // Side patches
-  function sidePatch(bx, by, bz, w, h) {
-    const m = box(w, h, 0.02, MAT.black);
-    m.position.set(bx, by, bz + 0.585);
-    body.add(m);
-  }
-  sidePatch( 0.1, 0,  0, 0.5, 0.55);
-  sidePatch(-0.55, 0, 0, 0.4, 0.45);
-
-  // Neck
+  // ── Neck ──────────────────────────────────────────────────────────────
   const neckPivot = new THREE.Object3D();
-  neckPivot.position.set(1.1, 0.25, 0);
+  neckPivot.position.set(1.15, 0.22, 0); // front of body in root space
   body.add(neckPivot);
-  const neck = cyl(0.2, 0.27, 0.6, segs, MAT.white);
-  neck.rotation.z = -0.45;
-  neck.position.set(0.22, 0.15, 0);
-  neck.castShadow = true;
+  const neck = mesh(new THREE.CylinderGeometry(0.18, 0.24, 0.62, segs));
+  neck.rotation.z = -0.5;
+  neck.position.set(0.28, 0.16, 0);
   neckPivot.add(neck);
 
-  // Head joint (at tip of neck)
+  // ── Head ──────────────────────────────────────────────────────────────
   const headJoint = new THREE.Object3D();
-  headJoint.position.set(0.5, 0.32, 0);
+  headJoint.position.set(0.52, 0.34, 0);
   neckPivot.add(headJoint);
 
-  const head = box(0.78, 0.62, 0.68, MAT.white);
-  head.position.set(0.32, 0, 0);
-  head.castShadow = true;
+  const head = mesh(new THREE.SphereGeometry(0.36, segs * 2, segs));
+  head.scale.set(1.18, 0.92, 0.90);
+  head.position.set(0.28, 0, 0);
   headJoint.add(head);
 
-  // Black face blaze
-  const blaze = box(0.25, 0.35, 0.01, MAT.black);
-  blaze.position.set(0.25, 0.05, 0.345);
-  head.add(blaze);
-
   // Snout
-  const snout = box(0.38, 0.33, 0.56, MAT.white);
-  snout.position.set(0.53, -0.1, 0);
+  const snout = mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.30, segs));
+  snout.rotation.z = Math.PI / 2;
+  snout.position.set(0.38, -0.04, 0);
   head.add(snout);
-  const nose = box(0.15, 0.12, 0.44, MAT.pink);
-  nose.position.set(0.2, 0, 0);
-  snout.add(nose);
+
+  // Nose pad
+  const nosePad = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.18, 0.18, 0.02, segs),
+    PINK_MAT
+  );
+  nosePad.rotation.z = Math.PI / 2;
+  nosePad.position.set(0.16, -0.04, 0);
+  snout.add(nosePad);
+
   // Nostrils
-  const nl = sphere(0.04, 4, MAT.black); nl.position.set(0.08, 0.02,  0.1); snout.add(nl);
-  const nr = sphere(0.04, 4, MAT.black); nr.position.set(0.08, 0.02, -0.1); snout.add(nr);
+  for (const z of [0.07, -0.07]) {
+    const n = new THREE.Mesh(new THREE.SphereGeometry(0.03, 4, 4), EYE_MAT);
+    n.position.set(0.08, -0.04, z);
+    snout.add(n);
+  }
 
   // Eyes
-  const eyeL = sphere(0.07, 5, MAT.black); eyeL.position.set(0.2,  0.12,  0.3); head.add(eyeL);
-  const eyeR = sphere(0.07, 5, MAT.black); eyeR.position.set(0.2,  0.12, -0.3); head.add(eyeR);
-
-  // Ears
-  const earL = box(0.18, 0.28, 0.07, MAT.pink);
-  earL.position.set(-0.18, 0.36,  0.33); earL.rotation.z = 0.25;
-  const earR = earL.clone();
-  earR.position.set(-0.18, 0.36, -0.33); earR.rotation.z = -0.25;
-  head.add(earL); head.add(earR);
-
-  // Horns (high only)
-  let hornL, hornR;
-  if (lod === 'high') {
-    hornL = cyl(0.02, 0.04, 0.28, 4, MAT.horn);
-    hornL.position.set(-0.15, 0.36, 0.24);
-    hornL.rotation.set(0.2, 0, -0.5);
-    hornR = hornL.clone();
-    hornR.position.set(-0.15, 0.36, -0.24);
-    hornR.rotation.set(-0.2, 0, -0.5);
-    head.add(hornL); head.add(hornR);
+  if (lod !== 'low') {
+    for (const z of [0.28, -0.28]) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.065, 6, 6), EYE_MAT);
+      eye.position.set(0.18, 0.1, z);
+      head.add(eye);
+    }
+    // Ears
+    for (const z of [0.32, -0.32]) {
+      const ear = new THREE.Mesh(
+        new THREE.SphereGeometry(0.1, 6, 5),
+        PINK_MAT
+      );
+      ear.scale.set(0.5, 1.1, 0.4);
+      ear.position.set(-0.12, 0.30, z);
+      ear.rotation.z = z > 0 ? 0.3 : -0.3;
+      head.add(ear);
+    }
   }
 
-  // 4 Legs
+  // Horns (high LOD)
+  if (lod === 'high') {
+    for (const z of [0.22, -0.22]) {
+      const horn = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.01, 0.035, 0.28, 5),
+        new THREE.MeshLambertMaterial({ color: 0xd8c060 })
+      );
+      horn.position.set(-0.08, 0.38, z);
+      horn.rotation.set(z > 0 ? 0.2 : -0.2, 0, -0.45);
+      head.add(horn);
+    }
+  }
+
+  // ── 4 Legs ────────────────────────────────────────────────────────────
   const legDefs = [
-    { name:'fl', lx: 0.85, lz:  0.44 },
-    { name:'fr', lx: 0.85, lz: -0.44 },
-    { name:'bl', lx:-0.85, lz:  0.44 },
-    { name:'br', lx:-0.85, lz: -0.44 },
+    { name: 'fl', x:  0.82, z:  0.46 },
+    { name: 'fr', x:  0.82, z: -0.46 },
+    { name: 'bl', x: -0.82, z:  0.46 },
+    { name: 'br', x: -0.82, z: -0.46 },
   ];
   const legs = {};
-  for (const def of legDefs) {
-    const legPivot = new THREE.Object3D();
-    legPivot.position.set(def.lx, -0.525, def.lz);
-    body.add(legPivot);
+  for (const d of legDefs) {
+    const pivot = new THREE.Object3D();
+    pivot.position.set(d.x, -0.54, d.z); // body-local
+    body.add(pivot);
 
-    const upper = cyl(0.12, 0.1, 0.55, segs, MAT.white);
-    upper.position.y = -0.275;
-    upper.castShadow = true;
-    legPivot.add(upper);
+    const upper = mesh(new THREE.CylinderGeometry(0.09, 0.08, 0.56, segs));
+    upper.position.y = -0.28;
+    pivot.add(upper);
 
-    const kneeJoint = new THREE.Object3D();
-    kneeJoint.position.y = -0.55;
-    legPivot.add(kneeJoint);
+    const knee = new THREE.Object3D();
+    knee.position.y = -0.56;
+    pivot.add(knee);
 
-    const lower = cyl(0.09, 0.08, 0.52, segs, MAT.white);
-    lower.position.y = -0.26;
-    lower.castShadow = true;
-    kneeJoint.add(lower);
+    const lower = mesh(new THREE.CylinderGeometry(0.07, 0.065, 0.50, segs));
+    lower.position.y = -0.25;
+    knee.add(lower);
 
-    const hoofMesh = box(0.18, 0.12, 0.22, MAT.hoof);
-    hoofMesh.position.y = -0.55;
-    kneeJoint.add(hoofMesh);
+    const hoof = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.11, 0.21), HOOF_MAT);
+    hoof.position.y = -0.55;
+    knee.add(hoof);
 
-    legs[def.name] = { pivot: legPivot, kneeJoint };
+    legs[d.name] = { pivot, knee };
   }
 
-  // Tail
+  // ── Tail ──────────────────────────────────────────────────────────────
   const tailRoot = new THREE.Object3D();
-  tailRoot.position.set(-1.25, 0.15, 0);
+  tailRoot.position.set(-1.22, 0.18, 0);
   body.add(tailRoot);
 
-  const tailSeg1 = new THREE.Object3D();
-  tailSeg1.position.set(-0.18, 0, 0);
-  tailRoot.add(tailSeg1);
-
-  const t1 = cyl(0.04, 0.05, 0.38, 4, MAT.white);
-  t1.rotation.z = Math.PI / 2;
-  t1.position.x = -0.19;
-  tailRoot.add(t1);
-
-  const tailSeg2 = new THREE.Object3D();
-  tailSeg2.position.x = -0.38;
-  tailRoot.add(tailSeg2);
-
-  const t2 = cyl(0.03, 0.04, 0.28, 4, MAT.white);
-  t2.rotation.z = Math.PI / 2;
-  t2.position.x = -0.14;
-  tailSeg2.add(t2);
+  for (let i = 0; i < (lod === 'low' ? 1 : 3); i++) {
+    const seg = mesh(new THREE.CylinderGeometry(0.025 - i*0.005, 0.038 - i*0.008, 0.32, 4));
+    seg.rotation.z = Math.PI / 2;
+    seg.position.x = -(0.16 + i * 0.32);
+    tailRoot.add(seg);
+  }
 
   // Tail tuft
-  const tuft = sphere(0.1, 4, MAT.black);
-  tuft.position.x = -0.3;
-  tailSeg2.add(tuft);
+  const tuft = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09, 5, 4),
+    new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
+  );
+  tuft.position.x = lod === 'low' ? -0.48 : -1.0;
+  tailRoot.add(tuft);
 
-  // Udder (high only)
+  // ── Udder (high LOD) ──────────────────────────────────────────────────
   let udder = null;
   if (lod === 'high') {
     udder = new THREE.Group();
-    udder.position.set(-0.3, -0.56, 0);
+    udder.position.set(-0.28, -0.58, 0);
     body.add(udder);
-    const tPos = [[0.13,0,0.13],[0.13,0,-0.13],[-0.1,0,0.13],[-0.1,0,-0.13]];
-    for (const [tx,ty,tz] of tPos) {
-      const t = sphere(0.1, 5, MAT.udder);
-      t.position.set(tx, ty, tz);
-      udder.add(t);
+    for (const [tx, tz] of [[0.12, 0.12],[0.12,-0.12],[-0.09, 0.12],[-0.09,-0.12]]) {
+      const q = new THREE.Mesh(
+        new THREE.SphereGeometry(0.1, 6, 5),
+        new THREE.MeshLambertMaterial({ color: 0xeeb090 })
+      );
+      q.position.set(tx, 0, tz);
+      udder.add(q);
+      const teat = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.025, 0.12, 4),
+        new THREE.MeshLambertMaterial({ color: 0xe0a07a })
+      );
+      teat.position.set(tx, -0.1, tz);
+      udder.add(teat);
     }
-    const teat1 = cyl(0.025, 0.03, 0.15, 4, MAT.udder);
-    teat1.position.set(0.13, -0.12, 0.13);
-    udder.add(teat1);
   }
 
-  // Store references for animation
+  // Store refs
   root.userData = {
-    body, headJoint, neckPivot, tailRoot, tailSeg1, tailSeg2,
-    legs,
-    highOnly: [hornL, hornR, udder].filter(Boolean),
-    earParts: [earL, earR],
-    lod,
+    mat, body, headJoint, neckPivot, tailRoot, legs, lod,
+    highOnly: [udder].filter(Boolean),
+    medLowHide: [],   // populated below
   };
 
+  // LOD switching: ears/horns are already conditionally built
   return root;
 }
 
@@ -349,24 +421,37 @@ let currentLOD = 'high';
 scene.add(cow);
 cow.position.set(0, 0, 0);
 
+// Inverse matrix for the shader — updated each frame
+const cowInvMatrix = new THREE.Matrix4();
+
+function syncShaderUniforms() {
+  cow.updateMatrixWorld(true);
+  cowInvMatrix.copy(cow.matrixWorld).invert();
+  // Update all shader material instances in the cow
+  cow.traverse(obj => {
+    if (obj.isMesh && obj.material && obj.material.uniforms && obj.material.uniforms.uInvCow) {
+      obj.material.uniforms.uInvCow.value.copy(cowInvMatrix);
+      obj.material.uniforms.tVideo.value = videoTexture;
+    }
+  });
+}
+
 function setLOD(lod) {
   if (lod === currentLOD) return;
   currentLOD = lod;
-  document.getElementById('lod-badge').textContent = 'LOD:' + lod.toUpperCase();
-
-  const u = cow.userData;
-  const isHigh = lod === 'high';
-  const notLow  = lod !== 'low';
-
-  u.highOnly.forEach(m => { if (m) m.visible = isHigh; });
-  u.earParts.forEach(m => { m.visible = notLow; });
+  document.getElementById('lod-badge').textContent = 'LOD: ' + lod.toUpperCase();
+  // Rebuild cow at new LOD
+  scene.remove(cow);
+  const oldPos = cow.position.clone();
+  const oldRotY = cow.rotation.y;
+  cow = buildCow(lod);
+  cow.position.copy(oldPos);
+  cow.rotation.y = oldRotY;
+  scene.add(cow);
 }
 
-// ─── Animation state (interpolated) ────────────────────────────────────────
-let target = {
-  walkPhase: 0, walkSpeed: 0, headPitch: 0, headYaw: 0,
-  bodyYaw: 0, animState: 'stand', confidence: 0,
-};
+// ─── Pose interpolation ──────────────────────────────────────────────────
+let target  = { walkPhase:0, walkSpeed:0, headPitch:0, headYaw:0, bodyYaw:0, animState:'stand' };
 let current = { ...target };
 
 function lerpAngle(a, b, t) {
@@ -376,85 +461,66 @@ function lerpAngle(a, b, t) {
   return a + d * t;
 }
 
-// ─── WebSocket connection ────────────────────────────────────────────────────
-let wsReconnectDelay = 1000;
-let wsConnected = false;
+// ─── WebSocket ───────────────────────────────────────────────────────────
+let wsDelay = 1000;
 
 function connectWS() {
   const ws = new WebSocket('ws://localhost:8092');
-
   ws.onopen = () => {
-    wsConnected = true;
-    wsReconnectDelay = 1000;
+    wsDelay = 1000;
     document.getElementById('s-anim').textContent = 'connected';
-    document.getElementById('s-anim').className = 's-val';
+    document.getElementById('s-anim').className = 'sv';
   };
-
-  ws.onmessage = (e) => {
+  ws.onmessage = e => {
     try {
       const d = JSON.parse(e.data);
       if (d.type !== 'pose') return;
-
-      // Update target pose
-      target.walkSpeed  = d.walk_speed  ?? 0;
-      target.headPitch  = d.head_pitch  ?? 0;
-      target.headYaw    = d.head_yaw    ?? 0;
-      target.bodyYaw    = (d.body_yaw   ?? 0) * Math.PI / 180;
+      target.walkSpeed  = d.walk_speed   ?? 0;
+      target.headPitch  = d.head_pitch   ?? 0;
+      target.headYaw    = d.head_yaw     ?? 0;
+      target.bodyYaw    = (d.body_yaw    ?? 0) * Math.PI / 180;
       target.animState  = d.animation_state ?? 'stand';
-      target.confidence = d.confidence  ?? 0;
+      target.walkPhase  = d.walk_phase   ?? target.walkPhase;
 
-      // Walk phase: accept directly (already integrated server-side)
-      target.walkPhase  = d.walk_phase  ?? target.walkPhase;
-
-      // Update overlays
       document.getElementById('s-anim').textContent = target.animState.toUpperCase();
-      document.getElementById('s-anim').className = 's-anim';
-      document.getElementById('s-conf').textContent = target.confidence.toFixed(2);
-      document.getElementById('s-spd').textContent  = target.walkSpeed.toFixed(2);
+      document.getElementById('s-anim').className = 'sa';
+      document.getElementById('s-conf').textContent = (d.confidence ?? 0).toFixed(2);
+      document.getElementById('s-spd').textContent  = (d.walk_speed ?? 0).toFixed(2);
 
       if (d.frame_b64) {
         document.getElementById('video-feed').src = d.frame_b64;
+        updateVideoTexture(d.frame_b64);
       }
 
-      // Concept labels
-      const labels = [...(d.concept_labels || []), ...(d.snap_labels || [])];
-      const unique  = [...new Set(labels)].slice(0, 12);
-      if (unique.length > 0) {
-        const box = document.getElementById('labels-box');
-        box.style.display = 'block';
-        document.getElementById('label-list').innerHTML =
-          unique.map(l => `<div class="lbl">${l}</div>`).join('');
+      const labels = [...(d.concept_labels || [])].slice(0, 8);
+      if (labels.length) {
+        document.getElementById('labels-box').style.display = 'block';
+        document.getElementById('label-list').innerHTML = labels.map(l =>
+          `<div class="lbl">${l}</div>`).join('');
       }
-
       if (d.narrative) {
-        const nb = document.getElementById('narrative-box');
-        nb.style.display = 'block';
+        document.getElementById('narrative-box').style.display = 'block';
         document.getElementById('narrative-text').textContent = d.narrative;
       }
     } catch (_) {}
   };
-
   ws.onclose = () => {
-    wsConnected = false;
     document.getElementById('s-anim').textContent = 'disconnected';
-    document.getElementById('s-anim').className = 's-dim';
-    setTimeout(connectWS, wsReconnectDelay);
-    wsReconnectDelay = Math.min(wsReconnectDelay * 1.5, 8000);
+    document.getElementById('s-anim').className = 'sd';
+    setTimeout(connectWS, wsDelay);
+    wsDelay = Math.min(wsDelay * 1.5, 8000);
   };
-
   ws.onerror = () => ws.close();
 }
 connectWS();
 
-// ─── Camera / pointer lock ───────────────────────────────────────────────────
+// ─── Camera / pointer lock ───────────────────────────────────────────────
 let isPointerLocked = false;
 const keys = {};
 document.addEventListener('keydown', e => { keys[e.code] = true; });
 document.addEventListener('keyup',   e => { keys[e.code] = false; });
 
-renderer.domElement.addEventListener('click', () => {
-  renderer.domElement.requestPointerLock();
-});
+renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
 document.addEventListener('pointerlockchange', () => {
   isPointerLocked = !!document.pointerLockElement;
   document.getElementById('crosshair').style.display = isPointerLocked ? 'block' : 'none';
@@ -463,121 +529,117 @@ document.addEventListener('pointerlockchange', () => {
 document.addEventListener('mousemove', e => {
   if (!isPointerLocked) return;
   camYaw   -= e.movementX * 0.0018;
-  camPitch  = Math.max(-1.1, Math.min(1.1, camPitch - e.movementY * 0.0018));
+  camPitch  = Math.max(-1.1, Math.min(0.7, camPitch - e.movementY * 0.0018));
 });
 
-// ─── FPS tracking + auto-LOD ─────────────────────────────────────────────────
+// ─── FPS / auto-LOD ──────────────────────────────────────────────────────
 const fpsWindow = [];
-let lastFrameTime = performance.now();
-
+let lastTime = performance.now();
 function trackFPS(now) {
-  const dt = now - lastFrameTime;
-  lastFrameTime = now;
+  const dt = now - lastTime; lastTime = now;
   fpsWindow.push(1000 / dt);
-  if (fpsWindow.length > 120) fpsWindow.shift();
+  if (fpsWindow.length > 90) fpsWindow.shift();
   if (fpsWindow.length < 30) return;
-
-  const avg = fpsWindow.reduce((a, b) => a + b, 0) / fpsWindow.length;
+  const avg = fpsWindow.reduce((a, b) => a + b) / fpsWindow.length;
   document.getElementById('s-fps').textContent = avg.toFixed(0);
-
   if      (avg < 20 && currentLOD !== 'low')  setLOD('low');
   else if (avg < 30 && currentLOD === 'high') setLOD('med');
-  else if (avg > 50 && currentLOD !== 'high') setLOD('high');
+  else if (avg > 52 && currentLOD !== 'high') setLOD('high');
 }
 
-// ─── Cow position in world ───────────────────────────────────────────────────
-const cowPos = new THREE.Vector3(0, 0, 0);
-let   cowYaw = 0;
-const BOUND = 50;
+// ─── Cow world position ───────────────────────────────────────────────────
+const cowPos  = new THREE.Vector3(0, 0, 0);
+let   cowYaw  = 0;
+const BOUND   = 50;
+const clock   = new THREE.Clock();
 
-// ─── Animation loop ──────────────────────────────────────────────────────────
-const clock = new THREE.Clock();
-
+// ─── Animation loop ───────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
   trackFPS(performance.now());
 
-  const dt  = Math.min(clock.getDelta(), 0.1);
-  const t   = clock.elapsedTime;
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const t  = clock.elapsedTime;
 
-  // ── Interpolate pose ─────────────────────────────────────────────────────
-  const alpha = 1.0 - Math.pow(0.05, dt * 8);
-  current.walkSpeed = current.walkSpeed + (target.walkSpeed - current.walkSpeed) * alpha;
-  current.headPitch = current.headPitch + (target.headPitch - current.headPitch) * alpha;
-  current.headYaw   = current.headYaw   + (target.headYaw   - current.headYaw  ) * alpha;
-  current.bodyYaw   = lerpAngle(current.bodyYaw, target.bodyYaw, alpha * 0.3);
-
-  // Integrate walk phase locally so animation stays smooth between WS frames
+  // ── Interpolate target → current ──────────────────────────────────────
+  const a = 1 - Math.pow(0.04, dt * 6);
+  current.walkSpeed = current.walkSpeed + (target.walkSpeed - current.walkSpeed) * a;
+  current.headPitch = current.headPitch + (target.headPitch - current.headPitch) * a;
+  current.headYaw   = current.headYaw   + (target.headYaw   - current.headYaw)   * a;
+  current.bodyYaw   = lerpAngle(current.bodyYaw, target.bodyYaw, a * 0.25);
   current.walkPhase = (current.walkPhase + current.walkSpeed * dt) % (Math.PI * 2);
 
-  // ── Cow world movement ───────────────────────────────────────────────────
   const isWalking = target.animState === 'walk';
-  const cowSpeed  = current.walkSpeed * 0.032;
-  cowYaw = lerpAngle(cowYaw, current.bodyYaw, alpha * 0.15);
+  const isGrazing = target.animState === 'graze';
 
+  // ── Cow movement ───────────────────────────────────────────────────────
+  cowYaw = lerpAngle(cowYaw, current.bodyYaw, a * 0.12);
   if (isWalking) {
-    cowPos.x += Math.sin(cowYaw) * cowSpeed;
-    cowPos.z += Math.cos(cowYaw) * cowSpeed;
+    cowPos.x += Math.sin(cowYaw) * current.walkSpeed * 0.025;
+    cowPos.z += Math.cos(cowYaw) * current.walkSpeed * 0.025;
   }
-
-  // Boundary turn
   if (Math.abs(cowPos.x) > BOUND || Math.abs(cowPos.z) > BOUND) {
-    current.bodyYaw += Math.PI * 0.02;
-    target.bodyYaw  = current.bodyYaw;
+    target.bodyYaw = current.bodyYaw + Math.PI + (Math.random() - 0.5) * 0.8;
   }
 
-  // Ground bounce during walk
-  const bounce = isWalking ? Math.abs(Math.sin(current.walkPhase * 2)) * 0.035 * Math.min(current.walkSpeed / 3, 1) : 0;
+  const bounce = isWalking
+    ? Math.abs(Math.sin(current.walkPhase * 2)) * 0.03 * Math.min(current.walkSpeed / 3, 1)
+    : 0;
   cow.position.set(cowPos.x, bounce, cowPos.z);
-  cow.rotation.y = cowYaw + Math.PI; // face forward
+  cow.rotation.y = cowYaw + Math.PI;
 
-  // ── Leg animation ────────────────────────────────────────────────────────
+  // ── Leg animation ──────────────────────────────────────────────────────
+  const amp  = Math.min(current.walkSpeed / 2.5, 1.0) * 0.30;
   const p    = current.walkPhase;
-  const amp  = Math.min(current.walkSpeed / 3.0, 1.0) * 0.32;
   const legs = cow.userData.legs;
 
-  // Diagonal pairs: FL+BR in phase, FR+BL offset by π
-  legs.fl.pivot.rotation.x = Math.sin(p)          * amp;
-  legs.br.pivot.rotation.x = Math.sin(p)          * amp;
-  legs.fr.pivot.rotation.x = Math.sin(p + Math.PI) * amp;
-  legs.bl.pivot.rotation.x = Math.sin(p + Math.PI) * amp;
+  if (legs) {
+    legs.fl.pivot.rotation.x = Math.sin(p)           * amp;
+    legs.br.pivot.rotation.x = Math.sin(p)           * amp;
+    legs.fr.pivot.rotation.x = Math.sin(p + Math.PI) * amp;
+    legs.bl.pivot.rotation.x = Math.sin(p + Math.PI) * amp;
 
-  // Knee flex on lift phase
-  for (const [name, leg] of Object.entries(legs)) {
-    const phase = (name === 'fl' || name === 'br') ? p : p + Math.PI;
-    leg.kneeJoint.rotation.x = Math.max(0, Math.sin(phase)) * amp * 0.75;
+    for (const [n, leg] of Object.entries(legs)) {
+      const phase = (n === 'fl' || n === 'br') ? p : p + Math.PI;
+      leg.knee.rotation.x = Math.max(0, Math.sin(phase)) * amp * 0.7;
+    }
   }
 
-  // ── Head movement ────────────────────────────────────────────────────────
+  // ── Head movement ──────────────────────────────────────────────────────
   const u = cow.userData;
-  u.headJoint.rotation.x = (current.headPitch * Math.PI / 180)
-    + (isWalking ? Math.sin(p) * 0.04 * Math.min(current.walkSpeed / 3, 1) : 0);
-  u.headJoint.rotation.y = current.headYaw * Math.PI / 180;
+  if (u.headJoint) {
+    u.headJoint.rotation.x = current.headPitch * Math.PI / 180
+      + (isWalking ? Math.sin(p) * 0.03 : 0);
+    u.headJoint.rotation.y = current.headYaw * Math.PI / 180;
+  }
 
-  // ── Tail sway ────────────────────────────────────────────────────────────
-  u.tailRoot.rotation.z  = Math.sin(t * 1.8)        * 0.18;
-  u.tailSeg1.rotation.z  = Math.sin(t * 1.8 + 0.6)  * 0.25;
-  u.tailSeg2.rotation.z  = Math.sin(t * 1.8 + 1.2)  * 0.30;
-  // Horizontal wag
-  u.tailRoot.rotation.y  = Math.sin(t * 0.9) * 0.12;
+  // ── Tail sway ──────────────────────────────────────────────────────────
+  if (u.tailRoot) {
+    u.tailRoot.rotation.z = Math.sin(t * 1.7) * 0.20;
+    u.tailRoot.rotation.y = Math.sin(t * 0.9) * 0.14;
+  }
 
-  // ── Body subtle sway ─────────────────────────────────────────────────────
-  u.body.rotation.z = isWalking
-    ? Math.sin(p * 2) * 0.015 * Math.min(current.walkSpeed / 3, 1)
-    : 0;
+  // ── Body sway ──────────────────────────────────────────────────────────
+  if (u.body) {
+    u.body.rotation.z = isWalking ? Math.sin(p * 2) * 0.012 * Math.min(current.walkSpeed / 3, 1) : 0;
+  }
 
-  // ── Camera ───────────────────────────────────────────────────────────────
+  // ── Sync shader uniforms (cow world position changed) ─────────────────
+  syncShaderUniforms();
+
+  // ── Background ────────────────────────────────────────────────────────
+  updateBackground();
+
+  // ── Camera ────────────────────────────────────────────────────────────
   if (isPointerLocked) {
-    // Free-roam
-    const speed = keys['ShiftLeft'] || keys['ShiftRight'] ? 0.18 : 0.07;
-    const dir = new THREE.Vector3();
-    if (keys['KeyW']) dir.z -= 1;
-    if (keys['KeyS']) dir.z += 1;
-    if (keys['KeyA']) dir.x -= 1;
-    if (keys['KeyD']) dir.x += 1;
+    const spd = (keys['ShiftLeft'] || keys['ShiftRight']) ? 0.20 : 0.08;
+    const dir = new THREE.Vector3(
+      (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0),
+      0,
+      (keys['KeyS'] ? 1 : 0) - (keys['KeyW'] ? 1 : 0)
+    );
     if (dir.lengthSq() > 0) {
-      dir.normalize().multiplyScalar(speed);
-      dir.applyEuler(new THREE.Euler(0, camYaw, 0));
+      dir.normalize().multiplyScalar(spd).applyEuler(new THREE.Euler(0, camYaw, 0));
       camera.position.add(dir);
     }
     camera.position.y = Math.max(0.3, camera.position.y);
@@ -585,14 +647,19 @@ function animate() {
     camera.rotation.y = camYaw;
     camera.rotation.x = camPitch;
   } else {
-    // Third-person follow
-    const dist = 9, height = 3.5;
-    const tx = cow.position.x - Math.sin(cowYaw) * dist;
-    const tz = cow.position.z - Math.cos(cowYaw) * dist;
-    camera.position.x += (tx - camera.position.x) * 0.04;
-    camera.position.y += (height - camera.position.y) * 0.04;
-    camera.position.z += (tz - camera.position.z) * 0.04;
+    // Default: orbit behind & to the side of the cow (matches video angle)
+    const dist = 10, height = 2.4;
+    const tx = cow.position.x + Math.cos(cowYaw + 1.4) * dist;
+    const tz = cow.position.z + Math.sin(cowYaw + 1.4) * dist;
+    camera.position.x += (tx - camera.position.x) * 0.035;
+    camera.position.y += (height - camera.position.y) * 0.035;
+    camera.position.z += (tz - camera.position.z) * 0.035;
     camera.lookAt(cow.position.x, cow.position.y + 1.6, cow.position.z);
+
+    // Sync camYaw to current camera direction for smooth pointer-lock entry
+    const dir2 = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    camYaw   = Math.atan2(dir2.x, -dir2.z);
+    camPitch = Math.asin(-dir2.y);
   }
 
   renderer.render(scene, camera);

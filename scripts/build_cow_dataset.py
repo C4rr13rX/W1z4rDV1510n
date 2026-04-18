@@ -96,6 +96,7 @@ STAGES = {
     4: 'Histology images   — tissue plates from Wikimedia',
     5: 'Molecular data     — PDB structures + molecular imagery',
     6: 'Bovine Q&A pairs   — embedded domain Q&A for chat capability',
+    7: 'Cross-modal train  — video frame + anatomy text Hebbian links',
 }
 
 # ── PubMed Central search terms for bovine anatomy ───────────────────────────
@@ -2041,12 +2042,103 @@ def write_manifest(data_dir: Path, stages: dict[int, list[dict]]) -> Path:
     return out
 
 
+# ── Stage 7: Cross-modal training ────────────────────────────────────────────
+# Pairs each cow video frame with an anatomical text description in a single
+# /media/train call.  This creates Hebbian connections between visual patterns
+# and bovine anatomy text concepts so the fabric outputs semantic labels
+# (e.g. "bovine:leg", "bovine:spine") when shown new cow images.
+
+CROSS_MODAL_CONTEXTS = [
+    "Holstein dairy cow bovine anatomy legs spine neck head tail udder",
+    "Bovine locomotion musculoskeletal system limbs hoof stride gait",
+    "Dairy cow body condition dorsal spine ribs pelvis bovine conformation",
+    "Bovine thorax abdomen rumen reticulum digestive system flank",
+    "Cattle behavior grazing standing walking bovine ethology pasture",
+    "Holstein Friesian breed black white coat pattern udder teat milking",
+    "Bovine cervical thoracic lumbar sacral vertebrae spine atlas axis",
+    "Cow face eye horn ear muzzle nasal head anatomy bovine skull",
+    "Bovine fetlock pastern coronary hoof coffin bone digital anatomy",
+    "Bovine shoulder elbow carpal metacarpal front limb forelimb",
+    "Bovine hip stifle hock metatarsal rear limb hindlimb anatomy",
+    "Dairy cattle poll forehead brow occipital bovine cranium",
+]
+
+
+def build_cross_modal(frames_dir: Path, videos_dir: Path, train_dir: Path,
+                      node: str, max_frames: int = 300) -> list:
+    """Stage 7: Cross-modal Hebbian training — image + anatomical text paired.
+
+    Samples up to max_frames from the Stage 2 extracted frames and trains
+    each alongside a text description derived from the source video title and
+    rotating anatomical context strings.  This bridges the visual and text
+    domains so /neuro/snapshot returns bovine anatomy labels during inference.
+    """
+    out_dir = train_dir / 'stage7_crossmodal'
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build video title map
+    title_map: dict = {}
+    for info_file in videos_dir.glob('*.info.json'):
+        try:
+            d = json.loads(info_file.read_bytes())
+            title_map[info_file.stem] = d.get('title', '')
+        except Exception:
+            pass
+
+    all_frames = sorted(frames_dir.glob('*.jpg'))
+    if not all_frames:
+        print(f'  [WARN] No frames found in {frames_dir}')
+        return []
+
+    step    = max(1, len(all_frames) // max_frames)
+    sampled = all_frames[::step][:max_frames]
+    base    = f'http://{node}'
+    items   = []
+    ok      = 0
+
+    print(f'  Cross-modal: {len(sampled)} frame-text pairs (from {len(all_frames)} frames)...')
+
+    for i, fp in enumerate(sampled):
+        video_id = fp.stem.split('_')[0]
+        title    = title_map.get(video_id, 'Bovine dairy cow CC video')
+        ctx      = CROSS_MODAL_CONTEXTS[i % len(CROSS_MODAL_CONTEXTS)]
+        text     = f'{title}. {ctx}.'
+
+        try:
+            with open(fp, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode()
+        except Exception:
+            continue
+
+        body = json.dumps({'modality': 'image', 'data_b64': b64, 'text': text}).encode()
+        req  = urllib.request.Request(
+            f'{base}/media/train', data=body,
+            headers={'Content-Type': 'application/json'}, method='POST')
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                json.loads(r.read())
+            ok += 1
+        except Exception as e:
+            print(f'  [WARN] frame {i}: {e}')
+
+        items.append({
+            'stage': 7, 'type': 'cross_modal', 'source': 'stage2_video',
+            'title': f'{title[:60]} [{fp.stem}]', 'text': text,
+            'modality': 'multimodal',
+            'tags': ['cross_modal', 'bovine', 'video', 'anatomy'],
+        })
+        time.sleep(0.05)
+
+    print(f'  Cross-modal trained: {ok}/{len(sampled)} pairs')
+    return items
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(
         description='Build and ingest bovine anatomy training dataset into W1z4rD node')
-    ap.add_argument('--stages',    default='0,1,2,3,4,5,6',
+    ap.add_argument('--stages',    default='0,1,2,3,4,5,6,7',
                     help='Comma-separated stage IDs to run (default all)')
     ap.add_argument('--node',      default=DEFAULT_NODE,
                     help='Node host:port (default localhost:8090)')
@@ -2147,6 +2239,16 @@ def main():
             items6 = build_bovine_qa(train_dir / 'stage6_qa', args.node)
             all_items[6] = items6
 
+    if 7 in stages_to_run:
+        print('\n[Stage 7] Cross-modal training (image + anatomical text Hebbian links)')
+        if args.download_only:
+            print('  [SKIP] Stage 7: cross-modal training skipped in --download-only mode')
+        else:
+            frames_dir = train_dir / 'stage2_video' / 'frames'
+            videos_dir = train_dir / 'stage2_video' / 'videos'
+            items7 = build_cross_modal(frames_dir, videos_dir, train_dir, args.node)
+            all_items[7] = items7
+
     # ── Write manifest ───────────────────────────────────────────────────────
     write_manifest(data_dir, all_items)
 
@@ -2154,7 +2256,7 @@ def main():
     if not args.download_only:
         # Stage 6 Q&A items are already ingested via /qa/ingest in build_bovine_qa
         all_flat = [it for sid, items in all_items.items() for it in items
-                    if sid != 6 and (it.get('b64') or it.get('text'))]
+                    if sid not in (6, 7) and (it.get('b64') or it.get('text'))]
         print(f'\n[Ingest] Posting {len(all_flat)} items to http://{args.node} ...')
         total_ok = ingest_batch(all_flat, args.node, workers=args.workers)
         print(f'  Ingested {total_ok}/{len(all_flat)} items successfully')

@@ -1,205 +1,199 @@
 #!/usr/bin/env python3
 """
 Cow Sensor Stream — W1z4rD V1510n
-Reads Stage 2 cow video frames, routes each frame through the neural fabric
-(/entity/observe), and broadcasts pose/state updates over WebSocket for the
-3D cow world frontend.
+Reads pre-extracted Stage 2 JPEG frames, routes each through the neural fabric
+(/media/train cross-modal: image + anatomical text), reads /neuro/snapshot and
+/qa/query for semantic state, and broadcasts over WebSocket for the 3D world.
+
+No third-party CV libraries — the neural fabric is the vision system.
 
 Ports:
   8092  WebSocket  ws://localhost:8092
   8093  HTTP       http://localhost:8093   (serves packages/cow_world/)
 
 Usage:
-  python scripts/cow_sensor_stream.py [--node localhost:8090] [--fps 8]
+  python scripts/cow_sensor_stream.py [--node localhost:8090] [--fps 4]
 """
-import argparse, asyncio, base64, io, json, math, os, sys, threading, time
+import argparse, asyncio, base64, json, math, sys, threading, time
 import urllib.request
-from pathlib import Path
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
 from typing import Optional
 
-import cv2
-import numpy as np
 import websockets
 
-ROOT = Path(__file__).resolve().parent.parent
-VIDEO_DIR = Path("D:/w1z4rdv1510n-data/training/training/stage2_video/videos")
-HTML_DIR  = ROOT / "packages" / "cow_world"
+ROOT       = Path(__file__).resolve().parent.parent
+FRAMES_DIR = Path("D:/w1z4rdv1510n-data/training/training/stage2_video/frames")
+VIDEOS_DIR = Path("D:/w1z4rdv1510n-data/training/training/stage2_video/videos")
+HTML_DIR   = ROOT / "packages" / "cow_world"
+
+# Rotating anatomical context strings for cross-modal training variety
+CONTEXTS = [
+    "Holstein dairy cow bovine anatomy legs spine neck head tail udder",
+    "Bovine locomotion musculoskeletal system limbs hoof stride gait",
+    "Dairy cow body condition dorsal spine ribs pelvis bovine conformation",
+    "Bovine thorax abdomen rumen reticulum digestive system flank",
+    "Cattle behavior grazing standing walking bovine ethology pasture",
+    "Holstein Friesian breed black white coat pattern udder teat milking",
+    "Bovine cervical thoracic lumbar sacral vertebrae spine atlas axis",
+    "Cow face eye horn ear muzzle nasal head anatomy bovine skull",
+    "Bovine fetlock pastern coronary hoof coffin bone digital anatomy",
+    "Cow shoulder elbow carpal metacarpal front limb bovine forelimb",
+    "Bovine hip stifle hock metatarsal rear limb hindlimb anatomy",
+    "Dairy cattle poll poll forehead brow occipital bovine cranium",
+]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature extraction
+# Data loading
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_features(frame: np.ndarray, prev_gray: Optional[np.ndarray]) -> dict:
-    small = cv2.resize(frame, (320, 180))
-    gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    h, w  = gray.shape
-    th, tw = h // 3, w // 3
+def load_title_map() -> dict:
+    result = {}
+    if not VIDEOS_DIR.exists():
+        return result
+    for info_file in VIDEOS_DIR.glob("*.info.json"):
+        try:
+            d = json.loads(info_file.read_bytes())
+            result[info_file.stem] = d.get("title", "")
+        except Exception:
+            pass
+    return result
 
-    bright_top    = float(gray[:th, :].mean())
-    bright_bot    = float(gray[2*th:, :].mean())
-    bright_left   = float(gray[:, :tw].mean())
-    bright_right  = float(gray[:, 2*tw:].mean())
-    brightness    = float(gray.mean())
-    contrast      = float(gray.std())
-
-    edges = cv2.Canny((gray * 255).astype(np.uint8), 50, 150)
-    edge_density = float(edges.mean() / 255.0)
-
-    motion_mag = 0.0
-    motion_cx  = 0.5
-    motion_cy  = 0.5
-    motion_dir = 0.0
-
-    if prev_gray is not None:
-        diff = np.abs(gray - prev_gray)
-        motion_mag = float(diff.mean())
-        if motion_mag > 0.004:
-            thresh = diff.max() * 0.25
-            ys, xs = np.where(diff > thresh)
-            if len(xs) > 0:
-                motion_cx  = float(xs.mean() / w)
-                motion_cy  = float(ys.mean() / h)
-                motion_dir = float(math.degrees(math.atan2(motion_cy - 0.5, motion_cx - 0.5)))
-
-    return {
-        "motion_mag":   motion_mag,
-        "motion_cx":    motion_cx,
-        "motion_cy":    motion_cy,
-        "motion_dir":   motion_dir,
-        "bright_top":   bright_top,
-        "bright_bot":   bright_bot,
-        "bright_left":  bright_left,
-        "bright_right": bright_right,
-        "brightness":   brightness,
-        "contrast":     contrast,
-        "edge_density": edge_density,
-        "gray":         gray,
-    }
+def get_all_frames() -> list:
+    if not FRAMES_DIR.exists():
+        return []
+    return sorted(FRAMES_DIR.glob("*.jpg"))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Neural fabric calls
+# Neural fabric API calls
 # ─────────────────────────────────────────────────────────────────────────────
 
-def call_entity_observe(features: dict, node: str) -> dict:
-    body = {
-        "entity_id": "bovine_cam",
-        "timestamp": int(time.time() * 1000),
-        "species":   "BOVINE",
-        "sensors": [
-            {
-                "kind": "Motion",
-                "values": {
-                    "magnitude":  features["motion_mag"],
-                    "x":          features["motion_cx"],
-                    "y":          features["motion_cy"],
-                    "direction":  features["motion_dir"],
-                },
-                "quality": 0.85,
-            },
-            {
-                "kind": "Environment",
-                "values": {
-                    "brightness":    features["brightness"],
-                    "contrast":      features["contrast"],
-                    "edge_density":  features["edge_density"],
-                    "top_ratio":     features["bright_top"]  / max(features["bright_bot"],   1e-6),
-                    "left_ratio":    features["bright_left"] / max(features["bright_right"], 1e-6),
-                },
-                "quality": 0.9,
-            },
-        ],
-    }
+def call_media_train(frame_path: Path, text: str, node: str) -> dict:
+    """Cross-modal train: image + anatomical text in one co-activation."""
+    with open(frame_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    body = json.dumps({"modality": "image", "data_b64": b64, "text": text}).encode()
+    req = urllib.request.Request(
+        f"http://{node}/media/train",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        req = urllib.request.Request(
-            f"http://{node}/entity/observe",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=2) as r:
+        with urllib.request.urlopen(req, timeout=8) as r:
             return json.loads(r.read())
     except Exception:
         return {}
+
+def call_qa_query(question: str, node: str) -> str:
+    """Query the Q&A fabric and return the top bovine answer."""
+    body = json.dumps({"question": question, "top_k": 3}).encode()
+    req = urllib.request.Request(
+        f"http://{node}/qa/query",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=4) as r:
+            d = json.loads(r.read())
+        results = d.get("report", {}).get("results", [])
+        # Take the highest-confidence result that mentions bovine/cow behaviour
+        for res in results:
+            a = (res.get("answer") or "").lower()
+            if any(w in a for w in ["cow", "bovine", "cattle", "dairy",
+                                     "walk", "graz", "stand", "hoof", "leg"]):
+                return res.get("answer", "")
+        return results[0].get("answer", "") if results else ""
+    except Exception:
+        return ""
 
 def call_neuro_snapshot(node: str) -> dict:
     try:
-        with urllib.request.urlopen(f"http://{node}/neuro/snapshot", timeout=2) as r:
+        with urllib.request.urlopen(f"http://{node}/neuro/snapshot", timeout=3) as r:
             return json.loads(r.read())
     except Exception:
         return {}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pose computation
+# Motion proxy (fabric-native — no CV)
+# Label count change + file size change between consecutive frames.
+# JPEG file size correlates with scene complexity; label count change reflects
+# how much the fabric's visual concept activations shifted frame-to-frame.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_pose(features: dict, observe: dict, state: dict, dt: float) -> dict:
-    motion_mag = features["motion_mag"]
-    bright_top = features["bright_top"]
-    bright_bot = features["bright_bot"]
+def motion_from_frame_delta(
+    curr_label_count: int,
+    prev_label_count: int,
+    curr_file_size: int,
+    prev_file_size: int,
+) -> float:
+    label_d = abs(curr_label_count - prev_label_count) / max(prev_label_count, 1)
+    size_d  = abs(curr_file_size  - prev_file_size)   / max(prev_file_size,  1)
+    return min(label_d * 0.6 + size_d * 0.4, 1.0)
 
-    # Animation state
-    if motion_mag > 0.025:
+# ─────────────────────────────────────────────────────────────────────────────
+# Pose computation (fabric-driven)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_pose(
+    motion_mag: float,
+    qa_answer: str,
+    snapshot: dict,
+    state: dict,
+    dt: float,
+) -> dict:
+    qa_lower = qa_answer.lower()
+
+    # Animation state from motion + Q&A context
+    if motion_mag > 0.12:
         anim = "walk"
-    elif bright_bot > bright_top * 1.12 and motion_mag < 0.01:
+    elif any(w in qa_lower for w in ["graz", "graze", "grass", "head low", "pasture"]):
         anim = "graze"
+    elif any(w in qa_lower for w in ["walk", "stride", "locomot", "gait"]):
+        anim = "walk"
     else:
         anim = "stand"
 
-    # Walk speed (radians/second for phase integration)
-    walk_speed = min(motion_mag * 100.0, 8.0)
+    # Walk speed
+    walk_speed = min(motion_mag * 6.0, 5.0) if anim == "walk" else 0.3 if anim == "graze" else 0.0
 
-    # Phase: integrate walk_speed * dt
+    # Integrate walk phase
     walk_phase = (state.get("walk_phase", 0.0) + walk_speed * dt) % (2 * math.pi)
 
-    # Head pitch: negative = down (grazing), positive = alert
-    raw_pitch = (bright_top - bright_bot) * 50.0
-    head_pitch = max(-28.0, min(12.0, raw_pitch))
+    # Head pitch: graze = down, alert = up
+    head_pitch = -22.0 if anim == "graze" else (5.0 if motion_mag < 0.05 else -5.0)
 
-    # Head yaw: follow horizontal motion
-    head_yaw = (features["motion_cx"] - 0.5) * 30.0
-
-    # Body yaw: slowly track motion direction
+    # Body yaw: slow random drift from motion
     body_yaw = state.get("body_yaw", 0.0)
-    if motion_mag > 0.008:
-        target = features["motion_dir"]
-        # Smooth toward motion direction (only when moving)
-        body_yaw = body_yaw * 0.97 + target * 0.03
+    if motion_mag > 0.08:
+        body_yaw += (motion_mag - 0.08) * 0.3
 
-    # Pull values from neural fabric response
-    confidence = float(observe.get("confidence", 0.5))
-    narrative  = observe.get("narrative") or ""
-    neuro_labels = observe.get("neuro_labels") or []
-    survival   = observe.get("survival") or {}
+    # Snapshot labels
+    active_labels = snapshot.get("active_labels", [])
+    bovine_labels = [l for l in active_labels if any(
+        w in l.lower() for w in ["bovine", "cow", "cattle", "dairy",
+                                   "rumen", "udder", "hoof", "spine"]
+    )]
 
-    # Threat nudges movement speed
-    threat = float((survival.get("threat_level") or 0.0))
-    if threat > 0.6 and anim == "walk":
-        walk_speed = min(walk_speed * 1.5, 8.0)
-
-    state.update({
-        "walk_phase": walk_phase,
-        "body_yaw":   body_yaw,
-    })
+    state.update({"walk_phase": walk_phase, "body_yaw": body_yaw})
 
     return {
         "type":            "pose",
         "walk_phase":      walk_phase,
         "walk_speed":      walk_speed,
         "head_pitch":      head_pitch,
-        "head_yaw":        head_yaw,
-        "body_yaw_delta":  (body_yaw - state.get("prev_body_yaw", body_yaw)),
+        "head_yaw":        0.0,
         "body_yaw":        body_yaw,
         "animation_state": anim,
-        "confidence":      confidence,
-        "narrative":       narrative[:120] if narrative else "",
-        "concept_labels":  [l for l in neuro_labels if ":" in l][:10],
+        "confidence":      min(motion_mag * 4.0 + 0.4, 1.0),
+        "concept_labels":  bovine_labels[:6] or active_labels[:4],
         "motion_mag":      motion_mag,
-        "threat":          threat,
+        "narrative":       qa_answer[:120] if qa_answer else "",
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HTTP server (serves packages/cow_world/)
+# HTTP server
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_http_server(port: int):
@@ -213,7 +207,7 @@ def run_http_server(port: int):
     server.serve_forever()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WebSocket server + main async loop
+# WebSocket server
 # ─────────────────────────────────────────────────────────────────────────────
 
 connected: set = set()
@@ -237,92 +231,71 @@ async def broadcast(msg: str):
     connected.difference_update(dead)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Video frame reader
+# Sensor loop
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_video_files() -> list:
-    if not VIDEO_DIR.exists():
-        print(f"  [WARN] Video dir not found: {VIDEO_DIR}", file=sys.stderr)
-        return []
-    files = sorted(VIDEO_DIR.glob("*.mp4"))
-    return [f for f in files if f.stat().st_size > 100_000]
-
 async def sensor_loop(node: str, target_fps: float):
-    videos = get_video_files()
-    if not videos:
-        print("  [WARN] No video files found — sensor loop idle", file=sys.stderr)
+    frames = get_all_frames()
+    if not frames:
+        print("  [WARN] No frames found in", FRAMES_DIR)
         while True:
             await asyncio.sleep(1)
 
-    print(f"  Sensor loop: {len(videos)} videos at {target_fps:.0f} fps")
+    title_map = load_title_map()
+    print(f"  Sensor loop: {len(frames)} frames  node={node}  fps={target_fps}")
+
     interval   = 1.0 / target_fps
-    video_idx  = 0
+    frame_idx  = 0
     state      = {"walk_phase": 0.0, "body_yaw": 0.0}
-    prev_gray  = None
-    snapshot_ts = 0.0
-    last_snapshot: dict = {}
-    observe_result: dict = {}
-    frame_count = 0
-    cap = None
+    prev_lc    = 487   # baseline label count
+    prev_sz    = 20480 # baseline file size (~20KB)
+    qa_answer  = ""
+    snapshot: dict = {}
+    snap_ts    = 0.0
 
     while True:
-        loop_start = time.monotonic()
+        t0 = time.monotonic()
 
-        # Open next video if needed
-        if cap is None or not cap.isOpened():
-            path = videos[video_idx % len(videos)]
-            video_idx += 1
-            cap = cv2.VideoCapture(str(path))
-            prev_gray = None
-            native_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-            skip = max(1, int(native_fps / target_fps))
-            print(f"  [{video_idx}/{len(videos)}] {path.name}  native={native_fps:.0f}fps  skip={skip}")
+        frame_path = frames[frame_idx % len(frames)]
+        frame_idx += 1
 
-        # Read frame (skip ahead to maintain target FPS)
-        ret = False
-        for _ in range(skip):
-            ret, frame = cap.read()
-            if not ret:
-                break
-        if not ret:
-            cap.release()
-            cap = None
-            prev_gray = None
-            await asyncio.sleep(0.05)
-            continue
+        # Build cross-modal text description
+        video_id = frame_path.stem.split("_")[0]
+        title    = title_map.get(video_id, "Bovine dairy cow CC video")
+        ctx      = CONTEXTS[frame_idx % len(CONTEXTS)]
+        text     = f"{title}. {ctx}."
 
-        frame_count += 1
+        # Train: image + text co-activation (cross-modal Hebbian linking)
+        result = await asyncio.to_thread(call_media_train, frame_path, text, node)
+        curr_lc = result.get("label_count", prev_lc)
+        curr_sz = frame_path.stat().st_size
 
-        # Feature extraction (blocking but fast)
-        features = await asyncio.to_thread(extract_features, frame, prev_gray)
-        prev_gray = features.pop("gray")
+        # Motion proxy from fabric output
+        motion_mag = motion_from_frame_delta(curr_lc, prev_lc, curr_sz, prev_sz)
+        prev_lc = curr_lc
+        prev_sz = curr_sz
 
-        # Call entity_observe (async, skip if slow)
-        observe_result = await asyncio.to_thread(call_entity_observe, features, node)
-
-        # Poll snapshot every 5s
+        # Periodic snapshot + Q&A query
         now = time.monotonic()
-        if now - snapshot_ts > 5.0:
-            last_snapshot = await asyncio.to_thread(call_neuro_snapshot, node)
-            snapshot_ts = now
+        if now - snap_ts > 4.0:
+            snapshot   = await asyncio.to_thread(call_neuro_snapshot, node)
+            qa_answer  = await asyncio.to_thread(
+                call_qa_query,
+                "What is a dairy cow doing when its legs are in motion?",
+                node,
+            )
+            snap_ts = now
 
-        # Compute pose
-        dt = time.monotonic() - loop_start
-        pose = compute_pose(features, observe_result, state, max(dt, 0.01))
-        state["prev_body_yaw"] = pose["body_yaw"]
+        dt   = max(time.monotonic() - t0, 0.01)
+        pose = compute_pose(motion_mag, qa_answer, snapshot, state, dt)
 
-        # Top concept labels from snapshot
-        snap_labels = last_snapshot.get("active_labels", [])[:8]
-        pose["snap_labels"] = snap_labels
-
-        # Thumbnail (160×90 JPEG)
-        thumb = cv2.resize(frame, (160, 90))
-        _, jpg = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 55])
-        pose["frame_b64"] = "data:image/jpeg;base64," + base64.b64encode(jpg).decode()
+        # Read frame as data URI (no resize needed at 20KB; browser handles display)
+        with open(frame_path, "rb") as f:
+            pose["frame_b64"] = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
 
         await broadcast(json.dumps(pose))
 
-        elapsed = time.monotonic() - loop_start
+        elapsed = time.monotonic() - t0
         await asyncio.sleep(max(0.0, interval - elapsed))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -331,7 +304,7 @@ async def sensor_loop(node: str, target_fps: float):
 
 async def main(node: str, ws_port: int, http_port: int, fps: float):
     print("=" * 60)
-    print("  W1z4rD V1510n — Cow Sensor Stream")
+    print("  W1z4rD V1510n -- Cow Sensor Stream (fabric-only)")
     print("=" * 60)
     print(f"  Node  -> http://{node}")
     print(f"  WS    -> ws://localhost:{ws_port}")
@@ -346,7 +319,7 @@ if __name__ == "__main__":
     ap.add_argument("--node",      default="localhost:8090")
     ap.add_argument("--ws-port",   type=int, default=8092)
     ap.add_argument("--http-port", type=int, default=8093)
-    ap.add_argument("--fps",       type=float, default=8.0)
+    ap.add_argument("--fps",       type=float, default=4.0)
     args = ap.parse_args()
     try:
         asyncio.run(main(args.node, args.ws_port, args.http_port, args.fps))
