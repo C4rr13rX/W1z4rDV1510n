@@ -314,65 +314,90 @@ _H_TAN     = 0.869  # tan(camera HFOV/2)
 
 def _bbox_to_3d_parts(cow: dict) -> list:
     """
-    Project a detected entity's 2D bounding box to approximate 3D body-part
-    positions using a ground-plane assumption.  The entity's bottom edge is
-    at world Y=0 (hooves on ground).  Height is inferred from box proportions.
+    Project a detected entity's 2D bounding box to a dense 3D point cloud.
 
-    Returns list of (symbol_id, x, y, z) tuples ready for EnvironmentSnapshot.
-    These are REAL observations derived from real video frames — no hard-coding.
+    Each sample point's label encodes its region in the entity's body so the
+    neural fabric learns the 3D spatial layout from repeated real-video
+    observations.  Points are grid-sampled across the visible silhouette +
+    inferred depth (Z = lateral spread proportional to entity width).
+
+    Returns list of (symbol_id, x, y, z) tuples.
     """
-    cx = cow["cx"]; cy = cow["cy"]
+    cx = cow["cx"]
     bw = cow["w"];  bh = cow["h"]
 
-    half_world_w = _ZOOM_DIST * _H_TAN  # ≈ 6.52 m
-    wz = (0.5 - cx) * half_world_w * 2  # world Z from horizontal centre
+    half_world_w = _ZOOM_DIST * _H_TAN       # ≈ 6.52 m
+    wz_centre    = (0.5 - cx) * half_world_w * 2
 
-    # Cow scale from bounding-box height in video
-    # Empirical: a full-frame-height cow would be ~2.0 m; scale by box h fraction
-    world_h = min(bh * 2.2, 1.8)      # estimated cow world height (cap 1.8 m)
-    half_l  = world_h * 0.85          # half-length along body axis
-    half_w  = world_h * 0.28          # half-width
+    world_h = min(bh * 2.2, 1.8)             # entity world height
+    half_l  = world_h * 0.88                 # half body-length (nose→tail)
+    half_w  = world_h * 0.30                 # half lateral width (depth)
 
-    h  = world_h
-    hl = half_l
-    hw = half_w
+    pts = []
 
-    # Body parts inferred proportionally from the bounding box.
-    # X = 0 (entities face camera from +X direction).
-    # Z = lateral axis (left/right in video frame maps to world Z).
-    return [
-        ("cow_head",      0.0,  h * 0.82, wz + hl * 0.70),
-        ("cow_neck",      0.0,  h * 0.88, wz + hl * 0.50),
-        ("cow_withers",   0.0,  h * 0.98, wz + hl * 0.28),
-        ("cow_spine",     0.0,  h * 0.92, wz),
-        ("cow_rump",      0.0,  h * 0.86, wz - hl * 0.50),
-        ("cow_tail",      0.0,  h * 0.76, wz - hl * 0.82),
-        ("cow_body",      0.0,  h * 0.65, wz),
-        ("cow_chest",     0.0,  h * 0.55, wz + hl * 0.38),
-        ("cow_belly",     0.0,  h * 0.22, wz),
-        ("cow_udder",     0.0,  h * 0.18, wz - hl * 0.18),
-        # Front legs (Z offset = entity width)
-        ("cow_shoulder_L",0.0,  h * 0.82, wz + hl * 0.45 + hw),
-        ("cow_shoulder_R",0.0,  h * 0.82, wz + hl * 0.45 - hw),
-        ("cow_leg_FL",    0.0,  h * 0.38, wz + hl * 0.48 + hw),
-        ("cow_leg_FR",    0.0,  h * 0.38, wz + hl * 0.48 - hw),
-        ("cow_hoof_FL",   0.0,  0.00,     wz + hl * 0.48 + hw),
-        ("cow_hoof_FR",   0.0,  0.00,     wz + hl * 0.48 - hw),
-        # Hind legs
-        ("cow_hip_L",     0.0,  h * 0.80, wz - hl * 0.48 + hw),
-        ("cow_hip_R",     0.0,  h * 0.80, wz - hl * 0.48 - hw),
-        ("cow_leg_BL",    0.0,  h * 0.38, wz - hl * 0.48 + hw),
-        ("cow_leg_BR",    0.0,  h * 0.38, wz - hl * 0.48 - hw),
-        ("cow_hoof_BL",   0.0,  0.00,     wz - hl * 0.48 + hw),
-        ("cow_hoof_BR",   0.0,  0.00,     wz - hl * 0.48 - hw),
-        # Internal organs (proportional to body volume)
-        ("cow_heart",     0.0,  h * 0.72, wz + hl * 0.30),
-        ("cow_rumen",     0.0,  h * 0.62, wz - hl * 0.12 + hw * 0.5),
-        ("cow_lung_L",    0.0,  h * 0.75, wz + hl * 0.22 + hw * 0.6),
-        ("cow_lung_R",    0.0,  h * 0.75, wz + hl * 0.22 - hw * 0.6),
-        ("cow_liver",     0.0,  h * 0.68, wz + hl * 0.05 - hw * 0.4),
-        ("cow_brain",     0.0,  h * 0.96, wz + hl * 0.82),
+    # ── Dense surface grid on the visible silhouette (Y–Z plane) ─────────────
+    # Grid: NZ columns (Z axis = nose–tail) × NY rows (Y axis = height)
+    # Each point represents one observed surface location on the entity.
+    NZ, NY = 14, 10
+    for iz in range(NZ):
+        tz = iz / (NZ - 1)          # 0 = head end, 1 = tail end
+        z  = wz_centre + half_l * (1.0 - 2*tz)   # Z in world space
+        for iy in range(NY):
+            ty = iy / (NY - 1)      # 0 = top (back), 1 = bottom (ground)
+            y  = world_h * (1.0 - ty)
+
+            # Region label encodes semantic zone at this grid cell
+            region_z = "head" if tz < 0.20 else "front" if tz < 0.45 else "mid" if tz < 0.65 else "rear" if tz < 0.88 else "tail"
+            region_y = "top" if ty < 0.15 else "upper" if ty < 0.40 else "mid" if ty < 0.65 else "lower" if ty < 0.85 else "ground"
+            label = f"cow_surf_{region_y}_{region_z}"
+
+            # Left side (positive Z lateral)
+            pts.append((label + "_L", 0.0, max(0.0, y), z + half_w * 0.9))
+            # Right side
+            pts.append((label + "_R", 0.0, max(0.0, y), z - half_w * 0.9))
+            # Centre line
+            pts.append((label, 0.0, max(0.0, y), z))
+
+    # ── Semantic landmark points (low jitter, high density via repetition) ───
+    h = world_h; hl = half_l; hw = half_w; wz = wz_centre
+    pts += [
+        ("cow_head",       0.0, h*0.84, wz + hl*0.72),
+        ("cow_snout",      0.0, h*0.70, wz + hl*0.94),
+        ("cow_neck",       0.0, h*0.88, wz + hl*0.52),
+        ("cow_withers",    0.0, h*0.98, wz + hl*0.28),
+        ("cow_spine",      0.0, h*0.94, wz),
+        ("cow_rump",       0.0, h*0.88, wz - hl*0.52),
+        ("cow_tail",       0.0, h*0.76, wz - hl*0.85),
+        ("cow_body",       0.0, h*0.64, wz),
+        ("cow_chest",      0.0, h*0.56, wz + hl*0.40),
+        ("cow_belly",      0.0, h*0.22, wz),
+        ("cow_udder",      0.0, h*0.18, wz - hl*0.18),
+        # Limbs — left (+Z) and right (-Z)
+        ("cow_shoulder_L", 0.0, h*0.80, wz + hl*0.46 + hw),
+        ("cow_shoulder_R", 0.0, h*0.80, wz + hl*0.46 - hw),
+        ("cow_elbow_L",    0.0, h*0.55, wz + hl*0.50 + hw),
+        ("cow_elbow_R",    0.0, h*0.55, wz + hl*0.50 - hw),
+        ("cow_knee_FL",    0.0, h*0.35, wz + hl*0.50 + hw),
+        ("cow_knee_FR",    0.0, h*0.35, wz + hl*0.50 - hw),
+        ("cow_hoof_FL",    0.0, 0.00,   wz + hl*0.50 + hw),
+        ("cow_hoof_FR",    0.0, 0.00,   wz + hl*0.50 - hw),
+        ("cow_hip_L",      0.0, h*0.80, wz - hl*0.48 + hw),
+        ("cow_hip_R",      0.0, h*0.80, wz - hl*0.48 - hw),
+        ("cow_stifle_L",   0.0, h*0.55, wz - hl*0.50 + hw),
+        ("cow_stifle_R",   0.0, h*0.55, wz - hl*0.50 - hw),
+        ("cow_hock_L",     0.0, h*0.35, wz - hl*0.50 + hw),
+        ("cow_hock_R",     0.0, h*0.35, wz - hl*0.50 - hw),
+        ("cow_hoof_BL",    0.0, 0.00,   wz - hl*0.50 + hw),
+        ("cow_hoof_BR",    0.0, 0.00,   wz - hl*0.50 - hw),
+        # Organs
+        ("cow_heart",      0.0, h*0.72, wz + hl*0.30),
+        ("cow_rumen",      0.0, h*0.62, wz - hl*0.12 + hw*0.5),
+        ("cow_lung_L",     0.0, h*0.75, wz + hl*0.24 + hw*0.6),
+        ("cow_lung_R",     0.0, h*0.75, wz + hl*0.24 - hw*0.6),
+        ("cow_liver",      0.0, h*0.68, wz + hl*0.06 - hw*0.4),
+        ("cow_brain",      0.0, h*0.94, wz + hl*0.85),
     ]
+    return pts
 
 
 def train_entity_observations(cows: list, ts: int, node: str) -> None:
