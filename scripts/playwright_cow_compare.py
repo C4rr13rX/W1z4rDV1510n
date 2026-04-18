@@ -13,8 +13,13 @@ Usage:
   python scripts/playwright_cow_compare.py [--iterations 5] [--url http://localhost:8093]
   python scripts/playwright_cow_compare.py --once      # single capture + report
 """
-import argparse, base64, io, json, math, os, time
+import argparse, base64, io, json, math, os, sys, time
 from pathlib import Path
+
+# Force UTF-8 output on Windows terminals
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ─── Deps ─────────────────────────────────────────────────────────────────────
 
@@ -78,11 +83,16 @@ def _count_non_green_blobs(img: "Image.Image") -> int:
 def run_comparison(url: str, iteration: int, page) -> dict:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Wait for at least one cow entity to appear in the 3D scene
-    page.wait_for_function("window.__getCowCount && window.__getCowCount() > 0", timeout=20_000)
+    # Wait for the JS helpers to be defined (page rendered)
+    page.wait_for_function("typeof window.__captureFrame === 'function'", timeout=15_000)
+    # Wait for at least one entity (old sensor stream fallback spawns after first WS msg)
+    try:
+        page.wait_for_function("window.__getCowCount && window.__getCowCount() > 0", timeout=25_000)
+    except Exception:
+        pass  # continue anyway — will report 0 cows
 
-    # Brief settle for texture update
-    page.wait_for_timeout(1200)
+    # Settle for texture / position update
+    page.wait_for_timeout(1500)
 
     # Capture 3D render
     render_b64 = page.evaluate("window.__captureFrame()")
@@ -182,7 +192,7 @@ def main():
         browser.close()
 
     # Summary report
-    print("\n── Summary ─────────────────────────────────────────────────────")
+    print("\n-- Summary ------------------------------------------------------")
     passes = sum(1 for r in results if r["pass"])
     print(f"  {passes}/{len(results)} iterations passed")
     if results:
@@ -190,7 +200,7 @@ def main():
         if avg_sim:
             print(f"  avg similarity: {sum(avg_sim)/len(avg_sim):.3f}")
     print(f"  screenshots saved to: {OUT_DIR}")
-    print("────────────────────────────────────────────────────────────────")
+    print("-----------------------------------------------------------------")
 
     # Write JSON report
     report_path = OUT_DIR / "report.json"

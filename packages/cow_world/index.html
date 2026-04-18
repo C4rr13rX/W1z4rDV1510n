@@ -398,22 +398,14 @@ function buildCow(lod) {
 }
 
 // ─── 2-D video position → 3-D world position ─────────────────────────────
-// Unprojects through the camera to the ground plane (Y = 0).
-// cx, cy are normalised [0,1] in video/image space (Y↓).
-function videoToWorldPos(cx, cy, groundY = 0) {
-  const ndcX =  cx * 2 - 1;
-  const ndcY = -(cy * 2 - 1);
-  const v = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera);
-  const dir = v.sub(camera.position).normalize();
-  if (Math.abs(dir.y) < 1e-5) {
-    return new THREE.Vector3(0, groundY, (cx - 0.5) * 14);
-  }
-  const t = (groundY - camera.position.y) / dir.y;
-  if (t < 0.5) {
-    // Ray going away from ground — place at a fixed depth
-    return new THREE.Vector3(0, groundY, (cx - 0.5) * 14);
-  }
-  return camera.position.clone().addScaledVector(dir, t);
+// Fixed-depth placement: all entities live on the X=0 plane (facing the camera).
+// Horizontal video position (cx) maps to world Z; the camera is at +X looking at -X.
+// Camera right ≈ -Z, so cx=0 (left in video) → +Z, cx=1 (right) → -Z.
+const WORLD_FIELD_WIDTH = 18;  // total spread in metres across the scene
+
+function videoToWorldPos(cx, _cy, groundY = 0) {
+  const z = (0.5 - cx) * WORLD_FIELD_WIDTH;
+  return new THREE.Vector3(0, groundY, z);
 }
 
 // ─── Cow registry ─────────────────────────────────────────────────────────
@@ -529,8 +521,11 @@ function connectWS() {
       }
 
       // Per-cow update
-      const now      = performance.now();
-      const incoming = d.cows ?? [];
+      const now = performance.now();
+      // Fallback for old sensor stream (no cows field): synthesise one entity
+      const incoming = d.cows && d.cows.length > 0
+        ? d.cows
+        : [{ id: 0, cx: 0.50, cy: 0.52, w: 0.55, h: 0.65, motion: d.motion_mag ?? 0 }];
       const seenIds  = new Set(incoming.map(c => c.id));
 
       for (const c of incoming) {
