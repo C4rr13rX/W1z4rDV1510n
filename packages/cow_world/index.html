@@ -398,13 +398,16 @@ function buildCow(lod) {
 }
 
 // ─── 2-D video position → 3-D world position ─────────────────────────────
-// Fixed-depth placement: all entities live on the X=0 plane (facing the camera).
-// Horizontal video position (cx) maps to world Z; the camera is at +X looking at -X.
-// Camera right ≈ -Z, so cx=0 (left in video) → +Z, cx=1 (right) → -Z.
-const WORLD_FIELD_WIDTH = 18;  // total spread in metres across the scene
+// Fixed-depth placement: entities at X=0 facing the camera.
+// Z spread matches the camera's visible width so horizontal positions align
+// with the video frame at the current zoom level.
+// Camera at (zoomDist, 2, 0) facing -X.  Vertical FOV=52°, aspect≈1.78
+// → horizontal FOV ≈ 82°, tan(41°) ≈ 0.869.
+const H_TAN = 0.869;
 
 function videoToWorldPos(cx, _cy, groundY = 0) {
-  const z = (0.5 - cx) * WORLD_FIELD_WIDTH;
+  const halfW = zoomDist * H_TAN;   // world metres visible left/right of centre
+  const z     = (0.5 - cx) * halfW * 2;
   return new THREE.Vector3(0, groundY, z);
 }
 
@@ -765,8 +768,8 @@ renderer.domElement.addEventListener('contextmenu', e => {
   if (id !== null) showEntityPanel(id);
 });
 
-// Mouse wheel: zoom in/out (move cinematic camera toward/away from centroid)
-let zoomDist = 14;  // matches CINEMATIC_X
+// Mouse wheel: zoom in/out
+let zoomDist = 7.5;  // ~7.5m ≈ makes a 2.4m cow fill ~33% of screen height
 renderer.domElement.addEventListener('wheel', e => {
   e.preventDefault();
   zoomDist = Math.max(4, Math.min(50, zoomDist + e.deltaY * 0.015));
