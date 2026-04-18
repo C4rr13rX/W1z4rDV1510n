@@ -347,9 +347,8 @@ def _bbox_to_3d_parts(cow: dict) -> list:
             ty = iy / (NY - 1)     # 0 = top, 1 = bottom (ground)
             y  = WITHER_H * (1.0 - ty) + jit()
 
-            region_x = "head" if tx < 0.20 else "front" if tx < 0.45 else "mid" if tx < 0.65 else "rear" if tx < 0.88 else "tail"
-            region_y = "top" if ty < 0.15 else "upper" if ty < 0.40 else "mid" if ty < 0.65 else "lower" if ty < 0.85 else "ground"
-            label = f"cow_surf_{region_y}_{region_x}"
+            # Use grid indices for full spatial resolution (140 unique X×Y positions)
+            label = f"cow_surf_{iy:02d}_{ix:02d}"
 
             pts.append((label + "_L", x, max(0.0, y), +HALF_W * 0.9 + jit()))
             pts.append((label + "_R", x, max(0.0, y), -HALF_W * 0.9 + jit()))
