@@ -6606,18 +6606,66 @@ async fn mesh_synthesize(
     let enc = TextBitsEncoder::new(TextBitsConfig::default());
     let seed_labels = enc.encode_plain(&req.query).labels;
 
-    // Propagate through the neural fabric
-    let activated = state.neuro.propagate_all_threshold(&seed_labels, req.hops, 0.01);
+    // Propagate — use req.min_activation so callers can tune sensitivity
+    let prop_thresh = req.min_activation.max(0.001);
+    let activated = state.neuro.propagate_all_threshold(&seed_labels, req.hops, prop_thresh as f32);
 
     // Read centroid positions + build MeshPoints
     let snap = state.neuro.snapshot();
-    let pts  = snapshot_to_mesh_points(&snap, &activated, &req.categories);
+    let mut pts = snapshot_to_mesh_points(&snap, &activated, &req.categories);
+
+    // ── Fallback: if propagation did not reach any centroid labels (common when
+    // the Hebbian text→spatial bridge is still building), use every centroid
+    // whose label matches the query entity pattern directly.
+    if pts.is_empty() && !snap.centroids.is_empty() {
+        let q_lower = req.query.to_lowercase();
+        let keywords: Vec<&str> = q_lower.split_whitespace().collect();
+        pts = snap.centroids.iter()
+            .filter_map(|(label, pos)| {
+                let l = label.to_lowercase();
+                // Accept any centroid whose label shares at least one query keyword
+                let score = keywords.iter()
+                    .filter(|&&kw| kw.len() > 2 && l.contains(kw))
+                    .count();
+                if score == 0 { return None; }
+                // Derive colour from network links if possible
+                let color = {
+                    let links = &snap.network_links;
+                    if let Some(conn) = links.get(label) {
+                        let (mut rs, mut gs, mut bs, mut ws) = (0f32,0f32,0f32,0f32);
+                        for (lk, &w) in conn {
+                            if let Some(rest) = lk.strip_prefix("img:h") {
+                                if let Ok(bin) = rest.parse::<usize>() {
+                                    let h = (bin as f32 + 0.5) / 16.0 * 360.0;
+                                    let c = 0.595f32;
+                                    let x = c * (1.0 - ((h/60.0)%2.0 - 1.0).abs());
+                                    let m = 0.85 - c;
+                                    let (r,g,b) = if h<60.0{(c,x,0.0)}else if h<120.0{(x,c,0.0)}
+                                        else if h<180.0{(0.0,c,x)}else if h<240.0{(0.0,x,c)}
+                                        else if h<300.0{(x,0.0,c)}else{(c,0.0,x)};
+                                    rs+=r*w; gs+=g*w; bs+=b*w; ws+=w;
+                                }
+                            }
+                        }
+                        if ws>0.01 { [rs/ws, gs/ws, bs/ws] } else { [0.55, 0.35, 0.15] }
+                    } else { [0.55, 0.35, 0.15] }
+                };
+                Some(crate::mesh_gen::MeshPoint {
+                    label: label.clone(),
+                    x: pos.x as f32, y: pos.y as f32, z: pos.z as f32,
+                    activation: (score as f32 / keywords.len() as f32).min(1.0),
+                    color,
+                })
+            })
+            .collect();
+    }
 
     if pts.is_empty() {
         return (StatusCode::OK, Json(serde_json::json!({
             "mesh": null,
             "reason": "no activated centroids matched the query",
             "activated_count": activated.len(),
+            "total_centroids": snap.centroids.len(),
         })));
     }
 
