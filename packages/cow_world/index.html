@@ -954,7 +954,7 @@ renderer.domElement.addEventListener('click', evt => {
   if (drill.depth === 0) {
     const id = pickEntity(evt);
     if (id !== null) enterEntityDrill(id);
-    else { closeInfoPanel(); renderer.domElement.requestPointerLock(); }
+    else if (!SCREENSHOT_MODE) { closeInfoPanel(); renderer.domElement.requestPointerLock(); }
   } else if (drill.depth === 1) {
     const id = pickEntity(evt);
     if (id !== null && id === drill.entityId) enterAnatomyDrill(id);
@@ -1105,6 +1105,16 @@ window.__captureFrame  = () => { renderer.render(scene,camera); return renderer.
 window.__getCowCount   = () => cowRegistry.size;
 window.__getFrameData  = () => document.getElementById('video-feed').src || null;
 window.__getDrillDepth = () => drill.depth;
+window.__getEntityScreenPos = () => {
+  const out = [];
+  const tmp = new THREE.Vector3();
+  for (const [id, e] of cowRegistry) {
+    tmp.setFromMatrixPosition(e.mesh.matrixWorld);
+    tmp.project(camera);
+    out.push({ id, sx: Math.round((tmp.x*0.5+0.5)*innerWidth), sy: Math.round((-tmp.y*0.5+0.5)*innerHeight) });
+  }
+  return out;
+};
 
 // ─── Main animation loop ──────────────────────────────────────────────────
 function animate() {
