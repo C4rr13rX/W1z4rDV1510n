@@ -6501,12 +6501,16 @@ struct MeshSynthesizeReq {
     #[serde(default = "default_mesh_min_act")]
     min_activation: f32,
     /// Optional category filter — e.g. ["cow_body", "visual_zone"].
-    /// When absent, all centroid categories are included.
     #[serde(default)]
     categories: Vec<String>,
-    /// "obj" (default) or "json" (returns vertex/face arrays instead of OBJ text).
+    /// "obj" (default) or "json".
     #[serde(default = "default_mesh_fmt")]
     format: String,
+    /// Optional spatial bounds filter (body-relative canonical coords).
+    /// Only centroids whose position falls within these ranges are included.
+    x_range: Option<[f32; 2]>,
+    y_range: Option<[f32; 2]>,
+    z_range: Option<[f32; 2]>,
 }
 fn default_mesh_hops()    -> usize { 2 }
 fn default_mesh_min_act() -> f32   { 0.05 }
@@ -6628,6 +6632,11 @@ async fn mesh_synthesize(
                     .filter(|&&kw| kw.len() > 2 && l.contains(kw))
                     .count();
                 if score == 0 { return None; }
+                // Apply optional spatial-bounds filter (body-relative canonical coords)
+                let px = pos.x as f32; let py = pos.y as f32; let pz = pos.z as f32;
+                if let Some([lo, hi]) = req.x_range { if px < lo || px > hi { return None; } }
+                if let Some([lo, hi]) = req.y_range { if py < lo || py > hi { return None; } }
+                if let Some([lo, hi]) = req.z_range { if pz < lo || pz > hi { return None; } }
                 // Derive colour from network links if possible
                 let color = {
                     let links = &snap.network_links;

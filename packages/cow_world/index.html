@@ -218,53 +218,126 @@ function makeCowMat() {
   });
 }
 
-// ─── Neural cow builder — geometry from /mesh/synthesize ──────────────────
-const NEURAL_COW_QUERY = 'dairy cow Holstein bovine full body skeleton legs head neck spine anatomy';
-const _neuralCowCache  = { geo: null, promise: null };
+// ─── Neural cow builder — multi-region assembly from /mesh/synthesize ────────
+// Each body region is synthesized separately (spatially filtered centroids)
+// then assembled into one Group.  All shapes come entirely from neural training.
+
+const COW_PARTS = [
+  // [name, query, x_range, y_range, z_range]
+  // Torso barrel
+  ['body',   'dairy cow Holstein bovine thorax spine rumen heart lung udder belly withers sacrum rump sternum flank back',
+             [-1.25,  0.65], null,         null          ],
+  // Head
+  ['head',   'dairy cow Holstein bovine head brain snout jaw skull eye ear horn nostril cranium',
+             [ 0.90,  1.70], [0.70, 1.50], null          ],
+  // Neck bridge
+  ['neck',   'dairy cow Holstein bovine neck upper lower trachea cervical withers throat',
+             [ 0.50,  1.10], [0.80, 1.50], null          ],
+  // Front legs — left (Z > 0) and right (Z < 0) as separate hulls
+  ['fl_L',   'dairy cow Holstein bovine shoulder elbow forearm knee cannon fetlock hoof front left forelimb',
+             [ 0.70,  0.90], null,         [0.08,  0.42] ],
+  ['fl_R',   'dairy cow Holstein bovine shoulder elbow forearm knee cannon fetlock hoof front right forelimb',
+             [ 0.70,  0.90], null,         [-0.42,-0.08] ],
+  // Rear legs — left and right
+  ['rl_L',   'dairy cow Holstein bovine hip femur stifle tibia hock cannon fetlock hoof rear left hindlimb pelvis',
+             [-0.90, -0.65], null,         [0.08,  0.42] ],
+  ['rl_R',   'dairy cow Holstein bovine hip femur stifle tibia hock cannon fetlock hoof rear right hindlimb pelvis',
+             [-0.90, -0.65], null,         [-0.42,-0.08] ],
+];
+
+const _cowPartCache = {};  // name → geo (shared across all entity instances)
+
+async function fetchCowPart(name, query, x_range, y_range, z_range) {
+  if (_cowPartCache[name] !== undefined) return _cowPartCache[name];
+  try {
+    const body = { query, hops: 3, min_activation: 0.01, categories: ['id'] };
+    if (x_range) body.x_range = x_range;
+    if (y_range) body.y_range = y_range;
+    if (z_range) body.z_range = z_range;
+    const resp = await fetch(`${NODE_API}/mesh/synthesize`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await resp.json();
+    if (!d.obj) { _cowPartCache[name] = null; return null; }
+    const verts = [], indices = [];
+    for (const line of d.obj.split('\n')) {
+      const p = line.trim().split(/\s+/);
+      if (p[0] === 'v') verts.push(parseFloat(p[1]), parseFloat(p[2]), parseFloat(p[3]));
+      else if (p[0] === 'f') {
+        const vi = (s) => parseInt(s.split('/')[0], 10) - 1;
+        indices.push(vi(p[1]), vi(p[2]), vi(p[3]));
+      }
+    }
+    if (verts.length < 12) { _cowPartCache[name] = null; return null; }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+    geo.computeVertexNormals();
+    _cowPartCache[name] = geo;
+    return geo;
+  } catch(_) { _cowPartCache[name] = null; return null; }
+}
+
+let _cowAssemblyPromise = null;
+let _cowAssemblyResult  = null;  // { geos, fullBB } — shared species data
+
+async function _buildCowAssembly() {
+  const geos = await Promise.all(COW_PARTS.map(([n,q,x,y,z]) => fetchCowPart(n,q,x,y,z)));
+  // Compute full bounding box across all parts for consistent UV projection
+  const fullBB = new THREE.Box3();
+  for (const g of geos) { if (g) { g.computeBoundingBox(); fullBB.union(g.boundingBox); } }
+  if (fullBB.isEmpty()) return null;
+  // Normalise: scale so Y height = 1.42 m (canonical withers), ground at Y=0
+  const dims = new THREE.Vector3(); fullBB.getSize(dims);
+  const sf = dims.y > 0 ? 1.42 / dims.y : 1.0;
+  for (const g of geos) {
+    if (!g) continue;
+    const mx = new THREE.Matrix4().makeScale(sf, sf, sf);
+    mx.setPosition(
+      -(fullBB.min.x + fullBB.max.x) * 0.5 * sf,
+      -fullBB.min.y * sf,
+      -(fullBB.min.z + fullBB.max.z) * 0.5 * sf
+    );
+    g.applyMatrix4(mx);
+    g.computeBoundingBox();
+  }
+  // Recompute full BB after scale
+  fullBB.makeEmpty();
+  for (const g of geos) { if (g) fullBB.union(g.boundingBox); }
+  return { geos, fullBB };
+}
 
 async function buildNeuralCow(entityColor) {
-  // Fetch once; all entities share the same species geometry
-  if (!_neuralCowCache.geo) {
-    if (!_neuralCowCache.promise) {
-      _neuralCowCache.promise = fetchNeuralMesh(NEURAL_COW_QUERY, 0.03).then(geo => {
-        if (!geo) return null;
-        // Normalize: scale to 1.8 m tall, ground feet at Y=0, centre X/Z
-        geo.computeBoundingBox();
-        const bb = geo.boundingBox;
-        const dims = new THREE.Vector3().subVectors(bb.max, bb.min);
-        // Normalize by height (Y), not max-dim — keeps correct bovine proportions
-        const sf = dims.y > 0 ? 1.42 / dims.y : 1.0;
-        const mx = new THREE.Matrix4().makeScale(sf, sf, sf);
-        mx.setPosition(
-          -(bb.min.x + bb.max.x) * 0.5 * sf,
-          -bb.min.y * sf,
-          -(bb.min.z + bb.max.z) * 0.5 * sf
-        );
-        geo.applyMatrix4(mx);
-        geo.computeBoundingBox();
-        _neuralCowCache.geo = geo;
-        return geo;
-      });
-    }
-    await _neuralCowCache.promise;
+  if (!_cowAssemblyResult) {
+    if (!_cowAssemblyPromise) _cowAssemblyPromise = _buildCowAssembly().then(r => { _cowAssemblyResult = r; return r; });
+    await _cowAssemblyPromise;
   }
-  const geo = _neuralCowCache.geo;
-  if (!geo) return null;
+  const assembly = _cowAssemblyResult;
+  if (!assembly) return null;
 
-  const bb = geo.boundingBox;
-  const mat = makeCowMat();
-  const u = mat.uniforms;
-  u.uCowMinX.value  = bb.min.x;  u.uCowSpanX.value = bb.max.x - bb.min.x;
-  u.uCowMinY.value  = bb.min.y;  u.uCowSpanY.value = bb.max.y - bb.min.y;
-
-  const cowMesh = new THREE.Mesh(geo, mat);
+  const { geos, fullBB } = assembly;
+  const mats = [];
   const root = new THREE.Group();
-  root.add(cowMesh);
-  root.userData = { mats: [mat], body: null, isNeuralCow: true };
 
+  for (let i = 0; i < geos.length; i++) {
+    const geo = geos[i];
+    if (!geo) continue;
+    const mat = makeCowMat();
+    // UV projection spans the full cow bounding box
+    mat.uniforms.uCowMinX.value  = fullBB.min.x;
+    mat.uniforms.uCowSpanX.value = fullBB.max.x - fullBB.min.x;
+    mat.uniforms.uCowMinY.value  = fullBB.min.y;
+    mat.uniforms.uCowSpanY.value = fullBB.max.y - fullBB.min.y;
+    mats.push(mat);
+    root.add(new THREE.Mesh(geo, mat));
+  }
+  if (mats.length === 0) return null;
+
+  root.userData = { mats, body: null, isNeuralCow: true };
   if (entityColor) {
     const fb = new THREE.Color(entityColor[0]/255, entityColor[1]/255, entityColor[2]/255);
-    mat.uniforms.uFallback.value.copy(fb);
+    for (const m of mats) m.uniforms.uFallback.value.copy(fb);
   }
   return root;
 }
