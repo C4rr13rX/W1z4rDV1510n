@@ -76,4 +76,13 @@ python scripts/build_biodiversity_corpus.py \
     2>&1 | tee -a "$LOG_DIR/biodiversity_run.log"
 echo "[$(date)] Stage 26 done" | tee -a "$LOG_DIR/run_all.log"
 
+# Stages 27-28: Cognitive/IQ reasoning + Sorting algorithms
+echo "[$(date)] Starting Stages 27-28 (cognitive + sorting)..." | tee -a "$LOG_DIR/run_all.log"
+python scripts/build_cognitive_corpus.py \
+    --stages 27,28 \
+    --node localhost:8090 \
+    --data-dir "$DATA" \
+    2>&1 | tee -a "$LOG_DIR/cognitive_run.log"
+echo "[$(date)] Stages 27-28 done" | tee -a "$LOG_DIR/run_all.log"
+
 echo "===== All training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"
