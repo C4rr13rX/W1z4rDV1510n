@@ -1109,7 +1109,14 @@ window.__getEntityScreenPos = () => {
   const out = [];
   const tmp = new THREE.Vector3();
   for (const [id, e] of cowRegistry) {
-    tmp.setFromMatrixPosition(e.mesh.matrixWorld);
+    // Use the body sphere centre (Y≈1.62m) rather than the mesh root (Y=0)
+    const body = e.mesh.userData.body;
+    if (body) {
+      tmp.setFromMatrixPosition(body.matrixWorld);
+    } else {
+      tmp.setFromMatrixPosition(e.mesh.matrixWorld);
+      tmp.y += 1.2;
+    }
     tmp.project(camera);
     out.push({ id, sx: Math.round((tmp.x*0.5+0.5)*innerWidth), sy: Math.round((-tmp.y*0.5+0.5)*innerHeight) });
   }
