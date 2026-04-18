@@ -66,4 +66,14 @@ python scripts/build_libretexts_corpus.py \
     2>&1 | tee -a "$LOG_DIR/libretexts_run.log"
 echo "[$(date)] Stage 25 done" | tee -a "$LOG_DIR/run_all.log"
 
+# Stage 26: Biodiversity visual-ID corpus — plants, animals, fungi
+echo "[$(date)] Starting Stage 26 (biodiversity visual-ID corpus)..." | tee -a "$LOG_DIR/run_all.log"
+python scripts/build_biodiversity_corpus.py \
+    --stages 26 \
+    --node localhost:8090 \
+    --data-dir "$DATA" \
+    --max-per-group 2000 \
+    2>&1 | tee -a "$LOG_DIR/biodiversity_run.log"
+echo "[$(date)] Stage 26 done" | tee -a "$LOG_DIR/run_all.log"
+
 echo "===== All training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"
