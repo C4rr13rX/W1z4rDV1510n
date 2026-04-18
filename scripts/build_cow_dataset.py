@@ -97,6 +97,7 @@ STAGES = {
     5: 'Molecular data     — PDB structures + molecular imagery',
     6: 'Bovine Q&A pairs   — embedded domain Q&A for chat capability',
     7: 'Cross-modal train  — video frame + anatomy text Hebbian links',
+    8: 'Multi-angle gallery — Wikimedia Commons cow images (all views)',
 }
 
 # ── PubMed Central search terms for bovine anatomy ───────────────────────────
@@ -2133,12 +2134,161 @@ def build_cross_modal(frames_dir: Path, videos_dir: Path, train_dir: Path,
     return items
 
 
+# ── Stage 8: Multi-angle cow gallery ─────────────────────────────────────────
+# Downloads CC-licensed cow images from Wikimedia Commons covering front, rear,
+# side, and 3/4 views — giving the fabric multi-perspective bovine appearance.
+
+WIKIMEDIA_COW_CATEGORIES = [
+    'Holstein_Friesian_cattle',
+    'Dairy_cattle',
+    'Bos_taurus',
+    'Cows_standing',
+    'Cows_lying_down',
+    'Cows_grazing',
+    'Cows_walking',
+    'Cattle_heads',
+    'Cattle_hooves',
+    'Cattle_udders',
+    'Bovine_anatomy',
+]
+
+# View-direction keywords parsed from Wikimedia image titles/descriptions
+VIEW_KEYWORDS = {
+    'front':  ['front', 'head-on', 'facing', 'frontal', 'anterior', 'face'],
+    'rear':   ['rear', 'back', 'posterior', 'behind', 'hindquarters', 'rump'],
+    'side':   ['side', 'lateral', 'profile', 'flank'],
+    'top':    ['top', 'dorsal', 'above', 'aerial', 'overhead'],
+    'three_quarter': ['three quarter', '3/4', 'oblique', 'angled'],
+}
+
+VIEW_ANATOMY_TEXT = {
+    'front':  'Bovine anterior view face muzzle nostrils forehead poll horns ears eyes front legs',
+    'rear':   'Bovine posterior view rump tail pin bones hip hooks hindquarters rear legs hoof',
+    'side':   'Holstein dairy cow lateral profile left right flank ribs barrel spine udder legs',
+    'top':    'Bovine dorsal view spine dorsal ridge topline loin rump shoulder withers',
+    'three_quarter': 'Bovine three-quarter oblique view body depth depth chest barrel angle',
+    'unknown': 'Holstein Friesian dairy cow bovine anatomy legs spine neck head tail udder body',
+}
+
+
+def _detect_view(title: str) -> str:
+    t = title.lower()
+    for view, keywords in VIEW_KEYWORDS.items():
+        if any(k in t for k in keywords):
+            return view
+    return 'unknown'
+
+
+def build_multiview_gallery(out_dir: Path, node: str,
+                             categories: list = None,
+                             max_per_cat: int = 30,
+                             max_total: int = 300) -> list:
+    """Stage 8: Download multi-angle cow images from Wikimedia Commons and
+    cross-modal train each with view-specific anatomical text.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if categories is None:
+        categories = WIKIMEDIA_COW_CATEGORIES
+
+    API = 'https://commons.wikimedia.org/w/api.php'
+    UA  = 'W1z4rDV1510n-DatasetBuilder/1.0 (https://github.com/C4rr13rX/W1z4rDV1510n; adamedsall@gmail.com)'
+    base = f'http://{node}'
+    items = []
+    ok    = 0
+
+    for cat in tqdm(categories, desc='Wikimedia cow gallery'):
+        if len(items) >= max_total:
+            break
+        params = {
+            'action': 'query', 'list': 'categorymembers',
+            'cmtitle': f'Category:{cat}', 'cmtype': 'file',
+            'cmlimit': str(max_per_cat), 'format': 'json',
+        }
+        url = API + '?' + urllib.parse.urlencode(params)
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': UA})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read())
+            members = data.get('query', {}).get('categorymembers', [])
+        except Exception as e:
+            print(f'  [WARN] Wikimedia category {cat}: {e}')
+            continue
+
+        for m in members:
+            if len(items) >= max_total:
+                break
+            title = m.get('title', '')
+            ext = title.lower().rsplit('.', 1)[-1] if '.' in title else ''
+            if ext not in ('jpg', 'jpeg', 'png'):
+                continue
+
+            # Resolve thumbnail URL via imageinfo API
+            img_params = {
+                'action': 'query', 'titles': title,
+                'prop': 'imageinfo', 'iiprop': 'url',
+                'iiurlwidth': '800', 'format': 'json',
+            }
+            img_url = API + '?' + urllib.parse.urlencode(img_params)
+            try:
+                img_req = urllib.request.Request(img_url, headers={'User-Agent': UA})
+                with urllib.request.urlopen(img_req, timeout=12) as r:
+                    idata = json.loads(r.read())
+                pages = idata.get('query', {}).get('pages', {})
+                dl_url = None
+                for pid, page in pages.items():
+                    ii = page.get('imageinfo', [{}])
+                    dl_url = (ii[0].get('thumburl') or ii[0].get('url')) if ii else None
+                if not dl_url:
+                    continue
+            except Exception:
+                continue
+
+            # Download image
+            fname = out_dir / (hashlib.sha1(dl_url.encode()).hexdigest()[:12] + '.jpg')
+            if not fname.exists():
+                try:
+                    dl_req = urllib.request.Request(dl_url, headers={'User-Agent': UA})
+                    with urllib.request.urlopen(dl_req, timeout=20) as r:
+                        raw = r.read()
+                    fname.write_bytes(raw)
+                except Exception:
+                    continue
+
+            # Cross-modal train: image + view-specific anatomical text
+            view = _detect_view(title)
+            text = f'{VIEW_ANATOMY_TEXT[view]}. Category: {cat.replace("_", " ")}.'
+            try:
+                with open(fname, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                body = json.dumps({'modality': 'image', 'data_b64': b64, 'text': text}).encode()
+                train_req = urllib.request.Request(
+                    f'{base}/media/train', data=body,
+                    headers={'Content-Type': 'application/json'}, method='POST')
+                with urllib.request.urlopen(train_req, timeout=12) as r:
+                    json.loads(r.read())
+                ok += 1
+            except Exception as e:
+                print(f'  [WARN] train {fname.name}: {e}')
+
+            items.append({
+                'stage': 8, 'type': 'image', 'source': 'wikimedia_commons',
+                'title': title, 'category': cat, 'view': view,
+                'file': str(fname), 'b64': b64,
+                'modality': 'image',
+                'tags': ['cow', 'multi_angle', view, cat.lower().replace('_', ' ')],
+            })
+            time.sleep(0.15)
+
+    print(f'  Multi-angle gallery: {len(items)} images downloaded, {ok} trained')
+    return items
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(
         description='Build and ingest bovine anatomy training dataset into W1z4rD node')
-    ap.add_argument('--stages',    default='0,1,2,3,4,5,6,7',
+    ap.add_argument('--stages',    default='0,1,2,3,4,5,6,7,8',
                     help='Comma-separated stage IDs to run (default all)')
     ap.add_argument('--node',      default=DEFAULT_NODE,
                     help='Node host:port (default localhost:8090)')
@@ -2249,6 +2399,16 @@ def main():
             items7 = build_cross_modal(frames_dir, videos_dir, train_dir, args.node)
             all_items[7] = items7
 
+    if 8 in stages_to_run:
+        print('\n[Stage 8] Multi-angle cow gallery (Wikimedia Commons)')
+        if args.download_only:
+            print('  [SKIP] Stage 8: cross-modal training skipped in --download-only mode')
+        else:
+            items8 = build_multiview_gallery(
+                train_dir / 'stage8_multiview', args.node,
+                max_per_cat=30, max_total=300)
+            all_items[8] = items8
+
     # ── Write manifest ───────────────────────────────────────────────────────
     write_manifest(data_dir, all_items)
 
@@ -2256,7 +2416,7 @@ def main():
     if not args.download_only:
         # Stage 6 Q&A items are already ingested via /qa/ingest in build_bovine_qa
         all_flat = [it for sid, items in all_items.items() for it in items
-                    if sid not in (6, 7) and (it.get('b64') or it.get('text'))]
+                    if sid not in (6, 7, 8) and (it.get('b64') or it.get('text'))]
         print(f'\n[Ingest] Posting {len(all_flat)} items to http://{args.node} ...')
         total_ok = ingest_batch(all_flat, args.node, workers=args.workers)
         print(f'  Ingested {total_ok}/{len(all_flat)} items successfully')
