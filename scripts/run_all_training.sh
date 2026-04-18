@@ -94,4 +94,14 @@ python scripts/build_bible_corpus.py \
     2>&1 | tee -a "$LOG_DIR/bible_run.log"
 echo "[$(date)] Stage 29 done" | tee -a "$LOG_DIR/run_all.log"
 
+# Stages 30-33: Medical/Psychology/Genetic Engineering/Reverse Aging (NCBI/NLM)
+echo "[$(date)] Starting Stages 30-33 (medical corpus from NCBI/NLM)..." | tee -a "$LOG_DIR/run_all.log"
+python scripts/build_medical_corpus.py \
+    --stages 30,31,32,33 \
+    --node localhost:8090 \
+    --data-dir "$DATA" \
+    --max-per-query 80 \
+    2>&1 | tee -a "$LOG_DIR/medical_run.log"
+echo "[$(date)] Stages 30-33 done" | tee -a "$LOG_DIR/run_all.log"
+
 echo "===== All training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"
