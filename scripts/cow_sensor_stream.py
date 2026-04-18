@@ -200,12 +200,29 @@ def detect_cows_pil(frame_path: Path) -> list:
             w_frac = w_px / DETECT_W
             if w_frac < 0.11:     # discard tiny noise blobs
                 continue
+            # Dominant non-grass colour for this entity (used as shader fallback)
+            non_grass = []
+            for y in range(max(sky_end, y_min), min(gnd_start, y_max + 1)):
+                for x in range(x0, x1 + 1):
+                    if mask[y * DETECT_W + x]:
+                        r2, g2, b2 = pixels[y * DETECT_W + x]
+                        gd = g2 - max(r2, b2)
+                        if gd < 25:   # not strongly green
+                            non_grass.append((r2, g2, b2))
+            if non_grass:
+                dom_r = _median([p[0] for p in non_grass])
+                dom_g = _median([p[1] for p in non_grass])
+                dom_b = _median([p[2] for p in non_grass])
+            else:
+                dom_r, dom_g, dom_b = 80, 60, 40
+
             results.append({
-                "cx":   (x0 + x1) / 2.0 / DETECT_W,
-                "cy":   (y_min + y_max) / 2.0 / DETECT_H,
-                "w":    min(w_frac, 0.55),
-                "h":    min(h_px / DETECT_H, 0.75),
-                "area": w_px * h_px,
+                "cx":    (x0 + x1) / 2.0 / DETECT_W,
+                "cy":    (y_min + y_max) / 2.0 / DETECT_H,
+                "w":     min(w_frac, 0.55),
+                "h":     min(h_px / DETECT_H, 0.75),
+                "area":  w_px * h_px,
+                "color": [dom_r, dom_g, dom_b],
             })
 
         results.sort(key=lambda r: -r["area"])
@@ -485,7 +502,7 @@ async def sensor_loop(node: str, target_fps: float):
 
         # Fallback: if detection yields nothing, emit one synthetic centred cow
         if not tracked_cows:
-            tracked_cows = [{"id": 0, "cx": 0.5, "cy": 0.55, "w": 0.55, "h": 0.65, "motion": motion_mag}]
+            tracked_cows = [{"id": 0, "cx": 0.5, "cy": 0.55, "w": 0.55, "h": 0.65, "motion": motion_mag, "color": [60, 50, 40]}]
 
         pose["cows"] = [
             {
@@ -495,6 +512,7 @@ async def sensor_loop(node: str, target_fps: float):
                 "w":      round(c["w"],    4),
                 "h":      round(c["h"],    4),
                 "motion": round(c.get("motion", 0.0), 4),
+                "color":  c.get("color", [60, 50, 40]),
             }
             for c in tracked_cows
         ]

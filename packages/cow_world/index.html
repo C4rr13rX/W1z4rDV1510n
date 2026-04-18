@@ -199,12 +199,13 @@ const cowShader = {
       float su = uTexOffU + u * uTexScaleU;
       float sv = uTexOffV + v * uTexScaleV;
       vec4 tex = texture2D(tVideo, vec2(su, sv));
-      // Suppress grass-coloured pixels (bleed-through when bbox spans a herd)
+      // Suppress grass-coloured pixels — replace with entity's dominant colour
       float gDom = max(0.0, tex.g - max(tex.r, tex.b) - 0.03);
       float notGrass = 1.0 - smoothstep(0.04, 0.22, gDom) * step(0.28, tex.g);
-      // Grass → transparent; non-grass inside bbox → video texture; outside → transparent
-      float alpha = inB * edge * notGrass * uOpacity;
-      gl_FragColor = vec4(tex.rgb, alpha);
+      // Blend: grass pixels → uFallback (entity dominant tone), non-grass → video
+      vec3 entityColor = mix(uFallback, tex.rgb, notGrass);
+      float alpha = inB * edge * uOpacity;
+      gl_FragColor = vec4(entityColor, alpha);
     }
   `,
 };
@@ -315,10 +316,17 @@ function setEntityOpacity(entry, opacity) {
   }
 }
 
-function spawnCow(id, worldPos, texOff) {
+function applyEntityColor(mesh, rgb) {
+  if (!rgb) return;
+  const fb = new THREE.Color(rgb[0]/255, rgb[1]/255, rgb[2]/255);
+  for (const mat of mesh.userData.mats) mat.uniforms.uFallback.value.copy(fb);
+}
+
+function spawnCow(id, worldPos, texOff, entityColor) {
   const mesh = buildCow(currentLOD);
   mesh.position.copy(worldPos);
   mesh.rotation.y = Math.PI / 2;
+  applyEntityColor(mesh, entityColor);
   scene.add(mesh);
   cowRegistry.set(id, {
     mesh, texOff: { ...texOff },
@@ -883,7 +891,8 @@ function connectWS() {
           e.target.animState = (c.motion??0) > 0.10 ? 'walk' : globalPose.animState;
           e.texOff = texOff; e.lastSeen = now;
           e.conceptLabels = d.concept_labels || [];
-        } else { spawnCow(c.id, worldPos, texOff); }
+          if (c.color) applyEntityColor(e.mesh, c.color);
+        } else { spawnCow(c.id, worldPos, texOff, c.color); }
       }
       for (const [id, e] of [...cowRegistry]) {
         if (!seenIds.has(id) && (now - e.lastSeen) > STALE_MS) despawnCow(id);
