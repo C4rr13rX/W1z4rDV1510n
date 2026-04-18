@@ -101,8 +101,8 @@ def detect_cows_pil(frame_path: Path) -> list:
                 _median([p[2] for p in row]),
             ))
 
-        # Exclude fixed top 15% (sky) and bottom 10% (ground edges)
-        sky_end   = int(DETECT_H * 0.15)
+        # Exclude top 35% (sky + title overlays) and bottom 10% (definite ground)
+        sky_end   = int(DETECT_H * 0.35)
         gnd_start = int(DETECT_H * 0.90)
         DEVIATION = 42   # L1 distance to call a pixel foreground
 
@@ -120,10 +120,10 @@ def detect_cows_pil(frame_path: Path) -> list:
             sum(mask[y * DETECT_W + x] for y in range(sky_end, gnd_start))
             for x in range(DETECT_W)
         ]
-        THRESH = max(3, active_h // 9)
+        THRESH = max(2, active_h // 9)
 
         # ── Horizontal runs with small-gap merging ─────────────────────────
-        MAX_GAP = 3
+        MAX_GAP = 2
         runs: list[tuple[int, int]] = []
         in_run = False
         gap = 0
@@ -140,20 +140,38 @@ def detect_cows_pil(frame_path: Path) -> list:
         if in_run:
             runs.append((run_start, DETECT_W - 1))
 
-        # ── Split wide blobs at local column-profile minima ────────────────
+        # ── Split / force-divide wide blobs ────────────────────────────────
+        # Target entity width ≤ 40% of frame.  For blobs wider than 55%, force
+        # an equal split so we always get multiple entities from dense herds.
+        TARGET_W  = int(DETECT_W * 0.38)   # ideal max per entity
+        SPLIT_THR = int(DETECT_W * 0.55)   # min blob width that triggers split
+
         split_runs: list[tuple[int, int]] = []
         for x0, x1 in runs:
-            if x1 - x0 + 1 > DETECT_W * 0.55:
+            span = x1 - x0 + 1
+            if span > SPLIT_THR:
+                # First try structural split at local minima
                 prof = col_profile[x0:x1 + 1]
                 splits = [x0]
                 for i in range(2, len(prof) - 2):
                     if prof[i] <= min(prof[i-1], prof[i-2], prof[i+1], prof[i+2]) \
-                            and prof[i] < THRESH * 2.0:
+                            and prof[i] < THRESH * 3.0:
                         splits.append(x0 + i)
                 splits.append(x1 + 1)
-                for a, b in zip(splits, splits[1:]):
-                    if b - a >= 4:
-                        split_runs.append((a, b - 1))
+                # If structural split produced segments, use them
+                if len(splits) > 2:
+                    for a, b in zip(splits, splits[1:]):
+                        if b - a >= 4:
+                            split_runs.append((a, b - 1))
+                else:
+                    # Force equal split into n_parts
+                    n_parts = max(2, round(span / TARGET_W))
+                    part_w  = span / n_parts
+                    for i in range(n_parts):
+                        a = x0 + round(i * part_w)
+                        b = x0 + round((i + 1) * part_w) - 1
+                        if b - a >= 4:
+                            split_runs.append((a, b))
             else:
                 split_runs.append((x0, x1))
 
@@ -168,25 +186,30 @@ def detect_cows_pil(frame_path: Path) -> list:
                 if mask[y * DETECT_W + x]
             ]
             if not y_set:
-                continue
+                # No active pixels in this column range — still emit a bbox
+                # centred vertically so the entity has a reasonable crop region
+                y_set = [sky_end, gnd_start - 1]
             y_min, y_max = min(y_set), max(y_set)
             w_px = x1 - x0 + 1
             h_px = y_max - y_min + 1
             if h_px < 3:
                 continue
             aspect = w_px / max(h_px, 1)
-            if aspect > 8.0 or aspect < 0.10:
+            if aspect > 9.0 or aspect < 0.08:
+                continue
+            w_frac = w_px / DETECT_W
+            if w_frac < 0.11:     # discard tiny noise blobs
                 continue
             results.append({
                 "cx":   (x0 + x1) / 2.0 / DETECT_W,
                 "cy":   (y_min + y_max) / 2.0 / DETECT_H,
-                "w":    min(w_px / DETECT_W, 0.80),
-                "h":    min(h_px / DETECT_H, 0.80),
+                "w":    min(w_frac, 0.55),
+                "h":    min(h_px / DETECT_H, 0.75),
                 "area": w_px * h_px,
             })
 
         results.sort(key=lambda r: -r["area"])
-        return results[:5]
+        return results[:3]
     except Exception:
         return []
 
