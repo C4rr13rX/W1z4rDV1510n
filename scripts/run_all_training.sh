@@ -85,4 +85,13 @@ python scripts/build_cognitive_corpus.py \
     2>&1 | tee -a "$LOG_DIR/cognitive_run.log"
 echo "[$(date)] Stages 27-28 done" | tee -a "$LOG_DIR/run_all.log"
 
+# Stage 29: World English Bible — complete 66-book corpus
+echo "[$(date)] Starting Stage 29 (World English Bible)..." | tee -a "$LOG_DIR/run_all.log"
+python scripts/build_bible_corpus.py \
+    --stages 29 \
+    --node localhost:8090 \
+    --data-dir "$DATA" \
+    2>&1 | tee -a "$LOG_DIR/bible_run.log"
+echo "[$(date)] Stage 29 done" | tee -a "$LOG_DIR/run_all.log"
+
 echo "===== All training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"
