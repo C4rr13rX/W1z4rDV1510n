@@ -1,4 +1,5 @@
 use crate::config::{KnowledgeConfig, NodeConfig};
+use crate::mesh_gen::{MeshPoint, MeshSynthesizer};
 use crate::distributed::DistributedCoordinator;
 use crate::data_mesh::{
     DataIngestRequest, DataMeshEvent, DataMeshHandle, PatternQuery, start_data_mesh,
@@ -984,6 +985,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // associations so the renderer can colour each body part with what the
         // fabric actually learned from the video, not hard-coded browns.
         .route("/neuro/world3d",        get(neuro_world3d))
+        .route("/mesh/synthesize",      post(mesh_synthesize))
+        .route("/mesh/from_image",      post(mesh_from_image))
+        .route("/mesh/template",        get(mesh_template))
         .route("/chat",                 post(neuro_ask))
         // ── Hypothesis queue ──────────────────────────────────────────────────
         // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
@@ -6482,4 +6486,274 @@ mod tests {
         let report = loaded.queue_report(Timestamp { unix: 2 });
         assert!(report.is_some());
     }
+}
+
+// ── Mesh synthesis routes ─────────────────────────────────────────────────────
+// Bridge layer: translates neural activation state → MeshPoint cloud → geometry.
+// The mesh_gen module has no neural imports — this is the only coupling point.
+
+#[derive(Deserialize)]
+struct MeshSynthesizeReq {
+    /// Natural-language query used to activate the neural fabric.
+    query: String,
+    #[serde(default = "default_mesh_hops")]
+    hops: usize,
+    #[serde(default = "default_mesh_min_act")]
+    min_activation: f32,
+    /// Optional category filter — e.g. ["cow_body", "visual_zone"].
+    /// When absent, all centroid categories are included.
+    #[serde(default)]
+    categories: Vec<String>,
+    /// "obj" (default) or "json" (returns vertex/face arrays instead of OBJ text).
+    #[serde(default = "default_mesh_fmt")]
+    format: String,
+}
+fn default_mesh_hops()    -> usize { 2 }
+fn default_mesh_min_act() -> f32   { 0.05 }
+fn default_mesh_fmt()     -> String { "obj".into() }
+
+#[derive(Deserialize)]
+struct MeshFromImageReq {
+    /// Base64-encoded image (PNG, JPEG, WebP, or BMP).
+    image_b64: String,
+    #[serde(default = "default_mesh_hops")]
+    hops: usize,
+    #[serde(default = "default_mesh_min_act")]
+    min_activation: f32,
+    #[serde(default)]
+    categories: Vec<String>,
+    #[serde(default = "default_mesh_fmt")]
+    format: String,
+}
+
+/// Convert NeuroSnapshot centroids + an activation map into MeshPoints.
+/// `activated` maps label → strength (0..1).
+/// `category_filter` — if non-empty only labels whose category is in the list are kept.
+fn snapshot_to_mesh_points(
+    snap: &w1z4rdv1510n::neuro::NeuroSnapshot,
+    activated: &HashMap<String, f32>,
+    category_filter: &[String],
+) -> Vec<MeshPoint> {
+    use std::collections::HashMap as HM;
+
+    // Re-use the colour derivation logic from neuro_world3d:
+    // sum hue-bin weights from img:h* neighbours.
+    fn hue_bin_rgb(bin: usize) -> [f32; 3] {
+        let h = (bin as f32 + 0.5) / 16.0 * 360.0;
+        let c = 0.7f32 * 0.85;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = 0.85 - c;
+        let (r, g, b) = if h < 60.0 { (c,x,0.0) } else if h < 120.0 { (x,c,0.0) }
+            else if h < 180.0 { (0.0,c,x) } else if h < 240.0 { (0.0,x,c) }
+            else if h < 300.0 { (x,0.0,c) } else { (c,0.0,x) };
+        [r+m, g+m, b+m]
+    }
+
+    fn derive_color(label: &str, links: &HM<String, HM<String, f32>>) -> [f32; 3] {
+        let Some(conn) = links.get(label) else { return [0.55, 0.35, 0.15]; };
+        let (mut rs, mut gs, mut bs, mut ws) = (0f32, 0f32, 0f32, 0f32);
+        for (l, &w) in conn {
+            if let Some(rest) = l.strip_prefix("img:h") {
+                if let Ok(bin) = rest.parse::<usize>() {
+                    let rgb = hue_bin_rgb(bin);
+                    rs += rgb[0]*w; gs += rgb[1]*w; bs += rgb[2]*w; ws += w;
+                }
+            }
+        }
+        if ws < 0.01 { [0.55, 0.35, 0.15] } else { [rs/ws, gs/ws, bs/ws] }
+    }
+
+    fn label_category(label: &str) -> &str {
+        if label.starts_with("cow_") || label.starts_with("id::cow") { "cow_body" }
+        else if label.starts_with("env_") { "env" }
+        else if label.starts_with("img:z") { "visual_zone" }
+        else if label.starts_with("img:") { "visual_feature" }
+        else { "other" }
+    }
+
+    let links = &snap.network_links;
+    snap.centroids.iter()
+        .filter_map(|(label, pos)| {
+            let act = *activated.get(label).unwrap_or(&0.0);
+            if act < 0.01 { return None; }
+            if !category_filter.is_empty()
+                && !category_filter.iter().any(|c| c == label_category(label)) {
+                return None;
+            }
+            Some(MeshPoint {
+                label: label.clone(),
+                x: pos.x as f32, y: pos.y as f32, z: pos.z as f32,
+                activation: act,
+                color: derive_color(label, links),
+            })
+        })
+        .collect()
+}
+
+/// POST /mesh/synthesize
+/// Activate the neural fabric with a text query, read the centroid positions
+/// of activated labels, synthesize a 3-D mesh, and return OBJ (or JSON).
+async fn mesh_synthesize(
+    State(state): State<ApiState>,
+    Json(req): Json<MeshSynthesizeReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.query.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "query must not be empty" })));
+    }
+
+    // Encode query → seed labels
+    let enc = TextBitsEncoder::new(TextBitsConfig::default());
+    let seed_labels = enc.encode_plain(&req.query).labels;
+
+    // Propagate through the neural fabric
+    let activated = state.neuro.propagate_all_threshold(&seed_labels, req.hops, 0.01);
+
+    // Read centroid positions + build MeshPoints
+    let snap = state.neuro.snapshot();
+    let pts  = snapshot_to_mesh_points(&snap, &activated, &req.categories);
+
+    if pts.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({
+            "mesh": null,
+            "reason": "no activated centroids matched the query",
+            "activated_count": activated.len(),
+        })));
+    }
+
+    let synth = MeshSynthesizer { min_activation: req.min_activation, ..Default::default() };
+    let mesh  = match synth.synthesize("neuro_mesh", &pts) {
+        Some(m) => m,
+        None => return (StatusCode::OK, Json(serde_json::json!({
+            "mesh": null,
+            "reason": "point cloud too sparse after activation filter",
+            "point_count": pts.len(),
+        }))),
+    };
+
+    if req.format == "json" {
+        return (StatusCode::OK, Json(serde_json::json!({
+            "verts":  mesh.verts,
+            "normals": mesh.normals,
+            "uvs":    mesh.uvs,
+            "faces":  mesh.faces,
+            "colors": mesh.vert_colors,
+            "vertex_count": mesh.vertex_count(),
+            "face_count":   mesh.face_count(),
+        })));
+    }
+
+    let obj = mesh.to_obj(Some("neuro_mesh"));
+    let mtl = mesh.to_mtl("neuro_mesh");
+    (StatusCode::OK, Json(serde_json::json!({
+        "obj":          obj,
+        "mtl":          mtl,
+        "vertex_count": mesh.vertex_count(),
+        "face_count":   mesh.face_count(),
+        "point_source": pts.len(),
+    })))
+}
+
+/// POST /mesh/from_image
+/// Encode an image through the existing ImageBitsEncoder, propagate the
+/// resulting labels through the fabric, then synthesize a mesh from the
+/// activated centroid cloud.  The mesh captures the spatial and semantic
+/// structure of what the node "sees" in the image.
+async fn mesh_from_image(
+    State(state): State<ApiState>,
+    Json(req): Json<MeshFromImageReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Re-use the existing encode_media_labels pipeline
+    let seed_labels = match encode_media_labels(
+        "image",
+        Some(&req.image_b64),
+        None, None, None, None,
+    ) {
+        Ok(l)  => l,
+        Err(e) => return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e }))),
+    };
+
+    if seed_labels.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "image produced no labels — check encoding" })));
+    }
+
+    let activated = state.neuro.propagate_all_threshold(&seed_labels, req.hops, 0.01);
+    let snap      = state.neuro.snapshot();
+    let pts       = snapshot_to_mesh_points(&snap, &activated, &req.categories);
+
+    if pts.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({
+            "mesh": null,
+            "reason": "image labels activated no known centroids — train more image data first",
+            "image_labels": seed_labels.len(),
+        })));
+    }
+
+    let synth = MeshSynthesizer { min_activation: req.min_activation, ..Default::default() };
+    let mesh  = match synth.synthesize("image_mesh", &pts) {
+        Some(m) => m,
+        None => return (StatusCode::OK, Json(serde_json::json!({
+            "mesh": null,
+            "reason": "point cloud too sparse",
+            "point_count": pts.len(),
+        }))),
+    };
+
+    let obj = mesh.to_obj(Some("image_mesh"));
+    let mtl = mesh.to_mtl("image_mesh");
+    (StatusCode::OK, Json(serde_json::json!({
+        "obj":           obj,
+        "mtl":           mtl,
+        "vertex_count":  mesh.vertex_count(),
+        "face_count":    mesh.face_count(),
+        "image_labels":  seed_labels.len(),
+        "activated":     activated.len(),
+    })))
+}
+
+/// GET /mesh/template
+/// Returns developer documentation describing how to use the mesh API,
+/// including the full pipeline from training to Three.js rendering.
+async fn mesh_template() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(serde_json::json!({
+        "description": "W1z4rD neural mesh synthesis — developer guide",
+        "pipeline": [
+            "1. Train the node: POST /media/train with modality=image (or text)",
+            "2. Synthesize: POST /mesh/synthesize { query, hops, min_activation, format }",
+            "   OR          POST /mesh/from_image  { image_b64, hops, min_activation }",
+            "3. Load in Three.js using OBJLoader + MTLLoader",
+            "4. Refine: lower min_activation to include more points; raise to sharpen focus"
+        ],
+        "endpoints": {
+            "POST /mesh/synthesize": {
+                "body": {
+                    "query":          "string — text query to activate neural memory",
+                    "hops":           "int (default 2) — propagation depth",
+                    "min_activation": "float (default 0.05) — activation threshold",
+                    "categories":     "string[] (optional) — filter: cow_body|visual_zone|env|visual_feature|other",
+                    "format":         "string — 'obj' (default) or 'json'"
+                },
+                "returns": {
+                    "obj":          "Wavefront OBJ text string",
+                    "mtl":          "MTL material file text",
+                    "vertex_count": "int",
+                    "face_count":   "int"
+                }
+            },
+            "POST /mesh/from_image": {
+                "body": {
+                    "image_b64":      "string — base64 PNG/JPEG/WebP",
+                    "hops":           "int (default 2)",
+                    "min_activation": "float (default 0.05)",
+                    "categories":     "string[] (optional)",
+                    "format":         "string — 'obj' (default) or 'json'"
+                }
+            },
+            "GET /neuro/world3d": "Raw centroid positions + colours (use as point cloud in Three.js)"
+        },
+        "threejs_snippet": "// Load OBJ response in Three.js:\nimport { OBJLoader } from 'three/addons/loaders/OBJLoader.js';\nimport { MTLLoader } from 'three/addons/loaders/MTLLoader.js';\n\nasync function loadNeuroMesh(query) {\n  const res = await fetch('/mesh/synthesize', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ query, hops: 2, min_activation: 0.05 })\n  });\n  const { obj, mtl } = await res.json();\n  const mtlBlob = URL.createObjectURL(new Blob([mtl], { type: 'text/plain' }));\n  const objBlob = URL.createObjectURL(new Blob([obj], { type: 'text/plain' }));\n  const materials = await new MTLLoader().loadAsync(mtlBlob);\n  materials.preload();\n  const loader = new OBJLoader();\n  loader.setMaterials(materials);\n  return loader.loadAsync(objBlob);\n}",
+        "architecture_note": "mesh_gen module is a pure consumer of centroid data — it has no imports from the neural layer. The brain stays the brain. This route file is the only coupling point."
+    })))
 }

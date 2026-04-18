@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 mod chain;
 mod bridge;
 mod api;
+mod mesh_gen;
 mod config;
 mod data_mesh;
 mod distributed;
