@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>W1z4rD V1510n — Neural Cow World</title>
+<title>W1z4rD V1510n — Neural Entity World</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #000; overflow: hidden; font-family: monospace; }
@@ -14,113 +14,91 @@ canvas { display: block; }
 }
 #feed-wrap {
   width: 220px; height: 124px; overflow: hidden;
-  border: 1px solid rgba(0,255,80,0.5); background: #111;
-  position: relative;
+  border: 1px solid rgba(0,255,80,0.5); background: #111; position: relative;
 }
 #feed-wrap img { width: 100%; height: 100%; object-fit: cover; }
-#feed-label {
-  position: absolute; bottom: 3px; left: 4px;
-  color: rgba(0,255,80,0.7); font-size: 9px; letter-spacing: 1px;
-}
-#status-box {
-  background: rgba(0,0,0,0.7); padding: 5px 8px;
-  border: 1px solid rgba(0,255,80,0.3); font-size: 11px; line-height: 1.7;
-}
-.sl { color: #0f8; } .sv { color: #cfc; } .sa { color: #ff0; font-weight: bold; }
-.sd { color: #555; }
-#labels-box {
-  background: rgba(0,0,0,0.6); padding: 4px 8px;
-  border: 1px solid rgba(0,255,80,0.2);
-  font-size: 10px; line-height: 1.7; display: none;
-}
+#feed-label { position: absolute; bottom: 3px; left: 4px; color: rgba(0,255,80,0.7); font-size: 9px; letter-spacing: 1px; }
+#status-box { background: rgba(0,0,0,0.7); padding: 5px 8px; border: 1px solid rgba(0,255,80,0.3); font-size: 11px; line-height: 1.7; }
+.sl { color: #0f8; } .sv { color: #cfc; } .sa { color: #ff0; font-weight: bold; } .sd { color: #555; }
+#labels-box { background: rgba(0,0,0,0.6); padding: 4px 8px; border: 1px solid rgba(0,255,80,0.2); font-size: 10px; line-height: 1.7; display: none; }
 .lbl { color: #0d9; }
-#narrative-box {
-  background: rgba(0,0,0,0.6); padding: 4px 8px;
-  border: 1px solid rgba(60,180,255,0.3);
-  font-size: 10px; color: #8ef; line-height: 1.5; display: none;
+#narrative-box { background: rgba(0,0,0,0.6); padding: 4px 8px; border: 1px solid rgba(60,180,255,0.3); font-size: 10px; color: #8ef; line-height: 1.5; display: none; }
+#crosshair { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); color: rgba(255,255,255,0.4); font-size: 22px; pointer-events: none; display: none; }
+#hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); color: rgba(255,255,255,0.3); font-size: 11px; pointer-events: none; }
+#lod-badge { position: fixed; bottom: 14px; right: 14px; color: rgba(0,255,80,0.3); font-size: 11px; pointer-events: none; }
+#hw-badge { position: fixed; bottom: 28px; right: 14px; color: rgba(0,200,255,0.28); font-size: 10px; pointer-events: none; }
+#depth-hud {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  color: rgba(0,255,200,0.7); font-size: 12px; letter-spacing: 2px;
+  background: rgba(0,0,0,0.5); padding: 4px 14px; display: none;
+  border: 1px solid rgba(0,255,200,0.2); pointer-events: none;
 }
-#crosshair {
-  position: fixed; top: 50%; left: 50%;
-  transform: translate(-50%,-50%);
-  color: rgba(255,255,255,0.4); font-size: 22px;
-  pointer-events: none; display: none;
+#exit-drill {
+  position: fixed; top: 12px; left: 14px;
+  background: rgba(0,0,0,0.65); border: 1px solid rgba(255,80,80,0.5);
+  color: #f88; font-size: 11px; padding: 4px 10px; cursor: pointer; z-index: 30;
+  display: none; pointer-events: auto;
 }
-#hint {
-  position: fixed; bottom: 14px; left: 50%;
-  transform: translateX(-50%);
-  color: rgba(255,255,255,0.35); font-size: 12px; pointer-events: none;
-}
-#lod-badge {
-  position: fixed; bottom: 14px; right: 14px;
-  color: rgba(0,255,80,0.35); font-size: 11px; pointer-events: none;
-}
-#hw-badge {
-  position: fixed; bottom: 30px; right: 14px;
-  color: rgba(0,200,255,0.3); font-size: 10px; pointer-events: none;
-}
-#screenshot-btn {
-  position: fixed; bottom: 14px; left: 14px;
-  background: rgba(0,0,0,0.6); border: 1px solid rgba(0,255,80,0.4);
-  color: #0f8; font-size: 11px; padding: 4px 10px; cursor: pointer;
-  display: none; z-index: 20; font-family: monospace;
-}
-#entity-panel {
-  position: fixed; top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
-  background: rgba(0,0,0,0.85); border: 1px solid rgba(0,255,120,0.5);
-  padding: 12px 16px; max-width: 320px; min-width: 200px;
+#info-panel {
+  position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,0.82); border: 1px solid rgba(0,255,120,0.4);
+  padding: 10px 16px; max-width: 480px; min-width: 200px;
   font-size: 11px; line-height: 1.8; display: none; z-index: 30;
   pointer-events: auto;
 }
-#entity-panel .ep-title { color: #0f8; font-size: 13px; margin-bottom: 6px; }
-#entity-panel .ep-label { color: #8ef; }
-#entity-panel .ep-close {
-  position: absolute; top: 5px; right: 8px;
-  color: #555; cursor: pointer; font-size: 14px;
+#info-panel .ip-name { color: #0f8; font-size: 13px; margin-bottom: 5px; }
+#info-panel .ip-desc { color: #ccc; }
+#info-panel .ip-labels { color: #8ef; margin-top: 6px; }
+#info-panel .ip-close { float: right; color: #555; cursor: pointer; margin-top: -2px; }
+#info-panel .ip-close:hover { color: #f44; }
+#organ-labels { position: fixed; top: 0; left: 0; pointer-events: none; z-index: 20; }
+.organ-tag {
+  position: absolute; color: #fff; font: 10px monospace;
+  background: rgba(0,0,0,0.65); padding: 2px 6px;
+  border: 1px solid rgba(255,230,80,0.5);
+  pointer-events: auto; cursor: pointer; white-space: nowrap;
+  transform: translate(-50%, -50%);
 }
-#entity-panel .ep-close:hover { color: #f44; }
-#zoom-hint {
-  position: fixed; bottom: 32px; left: 50%;
-  transform: translateX(-50%);
-  color: rgba(255,255,255,0.22); font-size: 11px; pointer-events: none;
-}
+.organ-tag:hover { background: rgba(255,230,80,0.25); border-color: rgba(255,230,80,0.9); }
+#screenshot-btn { position: fixed; bottom: 14px; left: 14px; background: rgba(0,0,0,0.6); border: 1px solid rgba(0,255,80,0.4); color: #0f8; font-size: 11px; padding: 4px 10px; cursor: pointer; display: none; z-index: 20; }
 </style>
 </head>
 <body>
 <div id="overlay">
-  <div id="feed-wrap">
-    <img id="video-feed" alt="">
-    <div id="feed-label">NEURAL SENSOR FEED</div>
-  </div>
+  <div id="feed-wrap"><img id="video-feed" alt=""><div id="feed-label">NEURAL SENSOR FEED</div></div>
   <div id="status-box">
     <span class="sl">STATE </span><span id="s-anim" class="sa">connecting</span><br>
-    <span class="sl">COWS  </span><span id="s-cows" class="sv">—</span><br>
-    <span class="sl">CONF  </span><span id="s-conf" class="sv">—</span><br>
-    <span class="sl">FPS   </span><span id="s-fps"  class="sv">—</span>
+    <span class="sl">ENTITY</span><span id="s-cows" class="sv"> —</span><br>
+    <span class="sl">DEPTH </span><span id="s-depth" class="sv"> 0</span><br>
+    <span class="sl">FPS   </span><span id="s-fps"  class="sv"> —</span>
   </div>
   <div id="labels-box"><div class="sd">FABRIC CONCEPTS</div><div id="label-list"></div></div>
   <div id="narrative-box"><span id="narrative-text"></span></div>
 </div>
+<div id="depth-hud">WORLD VIEW</div>
+<button id="exit-drill" onclick="exitDrill()">← EXIT  [right-click]</button>
+<div id="organ-labels"></div>
+<div id="info-panel">
+  <span class="ip-close" onclick="closeInfoPanel()">✕</span>
+  <div class="ip-name" id="ip-name"></div>
+  <div class="ip-desc" id="ip-desc"></div>
+  <div class="ip-labels" id="ip-labels"></div>
+</div>
 <div id="crosshair">+</div>
-<div id="hint">Click to enter free-roam · WASD move · Shift sprint · Scroll zoom · Esc exit</div>
-<div id="zoom-hint">Scroll to zoom · Left-click entity for labels · Right-click for anatomy</div>
+<div id="hint">Scroll zoom · Left-click entity → anatomy · Right-click → back · Click to free-roam</div>
 <div id="lod-badge">LOD: —</div>
 <div id="hw-badge">GPU: —</div>
 <button id="screenshot-btn" onclick="downloadScreenshot()">📷 SCREENSHOT</button>
-<div id="entity-panel">
-  <span class="ep-close" onclick="closeEntityPanel()">✕</span>
-  <div class="ep-title" id="ep-title">Entity</div>
-  <div id="ep-content"></div>
-</div>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
 <script>
 'use strict';
 
-// ─── URL params ────────────────────────────────────────────────────────────
 const params = new URLSearchParams(location.search);
 const SCREENSHOT_MODE = params.has('screenshot');
 if (SCREENSHOT_MODE) document.getElementById('screenshot-btn').style.display = 'block';
+
+const NODE_API = 'http://localhost:8090';
 
 // ─── Renderer ──────────────────────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: SCREENSHOT_MODE });
@@ -129,13 +107,12 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = false;
 document.body.appendChild(renderer.domElement);
 
-// ─── Hardware tier detection ───────────────────────────────────────────────
 function detectHardwareTier() {
   const gl = renderer.getContext();
   const info = (gl.getParameter(gl.RENDERER) || '').toLowerCase();
   document.getElementById('hw-badge').textContent = 'GPU: ' + info.slice(0, 28);
   const hi = ['rtx', 'gtx 10', 'gtx 16', 'gtx 9', 'rx ', 'radeon pro', 'apple m', 'tesla', 'quadro'];
-  const lo = ['swiftshader', 'llvmpipe', 'intel hd graphics 4', 'intel hd graphics 5', 'mali', 'adreno 3'];
+  const lo = ['swiftshader', 'llvmpipe', 'intel hd graphics 4', 'mali', 'adreno 3'];
   if (hi.some(k => info.includes(k))) return 'high';
   if (lo.some(k => info.includes(k))) return 'low';
   const c = navigator.hardwareConcurrency || 2;
@@ -147,34 +124,30 @@ const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x8fafb8, 0.018);
 
 // ─── Camera ────────────────────────────────────────────────────────────────
-// Fixed side-view matching the video camera perspective.
-// Free-roam via pointer lock overrides this.
-const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.1, 400);
-camera.position.set(14, 2.0, 0);
+const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.001, 400);
+camera.position.set(7.5, 2.0, 0);
 camera.lookAt(0, 1.2, 0);
 camera.rotation.order = 'YXZ';
-let camYaw   = Math.atan2(camera.getWorldDirection(new THREE.Vector3()).x,
-                           -camera.getWorldDirection(new THREE.Vector3()).z);
-let camPitch = 0;
+let camYaw = 0, camPitch = 0;
+let controlLookAt = new THREE.Vector3(0, 1.2, 0);
 
-// ─── Shared video texture ──────────────────────────────────────────────────
+// ─── Video texture ─────────────────────────────────────────────────────────
 const videoTexture = new THREE.Texture();
 videoTexture.minFilter = THREE.LinearFilter;
 videoTexture.magFilter = THREE.LinearFilter;
 const videoImg = new Image();
 videoImg.onload = () => { videoTexture.image = videoImg; videoTexture.needsUpdate = true; };
-
 function updateVideoTexture(dataURL) { videoImg.src = dataURL; }
 
 // ─── Background plane ─────────────────────────────────────────────────────
-const bgGeo = new THREE.PlaneGeometry(1, 1);
-const bgMat = new THREE.MeshBasicMaterial({ map: videoTexture, depthWrite: false });
-const bgPlane = new THREE.Mesh(bgGeo, bgMat);
+const bgPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(1, 1),
+  new THREE.MeshBasicMaterial({ map: videoTexture, depthWrite: false })
+);
 bgPlane.renderOrder = -1;
 scene.add(bgPlane);
-
 function updateBackground() {
-  const dist  = 80;
+  const dist = 80;
   const ahead = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   bgPlane.position.copy(camera.position).addScaledVector(ahead, dist);
   bgPlane.lookAt(camera.position);
@@ -184,25 +157,22 @@ function updateBackground() {
 
 // ─── Lighting ─────────────────────────────────────────────────────────────
 scene.add(new THREE.AmbientLight(0xffffff, 0.90));
-const sun = new THREE.DirectionalLight(0xfffce0, 0.60);
+const sun = new THREE.DirectionalLight(0xfffce0, 0.55);
 sun.position.set(20, 40, 10);
 scene.add(sun);
+const fillLight = new THREE.PointLight(0x8899ff, 0.4, 20);
+scene.add(fillLight);
 
-// ─── World-space video projection shader ──────────────────────────────────
-// Each cow gets its own ShaderMaterial instance with per-cow texture crop.
+// ─── Video-projection shader ───────────────────────────────────────────────
 const cowShader = {
   uniforms: {
-    tVideo:     { value: videoTexture },
-    uInvCow:    { value: new THREE.Matrix4() },
-    uCowMinX:   { value: -1.4 },
-    uCowSpanX:  { value:  3.0 },
-    uCowMinY:   { value:  0.0 },
-    uCowSpanY:  { value:  2.4 },
-    uTexOffU:   { value: 0.05 },
-    uTexScaleU: { value: 0.90 },
-    uTexOffV:   { value: 0.08 },
-    uTexScaleV: { value: 0.82 },
-    uFallback:  { value: new THREE.Color(0xddd8c8) },
+    tVideo: { value: videoTexture }, uInvCow: { value: new THREE.Matrix4() },
+    uCowMinX: { value: -1.4 }, uCowSpanX: { value: 3.0 },
+    uCowMinY: { value: 0.0 },  uCowSpanY: { value: 2.4 },
+    uTexOffU: { value: 0.05 }, uTexScaleU: { value: 0.90 },
+    uTexOffV: { value: 0.08 }, uTexScaleV: { value: 0.82 },
+    uFallback: { value: new THREE.Color(0xddd8c8) },
+    uOpacity:  { value: 1.0 },
   },
   vertexShader: `
     varying vec4 vWorldPos;
@@ -214,241 +184,113 @@ const cowShader = {
   fragmentShader: `
     uniform sampler2D tVideo;
     uniform mat4  uInvCow;
-    uniform float uCowMinX, uCowSpanX;
-    uniform float uCowMinY, uCowSpanY;
-    uniform float uTexOffU, uTexScaleU;
-    uniform float uTexOffV, uTexScaleV;
+    uniform float uCowMinX, uCowSpanX, uCowMinY, uCowSpanY;
+    uniform float uTexOffU, uTexScaleU, uTexOffV, uTexScaleV;
     uniform vec3  uFallback;
+    uniform float uOpacity;
     varying vec4 vWorldPos;
     void main() {
       vec3 local = (uInvCow * vWorldPos).xyz;
       float u = (local.x - uCowMinX) / uCowSpanX;
       float v = (local.y - uCowMinY) / uCowSpanY;
-      float inBounds = step(0.0, u) * step(u, 1.0) * step(0.0, v) * step(v, 1.0);
-      float edgeFade = smoothstep(0.0, 0.05, u) * smoothstep(1.0, 0.95, u)
-                     * smoothstep(0.0, 0.04, v) * smoothstep(1.0, 0.96, v);
+      float inB = step(0.0,u)*step(u,1.0)*step(0.0,v)*step(v,1.0);
+      float edge = smoothstep(0.0,0.05,u)*smoothstep(1.0,0.95,u)
+                 * smoothstep(0.0,0.04,v)*smoothstep(1.0,0.96,v);
       float su = uTexOffU + u * uTexScaleU;
       float sv = uTexOffV + v * uTexScaleV;
-      vec4 texColor = texture2D(tVideo, vec2(su, sv));
-      gl_FragColor  = mix(vec4(uFallback, 1.0), texColor, inBounds * edgeFade);
+      vec4 tex = texture2D(tVideo, vec2(su,sv));
+      gl_FragColor = mix(vec4(uFallback,1.0), tex, inB*edge);
+      gl_FragColor.a *= uOpacity;
     }
   `,
 };
-
 function makeCowMat() {
   return new THREE.ShaderMaterial({
-    uniforms:       THREE.UniformsUtils.clone(cowShader.uniforms),
-    vertexShader:   cowShader.vertexShader,
+    uniforms: THREE.UniformsUtils.clone(cowShader.uniforms),
+    vertexShader: cowShader.vertexShader,
     fragmentShader: cowShader.fragmentShader,
-    side:           THREE.DoubleSide,
+    side: THREE.DoubleSide, transparent: true,
   });
 }
 
-// ─── Helper materials (hooves, pink, eyes) ────────────────────────────────
+// ─── Helper materials ──────────────────────────────────────────────────────
 const HOOF_MAT = new THREE.MeshLambertMaterial({ color: 0x1e0f04 });
 const PINK_MAT = new THREE.MeshLambertMaterial({ color: 0xf0a090 });
 const EYE_MAT  = new THREE.MeshLambertMaterial({ color: 0x0a0808 });
 
 // ─── Cow builder ──────────────────────────────────────────────────────────
-// Stores all ShaderMaterial instances in root.userData.mats for fast uniform update.
 function buildCow(lod) {
   const segs = lod === 'low' ? 6 : lod === 'med' ? 10 : 16;
   const root = new THREE.Group();
   const mats = [];
-
   function mesh(geo) {
-    const mat = makeCowMat();
-    mats.push(mat);
-    const m = new THREE.Mesh(geo, mat);
-    return m;
+    const mat = makeCowMat(); mats.push(mat);
+    return new THREE.Mesh(geo, mat);
   }
-
-  // Body
-  const body = mesh(new THREE.SphereGeometry(1.0, segs * 2, segs));
-  body.scale.set(1.28, 0.56, 0.66);
-  body.position.y = 1.62;
-  root.add(body);
-
-  // Neck pivot (front of body in body-local space)
-  const neckPivot = new THREE.Object3D();
-  neckPivot.position.set(1.18, 0.20, 0);
-  body.add(neckPivot);
-
+  const body = mesh(new THREE.SphereGeometry(1.0, segs*2, segs));
+  body.scale.set(1.28, 0.56, 0.66); body.position.y = 1.62; root.add(body);
+  const neckPivot = new THREE.Object3D(); neckPivot.position.set(1.18, 0.20, 0); body.add(neckPivot);
   const neck = mesh(new THREE.CylinderGeometry(0.19, 0.26, 0.68, segs));
-  neck.rotation.z = -0.52;
-  neck.position.set(0.30, 0.18, 0);
-  neckPivot.add(neck);
-
-  // Head joint (articulated for head pitch)
-  const headJoint = new THREE.Object3D();
-  headJoint.position.set(0.54, 0.36, 0);
-  neckPivot.add(headJoint);
-
-  const head = mesh(new THREE.SphereGeometry(0.38, segs * 2, segs));
-  head.scale.set(1.22, 0.94, 0.88);
-  head.position.set(0.30, 0, 0);
-  headJoint.add(head);
-
-  // Snout
+  neck.rotation.z = -0.52; neck.position.set(0.30, 0.18, 0); neckPivot.add(neck);
+  const headJoint = new THREE.Object3D(); headJoint.position.set(0.54, 0.36, 0); neckPivot.add(headJoint);
+  const head = mesh(new THREE.SphereGeometry(0.38, segs*2, segs));
+  head.scale.set(1.22, 0.94, 0.88); head.position.set(0.30, 0, 0); headJoint.add(head);
   const snout = mesh(new THREE.CylinderGeometry(0.19, 0.23, 0.32, segs));
-  snout.rotation.z = Math.PI / 2;
-  snout.position.set(0.40, -0.04, 0);
-  head.add(snout);
-
-  // Nose pad
+  snout.rotation.z = Math.PI/2; snout.position.set(0.40, -0.04, 0); head.add(snout);
   const nosePad = new THREE.Mesh(new THREE.CylinderGeometry(0.185, 0.185, 0.025, segs), PINK_MAT);
-  nosePad.rotation.z = Math.PI / 2;
-  nosePad.position.set(0.165, -0.04, 0);
-  snout.add(nosePad);
-
-  for (const z of [0.07, -0.07]) {
-    const n = new THREE.Mesh(new THREE.SphereGeometry(0.033, 4, 4), EYE_MAT);
-    n.position.set(0.085, -0.04, z);
-    snout.add(n);
-  }
-
+  nosePad.rotation.z = Math.PI/2; nosePad.position.set(0.165, -0.04, 0); snout.add(nosePad);
+  for (const z of [0.07, -0.07]) { const n = new THREE.Mesh(new THREE.SphereGeometry(0.033, 4, 4), EYE_MAT); n.position.set(0.085, -0.04, z); snout.add(n); }
   if (lod !== 'low') {
-    for (const z of [0.30, -0.30]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.070, 7, 7), EYE_MAT);
-      eye.position.set(0.20, 0.10, z);
-      head.add(eye);
-    }
-    for (const z of [0.34, -0.34]) {
-      const ear = new THREE.Mesh(new THREE.SphereGeometry(0.11, 6, 5), PINK_MAT);
-      ear.scale.set(0.5, 1.1, 0.4);
-      ear.position.set(-0.14, 0.32, z);
-      ear.rotation.z = z > 0 ? 0.28 : -0.28;
-      head.add(ear);
-    }
+    for (const z of [0.30, -0.30]) { const e = new THREE.Mesh(new THREE.SphereGeometry(0.070, 7, 7), EYE_MAT); e.position.set(0.20, 0.10, z); head.add(e); }
+    for (const z of [0.34, -0.34]) { const ear = new THREE.Mesh(new THREE.SphereGeometry(0.11, 6, 5), PINK_MAT); ear.scale.set(0.5, 1.1, 0.4); ear.position.set(-0.14, 0.32, z); ear.rotation.z = z > 0 ? 0.28 : -0.28; head.add(ear); }
   }
-
   if (lod === 'high') {
-    for (const z of [0.24, -0.24]) {
-      const horn = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.012, 0.038, 0.30, 5),
-        new THREE.MeshLambertMaterial({ color: 0xd4bc50 })
-      );
-      horn.position.set(-0.09, 0.40, z);
-      horn.rotation.set(z > 0 ? 0.2 : -0.2, 0, -0.44);
-      head.add(horn);
-    }
+    for (const z of [0.24, -0.24]) { const horn = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.038, 0.30, 5), new THREE.MeshLambertMaterial({ color: 0xd4bc50 })); horn.position.set(-0.09, 0.40, z); horn.rotation.set(z>0?0.2:-0.2, 0, -0.44); head.add(horn); }
   }
-
-  // 4 Legs
-  const legDefs = [
-    { name: 'fl', x:  0.86, z:  0.44 },
-    { name: 'fr', x:  0.86, z: -0.44 },
-    { name: 'bl', x: -0.86, z:  0.44 },
-    { name: 'br', x: -0.86, z: -0.44 },
-  ];
+  const legDefs = [{ name:'fl',x:0.86,z:0.44 },{ name:'fr',x:0.86,z:-0.44 },{ name:'bl',x:-0.86,z:0.44 },{ name:'br',x:-0.86,z:-0.44 }];
   const legs = {};
   for (const d of legDefs) {
-    const pivot = new THREE.Object3D();
-    pivot.position.set(d.x, -0.54, d.z);
-    body.add(pivot);
-    const upper = mesh(new THREE.CylinderGeometry(0.095, 0.082, 0.58, segs));
-    upper.position.y = -0.29;
-    pivot.add(upper);
-    const knee = new THREE.Object3D();
-    knee.position.y = -0.58;
-    pivot.add(knee);
-    const lower = mesh(new THREE.CylinderGeometry(0.072, 0.064, 0.52, segs));
-    lower.position.y = -0.26;
-    knee.add(lower);
-    const hoof = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.22), HOOF_MAT);
-    hoof.position.y = -0.57;
-    knee.add(hoof);
+    const pivot = new THREE.Object3D(); pivot.position.set(d.x, -0.54, d.z); body.add(pivot);
+    const upper = mesh(new THREE.CylinderGeometry(0.095, 0.082, 0.58, segs)); upper.position.y = -0.29; pivot.add(upper);
+    const knee = new THREE.Object3D(); knee.position.y = -0.58; pivot.add(knee);
+    const lower = mesh(new THREE.CylinderGeometry(0.072, 0.064, 0.52, segs)); lower.position.y = -0.26; knee.add(lower);
+    const hoof = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.22), HOOF_MAT); hoof.position.y = -0.57; knee.add(hoof);
     legs[d.name] = { pivot, knee };
   }
-
-  // Tail
-  const tailRoot = new THREE.Object3D();
-  tailRoot.position.set(-1.28, 0.16, 0);
-  body.add(tailRoot);
-  const tailSegs = lod === 'low' ? 1 : 3;
-  for (let i = 0; i < tailSegs; i++) {
-    const seg = mesh(new THREE.CylinderGeometry(0.026 - i * 0.005, 0.040 - i * 0.009, 0.33, 4));
-    seg.rotation.z = Math.PI / 2;
-    seg.position.x = -(0.165 + i * 0.33);
-    tailRoot.add(seg);
-  }
-  const tuft = new THREE.Mesh(new THREE.SphereGeometry(0.092, 5, 4), new THREE.MeshLambertMaterial({ color: 0x181616 }));
-  tuft.position.x = lod === 'low' ? -0.50 : -(0.165 + tailSegs * 0.33);
-  tailRoot.add(tuft);
-
-  // Udder (high only)
+  const tailRoot = new THREE.Object3D(); tailRoot.position.set(-1.28, 0.16, 0); body.add(tailRoot);
+  const ts = lod === 'low' ? 1 : 3;
+  for (let i = 0; i < ts; i++) { const seg = mesh(new THREE.CylinderGeometry(0.026-i*0.005, 0.040-i*0.009, 0.33, 4)); seg.rotation.z = Math.PI/2; seg.position.x = -(0.165+i*0.33); tailRoot.add(seg); }
+  const tuft = new THREE.Mesh(new THREE.SphereGeometry(0.092,5,4), new THREE.MeshLambertMaterial({color:0x181616})); tuft.position.x=-(0.165+ts*0.33); tailRoot.add(tuft);
   if (lod === 'high') {
-    const udder = new THREE.Group();
-    udder.position.set(-0.25, -0.58, 0);
-    body.add(udder);
-    for (const [tx, tz] of [[0.11, 0.11], [0.11, -0.11], [-0.09, 0.11], [-0.09, -0.11]]) {
-      const q = new THREE.Mesh(new THREE.SphereGeometry(0.10, 6, 5),
-        new THREE.MeshLambertMaterial({ color: 0xefb898 }));
-      q.position.set(tx, 0, tz);
-      udder.add(q);
-      const teat = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.13, 4),
-        new THREE.MeshLambertMaterial({ color: 0xe0a07a }));
-      teat.position.set(tx, -0.11, tz);
-      udder.add(teat);
+    const udder = new THREE.Group(); udder.position.set(-0.25,-0.58,0); body.add(udder);
+    for (const [tx,tz] of [[0.11,0.11],[0.11,-0.11],[-0.09,0.11],[-0.09,-0.11]]) {
+      const q = new THREE.Mesh(new THREE.SphereGeometry(0.10,6,5), new THREE.MeshLambertMaterial({color:0xefb898})); q.position.set(tx,0,tz); udder.add(q);
+      const teat = new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.026,0.13,4), new THREE.MeshLambertMaterial({color:0xe0a07a})); teat.position.set(tx,-0.11,tz); udder.add(teat);
     }
   }
-
   root.userData = { mats, body, headJoint, neckPivot, tailRoot, legs, lod };
   return root;
 }
 
-// ─── 2-D video position → 3-D world position ─────────────────────────────
-// Fixed-depth placement: entities at X=0 facing the camera.
-// Z spread matches the camera's visible width so horizontal positions align
-// with the video frame at the current zoom level.
-// Camera at (zoomDist, 2, 0) facing -X.  Vertical FOV=52°, aspect≈1.78
-// → horizontal FOV ≈ 82°, tan(41°) ≈ 0.869.
+// ─── 2D → 3D position ─────────────────────────────────────────────────────
 const H_TAN = 0.869;
-
 function videoToWorldPos(cx, _cy, groundY = 0) {
-  const halfW = zoomDist * H_TAN;   // world metres visible left/right of centre
-  const z     = (0.5 - cx) * halfW * 2;
-  return new THREE.Vector3(0, groundY, z);
+  const halfW = zoomDist * H_TAN;
+  return new THREE.Vector3(0, groundY, (0.5 - cx) * halfW * 2);
 }
 
 // ─── Cow registry ─────────────────────────────────────────────────────────
-// Map<cowId, { mesh, mats, texOff, cur, target, lastSeen }>
 const cowRegistry = new Map();
 let currentLOD = 'high';
-let globalPose = { walkSpeed: 0, walkPhase: 0, headPitch: 0, headYaw: 0, animState: 'stand' };
-
-function spawnCow(id, worldPos, texOff) {
-  const mesh = buildCow(currentLOD);
-  mesh.position.copy(worldPos);
-  scene.add(mesh);
-
-  // Rotate cow to show its left side profile toward the camera.
-  // Camera is at +X, cow body runs along local-X.
-  // rotation.y = PI/2 → cow faces +Z, camera sees left side (matching video side view).
-  mesh.rotation.y = Math.PI / 2;
-
-  cowRegistry.set(id, {
-    mesh,
-    texOff: { ...texOff },
-    cur:  { x: worldPos.x, z: worldPos.z, yaw: Math.PI, walkPhase: 0 },
-    target: { x: worldPos.x, z: worldPos.z, yaw: Math.PI,
-              walkSpeed: 0, motion: 0, animState: 'stand' },
-    lastSeen: performance.now(),
-  });
-}
-
-function despawnCow(id) {
-  const e = cowRegistry.get(id);
-  if (e) { scene.remove(e.mesh); cowRegistry.delete(id); }
-}
+let globalPose  = { walkSpeed:0, walkPhase:0, headPitch:0, headYaw:0, animState:'stand' };
 
 function bboxToTexOff(cx, cy, w, h) {
-  const u0 = Math.max(0, cx - w / 2);
-  const us  = Math.min(w, 1 - u0);
-  // UV V=0 is bottom of image (Three.js default flipY=true)
-  const v0 = Math.max(0, 1.0 - cy - h / 2);
-  const vs  = Math.min(h, 1 - v0);
-  return { u0, us, v0, vs };
+  return {
+    u0: Math.max(0, cx - w/2),
+    us: Math.min(w, 1 - Math.max(0, cx - w/2)),
+    v0: Math.max(0, 1.0 - cy - h/2),
+    vs: Math.min(h, 1 - Math.max(0, 1.0 - cy - h/2)),
+  };
 }
 
 function syncCowShader(entry) {
@@ -457,32 +299,537 @@ function syncCowShader(entry) {
   for (const mat of entry.mesh.userData.mats) {
     const u = mat.uniforms;
     u.uInvCow.value.copy(inv);
-    u.tVideo.value    = videoTexture;
-    u.uTexOffU.value  = entry.texOff.u0;
-    u.uTexScaleU.value = entry.texOff.us;
-    u.uTexOffV.value  = entry.texOff.v0;
-    u.uTexScaleV.value = entry.texOff.vs;
+    u.tVideo.value = videoTexture;
+    u.uTexOffU.value  = entry.texOff.u0;  u.uTexScaleU.value = entry.texOff.us;
+    u.uTexOffV.value  = entry.texOff.v0;  u.uTexScaleV.value = entry.texOff.vs;
   }
 }
 
-// ─── LOD management ───────────────────────────────────────────────────────
+function setEntityOpacity(entry, opacity) {
+  for (const mat of entry.mesh.userData.mats) {
+    mat.uniforms.uOpacity.value = opacity;
+  }
+}
+
+function spawnCow(id, worldPos, texOff) {
+  const mesh = buildCow(currentLOD);
+  mesh.position.copy(worldPos);
+  mesh.rotation.y = Math.PI / 2;
+  scene.add(mesh);
+  cowRegistry.set(id, {
+    mesh, texOff: { ...texOff },
+    cur:  { x: worldPos.x, z: worldPos.z, yaw: Math.PI/2, walkPhase: 0 },
+    target: { x: worldPos.x, z: worldPos.z, yaw: Math.PI/2, walkSpeed:0, motion:0, animState:'stand' },
+    lastSeen: performance.now(),
+    conceptLabels: [],
+    anatomyGroup: null,
+    anatomyLoading: false,
+  });
+}
+
+function despawnCow(id) {
+  const e = cowRegistry.get(id);
+  if (!e) return;
+  if (e.anatomyGroup) scene.remove(e.anatomyGroup);
+  scene.remove(e.mesh);
+  cowRegistry.delete(id);
+}
+
 function setLOD(lod) {
   if (lod === currentLOD) return;
   currentLOD = lod;
   document.getElementById('lod-badge').textContent = 'LOD: ' + lod.toUpperCase();
-  for (const [id, e] of cowRegistry) {
-    const oldPos = e.mesh.position.clone();
-    const oldRY  = e.mesh.rotation.y;
+  for (const [, e] of cowRegistry) {
+    const p = e.mesh.position.clone(), ry = e.mesh.rotation.y;
     scene.remove(e.mesh);
-    const newMesh = buildCow(lod);
-    newMesh.position.copy(oldPos);
-    newMesh.rotation.y = oldRY;
-    scene.add(newMesh);
-    e.mesh = newMesh;
+    e.mesh = buildCow(lod);
+    e.mesh.position.copy(p); e.mesh.rotation.y = ry;
+    scene.add(e.mesh);
   }
 }
 
-// ─── WebSocket ────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// DRILL-DOWN ANATOMY SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+const DEPTH_NAMES = ['WORLD', 'ENTITY — EXTERIOR', 'ANATOMY — SYSTEMS', 'ORGAN DETAIL', 'CELLULAR', 'MOLECULAR'];
+
+const ORGANS = [
+  { name:'Rumen',     pos:[-0.40, 1.35,  0.25], color:0x44bb44, r:0.32, desc:'Largest compartment of the bovine stomach (100–150L). Microbial fermentation of cellulose.' },
+  { name:'Heart',     pos:[ 0.65, 1.62,  0.00], color:0xcc2222, r:0.13, desc:'4-chamber heart. Pumps 35–40L/min. Weighs 2–3kg. Located in the mediastinum.' },
+  { name:'L.Lung',    pos:[ 0.55, 1.70,  0.22], color:0xff9966, r:0.17, desc:'Left lung — constrained by rumen on left side. Lobed structure.' },
+  { name:'R.Lung',    pos:[ 0.55, 1.70, -0.22], color:0xff9966, r:0.17, desc:'Right lung — larger of the two. 4 lobes. Oxygen exchange ~500L/day.' },
+  { name:'Liver',     pos:[ 0.10, 1.44, -0.28], color:0xbb6622, r:0.21, desc:'Largest gland. Metabolises nutrients, detoxifies blood, produces bile. ~5kg.' },
+  { name:'L.Kidney',  pos:[-0.25, 1.65,  0.18], color:0xaa3333, r:0.10, desc:'Left kidney. Filters ~1000L blood/day. Lobulated structure unique to cattle.' },
+  { name:'R.Kidney',  pos:[-0.25, 1.65, -0.18], color:0xaa3333, r:0.10, desc:'Right kidney. Fixed position near right liver lobe. Produces erythropoietin.' },
+  { name:'Udder',     pos:[-0.30, 0.55,  0.00], color:0xffbbaa, r:0.22, desc:'4 mammary glands. Holstein avg 20–30L milk/day. Rich in lactalbumin, casein, lactose.' },
+  { name:'Brain',     pos:[ 1.55, 2.10,  0.00], color:0xffccaa, r:0.11, desc:'Bovine brain ~500g. Cerebral cortex, cerebellum, brainstem, olfactory bulbs.' },
+  { name:'Spine',     pos:[-0.10, 1.82,  0.00], color:0xe8e4aa, r:0.08, desc:'7 cervical + 13 thoracic + 6 lumbar + 5 sacral vertebrae. Supports 600–750kg.' },
+];
+
+// Drill state
+const drill = {
+  depth: 0,
+  entityId: null,
+  organName: null,
+  animating: false,
+  camFrom: new THREE.Vector3(),
+  camTo: new THREE.Vector3(),
+  lookFrom: new THREE.Vector3(),
+  lookTo: new THREE.Vector3(),
+  t: 0, duration: 0.9,
+};
+
+function easeCubic(t) { return t < 0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; }
+
+function flyCamera(toPos, toLook, dur = 0.9) {
+  drill.camFrom.copy(camera.position);
+  drill.camTo.copy(toPos);
+  drill.lookFrom.copy(controlLookAt);
+  drill.lookTo.copy(toLook);
+  drill.t = 0; drill.duration = dur; drill.animating = true;
+}
+
+function updateDrillCamera(dt) {
+  if (!drill.animating) return;
+  drill.t = Math.min(drill.t + dt / drill.duration, 1);
+  const e = easeCubic(drill.t);
+  camera.position.lerpVectors(drill.camFrom, drill.camTo, e);
+  controlLookAt.lerpVectors(drill.lookFrom, drill.lookTo, e);
+  camera.lookAt(controlLookAt);
+  if (drill.t >= 1) drill.animating = false;
+}
+
+function setDrillHUD(depth) {
+  document.getElementById('depth-hud').textContent = DEPTH_NAMES[depth] || `DEPTH ${depth}`;
+  document.getElementById('depth-hud').style.display = depth > 0 ? 'block' : 'none';
+  document.getElementById('exit-drill').style.display = depth > 0 ? 'block' : 'none';
+  document.getElementById('s-depth').textContent = ' ' + depth;
+}
+
+// ── Neural mesh fetch ─────────────────────────────────────────────────────
+async function fetchNeuralMesh(query, minAct = 0.04) {
+  try {
+    const resp = await fetch(`${NODE_API}/mesh/synthesize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, hops: 2, min_activation: minAct, format: 'json' }),
+    });
+    const d = await resp.json();
+    if (!d.verts || d.verts.length < 4) return null;
+    const pos = new Float32Array(d.verts.flat());
+    const idx = new Uint32Array(d.faces.flat());
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    if (d.normals?.length) {
+      geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(d.normals.flat()), 3));
+    } else { geo.computeVertexNormals(); }
+    if (d.colors?.length) {
+      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(d.colors.flat()), 3));
+    }
+    return geo;
+  } catch (_) { return null; }
+}
+
+// ── Anatomy overlay (depth 2) ─────────────────────────────────────────────
+function buildAnatomyGroup(entityEntry) {
+  const group = new THREE.Group();
+  group.position.copy(entityEntry.mesh.position);
+  group.rotation.copy(entityEntry.mesh.rotation);
+
+  // Spine
+  const spineGeo = new THREE.CylinderGeometry(0.04, 0.04, 2.2, 8);
+  spineGeo.applyMatrix4(new THREE.Matrix4().makeRotationZ(Math.PI/2));
+  const spineMesh = new THREE.Mesh(spineGeo,
+    new THREE.MeshPhongMaterial({ color:0xe8e4aa, transparent:true, opacity:0.85 }));
+  spineMesh.position.set(-0.1, 1.82, 0);
+  spineMesh.userData = { organName:'Spine', description: ORGANS.find(o=>o.name==='Spine')?.desc || '' };
+  group.add(spineMesh);
+
+  // Ribcage
+  for (let i = 0; i < 7; i++) {
+    const x = 0.85 - i * 0.24;
+    for (const side of [1, -1]) {
+      const pts = [];
+      for (let a = 0; a <= 14; a++) {
+        const ang = (a / 14) * Math.PI;
+        pts.push(new THREE.Vector3(x, 1.82 - Math.sin(ang)*0.38, side * Math.cos(ang)*0.30));
+      }
+      const rib = new THREE.Mesh(
+        new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 8, 0.022, 4, false),
+        new THREE.MeshPhongMaterial({ color:0xe0dbb8, transparent:true, opacity:0.65 })
+      );
+      rib.userData = { organName:'Spine' };
+      group.add(rib);
+    }
+  }
+
+  // Organ spheres
+  for (const organ of ORGANS) {
+    if (organ.name === 'Spine') continue;
+    const mat = new THREE.MeshPhongMaterial({
+      color: organ.color, transparent: true, opacity: 0.80, shininess: 70,
+    });
+    const m = new THREE.Mesh(new THREE.SphereGeometry(organ.r, 12, 10), mat);
+    m.position.set(...organ.pos);
+    m.userData = { organName: organ.name, description: organ.desc };
+    group.add(m);
+  }
+
+  group.visible = false;
+  scene.add(group);
+  return group;
+}
+
+// ── Cellular view (depth 4) ───────────────────────────────────────────────
+function buildCellularScene(worldPos) {
+  const group = new THREE.Group();
+  group.position.copy(worldPos);
+
+  for (let i = 0; i < 18; i++) {
+    const cx = (Math.random()-0.5)*2.4, cy = (Math.random()-0.5)*1.2, cz = (Math.random()-0.5)*1.0;
+    const cr = 0.18 + Math.random()*0.10;
+    // Cell membrane (transparent)
+    group.add(new THREE.Mesh(
+      new THREE.SphereGeometry(cr, 10, 8),
+      new THREE.MeshPhongMaterial({ color:0x88ccff, transparent:true, opacity:0.25, side:THREE.DoubleSide })
+    )).position.set(cx, cy, cz);
+    // Nucleus
+    const nuc = new THREE.Mesh(
+      new THREE.SphereGeometry(cr*0.45, 8, 6),
+      new THREE.MeshPhongMaterial({ color:0x5544cc, transparent:true, opacity:0.80 })
+    );
+    nuc.position.set(cx + cr*0.1, cy + cr*0.05, cz);
+    group.add(nuc);
+    // Mitochondria (2-3 per cell)
+    for (let m = 0; m < 2; m++) {
+      const mit = new THREE.Mesh(
+        new THREE.CapsuleGeometry(cr*0.08, cr*0.20, 4, 6),
+        new THREE.MeshPhongMaterial({ color:0xff8844, transparent:true, opacity:0.80 })
+      );
+      mit.position.set(cx + (Math.random()-0.5)*cr*0.7, cy + (Math.random()-0.5)*cr*0.7, cz + (Math.random()-0.5)*cr*0.7);
+      mit.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, 0);
+      group.add(mit);
+    }
+  }
+  // Labels
+  const labels = [
+    { text:'NUCLEUS', pos:[0,0.6,0], color:'#8877ff' },
+    { text:'MITOCHONDRIA', pos:[0.5,0.3,0.3], color:'#ff8844' },
+    { text:'CELL MEMBRANE', pos:[-0.4,0.2,0.6], color:'#88ccff' },
+    { text:'CYTOPLASM', pos:[0,-0.4,0.2], color:'#aaddcc' },
+  ];
+  group.userData.labels = labels;
+  group.visible = false;
+  scene.add(group);
+  return group;
+}
+
+// ── Molecular view (depth 5) ──────────────────────────────────────────────
+function buildMolecularScene(worldPos) {
+  const group = new THREE.Group();
+  group.position.copy(worldPos);
+
+  // DNA double helix
+  const STEPS = 40;
+  const materials = [
+    new THREE.MeshPhongMaterial({ color:0x4488ff }),
+    new THREE.MeshPhongMaterial({ color:0xff4444 }),
+  ];
+  const backbones = [[],[]];
+  for (let i = 0; i < STEPS; i++) {
+    const t = i / STEPS;
+    const angle = t * Math.PI * 4;
+    for (let s = 0; s < 2; s++) {
+      const a = angle + s * Math.PI;
+      const x = Math.cos(a) * 0.28;
+      const z = Math.sin(a) * 0.28;
+      const y = (t - 0.5) * 3.2;
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07, 8, 6), materials[s]
+      );
+      sphere.position.set(x, y, z);
+      group.add(sphere);
+      backbones[s].push(new THREE.Vector3(x, y, z));
+    }
+    // Base pair rungs
+    if (i % 3 === 0) {
+      const a0 = angle, a1 = angle + Math.PI;
+      const p0 = new THREE.Vector3(Math.cos(a0)*0.28, (t-0.5)*3.2, Math.sin(a0)*0.28);
+      const p1 = new THREE.Vector3(Math.cos(a1)*0.28, (t-0.5)*3.2, Math.sin(a1)*0.28);
+      const mid = p0.clone().add(p1).multiplyScalar(0.5);
+      const len = p0.distanceTo(p1);
+      const rung = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.03, 0.03, len, 4),
+        new THREE.MeshPhongMaterial({ color: i%2===0?0x44ff88:0xffee44 })
+      );
+      rung.position.copy(mid);
+      rung.lookAt(p1); rung.rotateX(Math.PI/2);
+      group.add(rung);
+    }
+  }
+  // Backbone tubes
+  for (let s = 0; s < 2; s++) {
+    const curve = new THREE.CatmullRomCurve3(backbones[s]);
+    const tube = new THREE.Mesh(
+      new THREE.TubeGeometry(curve, STEPS*2, 0.028, 5, false),
+      new THREE.MeshPhongMaterial({ color: s===0 ? 0x2266cc : 0xcc2222, transparent:true, opacity:0.7 })
+    );
+    group.add(tube);
+  }
+  group.userData.labels = [
+    { text:'ADENINE', pos:[0.4,0.8,0], color:'#44ff88' },
+    { text:'THYMINE', pos:[-0.4,0.5,0.3], color:'#ffee44' },
+    { text:'DEOXYRIBOSE BACKBONE', pos:[0.5,-0.5,0], color:'#4488ff' },
+    { text:'HYDROGEN BONDS', pos:[-0.3,0.1,0.5], color:'#fff' },
+  ];
+  group.visible = false;
+  scene.add(group);
+  return group;
+}
+
+// ── Label overlay DOM ─────────────────────────────────────────────────────
+const labelContainer = document.getElementById('organ-labels');
+const labelEls = new Map();  // name → div
+
+function getOrCreateLabel(name) {
+  if (labelEls.has(name)) return labelEls.get(name);
+  const div = document.createElement('div');
+  div.className = 'organ-tag';
+  div.textContent = name;
+  div.addEventListener('click', () => drillToOrgan(name));
+  labelContainer.appendChild(div);
+  labelEls.set(name, div);
+  return div;
+}
+
+function updateOrganLabels(group) {
+  if (!group || !group.visible) {
+    for (const div of labelEls.values()) div.style.display = 'none';
+    return;
+  }
+  const tmp = new THREE.Vector3();
+  for (const [name, div] of labelEls) {
+    const child = group.children.find(c => c.userData.organName === name);
+    if (!child) { div.style.display = 'none'; continue; }
+    child.getWorldPosition(tmp);
+    tmp.project(camera);
+    if (tmp.z > 1) { div.style.display = 'none'; continue; }
+    const x = (tmp.x * 0.5 + 0.5) * innerWidth;
+    const y = (-tmp.y * 0.5 + 0.5) * innerHeight;
+    div.style.display = 'block';
+    div.style.left = x + 'px';
+    div.style.top  = y + 'px';
+  }
+}
+
+function clearOrganLabels() {
+  for (const div of labelEls.values()) div.style.display = 'none';
+}
+
+// ── Neural label query for organ ──────────────────────────────────────────
+async function fetchOrganLabels(organName) {
+  try {
+    const resp = await fetch(`${NODE_API}/qa/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: `What is the bovine ${organName.toLowerCase()} and what is its function?`, top_k: 3 }),
+    });
+    const d = await resp.json();
+    return (d.report?.results || []).map(r => r.answer).filter(Boolean).slice(0, 2);
+  } catch (_) { return []; }
+}
+
+// ── Info panel ────────────────────────────────────────────────────────────
+function showInfoPanel(name, desc, labels) {
+  document.getElementById('ip-name').textContent = name;
+  document.getElementById('ip-desc').textContent = desc;
+  document.getElementById('ip-labels').innerHTML = labels.length
+    ? labels.map(l => `<div>◈ ${l.slice(0, 100)}</div>`).join('')
+    : '<div style="color:#444">Querying neural fabric…</div>';
+  document.getElementById('info-panel').style.display = 'block';
+}
+function closeInfoPanel() { document.getElementById('info-panel').style.display = 'none'; }
+
+// ── Enter / exit drill ────────────────────────────────────────────────────
+function enterEntityDrill(entityId) {
+  const entry = cowRegistry.get(entityId);
+  if (!entry) return;
+  drill.depth = 1;
+  drill.entityId = entityId;
+
+  // Camera flies close to the entity from the side
+  const ep = entry.mesh.position.clone();
+  flyCamera(
+    new THREE.Vector3(ep.x + 3.5, ep.y + 1.2, ep.z + 0.5),
+    new THREE.Vector3(ep.x, ep.y + 1.2, ep.z),
+    0.8
+  );
+
+  showInfoPanel(
+    `Entity #${entityId}  [${entry.target.animState?.toUpperCase() || 'STAND'}]`,
+    'Click again to enter anatomy view. Right-click to step back.',
+    entry.conceptLabels || []
+  );
+  setDrillHUD(1);
+}
+
+function enterAnatomyDrill(entityId) {
+  const entry = cowRegistry.get(entityId);
+  if (!entry) return;
+  drill.depth = 2;
+
+  // Build anatomy if not already built
+  if (!entry.anatomyGroup && !entry.anatomyLoading) {
+    entry.anatomyLoading = true;
+    entry.anatomyGroup = buildAnatomyGroup(entry);
+    // Async fetch neural mesh overlay
+    fetchNeuralMesh('dairy cow internal anatomy organs skeleton rumen heart').then(geo => {
+      if (geo && entry.anatomyGroup) {
+        const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+          color: 0x88bbff, transparent: true, opacity: 0.28,
+          side: THREE.DoubleSide, vertexColors: !!geo.attributes.color,
+        }));
+        // Centre the neural mesh at the cow's body centre
+        geo.computeBoundingBox();
+        const centre = new THREE.Vector3();
+        geo.boundingBox.getCenter(centre);
+        mesh.position.copy(entry.mesh.position).sub(centre).add(new THREE.Vector3(0, 1.4, entry.mesh.position.z));
+        mesh.userData = { isNeuralMesh: true };
+        scene.add(mesh);
+        entry.neuralMesh = mesh;
+      }
+      entry.anatomyLoading = false;
+    });
+    // Create organ label DOM elements
+    for (const organ of ORGANS) getOrCreateLabel(organ.name);
+  }
+
+  entry.anatomyGroup.visible = true;
+  setEntityOpacity(entry, 0.18);  // make cow exterior semi-transparent
+
+  // Camera enters the cow
+  const ep = entry.mesh.position.clone();
+  flyCamera(
+    new THREE.Vector3(ep.x + 1.8, ep.y + 1.5, ep.z),
+    new THREE.Vector3(ep.x - 0.2, ep.y + 1.4, ep.z),
+    0.9
+  );
+  setDrillHUD(2);
+  closeInfoPanel();
+}
+
+async function drillToOrgan(organName) {
+  if (drill.depth < 2 || !drill.entityId) return;
+  const entry = cowRegistry.get(drill.entityId);
+  if (!entry || !entry.anatomyGroup) return;
+
+  const organDef = ORGANS.find(o => o.name === organName);
+  if (!organDef) return;
+
+  drill.depth = 3;
+  drill.organName = organName;
+
+  // Find the organ mesh in the anatomy group
+  const child = entry.anatomyGroup.children.find(c => c.userData.organName === organName);
+  if (child) {
+    const wpos = new THREE.Vector3();
+    child.getWorldPosition(wpos);
+    flyCamera(
+      wpos.clone().add(new THREE.Vector3(0.6, 0.2, 0.3)),
+      wpos, 0.7
+    );
+  }
+
+  setDrillHUD(3);
+  clearOrganLabels();
+
+  // Show info with neural query
+  showInfoPanel(organName, organDef.desc, []);
+  const labels = await fetchOrganLabels(organName);
+  document.getElementById('ip-labels').innerHTML = labels.length
+    ? labels.map(l => `<div>◈ ${l.slice(0, 120)}</div>`).join('')
+    : '<div style="color:#555">Neural fabric: training more data required for detailed labels</div>';
+}
+
+function drillToCellular() {
+  if (!drill.entityId) return;
+  const entry = cowRegistry.get(drill.entityId);
+  if (!entry) return;
+  drill.depth = 4;
+
+  // Build or reuse cellular scene
+  if (!entry.cellularGroup) {
+    entry.cellularGroup = buildCellularScene(entry.mesh.position.clone().add(new THREE.Vector3(0, 1.4, 0)));
+  }
+  entry.cellularGroup.visible = true;
+  if (entry.anatomyGroup) entry.anatomyGroup.visible = false;
+
+  const cp = entry.cellularGroup.position;
+  flyCamera(
+    cp.clone().add(new THREE.Vector3(1.2, 0.3, 0.4)),
+    cp.clone(), 0.8
+  );
+  setDrillHUD(4);
+  clearOrganLabels();
+  showInfoPanel('Cellular View', `${drill.organName || 'Bovine'} cell structure — nucleus, mitochondria, cell membrane`, []);
+}
+
+function drillToMolecular() {
+  if (!drill.entityId) return;
+  const entry = cowRegistry.get(drill.entityId);
+  if (!entry) return;
+  drill.depth = 5;
+
+  if (!entry.molecularGroup) {
+    const base = (entry.cellularGroup?.position || entry.mesh.position).clone().add(new THREE.Vector3(0, 1.2, 0));
+    entry.molecularGroup = buildMolecularScene(base);
+  }
+  entry.molecularGroup.visible = true;
+  if (entry.cellularGroup) entry.cellularGroup.visible = false;
+
+  const mp = entry.molecularGroup.position;
+  flyCamera(
+    mp.clone().add(new THREE.Vector3(0.8, 0.3, 0.4)),
+    mp.clone(), 0.8
+  );
+  setDrillHUD(5);
+  clearOrganLabels();
+  showInfoPanel('Molecular View', 'DNA double helix — deoxyribose backbone, base pairs (A-T, G-C)', []);
+}
+
+function drillDeeper() {
+  if (drill.depth === 3) drillToCellular();
+  else if (drill.depth === 4) drillToMolecular();
+}
+
+function exitDrill() {
+  closeInfoPanel();
+  clearOrganLabels();
+
+  if (drill.entityId) {
+    const entry = cowRegistry.get(drill.entityId);
+    if (entry) {
+      setEntityOpacity(entry, 1.0);
+      if (entry.anatomyGroup) entry.anatomyGroup.visible = false;
+      if (entry.cellularGroup) entry.cellularGroup.visible = false;
+      if (entry.molecularGroup) entry.molecularGroup.visible = false;
+    }
+  }
+
+  drill.depth = 0; drill.entityId = null; drill.organName = null;
+
+  // Camera flies back to cinematic position
+  flyCamera(
+    new THREE.Vector3(zoomDist, 2.0, cinemaCentroidZ),
+    new THREE.Vector3(0, 1.2, cinemaCentroidZ),
+    1.0
+  );
+  setDrillHUD(0);
+}
+
+// ─── WebSocket ─────────────────────────────────────────────────────────────
 let wsDelay = 1000;
 const STALE_MS = 3000;
 
@@ -498,97 +845,151 @@ function connectWS() {
       const d = JSON.parse(e.data);
       if (d.type !== 'pose') return;
 
-      // Global pose (used for all cows as animation baseline)
-      globalPose.walkSpeed  = d.walk_speed   ?? 0;
-      globalPose.headPitch  = d.head_pitch   ?? 0;
-      globalPose.headYaw    = d.head_yaw     ?? 0;
-      globalPose.animState  = d.animation_state ?? 'stand';
-      globalPose.walkPhase  = d.walk_phase   ?? globalPose.walkPhase;
+      globalPose.walkSpeed = d.walk_speed ?? 0;
+      globalPose.headPitch = d.head_pitch ?? 0;
+      globalPose.headYaw   = d.head_yaw   ?? 0;
+      globalPose.animState = d.animation_state ?? 'stand';
+      globalPose.walkPhase = d.walk_phase ?? globalPose.walkPhase;
 
-      // Update status UI
       document.getElementById('s-anim').textContent = globalPose.animState.toUpperCase();
       document.getElementById('s-anim').className   = 'sa';
-      document.getElementById('s-conf').textContent = (d.confidence ?? 0).toFixed(2);
-      document.getElementById('s-cows').textContent = (d.cows?.length ?? 0);
+      document.getElementById('s-cows').textContent = ' ' + (d.cows?.length ?? 1);
 
-      if (d.frame_b64) {
-        document.getElementById('video-feed').src = d.frame_b64;
-        updateVideoTexture(d.frame_b64);
-      }
+      if (d.frame_b64) { document.getElementById('video-feed').src = d.frame_b64; updateVideoTexture(d.frame_b64); }
       if (d.concept_labels?.length) {
         document.getElementById('labels-box').style.display = 'block';
-        document.getElementById('label-list').innerHTML = d.concept_labels.slice(0, 8)
-          .map(l => `<div class="lbl">${l}</div>`).join('');
+        document.getElementById('label-list').innerHTML = d.concept_labels.slice(0,8).map(l=>`<div class="lbl">${l}</div>`).join('');
       }
-      if (d.narrative) {
-        document.getElementById('narrative-box').style.display = 'block';
-        document.getElementById('narrative-text').textContent = d.narrative;
-      }
+      if (d.narrative) { document.getElementById('narrative-box').style.display='block'; document.getElementById('narrative-text').textContent=d.narrative; }
 
-      // Per-cow update
       const now = performance.now();
-      // Fallback for old sensor stream (no cows field): synthesise one entity
-      const incoming = d.cows && d.cows.length > 0
+      const incoming = d.cows?.length > 0
         ? d.cows
-        : [{ id: 0, cx: 0.50, cy: 0.52, w: 0.55, h: 0.65, motion: d.motion_mag ?? 0 }];
-      const seenIds  = new Set(incoming.map(c => c.id));
+        : [{ id:0, cx:0.50, cy:0.52, w:0.55, h:0.65, motion:d.motion_mag??0 }];
+      const seenIds = new Set(incoming.map(c=>c.id));
 
       for (const c of incoming) {
         const texOff  = bboxToTexOff(c.cx, c.cy, c.w, c.h);
         const worldPos = videoToWorldPos(c.cx, c.cy);
-
         if (cowRegistry.has(c.id)) {
           const e = cowRegistry.get(c.id);
-          e.target.x         = worldPos.x;
-          e.target.z         = worldPos.z;
-          e.target.motion    = c.motion ?? 0;
-          e.target.walkSpeed = Math.min((c.motion ?? 0) * 5.0, 4.0);
-          e.target.animState = (c.motion ?? 0) > 0.10 ? 'walk' : globalPose.animState;
-          e.texOff           = texOff;
-          e.lastSeen         = now;
-          e.conceptLabels    = d.concept_labels || [];
-        } else {
-          spawnCow(c.id, worldPos, texOff);
-          const e = cowRegistry.get(c.id);
-          if (e) e.conceptLabels = d.concept_labels || [];
-        }
+          e.target.x = worldPos.x; e.target.z = worldPos.z;
+          e.target.motion = c.motion??0;
+          e.target.walkSpeed = Math.min((c.motion??0)*5.0, 4.0);
+          e.target.animState = (c.motion??0) > 0.10 ? 'walk' : globalPose.animState;
+          e.texOff = texOff; e.lastSeen = now;
+          e.conceptLabels = d.concept_labels || [];
+        } else { spawnCow(c.id, worldPos, texOff); }
       }
-
-      // Despawn stale cows
       for (const [id, e] of [...cowRegistry]) {
-        if (!seenIds.has(id) && (now - e.lastSeen) > STALE_MS) {
-          despawnCow(id);
-        }
+        if (!seenIds.has(id) && (now - e.lastSeen) > STALE_MS) despawnCow(id);
       }
-
     } catch (_) {}
   };
   ws.onclose = () => {
     document.getElementById('s-anim').textContent = 'disconnected';
     document.getElementById('s-anim').className   = 'sd';
     setTimeout(connectWS, wsDelay);
-    wsDelay = Math.min(wsDelay * 1.5, 8000);
+    wsDelay = Math.min(wsDelay*1.5, 8000);
   };
   ws.onerror = () => ws.close();
 }
 connectWS();
 
-// ─── Camera / pointer lock ────────────────────────────────────────────────
+// ─── Input ─────────────────────────────────────────────────────────────────
 let isPointerLocked = false;
 const keys = {};
-document.addEventListener('keydown', e => { keys[e.code] = true; });
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Escape' && drill.depth > 0) exitDrill();
+});
 document.addEventListener('keyup',   e => { keys[e.code] = false; });
 
-renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
+// ─── Raycaster ─────────────────────────────────────────────────────────────
+const raycaster  = new THREE.Raycaster();
+const mouse2d    = new THREE.Vector2();
+
+function pickFromEvent(evt) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse2d.x =  ((evt.clientX - rect.left) / rect.width)  * 2 - 1;
+  mouse2d.y = -((evt.clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse2d, camera);
+  return raycaster;
+}
+
+function pickEntity(evt) {
+  const rc = pickFromEvent(evt);
+  const objs = [];
+  for (const [id, e] of cowRegistry) e.mesh.traverse(o => { if (o.isMesh) objs.push({ m: o, id }); });
+  const hits = rc.intersectObjects(objs.map(o=>o.m), false);
+  if (!hits.length) return null;
+  return objs.find(o => o.m === hits[0].object)?.id ?? null;
+}
+
+function pickOrgan(evt) {
+  if (drill.depth < 2 || !drill.entityId) return null;
+  const entry = cowRegistry.get(drill.entityId);
+  if (!entry?.anatomyGroup) return null;
+  const rc = pickFromEvent(evt);
+  const hits = rc.intersectObjects(entry.anatomyGroup.children, false);
+  if (!hits.length) return null;
+  return hits[0].object.userData.organName ?? null;
+}
+
+renderer.domElement.addEventListener('click', evt => {
+  if (isPointerLocked) return;
+  if (drill.depth === 0) {
+    const id = pickEntity(evt);
+    if (id !== null) enterEntityDrill(id);
+    else { closeInfoPanel(); renderer.domElement.requestPointerLock(); }
+  } else if (drill.depth === 1) {
+    const id = pickEntity(evt);
+    if (id !== null && id === drill.entityId) enterAnatomyDrill(id);
+    else if (id !== null) enterEntityDrill(id);
+  } else if (drill.depth === 2) {
+    const organ = pickOrgan(evt);
+    if (organ) drillToOrgan(organ);
+  } else {
+    drillDeeper();
+  }
+});
+
+renderer.domElement.addEventListener('contextmenu', evt => {
+  evt.preventDefault();
+  if (isPointerLocked) return;
+  if (drill.depth > 0) exitDrill();
+  else {
+    const id = pickEntity(evt);
+    if (id !== null) enterEntityDrill(id);
+  }
+});
+
+// Scroll: zoom at world level, drill deeper at anatomy level
+let zoomDist = 7.5;
+renderer.domElement.addEventListener('wheel', evt => {
+  evt.preventDefault();
+  if (drill.depth <= 1) {
+    zoomDist = Math.max(2.5, Math.min(50, zoomDist + evt.deltaY * 0.015));
+  } else if (drill.depth >= 2) {
+    // Zoom toward/away from the current look target
+    const dir = new THREE.Vector3().subVectors(controlLookAt, camera.position).normalize();
+    camera.position.addScaledVector(dir, -evt.deltaY * 0.004);
+    // Trigger deeper drill when very close
+    if (drill.depth === 2 && camera.position.distanceTo(controlLookAt) < 0.25) drillToOrgan(ORGANS[0].name);
+    else if (drill.depth === 3 && camera.position.distanceTo(controlLookAt) < 0.06) drillToCellular();
+    else if (drill.depth === 4 && camera.position.distanceTo(controlLookAt) < 0.02) drillToMolecular();
+  }
+}, { passive: false });
+
+// ─── Camera pointer lock ──────────────────────────────────────────────────
+renderer.domElement.addEventListener('click', () => {/* handled above */});
 document.addEventListener('pointerlockchange', () => {
   isPointerLocked = !!document.pointerLockElement;
   document.getElementById('crosshair').style.display = isPointerLocked ? 'block' : 'none';
   document.getElementById('hint').style.display      = isPointerLocked ? 'none'  : 'block';
   if (isPointerLocked) {
-    const d = new THREE.Vector3();
-    camera.getWorldDirection(d);
-    camYaw   = Math.atan2(d.x, -d.z);
-    camPitch = Math.asin(-d.y);
+    const d2 = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    camYaw = Math.atan2(d2.x, -d2.z); camPitch = Math.asin(-d2.y);
   }
 });
 document.addEventListener('mousemove', e => {
@@ -603,252 +1004,153 @@ let lastTime = performance.now();
 function trackFPS(now) {
   const dt = now - lastTime; lastTime = now;
   if (dt < 1) return;
-  fpsWindow.push(1000 / dt);
+  fpsWindow.push(1000/dt);
   if (fpsWindow.length > 90) fpsWindow.shift();
   if (fpsWindow.length < 30) return;
-  const avg = fpsWindow.reduce((a, b) => a + b) / fpsWindow.length;
-  document.getElementById('s-fps').textContent = avg.toFixed(0);
+  const avg = fpsWindow.reduce((a,b)=>a+b) / fpsWindow.length;
+  document.getElementById('s-fps').textContent = ' ' + avg.toFixed(0);
   if      (avg < 18 && currentLOD !== 'low')  setLOD('low');
   else if (avg < 28 && currentLOD === 'high') setLOD('med');
   else if (avg > 55 && currentLOD !== 'high') setLOD('high');
 }
 
-// ─── Lerpings ─────────────────────────────────────────────────────────────
-function lerpAngle(a, b, t) {
-  let d = b - a;
-  while (d >  Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return a + d * t;
-}
-
-// ─── Cinematic camera — tracks herd centroid along Z, respects zoom ──────
+// ─── Cinematic camera ─────────────────────────────────────────────────────
 const CINEMATIC_Y = 2.0;
 let cinemaCentroidZ = 0;
-
 function updateCinematicCamera(dt) {
+  if (drill.depth > 0 || drill.animating) return;
   let sumZ = 0, n = 0;
-  for (const [, e] of cowRegistry) { sumZ += e.cur.z; n++; }
-  const targetZ = n > 0 ? sumZ / n : 0;
-  cinemaCentroidZ += (targetZ - cinemaCentroidZ) * Math.min(dt * 1.2, 1);
-
-  camera.position.set(zoomDist, CINEMATIC_Y * (zoomDist / 14), cinemaCentroidZ);
-  camera.lookAt(0, 1.2, cinemaCentroidZ);
-
-  const d2 = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  camYaw   = Math.atan2(d2.x, -d2.z);
-  camPitch = Math.asin(-d2.y);
+  for (const [,e] of cowRegistry) { sumZ += e.cur.z; n++; }
+  const tZ = n > 0 ? sumZ/n : 0;
+  cinemaCentroidZ += (tZ - cinemaCentroidZ) * Math.min(dt*1.2, 1);
+  const tx = zoomDist, ty = CINEMATIC_Y * (zoomDist/7.5);
+  camera.position.set(tx, ty, cinemaCentroidZ);
+  controlLookAt.set(0, 1.2, cinemaCentroidZ);
+  camera.lookAt(controlLookAt);
+  const d2 = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  camYaw = Math.atan2(d2.x, -d2.z); camPitch = Math.asin(-d2.y);
 }
 
-// ─── Per-cow animation ────────────────────────────────────────────────────
+// ─── Per-entity animation ─────────────────────────────────────────────────
 const clock = new THREE.Clock();
-const TMP_INV = new THREE.Matrix4();
+function lerpAngle(a, b, t) {
+  let d = b-a;
+  while(d>Math.PI) d-=2*Math.PI; while(d<-Math.PI) d+=2*Math.PI;
+  return a+d*t;
+}
 
 function animateCowEntry(entry, dt, t) {
-  const a = 1 - Math.pow(0.04, dt * 5);
-  entry.cur.x = entry.cur.x + (entry.target.x - entry.cur.x) * a;
-  entry.cur.z = entry.cur.z + (entry.target.z - entry.cur.z) * a;
+  const a = 1 - Math.pow(0.04, dt*5);
+  entry.cur.x += (entry.target.x - entry.cur.x)*a;
+  entry.cur.z += (entry.target.z - entry.cur.z)*a;
+  const walkSpeed = entry.target.walkSpeed > 0.1 ? entry.target.walkSpeed : globalPose.walkSpeed;
+  entry.cur.walkPhase = (entry.cur.walkPhase + walkSpeed*dt) % (Math.PI*2);
 
-  const walkSpeed = entry.target.walkSpeed > 0.1
-    ? entry.target.walkSpeed
-    : globalPose.walkSpeed;
-  entry.cur.walkPhase = (entry.cur.walkPhase + walkSpeed * dt) % (Math.PI * 2);
-
-  const anim    = entry.target.animState || globalPose.animState;
-  const isWalk  = anim === 'walk';
-  const isGraze = anim === 'graze';
-  const bounce  = isWalk
-    ? Math.abs(Math.sin(entry.cur.walkPhase * 2)) * 0.025 * Math.min(walkSpeed / 3, 1)
-    : 0;
-
+  const anim = entry.target.animState || globalPose.animState;
+  const isWalk = anim === 'walk', isGraze = anim === 'graze';
+  const bounce = isWalk ? Math.abs(Math.sin(entry.cur.walkPhase*2))*0.025*Math.min(walkSpeed/3,1) : 0;
   entry.mesh.position.set(entry.cur.x, bounce, entry.cur.z);
 
-  const u = entry.mesh.userData;
+  // Keep anatomy group in sync with cow position
+  if (entry.anatomyGroup) {
+    entry.anatomyGroup.position.set(entry.cur.x, bounce, entry.cur.z);
+    entry.anatomyGroup.rotation.y = entry.mesh.rotation.y;
+  }
+  if (entry.cellularGroup) entry.cellularGroup.position.set(entry.cur.x, 1.4+bounce, entry.cur.z);
+  if (entry.molecularGroup) entry.molecularGroup.position.set(entry.cur.x, 1.4+bounce, entry.cur.z);
 
-  // Legs
-  const amp  = Math.min(walkSpeed / 2.5, 1.0) * 0.30;
-  const p    = entry.cur.walkPhase;
+  const u = entry.mesh.userData;
+  const amp = Math.min(walkSpeed/2.5,1.0)*0.30, p = entry.cur.walkPhase;
   if (u.legs) {
-    u.legs.fl.pivot.rotation.x = Math.sin(p)           * amp;
-    u.legs.br.pivot.rotation.x = Math.sin(p)           * amp;
-    u.legs.fr.pivot.rotation.x = Math.sin(p + Math.PI) * amp;
-    u.legs.bl.pivot.rotation.x = Math.sin(p + Math.PI) * amp;
-    for (const [n, leg] of Object.entries(u.legs)) {
-      const ph = (n === 'fl' || n === 'br') ? p : p + Math.PI;
-      leg.knee.rotation.x = Math.max(0, Math.sin(ph)) * amp * 0.65;
+    u.legs.fl.pivot.rotation.x = Math.sin(p)*amp;  u.legs.br.pivot.rotation.x = Math.sin(p)*amp;
+    u.legs.fr.pivot.rotation.x = Math.sin(p+Math.PI)*amp; u.legs.bl.pivot.rotation.x = Math.sin(p+Math.PI)*amp;
+    for (const [n,leg] of Object.entries(u.legs)) {
+      leg.knee.rotation.x = Math.max(0,Math.sin((n==='fl'||n==='br'?p:p+Math.PI)))*amp*0.65;
     }
   }
-
-  // Head
-  const headPitch = isGraze ? -22 : (walkSpeed > 0.5 ? -5 : globalPose.headPitch);
   if (u.headJoint) {
-    u.headJoint.rotation.x = headPitch * Math.PI / 180
-      + (isWalk ? Math.sin(p) * 0.028 : 0);
-    u.headJoint.rotation.y = globalPose.headYaw * Math.PI / 180;
+    const hp = isGraze ? -22 : (walkSpeed>0.5?-5:globalPose.headPitch);
+    u.headJoint.rotation.x = hp*Math.PI/180 + (isWalk?Math.sin(p)*0.028:0);
+    u.headJoint.rotation.y = globalPose.headYaw*Math.PI/180;
   }
-
-  // Tail sway
   if (u.tailRoot) {
-    u.tailRoot.rotation.z = Math.sin(t * 1.7 + entry.cur.z * 0.5) * 0.20;
-    u.tailRoot.rotation.y = Math.sin(t * 0.9 + entry.cur.z * 0.3) * 0.14;
+    u.tailRoot.rotation.z = Math.sin(t*1.7+entry.cur.z*0.5)*0.20;
+    u.tailRoot.rotation.y = Math.sin(t*0.9+entry.cur.z*0.3)*0.14;
   }
-
-  // Body sway
-  if (u.body) {
-    u.body.rotation.z = isWalk
-      ? Math.sin(p * 2) * 0.010 * Math.min(walkSpeed / 3, 1) : 0;
-  }
-
+  if (u.body) u.body.rotation.z = isWalk ? Math.sin(p*2)*0.010*Math.min(walkSpeed/3,1) : 0;
   syncCowShader(entry);
 }
-
-// ─── Raycaster + interaction ──────────────────────────────────────────────
-const raycaster = new THREE.Raycaster();
-const mouse2d   = new THREE.Vector2();
-
-// Collect all mesh children of a cow group into a flat list for raycasting
-function cowMeshObjects() {
-  const objs = [];
-  for (const [id, e] of cowRegistry) {
-    e.mesh.traverse(o => { if (o.isMesh) objs.push({ mesh: o, id }); });
-  }
-  return objs;
-}
-
-function pickEntity(event) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  mouse2d.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
-  mouse2d.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse2d, camera);
-
-  const candidates = cowMeshObjects();
-  const meshes     = candidates.map(c => c.mesh);
-  const hits       = raycaster.intersectObjects(meshes, false);
-  if (!hits.length) return null;
-
-  const hitMesh = hits[0].object;
-  const found   = candidates.find(c => c.mesh === hitMesh);
-  return found ? found.id : null;
-}
-
-function showEntityPanel(id) {
-  const e = cowRegistry.get(id);
-  if (!e) return;
-  const labels = e.conceptLabels || [];
-  const motion = (e.target.motion || 0).toFixed(2);
-  const anim   = e.target.animState || 'stand';
-  document.getElementById('ep-title').textContent =
-    `Entity #${id}  [${anim.toUpperCase()}]`;
-  document.getElementById('ep-content').innerHTML =
-    `<div style="color:#888;margin-bottom:4px">motion: ${motion}</div>` +
-    (labels.length
-      ? labels.map(l => `<div class="ep-label">◈ ${l}</div>`).join('')
-      : '<div style="color:#444">No neural labels yet — train to activate</div>');
-  document.getElementById('entity-panel').style.display = 'block';
-}
-
-function closeEntityPanel() {
-  document.getElementById('entity-panel').style.display = 'none';
-}
-
-// Left-click: select entity → show neural label panel
-renderer.domElement.addEventListener('click', e => {
-  if (isPointerLocked) return;  // pointer-lock handles movement
-  const id = pickEntity(e);
-  if (id !== null) {
-    showEntityPanel(id);
-  } else {
-    closeEntityPanel();
-    renderer.domElement.requestPointerLock();
-  }
-});
-
-// Right-click: show anatomy view (toggle internal neural-label overlay)
-renderer.domElement.addEventListener('contextmenu', e => {
-  e.preventDefault();
-  if (isPointerLocked) return;
-  const id = pickEntity(e);
-  if (id !== null) showEntityPanel(id);
-});
-
-// Mouse wheel: zoom in/out
-let zoomDist = 7.5;  // ~7.5m ≈ makes a 2.4m cow fill ~33% of screen height
-renderer.domElement.addEventListener('wheel', e => {
-  e.preventDefault();
-  zoomDist = Math.max(4, Math.min(50, zoomDist + e.deltaY * 0.015));
-}, { passive: false });
-
-// Override CINEMATIC_X usage to use zoomDist
-// (patch updateCinematicCamera below to use zoomDist instead of literal 14)
 
 // ─── Screenshot capture ───────────────────────────────────────────────────
 function downloadScreenshot() {
   renderer.render(scene, camera);
-  const url = renderer.domElement.toDataURL('image/png');
-  const a   = document.createElement('a');
-  a.href    = url;
-  a.download = `cow_world_${Date.now()}.png`;
-  a.click();
+  const a = document.createElement('a');
+  a.href = renderer.domElement.toDataURL('image/png');
+  a.download = `entity_world_${Date.now()}.png`; a.click();
 }
+window.__captureFrame  = () => { renderer.render(scene,camera); return renderer.domElement.toDataURL('image/png'); };
+window.__getCowCount   = () => cowRegistry.size;
+window.__getFrameData  = () => document.getElementById('video-feed').src || null;
+window.__getDrillDepth = () => drill.depth;
 
-// Expose capture for Playwright
-window.__captureFrame = function() {
-  renderer.render(scene, camera);
-  return renderer.domElement.toDataURL('image/png');
-};
-
-window.__getCowCount  = function() { return cowRegistry.size; };
-window.__getFrameData = function() {
-  const feed = document.getElementById('video-feed');
-  return feed.src || null;
-};
-
-// ─── Animation loop ───────────────────────────────────────────────────────
+// ─── Main animation loop ──────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
   trackFPS(performance.now());
-
   const dt = Math.min(clock.getDelta(), 0.1);
   const t  = clock.elapsedTime;
 
-  // Animate all registered cows
-  for (const [, entry] of cowRegistry) {
-    animateCowEntry(entry, dt, t);
-  }
+  // Drill camera animation takes priority
+  updateDrillCamera(dt);
 
-  // Camera
+  // Animate all entities
+  for (const [,entry] of cowRegistry) animateCowEntry(entry, dt, t);
+
+  // Organ label overlay (only at anatomy depth)
+  if (drill.depth === 2 && drill.entityId) {
+    const e = cowRegistry.get(drill.entityId);
+    if (e?.anatomyGroup) updateOrganLabels(e.anatomyGroup);
+  } else if (drill.depth !== 2) clearOrganLabels();
+
+  // Cinematic or free-roam camera
   if (isPointerLocked) {
-    const spd = (keys['ShiftLeft'] || keys['ShiftRight']) ? 0.22 : 0.09;
+    const spd = (keys['ShiftLeft']||keys['ShiftRight']) ? 0.22 : 0.09;
     const dir = new THREE.Vector3(
-      (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0),
-      0,
-      (keys['KeyS'] ? 1 : 0) - (keys['KeyW'] ? 1 : 0)
+      (keys['KeyD']?1:0)-(keys['KeyA']?1:0), 0, (keys['KeyS']?1:0)-(keys['KeyW']?1:0)
     );
     if (dir.lengthSq() > 0) {
-      dir.normalize().multiplyScalar(spd).applyEuler(new THREE.Euler(0, camYaw, 0));
+      dir.normalize().multiplyScalar(spd).applyEuler(new THREE.Euler(0,camYaw,0));
       camera.position.add(dir);
     }
-    camera.position.y = Math.max(0.2, camera.position.y);
-    camera.rotation.order = 'YXZ';
-    camera.rotation.y = camYaw;
-    camera.rotation.x = camPitch;
-  } else {
+    camera.position.y = Math.max(0.001, camera.position.y);
+    camera.rotation.order='YXZ'; camera.rotation.y=camYaw; camera.rotation.x=camPitch;
+    controlLookAt.set(
+      camera.position.x - Math.sin(camYaw)*2,
+      camera.position.y - Math.sin(camPitch)*2,
+      camera.position.z + Math.cos(camYaw)*2
+    );
+  } else if (!drill.animating && drill.depth === 0) {
     updateCinematicCamera(dt);
   }
+
+  // Fill light follows camera
+  fillLight.position.copy(camera.position);
 
   updateBackground();
   renderer.render(scene, camera);
 }
 
-// ─── Init hardware tier → LOD ─────────────────────────────────────────────
+// ─── Init ─────────────────────────────────────────────────────────────────
 (function init() {
   const tier = detectHardwareTier();
   currentLOD = tier;
   document.getElementById('lod-badge').textContent = 'LOD: ' + tier.toUpperCase();
+  setDrillHUD(0);
   animate();
 })();
 
 window.addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
+  camera.aspect = innerWidth/innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
