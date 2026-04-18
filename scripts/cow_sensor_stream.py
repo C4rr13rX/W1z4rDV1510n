@@ -209,7 +209,7 @@ def run_http_server(port: int):
         def log_message(self, *_): pass
 
     server = HTTPServer(("localhost", port), Handler)
-    print(f"  HTTP  → http://localhost:{port}")
+    print(f"  HTTP  -> http://localhost:{port}")
     server.serve_forever()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,8 +333,8 @@ async def main(node: str, ws_port: int, http_port: int, fps: float):
     print("=" * 60)
     print("  W1z4rD V1510n — Cow Sensor Stream")
     print("=" * 60)
-    print(f"  Node  → http://{node}")
-    print(f"  WS    → ws://localhost:{ws_port}")
+    print(f"  Node  -> http://{node}")
+    print(f"  WS    -> ws://localhost:{ws_port}")
 
     threading.Thread(target=run_http_server, args=(http_port,), daemon=True).start()
 
