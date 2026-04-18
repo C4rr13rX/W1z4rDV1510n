@@ -98,6 +98,7 @@ STAGES = {
     6: 'Bovine Q&A pairs   — embedded domain Q&A for chat capability',
     7: 'Cross-modal train  — video frame + anatomy text Hebbian links',
     8: 'Multi-angle gallery — Wikimedia Commons cow images (all views)',
+    9: 'Mesh understanding   — OBJ renders + Sketchfab CC thumbnails',
 }
 
 # ── PubMed Central search terms for bovine anatomy ───────────────────────────
@@ -2283,12 +2284,618 @@ def build_multiview_gallery(out_dir: Path, node: str,
     return items
 
 
+# ── Stage 9: 3D Mesh Understanding ───────────────────────────────────────────
+# Goal: teach the fabric to reconstruct 3D objects from 2D images — given an
+# unseen image, identify objects, predict occluded sides, and generate mesh +
+# UV map + OBJ topology.
+#
+# Training triplets for each object:
+#   A. [rendered 3D view]  ↔  [mesh topology text + object semantics]
+#   B. [UV layout image]   ↔  [UV unwrap description + mesh topology text]
+#   C. [OBJ vertex text]   ↔  text-modality describing geometry precisely
+#   D. [Wikipedia extract] ↔  object semantic understanding
+#
+# Hebbian chains learned:
+#   photo_of_cow → bovine_labels → mesh_topology → UV_map_layout → OBJ_structure
+#
+# Scale: 10K+ training items across 65+ object categories.
+
+MESH_OBJ_SOURCES = [
+    # (raw_url, name, category, description_text)
+    ('https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/spot.obj',
+     'spot_cow', 'bovine_quadruped',
+     'Spot the cow: CC0 bovine quadruped mesh by Keenan Crane. '
+     'Holstein dairy cow 3D topology: 4 limbs with knee joints, barrel torso, '
+     'neck, head, tail, udder. Quadruped standing pose. '
+     'Surface landmarks: dorsal spine ridge, ribcage curvature, hip hooks, '
+     'pin bones, stifle joint, hock, fetlock, pastern, coronary band, hoof capsule, '
+     'shoulder point, elbow, knee, dewclaw, poll, withers, loin, rump, thurls.'),
+    ('https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/horse.obj',
+     'horse', 'equine_quadruped',
+     'Horse 3D mesh: equine quadruped anatomy. Deep barrel chest, arched muscular '
+     'neck, elongated cranium, 4 long limbs with cannon bones and hooves. '
+     'Surface topology: withers, croup, loins, flanks, gaskin, fetlock, coronet. '
+     'Bilateral symmetry along dorsal midline spine.'),
+    ('https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/armadillo.obj',
+     'armadillo', 'armored_quadruped',
+     'Armadillo 3D mesh: armored mammal quadruped. Compact torso with dorsal '
+     'segmented osteoderms, 4 short robust limbs, conical tapering tail.'),
+    ('https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/suzanne.obj',
+     'primate_head', 'head_anatomy',
+     'Suzanne primate head mesh: facial anatomy topology. Cranium volume, '
+     'supraorbital ridges, nasal bone, zygomatic arch, mandible ramus, '
+     'external ear pinnae, orbital cavities, temporal fossa.'),
+    # Three.js example models — human body (biped generalization)
+    ('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/obj/male02/male02.obj',
+     'human_male', 'human_biped',
+     'Human male body 3D mesh: bipedal anatomy in anatomical position. '
+     'Axial skeleton: skull, spine (cervical 7, thoracic 12, lumbar 5), '
+     'ribcage 12 pairs, pelvis. Appendicular: shoulder girdle, humerus, '
+     'radius+ulna, 8 carpals, 5 metacarpals, 14 phalanges per hand; '
+     'hip joint, femur, tibia+fibula, 7 tarsals, 5 metatarsals, 14 toe phalanges.'),
+    ('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/obj/female02/female02.obj',
+     'human_female', 'human_biped',
+     'Human female body 3D mesh: bipedal anatomy. Same skeletal topology as male. '
+     'Gynaecoid pelvis wider than android. '
+     'Surface: deltoid, pectoralis, abdominis, gluteus, quadriceps, '
+     'gastrocnemius landmarks visible as mesh contours.'),
+]
+
+# 65+ Sketchfab categories × up to 150 paginated models = ~10K training items.
+# Each tuple: (search_query, semantic_context_text_appended_to_training_text)
+SKETCHFAB_MESH_QUERIES = [
+    # ── Bovine/livestock (primary targets) ──────────────────────────────────
+    ('cow dairy',         'dairy cow bovine Holstein Friesian quadruped 3D mesh vertices faces '
+                          'legs torso udder body spine ribs pelvis anatomical structure'),
+    ('cattle bovine',     'cattle bovine livestock Bos taurus 3D mesh anatomy quadruped '
+                          'musculoskeletal surface topology body landmarks'),
+    ('cow skeleton',      'bovine skeletal anatomy 3D mesh bones spine ribs pelvis '
+                          'skull femur tibia fibula scapula humerus radius ulna'),
+    ('bovine anatomy',    'bovine anatomical 3D mesh musculoskeletal quadruped body '
+                          'surface muscles tendons ligaments joints'),
+    ('calf young cow',    'calf young bovine quadruped 3D mesh juvenile body proportions '
+                          'long limbs large head relative to body size'),
+    # ── Other livestock ──────────────────────────────────────────────────────
+    ('horse equine',      'equine quadruped 3D mesh barrel chest arched neck limbs cannon hooves'),
+    ('sheep ovine',       'ovine quadruped 3D mesh sheep wool fleece body legs head barrel'),
+    ('pig porcine',       'porcine quadruped 3D mesh pig snout disc barrel torso legs jowl'),
+    ('goat caprine',      'caprine quadruped 3D mesh goat horns beard dewlap legs hooves'),
+    ('donkey ass',        'donkey equid quadruped 3D mesh long ears compact body hooves'),
+    ('deer cervid',       'cervid quadruped 3D mesh deer antlers slender legs body spots'),
+    ('alpaca llama',      'South American camelid quadruped 3D mesh long neck wool legs'),
+    # ── Carnivores / pets ────────────────────────────────────────────────────
+    ('dog canine',        'canine quadruped 3D mesh spine ribs shoulder hip stifle legs head muzzle'),
+    ('cat feline',        'feline quadruped 3D mesh flexible spine lithe body retractile claws'),
+    ('wolf lupine',       'wolf canid quadruped 3D mesh muscular body long limbs muzzle'),
+    ('lion',              'lion big cat quadruped 3D mesh mane muscular body deep chest paws'),
+    ('tiger',             'tiger feline quadruped 3D mesh muscular body striped pattern limbs'),
+    ('bear',              'bear plantigrade quadruped 3D mesh massive body thick limbs claws'),
+    ('fox',               'fox canid quadruped 3D mesh slender muzzle bushy tail pointed ears'),
+    # ── Large mammals ────────────────────────────────────────────────────────
+    ('elephant',          'elephant proboscid quadruped 3D mesh pillar limbs long trunk large ears'),
+    ('rhinoceros',        'rhinoceros large mammal 3D mesh horn thick hide columnar limbs'),
+    ('hippopotamus',      'hippo aquatic mammal 3D mesh massive barrel body short thick limbs'),
+    ('giraffe',           'giraffe quadruped 3D mesh extremely long neck spotted coat long legs'),
+    ('camel',             'camel quadruped 3D mesh dorsal hump long neck splayed hooves'),
+    ('buffalo bison',     'bison buffalo quadruped 3D mesh prominent shoulder hump horns'),
+    ('rhinoceros horns',  'rhinoceros 3D mesh detailed surface skin folds horn base anatomy'),
+    # ── Primates ─────────────────────────────────────────────────────────────
+    ('human body',        'human bipedal anatomy 3D mesh skeleton muscles bilateral symmetry S-spine'),
+    ('human anatomy',     'human anatomical figure 3D mesh detailed surface muscles tendons'),
+    ('human skeleton',    'human skeletal 3D mesh 206 bones vertebral column limb bones skull'),
+    ('gorilla primate',   'gorilla great ape quadrumanous 3D mesh sagittal crest massive arms'),
+    # ── Birds ────────────────────────────────────────────────────────────────
+    ('eagle raptor',      'eagle raptor avian 3D mesh wingspan feathers beak talons hollow bones'),
+    ('parrot bird',       'parrot psittacine avian 3D mesh curved beak zygodactyl feet wings'),
+    ('owl nocturnal',     'owl strigiform avian 3D mesh large eyes facial disc wings talons'),
+    ('dinosaur',          'theropod dinosaur biped 3D mesh large hind limbs vestigial arms'),
+    ('prehistoric animal','prehistoric animal fossil reconstruction 3D mesh anatomy'),
+    # ── Marine ───────────────────────────────────────────────────────────────
+    ('fish aquatic',      'fish teleost aquatic vertebrate 3D mesh fusiform body fins scales lateral line'),
+    ('shark',             'shark elasmobranch 3D mesh fusiform body pectoral dorsal caudal fins'),
+    ('whale cetacean',    'cetacean marine mammal 3D mesh fusiform body pectoral flukes dorsal fin'),
+    ('octopus cephalopod','octopus cephalopod mollusc 3D mesh 8 arms mantle no skeleton'),
+    # ── Reptiles ─────────────────────────────────────────────────────────────
+    ('crocodile alligator','crocodilian reptile 3D mesh osteoderms jaws legs long tail'),
+    ('turtle tortoise',   'chelonian reptile 3D mesh domed carapace plastron beak limbs'),
+    ('snake serpent',     'serpent snake 3D mesh elongated body 200+ vertebrae no limbs'),
+    ('lizard gecko',      'lizard reptile 3D mesh 4 limbs lateral undulation long tail'),
+    ('frog amphibian',    'frog anuran amphibian 3D mesh wide head large eyes long hind limbs'),
+    # ── Human anatomy details ─────────────────────────────────────────────────
+    ('skull cranium',     'skull cranium 3D mesh 22 bones frontal parietal temporal occipital'),
+    ('spine vertebrae',   'vertebral column 3D mesh cervical thoracic lumbar sacral coccyx'),
+    ('hand fingers',      'hand anatomy 3D mesh phalanges metacarpals carpals thumb opposition'),
+    ('foot ankle',        'foot anatomy 3D mesh tarsal metatarsal phalanges arch plantar'),
+    ('heart anatomy',     'cardiac heart 3D mesh 4 chambers ventricles atria aorta valves'),
+    ('brain',             'brain 3D mesh frontal parietal temporal occipital cortex cerebellum'),
+    ('muscle body',       'musculature 3D mesh superficial muscles origin insertion tendons'),
+    ('eye ball',          'eyeball globe 3D mesh cornea iris pupil lens vitreous retina sclera'),
+    ('ear anatomy',       'ear 3D mesh pinna helix antihelix tragus concha external canal'),
+    # ── Vehicles ─────────────────────────────────────────────────────────────
+    ('car automobile',    'automobile vehicle 3D mesh body panels wheels chassis suspension'),
+    ('truck lorry',       'truck lorry vehicle 3D mesh cab chassis axles cargo body'),
+    ('airplane',          'airplane fixed-wing aircraft 3D mesh wings fuselage tail rudder'),
+    ('boat sailing',      'sailing boat watercraft 3D mesh hull deck mast keel rudder'),
+    ('motorcycle',        'motorcycle 3D mesh tubular frame engine block wheels handlebars'),
+    ('bicycle cycling',   'bicycle 3D mesh diamond frame fork wheels spokes handlebars saddle'),
+    ('helicopter',        'helicopter rotorcraft 3D mesh main rotor blades tail rotor fuselage'),
+    ('rocket space',      'rocket spacecraft 3D mesh nose cone fuel tank fins nozzle payload'),
+    # ── Furniture / indoor ────────────────────────────────────────────────────
+    ('chair furniture',   'chair furniture 3D mesh 4 legs seat back apron joints mortise'),
+    ('table desk',        'table furniture 3D mesh flat surface 4 legs apron structural'),
+    ('sofa couch',        'sofa upholstered furniture 3D mesh seat cushion arm back frame'),
+    # ── Architecture ──────────────────────────────────────────────────────────
+    ('house building',    'house residential building 3D mesh walls roof windows doors foundation'),
+    ('medieval building', 'medieval architecture 3D mesh stone walls towers arch buttress'),
+    ('bridge structure',  'bridge civil structure 3D mesh span deck piers cables tension'),
+    # ── Nature ────────────────────────────────────────────────────────────────
+    ('tree forest',       'tree plant 3D mesh trunk bark branches fork canopy leaves roots'),
+    ('rock geological',   'rock stone geological 3D mesh irregular fractured surface facets'),
+    ('crystal mineral',   'crystal mineral 3D mesh planar faces prismatic hexagonal geometry'),
+    # ── Fantasy / characters ──────────────────────────────────────────────────
+    ('robot mechanical',  'robot machine 3D mesh rigid body articulated joints actuators'),
+    ('dragon wings',      'fantasy dragon 3D mesh wings four limbs tail scales head horns'),
+    ('character humanoid','humanoid character 3D mesh head torso arms legs articulation'),
+]
+
+# Wikipedia articles per category for rich text corpus
+WIKI_CORPUS_TITLES = [
+    # core bovine
+    ('Holstein_Friesian_cattle', 'bovine'), ('Cattle',                   'bovine'),
+    ('Dairy_cattle',             'bovine'), ('Bovine_anatomy',            'bovine'),
+    ('Bovine_locomotion',        'bovine'), ('Udder',                     'bovine'),
+    ('Rumen',                    'bovine'), ('Hoof',                      'bovine'),
+    # other animals
+    ('Horse_anatomy',  'equine'),   ('Domestic_horse',    'equine'),
+    ('Dog_anatomy',    'canine'),   ('Elephant_anatomy',  'elephant'),
+    ('Tiger',          'felid'),    ('Gray_wolf',         'canine'),
+    # human anatomy
+    ('Human_body',             'human'), ('Human_skeleton',          'human'),
+    ('Vertebral_column',       'human'), ('Limb_(anatomy)',           'human'),
+    ('Muscle',                 'human'), ('Facial_skeleton',          'human'),
+    # general animal anatomy
+    ('Quadrupedalism', 'anatomy'), ('Tetrapod',         'anatomy'),
+    ('Mammal',         'anatomy'), ('Skull',            'anatomy'),
+    ('Vertebrate',     'anatomy'), ('Bilateral_symmetry','anatomy'),
+    # 3D mesh / computer graphics
+    ('Polygon_mesh',          '3d'), ('UV_mapping',           '3d'),
+    ('3D_modeling',           '3d'), ('Texture_mapping',      '3d'),
+    ('Triangulation_(geometry)','3d'),('Photogrammetry',       '3d'),
+    ('Computer_graphics',     '3d'), ('Rendering_(computer_graphics)','3d'),
+    ('Normal_mapping',        '3d'), ('Level_of_detail_(computer_graphics)','3d'),
+    # extra real-world sources (Wikimedia science articles)
+    ('Surface_reconstruction', '3d'), ('Point_cloud',          '3d'),
+    ('Vertex_(computer_graphics)','3d'),('Triangle_mesh',       '3d'),
+    ('Topology_(geometry)',   '3d'),
+]
+
+# 8 views per mesh: covers front/rear/sides/top and two 3-quarter angles
+MESH_RENDER_VIEWS = [
+    (  0,   0, 'right_side'),
+    ( 90,   0, 'front'),
+    (180,   0, 'left_side'),
+    (270,   0, 'rear'),
+    ( 45,  28, 'right_front_high'),
+    (315,  28, 'right_rear_high'),
+    (135,  28, 'left_front_high'),
+    (  0,  88, 'top_down'),
+]
+
+
+def _rot3y(a):
+    c, s = math.cos(a), math.sin(a)
+    return [c, 0, s,  0, 1, 0,  -s, 0, c]
+
+def _rot3x(a):
+    c, s = math.cos(a), math.sin(a)
+    return [1, 0, 0,  0, c, -s,  0, s, c]
+
+def _m3mul(a, b):
+    r = [0.0] * 9
+    for i in range(3):
+        for j in range(3):
+            for k in range(3):
+                r[i*3+j] += a[i*3+k] * b[k*3+j]
+    return r
+
+def _mv3(m, v):
+    return [m[0]*v[0]+m[1]*v[1]+m[2]*v[2],
+            m[3]*v[0]+m[4]*v[1]+m[5]*v[2],
+            m[6]*v[0]+m[7]*v[1]+m[8]*v[2]]
+
+
+def parse_obj_text(text: str):
+    """Pure Python OBJ parser — handles v/vt/vn, quads, fan-triangulates.
+    Returns (verts, uvs, faces, face_uvs) where uvs/face_uvs may be empty.
+    """
+    verts, uvs, faces, face_uvs = [], [], [], []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] == '#':
+            continue
+        parts = line.split()
+        if parts[0] == 'v' and len(parts) >= 4:
+            try:
+                verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            except ValueError:
+                pass
+        elif parts[0] == 'vt' and len(parts) >= 3:
+            try:
+                uvs.append([float(parts[1]), float(parts[2])])
+            except ValueError:
+                pass
+        elif parts[0] == 'f' and len(parts) >= 4:
+            v_idxs, uv_idxs = [], []
+            ok = True
+            for p in parts[1:]:
+                segs = p.split('/')
+                try:
+                    v_idxs.append(int(segs[0]))
+                    uv_idxs.append(int(segs[1]) if len(segs) > 1 and segs[1] else None)
+                except ValueError:
+                    ok = False; break
+            if not ok:
+                continue
+            rv = [(i - 1) if i > 0 else (len(verts) + i) for i in v_idxs]
+            ru = [(i - 1) if i and i > 0 else (len(uvs) + i if i else None)
+                  for i in uv_idxs]
+            for i in range(1, len(rv) - 1):
+                faces.append([rv[0], rv[i], rv[i + 1]])
+                face_uvs.append([ru[0], ru[i], ru[i + 1]])
+    return verts, uvs, faces, face_uvs
+
+
+def render_uv_layout(uvs: list, face_uvs: list, img_size: int = 256):
+    """Render UV unwrap layout as PIL Image — triangles drawn in UV space."""
+    if not HAS_PIL or not uvs or not face_uvs:
+        return None
+    from PIL import Image, ImageDraw
+    img  = Image.new('RGB', (img_size, img_size), (12, 14, 20))
+    draw = ImageDraw.Draw(img)
+    for tri in face_uvs:
+        if not all(i is not None and 0 <= i < len(uvs) for i in tri):
+            continue
+        pts = [(int(uvs[i][0] * (img_size - 1)),
+                int((1.0 - uvs[i][1]) * (img_size - 1))) for i in tri]
+        draw.polygon(pts, fill=None, outline=(40, 200, 80))
+    return img
+
+
+def render_mesh_view(verts, faces, az_deg, el_deg, img_size=256):
+    """Pure Python + PIL orthographic renderer with diffuse shading.
+    Returns a PIL Image or None if PIL is unavailable.
+    """
+    if not HAS_PIL or not verts:
+        return None
+    from PIL import Image, ImageDraw
+
+    rot = _m3mul(_rot3x(-math.radians(el_deg)), _rot3y(math.radians(az_deg)))
+
+    xs = [v[0] for v in verts]; ys = [v[1] for v in verts]; zs = [v[2] for v in verts]
+    cx = (min(xs)+max(xs))/2;  cy = (min(ys)+max(ys))/2;  cz = (min(zs)+max(zs))/2
+    span = max(max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs), 1e-6)
+
+    rv = [_mv3(rot, [(v[0]-cx)/span, (v[1]-cy)/span, (v[2]-cz)/span]) for v in verts]
+
+    scale = img_size * 0.43
+    half  = img_size / 2
+    def px(v): return (int(v[0]*scale + half), int(-v[1]*scale + half))
+
+    img  = Image.new('RGB', (img_size, img_size), (22, 22, 28))
+    draw = ImageDraw.Draw(img)
+
+    light = [0.577, 0.577, 0.577]
+
+    face_d = []
+    for f in faces:
+        vv = [rv[i] for i in f if 0 <= i < len(rv)]
+        if vv:
+            face_d.append((sum(v[2] for v in vv) / len(vv), f))
+    face_d.sort()
+
+    for _, f in face_d:
+        vv = [rv[i] for i in f if 0 <= i < len(rv)]
+        if len(vv) < 3:
+            continue
+        pts = [px(v) for v in vv]
+        e1  = [vv[1][i]-vv[0][i] for i in range(3)]
+        e2  = [vv[2][i]-vv[0][i] for i in range(3)]
+        n   = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]]
+        nl  = math.sqrt(n[0]**2+n[1]**2+n[2]**2) or 1
+        d   = max(0, (n[0]*light[0]+n[1]*light[1]+n[2]*light[2]) / nl)
+        c   = int(50 + 178 * d)
+        draw.polygon(pts, fill=(c, c, max(0, c-18)), outline=(14, 14, 18))
+
+    return img
+
+
+def _fetch_wiki_extract(title: str, ua: str) -> str:
+    """Fetch Wikipedia plain-text extract for an article title."""
+    url = ('https://en.wikipedia.org/api/rest_v1/page/summary/'
+           + urllib.parse.quote(title.replace(' ', '_')))
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': ua})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            d = json.loads(r.read())
+        return d.get('extract', '')[:800]
+    except Exception:
+        return ''
+
+
+def _fetch_wikidata_description(title: str, ua: str) -> str:
+    """Fetch short Wikidata description via Wikipedia API."""
+    params = {'action': 'query', 'prop': 'description', 'titles': title,
+              'format': 'json'}
+    url = 'https://en.wikipedia.org/w/api.php?' + urllib.parse.urlencode(params)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': ua})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            d = json.loads(r.read())
+        pages = d.get('query', {}).get('pages', {})
+        for p in pages.values():
+            return p.get('description', '')
+    except Exception:
+        return ''
+
+
+def build_mesh_training(out_dir: Path, node: str,
+                        max_sketchfab_per_query: int = 100,
+                        max_sketchfab_total: int = 10000) -> list:
+    """Stage 9: 3D mesh understanding — 10K+ cross-modal training items.
+
+    Four sub-stages:
+      A. CC0 OBJ meshes: download, parse, render 8 views + UV layout, train triplets
+         [3D render] + [UV layout] + [OBJ vertex text] per mesh.
+      B. Sketchfab: paginated search across 65+ categories × 100 models = ~6K thumbnails.
+         Train each with mesh topology metadata + semantic context.
+      C. Wikipedia + Wikidata corpus: rich semantic text per object category
+         posted as text-modality items for each of 30+ categories.
+      D. Cross-category mesh text: OBJ vertex/face excerpts as pure text training.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    obj_dir   = out_dir / 'obj_renders'
+    sfab_dir  = out_dir / 'sketchfab_thumbs'
+    wiki_dir  = out_dir / 'wiki_corpus'
+    obj_dir.mkdir(exist_ok=True)
+    sfab_dir.mkdir(exist_ok=True)
+    wiki_dir.mkdir(exist_ok=True)
+
+    UA   = ('W1z4rDV1510n-DatasetBuilder/1.0 '
+            '(https://github.com/C4rr13rX/W1z4rDV1510n; adamedsall@gmail.com)')
+    base = f'http://{node}'
+    items: list  = []
+    ok_obj = ok_sfab = ok_wiki = ok_text = 0
+
+    def _train_img(b64, text):
+        body = json.dumps({'modality': 'image', 'data_b64': b64, 'text': text}).encode()
+        req  = urllib.request.Request(f'{base}/media/train', data=body,
+               headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=12) as r:
+            json.loads(r.read())
+
+    def _train_text(text):
+        body = json.dumps({'modality': 'text', 'text': text}).encode()
+        req  = urllib.request.Request(f'{base}/train', data=body,
+               headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=8) as r:
+            json.loads(r.read())
+
+    # ── Part A: OBJ meshes ──────────────────────────────────────────────────
+    print('  [9A] Downloading OBJ meshes — render, UV map, vertex text...')
+
+    for obj_url, name, category, desc in tqdm(MESH_OBJ_SOURCES, desc='OBJ meshes'):
+        try:
+            req = urllib.request.Request(obj_url, headers={'User-Agent': UA})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                raw = r.read().decode('utf-8', errors='replace')
+        except Exception as e:
+            print(f'\n    [WARN] {name}: {e}')
+            continue
+
+        verts, uvs, faces, face_uvs = parse_obj_text(raw)
+        if not verts or not faces:
+            print(f'\n    [WARN] {name}: no geometry parsed')
+            continue
+
+        topo_base = (f'3D OBJ mesh: {name.replace("_"," ")}. '
+                     f'Topology: {len(verts)} vertices, {len(faces)} triangular faces. '
+                     f'Category: {category.replace("_"," ")}. {desc}')
+
+        # A1: 8 rendered views
+        for az, el, view_name in MESH_RENDER_VIEWS:
+            img = render_mesh_view(verts, faces, az, el)
+            if img is None:
+                continue
+            img_path = obj_dir / f'{name}_{view_name}.jpg'
+            try:
+                img.save(str(img_path), 'JPEG', quality=88)
+                b64 = base64.b64encode(img_path.read_bytes()).decode()
+                view_text = (f'{topo_base} '
+                             f'3D render: {view_name.replace("_"," ")} view '
+                             f'(azimuth {az}deg elevation {el}deg). '
+                             f'Orthographic projection shows surface topology, '
+                             f'depth, limb arrangement, body segment proportions. '
+                             f'From this 2D rendering the original 3D mesh can be '
+                             f'reconstructed by predicting occluded vertices.')
+                _train_img(b64, view_text)
+                ok_obj += 1
+                items.append({'stage': 9, 'type': 'obj_render', 'name': name,
+                               'view': view_name, 'modality': 'multimodal',
+                               'tags': ['mesh', '3d', category, view_name]})
+            except Exception as e:
+                print(f'\n    [WARN] render {name}/{view_name}: {e}')
+            time.sleep(0.05)
+
+        # A2: UV layout map (if UVs present)
+        if uvs and face_uvs:
+            uv_img = render_uv_layout(uvs, face_uvs)
+            if uv_img is not None:
+                uv_path = obj_dir / f'{name}_uv_layout.jpg'
+                try:
+                    uv_img.save(str(uv_path), 'JPEG', quality=88)
+                    b64 = base64.b64encode(uv_path.read_bytes()).decode()
+                    uv_text = (f'UV unwrap layout for: {name.replace("_"," ")}. '
+                               f'Flattened mesh surface showing how {len(uvs)} UV '
+                               f'coordinates map each of {len(faces)} triangular faces '
+                               f'to texture space. Green triangles = face boundaries. '
+                               f'UV map used to apply 2D texture image onto 3D mesh. '
+                               f'Category: {category.replace("_"," ")}. '
+                               f'Reconstructing this UV layout from a 2D photo requires '
+                               f'predicting how the 3D surface unfolds flat.')
+                    _train_img(b64, uv_text)
+                    ok_obj += 1
+                    items.append({'stage': 9, 'type': 'uv_layout', 'name': name,
+                                   'modality': 'multimodal',
+                                   'tags': ['mesh', 'uv_map', category]})
+                except Exception as e:
+                    print(f'\n    [WARN] UV layout {name}: {e}')
+
+        # A3: OBJ vertex text — teach the raw geometry language
+        sample_step = max(1, len(verts) // 30)
+        sample_v    = verts[::sample_step][:30]
+        vert_lines  = ' '.join(f'v {v[0]:.3f} {v[1]:.3f} {v[2]:.3f}' for v in sample_v)
+        sample_f    = faces[::max(1, len(faces)//10)][:10]
+        face_lines  = ' '.join(f'f {f[0]+1} {f[1]+1} {f[2]+1}' for f in sample_f)
+        obj_txt     = (f'OBJ file format: {name.replace("_"," ")}. '
+                       f'Vertex coordinates (x y z): {vert_lines}... '
+                       f'Triangular face indices (1-based): {face_lines}... '
+                       f'Total: {len(verts)} vertices, {len(faces)} triangles. '
+                       f'UV coordinates present: {bool(uvs)}. '
+                       f'Category: {category.replace("_"," ")}. '
+                       f'Mesh reconstruction from image: identify object outline '
+                       f'in 2D, project to 3D coordinate system, predict occluded '
+                       f'vertex positions from category prior, triangulate surface.')
+        try:
+            _train_text(obj_txt)
+            ok_text += 1
+            items.append({'stage': 9, 'type': 'obj_text', 'name': name,
+                           'modality': 'text', 'tags': ['mesh', 'obj', category]})
+        except Exception as e:
+            print(f'\n    [WARN] obj text {name}: {e}')
+
+    print(f'  [9A] OBJ: {ok_obj} image pairs + {ok_text} text items trained')
+
+    # ── Part B: Sketchfab — paginated across 65+ categories ─────────────────
+    print(f'  [9B] Sketchfab paginated search ({len(SKETCHFAB_MESH_QUERIES)} queries, '
+          f'up to {max_sketchfab_per_query}/query)...')
+
+    for query, semantic_text in tqdm(SKETCHFAB_MESH_QUERIES, desc='Sketchfab'):
+        if ok_sfab >= max_sketchfab_total:
+            break
+        fetched = 0
+        next_url = ('https://api.sketchfab.com/v3/models?'
+                    + urllib.parse.urlencode({'q': query,
+                                              'count': '24',
+                                              'sort_by': '-relevance'}))
+        while next_url and fetched < max_sketchfab_per_query and ok_sfab < max_sketchfab_total:
+            try:
+                req = urllib.request.Request(next_url, headers={'User-Agent': UA})
+                with urllib.request.urlopen(req, timeout=14) as r:
+                    page = json.loads(r.read())
+                next_url = page.get('next')
+                results  = page.get('results', [])
+            except Exception as e:
+                print(f'\n    [WARN] Sketchfab page "{query}": {e}')
+                break
+
+            for model in results:
+                if fetched >= max_sketchfab_per_query or ok_sfab >= max_sketchfab_total:
+                    break
+                mname = model.get('name', '')
+                vc    = model.get('vertexCount') or 0
+                fc    = model.get('faceCount')   or 0
+                cats  = ', '.join(c.get('name', '') for c in model.get('categories', []))
+                mdesc = (model.get('description') or '')[:200].replace('\n', ' ')
+
+                thumbs = model.get('thumbnails', {}).get('images', [])
+                turl   = None
+                for t in sorted(thumbs, key=lambda x: abs(x.get('width', 0) - 448)):
+                    turl = t.get('url'); break
+                if not turl:
+                    continue
+
+                fname = sfab_dir / (hashlib.sha1(turl.encode()).hexdigest()[:12] + '.jpg')
+                if not fname.exists():
+                    try:
+                        dl = urllib.request.Request(turl, headers={'User-Agent': UA})
+                        with urllib.request.urlopen(dl, timeout=18) as r:
+                            fname.write_bytes(r.read())
+                    except Exception:
+                        continue
+
+                topo = f'{vc} vertices, {fc} faces' if vc else 'polygonal mesh'
+                text = (f'3D model render: {mname}. '
+                        f'Mesh topology: {topo}. '
+                        f'Categories: {cats or query}. '
+                        f'{semantic_text}. '
+                        f'Mesh reconstruction: given this 2D render, predict the full '
+                        f'3D mesh including all hidden faces, generate UV unwrap, '
+                        f'produce OBJ file with vertices and faces. {mdesc}')
+                try:
+                    b64 = base64.b64encode(fname.read_bytes()).decode()
+                    _train_img(b64, text)
+                    ok_sfab += 1
+                    fetched += 1
+                    items.append({'stage': 9, 'type': 'sketchfab_thumb',
+                                   'name': mname, 'modality': 'multimodal',
+                                   'tags': ['mesh', '3d', 'sketchfab', query]})
+                except Exception as e:
+                    print(f'\n    [WARN] sfab train {fname.name}: {e}')
+                time.sleep(0.10)
+
+            time.sleep(0.3)  # between Sketchfab pages
+
+    print(f'  [9B] Sketchfab: {ok_sfab} thumbnails trained')
+
+    # ── Part C: Wikipedia + Wikidata text corpus ─────────────────────────────
+    print(f'  [9C] Wikipedia corpus for {len(WIKI_CORPUS_TITLES)} object categories...')
+
+    wiki_cache: dict = {}
+    for wiki_title, cat in tqdm(WIKI_CORPUS_TITLES, desc='Wikipedia'):
+        extract = wiki_cache.get(wiki_title)
+        if extract is None:
+            extract = _fetch_wiki_extract(wiki_title, UA)
+            wiki_cache[wiki_title] = extract
+            time.sleep(0.2)
+
+        if not extract:
+            continue
+
+        wdata_desc = _fetch_wikidata_description(wiki_title, UA)
+        time.sleep(0.15)
+
+        wiki_txt = (f'Real-world reference: {wiki_title.replace("_"," ")}. '
+                    f'Category: {cat.replace("_"," ")}. '
+                    f'Description: {wdata_desc}. '
+                    f'{extract} '
+                    f'3D mesh representation: vertices define surface of this object. '
+                    f'UV map flattens surface for texturing. OBJ format stores geometry.')
+
+        # Also save locally as reference
+        fpath = wiki_dir / f'{wiki_title[:60]}.txt'
+        fpath.write_text(wiki_txt, encoding='utf-8')
+
+        try:
+            _train_text(wiki_txt)
+            ok_wiki += 1
+            items.append({'stage': 9, 'type': 'wiki_corpus', 'title': wiki_title,
+                           'modality': 'text', 'tags': ['wiki', cat, '3d']})
+        except Exception as e:
+            print(f'\n    [WARN] wiki {wiki_title}: {e}')
+
+    print(f'  [9C] Wikipedia corpus: {ok_wiki} items trained')
+    print(f'  Stage 9 total: {len(items)} items '
+          f'({ok_obj} OBJ renders/UV + {ok_sfab} Sketchfab + '
+          f'{ok_wiki} wiki + {ok_text} obj-text)')
+    return items
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(
         description='Build and ingest bovine anatomy training dataset into W1z4rD node')
-    ap.add_argument('--stages',    default='0,1,2,3,4,5,6,7,8',
+    ap.add_argument('--stages',    default='0,1,2,3,4,5,6,7,8,9',
                     help='Comma-separated stage IDs to run (default all)')
     ap.add_argument('--node',      default=DEFAULT_NODE,
                     help='Node host:port (default localhost:8090)')
@@ -2409,6 +3016,16 @@ def main():
                 max_per_cat=30, max_total=300)
             all_items[8] = items8
 
+    if 9 in stages_to_run:
+        print('\n[Stage 9] 3D mesh understanding (OBJ renders + Sketchfab thumbnails)')
+        if args.download_only:
+            print('  [SKIP] Stage 9: cross-modal training skipped in --download-only mode')
+        else:
+            items9 = build_mesh_training(
+                train_dir / 'stage9_mesh', args.node,
+                max_sketchfab_per_query=100, max_sketchfab_total=10000)
+            all_items[9] = items9
+
     # ── Write manifest ───────────────────────────────────────────────────────
     write_manifest(data_dir, all_items)
 
@@ -2416,7 +3033,7 @@ def main():
     if not args.download_only:
         # Stage 6 Q&A items are already ingested via /qa/ingest in build_bovine_qa
         all_flat = [it for sid, items in all_items.items() for it in items
-                    if sid not in (6, 7, 8) and (it.get('b64') or it.get('text'))]
+                    if sid not in (6, 7, 8, 9) and (it.get('b64') or it.get('text'))]
         print(f'\n[Ingest] Posting {len(all_flat)} items to http://{args.node} ...')
         total_ok = ingest_batch(all_flat, args.node, workers=args.workers)
         print(f'  Ingested {total_ok}/{len(all_flat)} items successfully')
