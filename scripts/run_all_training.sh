@@ -56,4 +56,14 @@ python scripts/build_library_corpus.py \
     2>&1 | tee -a "$LOG_DIR/library_run.log"
 echo "[$(date)] Stages 23-24 done" | tee -a "$LOG_DIR/run_all.log"
 
+# Stage 25: LibreTexts comprehensive corpus — all 13 domains, all bookshelves
+echo "[$(date)] Starting Stage 25 (LibreTexts comprehensive corpus)..." | tee -a "$LOG_DIR/run_all.log"
+python scripts/build_libretexts_corpus.py \
+    --stages 25 \
+    --node localhost:8090 \
+    --data-dir "$DATA" \
+    --max-pages 5000 \
+    2>&1 | tee -a "$LOG_DIR/libretexts_run.log"
+echo "[$(date)] Stage 25 done" | tee -a "$LOG_DIR/run_all.log"
+
 echo "===== All training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"
