@@ -422,8 +422,10 @@ function spawnCow(id, worldPos, texOff) {
   mesh.position.copy(worldPos);
   scene.add(mesh);
 
-  // Rotate cow to face camera (roughly along +X from origin)
-  mesh.rotation.y = Math.PI;
+  // Rotate cow to show its left side profile toward the camera.
+  // Camera is at +X, cow body runs along local-X.
+  // rotation.y = PI/2 → cow faces +Z, camera sees left side (matching video side view).
+  mesh.rotation.y = Math.PI / 2;
 
   cowRegistry.set(id, {
     mesh,
