@@ -104,4 +104,23 @@ python scripts/build_medical_corpus.py \
     2>&1 | tee -a "$LOG_DIR/medical_run.log"
 echo "[$(date)] Stages 30-33 done" | tee -a "$LOG_DIR/run_all.log"
 
+# Stage 34: Mathematics — arithmetic through topology, symbol dictionary, notation mastery
+echo "[$(date)] Starting Stage 34 (mathematics corpus)..." | tee -a "$LOG_DIR/run_all.log"
+python scripts/build_math_corpus.py \
+    --stages 34 \
+    --node localhost:8090 \
+    --data-dir "$DATA" \
+    2>&1 | tee -a "$LOG_DIR/math_run.log"
+echo "[$(date)] Stage 34 done" | tee -a "$LOG_DIR/run_all.log"
+
+# Stage 35: Evidence-based pedagogy + curriculum design
+echo "[$(date)] Starting Stage 35 (pedagogy & curriculum design)..." | tee -a "$LOG_DIR/run_all.log"
+python scripts/build_pedagogy_corpus.py \
+    --stages 35 \
+    --node localhost:8090 \
+    --data-dir "$DATA" \
+    --max-per-query 30 \
+    2>&1 | tee -a "$LOG_DIR/pedagogy_run.log"
+echo "[$(date)] Stage 35 done" | tee -a "$LOG_DIR/run_all.log"
+
 echo "===== All training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"
