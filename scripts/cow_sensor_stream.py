@@ -5,7 +5,8 @@ Reads pre-extracted Stage 2 JPEG frames, routes each through the neural fabric
 (/media/train cross-modal: image + anatomical text), reads /neuro/snapshot and
 /qa/query for semantic state, and broadcasts over WebSocket for the 3D world.
 
-No third-party CV libraries — the neural fabric is the vision system.
+Per-cow bounding-box detection is done via Pillow (pip install Pillow).
+Without Pillow the stream still works but emits a single synthetic cow.
 
 Ports:
   8092  WebSocket  ws://localhost:8092
@@ -40,8 +41,156 @@ CONTEXTS = [
     "Bovine fetlock pastern coronary hoof coffin bone digital anatomy",
     "Cow shoulder elbow carpal metacarpal front limb bovine forelimb",
     "Bovine hip stifle hock metatarsal rear limb hindlimb anatomy",
-    "Dairy cattle poll poll forehead brow occipital bovine cranium",
+    "Dairy cattle poll forehead brow occipital bovine cranium",
 ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pillow-based per-cow bounding box detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+DETECT_W, DETECT_H = 96, 54
+_PIL_AVAILABLE: Optional[bool] = None
+
+
+def _check_pil() -> bool:
+    global _PIL_AVAILABLE
+    if _PIL_AVAILABLE is None:
+        try:
+            from PIL import Image  # noqa: F401
+            _PIL_AVAILABLE = True
+        except ImportError:
+            print("  [WARN] Pillow not installed — per-cow detection disabled.")
+            print("         Run:  pip install Pillow   to enable multi-cow tracking")
+            _PIL_AVAILABLE = False
+    return _PIL_AVAILABLE
+
+
+def detect_cows_pil(frame_path: Path) -> list:
+    """
+    Detect cow bounding boxes via colour segmentation on a down-sampled frame.
+    Returns a list of {cx, cy, w, h, area} dicts with coordinates normalised to [0,1].
+    Requires Pillow; returns [] gracefully if unavailable.
+    """
+    if not _check_pil():
+        return []
+    try:
+        from PIL import Image
+
+        img = (
+            Image.open(frame_path)
+            .convert("RGB")
+            .resize((DETECT_W, DETECT_H), Image.BILINEAR)
+        )
+
+        # Binary mask: True = potential cow pixel (not grass, not sky)
+        mask = bytearray(DETECT_W * DETECT_H)
+        for y in range(DETECT_H):
+            for x in range(DETECT_W):
+                r, g, b = img.getpixel((x, y))
+                # Green grass: green channel dominant
+                is_grass = g > r + 14 and g > b + 8 and g > 50
+                # Sky/bright top region: cool bright pixels in top third
+                is_sky = y < DETECT_H // 3 and (
+                    b > 140 or (r > 185 and g > 185 and b > 185)
+                )
+                if not is_grass and not is_sky:
+                    mask[y * DETECT_W + x] = 1
+
+        sky_end = DETECT_H // 4
+        # Column projection: count non-grass pixels per column (below sky)
+        col_profile = [
+            sum(mask[y * DETECT_W + x] for y in range(sky_end, DETECT_H))
+            for x in range(DETECT_W)
+        ]
+
+        THRESH = max(4, (DETECT_H - sky_end) // 8)
+
+        # Find horizontal runs of "active" columns
+        runs: list[tuple[int, int]] = []
+        in_run = False
+        for x, cnt in enumerate(col_profile):
+            if cnt >= THRESH:
+                if not in_run:
+                    run_start = x
+                    in_run = True
+            else:
+                if in_run:
+                    runs.append((run_start, x - 1))
+                    in_run = False
+        if in_run:
+            runs.append((run_start, DETECT_W - 1))
+
+        results = []
+        for x0, x1 in runs:
+            if x1 - x0 < 4:
+                continue
+            y_coords = [
+                y
+                for y in range(sky_end, DETECT_H)
+                for x in range(x0, x1 + 1)
+                if mask[y * DETECT_W + x]
+            ]
+            if not y_coords:
+                continue
+            y_min, y_max = min(y_coords), max(y_coords)
+            w_px = x1 - x0 + 1
+            h_px = y_max - y_min + 1
+            if h_px < 4:
+                continue
+            aspect = w_px / max(h_px, 1)
+            if aspect > 6.0 or aspect < 0.15:
+                continue
+            cx = (x0 + x1) / 2.0 / DETECT_W
+            cy = (y_min + y_max) / 2.0 / DETECT_H
+            results.append(
+                {
+                    "cx": cx,
+                    "cy": cy,
+                    "w": w_px / DETECT_W,
+                    "h": h_px / DETECT_H,
+                    "area": w_px * h_px,
+                }
+            )
+
+        results.sort(key=lambda r: -r["area"])
+        return results[:4]
+    except Exception:
+        return []
+
+
+def track_cows(prev_tracked: list, new_detections: list) -> list:
+    """
+    Assign stable IDs to new detections by nearest-centroid matching
+    against the previous frame's tracked cows.
+    """
+    if not prev_tracked:
+        return [dict(d, id=i, motion=0.0) for i, d in enumerate(new_detections)]
+
+    next_new_id = max(c["id"] for c in prev_tracked) + 1
+    used: set[int] = set()
+    result = []
+
+    for d in new_detections:
+        best_id, best_dist = None, 0.22
+        for pc in prev_tracked:
+            if pc["id"] in used:
+                continue
+            dist = math.hypot(d["cx"] - pc["cx"], d["cy"] - pc["cy"])
+            if dist < best_dist:
+                best_dist = dist
+                best_id = pc["id"]
+
+        if best_id is not None:
+            used.add(best_id)
+            pc = next(c for c in prev_tracked if c["id"] == best_id)
+            motion = math.hypot(d["cx"] - pc["cx"], d["cy"] - pc["cy"]) * 10.0
+            result.append(dict(d, id=best_id, motion=min(motion, 1.0)))
+        else:
+            result.append(dict(d, id=next_new_id, motion=0.0))
+            next_new_id += 1
+
+    return result
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data loading
@@ -98,7 +247,6 @@ def call_qa_query(question: str, node: str) -> str:
         with urllib.request.urlopen(req, timeout=4) as r:
             d = json.loads(r.read())
         results = d.get("report", {}).get("results", [])
-        # Take the highest-confidence result that mentions bovine/cow behaviour
         for res in results:
             a = (res.get("answer") or "").lower()
             if any(w in a for w in ["cow", "bovine", "cattle", "dairy",
@@ -116,10 +264,7 @@ def call_neuro_snapshot(node: str) -> dict:
         return {}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Motion proxy (fabric-native — no CV)
-# Label count change + file size change between consecutive frames.
-# JPEG file size correlates with scene complexity; label count change reflects
-# how much the fabric's visual concept activations shifted frame-to-frame.
+# Motion proxy (fabric-native)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def motion_from_frame_delta(
@@ -145,7 +290,6 @@ def compute_pose(
 ) -> dict:
     qa_lower = qa_answer.lower()
 
-    # Animation state from motion + Q&A context
     if motion_mag > 0.12:
         anim = "walk"
     elif any(w in qa_lower for w in ["graz", "graze", "grass", "head low", "pasture"]):
@@ -155,21 +299,14 @@ def compute_pose(
     else:
         anim = "stand"
 
-    # Walk speed
     walk_speed = min(motion_mag * 6.0, 5.0) if anim == "walk" else 0.3 if anim == "graze" else 0.0
-
-    # Integrate walk phase
     walk_phase = (state.get("walk_phase", 0.0) + walk_speed * dt) % (2 * math.pi)
-
-    # Head pitch: graze = down, alert = up
     head_pitch = -22.0 if anim == "graze" else (5.0 if motion_mag < 0.05 else -5.0)
 
-    # Body yaw: slow random drift from motion
     body_yaw = state.get("body_yaw", 0.0)
     if motion_mag > 0.08:
         body_yaw += (motion_mag - 0.08) * 0.3
 
-    # Snapshot labels
     active_labels = snapshot.get("active_labels", [])
     bovine_labels = [l for l in active_labels if any(
         w in l.lower() for w in ["bovine", "cow", "cattle", "dairy",
@@ -244,14 +381,15 @@ async def sensor_loop(node: str, target_fps: float):
     title_map = load_title_map()
     print(f"  Sensor loop: {len(frames)} frames  node={node}  fps={target_fps}")
 
-    interval   = 1.0 / target_fps
-    frame_idx  = 0
-    state      = {"walk_phase": 0.0, "body_yaw": 0.0}
-    prev_lc    = 487   # baseline label count
-    prev_sz    = 20480 # baseline file size (~20KB)
-    qa_answer  = ""
+    interval       = 1.0 / target_fps
+    frame_idx      = 0
+    state          = {"walk_phase": 0.0, "body_yaw": 0.0}
+    prev_lc        = 487
+    prev_sz        = 20480
+    qa_answer      = ""
     snapshot: dict = {}
-    snap_ts    = 0.0
+    snap_ts        = 0.0
+    tracked_cows: list = []
 
     while True:
         t0 = time.monotonic()
@@ -259,27 +397,23 @@ async def sensor_loop(node: str, target_fps: float):
         frame_path = frames[frame_idx % len(frames)]
         frame_idx += 1
 
-        # Build cross-modal text description
         video_id = frame_path.stem.split("_")[0]
         title    = title_map.get(video_id, "Bovine dairy cow CC video")
         ctx      = CONTEXTS[frame_idx % len(CONTEXTS)]
         text     = f"{title}. {ctx}."
 
-        # Train: image + text co-activation (cross-modal Hebbian linking)
-        result = await asyncio.to_thread(call_media_train, frame_path, text, node)
+        result  = await asyncio.to_thread(call_media_train, frame_path, text, node)
         curr_lc = result.get("label_count", prev_lc)
         curr_sz = frame_path.stat().st_size
 
-        # Motion proxy from fabric output
         motion_mag = motion_from_frame_delta(curr_lc, prev_lc, curr_sz, prev_sz)
         prev_lc = curr_lc
         prev_sz = curr_sz
 
-        # Periodic snapshot + Q&A query
         now = time.monotonic()
         if now - snap_ts > 4.0:
-            snapshot   = await asyncio.to_thread(call_neuro_snapshot, node)
-            qa_answer  = await asyncio.to_thread(
+            snapshot  = await asyncio.to_thread(call_neuro_snapshot, node)
+            qa_answer = await asyncio.to_thread(
                 call_qa_query,
                 "What is a dairy cow doing when its legs are in motion?",
                 node,
@@ -289,7 +423,26 @@ async def sensor_loop(node: str, target_fps: float):
         dt   = max(time.monotonic() - t0, 0.01)
         pose = compute_pose(motion_mag, qa_answer, snapshot, state, dt)
 
-        # Read frame as data URI (no resize needed at 20KB; browser handles display)
+        # Per-cow detection and tracking
+        new_dets    = await asyncio.to_thread(detect_cows_pil, frame_path)
+        tracked_cows = track_cows(tracked_cows, new_dets)
+
+        # Fallback: if detection yields nothing, emit one synthetic centred cow
+        if not tracked_cows:
+            tracked_cows = [{"id": 0, "cx": 0.5, "cy": 0.55, "w": 0.55, "h": 0.65, "motion": motion_mag}]
+
+        pose["cows"] = [
+            {
+                "id":     c["id"],
+                "cx":     round(c["cx"],   4),
+                "cy":     round(c["cy"],   4),
+                "w":      round(c["w"],    4),
+                "h":      round(c["h"],    4),
+                "motion": round(c.get("motion", 0.0), 4),
+            }
+            for c in tracked_cows
+        ]
+
         with open(frame_path, "rb") as f:
             pose["frame_b64"] = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
 
@@ -304,10 +457,11 @@ async def sensor_loop(node: str, target_fps: float):
 
 async def main(node: str, ws_port: int, http_port: int, fps: float):
     print("=" * 60)
-    print("  W1z4rD V1510n -- Cow Sensor Stream (fabric-only)")
+    print("  W1z4rD V1510n -- Cow Sensor Stream (multi-cow)")
     print("=" * 60)
     print(f"  Node  -> http://{node}")
     print(f"  WS    -> ws://localhost:{ws_port}")
+    _check_pil()
 
     threading.Thread(target=run_http_server, args=(http_port,), daemon=True).start()
 
