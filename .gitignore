@@ -37,6 +37,11 @@
 *.tar.gz
 *.tgz
 
+# ── Code-test compilation artefacts (D:\w1z4rdv1510n-data\code_tests\) ─────────
+# These are compiled outside the repo to avoid Avira quarantining temp exes.
+# The directory lives in the data volume, not here, but exclude the pattern anyway.
+code_tests/
+
 # ── Python generated ──────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

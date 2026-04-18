@@ -23,7 +23,10 @@ import argparse, json, os, platform, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RESULTS_DEFAULT = ROOT / 'D:/w1z4rdv1510n-data/training/code_test_results.json'
+DATA_DIR = Path('D:/w1z4rdv1510n-data')
+# Compile outputs go here so Avira (which scans AppData\Local\Temp) won't quarantine them
+COMPILE_DIR = DATA_DIR / 'code_tests'
+RESULTS_DEFAULT = DATA_DIR / 'training/code_test_results.json'
 
 # ── Tool discovery ─────────────────────────────────────────────────────────────
 
@@ -420,7 +423,7 @@ def dispatch(ex: dict, tmpdir: Path) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--results-json', default=str(ROOT / 'D:/w1z4rdv1510n-data/training/code_test_results.json'))
+    ap.add_argument('--results-json', default=str(RESULTS_DEFAULT))
     ap.add_argument('--train-node',   default='localhost:8090',
                     help='If set, train results to neural node')
     ap.add_argument('--no-train', action='store_true')
@@ -438,93 +441,100 @@ def main():
 
     print(f'\nTesting {len(PROG_CODE_EXAMPLES)} code examples on {platform_info}\n')
 
-    with tempfile.TemporaryDirectory(prefix='w1z4rd_code_test_', ignore_cleanup_errors=True) as td:
-        tmpdir = Path(td)
+    # Use a fixed directory outside AppData\Temp so Avira doesn't quarantine compiled exes
+    COMPILE_DIR.mkdir(parents=True, exist_ok=True)
+    # Wipe previous run's artefacts so stale exes don't interfere
+    import shutil as _shutil
+    for _p in COMPILE_DIR.iterdir():
+        try:
+            _shutil.rmtree(_p) if _p.is_dir() else _p.unlink()
+        except Exception:
+            pass
 
-        for i, ex in enumerate(PROG_CODE_EXAMPLES):
-            lang  = ex['lang']
-            year  = ex['year']
-            desc  = ex['description']
-            print(f'  [{i+1:02}/{len(PROG_CODE_EXAMPLES)}] {lang} ({year}): {desc[:50]}...', end=' ', flush=True)
+    for i, ex in enumerate(PROG_CODE_EXAMPLES):
+        lang  = ex['lang']
+        year  = ex['year']
+        desc  = ex['description']
+        print(f'  [{i+1:02}/{len(PROG_CODE_EXAMPLES)}] {lang} ({year}): {desc[:50]}...', end=' ', flush=True)
 
-            exdir = tmpdir / f'ex_{i:03}'
-            exdir.mkdir()
+        exdir = COMPILE_DIR / f'ex_{i:03}'
+        exdir.mkdir(exist_ok=True)
 
-            result = dispatch(ex, exdir)
-            time.sleep(0.2)  # avoid Windows resource exhaustion from rapid subprocess spawning
+        result = dispatch(ex, exdir)
+        time.sleep(0.2)  # avoid Windows resource exhaustion from rapid subprocess spawning
 
-            skip_reason = result.pop('skip_reason', None)
-            note        = result.pop('note', '')
-            success     = (result['exit_code'] == 0 and not result['timed_out']
-                           and not skip_reason)
+        skip_reason = result.pop('skip_reason', None)
+        note        = result.pop('note', '')
+        success     = (result['exit_code'] == 0 and not result['timed_out']
+                       and not skip_reason)
 
-            if skip_reason:
-                status = 'SKIP'
-                skipped += 1
-            elif success:
-                status = 'PASS'
-                passed += 1
-            else:
-                status = 'FAIL'
-                failed += 1
+        if skip_reason:
+            status = 'SKIP'
+            skipped += 1
+        elif success:
+            status = 'PASS'
+            passed += 1
+        else:
+            status = 'FAIL'
+            failed += 1
 
-            print(status)
-            if result['stderr'] and status != 'SKIP':
-                short_err = result['stderr'][:120].replace('\n', ' ')
-                print(f'         stderr: {short_err}')
+        print(status)
+        if result['stderr'] and status != 'SKIP':
+            short_err = result['stderr'][:120].replace('\n', ' ')
+            print(f'         stderr: {short_err}')
 
-            record = {
-                'lang':           lang,
-                'year':           year,
-                'description':    desc,
-                'platform':       ex.get('platform', ''),
-                'compiler_spec':  ex.get('compiler', ''),
-                'status':         status,
-                'skip_reason':    skip_reason,
-                'stdout':         result.get('stdout', '')[:500],
-                'stderr':         result.get('stderr', '')[:300],
-                'exit_code':      result.get('exit_code'),
-                'timed_out':      result.get('timed_out', False),
-                'note':           note,
-                'test_platform':  platform_info,
-                'test_date':      time.strftime('%Y-%m-%d'),
-            }
-            results.append(record)
+        record = {
+            'lang':           lang,
+            'year':           year,
+            'description':    desc,
+            'platform':       ex.get('platform', ''),
+            'compiler_spec':  ex.get('compiler', ''),
+            'status':         status,
+            'skip_reason':    skip_reason,
+            'stdout':         result.get('stdout', '')[:500],
+            'stderr':         result.get('stderr', '')[:300],
+            'exit_code':      result.get('exit_code'),
+            'timed_out':      result.get('timed_out', False),
+            'note':           note,
+            'test_platform':  platform_info,
+            'test_date':      time.strftime('%Y-%m-%d'),
+        }
+        results.append(record)
 
-            # Train result to neural node
-            if not args.no_train and not skip_reason:
-                import urllib.request
-                verdict = 'VERIFIED WORKING' if success else 'COMPILE/RUN ERROR'
+        # Train result to neural node
+        if not args.no_train and not skip_reason:
+            import urllib.request
+            verdict = 'VERIFIED WORKING' if success else 'COMPILE/RUN ERROR'
+            train_text = (
+                f'Code example test result — {verdict}. '
+                f'Language: {lang}. Year: {year}. Platform: {ex.get("platform","")}. '
+                f'Tested on: {platform_info} ({time.strftime("%Y-%m-%d")}). '
+                f'Description: {desc}.\n'
+                f'Code:\n{ex["code"]}\n'
+            )
+            if success and result.get('stdout'):
+                train_text += f'Output: {result["stdout"][:300]}\n'
+            if not success and result.get('stderr'):
+                train_text += f'Error: {result["stderr"][:200]}\n'
+            train_text += f'Notes: {ex.get("notes","")}'
+            try:
+                _train_text(train_text, args.train_node)
+            except Exception as e:
+                print(f'         [WARN] train failed: {e}')
+        elif skip_reason:
+            # Still train the example with skip context
+            if not args.no_train:
                 train_text = (
-                    f'Code example test result — {verdict}. '
-                    f'Language: {lang}. Year: {year}. Platform: {ex.get("platform","")}. '
-                    f'Tested on: {platform_info} ({time.strftime("%Y-%m-%d")}). '
-                    f'Description: {desc}.\n'
+                    f'Code example — {lang} ({year}). {desc}.\n'
+                    f'Platform requirement: {skip_reason}.\n'
                     f'Code:\n{ex["code"]}\n'
+                    f'Notes: {ex.get("notes","")} '
+                    f'To run on correct platform: {ex.get("platform","")}'
                 )
-                if success and result.get('stdout'):
-                    train_text += f'Output: {result["stdout"][:300]}\n'
-                if not success and result.get('stderr'):
-                    train_text += f'Error: {result["stderr"][:200]}\n'
-                train_text += f'Notes: {ex.get("notes","")}'
                 try:
                     _train_text(train_text, args.train_node)
-                except Exception as e:
-                    print(f'         [WARN] train failed: {e}')
-            elif skip_reason:
-                # Still train the example with skip context
-                if not args.no_train:
-                    train_text = (
-                        f'Code example — {lang} ({year}). {desc}.\n'
-                        f'Platform requirement: {skip_reason}.\n'
-                        f'Code:\n{ex["code"]}\n'
-                        f'Notes: {ex.get("notes","")} '
-                        f'To run on correct platform: {ex.get("platform","")}'
-                    )
-                    try:
-                        _train_text(train_text, args.train_node)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
     # Save JSON
     out_path = Path(args.results_json)
