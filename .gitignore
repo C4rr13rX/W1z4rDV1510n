@@ -32,6 +32,14 @@
 /data/
 /.genomic_benchmarks/
 
+# ── Playwright test captures and other image artifacts ───────────────────────
+/playwright_captures/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
 # ── Compressed archives ───────────────────────────────────────────────────────
 *.zip
 *.tar.gz

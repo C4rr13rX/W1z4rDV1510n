@@ -154,6 +154,12 @@ pub struct QaQueryReport {
     pub active_question_neurons: usize,
     pub results: Vec<QaQueryResult>,
     pub timestamp: Timestamp,
+    /// Tokens from this query whose IDF exceeds the median IDF of all active
+    /// tokens — i.e., the specific/rare words the network considers
+    /// discriminative.  Computed entirely from learned training statistics;
+    /// no hardcoded stop-word lists.
+    #[serde(default)]
+    pub significant_tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,6 +389,7 @@ impl QaRuntime {
                 question: question.to_string(),
                 active_question_neurons: 0,
                 results: vec![],
+                significant_tokens: vec![],
                 timestamp,
             };
         }
@@ -454,10 +461,32 @@ impl QaRuntime {
             })
             .collect();
 
+        // ── Significant tokens: learned discrimination, no hardcoded stops ───
+        // Tokens whose IDF exceeds the median IDF of all active tokens are the
+        // network's own assessment of what is specific/rare vs. ubiquitous noise.
+        // These are the tokens that carry the most discriminative power for this
+        // query — derived purely from training statistics.
+        let mut sorted_idf = idf_weights.clone();
+        sorted_idf.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median_idf = if sorted_idf.is_empty() {
+            0.0f32
+        } else {
+            sorted_idf[sorted_idf.len() / 2]
+        };
+        // Collect the vocab token strings for discriminative neurons
+        let id_to_token: std::collections::HashMap<u32, &str> = self.question_vocab
+            .iter().map(|(tok, &id)| (id, tok.as_str())).collect();
+        let significant_tokens: Vec<String> = active_q_ids.iter()
+            .zip(idf_weights.iter())
+            .filter(|(_, idf)| **idf > median_idf && **idf > 0.5)
+            .filter_map(|(&q_id, _)| id_to_token.get(&q_id).map(|t| t.to_string()))
+            .collect();
+
         QaQueryReport {
             question: question.to_string(),
             active_question_neurons: active_q_ids.len(),
             results,
+            significant_tokens,
             timestamp,
         }
     }
