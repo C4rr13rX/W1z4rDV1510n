@@ -163,49 +163,57 @@ scene.add(sun);
 const fillLight = new THREE.PointLight(0x8899ff, 0.4, 20);
 scene.add(fillLight);
 
-// ─── Video-projection shader ───────────────────────────────────────────────
+// ─── Screen-space video-projection shader ─────────────────────────────────
+// Each mesh vertex samples the live video texture at its exact screen position.
+// From the camera's viewpoint this makes the entity a perfect 3D replica of the
+// 2D cow — invisible against the video background but fully 3D when the camera
+// orbits.  A fresnel rim makes the silhouette visible from the default angle.
 const cowShader = {
   uniforms: {
-    tVideo: { value: videoTexture }, uInvCow: { value: new THREE.Matrix4() },
-    uCowMinX: { value: -1.4 }, uCowSpanX: { value: 3.0 },
-    uCowMinY: { value: 0.0 },  uCowSpanY: { value: 2.4 },
-    uTexOffU: { value: 0.05 }, uTexScaleU: { value: 0.90 },
-    uTexOffV: { value: 0.08 }, uTexScaleV: { value: 0.82 },
-    uFallback: { value: new THREE.Color(0xddd8c8) },
+    tVideo:    { value: videoTexture },
+    uFallback: { value: new THREE.Color(0xc8b898) },
     uOpacity:  { value: 1.0 },
+    uCamWorld: { value: new THREE.Vector3(7.5, 2.0, 0) },
   },
   vertexShader: `
-    varying vec4 vWorldPos;
+    varying vec4 vClip;
+    varying vec3 vWorldNorm;
+    varying vec3 vWorldPos;
     void main() {
-      vWorldPos = modelMatrix * vec4(position, 1.0);
-      gl_Position = projectionMatrix * viewMatrix * vWorldPos;
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos  = wp.xyz;
+      vWorldNorm = normalize(mat3(modelMatrix) * normal);
+      vClip      = projectionMatrix * viewMatrix * wp;
+      gl_Position = vClip;
     }
   `,
   fragmentShader: `
     uniform sampler2D tVideo;
-    uniform mat4  uInvCow;
-    uniform float uCowMinX, uCowSpanX, uCowMinY, uCowSpanY;
-    uniform float uTexOffU, uTexScaleU, uTexOffV, uTexScaleV;
     uniform vec3  uFallback;
     uniform float uOpacity;
-    varying vec4 vWorldPos;
+    uniform vec3  uCamWorld;
+    varying vec4 vClip;
+    varying vec3 vWorldNorm;
+    varying vec3 vWorldPos;
     void main() {
-      vec3 local = (uInvCow * vWorldPos).xyz;
-      float u = (local.x - uCowMinX) / uCowSpanX;
-      float v = (local.y - uCowMinY) / uCowSpanY;
-      float inB = step(0.0,u)*step(u,1.0)*step(0.0,v)*step(v,1.0);
-      float edge = smoothstep(0.0,0.05,u)*smoothstep(1.0,0.95,u)
-                 * smoothstep(0.0,0.04,v)*smoothstep(1.0,0.96,v);
-      float su = uTexOffU + u * uTexScaleU;
-      float sv = uTexOffV + v * uTexScaleV;
-      vec4 tex = texture2D(tVideo, vec2(su, sv));
-      // Suppress grass-coloured pixels — replace with entity's dominant colour
-      float gDom = max(0.0, tex.g - max(tex.r, tex.b) - 0.03);
-      float notGrass = 1.0 - smoothstep(0.04, 0.22, gDom) * step(0.28, tex.g);
-      // Blend: grass pixels → uFallback (entity dominant tone), non-grass → video
-      vec3 entityColor = mix(uFallback, tex.rgb, notGrass);
-      float alpha = inB * edge * uOpacity;
-      gl_FragColor = vec4(entityColor, alpha);
+      // Sample video at this vertex's screen position (screen-space projection)
+      vec2 uv = (vClip.xy / vClip.w) * 0.5 + 0.5;
+      uv.y = 1.0 - uv.y;
+      uv  = clamp(uv, 0.001, 0.999);
+      vec4 tex = texture2D(tVideo, uv);
+
+      // Suppress green/sky background — show entity fallback colour there
+      float gDom = max(0.0, tex.g - max(tex.r, tex.b) - 0.04);
+      float isBg = smoothstep(0.05, 0.25, gDom) * step(0.25, tex.g);
+      vec3 color = mix(tex.rgb, uFallback, isBg);
+
+      // Fresnel rim — subtle edge glow makes silhouette visible without drowning colour
+      vec3 viewDir = normalize(uCamWorld - vWorldPos);
+      float rim = 1.0 - max(0.0, dot(normalize(vWorldNorm), viewDir));
+      rim = pow(rim, 3.5);
+      color += vec3(0.20, 0.70, 1.0) * rim * 0.28;
+
+      gl_FragColor = vec4(color, uOpacity);
     }
   `,
 };
@@ -222,28 +230,116 @@ function makeCowMat() {
 // Each body region is synthesized separately (spatially filtered centroids)
 // then assembled into one Group.  All shapes come entirely from neural training.
 
+// Queries use only anatomy-specific terms — NO generic "cow"/"dairy"/"bovine"/
+// "Holstein" keywords which would also match the surface-grid labels
+// (id::cow_surf_NN_NN).  Anatomy-specific terms match ONLY named anatomy
+// centroids which have the correct bovine proportions.
+// COW_PARTS: each part is [name, query, x_range, y_range, z_range]
+// Query words match centroid label substrings — both named anatomy centroids
+// AND the new dense surface centroids from train_cow_multiview_surface.py.
+// No generic "cow"/"dairy"/"bovine"/"Holstein" to avoid matching surface-grid labels.
 const COW_PARTS = [
-  // [name, query, x_range, y_range, z_range]
-  // Torso barrel
-  ['body',   'dairy cow Holstein bovine thorax spine rumen heart lung udder belly withers sacrum rump sternum flank back',
-             [-1.25,  0.65], null,         null          ],
-  // Head
-  ['head',   'dairy cow Holstein bovine head brain snout jaw skull eye ear horn nostril cranium',
-             [ 0.90,  1.70], [0.70, 1.50], null          ],
-  // Neck bridge
-  ['neck',   'dairy cow Holstein bovine neck upper lower trachea cervical withers throat',
-             [ 0.50,  1.10], [0.80, 1.50], null          ],
-  // Front legs — left (Z > 0) and right (Z < 0) as separate hulls
-  ['fl_L',   'dairy cow Holstein bovine shoulder elbow forearm knee cannon fetlock hoof front left forelimb',
-             [ 0.70,  0.90], null,         [0.08,  0.42] ],
-  ['fl_R',   'dairy cow Holstein bovine shoulder elbow forearm knee cannon fetlock hoof front right forelimb',
-             [ 0.70,  0.90], null,         [-0.42,-0.08] ],
-  // Rear legs — left and right
-  ['rl_L',   'dairy cow Holstein bovine hip femur stifle tibia hock cannon fetlock hoof rear left hindlimb pelvis',
-             [-0.90, -0.65], null,         [0.08,  0.42] ],
-  ['rl_R',   'dairy cow Holstein bovine hip femur stifle tibia hock cannon fetlock hoof rear right hindlimb pelvis',
-             [-0.90, -0.65], null,         [-0.42,-0.08] ],
+  ['body',
+   'thorax spine rumen reticulum omasum abomasum heart lung diaphragm udder belly withers sacrum rump sternum flank back shoulder hip chest liver kidney spleen pancreas hide_dorsal surface',
+   [-1.50, 0.82], null, null],
+  ['head',
+   'head brain snout jaw skull eye ear horn nostril cranium',
+   [ 0.90, 1.70], [0.70, 1.50], null],
+  ['neck',
+   'neck trachea cervical throat withers',
+   [ 0.50, 1.10], [0.80, 1.50], null],
+  ['fl_L',
+   'shoulder elbow forearm knee cannon fetlock hoof',
+   [ 0.60, 0.95], null, [0.08, 0.45]],
+  ['fl_R',
+   'shoulder elbow forearm knee cannon fetlock hoof',
+   [ 0.60, 0.95], null, [-0.45,-0.08]],
+  ['rl_L',
+   'hip femur stifle tibia hock cannon fetlock hoof',
+   [-0.95,-0.55], null, [0.08, 0.45]],
+  ['rl_R',
+   'hip femur stifle tibia hock cannon fetlock hoof',
+   [-0.95,-0.55], null, [-0.45,-0.08]],
 ];
+
+// ─── Triangle subdivision (Loop-style midpoint split, n passes) ──────────────
+// Each pass splits every triangle into 4 by adding edge midpoints.
+// The outer convex hull stays correct; interior gets smoothed by new vertices.
+// 2 passes on a 16-face hull → 256 faces with interpolated positions.
+function subdivideGeo(geo, passes = 2) {
+  for (let pass = 0; pass < passes; pass++) {
+    const posArr  = geo.attributes.position.array;
+    const idxArr  = geo.index.array;
+    const nVerts  = posArr.length / 3;
+    const newPos  = Array.from(posArr); // copy existing verts
+    const newIdx  = [];
+    const edgeMap = new Map();
+
+    function midpoint(a, b) {
+      const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+      if (edgeMap.has(key)) return edgeMap.get(key);
+      const mi = newPos.length / 3;
+      newPos.push(
+        (posArr[a*3] + posArr[b*3]) / 2,
+        (posArr[a*3+1] + posArr[b*3+1]) / 2,
+        (posArr[a*3+2] + posArr[b*3+2]) / 2,
+      );
+      edgeMap.set(key, mi);
+      return mi;
+    }
+
+    for (let i = 0; i < idxArr.length; i += 3) {
+      const [a, b, c] = [idxArr[i], idxArr[i+1], idxArr[i+2]];
+      const ab = midpoint(a, b), bc = midpoint(b, c), ca = midpoint(c, a);
+      newIdx.push(a, ab, ca,  ab, b, bc,  ca, bc, c,  ab, bc, ca);
+    }
+
+    const newGeo = new THREE.BufferGeometry();
+    newGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newPos), 3));
+    newGeo.setIndex(new THREE.BufferAttribute(new Uint32Array(newIdx), 1));
+    newGeo.computeVertexNormals();
+    geo.dispose();
+    geo = newGeo;
+  }
+  return geo;
+}
+
+// ─── Laplacian smoothing — softens sharp hull edges ───────────────────────────
+// Each interior vertex moves slightly toward the average of its neighbours.
+function laplacianSmooth(geo, iters = 2, alpha = 0.35) {
+  const posArr = geo.attributes.position.array;
+  const idxArr = geo.index.array;
+  const nV     = posArr.length / 3;
+
+  // Build adjacency list
+  const adj = Array.from({length: nV}, () => new Set());
+  for (let i = 0; i < idxArr.length; i += 3) {
+    const [a, b, c] = [idxArr[i], idxArr[i+1], idxArr[i+2]];
+    adj[a].add(b); adj[a].add(c);
+    adj[b].add(a); adj[b].add(c);
+    adj[c].add(a); adj[c].add(b);
+  }
+
+  const pos = new Float32Array(posArr);
+  const tmp = new Float32Array(pos.length);
+  for (let iter = 0; iter < iters; iter++) {
+    for (let v = 0; v < nV; v++) {
+      const nbrs = [...adj[v]];
+      if (nbrs.length === 0) { tmp[v*3]=pos[v*3]; tmp[v*3+1]=pos[v*3+1]; tmp[v*3+2]=pos[v*3+2]; continue; }
+      let ax=0, ay=0, az=0;
+      for (const n of nbrs) { ax+=pos[n*3]; ay+=pos[n*3+1]; az+=pos[n*3+2]; }
+      const k = nbrs.length;
+      tmp[v*3]   = pos[v*3]   + alpha * (ax/k - pos[v*3]);
+      tmp[v*3+1] = pos[v*3+1] + alpha * (ay/k - pos[v*3+1]);
+      tmp[v*3+2] = pos[v*3+2] + alpha * (az/k - pos[v*3+2]);
+    }
+    pos.set(tmp);
+  }
+  geo.attributes.position.array.set(pos);
+  geo.attributes.position.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
 
 const _cowPartCache = {};  // name → geo (shared across all entity instances)
 
@@ -257,6 +353,7 @@ async function fetchCowPart(name, query, x_range, y_range, z_range) {
     const resp = await fetch(`${NODE_API}/mesh/synthesize`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(25000),
     });
     const d = await resp.json();
     if (!d.obj) { _cowPartCache[name] = null; return null; }
@@ -270,10 +367,17 @@ async function fetchCowPart(name, query, x_range, y_range, z_range) {
       }
     }
     if (verts.length < 12) { _cowPartCache[name] = null; return null; }
-    const geo = new THREE.BufferGeometry();
+    let geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
     geo.computeVertexNormals();
+    // Subdivide (2 passes: 16→256 faces) + smooth to reduce shard angularity
+    const faceCount = indices.length / 3;
+    const subPasses = faceCount < 40 ? 2 : faceCount < 120 ? 1 : 0;
+    if (subPasses > 0) {
+      geo = subdivideGeo(geo, subPasses);
+      geo = laplacianSmooth(geo, 3, 0.35);
+    }
     _cowPartCache[name] = geo;
     return geo;
   } catch(_) { _cowPartCache[name] = null; return null; }
@@ -283,7 +387,10 @@ let _cowAssemblyPromise = null;
 let _cowAssemblyResult  = null;  // { geos, fullBB } — shared species data
 
 async function _buildCowAssembly() {
-  const geos = await Promise.all(COW_PARTS.map(([n,q,x,y,z]) => fetchCowPart(n,q,x,y,z)));
+  const geos = [];
+  for (const [n, q, x, y, z] of COW_PARTS) {
+    geos.push(await fetchCowPart(n, q, x, y, z));
+  }
   // Compute full bounding box across all parts for consistent UV projection
   const fullBB = new THREE.Box3();
   for (const g of geos) { if (g) { g.computeBoundingBox(); fullBB.union(g.boundingBox); } }
@@ -316,7 +423,7 @@ async function buildNeuralCow(entityColor) {
   const assembly = _cowAssemblyResult;
   if (!assembly) return null;
 
-  const { geos, fullBB } = assembly;
+  const { geos } = assembly;
   const mats = [];
   const root = new THREE.Group();
 
@@ -324,11 +431,6 @@ async function buildNeuralCow(entityColor) {
     const geo = geos[i];
     if (!geo) continue;
     const mat = makeCowMat();
-    // UV projection spans the full cow bounding box
-    mat.uniforms.uCowMinX.value  = fullBB.min.x;
-    mat.uniforms.uCowSpanX.value = fullBB.max.x - fullBB.min.x;
-    mat.uniforms.uCowMinY.value  = fullBB.min.y;
-    mat.uniforms.uCowSpanY.value = fullBB.max.y - fullBB.min.y;
     mats.push(mat);
     root.add(new THREE.Mesh(geo, mat));
   }
@@ -344,10 +446,28 @@ async function buildNeuralCow(entityColor) {
 
 // ─── 2D → 3D position ─────────────────────────────────────────────────────
 const H_TAN = 0.869;
-function videoToWorldPos(cx, _cy, groundY = 0) {
-  const halfW = zoomDist * H_TAN;
-  return new THREE.Vector3(0, groundY, (0.5 - cx) * halfW * 2);
+const V_TAN = H_TAN * (9 / 16);   // ≈ 0.489 for 16:9 video
+
+// Estimate how far the detected cow is from the camera using apparent height.
+// A 1.42m cow at distance d fills h_frac = 1.42 / (2*d*V_TAN) of frame height.
+function cowDepthFromH(h) {
+  return 1.42 / (2 * V_TAN * Math.max(0.04, h));
 }
+
+// Place entity in world space at the estimated depth along the camera's view axis.
+// camera sits at X=+zoomDist; world origin is scene centre.  Depth reduces X.
+// camera.position.z is added so the lateral mapping stays correct when the
+// cinematic camera tracks the cow centroid Z (cinemaCentroidZ).
+function videoToWorldPos(cx, _cy, h) {
+  const depth = cowDepthFromH(h || 0.194);
+  const worldX = camera.position.x - depth;
+  const worldZ = camera.position.z + (0.5 - cx) * 2 * depth * H_TAN;
+  return new THREE.Vector3(worldX, 0, worldZ);
+}
+
+// With depth-based placement the mesh stays at canonical scale (1.42m tall).
+// Tiny clamp avoids exploding scale if detection gives degenerate h.
+function cowScaleFromH(_h) { return 1.0; }
 
 // ─── Cow registry ─────────────────────────────────────────────────────────
 const cowRegistry = new Map();
@@ -365,14 +485,9 @@ function bboxToTexOff(cx, cy, w, h) {
 
 function syncCowShader(entry) {
   if (!entry.mesh.userData.mats) return;
-  entry.mesh.updateMatrixWorld(true);
-  const inv = new THREE.Matrix4().copy(entry.mesh.matrixWorld).invert();
   for (const mat of entry.mesh.userData.mats) {
-    const u = mat.uniforms;
-    u.uInvCow.value.copy(inv);
-    u.tVideo.value = videoTexture;
-    u.uTexOffU.value  = entry.texOff.u0;  u.uTexScaleU.value = entry.texOff.us;
-    u.uTexOffV.value  = entry.texOff.v0;  u.uTexScaleV.value = entry.texOff.vs;
+    mat.uniforms.tVideo.value    = videoTexture;
+    mat.uniforms.uCamWorld.value.copy(camera.position);
   }
 }
 
@@ -389,13 +504,14 @@ function applyEntityColor(mesh, rgb) {
   for (const mat of mesh.userData.mats) mat.uniforms.uFallback.value.copy(fb);
 }
 
-async function spawnCow(id, worldPos, texOff, entityColor) {
+async function spawnCow(id, worldPos, texOff, entityColor, detH) {
+  const initScale = cowScaleFromH(detH);
   // Register immediately so incoming WS updates don't re-spawn while loading
   const entry = {
     mesh: new THREE.Group(),
     texOff: { ...texOff },
-    cur:    { x: worldPos.x, z: worldPos.z, yaw: Math.PI/2, walkPhase: 0 },
-    target: { x: worldPos.x, z: worldPos.z, yaw: Math.PI/2, walkSpeed:0, motion:0, animState:'stand' },
+    cur:    { x: worldPos.x, z: worldPos.z, yaw: Math.PI/2, walkPhase: 0, scale: initScale },
+    target: { x: worldPos.x, z: worldPos.z, yaw: Math.PI/2, walkSpeed:0, motion:0, animState:'stand', scale: initScale },
     lastSeen:     performance.now(),
     conceptLabels: [], anatomyGroup: null, anatomyLoading: false,
   };
@@ -407,6 +523,7 @@ async function spawnCow(id, worldPos, texOff, entityColor) {
 
   root.position.copy(worldPos);
   root.rotation.y = Math.PI / 2;
+  root.scale.setScalar(entry.cur.scale);
   scene.add(root);
   entry.mesh = root;
   syncCowShader(entry);
@@ -434,18 +551,46 @@ function setLOD(lod) {
 
 const DEPTH_NAMES = ['WORLD', 'ENTITY — EXTERIOR', 'ANATOMY — SYSTEMS', 'ORGAN DETAIL', 'CELLULAR', 'MOLECULAR'];
 
+// Organ definitions: positions match the anatomy training atlas (cow_* centroids).
+// neuralLabel maps each organ to its neural centroid — positions are updated at
+// runtime by fetchNeuralOrganPositions() so the drill-down reflects what the
+// network has actually learned.
 const ORGANS = [
-  { name:'Rumen',     pos:[-0.40, 1.35,  0.25], color:0x44bb44, r:0.32, desc:'Largest compartment of the bovine stomach (100–150L). Microbial fermentation of cellulose.' },
-  { name:'Heart',     pos:[ 0.65, 1.62,  0.00], color:0xcc2222, r:0.13, desc:'4-chamber heart. Pumps 35–40L/min. Weighs 2–3kg. Located in the mediastinum.' },
-  { name:'L.Lung',    pos:[ 0.55, 1.70,  0.22], color:0xff9966, r:0.17, desc:'Left lung — constrained by rumen on left side. Lobed structure.' },
-  { name:'R.Lung',    pos:[ 0.55, 1.70, -0.22], color:0xff9966, r:0.17, desc:'Right lung — larger of the two. 4 lobes. Oxygen exchange ~500L/day.' },
-  { name:'Liver',     pos:[ 0.10, 1.44, -0.28], color:0xbb6622, r:0.21, desc:'Largest gland. Metabolises nutrients, detoxifies blood, produces bile. ~5kg.' },
-  { name:'L.Kidney',  pos:[-0.25, 1.65,  0.18], color:0xaa3333, r:0.10, desc:'Left kidney. Filters ~1000L blood/day. Lobulated structure unique to cattle.' },
-  { name:'R.Kidney',  pos:[-0.25, 1.65, -0.18], color:0xaa3333, r:0.10, desc:'Right kidney. Fixed position near right liver lobe. Produces erythropoietin.' },
-  { name:'Udder',     pos:[-0.30, 0.55,  0.00], color:0xffbbaa, r:0.22, desc:'4 mammary glands. Holstein avg 20–30L milk/day. Rich in lactalbumin, casein, lactose.' },
-  { name:'Brain',     pos:[ 1.55, 2.10,  0.00], color:0xffccaa, r:0.11, desc:'Bovine brain ~500g. Cerebral cortex, cerebellum, brainstem, olfactory bulbs.' },
-  { name:'Spine',     pos:[-0.10, 1.82,  0.00], color:0xe8e4aa, r:0.08, desc:'7 cervical + 13 thoracic + 6 lumbar + 5 sacral vertebrae. Supports 600–750kg.' },
+  { name:'Rumen',    neuralLabel:'cow_rumen',    pos:[-0.28, 0.92,  0.24], color:0x44bb44, r:0.28, desc:'Largest compartment of the bovine stomach (100-150L). Microbial fermentation of cellulose.' },
+  { name:'Heart',    neuralLabel:'cow_heart',    pos:[ 0.62, 1.10,  0.00], color:0xcc2222, r:0.13, desc:'4-chamber heart. Pumps 35-40L/min. Weighs 2-3kg. Located in the mediastinum.' },
+  { name:'L.Lung',   neuralLabel:'cow_lung_L',   pos:[ 0.45, 1.16,  0.24], color:0xff9966, r:0.17, desc:'Left lung — constrained by rumen on left side. Lobed structure.' },
+  { name:'R.Lung',   neuralLabel:'cow_lung_R',   pos:[ 0.45, 1.16, -0.24], color:0xff9966, r:0.17, desc:'Right lung — larger of the two. 4 lobes. Oxygen exchange ~500L/day.' },
+  { name:'Liver',    neuralLabel:'cow_liver',    pos:[ 0.15, 0.94, -0.26], color:0xbb6622, r:0.21, desc:'Largest gland. Metabolises nutrients, detoxifies blood, produces bile. ~5kg.' },
+  { name:'L.Kidney', neuralLabel:'cow_kidney_L', pos:[-0.24, 1.06,  0.20], color:0xaa3333, r:0.10, desc:'Left kidney. Filters ~1000L blood/day. Lobulated structure unique to cattle.' },
+  { name:'R.Kidney', neuralLabel:'cow_kidney_R', pos:[-0.24, 1.06, -0.20], color:0xaa3333, r:0.10, desc:'Right kidney. Fixed position near right liver lobe. Produces erythropoietin.' },
+  { name:'Udder',    neuralLabel:'cow_udder',    pos:[-0.34, 0.28,  0.00], color:0xffbbaa, r:0.22, desc:'4 mammary glands. Holstein avg 20-30L milk/day. Rich in lactalbumin, casein, lactose.' },
+  { name:'Brain',    neuralLabel:'cow_brain',    pos:[ 1.36, 1.22,  0.00], color:0xffccaa, r:0.11, desc:'Bovine brain ~500g. Cerebral cortex, cerebellum, brainstem, olfactory bulbs.' },
+  { name:'Spine',    neuralLabel:'cow_spine_T',  pos:[ 0.10, 1.32,  0.00], color:0xe8e4aa, r:0.08, desc:'7 cervical + 13 thoracic + 6 lumbar + 5 sacral vertebrae. Supports 600-750kg.' },
 ];
+
+// Fetch neural centroid positions for organs and update ORGANS[].pos so the
+// anatomy drill-down reflects real learned data, not just the atlas defaults.
+let _organPositionsFetched = false;
+async function fetchNeuralOrganPositions() {
+  if (_organPositionsFetched) return;
+  try {
+    const resp = await fetch(`${NODE_API}/neuro/snapshot`);
+    const d = await resp.json();
+    const centroids = d.centroids || {};
+    let updated = 0;
+    for (const organ of ORGANS) {
+      const c = centroids['id::' + organ.neuralLabel] || centroids[organ.neuralLabel];
+      if (c && typeof c.x === 'number') {
+        organ.pos = [c.x, c.y, c.z];
+        updated++;
+      }
+    }
+    if (updated > 0) {
+      console.log(`[anatomy] Updated ${updated} organ positions from neural centroids`);
+      _organPositionsFetched = true;
+    }
+  } catch (_) {}
+}
 
 // Drill state
 const drill = {
@@ -763,17 +908,20 @@ function enterEntityDrill(entityId) {
   setDrillHUD(1);
 }
 
-function enterAnatomyDrill(entityId) {
+async function enterAnatomyDrill(entityId) {
   const entry = cowRegistry.get(entityId);
   if (!entry) return;
   drill.depth = 2;
+
+  // Update organ positions from neural centroids before building anatomy group
+  await fetchNeuralOrganPositions();
 
   // Build anatomy if not already built
   if (!entry.anatomyGroup && !entry.anatomyLoading) {
     entry.anatomyLoading = true;
     entry.anatomyGroup = buildAnatomyGroup(entry);
-    // Async fetch neural mesh overlay
-    fetchNeuralMesh('dairy cow internal anatomy organs skeleton rumen heart').then(geo => {
+    // Async fetch neural mesh overlay using anatomy-specific terms
+    fetchNeuralMesh('rumen heart lung liver kidney udder brain spine thorax diaphragm').then(geo => {
       if (geo && entry.anatomyGroup) {
         const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
           color: 0x88bbff, transparent: true, opacity: 0.28,
@@ -958,17 +1106,18 @@ function connectWS() {
 
       for (const c of incoming) {
         const texOff  = bboxToTexOff(c.cx, c.cy, c.w, c.h);
-        const worldPos = videoToWorldPos(c.cx, c.cy);
+        const worldPos = videoToWorldPos(c.cx, c.cy, c.h);
         if (cowRegistry.has(c.id)) {
           const e = cowRegistry.get(c.id);
           e.target.x = worldPos.x; e.target.z = worldPos.z;
+          e.target.scale = cowScaleFromH(c.h);
           e.target.motion = c.motion??0;
           e.target.walkSpeed = Math.min((c.motion??0)*5.0, 4.0);
           e.target.animState = (c.motion??0) > 0.10 ? 'walk' : globalPose.animState;
           e.texOff = texOff; e.lastSeen = now;
           e.conceptLabels = d.concept_labels || [];
           if (c.color) applyEntityColor(e.mesh, c.color);
-        } else { spawnCow(c.id, worldPos, texOff, c.color); }
+        } else { spawnCow(c.id, worldPos, texOff, c.color, c.h); }
       }
       for (const [id, e] of [...cowRegistry]) {
         if (!seenIds.has(id) && (now - e.lastSeen) > STALE_MS) despawnCow(id);
@@ -1138,6 +1287,12 @@ function animateCowEntry(entry, dt, t) {
   const anim = entry.target.animState || globalPose.animState;
   const isWalk = anim === 'walk', isGraze = anim === 'graze';
   const bounce = isWalk ? Math.abs(Math.sin(entry.cur.walkPhase*2))*0.025*Math.min(walkSpeed/3,1) : 0;
+
+  // Smoothly lerp entity scale to match detected 2D cow apparent size
+  if (entry.cur.scale == null) entry.cur.scale = entry.target.scale ?? 1;
+  entry.cur.scale += ((entry.target.scale ?? 1) - entry.cur.scale) * Math.min(a * 0.5, 1);
+  entry.mesh.scale.setScalar(entry.cur.scale);
+
   entry.mesh.position.set(entry.cur.x, bounce, entry.cur.z);
 
   // Keep anatomy group in sync with cow position
