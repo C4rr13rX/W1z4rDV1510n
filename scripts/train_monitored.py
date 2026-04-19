@@ -111,7 +111,7 @@ def phases(node: str) -> list[Phase]:
         ]),
         Phase("Foreign languages (Stages 36-40)", 5, [
             [PYTHON, f"{SCRIPTS}/build_foreign_language_corpus.py",
-             "--stages", "36,37,38,39,40", "--node", node, "--data-dir", DATA],
+             "--stages", "36,37,38,39,40", "--node", node],
         ]),
         Phase("JSON scoped responses", 5, [
             [PYTHON, f"{SCRIPTS}/train_json_responses.py",
