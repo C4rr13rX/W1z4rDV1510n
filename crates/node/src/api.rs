@@ -5488,17 +5488,23 @@ async fn neuro_ask(
     (StatusCode::OK, Json(result))
 }
 
-// ── Multi-stage inference pipeline ────────────────────────────────────────────
+// ── Multi-pool inference pipeline ─────────────────────────────────────────────
 //
-// Chains Hebbian recall with deterministic post-processing stages:
-//   Stage 1 — Recall:      QA fabric finds best-match template + rule
-//   Stage 2 — Extraction:  structural rule extracted from Stage 1 output
-//   Stage 3 — Application: rule applied to the actual input tokens
-//   Stage 4 — Composition: final answer assembled
+// The pipeline is a SCOPE ROUTER — it detects what kind of query this is and
+// routes it to the appropriate trained QA pool.  No deterministic NLP code,
+// no hardcoded substitution tables, no rule-based transforms.
 //
-// For DirectAnswer / JsonOutput: Stage 1 passes through unchanged.
-// For GrammarCorrection / PunctuationCorrection / TextRewrite: all 4 stages run
-// and Stage 3 substitutes actual input tokens instead of echoing a template.
+// All outputs come from pool recall (Hebbian QA fabric).  Each pool is a
+// specialist trained for its job:
+//   - Correction scopes (spelling / grammar / punctuation): the query is
+//     forwarded as-is (with its scope marker) to the QA pool which was trained
+//     on correction pairs.  The pool's recalled answer IS the correction.
+//   - DirectAnswer / JsonOutput: general knowledge pool.
+//
+// If the recalled answer fails the IDF relevance gate, the pipeline falls back
+// to Hebbian associative recall (propagate from question word-labels → re-query
+// from the activated concept cluster).  Only when both paths fail does the
+// question go to the hypothesis queue.
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -5509,15 +5515,6 @@ enum PipelineScope {
     TextRewrite,
     JsonOutput,
     DirectAnswer,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PipelineStageResult {
-    stage: u8,
-    name: &'static str,
-    output: String,
-    confidence: f32,
-    transformed: bool,
 }
 
 fn detect_pipeline_scope(text: &str) -> PipelineScope {
@@ -5582,153 +5579,6 @@ fn detect_pipeline_scope(text: &str) -> PipelineScope {
     PipelineScope::DirectAnswer
 }
 
-fn extract_correction_target(text: &str) -> Option<String> {
-    text.find(':').map(|pos| text[pos + 1..].trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn extract_spelling_target(text: &str) -> Option<String> {
-    if let Some(start) = text.find('\'') {
-        if let Some(end) = text[start + 1..].find('\'') {
-            let w = text[start + 1..start + 1 + end].trim().to_string();
-            if !w.is_empty() && !w.contains(' ') { return Some(w); }
-        }
-    }
-    let clean = text.trim_end_matches(|c: char| matches!(c, '?' | '.' | '!'));
-    clean.split_whitespace().last().map(|w| w.trim_matches('\'').to_string())
-}
-
-fn extract_correct_spelling(answer: &str) -> Option<String> {
-    for pat in &["The correct spelling is '", "the correct spelling is '",
-                 "correct spelling is '", "correctly spelled as '"] {
-        if let Some(start) = answer.find(pat) {
-            if let Some(end) = answer[start + pat.len()..].find('\'') {
-                let w = answer[start + pat.len()..start + pat.len() + end].trim().to_string();
-                if !w.is_empty() { return Some(w); }
-            }
-        }
-    }
-    None
-}
-
-fn apply_grammar_corrections(input: &str) -> (String, Vec<String>) {
-    let mut result = input.trim().to_string();
-    let mut notes: Vec<String> = Vec::new();
-
-    // Subject pronoun corrections
-    for (wrong, correct) in &[
-        ("Me and ", "I and "), ("Him and ", "He and "),
-        ("Her and ", "She and "), ("Them and ", "They and "), ("Us and ", "We and "),
-        (" and me ", " and I "), (" and him ", " and he "),
-        (" and her ", " and she "), (" and them ", " and they "), (" and us ", " and we "),
-    ] {
-        let lower = result.to_lowercase();
-        let lw = wrong.to_lowercase();
-        if let Some(pos) = lower.find(&lw) {
-            let replacement = if pos == 0 {
-                let mut r = correct.to_string();
-                if let Some(f) = r.get_mut(0..1) { f.make_ascii_uppercase(); }
-                r
-            } else { correct.to_lowercase() };
-            notes.push(format!("'{}' \u{2192} '{}'", wrong.trim(), correct.trim()));
-            result = format!("{}{}{}", &result[..pos], replacement, &result[pos + wrong.len()..]);
-        }
-    }
-    // Modal + "of" → "have"
-    for (wrong, correct) in &[
-        ("should of ", "should have "), ("would of ", "would have "),
-        ("could of ", "could have "), ("might of ", "might have "),
-        ("must of ", "must have "),
-    ] {
-        let lower = result.to_lowercase();
-        if let Some(pos) = lower.find(&wrong.to_lowercase()) {
-            notes.push(format!("'{}' \u{2192} '{}'", wrong.trim(), correct.trim()));
-            result = format!("{}{}{}", &result[..pos], correct, &result[pos + wrong.len()..]);
-        }
-    }
-    // Double negatives (only when a negation word precedes)
-    let lower_r = result.to_lowercase();
-    if lower_r.contains("n't") || lower_r.contains(" not ") {
-        for (wrong, correct) in &[
-            (" know nothing", " know anything"), (" knows nothing", " knows anything"),
-            (" do nothing", " do anything"),     (" have nothing", " have anything"),
-            (" got nothing", " got anything"),   (" say nothing", " say anything"),
-            (" find nothing", " find anything"),
-        ] {
-            let lower = result.to_lowercase();
-            if let Some(pos) = lower.find(&wrong.to_lowercase()) {
-                notes.push(format!("double negative: '{}' \u{2192} '{}'", wrong.trim(), correct.trim()));
-                result = format!("{}{}{}", &result[..pos], correct, &result[pos + wrong.len()..]);
-            }
-        }
-    }
-    // "She/He/It don't" → "doesn't"
-    for (wrong, correct) in &[
-        ("she don't ", "she doesn't "), ("he don't ", "he doesn't "), ("it don't ", "it doesn't "),
-        ("She don't ", "She doesn't "), ("He don't ", "He doesn't "), ("It don't ", "It doesn't "),
-    ] {
-        let lower = result.to_lowercase();
-        if let Some(pos) = lower.find(&wrong.to_lowercase()) {
-            notes.push(format!("'{}' \u{2192} '{}'", wrong.trim(), correct.trim()));
-            result = format!("{}{}{}", &result[..pos], correct, &result[pos + wrong.len()..]);
-        }
-    }
-    if let Some(f) = result.get_mut(0..1) { f.make_ascii_uppercase(); }
-    if !result.is_empty() && !result.ends_with(['.', '!', '?']) { result.push('.'); }
-    (result, notes)
-}
-
-fn apply_punctuation_corrections(input: &str) -> (String, Vec<String>) {
-    let mut notes: Vec<String> = Vec::new();
-    let mut segments: Vec<String> = vec![input.to_string()];
-
-    for marker in &[" and ", " but ", " so ", " however ", " therefore "] {
-        let mut new_segs: Vec<String> = Vec::new();
-        for seg in &segments {
-            let lower = seg.to_lowercase();
-            let lm = marker.to_lowercase();
-            let mut start = 0usize;
-            let mut local: Vec<String> = Vec::new();
-            let mut search_from = 0usize;
-            loop {
-                match lower[search_from..].find(&lm) {
-                    None => break,
-                    Some(rel) => {
-                        let abs = search_from + rel;
-                        let clause_len = abs - start;
-                        let tail = &lower[abs + marker.len()..];
-                        if clause_len >= 18 && tail.len() >= 10 {
-                            local.push(seg[start..abs].trim().to_string());
-                            start = abs + marker.len();
-                            notes.push(format!("split at '{}'", marker.trim()));
-                        }
-                        search_from = abs + marker.len();
-                    }
-                }
-            }
-            if local.is_empty() {
-                new_segs.push(seg.clone());
-            } else {
-                local.push(seg[start..].trim().to_string());
-                new_segs.extend(local);
-            }
-        }
-        segments = new_segs;
-    }
-
-    let result = segments.iter()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| {
-            let mut sentence = s.trim().to_string();
-            if let Some(f) = sentence.get_mut(0..1) { f.make_ascii_uppercase(); }
-            if !sentence.ends_with(['.', '!', '?']) { sentence.push('.'); }
-            sentence
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    (result, notes)
-}
 
 /// Returns false when a QA answer is off-topic for the question, using the
 /// QA fabric's own learned IDF statistics to determine which tokens are
@@ -5964,145 +5814,16 @@ async fn neuro_pipeline(
             }
         }
 
-        let mut s1_ans = s1_raw_answer;
-        if let Some(f) = s1_ans.get_mut(0..1) { f.make_ascii_uppercase(); }
-        if !s1_ans.is_empty() && !s1_ans.ends_with(['.', '!', '?']) { s1_ans.push('.'); }
-
-        let stage1 = PipelineStageResult {
-            stage: 1, name: "recall",
-            output: s1_ans.clone(), confidence: qa_conf, transformed: false,
-        };
-
-        // ── Stages 2–4 depending on scope ────────────────────────────────────
-        let (final_answer, stages) = match scope {
-
-            PipelineScope::SpellingCorrection => {
-                let correct = extract_correct_spelling(&s1_ans);
-                let s2 = PipelineStageResult {
-                    stage: 2, name: "extraction",
-                    output: correct.as_deref()
-                        .map(|w| format!("Correct form: '{}'", w))
-                        .unwrap_or_else(|| "Could not extract correct spelling.".into()),
-                    confidence: if correct.is_some() { qa_conf * 0.98 } else { 0.4 },
-                    transformed: correct.is_some(),
-                };
-                let s3_out = if let Some(ref cw) = correct {
-                    let mw = extract_spelling_target(&text).unwrap_or_else(|| "the word".into());
-                    format!("Correct: '{}' (not '{}'). {}", cw, mw, s1_ans)
-                } else { s1_ans.clone() };
-                let s3 = PipelineStageResult {
-                    stage: 3, name: "application",
-                    output: s3_out, confidence: s2.confidence, transformed: correct.is_some(),
-                };
-                let s4 = PipelineStageResult {
-                    stage: 4, name: "composition",
-                    output: s1_ans.clone(), confidence: qa_conf, transformed: false,
-                };
-                (s1_ans.clone(), vec![stage1, s2, s3, s4])
-            }
-
-            PipelineScope::GrammarCorrection => {
-                let target = extract_correction_target(&text).unwrap_or_else(|| text.clone());
-                let rule_hint = if s1_ans.to_lowercase().contains("pronoun")
-                    || s1_ans.to_lowercase().contains("subject") { "subject pronoun rule" }
-                    else if s1_ans.to_lowercase().contains("should have")
-                        || s1_ans.to_lowercase().contains("modal") { "modal + have rule" }
-                    else if s1_ans.to_lowercase().contains("double negative") { "double negative rule" }
-                    else { "grammar rule" };
-                let s2 = PipelineStageResult {
-                    stage: 2, name: "extraction",
-                    output: format!("Rule: {}. Input: \"{}\"", rule_hint, &target[..target.len().min(100)]),
-                    confidence: qa_conf * 0.95, transformed: true,
-                };
-                let (corrected, notes) = apply_grammar_corrections(&target);
-                let transformed = corrected.trim() != target.trim()
-                    && corrected.trim_end_matches('.') != target.trim().trim_end_matches('.');
-                let s3 = PipelineStageResult {
-                    stage: 3, name: "application",
-                    output: if transformed {
-                        format!("Corrected: '{}' [{}]", corrected, notes.join(", "))
-                    } else {
-                        format!("No rule applied automatically. Recall: {}", &s1_ans[..s1_ans.len().min(120)])
-                    },
-                    confidence: if transformed { qa_conf * 0.92 } else { qa_conf * 0.70 },
-                    transformed,
-                };
-                let rule_explanation = s1_ans.find("Rule:")
-                    .or_else(|| s1_ans.find("rule:"))
-                    .map(|p| s1_ans[p..].trim().to_string())
-                    .unwrap_or_else(|| s1_ans.clone());
-                let final_ans = if transformed {
-                    let notes_str = if notes.is_empty() { String::new() }
-                        else { format!(" Corrections: {}.", notes.join("; ")) };
-                    format!("Corrected: '{}'{} {}", corrected, notes_str, rule_explanation)
-                } else { s1_ans.clone() };
-                let s4 = PipelineStageResult {
-                    stage: 4, name: "composition",
-                    output: final_ans.clone(), confidence: s3.confidence, transformed,
-                };
-                (final_ans, vec![stage1, s2, s3, s4])
-            }
-
-            PipelineScope::PunctuationCorrection => {
-                let target = extract_correction_target(&text).unwrap_or_else(|| text.clone());
-                let s2 = PipelineStageResult {
-                    stage: 2, name: "extraction",
-                    output: format!("Run-on input: \"{}\"", &target[..target.len().min(120)]),
-                    confidence: qa_conf * 0.95, transformed: true,
-                };
-                let (punctuated, notes) = apply_punctuation_corrections(&target);
-                let transformed = !notes.is_empty();
-                let s3 = PipelineStageResult {
-                    stage: 3, name: "application",
-                    output: format!("Punctuated: \"{}\"", &punctuated[..punctuated.len().min(200)]),
-                    confidence: if transformed { qa_conf * 0.88 } else { qa_conf * 0.65 },
-                    transformed,
-                };
-                let final_ans = if transformed { punctuated } else { s1_ans.clone() };
-                let s4 = PipelineStageResult {
-                    stage: 4, name: "composition",
-                    output: final_ans.clone(), confidence: s3.confidence, transformed,
-                };
-                (final_ans, vec![stage1, s2, s3, s4])
-            }
-
-            PipelineScope::TextRewrite => {
-                let target = extract_correction_target(&text).unwrap_or_else(|| text.clone());
-                let s2 = PipelineStageResult {
-                    stage: 2, name: "extraction",
-                    output: format!("Input: \"{}\"", &target[..target.len().min(120)]),
-                    confidence: qa_conf * 0.95, transformed: true,
-                };
-                let (grammar_pass, g_notes) = apply_grammar_corrections(&target);
-                let (final_pass, p_notes)   = apply_punctuation_corrections(&grammar_pass);
-                let all_notes: Vec<String> = g_notes.into_iter().chain(p_notes).collect();
-                let transformed = !all_notes.is_empty();
-                let s3 = PipelineStageResult {
-                    stage: 3, name: "application",
-                    output: final_pass.clone(),
-                    confidence: if transformed { qa_conf * 0.88 } else { qa_conf * 0.65 },
-                    transformed,
-                };
-                let final_ans = if transformed {
-                    let notes_str = if all_notes.is_empty() { String::new() }
-                        else { format!(" ({})", all_notes.join(", ")) };
-                    format!("Corrected: '{}'{}", final_pass, notes_str)
-                } else { s1_ans.clone() };
-                let s4 = PipelineStageResult {
-                    stage: 4, name: "composition",
-                    output: final_ans.clone(), confidence: s3.confidence, transformed,
-                };
-                (final_ans, vec![stage1, s2, s3, s4])
-            }
-
-            // Pass-through scopes
-            PipelineScope::JsonOutput | PipelineScope::DirectAnswer => {
-                (s1_ans.clone(), vec![stage1])
-            }
-        };
-
-        let pipeline_applied = stages.len() > 1 && stages.iter().any(|s| s.transformed);
-        let final_conf = stages.last().map(|s| s.confidence).unwrap_or(qa_conf);
+        // Pure pool recall — the QA fabric's recalled answer IS the answer.
+        // No transformation stages, no deterministic NLP.  The scope determined
+        // which pool was queried (currently unified pool; separate specialist
+        // pools are the next architectural step).
+        let mut final_answer = s1_raw_answer;
+        if let Some(f) = final_answer.get_mut(0..1) { f.make_ascii_uppercase(); }
+        if !final_answer.is_empty() && !final_answer.ends_with(['.', '!', '?']) {
+            final_answer.push('.');
+        }
+        let final_conf = qa_conf;
         let qa_candidates: Vec<serde_json::Value> = qa_report.results.iter().take(3)
             .map(|r| serde_json::json!({
                 "answer": r.answer, "activation": r.activation, "confidence": r.confidence,
@@ -6113,9 +5834,7 @@ async fn neuro_pipeline(
             "question":           text,
             "scope":              scope,
             "answer":             final_answer,
-            "pipeline_applied":   pipeline_applied,
             "associative_recall": used_associative,
-            "stages":             serde_json::to_value(&stages).unwrap_or(serde_json::json!([])),
             "hypothesis":         false,
             "qa_activation":      qa_act,
             "confidence_tier":    confidence_tier,
