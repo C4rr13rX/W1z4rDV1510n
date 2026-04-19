@@ -920,7 +920,7 @@ def _format_symbol(sym: dict) -> str:
         f"HOW TO READ IT: {sym['how_to_read']}",
         '',
         f"REAL-WORLD INTERPRETATION:",
-        f"  {sym['real_world']}",
+        f"  {sym.get('real_world', sym.get('meaning', ''))}",
     ]
     if 'dimensional_note' in sym:
         lines += ['', f"DIMENSIONAL ANALYSIS: {sym['dimensional_note']}"]

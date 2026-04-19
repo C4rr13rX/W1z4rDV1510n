@@ -155,11 +155,11 @@ async def media_train_image(client: httpx.AsyncClient, node_url: str,
 
 
 async def qa_ingest_batch(client: httpx.AsyncClient, node_url: str,
-                          batch: list[dict]) -> int:
+                          batch: list[dict], pool: str = "knowledge") -> int:
     try:
         r = await client.post(
             f"{node_url}/qa/ingest",
-            json={"candidates": batch},
+            json={"candidates": batch, "pool": pool},
             timeout=30,
         )
         if r.status_code == 200:
@@ -167,6 +167,13 @@ async def qa_ingest_batch(client: httpx.AsyncClient, node_url: str,
         return 0
     except Exception:
         return 0
+
+
+def _is_misconception_question(q: str) -> bool:
+    """Questions that assert a false premise and expect a correction."""
+    lower = q.lower()
+    return lower.startswith("is it true") or lower.startswith("is it correct") \
+        or lower.startswith("is it a fact") or lower.startswith("do people think")
 
 
 def resize_image_b64(image_path: str, max_px: int = IMAGE_MAX_PX) -> str | None:
@@ -241,12 +248,15 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
                 ok = await media_train_image(client, node_url, b64, caption)
             stats["img_ok" if ok else "img_fail"] += 1
 
-        async def flush_qa(pairs: list[dict]) -> None:
-            n = await qa_ingest_batch(client, node_url, pairs)
+        async def flush_qa(pairs: list[dict], pool: str = "knowledge") -> None:
+            n = await qa_ingest_batch(client, node_url, pairs, pool=pool)
             stats["qa"] += n
 
         tasks: list[asyncio.Task] = []
+        # Separate buffers: definitional pairs repeat 4x; misconceptions go to correction pool
+        corr_buf: list[dict] = []
         current_level = None
+        QA_REPEATS = 4  # repeat each definitional pair to dominate competing answers
 
         for idx, rec in enumerate(records):
             level   = rec.get("level", 0)
@@ -274,17 +284,27 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
             for img_path in images[:8]:   # max 8 images per concept
                 tasks.append(asyncio.create_task(train_img(img_path, caption)))
 
-            # Collect QA pairs (add source info)
+            # Collect QA pairs — route misconceptions to correction pool
             for qa in qa_pairs:
                 qa_with_source = dict(qa)
                 qa_with_source["book_id"]    = f"concept_{concept}"
                 qa_with_source["page_index"] = level + 1
-                qa_buf.append(qa_with_source)
+                if _is_misconception_question(qa.get("question", "")):
+                    corr_buf.append(qa_with_source)
+                else:
+                    # Repeat definitional pairs QA_REPEATS times so they dominate
+                    for _ in range(QA_REPEATS):
+                        qa_buf.append(qa_with_source)
 
             while len(qa_buf) >= batch_size:
                 batch = qa_buf[:batch_size]
                 del qa_buf[:batch_size]
-                tasks.append(asyncio.create_task(flush_qa(batch)))
+                tasks.append(asyncio.create_task(flush_qa(batch, pool="knowledge")))
+
+            while len(corr_buf) >= batch_size:
+                batch = corr_buf[:batch_size]
+                del corr_buf[:batch_size]
+                tasks.append(asyncio.create_task(flush_qa(batch, pool="correction")))
 
             if len(tasks) >= concurrency * 4:
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -298,7 +318,9 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
                       f"qa={stats['qa']}  {rate:.1f}/s")
 
         if qa_buf:
-            tasks.append(asyncio.create_task(flush_qa(qa_buf)))
+            tasks.append(asyncio.create_task(flush_qa(qa_buf, pool="knowledge")))
+        if corr_buf:
+            tasks.append(asyncio.create_task(flush_qa(corr_buf, pool="correction")))
         if tasks:
             await asyncio.gather(*tasks)
 
