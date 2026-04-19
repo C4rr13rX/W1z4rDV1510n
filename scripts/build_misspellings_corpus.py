@@ -311,7 +311,7 @@ def ingest_batch(node: str, pairs: list[tuple[str, str]], book_id: str) -> dict:
         }
         for q, a in pairs
     ]
-    return post(node, "/qa/ingest", {"candidates": candidates})
+    return post(node, "/qa/ingest", {"candidates": candidates, "pool": "correction"})
 
 
 def main() -> None:

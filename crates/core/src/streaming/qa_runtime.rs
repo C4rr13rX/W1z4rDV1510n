@@ -48,6 +48,10 @@ pub struct QaRuntimeConfig {
     /// (typically once per major time step).  Keeps older patterns from
     /// dominating indefinitely while still preserving long-term memory.
     pub weight_decay: f32,
+    /// Asymptotic ceiling for Hebbian weights.  Weights grow toward this
+    /// value but never exceed it.  Higher ceiling preserves relative strength
+    /// between lightly- and heavily-trained pairs — no hard saturation at 1.0.
+    pub weight_ceiling: f32,
     /// Maximum number of question-vocabulary neurons (stops unbounded growth).
     pub max_question_neurons: usize,
     /// Maximum number of stored answer entries.
@@ -65,6 +69,7 @@ impl Default for QaRuntimeConfig {
         Self {
             hebbian_lr: 0.05,
             weight_decay: 0.999,
+            weight_ceiling: 5.0,
             max_question_neurons: 65_536,
             max_answers: 131_072,
             // IDF-weighted activation floor.  With IDF reweighting, a single
@@ -279,11 +284,12 @@ impl QaRuntime {
         if let Some(&entry_idx) = self.answer_index.get(&answer_key) {
             // Answer already exists — reinforce its weights.
             reinforced = true;
-            let lr = self.config.hebbian_lr;
+            let lr  = self.config.hebbian_lr;
+            let max = self.config.weight_ceiling;
             let entry = &mut self.answers[entry_idx];
             for &q_id in &active_q_ids {
                 let w = entry.weights.entry(q_id).or_insert(0.0);
-                *w = (*w + lr).min(1.0);
+                *w = (*w + lr * (1.0 - *w / max)).min(max);
             }
             // Keep the highest source confidence seen for this answer so the
             // scoring pass can boost high-quality pairs over noisy extractions.
@@ -555,10 +561,15 @@ impl QaRuntime {
     // ── Internal ────────────────────────────────────────────────────────────
 
     fn hebbian_update_entry(&self, entry: &mut AnswerEntry, active_q_ids: &[u32]) {
-        let lr = self.config.hebbian_lr;
+        let lr  = self.config.hebbian_lr;
+        let max = self.config.weight_ceiling;
         for &q_id in active_q_ids {
             let w = entry.weights.entry(q_id).or_insert(0.0);
-            *w = (*w + lr).min(1.0); // clamp: weight can't exceed 1.0
+            // Asymptotic growth: fast at first, slows as weight approaches
+            // ceiling.  Preserves relative strength between lightly- and
+            // heavily-trained pairs even after thousands of reinforcements —
+            // no hard saturation at 1.0 that erases cumulative evidence.
+            *w = (*w + lr * (1.0 - *w / max)).min(max);
         }
     }
 }
@@ -738,7 +749,7 @@ mod tests {
     #[test]
     fn decay_reduces_weights_over_time() {
         let mut rt = QaRuntime::new(QaRuntimeConfig {
-            weight_decay: 0.5, // aggressive decay for test
+            weight_decay: 0.5, weight_ceiling: 5.0, // aggressive decay for test
             ..Default::default()
         });
         rt.ingest("What is gravity?", "Gravity is the force that attracts bodies.", "physics", 1, 0.9, ts(1));

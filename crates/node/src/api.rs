@@ -101,6 +101,10 @@ struct ApiState {
     knowledge: Arc<Mutex<KnowledgeRuntime>>,
     knowledge_persist: KnowledgePersist,
     qa_runtime: Arc<Mutex<QaRuntime>>,
+    /// Specialist pool: correction tasks (grammar, spelling, punctuation).
+    /// Isolated from the knowledge pool so correction training never
+    /// interferes with factual recall, and vice versa.
+    correction_qa: Arc<Mutex<QaRuntime>>,
     identity: Arc<Mutex<IdentityRuntime>>,
     label_state: Arc<Mutex<LabelQueueState>>,
     fabric_share_kind: String,
@@ -739,18 +743,23 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         config.api.rate_limit_window_secs,
     )));
     let (knowledge_runtime, knowledge_persist) = build_knowledge_runtime(&config.knowledge);
-    let qa_state_path = node_data_dir().join("qa_store.json");
     let qa_config = QaRuntimeConfig::default();
+
+    let qa_state_path = node_data_dir().join("qa_store.json");
     let qa_runtime = if qa_state_path.exists() {
         match QaRuntime::load(&qa_state_path, qa_config.clone()) {
-            Ok(rt) => {
-                tracing::info!("QA store loaded: {} pairs", rt.pairs_ingested());
-                rt
-            }
-            Err(e) => {
-                tracing::warn!("QA store load failed ({}), starting fresh", e);
-                QaRuntime::new(qa_config)
-            }
+            Ok(rt) => { tracing::info!("QA knowledge pool loaded: {} pairs", rt.pairs_ingested()); rt }
+            Err(e) => { tracing::warn!("QA knowledge pool load failed ({}), starting fresh", e); QaRuntime::new(qa_config.clone()) }
+        }
+    } else {
+        QaRuntime::new(qa_config.clone())
+    };
+
+    let corr_state_path = node_data_dir().join("qa_correction_store.json");
+    let correction_qa = if corr_state_path.exists() {
+        match QaRuntime::load(&corr_state_path, qa_config.clone()) {
+            Ok(rt) => { tracing::info!("QA correction pool loaded: {} pairs", rt.pairs_ingested()); rt }
+            Err(e) => { tracing::warn!("QA correction pool load failed ({}), starting fresh", e); QaRuntime::new(qa_config) }
         }
     } else {
         QaRuntime::new(qa_config)
@@ -802,6 +811,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         knowledge: Arc::new(Mutex::new(knowledge_runtime)),
         knowledge_persist,
         qa_runtime: Arc::new(Mutex::new(qa_runtime)),
+        correction_qa: Arc::new(Mutex::new(correction_qa)),
         identity: Arc::new(Mutex::new(identity_runtime)),
         label_state: Arc::new(Mutex::new(LabelQueueState::default())),
         fabric_share_kind: share_kind.clone(),
@@ -2497,6 +2507,10 @@ async fn network_pattern_sources(
 struct QaIngestRequest {
     /// One or more Q&A candidate records (same schema as qa_candidates.jsonl).
     candidates: Vec<QaCandidateRecord>,
+    /// Which pool to ingest into: "knowledge" (default) or "correction".
+    /// Use "correction" for grammar, spelling, and punctuation correction pairs.
+    #[serde(default)]
+    pool: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2549,17 +2563,19 @@ async fn submit_qa_ingest(
         );
     }
     let now = now_timestamp();
-    let (ingested, total_pairs, question_neurons, answer_entries) = {
+    let use_correction_pool = request.pool.as_deref() == Some("correction");
+    let (ingested, total_pairs, question_neurons, answer_entries) = if use_correction_pool {
+        let mut qa = state.correction_qa.lock().expect("corr mutex");
+        let before = qa.pairs_ingested();
+        qa.ingest_candidates(&request.candidates, now);
+        let after = qa.pairs_ingested();
+        ((after - before) as usize, after, qa.question_neuron_count(), qa.answer_count())
+    } else {
         let mut qa = state.qa_runtime.lock().expect("qa mutex");
         let before = qa.pairs_ingested();
         qa.ingest_candidates(&request.candidates, now);
         let after = qa.pairs_ingested();
-        (
-            (after - before) as usize,
-            after,
-            qa.question_neuron_count(),
-            qa.answer_count(),
-        )
+        ((after - before) as usize, after, qa.question_neuron_count(), qa.answer_count())
     };
     // Fan-out to peers — skip if this call was already forwarded by a peer
     // (header x-w1z-local present) to prevent replication loops.
@@ -5624,7 +5640,8 @@ async fn neuro_pipeline(
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
     let neuro        = state.neuro.clone();
-    let qa_arc       = state.qa_runtime.clone();
+    let knowledge_qa = state.qa_runtime.clone();
+    let correction_qa = state.correction_qa.clone();
     let hq_arc       = state.hypothesis_queue.clone();
     let sess_ctxs    = state.session_contexts.clone();
     let text         = req.text.clone();
@@ -5636,7 +5653,20 @@ async fn neuro_pipeline(
         let now   = now_timestamp();
         let scope = detect_pipeline_scope(&text);
 
-        // ── Stage 1: Hebbian recall ───────────────────────────────────────────
+        // Route to the appropriate specialist pool.
+        // Correction scopes (grammar, spelling, punctuation, rewrite) go to the
+        // correction pool which was trained exclusively on correction pairs.
+        // Knowledge scopes go to the general knowledge pool.
+        // This isolation prevents cross-domain weight interference.
+        let is_correction = matches!(scope,
+            PipelineScope::SpellingCorrection |
+            PipelineScope::GrammarCorrection  |
+            PipelineScope::PunctuationCorrection |
+            PipelineScope::TextRewrite
+        );
+        let qa_arc = if is_correction { correction_qa } else { knowledge_qa };
+
+        // ── Recall ───────────────────────────────────────────────────────────
         let enc      = TextBitsEncoder::new(TextBitsConfig::default());
         let stop: HashSet<&str> = [
             "the","a","an","is","are","was","were","be","been","have","has","had",
@@ -5675,13 +5705,10 @@ async fn neuro_pipeline(
         // builds strong but wrong associations (e.g. "sun" → "Mercury." from
         // solar-system data). Correction scopes are exempt — their answers are
         // rule templates that don't echo the question topic.
-        let is_correction_scope = matches!(scope,
-            PipelineScope::SpellingCorrection |
-            PipelineScope::GrammarCorrection  |
-            PipelineScope::PunctuationCorrection |
-            PipelineScope::TextRewrite
-        );
-        let direct_qa_relevant = is_correction_scope
+        // Correction scopes: any recall from the correction pool is accepted —
+        // that pool was trained only on corrections, so its answers are always
+        // on-topic by construction.  Knowledge scopes still need IDF relevance gating.
+        let direct_qa_relevant = is_correction
             || (qa_act > ANSWER_THRESHOLD
                 && best.map(|r| answer_is_relevant_idf(&r.answer, &qa_report.significant_tokens)).unwrap_or(false));
 
@@ -6011,61 +6038,65 @@ async fn neuro_checkpoint(
     let pool_path = state.neuro.pool_state_path().unwrap_or("").to_string();
     let qa_path = node_data_dir().join("qa_store.json");
 
-    // Snapshot the QA store under the lock, then release before the blocking save.
-    let qa_snapshot = {
-        let qa = state.qa_runtime.lock().expect("qa mutex");
-        qa.clone()
-    };
+    let corr_path = node_data_dir().join("qa_correction_store.json");
+    let qa_snapshot   = { let qa = state.qa_runtime.lock().expect("qa mutex"); qa.clone() };
+    let corr_snapshot = { let cq = state.correction_qa.lock().expect("corr mutex"); cq.clone() };
 
     let pool_path_clone = pool_path.clone();
-    let qa_path_clone = qa_path.clone();
+    let qa_path_clone   = qa_path.clone();
+    let corr_path_clone = corr_path.clone();
 
-    let (pool_result, qa_result) = tokio::task::spawn_blocking(move || {
+    let (pool_result, qa_result, corr_result) = tokio::task::spawn_blocking(move || {
         let pr = state.neuro.save_pool();
         let qr = qa_snapshot.save(&qa_path_clone);
-        (pr, qr)
+        let cr = corr_snapshot.save(&corr_path_clone);
+        (pr, qr, cr)
     }).await.unwrap_or_else(|e| (
         Err(e.to_string()),
         Err(std::io::Error::new(std::io::ErrorKind::Other, "join error")),
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "join error")),
     ));
-    let _ = pool_path_clone; // suppress unused warning
+    let _ = pool_path_clone;
 
-    match (pool_result, qa_result) {
-        (Ok(()), Ok(())) => (StatusCode::OK, Json(serde_json::json!({
+    match (pool_result, qa_result, corr_result) {
+        (Ok(()), Ok(()), Ok(())) => (StatusCode::OK, Json(serde_json::json!({
             "saved": true,
             "pool_path": pool_path,
-            "qa_path": qa_path.to_string_lossy(),
+            "qa_path":   qa_path.to_string_lossy(),
+            "corr_path": corr_path.to_string_lossy(),
         }))),
-        (Err(e), _) => (StatusCode::INTERNAL_SERVER_ERROR,
+        (Err(e), _, _) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("pool: {}", e) }))),
-        (_, Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
+        (_, Err(e), _) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("qa_store: {}", e) }))),
+        (_, _, Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("qa_correction_store: {}", e) }))),
     }
 }
 
 /// POST /qa/checkpoint
-/// Save only the QA store to disk (fast — typically < 1 MB).
-/// Use this instead of /neuro/checkpoint when you only need to persist
-/// Q&A pair updates without serializing the full 22 GB neuro pool.
+/// Save both QA pools to disk (knowledge + correction).
 async fn qa_checkpoint(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let qa_path = node_data_dir().join("qa_store.json");
-    let qa_snapshot = {
-        let qa = state.qa_runtime.lock().expect("qa mutex");
-        qa.clone()
-    };
-    let qa_path_clone = qa_path.clone();
+    let qa_path   = node_data_dir().join("qa_store.json");
+    let corr_path = node_data_dir().join("qa_correction_store.json");
+    let qa_snap   = { state.qa_runtime.lock().expect("qa mutex").clone() };
+    let corr_snap = { state.correction_qa.lock().expect("corr mutex").clone() };
+    let qa_p = qa_path.clone(); let cr_p = corr_path.clone();
     let result = tokio::task::spawn_blocking(move || {
-        qa_snapshot.save(&qa_path_clone)
+        (qa_snap.save(&qa_p), corr_snap.save(&cr_p))
     }).await;
     match result {
-        Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({
+        Ok((Ok(()), Ok(()))) => (StatusCode::OK, Json(serde_json::json!({
             "saved": true,
-            "qa_path": qa_path.to_string_lossy(),
+            "qa_path":   qa_path.to_string_lossy(),
+            "corr_path": corr_path.to_string_lossy(),
         }))),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
+        Ok((Err(e), _)) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("qa_store: {}", e) }))),
+        Ok((_, Err(e))) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("correction_store: {}", e) }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("task: {}", e) }))),
     }
