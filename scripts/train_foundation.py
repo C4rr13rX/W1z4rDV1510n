@@ -284,6 +284,12 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
             for img_path in images[:8]:   # max 8 images per concept
                 tasks.append(asyncio.create_task(train_img(img_path, caption)))
 
+            # Compound/hyphenated concepts (e.g. "water-skiing") share base-word tokens
+            # with simple concepts ("water"). Give them only 1 repeat so they don't
+            # drown out the base-concept definition through aggregate weight.
+            is_compound = "-" in concept or " " in concept
+            repeats = 1 if is_compound else QA_REPEATS
+
             # Collect QA pairs — route misconceptions to correction pool
             for qa in qa_pairs:
                 qa_with_source = dict(qa)
@@ -292,8 +298,7 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
                 if _is_misconception_question(qa.get("question", "")):
                     corr_buf.append(qa_with_source)
                 else:
-                    # Repeat definitional pairs QA_REPEATS times so they dominate
-                    for _ in range(QA_REPEATS):
+                    for _ in range(repeats):
                         qa_buf.append(qa_with_source)
 
             while len(qa_buf) >= batch_size:
