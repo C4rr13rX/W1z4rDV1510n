@@ -339,20 +339,25 @@ def _bbox_to_3d_parts(cow: dict) -> list:
 
     # ── Dense surface grid in canonical body-relative space ───────────────────
     # X axis = head-to-tail (NX columns), Y axis = height (NY rows)
+    # Z width follows cow's barrel cross-section: widest at belly, tapers top/bottom
+    import math as _math
     NX, NY = 14, 10
     for ix in range(NX):
         tx = ix / (NX - 1)         # 0 = head end, 1 = tail end
         x  = HALF_L * (1.0 - 2*tx) + jit()   # head = +HALF_L, tail = -HALF_L
         for iy in range(NY):
-            ty = iy / (NY - 1)     # 0 = top, 1 = bottom (ground)
+            ty = iy / (NY - 1)     # 0 = top (withers), 1 = bottom (ground)
             y  = WITHER_H * (1.0 - ty) + jit()
+
+            # Barrel cross-section: widest at mid-belly (ty≈0.6), narrow at withers/hooves
+            barrel = HALF_W * (0.25 + 0.75 * _math.sin(_math.pi * min(ty * 1.5, 1.0)) ** 0.7)
 
             # Use grid indices for full spatial resolution (140 unique X×Y positions)
             label = f"cow_surf_{iy:02d}_{ix:02d}"
 
-            pts.append((label + "_L", x, max(0.0, y), +HALF_W * 0.9 + jit()))
-            pts.append((label + "_R", x, max(0.0, y), -HALF_W * 0.9 + jit()))
-            pts.append((label,        x, max(0.0, y),  0.0           + jit()))
+            pts.append((label + "_L", x, max(0.0, y), +barrel + jit()))
+            pts.append((label + "_R", x, max(0.0, y), -barrel - jit()))
+            pts.append((label,        x, max(0.0, y),  0.0    + jit()))
 
     # ── Named anatomy landmarks (matching anatomy atlas label names) ──────────
     pts += [
