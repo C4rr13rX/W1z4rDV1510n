@@ -90,9 +90,6 @@ def phases(node: str) -> list[Phase]:
         Phase("Foundation (Stage 0 — K-12 books)", 1, [
             [PYTHON, f"{SCRIPTS}/train_foundation.py", "--node", f"http://{node}"],
         ]),
-        Phase("Foundational fact seeds (15x)", 1, [
-            [PYTHON, f"{SCRIPTS}/build_foundational_seeds.py", "--node", node, "--repeats", "15"],
-        ]),
         Phase("K-12 curriculum (stages 0-2)", 2, [
             [PYTHON, f"{SCRIPTS}/train_k12.py", "--node", f"http://{node}",
              "--stages", "0,1,2", "--resume"],
