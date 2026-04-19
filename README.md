@@ -176,6 +176,68 @@ These scores are corpus-dependent — they shift as more training data is ingest
 
 ---
 
+## Multi-stage inference pipeline
+
+The node's inference architecture supports chaining multiple processing stages within a single prediction pass. Instead of a single Hebbian recall step producing a final answer, the output from Stage 1 is routed through additional processing networks — each one a small Hebbian network trained for a specific transformation task — that add structure and produce a refined final output.
+
+**The core insight:** single-stage recall finds the right rule but echoes the wrong specific example. Example: correcting *"Me and him went to the store"* recalls the training template *"My friend and I went to the store"* (correct rule, wrong substitution). A pipeline solves this because Stage 1 only needs to find the rule — downstream stages handle applying it to the actual input.
+
+**How the stages chain:**
+
+```
+Input question
+      │
+      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Stage 1 — Hebbian recall                                   │
+│  QA fabric finds the closest matching template + rule       │
+│  e.g. "use 'I' as subject, not 'me' or 'him'"              │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ template + rule type
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Stage 2 — Pattern extraction                               │
+│  Second Hebbian network extracts the structural component   │
+│  from Stage 1's output: rule type, correction pattern,      │
+│  or relevant constraint — no application to input yet       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ extracted rule
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Stage 3 — Application / slot-filling                       │
+│  Third network applies the extracted rule to the actual     │
+│  tokens from the original input — "him" → "he",            │
+│  "me" → "I" — substituting real values into the template   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ structured output
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Stage 4 — Composition                                      │
+│  Assembles the final response from the structured output    │
+│  of all prior stages                                        │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+                    Final answer
+```
+
+**The same pipeline applies to every transformation task:**
+
+| Task | Stage 1 recalls | Stage 2 extracts | Stage 3 applies |
+|------|----------------|-----------------|-----------------|
+| Grammar correction | The rule ("subject pronoun after preposition") | Rule type + target token class | Substitution into actual input tokens |
+| Spelling correction | The correction pattern for the error type | Which letters are wrong and why | Applied to the actual misspelled word |
+| Run-on punctuation | A correctly-punctuated template of similar length | Clause boundary positions | Applied to the actual input sentence |
+| JSON formatting | The matching JSON schema template | Field names and types | Populated with actual values from input |
+
+**Routing:** The pipeline is invoked based on scope markers in the original question (`"fix the grammar:"`, `"correct the spelling:"`, `"rewrite with punctuation:"`) and the output-type classification from Stage 1. Without a scope marker, the single-stage path runs and the node answers the question directly — no transformation applied. With a scope marker, the full pipeline activates.
+
+**Training implication:** Each stage needs its own training corpus. Stage 2 needs pairs of `(recalled_template → extracted_rule_type)`. Stage 3 needs pairs of `(rule_type + input_tokens → transformed_output)`. This is the same scope-marker design principle used throughout the system: each stage only activates when its specific input pattern is present, preventing over-application of transformations to non-correction queries.
+
+**Scalability:** Additional stages can be inserted into the chain without changing the stages that precede or follow them. A confidence-checking stage, a factual-grounding stage, or a tone-adjustment stage can each be a separate small Hebbian network trained independently and composed into the pipeline at any position.
+
+---
+
 The node is an **instrument, not an agent**. It observes every incoming sensor stream, builds a living representation of the environment inside itself, and reports what it sees in the language of physics. It does not act on that data. Whatever acts on its outputs — a script, a decision system, a human — does so with full transparency into how the node arrived at its conclusions. The node is the measurement device. Everything else is up to you.
 
 Every sensor stream — a chess board, a video camera, a news feed, a social graph, a chemical state — arrives in the same generic format. The node has no knowledge of any specific domain. It sees positions, labels, and co-occurrences. What it learns from a chess game transfers to what it knows about crowd dynamics, and vice versa. The neural fabric that grows from one domain is the same fabric another domain trains.
