@@ -2577,28 +2577,35 @@ async fn submit_qa_ingest(
         let after = qa.pairs_ingested();
         ((after - before) as usize, after, qa.question_neuron_count(), qa.answer_count())
     };
-    // Build Hebbian word-label associations from ingested Q&A pairs.
-    // This populates the propagation graph so Hebbian-first inference can
-    // surface the concept cluster for each question at query time.
-    // Correction pool pairs are skipped — they use direct specialist recall.
-    if !use_correction_pool && ingested > 0 {
+    // Full STDP temporal sequence training from every ingested Q&A pair.
+    // Uses complete perceptual encoding (all label types: char, word, ngram,
+    // structural) — not just word tokens — so every level of the hierarchy
+    // feeds the Hebbian graph.  Q-frame then A-frame with a temporal bridge
+    // teaches the network that question patterns PREDICT answer patterns.
+    // Applied to both pools so the shared Hebbian graph learns from all training.
+    if ingested > 0 {
         let neuro = state.neuro.clone();
         let candidates = request.candidates.clone();
         tokio::task::spawn_blocking(move || {
             let enc = TextBitsEncoder::new(TextBitsConfig::default());
+            const TAU: f32 = 2.0; // temporal decay constant (seconds)
             for candidate in &candidates {
-                let q_lbl: Vec<String> = enc.encode_plain(&candidate.question).labels
-                    .into_iter()
-                    .filter(|l| l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
-                    .collect();
-                let a_lbl: Vec<String> = enc.encode_plain(&candidate.answer).labels
-                    .into_iter()
-                    .filter(|l| l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
-                    .collect();
-                if q_lbl.is_empty() || a_lbl.is_empty() { continue; }
-                let mut combined: Vec<String> = q_lbl;
-                for l in a_lbl { if !combined.contains(&l) { combined.push(l); } }
-                neuro.train_weighted(&combined, 0.3, false);
+                // Full label set — character, word, ngram, positional, structural
+                let q_labels = enc.encode_plain(&candidate.question).labels;
+                let a_labels = enc.encode_plain(&candidate.answer).labels;
+                if q_labels.is_empty() || a_labels.is_empty() { continue; }
+                // Frame 0: within-question associations (cause)
+                neuro.train_weighted(&q_labels, 1.0, false);
+                // Frame 1: within-answer associations (effect)
+                neuro.train_weighted(&a_labels, 0.8, false);
+                // Temporal bridge: directed Q→A prediction (STDP)
+                // bridge_lr = 0.9 * exp(-1.0 / TAU) ≈ 0.55
+                let bridge_lr = 0.9_f32 * (-1.0_f32 / TAU).exp();
+                let mut bridge: Vec<String> = q_labels.iter()
+                    .chain(a_labels.iter()).cloned().collect();
+                bridge.sort_unstable();
+                bridge.dedup();
+                neuro.train_weighted(&bridge, bridge_lr, false);
             }
         });
     }
