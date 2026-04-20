@@ -64,6 +64,12 @@ except ImportError:
             yield x
         print()
 
+import sys as _sys
+_scripts_dir = str(Path(__file__).resolve().parent)
+if _scripts_dir not in _sys.path:
+    _sys.path.insert(0, _scripts_dir)
+from neuro_client import detect_discipline
+
 ROOT = Path(__file__).resolve().parents[1]
 TEXTBOOKS_DIR = ROOT / "textbooks"
 PROGRESS_FILE = ROOT / "data" / "k12_progress.json"
@@ -309,6 +315,76 @@ def checkpoint(client: httpx.Client, node_url: str) -> None:
             tqdm.write(f"  Neuro pool saved -> {path}")
     except Exception as e:
         tqdm.write(f"  Neuro checkpoint: {e} (pool save may still be running)")
+
+def ingest_equations(client: httpx.Client, node_url: str, text: str,
+                     discipline: str | None = None) -> int:
+    """Feed text to the Environmental Equation Matrix if it contains equations."""
+    disc = discipline or detect_discipline(text)
+    if not disc:
+        return 0
+    result = api_post(client, f"{node_url}/equations/ingest",
+                      {"text": text, "discipline": disc, "confidence": 0.6})
+    return (result or {}).get("ingested", 0)
+
+
+def ingest_knowledge(client: httpx.Client, node_url: str,
+                     title: str, body: str,
+                     source: str = "", tags: list[str] | None = None) -> bool:
+    """Post a structured knowledge document to /knowledge/ingest."""
+    doc: dict = {"title": title, "body": body, "source": source}
+    if tags:
+        doc["tags"] = tags
+    return api_post(client, f"{node_url}/knowledge/ingest", {"document": doc}) is not None
+
+
+def record_episode(client: httpx.Client, node_url: str,
+                   question: str, answer: str, surprise: float = 0.0) -> bool:
+    """Log a resolved Q→A episode into the episodic store."""
+    q_words = [
+        f"txt:word_{w.lower().strip('.,;:!?()[]\"\'')}"
+        for w in question.split()
+        if len(w.strip('.,;:!?()[]\"\'')) > 2
+    ]
+    if not q_words:
+        return False
+    payload = {
+        "context_labels": q_words,
+        "predicted":      answer[:500],
+        "actual":         answer[:500],
+        "streams":        [],
+        "surprise":       float(max(0.0, min(1.0, surprise))),
+    }
+    return api_post(client, f"{node_url}/neuro/record_episode", payload) is not None
+
+
+def ingest_qa_full(client: httpx.Client, node_url: str,
+                   candidates: list[dict], pool: str = "knowledge") -> int:
+    """
+    Full Q&A training:
+      1. /qa/ingest — Q&A store + STDP bridge
+      2. /media/train_sequence — Q→A temporal frame pair per candidate
+      3. /neuro/record_episode — episodic learning per candidate
+    """
+    if not candidates:
+        return 0
+    ingested = ingest_qa_batch(client, node_url, candidates)
+    for pair in candidates:
+        q = pair.get("question", "")
+        a = pair.get("answer", "")
+        if not q or not a:
+            continue
+        # Q→A temporal sequence
+        api_post(client, f"{node_url}/media/train_sequence", {
+            "frames": [
+                {"modality": "text", "text": q, "t_secs": 0.0, "lr_scale": 1.0},
+                {"modality": "text", "text": a, "t_secs": 1.0, "lr_scale": 0.9},
+            ],
+            "temporal_tau": 2.0,
+        })
+        # Episodic record
+        record_episode(client, node_url, q, a, surprise=0.0)
+    return ingested
+
 
 def train_sequence(client: httpx.Client, node_url: str,
                    texts: list[str], tau: float = 1.5,
@@ -709,8 +785,8 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
             p2 += 1
     print(f"  Pass 2 complete: {p2}/{n}")
 
-    # ── Ingest Q&A pairs into the QA store ───────────────────────────────────
-    print(f"  Ingesting {n} Q&A pairs into QA store...")
+    # ── Full Q&A pipeline: ingest + Q→A sequence + episodic record ───────────
+    print(f"  Full Q&A pipeline ({n} pairs)...")
     candidates = []
     for question, answer, _ in TODDLER_CONCEPTS:
         qa_id = hashlib.sha256(f"toddler|{question}|{answer}".encode()).hexdigest()[:16]
@@ -718,8 +794,13 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
                             "book_id": "toddler_foundations", "page_index": 0,
                             "confidence": 0.95, "evidence": answer,
                             "review_status": "VERIFIED"})
-    ingested = ingest_qa_batch(client, node_url, candidates)
-    print(f"  Ingested {ingested} Q&A pairs")
+    ingested = ingest_qa_full(client, node_url, candidates, pool="knowledge")
+    print(f"  Full pipeline: {ingested} pairs ingested + Q→A sequences + episodes")
+
+    # ── Knowledge document — structured toddler curriculum ───────────────────
+    body = "\n\n".join(f"Q: {q}\nA: {a}" for q, a, _ in TODDLER_CONCEPTS)
+    ingest_knowledge(client, node_url, "Toddler Foundations", body,
+                     source="toddler_foundations", tags=["stage0", "toddler"])
 
     # ── Train temporal concept sequences (STDP-ordered chains) ───────────────
     # Sequences are ordered causally: apple→fruit→sweet→... so earlier tokens
@@ -811,6 +892,22 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
             else:
                 skipped += 1
 
+            # Also train the page text as a temporal sequence (text + source context)
+            if stitched.strip():
+                plain = stitched[:2000]
+                api_post(client, f"{node_url}/media/train_sequence", {
+                    "frames": [
+                        {"modality": "text", "text": plain,
+                         "t_secs": 0.0, "lr_scale": 0.8},
+                        {"modality": "text",
+                         "text": f"[book:{book_id}] [page:{page_idx+1}]",
+                         "t_secs": 0.5, "lr_scale": 0.5},
+                    ],
+                    "temporal_tau": 2.0,
+                })
+                # Feed equations into EEM
+                ingest_equations(client, node_url, plain)
+
             # Split at last sentence boundary for QA extraction.
             # The tail (after the last complete sentence) is carried forward.
             boundary = _last_sentence_boundary(stitched)
@@ -835,12 +932,17 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
 
     doc.close()
 
-    # Ingest all Q&A for this book in one call
+    # Full Q&A pipeline for this book: ingest + Q→A sequences + episodes
     if qa_candidates:
-        ingested = ingest_qa_batch(client, node_url, qa_candidates)
-        tqdm.write(f"  QA ingested: {ingested}/{len(qa_candidates)} pairs")
+        ingested = ingest_qa_full(client, node_url, qa_candidates, pool="knowledge")
+        tqdm.write(f"  QA full pipeline: {ingested}/{len(qa_candidates)} pairs + episodes")
     else:
         ingested = 0
+
+    # Knowledge document — book summary
+    ingest_knowledge(client, node_url, book_id,
+                     body=f"Textbook: {book_id}. Pages: {trained_pages}.",
+                     source="k12_textbook", tags=["k12", book_id])
 
     checkpoint(client, node_url)
     return {"book_id": book_id, "pages_trained": trained_pages,

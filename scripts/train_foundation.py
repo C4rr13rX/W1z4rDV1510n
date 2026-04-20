@@ -2,25 +2,19 @@
 """
 train_foundation.py — Feed English foundation corpus into the neural node
 =========================================================================
-Three-pass foundation training pipeline.  Run passes in order:
+Full-architecture training pipeline.  Uses every available API endpoint:
 
-  Pass 0 (PRIMARY) — Concept dataset (build_concept_dataset.py output)
-    data/foundation/concept_dataset.jsonl, processed LEVEL BY LEVEL (-1 → 3).
-    For each concept:
-      - Definition text → /media/train (text modality)
-      - Each image + definition caption → /media/train (page modality)
-      - QA pairs (definition, misconception/correction) → /qa/ingest
-    This is the developmental curriculum pass — first words, then infant
-    vocabulary, then toddler, pre-K, kindergarten.
+  /media/train_sequence  — temporal STDP (image+text, text+context, Q→A)
+  /equations/ingest      — Environmental Equation Matrix
+  /knowledge/ingest      — structured knowledge documents
+  /qa/ingest             — Q&A store + internal STDP bridge
+  /neuro/record_episode  — episodic learning from confirmed Q→A pairs
+  /neuro/checkpoint      — pool persistence
 
-  Pass 1 — Wikipedia prose (Simple English Wikipedia)
-    data/foundation/simple_wiki_articles.jsonl
-    Full articles as text → /media/train.  Builds broad English word
-    co-occurrence representations to support K-12 reading.
-
-  Pass 2 — Scene images (COCO 2017 val)
-    data/foundation/coco_val_index.jsonl
-    Real-world scene images + captions → /media/train (page modality).
+Three passes:
+  Pass 0 (CONCEPTS)  — concept_dataset.jsonl (first-words → kindergarten)
+  Pass 1 (TEXT)      — simple_wiki_articles.jsonl
+  Pass 2 (IMAGES)    — coco_val_index.jsonl
 
 Usage:
   python scripts/train_foundation.py [--node http://127.0.0.1:8090]
@@ -37,13 +31,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import re
 import sys
 import time
 import uuid
-from io import BytesIO
 from pathlib import Path
 
 try:
@@ -56,19 +48,20 @@ try:
 except ImportError:
     sys.exit("Missing: pip install Pillow")
 
+from neuro_client import NeuroClient, resize_image_b64, detect_discipline, make_spans
+
 # ---------------------------------------------------------------------------
-# Config defaults
+# Config
 # ---------------------------------------------------------------------------
 
 NODE_URL     = "http://127.0.0.1:8090"
-CONCURRENCY  = 40      # max concurrent HTTP requests
-BATCH_SIZE   = 50      # QA pairs per /qa/ingest request
-IMAGE_MAX_PX = 512     # resize longest edge before base64
-
-MIN_TEXT_LEN = 60      # min character length for a text block to train
+CONCURRENCY  = 40
+BATCH_SIZE   = 50
+IMAGE_MAX_PX = 512
+MIN_TEXT_LEN = 60
 
 # ---------------------------------------------------------------------------
-# QA extraction (same filter rules as train_k12.py)
+# QA extraction from free text
 # ---------------------------------------------------------------------------
 
 _IS_RE = re.compile(
@@ -77,12 +70,10 @@ _IS_RE = re.compile(
 )
 _SKIP_SUBJECTS = {
     "this", "that", "these", "those", "it", "they", "he", "she", "we", "you", "i",
-    "a", "an", "the",
-    "because", "when", "if", "although", "while", "since", "once",
+    "a", "an", "the", "because", "when", "if", "although", "while", "since", "once",
     "however", "therefore", "thus", "hence", "moreover", "furthermore",
-    "there", "here", "then", "now",
-    "no", "not", "one", "some", "many", "most", "all", "each", "both",
-    "several", "few", "any", "every", "either", "neither",
+    "there", "here", "then", "now", "no", "not", "one", "some", "many", "most",
+    "all", "each", "both", "several", "few", "any", "every", "either", "neither",
     "for", "with", "by", "from", "of", "in", "on", "at", "as", "to",
 }
 _CONTEXT_SUBJ_RE = re.compile(r"\b(of the|of a|of an|in the|in a|by the|for the)\b", re.I)
@@ -125,73 +116,13 @@ def extract_qa_from_text(text: str, source_id: str) -> list[dict]:
     return pairs
 
 
-# ---------------------------------------------------------------------------
-# Async HTTP helpers
-# ---------------------------------------------------------------------------
-
-async def media_train_text(client: httpx.AsyncClient, node_url: str, text: str) -> bool:
-    try:
-        r = await client.post(
-            f"{node_url}/media/train",
-            json={"modality": "text", "text": text, "lr_scale": 1.0},
-            timeout=30,
-        )
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
-async def media_train_image(client: httpx.AsyncClient, node_url: str,
-                            img_b64: str, caption: str) -> bool:
-    try:
-        r = await client.post(
-            f"{node_url}/media/train",
-            json={"modality": "page", "data_b64": img_b64, "text": caption, "lr_scale": 1.0},
-            timeout=30,
-        )
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
-async def qa_ingest_batch(client: httpx.AsyncClient, node_url: str,
-                          batch: list[dict], pool: str = "knowledge") -> int:
-    try:
-        r = await client.post(
-            f"{node_url}/qa/ingest",
-            json={"candidates": batch, "pool": pool},
-            timeout=30,
-        )
-        if r.status_code == 200:
-            return r.json().get("ingested", 0)
-        return 0
-    except Exception:
-        return 0
-
-
 def _is_misconception_question(q: str) -> bool:
-    """Questions that assert a false premise and expect a correction."""
     lower = q.lower()
-    return lower.startswith("is it true") or lower.startswith("is it correct") \
-        or lower.startswith("is it a fact") or lower.startswith("do people think")
-
-
-def resize_image_b64(image_path: str, max_px: int = IMAGE_MAX_PX) -> str | None:
-    try:
-        img = Image.open(image_path).convert("RGB")
-        w, h = img.size
-        if max(w, h) > max_px:
-            scale = max_px / max(w, h)
-            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=75)
-        return base64.b64encode(buf.getvalue()).decode()
-    except Exception:
-        return None
+    return lower.startswith(("is it true", "is it correct", "is it a fact", "do people think"))
 
 
 # ---------------------------------------------------------------------------
-# Pass 0 — Concept dataset (PRIMARY: developmental vocabulary + images)
+# Pass 0 — Concept dataset
 # ---------------------------------------------------------------------------
 
 LEVEL_NAMES = {-1: "first-words", 0: "infant", 1: "toddler",
@@ -213,52 +144,24 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
             except Exception:
                 pass
 
-    # Sort by level then frequency (most common first within level)
     records.sort(key=lambda r: (r.get("level", 0), -r.get("frequency", 0)))
-
     if limit:
         records = records[:limit]
 
     total = len(records)
-    print(f"\n[CONCEPT PASS] {total:,} concepts across levels "
-          f"{min(r.get('level',0) for r in records)} to "
-          f"{max(r.get('level',0) for r in records)}")
-    print(f"  concurrency={concurrency}  batch_size={batch_size}")
+    print(f"\n[CONCEPT PASS] {total:,} concepts — full architecture training")
+    print(f"  Endpoints: train_sequence | equations/ingest | knowledge/ingest | qa/ingest | record_episode")
 
     sem     = asyncio.Semaphore(concurrency)
     qa_buf: list[dict] = []
-    stats   = {"text_ok": 0, "text_fail": 0,
-               "img_ok": 0, "img_skip": 0, "img_fail": 0, "qa": 0}
+    corr_buf: list[dict] = []
+    stats   = {"seq": 0, "img": 0, "eq": 0, "know": 0, "qa": 0, "ep": 0}
     t_start = time.time()
 
     async with httpx.AsyncClient(timeout=30) as client:
+        nc = NeuroClient(node_url, client)
 
-        async def train_text(text: str) -> None:
-            async with sem:
-                ok = await media_train_text(client, node_url, text)
-            stats["text_ok" if ok else "text_fail"] += 1
-
-        async def train_img(img_path: str, caption: str) -> None:
-            loop = asyncio.get_running_loop()
-            b64  = await loop.run_in_executor(None, resize_image_b64, img_path)
-            if b64 is None:
-                stats["img_skip"] += 1
-                return
-            async with sem:
-                ok = await media_train_image(client, node_url, b64, caption)
-            stats["img_ok" if ok else "img_fail"] += 1
-
-        async def flush_qa(pairs: list[dict], pool: str = "knowledge") -> None:
-            n = await qa_ingest_batch(client, node_url, pairs, pool=pool)
-            stats["qa"] += n
-
-        tasks: list[asyncio.Task] = []
-        # Separate buffers: definitional pairs repeat 4x; misconceptions go to correction pool
-        corr_buf: list[dict] = []
-        current_level = None
-        QA_REPEATS = 4  # repeat each definitional pair to dominate competing answers
-
-        for idx, rec in enumerate(records):
+        async def train_concept_record(rec: dict) -> None:
             level   = rec.get("level", 0)
             concept = rec.get("concept", "")
             defn    = rec.get("definition", "")
@@ -266,31 +169,69 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
             qa_pairs = rec.get("qa_pairs", [])
             wiki_text = rec.get("wiki_text", "")
 
-            # Announce level transitions
+            full_text = defn
+            if wiki_text and len(wiki_text) > len(defn):
+                full_text = defn + "  " + wiki_text[:500]
+
+            async with sem:
+                # 1. Text temporal sequence (definition + wiki)
+                if full_text.strip():
+                    ok = await nc.train_text_temporal(
+                        full_text,
+                        context=f"[concept:{concept}] [level:{level}]",
+                        lr=1.0,
+                    )
+                    if ok:
+                        stats["seq"] += 1
+
+                # 2. Each image as image+text+structural temporal sequence
+                for img_path in images[:8]:
+                    loop = asyncio.get_running_loop()
+                    b64  = await loop.run_in_executor(
+                        None, resize_image_b64, img_path, IMAGE_MAX_PX)
+                    if b64:
+                        ok = await nc.train_image_text_temporal(
+                            b64, defn[:300],
+                            structural=f"[concept:{concept}] [level:{level}] [visual]",
+                            lr=1.0,
+                        )
+                        if ok:
+                            stats["img"] += 1
+
+                # 3. Equation matrix — scientific text
+                disc = detect_discipline(full_text)
+                if disc:
+                    n = await nc.ingest_equations(full_text, discipline=disc)
+                    stats["eq"] += n
+
+                # 4. Knowledge document
+                if defn.strip():
+                    await nc.ingest_knowledge(
+                        title=concept,
+                        body=full_text,
+                        source="concept_dataset",
+                        tags=[f"level:{level}"],
+                    )
+                    stats["know"] += 1
+
+        tasks: list[asyncio.Task] = []
+        current_level = None
+        QA_REPEATS = 4
+
+        for idx, rec in enumerate(records):
+            level   = rec.get("level", 0)
+            concept = rec.get("concept", "")
+            qa_pairs = rec.get("qa_pairs", [])
+
             if level != current_level:
                 current_level = level
                 print(f"\n  --- Level {level}: {LEVEL_NAMES.get(level, str(level))} ---")
 
-            # Build full training text: definition + wiki excerpt if available
-            full_text = defn
-            if wiki_text and len(wiki_text) > len(defn):
-                full_text = defn + "  " + wiki_text[:400]
+            tasks.append(asyncio.create_task(train_concept_record(rec)))
 
-            if full_text.strip():
-                tasks.append(asyncio.create_task(train_text(full_text)))
-
-            # Train each image paired with the definition as caption
-            caption = defn[:200] if defn else concept
-            for img_path in images[:8]:   # max 8 images per concept
-                tasks.append(asyncio.create_task(train_img(img_path, caption)))
-
-            # Compound/hyphenated concepts (e.g. "water-skiing") share base-word tokens
-            # with simple concepts ("water"). Give them only 1 repeat so they don't
-            # drown out the base-concept definition through aggregate weight.
             is_compound = "-" in concept or " " in concept
             repeats = 1 if is_compound else QA_REPEATS
 
-            # Collect QA pairs — route misconceptions to correction pool
             for qa in qa_pairs:
                 qa_with_source = dict(qa)
                 qa_with_source["book_id"]    = f"concept_{concept}"
@@ -301,15 +242,18 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
                     for _ in range(repeats):
                         qa_buf.append(qa_with_source)
 
+            # Flush QA buffers — full pipeline: ingest + sequence + episode
             while len(qa_buf) >= batch_size:
                 batch = qa_buf[:batch_size]
                 del qa_buf[:batch_size]
-                tasks.append(asyncio.create_task(flush_qa(batch, pool="knowledge")))
+                tasks.append(asyncio.create_task(
+                    nc.ingest_qa_full(batch, pool="knowledge", record_episodes=True)))
 
             while len(corr_buf) >= batch_size:
                 batch = corr_buf[:batch_size]
                 del corr_buf[:batch_size]
-                tasks.append(asyncio.create_task(flush_qa(batch, pool="correction")))
+                tasks.append(asyncio.create_task(
+                    nc.ingest_qa_full(batch, pool="correction", record_episodes=True)))
 
             if len(tasks) >= concurrency * 4:
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -318,27 +262,30 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
             if (idx + 1) % 100 == 0:
                 elapsed = time.time() - t_start
                 rate = (idx + 1) / elapsed if elapsed > 0 else 0
-                print(f"  [{idx+1}/{total}] concept={concept!r:<20} "
-                      f"txt={stats['text_ok']}  img={stats['img_ok']}  "
-                      f"qa={stats['qa']}  {rate:.1f}/s")
+                print(f"  [{idx+1}/{total}] {concept!r:<20}  "
+                      f"seq={stats['seq']} img={stats['img']} eq={stats['eq']} "
+                      f"know={stats['know']} qa={stats['qa']}  {rate:.1f}/s")
 
         if qa_buf:
-            tasks.append(asyncio.create_task(flush_qa(qa_buf, pool="knowledge")))
+            tasks.append(asyncio.create_task(
+                nc.ingest_qa_full(qa_buf, pool="knowledge", record_episodes=True)))
         if corr_buf:
-            tasks.append(asyncio.create_task(flush_qa(corr_buf, pool="correction")))
+            tasks.append(asyncio.create_task(
+                nc.ingest_qa_full(corr_buf, pool="correction", record_episodes=True)))
         if tasks:
             await asyncio.gather(*tasks)
 
     elapsed = time.time() - t_start
     print(f"\n[CONCEPT PASS] Done in {elapsed:.0f}s  ({elapsed/60:.1f} min)")
-    print(f"  Text trained  : {stats['text_ok']:,} ok  {stats['text_fail']:,} failed")
-    print(f"  Images trained: {stats['img_ok']:,} ok  "
-          f"{stats['img_skip']:,} skip  {stats['img_fail']:,} failed")
-    print(f"  QA ingested   : {stats['qa']:,}")
+    print(f"  Sequences  : {stats['seq']:,}")
+    print(f"  Images     : {stats['img']:,}")
+    print(f"  Equations  : {stats['eq']:,}")
+    print(f"  Knowledge  : {stats['know']:,}")
+    print(f"  QA ingested: {stats['qa']:,}")
 
 
 # ---------------------------------------------------------------------------
-# Pass 1 — Text (Simple English Wikipedia)
+# Pass 1 — Simple English Wikipedia
 # ---------------------------------------------------------------------------
 
 async def run_text_pass(node_url: str, data_dir: Path, limit: int | None,
@@ -349,26 +296,34 @@ async def run_text_pass(node_url: str, data_dir: Path, limit: int | None,
         return
 
     print(f"\n[TEXT PASS] {jsonl}")
-    print(f"  concurrency={concurrency}  batch_size={batch_size}")
+    print(f"  Endpoints: train_sequence | equations/ingest | qa/ingest | record_episode")
 
     sem      = asyncio.Semaphore(concurrency)
     qa_buf:  list[dict] = []
-    stats    = {"ok": 0, "fail": 0, "qa": 0}
+    stats    = {"seq": 0, "fail": 0, "eq": 0, "qa": 0}
     t_start  = time.time()
 
     async with httpx.AsyncClient(timeout=30) as client:
+        nc = NeuroClient(node_url, client)
 
-        async def train_one(text: str) -> None:
+        async def train_article(text: str, source_id: str) -> None:
             async with sem:
-                ok = await media_train_text(client, node_url, text)
-            if ok:
-                stats["ok"] += 1
-            else:
-                stats["fail"] += 1
+                # Temporal text sequence (text + structural context)
+                ok = await nc.train_text_temporal(
+                    text[:2000],
+                    context=f"[source:simple_wikipedia] [id:{source_id}]",
+                    lr=1.0,
+                )
+                if ok:
+                    stats["seq"] += 1
+                else:
+                    stats["fail"] += 1
 
-        async def flush_qa(pairs: list[dict]) -> None:
-            n = await qa_ingest_batch(client, node_url, pairs)
-            stats["qa"] += n
+                # Equation matrix for scientific articles
+                disc = detect_discipline(text)
+                if disc:
+                    n = await nc.ingest_equations(text[:2000], discipline=disc)
+                    stats["eq"] += n
 
         tasks: list[asyncio.Task] = []
         count = 0
@@ -382,48 +337,49 @@ async def run_text_pass(node_url: str, data_dir: Path, limit: int | None,
                 except json.JSONDecodeError:
                     continue
 
-                text = rec.get("text", "").strip()
+                text      = rec.get("text", "").strip()
                 source_id = rec.get("id", str(count))
 
                 if len(text) >= MIN_TEXT_LEN:
-                    tasks.append(asyncio.create_task(train_one(text)))
+                    tasks.append(asyncio.create_task(train_article(text, source_id)))
 
-                # QA extraction
-                pairs = extract_qa_from_text(text, source_id)
-                qa_buf.extend(pairs)
+                    # Q&A extraction from text
+                    pairs = extract_qa_from_text(text, source_id)
+                    qa_buf.extend(pairs)
+
                 while len(qa_buf) >= batch_size:
                     batch = qa_buf[:batch_size]
                     del qa_buf[:batch_size]
-                    tasks.append(asyncio.create_task(flush_qa(batch)))
+                    tasks.append(asyncio.create_task(
+                        nc.ingest_qa_full(batch, pool="knowledge", record_episodes=True)))
 
                 count += 1
 
-                # Drain completed tasks to avoid memory explosion
                 if len(tasks) >= concurrency * 3:
                     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     tasks = list(pending)
 
                 if count % 5000 == 0:
                     elapsed = time.time() - t_start
-                    rate = stats["ok"] / elapsed if elapsed > 0 else 0
-                    print(f"  {count:,} articles  {stats['ok']:,} trained  "
-                          f"{stats['qa']:,} qa  {rate:.1f} art/s")
+                    rate = stats["seq"] / elapsed if elapsed > 0 else 0
+                    print(f"  {count:,} articles  seq={stats['seq']:,}  eq={stats['eq']:,}  "
+                          f"qa={stats['qa']:,}  {rate:.1f}/s")
 
-        # Flush remaining QA
         if qa_buf:
-            tasks.append(asyncio.create_task(flush_qa(qa_buf)))
-
+            tasks.append(asyncio.create_task(
+                nc.ingest_qa_full(qa_buf, pool="knowledge", record_episodes=True)))
         if tasks:
             await asyncio.gather(*tasks)
 
     elapsed = time.time() - t_start
     print(f"\n[TEXT PASS] Done in {elapsed:.0f}s")
-    print(f"  Articles trained: {stats['ok']:,} ok  {stats['fail']:,} failed")
-    print(f"  QA pairs ingested: {stats['qa']:,}")
+    print(f"  Sequences  : {stats['seq']:,}  failures: {stats['fail']:,}")
+    print(f"  Equations  : {stats['eq']:,}")
+    print(f"  QA ingested: {stats['qa']:,}")
 
 
 # ---------------------------------------------------------------------------
-# Pass 2 — Images (COCO)
+# Pass 2 — COCO scene images
 # ---------------------------------------------------------------------------
 
 async def run_images_pass(node_url: str, data_dir: Path, limit: int | None,
@@ -434,30 +390,33 @@ async def run_images_pass(node_url: str, data_dir: Path, limit: int | None,
         return
 
     print(f"\n[IMAGES PASS] {jsonl}")
+    print(f"  Endpoints: train_sequence (image+text) | qa/ingest | record_episode")
 
     sem     = asyncio.Semaphore(concurrency)
     qa_buf: list[dict] = []
-    stats   = {"ok": 0, "skip": 0, "fail": 0, "qa": 0}
+    stats   = {"seq": 0, "skip": 0, "fail": 0, "qa": 0}
     t_start = time.time()
 
     async with httpx.AsyncClient(timeout=30) as client:
+        nc = NeuroClient(node_url, client)
 
-        async def train_one_image(img_path: str, cap: str) -> None:
+        async def train_coco_image(img_path: str, caption: str, categories: list[str],
+                                   img_id: int) -> None:
             loop = asyncio.get_running_loop()
-            b64  = await loop.run_in_executor(None, resize_image_b64, img_path)
+            b64  = await loop.run_in_executor(None, resize_image_b64, img_path, IMAGE_MAX_PX)
             if b64 is None:
                 stats["skip"] += 1
                 return
+            # Structural context: what objects are present
+            structural = f"[scene] [objects:{','.join(categories[:5])}] [id:{img_id}]"
             async with sem:
-                ok = await media_train_image(client, node_url, b64, cap)
+                ok = await nc.train_image_text_temporal(
+                    b64, caption, structural=structural, lr=1.0,
+                )
             if ok:
-                stats["ok"] += 1
+                stats["seq"] += 1
             else:
                 stats["fail"] += 1
-
-        async def flush_qa(pairs: list[dict]) -> None:
-            n = await qa_ingest_batch(client, node_url, pairs)
-            stats["qa"] += n
 
         tasks: list[asyncio.Task] = []
         count = 0
@@ -480,9 +439,11 @@ async def run_images_pass(node_url: str, data_dir: Path, limit: int | None,
                 if categories:
                     cap_text += "  Objects: " + ", ".join(categories) + "."
 
-                if cap_text.strip():
-                    tasks.append(asyncio.create_task(train_one_image(img_path, cap_text)))
+                if cap_text.strip() and img_path:
+                    tasks.append(asyncio.create_task(
+                        train_coco_image(img_path, cap_text, categories, img_id)))
 
+                # Q&A from scene captions + category labels
                 for cat in categories:
                     qa_buf.append({
                         "qa_id":         str(uuid.uuid4()),
@@ -498,7 +459,8 @@ async def run_images_pass(node_url: str, data_dir: Path, limit: int | None,
                 while len(qa_buf) >= batch_size:
                     batch = qa_buf[:batch_size]
                     del qa_buf[:batch_size]
-                    tasks.append(asyncio.create_task(flush_qa(batch)))
+                    tasks.append(asyncio.create_task(
+                        nc.ingest_qa_full(batch, pool="knowledge", record_episodes=True)))
 
                 count += 1
 
@@ -507,72 +469,65 @@ async def run_images_pass(node_url: str, data_dir: Path, limit: int | None,
                     tasks = list(pending)
 
         if qa_buf:
-            tasks.append(asyncio.create_task(flush_qa(qa_buf)))
+            tasks.append(asyncio.create_task(
+                nc.ingest_qa_full(qa_buf, pool="knowledge", record_episodes=True)))
         if tasks:
             await asyncio.gather(*tasks)
 
     elapsed = time.time() - t_start
     print(f"\n[IMAGES PASS] Done in {elapsed:.0f}s")
-    print(f"  Images trained: {stats['ok']:,} ok  {stats['skip']:,} skip  {stats['fail']:,} failed")
-    print(f"  QA pairs ingested: {stats['qa']:,}")
+    print(f"  Image sequences: {stats['seq']:,}  skip={stats['skip']:,}  fail={stats['fail']:,}")
+    print(f"  QA ingested    : {stats['qa']:,}")
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Checkpoint + main
 # ---------------------------------------------------------------------------
 
-async def checkpoint(node_url: str) -> None:
-    """Force-save both the neuro pool and QA store to disk."""
-    try:
-        async with httpx.AsyncClient(timeout=120) as c:
-            r = await c.post(f"{node_url}/neuro/checkpoint")
-            if r.status_code == 200:
-                d = r.json()
-                print(f"  Checkpoint saved: pool={d.get('pool_path','?')}  qa={d.get('qa_path','?')}")
-            else:
-                print(f"  Checkpoint warning: HTTP {r.status_code}")
-    except Exception as e:
-        print(f"  Checkpoint failed: {e}")
+async def checkpoint(nc: NeuroClient) -> None:
+    ok = await nc.checkpoint()
+    print("  Checkpoint saved." if ok else "  Checkpoint warning: failed.")
 
 
 async def main_async(args: argparse.Namespace) -> None:
     data_dir = Path(args.data_dir)
 
-    try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(f"{args.node}/health", timeout=5)
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            r = await client.get(f"{args.node}/health", timeout=5)
             info = r.json()
-            print(f"Node: {info.get('node_id','?')}  status={info.get('status')}  uptime={info.get('uptime_secs')}s")
-    except Exception as e:
-        sys.exit(f"Node not reachable at {args.node}: {e}")
+            print(f"Node: {info.get('node_id','?')}  status={info.get('status')}  "
+                  f"uptime={info.get('uptime_secs')}s")
+        except Exception as e:
+            sys.exit(f"Node not reachable at {args.node}: {e}")
 
-    if args.mode in ("concepts", "all"):
-        await run_concept_pass(args.node, data_dir, args.limit,
-                               args.concurrency, args.batch_size)
-        await checkpoint(args.node)
+        nc = NeuroClient(args.node, client)
 
-    if args.mode in ("text", "all"):
-        await run_text_pass(args.node, data_dir, args.limit,
-                            args.concurrency, args.batch_size)
-        await checkpoint(args.node)
+        if args.mode in ("concepts", "all"):
+            await run_concept_pass(args.node, data_dir, args.limit,
+                                   args.concurrency, args.batch_size)
+            await checkpoint(nc)
 
-    if args.mode in ("images", "all"):
-        await run_images_pass(args.node, data_dir, args.limit,
-                              args.concurrency, args.batch_size)
-        await checkpoint(args.node)
+        if args.mode in ("text", "all"):
+            await run_text_pass(args.node, data_dir, args.limit,
+                                args.concurrency, args.batch_size)
+            await checkpoint(nc)
+
+        if args.mode in ("images", "all"):
+            await run_images_pass(args.node, data_dir, args.limit,
+                                  args.concurrency, args.batch_size)
+            await checkpoint(nc)
 
     print("\nFoundation training complete.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Foundation training pipeline (async)")
+    parser = argparse.ArgumentParser(description="Foundation training pipeline — full architecture")
     parser.add_argument("--node",        default=NODE_URL)
     parser.add_argument("--pass",        dest="mode",
                         choices=["concepts", "text", "images", "all"], default="concepts")
-    parser.add_argument("--limit",       type=int, default=None,
-                        help="Max articles/images (default: all)")
-    parser.add_argument("--concurrency", type=int, default=CONCURRENCY,
-                        help="Max concurrent HTTP requests (default: 40)")
+    parser.add_argument("--limit",       type=int, default=None)
+    parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
     parser.add_argument("--batch-size",  type=int, default=BATCH_SIZE)
     parser.add_argument("--data-dir",    default="data/foundation")
     args = parser.parse_args()
