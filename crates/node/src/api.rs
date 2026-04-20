@@ -2577,6 +2577,31 @@ async fn submit_qa_ingest(
         let after = qa.pairs_ingested();
         ((after - before) as usize, after, qa.question_neuron_count(), qa.answer_count())
     };
+    // Build Hebbian word-label associations from ingested Q&A pairs.
+    // This populates the propagation graph so Hebbian-first inference can
+    // surface the concept cluster for each question at query time.
+    // Correction pool pairs are skipped — they use direct specialist recall.
+    if !use_correction_pool && ingested > 0 {
+        let neuro = state.neuro.clone();
+        let candidates = request.candidates.clone();
+        tokio::task::spawn_blocking(move || {
+            let enc = TextBitsEncoder::new(TextBitsConfig::default());
+            for candidate in &candidates {
+                let q_lbl: Vec<String> = enc.encode_plain(&candidate.question).labels
+                    .into_iter()
+                    .filter(|l| l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
+                    .collect();
+                let a_lbl: Vec<String> = enc.encode_plain(&candidate.answer).labels
+                    .into_iter()
+                    .filter(|l| l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
+                    .collect();
+                if q_lbl.is_empty() || a_lbl.is_empty() { continue; }
+                let mut combined: Vec<String> = q_lbl;
+                for l in a_lbl { if !combined.contains(&l) { combined.push(l); } }
+                neuro.train_weighted(&combined, 0.3, false);
+            }
+        });
+    }
     // Fan-out to peers — skip if this call was already forwarded by a peer
     // (header x-w1z-local present) to prevent replication loops.
     if !headers.contains_key("x-w1z-local") {
