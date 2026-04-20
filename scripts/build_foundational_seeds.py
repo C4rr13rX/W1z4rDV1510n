@@ -17,6 +17,7 @@ import json
 import sys
 import time
 import urllib.request
+import uuid
 
 DEFAULT_NODE    = "localhost:8090"
 DEFAULT_REPEATS = 15
@@ -133,7 +134,8 @@ def main() -> None:
     print(f"Seed pairs: {len(KNOWLEDGE_SEEDS)}")
 
     candidates = [
-        {"question": q, "answer": a, "book_id": "foundational_seeds", "page_index": 1}
+        {"qa_id": str(uuid.uuid4()), "question": q, "answer": a,
+         "book_id": "foundational_seeds", "page_index": 1, "confidence": 0.95}
         for q, a in KNOWLEDGE_SEEDS
     ]
 
