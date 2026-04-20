@@ -5093,40 +5093,39 @@ async fn neuro_ask(
             .cloned()
             .collect();
 
-        // ── Pathway B: QA store answer labels ────────────────────────────────
+        // ── Pure Hebbian path — no QA store ──────────────────────────────────
+        // Answer comes entirely from Hebbian activation. QA module removed.
+        // The system speaks from what the Hebbian graph has learned, nothing else.
         let now = now_timestamp();
-        let qa_report = {
-            let mut qa = qa_arc.lock().expect("qa mutex");
-            qa.query(&text, now)
-        };
-        let best_qa = qa_report.results.first();
-        // Gate on raw IDF-weighted activation, not normalized confidence.
-        // Normalized confidence is always 1.0 for the top result regardless of
-        // signal quality; raw activation reflects actual Hebbian match strength.
-        let (qa_answer_labels, qa_conf): (Vec<String>, f32) = best_qa
-            .filter(|r| r.activation > 0.10)
-            .map(|r| {
-                let labels = enc.encode_plain(&r.answer).labels;
-                (labels, r.confidence.min(1.0))
-            })
-            .unwrap_or_default();
+        let qa_answer_labels: Vec<String> = vec![];
+        let qa_conf = 0.0_f32;
+        let _ = qa_arc; // QA store present but not used for inference
 
-        // Raw QA activation: the true confidence signal.
-        // This is what the app layer should use to decide hedging language.
-        // HIGH ≥ 0.50 — strong Hebbian match, answer is reliable
-        // MEDIUM 0.25–0.50 — partial match, answer present but uncertain
-        // LOW 0.10–0.25 — weak match, best available but likely imprecise
-        let qa_activation = best_qa.map(|r| r.activation).unwrap_or(0.0_f32);
-        let confidence_tier = if qa_activation >= 0.50 {
-            "high"
-        } else if qa_activation >= 0.25 {
-            "medium"
-        } else if qa_activation >= 0.10 {
-            "low"
+        // 1-hop Hebbian resonance — discriminates trained vs novel concepts
+        // without QA score. Peak > threshold means the Hebbian graph has
+        // associations built for this concept cluster; below means hypothesis.
+        let q_word_only_pre: Vec<String> = question_content_labels.iter()
+            .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .cloned()
+            .collect();
+        let pre_1hop = if q_word_only_pre.is_empty() {
+            HashMap::new()
         } else {
-            "uncertain"
+            neuro.propagate_combined(&[(q_word_only_pre.as_slice(), 1.0_f32)], 1, 0.001)
         };
-        let qa_gated = qa_activation > 0.10;
+        let q_pre_set: std::collections::HashSet<&String> = q_word_only_pre.iter().collect();
+        let hebbian_peak = pre_1hop.iter()
+            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .filter(|(l, _)| !q_pre_set.contains(l))
+            .map(|(_, &v)| v)
+            .fold(0.0f32, f32::max);
+
+        let qa_activation = hebbian_peak; // renamed for compat with response fields
+        let confidence_tier = if hebbian_peak >= 0.50 { "high" }
+            else if hebbian_peak >= 0.25 { "medium" }
+            else if hebbian_peak >= 0.10 { "low" }
+            else { "uncertain" };
+        let qa_gated = hebbian_peak > 0.10;
 
         if !qa_gated {
             // ── Unknown concept: register novel chars, spike NE, queue hypothesis ──
@@ -5230,66 +5229,34 @@ async fn neuro_ask(
             // and closer to the actual concept.  No code changes needed.
             // When the pool is sparse, the response is null — the network is
             // genuinely silent, which is honest.
+            // Pure Hebbian gap state — no QA lookup.
+            // The network is genuinely in a gap: fire from what it knows near
+            // the unknown concept, surface the deeper association cluster.
+            // The activated_concepts IS the answer — the Hebbian state of
+            // "what fires around this unknown."  As training grows, this
+            // becomes richer and closer to the actual concept.
             let gap_answer: Option<String> = if !activated_concepts.is_empty() {
-                // Build word labels from activated concepts to seed the propagation.
                 let gap_seed_labels: Vec<String> = activated_concepts.iter()
                     .map(|w| format!("txt:word_{w}"))
                     .collect();
-
-                // Full propagation from the gap state — NE elevation means the
-                // network is in exploratory mode, so we use a slightly lower
-                // min_activation to allow looser associations through.
                 let gap_propagated = neuro.propagate_combined(
                     &[(gap_seed_labels.as_slice(), 1.0_f32)],
-                    hops,
-                    0.001,
+                    hops, 0.001,
                 );
-
-                // Collect the top word labels from the gap propagation.
+                let gap_seed_set: std::collections::HashSet<&String> =
+                    gap_seed_labels.iter().collect();
                 let mut gap_word_acts: Vec<(String, f32)> = gap_propagated.iter()
                     .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                    .filter(|(l, _)| !gap_seed_set.contains(l))
                     .map(|(l, &v)| (l.clone(), v))
                     .collect();
                 gap_word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal));
-
-                // Form a mini-prompt from the top activated words and query the
-                // QA store.  Whatever the store surfaces from this state is the
-                // network's self-expression — not chosen by code.
-                let gap_seed_set: std::collections::HashSet<&String> =
-                    gap_seed_labels.iter().collect();
-                let gap_prompt_words: Vec<&str> = gap_word_acts.iter()
-                    .filter(|(l, _)| !gap_seed_set.contains(l))
+                let gap_words: Vec<&str> = gap_word_acts.iter()
                     .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
-                    .take(8)
+                    .take(12)
                     .collect();
-
-                if !gap_prompt_words.is_empty() {
-                    let gap_prompt = gap_prompt_words.join(" ");
-                    let gap_qa = {
-                        let mut qa = qa_arc.lock().expect("qa mutex");
-                        qa.query(&gap_prompt, now)
-                    };
-                    // Accept at a lower threshold than direct recall — this is
-                    // associative, not exact.  The caller knows it's hypothesis.
-                    //
-                    // Thematic relevance filter: only surface the gap answer if it
-                    // actually mentions one of the activated concepts.  This prevents
-                    // the network from confabulating by returning a nearby-but-unrelated
-                    // QA entry.  When no answer is thematically relevant, the network
-                    // is genuinely silent — the `activated_concepts` field IS the
-                    // discovery (the constraint cluster the network built around the
-                    // unknown concept from Hebbian co-occurrence alone).
-                    gap_qa.results.first()
-                        .filter(|r| r.activation > 0.08)
-                        .filter(|r| {
-                            let answer_lower = r.answer.to_lowercase();
-                            activated_concepts.iter().any(|c| answer_lower.contains(c.as_str()))
-                        })
-                        .map(|r| r.answer.clone())
-                } else {
-                    None
-                }
+                if gap_words.is_empty() { None } else { Some(gap_words.join(" ")) }
             } else {
                 None
             };
@@ -5388,13 +5355,6 @@ async fn neuro_ask(
         word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal));
 
-        // Seed word labels for session storage exclusion.
-        let seed_word_labels: std::collections::HashSet<String> = question_content_labels.iter()
-            .chain(qa_answer_labels.iter())
-            .filter(|l| l.starts_with("txt:word_"))
-            .cloned()
-            .collect();
-
         // ── Property binding (is/can/are/does questions) ──────────────────────
         // Runs two separate 1-hop propagations: one from the subject concept,
         // one from the predicate concept.  Computes Jaccard overlap of their
@@ -5468,17 +5428,21 @@ async fn neuro_ask(
             None
         };
 
-        // ── Answer: always verbatim from the QA store ─────────────────────────
-        // The fabric stores full grown answers during training.  We return them
-        // as-is — no word extraction, no reconstruction, no reassembly.
-        // The "grows from small parts" principle applies to TRAINING (char → word
-        // → concept), not to answer retrieval which must respect the grown unit.
-        let mut answer = best_qa
-            .filter(|r| r.activation > 0.10)
-            .map(|best| best.answer.clone())
-            .unwrap_or_default();
+        // ── Answer: pure Hebbian activation — no QA store ────────────────────
+        // The answer is the top activated concept words from Hebbian propagation.
+        // As STDP training grows denser associations, this output becomes richer.
+        let seed_word_labels: std::collections::HashSet<String> = question_content_labels.iter()
+            .filter(|l| l.starts_with("txt:word_"))
+            .cloned()
+            .collect();
+        let answer_words: Vec<&str> = word_acts.iter()
+            .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
+            .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
+            .filter(|w| !w.contains('_') && w.len() > 2)
+            .take(max_tok.min(20))
+            .collect();
+        let mut answer = answer_words.join(" ");
         if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
-        if !answer.is_empty() && !answer.ends_with(['.', '!', '?']) { answer.push('.'); }
 
         // ── Update session working memory ─────────────────────────────────────
         // Store the top 8 non-seed activated word labels as context for the next
@@ -5504,28 +5468,17 @@ async fn neuro_ask(
                 serde_json::json!({ "word": word, "strength": strength })
             })
             .collect();
-        let qa_candidates: Vec<serde_json::Value> = qa_report.results.iter().take(3)
-            .map(|r| serde_json::json!({
-                "answer":     r.answer,
-                "activation": r.activation,
-                "confidence": r.confidence,
-                "book_id":    r.book_id,
-            }))
-            .collect();
-
         let mut resp = serde_json::json!({
-            "question":                text,
-            "hypothesis":              false,
-            "answer":                  answer,
-            "qa_activation":           qa_activation,
-            "confidence_tier":         confidence_tier,
-            "peak_activation":         peak,
-            "intent":                  format!("{:?}", intent),
-            "word_activations":        word_activations,
-            "qa_candidates":           qa_candidates,
-            "active_question_neurons": qa_report.active_question_neurons,
-            "context_trained":         context_trained,
-            "session_id":              session_id,
+            "question":         text,
+            "hypothesis":       answer.is_empty(),
+            "answer":           if answer.is_empty() { serde_json::Value::Null } else { serde_json::json!(answer) },
+            "hebbian_peak":     qa_activation,
+            "confidence_tier":  confidence_tier,
+            "peak_activation":  peak,
+            "intent":           format!("{:?}", intent),
+            "word_activations": word_activations,
+            "context_trained":  context_trained,
+            "session_id":       session_id,
         });
         if let Some(score) = property_binding_score {
             resp["property_binding_score"] = serde_json::json!(score);
@@ -5665,7 +5618,9 @@ struct PipelineReq {
 
 /// POST /neuro/pipeline
 ///
-/// Multi-stage inference pipeline. See module comment above for full description.
+/// Pure Hebbian inference — no QA store. Propagates from question word labels
+/// through the Hebbian graph, returns top activated concept words as the answer.
+/// As STDP training grows, the activated cluster becomes the answer.
 async fn neuro_pipeline(
     State(state): State<ApiState>,
     Json(req): Json<PipelineReq>,
@@ -5674,221 +5629,111 @@ async fn neuro_pipeline(
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
-    let neuro        = state.neuro.clone();
-    let knowledge_qa = state.qa_runtime.clone();
-    let correction_qa = state.correction_qa.clone();
-    let hq_arc       = state.hypothesis_queue.clone();
-    let sess_ctxs    = state.session_contexts.clone();
-    let text         = req.text.clone();
-    let hops         = req.hops;
-    let _max_tok     = req.top_k.max(30);
-    let session_id   = req.session_id.clone();
+    let neuro      = state.neuro.clone();
+    let hq_arc     = state.hypothesis_queue.clone();
+    let sess_ctxs  = state.session_contexts.clone();
+    let text       = req.text.clone();
+    let hops       = req.hops;
+    let max_tok    = req.top_k.max(30);
+    let session_id = req.session_id.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        let now   = now_timestamp();
-        let scope = detect_pipeline_scope(&text);
-
-        // Route to the appropriate specialist pool.
-        // Correction scopes (grammar, spelling, punctuation, rewrite) go to the
-        // correction pool which was trained exclusively on correction pairs.
-        // Knowledge scopes go to the general knowledge pool.
-        // This isolation prevents cross-domain weight interference.
-        let is_correction = matches!(scope,
-            PipelineScope::SpellingCorrection |
-            PipelineScope::GrammarCorrection  |
-            PipelineScope::PunctuationCorrection |
-            PipelineScope::TextRewrite
-        );
-        let qa_arc = if is_correction { correction_qa } else { knowledge_qa };
-
-        // ── Recall ────────────────────────────────────────────────────────────
-        let enc = TextBitsEncoder::new(TextBitsConfig::default());
-
-        let sess_labels: Vec<String> = session_id.as_ref()
+        let enc         = TextBitsEncoder::new(TextBitsConfig::default());
+        let sess_labels = session_id.as_ref()
             .and_then(|sid| sess_ctxs.lock().expect("sess mutex").get(sid).cloned())
             .unwrap_or_default();
 
-        // Query QA for IDF-significant tokens — the pool's learned discrimination.
-        // For correction scope this also provides the direct specialist answer.
-        let qa_report: QaQueryReport = {
-            let mut qa = qa_arc.lock().expect("qa mutex");
-            qa.query(&text, now.clone())
-        };
-
-        // Correction scope: direct pool recall is reliable — trained exclusively
-        // on correction pairs so any above-threshold answer is on-topic.
-        let correction_direct: Option<(String, f32)> = if is_correction {
-            qa_report.results.first()
-                .filter(|r| r.activation > ANSWER_THRESHOLD)
-                .map(|r| (r.answer.clone(), r.confidence))
-        } else {
-            None
-        };
-
-        // ── Stage 1: Hebbian associative propagation ──────────────────────────
-        // Fire question word labels into the Hebbian graph to surface the concept
-        // cluster the network has learned to associate with this query.
-        // Seeds: IDF-significant tokens from the pool (learned, not hardcoded),
-        // falling back to all word labels (len > 2) when IDF is not yet trained.
-        let all_q_labels: Vec<String> = enc.encode_plain(&text).labels.into_iter()
-            .filter(|l| l.starts_with("txt:word_"))
+        // Encode full label set — all types feed the Hebbian graph
+        let q_all_labels: Vec<String> = enc.encode_plain(&text).labels;
+        let q_word_labels: Vec<String> = q_all_labels.iter()
+            .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_")
+                && l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
+            .cloned()
             .collect();
 
-        let q_labels: Vec<String> = if !qa_report.significant_tokens.is_empty() {
-            let sig_set: HashSet<String> = qa_report.significant_tokens.iter()
-                .map(|w| format!("txt:word_{}", w))
-                .collect();
-            all_q_labels.iter().filter(|l| sig_set.contains(*l)).cloned().collect()
-        } else {
-            all_q_labels.iter()
-                .filter(|l| l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
-                .cloned()
-                .collect()
-        };
+        if q_word_labels.is_empty() {
+            return serde_json::json!({
+                "question": text, "hypothesis": true, "answer": serde_json::Value::Null,
+                "hebbian_peak": 0.0, "confidence_tier": "uncertain", "session_id": session_id,
+            });
+        }
 
-        let (effective_best_answer, effective_qa_act, effective_tier, used_associative, effective_qa_conf): (Option<String>, f32, &str, bool, f32) =
-        if let Some((correction_ans, correction_conf)) = correction_direct {
-            let act = qa_report.results.first().map(|r| r.activation).unwrap_or(0.0);
-            let tier = if act >= 5.0 { "high" } else if act >= 1.0 { "medium" } else { "low" };
-            (Some(correction_ans), act, tier, false, correction_conf)
-        } else {
-            // Knowledge scope: Hebbian-first — propagate from question word labels
-            // to the activated concept cluster, then query QA from that cluster.
-            let nearby = if q_labels.is_empty() {
-                std::collections::HashMap::new()
-            } else {
-                neuro.propagate_combined(
-                    &[(q_labels.as_slice(), 1.0_f32),
-                      (sess_labels.as_slice(), 0.3_f32)],
-                    hops, 0.001,
-                )
-            };
+        // Propagate from question word labels + session context through Hebbian graph
+        let activated = neuro.propagate_combined(
+            &[(q_word_labels.as_slice(), 1.0_f32),
+              (sess_labels.as_slice(),   0.3_f32)],
+            hops, 0.001,
+        );
 
-            let q_label_set: HashSet<&String> = q_labels.iter().collect();
-            let mut nearby_acts: Vec<(String, f32)> = nearby.iter()
-                .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                .filter(|(l, _)| !q_label_set.contains(l))
-                .map(|(l, &v)| (l.clone(), v))
-                .collect();
-            nearby_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal));
+        let q_word_set: HashSet<&String> = q_word_labels.iter().collect();
+        let mut word_acts: Vec<(String, f32)> = activated.iter()
+            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .filter(|(l, _)| !q_word_set.contains(l))
+            .map(|(l, &v)| (l.clone(), v))
+            .collect();
+        word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
 
-            let top_words: Vec<&str> = nearby_acts.iter()
-                .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
-                .take(8)
-                .collect();
+        let peak = word_acts.iter().map(|(_, v)| *v).fold(0.0f32, f32::max);
 
-            if top_words.is_empty() {
-                (None, 0.0, "uncertain", true, 0.0)
-            } else {
-                let assoc_prompt = top_words.join(" ");
-                let assoc_qa = {
-                    let mut qa = qa_arc.lock().expect("qa mutex");
-                    qa.query(&assoc_prompt, now.clone())
-                };
-                let assoc_best = assoc_qa.results.first();
-                let assoc_act  = assoc_best.map(|r| r.activation).unwrap_or(0.0);
-                let assoc_conf = assoc_best.map(|r| r.confidence).unwrap_or(0.0);
-
-                let assoc_relevant = assoc_best
-                    .map(|r| answer_is_relevant_idf(&r.answer, &qa_report.significant_tokens))
-                    .unwrap_or(false);
-
-                if assoc_act > ANSWER_THRESHOLD && assoc_relevant {
-                    let tier = if assoc_act >= 5.0 { "high" } else if assoc_act >= 1.0 { "medium" } else { "low" };
-                    (assoc_best.map(|r| r.answer.clone()), assoc_act, tier, true, assoc_conf)
-                } else {
-                    (None, 0.0, "uncertain", true, 0.0)
-                }
-            }
-        };
-
-        // ── Gate: push to hypothesis only when both paths failed ─────────────
-        if effective_best_answer.is_none() {
+        if peak < ANSWER_THRESHOLD {
+            // Dark graph — hypothesis
+            neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
             {
                 let mut hq = hq_arc.lock().expect("hypothesis mutex");
                 if !hq.iter().any(|e| e.question == text) {
                     let mut h = 0u64;
                     for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
                     hq.push(HypothesisEntry {
-                        id: format!("pipe_{h:x}"),
-                        question: text.clone(),
-                        queued_at_unix: now.unix,
+                        id: format!("pipe_{h:x}"), question: text.clone(),
+                        queued_at_unix: now_timestamp().unix,
                         attempts: 0, max_attempts: 5,
                         resolved: false, answer: None, confidence: None,
                     });
                 }
             }
-            neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
+            let concepts: Vec<&str> = word_acts.iter()
+                .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
+                .filter(|w| !w.contains('_') && w.len() > 2)
+                .take(8)
+                .collect();
             return serde_json::json!({
-                "question": text, "scope": scope,
-                "hypothesis": true, "answer": serde_json::Value::Null,
-                "pipeline_applied": false, "stages": [],
-                "qa_activation": effective_qa_act, "confidence_tier": "uncertain",
+                "question": text, "hypothesis": true,
+                "answer": serde_json::Value::Null,
+                "activated_concepts": concepts,
+                "hebbian_peak": peak, "confidence_tier": "uncertain",
                 "session_id": session_id,
             });
         }
 
-        // Effective values from whichever path succeeded
-        let qa_act          = effective_qa_act;
-        let qa_conf         = effective_qa_conf;
-        let confidence_tier = effective_tier;
-        let s1_raw_answer   = effective_best_answer.unwrap_or_default();
+        // Build answer from top activated words
+        let answer_words: Vec<&str> = word_acts.iter()
+            .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
+            .filter(|w| !w.contains('_') && w.len() > 2)
+            .take(max_tok.min(20))
+            .collect();
+        let mut answer = answer_words.join(" ");
+        if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
 
-        // Re-encode the effective answer's word labels for the Hebbian propagation
-        let eff_ans_labels: Vec<String> = {
-            let enc2 = TextBitsEncoder::new(TextBitsConfig::default());
-            enc2.encode_plain(&s1_raw_answer)
-                .labels.into_iter()
-                .filter(|l| l.starts_with("txt:word_"))
-                .collect()
-        };
-
-        // 3-pathway propagation (question + effective answer + session context)
-        let combined = neuro.propagate_combined(
-            &[(q_labels.as_slice(),        1.0_f32),
-              (eff_ans_labels.as_slice(),   qa_conf),
-              (sess_labels.as_slice(),      0.3_f32)],
-            hops, 0.005,
-        );
+        let confidence_tier = if peak >= 0.50 { "high" }
+            else if peak >= 0.25 { "medium" } else { "low" };
 
         // Update session working memory
         if let Some(ref sid) = session_id {
-            let ctx: Vec<String> = combined.iter()
-                .filter(|(l, _)| l.starts_with("txt:word_") && !q_labels.contains(l))
+            let ctx: Vec<String> = word_acts.iter()
                 .take(8).map(|(l, _)| l.clone()).collect();
             if !ctx.is_empty() {
                 sess_ctxs.lock().expect("sess mutex").insert(sid.clone(), ctx);
             }
         }
 
-        // Pure pool recall — the QA fabric's recalled answer IS the answer.
-        // No transformation stages, no deterministic NLP.  The scope determined
-        // which pool was queried (currently unified pool; separate specialist
-        // pools are the next architectural step).
-        let mut final_answer = s1_raw_answer;
-        if let Some(f) = final_answer.get_mut(0..1) { f.make_ascii_uppercase(); }
-        if !final_answer.is_empty() && !final_answer.ends_with(['.', '!', '?']) {
-            final_answer.push('.');
-        }
-        let final_conf = qa_conf;
-        let qa_candidates: Vec<serde_json::Value> = qa_report.results.iter().take(3)
-            .map(|r| serde_json::json!({
-                "answer": r.answer, "activation": r.activation, "confidence": r.confidence,
-            }))
-            .collect();
-
         serde_json::json!({
-            "question":           text,
-            "scope":              scope,
-            "answer":             final_answer,
-            "associative_recall": used_associative,
-            "hypothesis":         false,
-            "qa_activation":      qa_act,
-            "confidence_tier":    confidence_tier,
-            "final_confidence":   final_conf,
-            "qa_candidates":      qa_candidates,
-            "session_id":         session_id,
+            "question":        text,
+            "hypothesis":      false,
+            "answer":          answer,
+            "hebbian_peak":    peak,
+            "confidence_tier": confidence_tier,
+            "session_id":      session_id,
         })
     }).await.unwrap_or_else(|e| serde_json::json!({ "error": format!("internal: {e}") }));
 
@@ -6201,125 +6046,61 @@ async fn neuro_generate(
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
     let neuro   = state.neuro.clone();
-    let qa_arc  = state.qa_runtime.clone();
     let hq_arc  = state.hypothesis_queue.clone();
     let text    = req.text.clone();
     let hops    = req.hops;
     let max_tok = req.max_tokens;
 
     let result = tokio::task::spawn_blocking(move || {
-        const STOP_WORDS: &[&str] = &[
-            "what","is","are","how","does","do","the","a","an","in","of",
-            "to","and","or","it","this","that","be","was","were","can","will",
-            "would","could","should","did","have","has","had","for","with","by",
-            "at","as","but","not","he","she","they","we","you","i","its","get",
-            "about","tell","me","describe","explain","define",
-            "why","where","when","who","which",
-        ];
-
-        // Encode the prompt text into neural labels
+        // Pure Hebbian auto-regressive generation — no QA store.
+        // Propagate from prompt labels, pick top activated words, feed back
+        // iteratively until max_tokens or activation drops below min_strength.
         let enc = TextBitsEncoder::new(TextBitsConfig::default());
         let prompt_labels: Vec<String> = enc.encode_plain(&text).labels;
 
-        // Filter out stop-word txt:word_* labels from the seed
-        let content_labels: Vec<String> = prompt_labels.iter()
-            .filter(|l| {
-                if let Some(w) = l.strip_prefix("txt:word_") {
-                    !STOP_WORDS.contains(&w)
-                } else {
-                    true
-                }
-            })
+        let seed_words: Vec<String> = prompt_labels.iter()
+            .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_")
+                && l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
             .cloned()
             .collect();
 
-        // QA recall: find if the node has trained knowledge about this prompt
-        let now = now_timestamp();
-        let qa_report = {
-            let mut qa = qa_arc.lock().expect("qa mutex");
-            qa.query(&text, now)
-        };
-        let best_qa = qa_report.results.first();
-        let (qa_answer_labels, qa_conf): (Vec<String>, f32) = best_qa
-            .filter(|r| r.activation > 0.10)
-            .map(|r| {
-                let labels = enc.encode_plain(&r.answer).labels;
-                (labels, r.confidence.min(1.0))
-            })
-            .unwrap_or_default();
+        if seed_words.is_empty() {
+            return serde_json::json!({
+                "prompt": text, "hypothesis": true, "response": serde_json::Value::Null,
+            });
+        }
 
-        // QA gate — raw activation threshold, same as neuro_ask
-        let qa_activation_gen = best_qa.map(|r| r.activation).unwrap_or(0.0_f32);
-        let qa_gated = qa_activation_gen > 0.10;
+        let mut output_tokens: Vec<String> = Vec::new();
+        let mut suppressed: HashSet<String> = seed_words.iter().cloned().collect();
+        let mut current_seeds = seed_words.clone();
 
-        if !qa_gated {
-            // NE spike: novel input, boost LR for next training.
-            neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
-
-            // Gap-state generation: same mechanism as neuro_ask hypothesis path.
-            // Propagate from the 1-hop activation neighbourhood of the prompt,
-            // query the QA store from the resulting state.
-            let word_only_gen: Vec<String> = content_labels.iter()
-                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                .cloned()
-                .collect();
-            let gap_1hop = if word_only_gen.is_empty() {
-                HashMap::new()
-            } else {
-                neuro.propagate_combined(&[(word_only_gen.as_slice(), 1.0_f32)], 1, 0.001)
-            };
-            let word_seed_set_gen: std::collections::HashSet<&String> =
-                word_only_gen.iter().collect();
-            let mut gap_acts_gen: Vec<(String, f32)> = gap_1hop.iter()
+        for _ in 0..max_tok {
+            let activated = neuro.propagate_combined(
+                &[(current_seeds.as_slice(), 1.0_f32)],
+                hops, 0.001,
+            );
+            let mut word_acts: Vec<(String, f32)> = activated.iter()
                 .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                .filter(|(l, _)| !word_seed_set_gen.contains(l))
+                .filter(|(l, _)| !suppressed.contains(*l))
                 .map(|(l, &v)| (l.clone(), v))
                 .collect();
-            gap_acts_gen.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
+            word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal));
-            let activated_gen: Vec<String> = gap_acts_gen.iter()
-                .filter_map(|(l, _)| l.strip_prefix("txt:word_").map(|w| w.to_string()))
-                .filter(|w| !w.contains('_') && w.len() > 2)
-                .take(6)
-                .collect();
+            let best = match word_acts.first() {
+                Some(b) if b.1 >= req.min_strength => b.clone(),
+                _ => break,
+            };
+            let word = best.0.strip_prefix("txt:word_").unwrap_or("").to_string();
+            if word.is_empty() || word.contains('_') { break; }
+            output_tokens.push(word);
+            suppressed.insert(best.0.clone());
+            current_seeds = vec![best.0];
+        }
 
-            let gap_response: Option<String> = if !activated_gen.is_empty() {
-                let gap_seed_labels_gen: Vec<String> = activated_gen.iter()
-                    .map(|w| format!("txt:word_{w}"))
-                    .collect();
-                let gap_prop = neuro.propagate_combined(
-                    &[(gap_seed_labels_gen.as_slice(), 1.0_f32)],
-                    hops,
-                    0.001,
-                );
-                let seed_set_gen: std::collections::HashSet<&String> =
-                    gap_seed_labels_gen.iter().collect();
-                let mut gpa: Vec<(String, f32)> = gap_prop.iter()
-                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                    .filter(|(l, _)| !seed_set_gen.contains(l))
-                    .map(|(l, &v)| (l.clone(), v))
-                    .collect();
-                gpa.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal));
-                let gap_words: Vec<&str> = gpa.iter()
-                    .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
-                    .take(8)
-                    .collect();
-                if !gap_words.is_empty() {
-                    let gp = gap_words.join(" ");
-                    let gqr = { let mut qa = qa_arc.lock().expect("qa mutex"); qa.query(&gp, now) };
-                    gqr.results.first()
-                        .filter(|r| r.activation > 0.08)
-                        .filter(|r| {
-                            // Thematic relevance: only return if the answer mentions
-                            // at least one activated concept.
-                            let al = r.answer.to_lowercase();
-                            activated_gen.iter().any(|c| al.contains(c.as_str()))
-                        })
-                        .map(|r| r.answer.clone())
-                } else { None }
-            } else { None };
+        let peak = output_tokens.len() as f32 / max_tok.max(1) as f32;
 
+        if output_tokens.is_empty() {
+            neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.75);
             let id = {
                 let mut h = 0u64;
                 for b in text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
@@ -6329,41 +6110,26 @@ async fn neuro_generate(
                 let mut hq = hq_arc.lock().expect("hypothesis mutex");
                 if !hq.iter().any(|e| e.question == text) {
                     hq.push(HypothesisEntry {
-                        id,
-                        question: text.clone(),
-                        queued_at_unix: now.unix,
-                        attempts: 0,
-                        max_attempts: 5,
-                        resolved: false,
-                        answer: None,
-                        confidence: None,
+                        id, question: text.clone(),
+                        queued_at_unix: now_timestamp().unix,
+                        attempts: 0, max_attempts: 5,
+                        resolved: false, answer: None, confidence: None,
                     });
                 }
             }
             return serde_json::json!({
-                "prompt":             text,
-                "hypothesis":         true,
-                "response":           gap_response,
-                "activated_concepts": activated_gen,
-                "qa_activation":      qa_activation_gen,
+                "prompt": text, "hypothesis": true, "response": serde_json::Value::Null,
             });
         }
 
-        // Known concept — return verbatim QA answer.
-        // The generate path respects grown representations: no word extraction,
-        // no reconstruction.  The answer is the stored unit.
-        let mut response = best_qa
-            .filter(|r| r.activation > 0.10)
-            .map(|best| best.answer.clone())
-            .unwrap_or_default();
+        let mut response = output_tokens.join(" ");
         if let Some(c) = response.get_mut(0..1) { c.make_ascii_uppercase(); }
-        if !response.is_empty() && !response.ends_with(['.','!','?']) { response.push('.'); }
 
         serde_json::json!({
             "prompt":        text,
             "hypothesis":    false,
             "response":      response,
-            "qa_activation": qa_activation_gen,
+            "hebbian_peak":  peak,
         })
     }).await.unwrap_or_else(|e| serde_json::json!({ "error": format!("internal: {e}") }));
 
