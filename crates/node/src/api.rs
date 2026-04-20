@@ -5608,7 +5608,10 @@ fn detect_pipeline_scope(text: &str) -> PipelineScope {
 /// The check: the answer must contain at least 2/3 of the significant tokens.
 fn answer_is_relevant_idf(answer: &str, significant_tokens: &[String]) -> bool {
     if significant_tokens.is_empty() {
-        return true; // no discriminative signal → can't gate
+        // No discriminative vocabulary for this query means the pool has no basis
+        // to confirm the answer is on-topic.  Reject rather than accept blindly —
+        // hypothesis is the honest response when the system can't discriminate.
+        return false;
     }
     let a_lc = answer.to_lowercase();
     let matches = significant_tokens.iter()
@@ -5666,85 +5669,73 @@ async fn neuro_pipeline(
         );
         let qa_arc = if is_correction { correction_qa } else { knowledge_qa };
 
-        // ── Recall ───────────────────────────────────────────────────────────
-        let enc      = TextBitsEncoder::new(TextBitsConfig::default());
-        let stop: HashSet<&str> = [
-            "the","a","an","is","are","was","were","be","been","have","has","had",
-            "do","does","did","will","would","could","should","may","might",
-            "to","of","in","on","at","by","for","with","from","and","or","but",
-            "if","as","that","this","it","its","what","who","how","why","when",
-            "where","i","you","we","they","he","she","me","him","her","us","them",
-        ].iter().cloned().collect();
-
-        let q_labels: Vec<String> = enc.encode_plain(&text).labels.into_iter()
-            .filter(|l| l.strip_prefix("txt:word_")
-                .map(|w| !stop.contains(w) && w.len() > 2).unwrap_or(false))
-            .collect();
+        // ── Recall ────────────────────────────────────────────────────────────
+        let enc = TextBitsEncoder::new(TextBitsConfig::default());
 
         let sess_labels: Vec<String> = session_id.as_ref()
             .and_then(|sid| sess_ctxs.lock().expect("sess mutex").get(sid).cloned())
             .unwrap_or_default();
 
+        // Query QA for IDF-significant tokens — the pool's learned discrimination.
+        // For correction scope this also provides the direct specialist answer.
         let qa_report: QaQueryReport = {
             let mut qa = qa_arc.lock().expect("qa mutex");
             qa.query(&text, now.clone())
         };
-        let best = qa_report.results.first();
-        let qa_act  = best.map(|r| r.activation).unwrap_or(0.0);
-        let qa_conf = best.map(|r| r.confidence).unwrap_or(0.0);
 
-        let qa_labels: Vec<String> = best
-            .filter(|r| r.activation > 0.10)
-            .map(|r| enc.encode_plain(&r.answer).labels.into_iter()
-                .filter(|l| l.starts_with("txt:word_")).collect())
-            .unwrap_or_default();
-
-        // ── Relevance check: reject cross-domain Hebbian misfires ────────────
-        // For direct-answer queries, verify the top QA result shares at least
-        // one significant word with the question. Heavy multi-topic training
-        // builds strong but wrong associations (e.g. "sun" → "Mercury." from
-        // solar-system data). Correction scopes are exempt — their answers are
-        // rule templates that don't echo the question topic.
-        // Correction scopes: any recall from the correction pool is accepted —
-        // that pool was trained only on corrections, so its answers are always
-        // on-topic by construction.  Knowledge scopes still need IDF relevance gating.
-        let direct_qa_relevant = is_correction
-            || (qa_act > ANSWER_THRESHOLD
-                && best.map(|r| answer_is_relevant_idf(&r.answer, &qa_report.significant_tokens)).unwrap_or(false));
-
-        // ── Fallback: Hebbian associative recall when direct QA misfires ─────
-        // When the QA store returns an off-topic or low-activation result,
-        // propagate from the question's word labels through the Hebbian graph
-        // to find what concepts the fabric genuinely associates with this topic.
-        // Re-query QA from those concepts — this surfaces the "most probable"
-        // answer the network has built from experience, not from a single strong
-        // cross-domain weight.
-        let (effective_best_answer, effective_qa_act, effective_tier, used_associative): (Option<String>, f32, &str, bool) =
-        if direct_qa_relevant {
-            let ans = best.map(|r| r.answer.clone());
-            let tier = if qa_act >= 5.0 { "high" } else if qa_act >= 1.0 { "medium" } else { "low" };
-            (ans, qa_act, tier, false)
+        // Correction scope: direct pool recall is reliable — trained exclusively
+        // on correction pairs so any above-threshold answer is on-topic.
+        let correction_direct: Option<(String, f32)> = if is_correction {
+            qa_report.results.first()
+                .filter(|r| r.activation > ANSWER_THRESHOLD)
+                .map(|r| (r.answer.clone(), r.confidence))
         } else {
-            // Propagate from question word labels to activate nearby concepts
-            let q_word_labels: Vec<String> = q_labels.iter()
-                .filter(|l| l.starts_with("txt:word_"))
-                .cloned()
-                .collect();
+            None
+        };
 
-            let nearby = if q_word_labels.is_empty() {
+        // ── Stage 1: Hebbian associative propagation ──────────────────────────
+        // Fire question word labels into the Hebbian graph to surface the concept
+        // cluster the network has learned to associate with this query.
+        // Seeds: IDF-significant tokens from the pool (learned, not hardcoded),
+        // falling back to all word labels (len > 2) when IDF is not yet trained.
+        let all_q_labels: Vec<String> = enc.encode_plain(&text).labels.into_iter()
+            .filter(|l| l.starts_with("txt:word_"))
+            .collect();
+
+        let q_labels: Vec<String> = if !qa_report.significant_tokens.is_empty() {
+            let sig_set: HashSet<String> = qa_report.significant_tokens.iter()
+                .map(|w| format!("txt:word_{}", w))
+                .collect();
+            all_q_labels.iter().filter(|l| sig_set.contains(*l)).cloned().collect()
+        } else {
+            all_q_labels.iter()
+                .filter(|l| l.strip_prefix("txt:word_").map(|w| w.len() > 2).unwrap_or(false))
+                .cloned()
+                .collect()
+        };
+
+        let (effective_best_answer, effective_qa_act, effective_tier, used_associative, effective_qa_conf): (Option<String>, f32, &str, bool, f32) =
+        if let Some((correction_ans, correction_conf)) = correction_direct {
+            let act = qa_report.results.first().map(|r| r.activation).unwrap_or(0.0);
+            let tier = if act >= 5.0 { "high" } else if act >= 1.0 { "medium" } else { "low" };
+            (Some(correction_ans), act, tier, false, correction_conf)
+        } else {
+            // Knowledge scope: Hebbian-first — propagate from question word labels
+            // to the activated concept cluster, then query QA from that cluster.
+            let nearby = if q_labels.is_empty() {
                 std::collections::HashMap::new()
             } else {
                 neuro.propagate_combined(
-                    &[(q_word_labels.as_slice(), 1.0_f32),
+                    &[(q_labels.as_slice(), 1.0_f32),
                       (sess_labels.as_slice(), 0.3_f32)],
                     hops, 0.001,
                 )
             };
 
-            let q_word_set: HashSet<&String> = q_word_labels.iter().collect();
+            let q_label_set: HashSet<&String> = q_labels.iter().collect();
             let mut nearby_acts: Vec<(String, f32)> = nearby.iter()
                 .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                .filter(|(l, _)| !q_word_set.contains(l))
+                .filter(|(l, _)| !q_label_set.contains(l))
                 .map(|(l, &v)| (l.clone(), v))
                 .collect();
             nearby_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
@@ -5756,9 +5747,8 @@ async fn neuro_pipeline(
                 .collect();
 
             if top_words.is_empty() {
-                (None, 0.0, "uncertain", false)
+                (None, 0.0, "uncertain", true, 0.0)
             } else {
-                // Re-query QA from the activated concept cluster
                 let assoc_prompt = top_words.join(" ");
                 let assoc_qa = {
                     let mut qa = qa_arc.lock().expect("qa mutex");
@@ -5766,18 +5756,17 @@ async fn neuro_pipeline(
                 };
                 let assoc_best = assoc_qa.results.first();
                 let assoc_act  = assoc_best.map(|r| r.activation).unwrap_or(0.0);
+                let assoc_conf = assoc_best.map(|r| r.confidence).unwrap_or(0.0);
 
-                // Accept associative answer only if it is relevant to the
-                // original question — use the same IDF-based significant tokens
-                // from the original query report (not the associative sub-query)
                 let assoc_relevant = assoc_best
                     .map(|r| answer_is_relevant_idf(&r.answer, &qa_report.significant_tokens))
                     .unwrap_or(false);
 
                 if assoc_act > ANSWER_THRESHOLD && assoc_relevant {
-                    (assoc_best.map(|r| r.answer.clone()), assoc_act, "low", true)
+                    let tier = if assoc_act >= 5.0 { "high" } else if assoc_act >= 1.0 { "medium" } else { "low" };
+                    (assoc_best.map(|r| r.answer.clone()), assoc_act, tier, true, assoc_conf)
                 } else {
-                    (None, 0.0, "uncertain", false)
+                    (None, 0.0, "uncertain", true, 0.0)
                 }
             }
         };
@@ -5810,7 +5799,7 @@ async fn neuro_pipeline(
 
         // Effective values from whichever path succeeded
         let qa_act          = effective_qa_act;
-        let qa_conf         = if used_associative { 0.4_f32 } else { qa_conf };
+        let qa_conf         = effective_qa_conf;
         let confidence_tier = effective_tier;
         let s1_raw_answer   = effective_best_answer.unwrap_or_default();
 
