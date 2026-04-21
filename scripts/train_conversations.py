@@ -99,10 +99,15 @@ def propagate(node: str, question: str) -> list[str]:
     payload = json.dumps({"seed_labels": q_labels, "hops": 2}).encode()
     try:
         result = _post(f"{node}/neuro/propagate", payload, timeout=10)
-        activated = result.get("activated") or {}
+        raw = result.get("activated") or []
+        # API returns either a list of {label, strength} dicts or a {label: strength} dict
+        if isinstance(raw, dict):
+            items = [(l, s) for l, s in raw.items()]
+        else:
+            items = [(e["label"], e["strength"]) for e in raw if isinstance(e, dict)]
         # Keep only word labels, strip prefix, sort by strength desc
         words = sorted(
-            [(l.removeprefix("txt:word_"), s) for l, s in activated.items()
+            [(l.removeprefix("txt:word_"), s) for l, s in items
              if l.startswith("txt:word_") and s > 0.05],
             key=lambda x: -x[1],
         )
