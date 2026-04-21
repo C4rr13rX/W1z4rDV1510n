@@ -246,6 +246,49 @@ pub struct Dendrite {
     pub weight: f32,
 }
 
+// ── Cluster-portable cold-storage types ───────────────────────────────────────
+//
+// When a neuron is evicted to disk every synapse target/source is converted from
+// a node-local u32 ID to the corresponding label string.  This means the cold
+// file is fully self-describing: any node in the cluster can load it and wire it
+// into its own local pool regardless of how IDs were assigned there.
+
+/// One synapse as it appears in a cold (disk) neuron file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColdSynapse {
+    pub target_label: String,
+    pub weight:       f32,
+}
+
+/// One dendrite as it appears in a cold (disk) neuron file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColdDendrite {
+    pub source_label: String,
+    pub weight:       f32,
+}
+
+/// Complete cluster-portable neuron representation written to / read from disk.
+/// Contains no node-local IDs — only labels, weights, and timing metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColdNeuron {
+    pub label:            String,
+    pub activation:       f32,
+    pub bias:             f32,
+    pub excitatory:       Vec<ColdSynapse>,
+    pub inhibitory:       Vec<ColdSynapse>,
+    pub dendrites:        Vec<ColdDendrite>,
+    pub born_at:          u64,
+    pub use_count:        u64,
+    pub fatigue:          f32,
+    pub trace:            f32,
+    pub last_active_step: u64,
+    pub mean_activation:  f32,
+    pub prediction:       f32,
+    pub dopamine_tag:     f32,
+    pub symbol_id:        Option<String>,
+    pub influence_history: Vec<InfluenceRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neuron {
     pub id: u32,
@@ -629,32 +672,104 @@ impl NeuronPool {
         Some(base.join(shard).join(format!("n_{:06}.json", id)))
     }
 
-    /// Ensure neuron `id` is in the hot tier.  Reads from disk if cold,
-    /// applies lazy geometric decay, then replaces the Cold slot with Hot.
-    /// No-op if already hot. Does nothing if cold_dir is not configured.
+    /// Look up or create a neuron for `label` without triggering a recursive
+    /// `ensure_hot` cascade.  Used during synapse resolution when warming a
+    /// cold neuron: we only need the local ID, not the neuron to be hot yet.
+    fn get_or_create_no_ensure(&mut self, label: &str) -> u32 {
+        if let Some(&id) = self.label_to_id.get(label) {
+            return id;
+        }
+        let id = if let Some(id) = self.free.pop() {
+            let step = self.step;
+            let mut neuron = Neuron::new(id, Some(label.to_string()), step);
+            neuron.symbol_id = label.strip_prefix("id::").map(|s| s.to_string());
+            if matches!(self.neurons.get(id as usize), Some(NeuronSlot::Hot(_))) {
+                self.hot_count -= 1;
+            }
+            self.neurons[id as usize] = NeuronSlot::Hot(neuron);
+            self.hot_count += 1;
+            id
+        } else {
+            let id = self.neurons.len() as u32;
+            let mut neuron = Neuron::new(id, Some(label.to_string()), self.step);
+            neuron.symbol_id = label.strip_prefix("id::").map(|s| s.to_string());
+            self.neurons.push(NeuronSlot::Hot(neuron));
+            self.hot_count += 1;
+            id
+        };
+        self.label_to_id.insert(label.to_string(), id);
+        id
+    }
+
+    /// Ensure neuron `id` is in the hot tier.
+    ///
+    /// Reads the cold file (new `ColdNeuron` format or legacy `Neuron` format),
+    /// re-wires every synapse using the *local* label→ID mapping so the pool
+    /// is consistent regardless of which node originally wrote the file.
+    /// Applies lazy geometric decay for all steps spent cold, then promotes the
+    /// slot to Hot.
     fn ensure_hot(&mut self, id: u32) {
         if !matches!(self.neurons.get(id as usize), Some(NeuronSlot::Cold { .. })) {
             return;
         }
-
         let (frozen_step, label) = match self.neurons.get(id as usize) {
             Some(NeuronSlot::Cold { last_active_step, label }) => (*last_active_step, label.clone()),
             _ => return,
         };
 
-        // Try label-based path first; fall back to legacy shard path for pre-migration neurons.
+        // Try label-based path first; fall back to legacy shard path for old files.
         let path = self.cold_path_for_label(&label)
             .filter(|p| p.exists())
             .or_else(|| self.cold_path_legacy(id).filter(|p| p.exists()));
 
-        let mut neuron = if let Some(ref p) = path {
-            std::fs::read_to_string(p).ok()
-                .and_then(|s| serde_json::from_str::<Neuron>(&s).ok())
-                .unwrap_or_else(|| {
-                    let mut n = Neuron::new(id, Some(label.clone()), self.step);
-                    n.last_active_step = frozen_step;
-                    n
-                })
+        let raw_json: Option<String> = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+
+        let mut neuron = if let Some(ref json) = raw_json {
+            // Try new cluster-portable format first.
+            if let Ok(cold) = serde_json::from_str::<ColdNeuron>(json) {
+                // Resolve label-based synapses to this node's local IDs.
+                // get_or_create_no_ensure creates stub Hot neurons for any label
+                // that has not yet been seen locally — they will be trained on demand.
+                let excitatory: Vec<Synapse> = cold.excitatory.iter().map(|cs| {
+                    let target = self.get_or_create_no_ensure(&cs.target_label);
+                    Synapse { target, weight: cs.weight, inhibitory: false }
+                }).collect();
+                let inhibitory: Vec<Synapse> = cold.inhibitory.iter().map(|cs| {
+                    let target = self.get_or_create_no_ensure(&cs.target_label);
+                    Synapse { target, weight: cs.weight, inhibitory: true }
+                }).collect();
+                let dendrites: Vec<Dendrite> = cold.dendrites.iter().map(|cd| {
+                    let source = self.get_or_create_no_ensure(&cd.source_label);
+                    Dendrite { source, weight: cd.weight }
+                }).collect();
+
+                let mut n = Neuron::new(id, Some(cold.label), frozen_step);
+                n.activation       = cold.activation;
+                n.bias             = cold.bias;
+                n.excitatory       = excitatory;
+                n.inhibitory       = inhibitory;
+                n.dendrites        = dendrites;
+                n.born_at          = cold.born_at;
+                n.use_count        = cold.use_count;
+                n.fatigue          = cold.fatigue;
+                n.trace            = cold.trace;
+                n.last_active_step = cold.last_active_step;
+                n.mean_activation  = cold.mean_activation;
+                n.prediction       = cold.prediction;
+                n.dopamine_tag     = cold.dopamine_tag;
+                n.symbol_id        = cold.symbol_id;
+                n.influence_history = cold.influence_history;
+                n
+            } else if let Ok(mut old) = serde_json::from_str::<Neuron>(json) {
+                // Legacy format — synapse targets are already local IDs for this node.
+                old.id             = id;
+                old.last_active_step = frozen_step.max(old.last_active_step);
+                old
+            } else {
+                let mut n = Neuron::new(id, Some(label.clone()), self.step);
+                n.last_active_step = frozen_step;
+                n
+            }
         } else {
             let mut n = Neuron::new(id, Some(label.clone()), self.step);
             n.last_active_step = frozen_step;
@@ -675,19 +790,57 @@ impl NeuronPool {
         self.hot_count += 1;
     }
 
-    /// Write a neuron to its cold file and replace the slot with Cold.
-    /// Files are stored under `<cold_dir>/<prefix>/<suffix>.json` derived from the label.
+    /// Evict a neuron to disk in `ColdNeuron` (cluster-portable) format.
+    ///
+    /// Every synapse target/source u32 ID is resolved to its label string before
+    /// writing so any node in the cluster can load the file and re-wire it into
+    /// its own pool.  Synapses whose targets have no label are dropped (they
+    /// reference internal-only neurons that don't need cross-node portability).
     fn evict_to_cold(&mut self, id: u32) {
         let neuron = match self.neurons.get(id as usize) {
             Some(NeuronSlot::Hot(n)) => n.clone(),
             _ => return,
         };
         let label = neuron.label.clone().unwrap_or_else(|| format!("unlabeled:{}", id));
+
+        // Resolve synapse targets to labels for portable storage.
+        let excitatory: Vec<ColdSynapse> = neuron.excitatory.iter().filter_map(|s| {
+            let target_label = self.label_for(s.target)?;
+            Some(ColdSynapse { target_label, weight: s.weight })
+        }).collect();
+        let inhibitory: Vec<ColdSynapse> = neuron.inhibitory.iter().filter_map(|s| {
+            let target_label = self.label_for(s.target)?;
+            Some(ColdSynapse { target_label, weight: s.weight })
+        }).collect();
+        let dendrites: Vec<ColdDendrite> = neuron.dendrites.iter().filter_map(|d| {
+            let source_label = self.label_for(d.source)?;
+            Some(ColdDendrite { source_label, weight: d.weight })
+        }).collect();
+
+        let cold = ColdNeuron {
+            label:            label.clone(),
+            activation:       neuron.activation,
+            bias:             neuron.bias,
+            excitatory,
+            inhibitory,
+            dendrites,
+            born_at:          neuron.born_at,
+            use_count:        neuron.use_count,
+            fatigue:          neuron.fatigue,
+            trace:            neuron.trace,
+            last_active_step: neuron.last_active_step,
+            mean_activation:  neuron.mean_activation,
+            prediction:       neuron.prediction,
+            dopamine_tag:     neuron.dopamine_tag,
+            symbol_id:        neuron.symbol_id.clone(),
+            influence_history: neuron.influence_history.clone(),
+        };
+
         if let Some(path) = self.cold_path_for_label(&label) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            if let Ok(json) = serde_json::to_string(&neuron) {
+            if let Ok(json) = serde_json::to_string(&cold) {
                 let tmp = path.with_extension("tmp");
                 if std::fs::write(&tmp, &json).is_ok() {
                     let _ = std::fs::rename(&tmp, &path);
@@ -739,98 +892,204 @@ impl NeuronPool {
         }
     }
 
-    /// Scan the cold directory index and mark all evicted neurons as Cold slots in the slot array.
-    /// Called on startup when a checkpoint is loaded alongside an existing cold directory.
+    /// Restore the cold index on startup.
     ///
-    /// Supports two meta.json formats:
-    ///   New: `{ "txt:word_hello": [42, 1234567], ... }`  (label → [id, step])
-    ///   Old: `{ "42": 1234567, ... }`                    (id → step)
+    /// Three code paths in priority order:
     ///
-    /// Old-format files are migrated on first load: each shard file is read once to recover
-    /// the label, then the new format is saved so subsequent boots are fast.
+    /// 1. **`cold_index.json`** — new cluster-portable format: `{ label: step }`.
+    ///    No node-local IDs.  Local IDs are assigned fresh via sequential allocation
+    ///    after the hot checkpoint has already been loaded, so every cold label gets
+    ///    the next available slot.  Any node can use this file.
+    ///
+    /// 2. **`meta.json` migration** — previous intermediate format that still stored
+    ///    `{ label: [id, step] }` or the original `{ id: step }` shard index.
+    ///    Migrated to `cold_index.json` on first load; deleted afterward.
+    ///
+    /// 3. **Directory scan** — cold_index.json AND meta.json are both missing.
+    ///    Walks the label-based directory tree, reads `last_active_step` from each
+    ///    `.json` file, and builds the index from scratch.  This is the bootstrap
+    ///    path for a node that is joining a cluster and inheriting a shared cold pool
+    ///    for the first time.
     pub fn restore_cold_index(&mut self, cold_dir: &PathBuf) {
-        let meta_path = cold_dir.join("meta.json");
-        let json = match std::fs::read_to_string(&meta_path) {
-            Ok(j) => j,
-            Err(_) => return,
-        };
-        let value: serde_json::Value = match serde_json::from_str(&json) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let obj = match value.as_object() {
-            Some(o) => o,
-            None => return,
-        };
+        let index_path = cold_dir.join("cold_index.json");
+        let meta_path  = cold_dir.join("meta.json");
 
-        // Detect format by inspecting the first key.
-        let is_old_format = obj.keys().next()
-            .map(|k| k.chars().all(|c| c.is_ascii_digit()))
-            .unwrap_or(false);
-
-        if is_old_format {
-            // Old format: key = numeric id string, value = step u64.
-            // One-time migration: read each shard file to recover the label.
-            let entries: Vec<(u32, u64)> = obj.iter().filter_map(|(k, v)| {
-                Some((k.parse::<u32>().ok()?, v.as_u64()?))
-            }).collect();
-            for (id, last_active_step) in entries {
-                let idx = id as usize;
-                while self.neurons.len() <= idx { self.neurons.push(NeuronSlot::Free); }
-                if matches!(self.neurons.get(idx), Some(NeuronSlot::Hot(_))) { continue; }
-                let label = self.read_cold_label_legacy(id)
-                    .unwrap_or_else(|| format!("unlabeled:{}", id));
-                self.neurons[idx] = NeuronSlot::Cold { last_active_step, label: label.clone() };
-                self.label_to_id.entry(label).or_insert(id);
-            }
-            // Persist new format immediately so future boots skip the migration.
-            self.save_cold_index();
-        } else {
-            // New format: key = label string, value = [id, step].
-            for (label, val) in obj {
-                let (id, last_active_step) = match val.as_array() {
-                    Some(arr) => match (arr.first().and_then(|v| v.as_u64()),
-                                        arr.get(1).and_then(|v| v.as_u64())) {
-                        (Some(id), Some(step)) => (id as u32, step),
-                        _ => continue,
-                    },
-                    None => continue,
-                };
-                let idx = id as usize;
-                while self.neurons.len() <= idx { self.neurons.push(NeuronSlot::Free); }
-                if !matches!(self.neurons.get(idx), Some(NeuronSlot::Hot(_))) {
-                    self.neurons[idx] = NeuronSlot::Cold {
-                        last_active_step,
-                        label: label.clone(),
-                    };
-                    self.label_to_id.entry(label.clone()).or_insert(id);
+        // ── Path 1: fast path — read cold_index.json ──────────────────────────
+        if let Ok(json) = std::fs::read_to_string(&index_path) {
+            if let Ok(index) = serde_json::from_str::<HashMap<String, u64>>(&json) {
+                // Only take this path if the index is non-empty.  An empty file
+                // means a previous migration failed mid-write — fall through to scan.
+                if !index.is_empty() {
+                    self.apply_cold_index(index);
+                    self.hot_count = self.neurons.iter().filter(|s| matches!(s, NeuronSlot::Hot(_))).count();
+                    return;
                 }
             }
         }
 
+        // ── Path 2: migration — read meta.json (old formats) ──────────────────
+        if let Ok(json) = std::fs::read_to_string(&meta_path) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(obj) = value.as_object() {
+                    let is_id_keyed = obj.keys().next()
+                        .map(|k| k.chars().all(|c| c.is_ascii_digit()))
+                        .unwrap_or(false);
+
+                    let mut index: HashMap<String, u64> = HashMap::new();
+
+                    if is_id_keyed {
+                        // Oldest format: { "42": 1234567 } — id → step.
+                        // Must read each shard file once to recover the label.
+                        for (k, v) in obj {
+                            if let (Ok(id), Some(step)) = (k.parse::<u32>(), v.as_u64()) {
+                                let label = self.read_cold_label_legacy(id)
+                                    .unwrap_or_else(|| format!("unlabeled:{}", id));
+                                index.insert(label, step);
+                            }
+                        }
+                    } else {
+                        // Intermediate format: { "txt:word_hello": [id, step] }.
+                        for (label, val) in obj {
+                            let step = val.as_array()
+                                .and_then(|a| a.get(1))
+                                .and_then(|v| v.as_u64())
+                                .or_else(|| val.as_u64());
+                            if let Some(step) = step {
+                                index.insert(label.clone(), step);
+                            }
+                        }
+                    }
+
+                    self.apply_cold_index(index);
+                    self.hot_count = self.neurons.iter().filter(|s| matches!(s, NeuronSlot::Hot(_))).count();
+
+                    // Persist the canonical format and clean up the old file.
+                    self.save_cold_index();
+                    let _ = std::fs::remove_file(&meta_path);
+                    return;
+                }
+            }
+        }
+
+        // ── Path 3: directory scan — new node or missing index ─────────────────
+        let index = self.scan_cold_dir_for_index(cold_dir);
+        if !index.is_empty() {
+            self.apply_cold_index(index);
+            self.save_cold_index(); // cache the scan result
+        }
         self.hot_count = self.neurons.iter().filter(|s| matches!(s, NeuronSlot::Hot(_))).count();
     }
 
-    /// Persist cold-tier index as `{ label: [id, step] }` so it can be restored on next boot.
-    fn save_cold_index(&self) {
-        let cd = match &self.cold_dir { Some(d) => d, None => return };
-        let mut map = serde_json::Map::new();
-        for (idx, slot) in self.neurons.iter().enumerate() {
-            if let NeuronSlot::Cold { last_active_step, label } = slot {
-                map.insert(label.clone(), serde_json::json!([idx as u32, last_active_step]));
-            }
-        }
-        let meta_path = cd.join("meta.json");
-        if let Ok(json) = serde_json::to_string(&map) {
-            let tmp = meta_path.with_extension("tmp");
-            let _ = std::fs::create_dir_all(cd);
-            if std::fs::write(&tmp, &json).is_ok() {
-                let _ = std::fs::rename(&tmp, &meta_path);
+    /// Apply a `{ label → last_active_step }` index to populate Cold slots.
+    ///
+    /// The hot checkpoint already contains `label_to_id` for every label ever
+    /// seen (including cold ones), so we must look up the existing ID and grow
+    /// the neurons vector to accommodate it — not allocate a new ID blindly.
+    /// Only skip if the slot is already Hot (the checkpoint loaded it hot).
+    fn apply_cold_index(&mut self, index: HashMap<String, u64>) {
+        for (label, last_active_step) in index {
+            if let Some(&id) = self.label_to_id.get(&label) {
+                // Label is known from the checkpoint — ensure its slot exists.
+                let idx = id as usize;
+                while self.neurons.len() <= idx {
+                    self.neurons.push(NeuronSlot::Free);
+                }
+                // Hot slot wins; only mark as Cold if the slot is Free.
+                if matches!(self.neurons.get(idx), Some(NeuronSlot::Free)) {
+                    self.neurons[idx] = NeuronSlot::Cold { last_active_step, label };
+                }
+            } else {
+                // Label not in checkpoint — came from another node's shared pool.
+                let id = self.neurons.len() as u32;
+                self.neurons.push(NeuronSlot::Cold { last_active_step, label: label.clone() });
+                self.label_to_id.insert(label, id);
             }
         }
     }
 
-    /// Read the label from an old-format shard file (migration path only).
+    /// Walk the entire cold directory tree and collect `{ label → last_active_step }`.
+    ///
+    /// Handles two layouts:
+    ///   • Label-based: `<prefix>/<suffix>.json` → label = `<prefix>:<suffix>`
+    ///   • Legacy shard: `shard_XXXX/n_XXXXXX.json` → label read from `"label"` field
+    ///
+    /// This is the last-resort bootstrap path: a node joining a cluster and
+    /// inheriting a shared cold pool, or recovering from a failed migration.
+    fn scan_cold_dir_for_index(&self, cold_dir: &PathBuf) -> HashMap<String, u64> {
+        let mut index = HashMap::new();
+        let prefix_dirs = match std::fs::read_dir(cold_dir) {
+            Ok(d) => d,
+            Err(_) => return index,
+        };
+        for prefix_entry in prefix_dirs.flatten() {
+            let prefix_path = prefix_entry.path();
+            if !prefix_path.is_dir() { continue; }
+            let prefix_name = prefix_entry.file_name().to_string_lossy().to_string();
+
+            let files = match std::fs::read_dir(&prefix_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            if prefix_name.starts_with("shard_") {
+                // Legacy format: read "label" and "last_active_step" from each file.
+                for file_entry in files.flatten() {
+                    let file_path = file_entry.path();
+                    if file_path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+                    if let Some(s) = std::fs::read_to_string(&file_path).ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    {
+                        let label = s.get("label").and_then(|l| l.as_str()).map(|s| s.to_string());
+                        let step  = s.get("last_active_step").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if let Some(label) = label {
+                            index.insert(label, step);
+                        }
+                    }
+                }
+            } else {
+                // Label-based format: filename IS the label suffix.
+                for file_entry in files.flatten() {
+                    let file_path = file_entry.path();
+                    if file_path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+                    let suffix = file_path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let label = if prefix_name == "misc" {
+                        suffix
+                    } else {
+                        format!("{}:{}", prefix_name, suffix)
+                    };
+                    let step = std::fs::read_to_string(&file_path).ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                        .and_then(|v| v.get("last_active_step")?.as_u64())
+                        .unwrap_or(0);
+                    index.insert(label, step);
+                }
+            }
+        }
+        index
+    }
+
+    /// Persist `{ label → last_active_step }` to `cold_index.json`.
+    /// No node-local IDs — any node in the cluster can load this file.
+    fn save_cold_index(&self) {
+        let cd = match &self.cold_dir { Some(d) => d, None => return };
+        let index: HashMap<&str, u64> = self.neurons.iter().filter_map(|slot| {
+            if let NeuronSlot::Cold { last_active_step, label } = slot {
+                Some((label.as_str(), *last_active_step))
+            } else { None }
+        }).collect();
+        let index_path = cd.join("cold_index.json");
+        if let Ok(json) = serde_json::to_string(&index) {
+            let tmp = index_path.with_extension("tmp");
+            let _ = std::fs::create_dir_all(cd);
+            if std::fs::write(&tmp, &json).is_ok() {
+                let _ = std::fs::rename(&tmp, &index_path);
+            }
+        }
+    }
+
+    /// Read the label field from a legacy shard-format neuron file.  Migration only.
     fn read_cold_label_legacy(&self, id: u32) -> Option<String> {
         let path = self.cold_path_legacy(id)?;
         let json = std::fs::read_to_string(&path).ok()?;
