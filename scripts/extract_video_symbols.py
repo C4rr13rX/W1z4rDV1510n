@@ -6,15 +6,15 @@ Converts live video frames into EnvironmentSnapshot symbols and streams them
 into the neural fabric at configurable FPS.
 
 Each detected object becomes a symbol with:
-  id          — persistent track ID across frames (e.g. cow_3, person_7)
-  position    — normalised x, y (0–1 frame coords), z (monocular depth estimate)
-  velocity    — dx, dy per second in normalised frame coords
-  properties  — label, scale_m, depth_class, track_id, confidence
+  id          -- persistent track ID across frames (e.g. cow_3, person_7)
+  position    -- normalised x, y (0-1 frame coords), z (monocular depth estimate)
+  velocity    -- dx, dy per second in normalised frame coords
+  properties  -- label, scale_m, depth_class, track_id, confidence
 
 Detection backends (auto-selected by availability):
-  yolo  — YOLOv8n / YOLO11n real-time detection + ByteTrack
+  yolo  -- YOLOv8n / YOLO11n real-time detection + ByteTrack
             pip install ultralytics
-  flow  — OpenCV MOG2 background subtraction + centroid tracking
+  flow  -- OpenCV MOG2 background subtraction + centroid tracking
             works with any OpenCV install, no ML dependencies
 
 Usage:
@@ -33,20 +33,20 @@ import urllib.request, urllib.error
 import numpy as np
 import cv2
 
-# ── Optional: ultralytics for YOLO detection + tracking ──────────────────────
+# -- Optional: ultralytics for YOLO detection + tracking ----------------------
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
 except ImportError:
     YOLO_AVAILABLE = False
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 FPS           = 10
 BOUNDS        = {'x': 1.0, 'y': 1.0, 'z': 1.0}
 MIN_AREA_FRAC = 0.0003   # ignore detections < 0.03% of frame area
 MAX_SYMBOLS   = 60       # cap per frame
 
-# COCO / YOLO class name → neural depth layer
+# COCO / YOLO class name -> neural depth layer
 DEPTH_CLASS = {
     'person':    'd2_subject',  'rider':    'd2_subject',
     'cow':       'd2_subject',  'horse':    'd2_subject',
@@ -93,7 +93,7 @@ CLASS_COLORS = {
 }
 
 
-# ── Centroid tracker (used by FlowBackend) ────────────────────────────────────
+# -- Centroid tracker (used by FlowBackend) ------------------------------------
 class CentroidTracker:
     """Greedy nearest-neighbour tracker. Assigns persistent integer IDs."""
 
@@ -105,7 +105,7 @@ class CentroidTracker:
         self.max_dist   = max_dist
 
     def update(self, rects):
-        """rects: list of (cx, cy, w, h, label)  — all normalised 0–1
+        """rects: list of (cx, cy, w, h, label)  -- all normalised 0-1
         Returns: list of (id, cx, cy, w, h, label)"""
 
         # Expire old tracks
@@ -165,7 +165,7 @@ class CentroidTracker:
         return result
 
 
-# ── YOLO backend ──────────────────────────────────────────────────────────────
+# -- YOLO backend --------------------------------------------------------------
 class YOLOBackend:
     """YOLOv8/11 with ByteTrack for persistent IDs across frames."""
 
@@ -173,10 +173,10 @@ class YOLOBackend:
         print(f'  Loading {model_name} (downloads ~6 MB on first use)...', flush=True)
         self.model = YOLO(model_name)
         self.names = self.model.names   # {int: str}
-        print(f'  YOLO ready — {len(self.names)} classes', flush=True)
+        print(f'  YOLO ready -- {len(self.names)} classes', flush=True)
 
     def detect(self, frame) -> list:
-        """Returns list of dicts: id, label, cx, cy, w, h, conf  (0–1 normalised)."""
+        """Returns list of dicts: id, label, cx, cy, w, h, conf  (0-1 normalised)."""
         H, W = frame.shape[:2]
         frame_area = H * W
 
@@ -209,7 +209,7 @@ class YOLOBackend:
         return dets
 
 
-# ── Flow backend ──────────────────────────────────────────────────────────────
+# -- Flow backend --------------------------------------------------------------
 class FlowBackend:
     """
     No-ML fallback: MOG2 background subtraction finds moving regions.
@@ -267,10 +267,10 @@ class FlowBackend:
                 for oid, cx, cy, w, h, lbl in tracked]
 
 
-# ── Depth estimation (monocular) ──────────────────────────────────────────────
+# -- Depth estimation (monocular) ----------------------------------------------
 def estimate_depth(cx: float, cy: float, w: float, h: float) -> float:
     """
-    Combine size cue (larger bbox → closer) and vertical cue (lower in frame → closer).
+    Combine size cue (larger bbox -> closer) and vertical cue (lower in frame -> closer).
     Returns z in [0.02, 0.95].
     """
     area = w * h
@@ -283,16 +283,16 @@ def estimate_depth(cx: float, cy: float, w: float, h: float) -> float:
     return round(max(0.02, min(0.95, z)), 4)
 
 
-# ── Scene anchors (static background context symbols) ─────────────────────────
+# -- Scene anchors (static background context symbols) -------------------------
 def scene_anchors(context: str, scene_width_m: float) -> list:
     """
     Always-present symbols for sky, ground, and midground so the neural fabric
     builds a stable spatial scaffold even during static or slow scenes.
     """
     anchors = [
-        # Sky strip — top 30 % of frame
+        # Sky strip -- top 30 % of frame
         {'id': 'sky_0',    'label': 'sky_region',    'cx': 0.50, 'cy': 0.15, 'w': 1.0, 'h': 0.30, 'conf': 1.0},
-        # Ground strip — bottom 20 %
+        # Ground strip -- bottom 20 %
         {'id': 'ground_0', 'label': 'ground_region', 'cx': 0.50, 'cy': 0.90, 'w': 1.0, 'h': 0.20, 'conf': 1.0},
         # Midground band
         {'id': 'mid_0',    'label': 'background',    'cx': 0.50, 'cy': 0.55, 'w': 1.0, 'h': 0.40, 'conf': 1.0},
@@ -304,7 +304,7 @@ def scene_anchors(context: str, scene_width_m: float) -> list:
     return anchors
 
 
-# ── EnvironmentSnapshot builder ───────────────────────────────────────────────
+# -- EnvironmentSnapshot builder -----------------------------------------------
 def build_snapshot(detections: list, prev_pos: dict, frame_dt: float,
                    t: float, context: str, scene_width_m: float) -> dict:
     symbols = []
@@ -325,7 +325,7 @@ def build_snapshot(detections: list, prev_pos: dict, frame_dt: float,
         else:
             vx = vy = 0.0
 
-        # Scale: prefer known real-world value, fall back to bbox × scene width
+        # Scale: prefer known real-world value, fall back to bbox x scene width
         known = KNOWN_SCALE_M.get(label)
         scale_m = round(known if known else max(0.01, w * scene_width_m), 4)
 
@@ -360,7 +360,7 @@ def build_snapshot(detections: list, prev_pos: dict, frame_dt: float,
     }
 
 
-# ── Preview renderer ──────────────────────────────────────────────────────────
+# -- Preview renderer ----------------------------------------------------------
 def draw_preview(frame, detections: list, host: str, port: int,
                  fps: int, frame_no: int, last_labels):
     H, W = frame.shape[:2]
@@ -393,7 +393,7 @@ def draw_preview(frame, detections: list, host: str, port: int,
     return ann
 
 
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
+# -- HTTP helpers --------------------------------------------------------------
 def post(host: str, port: int, path: str, body: dict) -> dict:
     url  = f'http://{host}:{port}{path}'
     data = json.dumps(body).encode()
@@ -418,7 +418,7 @@ def check_connection(host: str, port: int) -> bool:
         return False
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(
         description='Stream live video frames as EnvironmentSnapshot symbols into the neural fabric.')
@@ -444,7 +444,7 @@ def main():
                     help='Force a single label for all flow-backend detections')
     args = ap.parse_args()
 
-    # ── Open video source ────────────────────────────────────────────────────
+    # -- Open video source ----------------------------------------------------
     src = int(args.source) if args.source.isdigit() else args.source
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
@@ -453,7 +453,7 @@ def main():
     cap_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     print(f'Video source: {args.source}  (native {cap_fps:.1f} fps)', flush=True)
 
-    # ── Select backend ───────────────────────────────────────────────────────
+    # -- Select backend -------------------------------------------------------
     backend_name = args.backend
     if backend_name == 'auto':
         backend_name = 'yolo' if YOLO_AVAILABLE else 'flow'
@@ -461,7 +461,7 @@ def main():
 
     if backend_name == 'yolo':
         if not YOLO_AVAILABLE:
-            print('ultralytics not found — falling back to flow backend.', flush=True)
+            print('ultralytics not found -- falling back to flow backend.', flush=True)
             print('  To enable YOLO:  pip install ultralytics', flush=True)
             backend_name = 'flow'
         else:
@@ -471,17 +471,17 @@ def main():
         lbl = args.label or 'motion_region'
         detector = FlowBackend(default_label=lbl)
 
-    # ── Node connection ──────────────────────────────────────────────────────
+    # -- Node connection ------------------------------------------------------
     print(f'Connecting to {args.host}:{args.port} ...', flush=True)
     if not check_connection(args.host, args.port):
-        print('Node not reachable — start the node first.', flush=True)
+        print('Node not reachable -- start the node first.', flush=True)
         sys.exit(1)
     print('Connected. Starting video symbol extraction.', flush=True)
     print(f'  context={args.context}  scene_width={args.scene_width_m}m  '
           f'target_fps={args.fps}  backend={backend_name}', flush=True)
     print('Press Q in the preview window (or Ctrl+C) to stop.', flush=True)
 
-    # ── Rate-control: skip video frames to hit target fps ───────────────────
+    # -- Rate-control: skip video frames to hit target fps -------------------
     interval   = 1.0 / args.fps
     skip_every = max(1, round(cap_fps / args.fps))
 
@@ -507,13 +507,13 @@ def main():
             if frame_count % skip_every != 0:
                 continue
 
-            # ── Detect ──────────────────────────────────────────────────────
+            # -- Detect ------------------------------------------------------
             dets = detector.detect(frame)
 
             # Merge with static scene anchors
             all_dets = dets + ([] if args.no_anchors else anchors)
 
-            # ── Build and send snapshot ──────────────────────────────────────
+            # -- Build and send snapshot --------------------------------------
             snap   = build_snapshot(all_dets, prev_pos, interval, t,
                                     args.context, args.scene_width_m)
             result = post(args.host, args.port, '/neuro/train', {'snapshot': snap})
@@ -527,23 +527,23 @@ def main():
             last_labels  = result.get('label_count', last_labels)
             t           += interval
 
-            # ── Progress log every 5 s ───────────────────────────────────────
+            # -- Progress log every 5 s ---------------------------------------
             if send_count % (args.fps * 5) == 0:
                 n_real = sum(1 for d in dets
                              if d['label'] not in ('sky_region', 'ground_region', 'background'))
                 print(f'  frame {send_count:06d}  t={t:.1f}s  '
                       f'objects={n_real}  labels={last_labels}', flush=True)
 
-            # ── Preview ──────────────────────────────────────────────────────
+            # -- Preview ------------------------------------------------------
             if not args.no_preview:
                 ann = draw_preview(frame, all_dets, args.host, args.port,
                                    args.fps, send_count, last_labels)
-                cv2.imshow('W1z4rD — Video Symbol Extractor', ann)
+                cv2.imshow('W1z4rD -- Video Symbol Extractor', ann)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print('User quit.', flush=True)
                     break
 
-            # ── Rate control ─────────────────────────────────────────────────
+            # -- Rate control -------------------------------------------------
             elapsed = time.perf_counter() - t0
             wait    = interval - elapsed - drift
             if wait > 0:

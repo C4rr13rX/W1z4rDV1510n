@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-build_foundational_seeds.py — Train high-priority factual Q&A seeds.
+build_foundational_seeds.py -- Train high-priority factual Q&A seeds.
 
-Full-architecture training: every seed pair goes through ALL endpoints:
-  /media/train_sequence  — Q→A temporal STDP sequence
-  /qa/ingest             — Q&A store + internal STDP bridge
-  /neuro/record_episode  — episodic store (surprise=0, correct answer)
-  /equations/ingest      — math/science text into equation matrix
-  /knowledge/ingest      — structured knowledge document per fact group
+Full-architecture training: every seed pair goes through ALL neural pool endpoints:
+  /media/train           -- combined text Hebbian activation
+  /media/train_sequence  -- Q->A temporal STDP sequence
+  /neuro/record_episode  -- episodic store (surprise=0, correct answer)
+  /equations/ingest      -- math/science text into equation matrix
+  /knowledge/ingest      -- structured knowledge document per fact group
 
 Usage:
     python scripts/build_foundational_seeds.py --node localhost:8090 [--repeats 15]
@@ -34,7 +34,7 @@ DEFAULT_REPEATS = 15
 BATCH_SIZE      = 50
 
 # ---------------------------------------------------------------------------
-# Seed Q&A pairs — vocabulary chosen to match probe requirements.
+# Seed Q&A pairs -- vocabulary chosen to match probe requirements.
 # Grouped by topic so knowledge/ingest gets a well-structured document.
 # ---------------------------------------------------------------------------
 
@@ -48,7 +48,7 @@ SEED_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
         ("What is water made of?",
          "Water is made of hydrogen and oxygen atoms bonded together as H2O."),
         ("What are the chemical components of water?",
-         "Water consists of two hydrogen atoms and one oxygen atom — its chemical formula is H2O."),
+         "Water consists of two hydrogen atoms and one oxygen atom -- its chemical formula is H2O."),
     ]),
 
     ("Speed of Light", "special_relativity", [
@@ -88,7 +88,7 @@ SEED_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
 
     ("Pi and Geometry", "information_theory", [
         ("What is pi?",
-         "Pi (π) is the mathematical ratio of a circle's circumference to its diameter. "
+         "Pi (pi) is the mathematical ratio of a circle's circumference to its diameter. "
          "Its value is approximately 3.14159. Pi is used to calculate the area and "
          "circumference of circles."),
         ("What is the value of pi?",
@@ -135,7 +135,7 @@ SEED_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
          "plasma held together by gravity, powered by nuclear fusion in its core. "
          "It provides light and energy to Earth."),
         ("What kind of object is the sun?",
-         "The sun is a star — a giant sphere of hot plasma powered by nuclear fusion. "
+         "The sun is a star -- a giant sphere of hot plasma powered by nuclear fusion. "
          "It emits light, heat, and solar energy that drives life on Earth."),
     ]),
 
@@ -145,7 +145,7 @@ SEED_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
          "On Earth, gravity gives weight to objects and causes them to fall toward the ground. "
          "The gravitational force between two masses is described by Newton's law."),
         ("What causes gravity?",
-         "Gravity is caused by mass — every object with mass exerts a gravitational pull "
+         "Gravity is caused by mass -- every object with mass exerts a gravitational pull "
          "on other objects. The greater the mass and the closer the distance, the stronger "
          "the gravitational attraction."),
     ]),
@@ -176,7 +176,7 @@ async def train_seeds(node: str, repeats: int) -> None:
             sys.exit(f"Node not reachable at {node}: {e}")
 
         total_pairs = sum(len(pairs) for _, _, pairs in SEED_GROUPS)
-        print(f"Foundational seeds — {total_pairs} pairs in {len(SEED_GROUPS)} groups")
+        print(f"Foundational seeds -- {total_pairs} pairs in {len(SEED_GROUPS)} groups")
         print(f"Repeats: {repeats}")
         print(f"Endpoints: train_sequence | qa/ingest | record_episode | equations/ingest | knowledge/ingest\n")
 
@@ -197,20 +197,20 @@ async def train_seeds(node: str, repeats: int) -> None:
                     for q, a in pairs
                 ]
 
-                # Q&A ingest + Q→A temporal sequence + episodic learning
+                # Q&A ingest + Q->A temporal sequence + episodic learning
                 n = await nc.ingest_qa_full(
                     candidates, pool="knowledge", record_episodes=True)
                 stats["qa"] += n
                 stats["seq"] += len(candidates)
                 stats["ep"] += len(candidates)
 
-                # Equation matrix — for science-heavy groups
+                # Equation matrix -- for science-heavy groups
                 if discipline:
                     combined_text = " ".join(a for _, a in pairs)
                     n_eq = await nc.ingest_equations(combined_text, discipline=discipline)
                     stats["eq"] += n_eq
 
-                # Knowledge document — structured fact group
+                # Knowledge document -- structured fact group
                 if rep == 1:  # only need to ingest once
                     body = "\n\n".join(f"Q: {q}\nA: {a}" for q, a in pairs)
                     ok = await nc.ingest_knowledge(

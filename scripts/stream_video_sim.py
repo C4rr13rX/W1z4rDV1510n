@@ -2,7 +2,7 @@
 """
 Video Scene Simulator
 =====================
-Simulates what a real video-to-neural pipeline would produce — sends
+Simulates what a real video-to-neural pipeline would produce -- sends
 EnvironmentSnapshot frames as if frames of video are being decoded and
 the detected regions are being forwarded to the neural fabric.
 
@@ -15,7 +15,7 @@ The pipeline is identical to what a real video stream would use:
   -> POST /neuro/train
 
 After training, GET /neuro/stream returns centroid positions that reconstruct
-the spatial layout — positions ARE learned from the stream, not echoed.
+the spatial layout -- positions ARE learned from the stream, not echoed.
 The world_viewer.html reads that stream and builds the 3D world from it.
 
 Usage:
@@ -30,12 +30,12 @@ DT       = 1.0 / FPS
 BOUNDS   = {'x': 1.0, 'y': 1.0, 'z': 0.30}   # normalised scene volume (z = depth)
 
 
-# ── Scene definitions ─────────────────────────────────────────────────────────
+# -- Scene definitions ---------------------------------------------------------
 # Each entry: (id, label, x0, y0, z0, diam_m, mass, mobile, behaviour)
 # behaviour: string key used in step_physics
 
 FIELD_SCENE = [
-    # Cow body — large, walks in a slow arc
+    # Cow body -- large, walks in a slow arc
     ('cow_body',    'cow_body',           0.50, 0.60, 0.18, 2.0,   10.0, True,  'cow_walk'),
     ('cow_head',    'cow_head',           0.50, 0.60, 0.22, 0.5,    8.0, True,  'cow_head'),
     ('cow_tail',    'cow_tail',           0.50, 0.60, 0.14, 0.1,    6.0, True,  'cow_tail'),
@@ -45,7 +45,7 @@ FIELD_SCENE = [
     ('cow_leg_rr',  'cow_leg',            0.50, 0.60, 0.06, 0.08,   5.0, True,  'leg_rr'),
     ('cow_eye_l',   'cow_eye',            0.50, 0.60, 0.24, 0.04,   4.0, True,  'eye'),
     ('cow_eye_r',   'cow_eye',            0.50, 0.60, 0.24, 0.04,   4.0, True,  'eye'),
-    # Grass patches — many, stationary with subtle wind sway
+    # Grass patches -- many, stationary with subtle wind sway
     ('grass_0',     'grass',              0.10, 0.80, 0.02, 0.3,   20.0, True,  'grass'),
     ('grass_1',     'grass',              0.22, 0.82, 0.02, 0.25,  20.0, True,  'grass'),
     ('grass_2',     'grass',              0.34, 0.78, 0.02, 0.28,  20.0, True,  'grass'),
@@ -56,7 +56,7 @@ FIELD_SCENE = [
     ('grass_7',     'grass',              0.15, 0.92, 0.02, 0.24,  20.0, True,  'grass'),
     ('grass_8',     'grass',              0.42, 0.90, 0.02, 0.31,  20.0, True,  'grass'),
     ('grass_9',     'grass',              0.70, 0.88, 0.02, 0.25,  20.0, True,  'grass'),
-    # Trees — tall, anchored, slight sway
+    # Trees -- tall, anchored, slight sway
     ('tree_0',      'tree',               0.08, 0.40, 0.25, 0.8,   30.0, True,  'tree'),
     ('tree_1',      'tree',               0.88, 0.35, 0.28, 0.9,   30.0, True,  'tree'),
     ('tree_2',      'tree',               0.50, 0.15, 0.30, 0.7,   30.0, True,  'tree'),
@@ -88,7 +88,7 @@ def depth_class(label):
     return 'd2_subject'
 
 
-# ── Physics ───────────────────────────────────────────────────────────────────
+# -- Physics -------------------------------------------------------------------
 def make_objects(scene_spec):
     objs = []
     for sid, label, x, y, z, diam_m, mass, mobile, beh in scene_spec:
@@ -175,7 +175,7 @@ def step_physics(objs, t, dt=DT):
             o['z'] = 0.24
 
         elif beh == 'grass':
-            # Barely moves — wind sway in z
+            # Barely moves -- wind sway in z
             seed = sum(ord(c) for c in o['id'])
             o['z'] = 0.02 + math.sin(t * 0.8 + seed * 0.1) * 0.003
             o['x'] = o['x'] + math.sin(t * 1.1 + seed * 0.2) * 0.0003
@@ -244,7 +244,7 @@ def build_snapshot(objs, t, scene_name='field'):
     }
 
 
-# ── HTTP ──────────────────────────────────────────────────────────────────────
+# -- HTTP ----------------------------------------------------------------------
 def post(host, port, path, body):
     url  = f'http://{host}:{port}{path}'
     data = json.dumps(body).encode()
@@ -268,7 +268,7 @@ def check_connection(host, port):
         return False
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 SCENES = {'field': FIELD_SCENE}
 
 def main():

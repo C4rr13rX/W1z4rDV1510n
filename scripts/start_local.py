@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-start_local.py — Start the full W1z4rD chess training stack from any shell.
+start_local.py -- Start the full W1z4rD chess training stack from any shell.
 
 Works from Git Bash, PowerShell, or cmd.exe without path-conversion issues.
 Equivalent to start_chess_local.bat but uses Python subprocess so the /MIN
@@ -120,7 +120,7 @@ def main() -> None:
 
     log("\n[W1Z4RD] Starting local chess training stack...\n")
 
-    # ── psutil ───────────────────────────────────────────────────────────────
+    # -- psutil ---------------------------------------------------------------
     try:
         import psutil  # noqa: F401
         log("[OK] psutil available")
@@ -129,19 +129,19 @@ def main() -> None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "psutil", "--quiet"])
         log("[OK] psutil installed")
 
-    # ── Reset logs ───────────────────────────────────────────────────────────
+    # -- Reset logs -----------------------------------------------------------
     if not args.skip_reset:
         reset_logs()
 
-    # ── Kill any stale training / viz python processes first ─────────────────
+    # -- Kill any stale training / viz python processes first -----------------
     _kill_python_scripts("chess_training_loop.py", "live_viz_server.py")
     time.sleep(1)
 
-    # ── Kill stale processes on ports we need ────────────────────────────────
+    # -- Kill stale processes on ports we need --------------------------------
     killed_any = False
     for port in (8080, 8090, 8765):
         if is_port_open(port):
-            log(f"[CLEANUP] Port {port} in use — killing occupant...")
+            log(f"[CLEANUP] Port {port} in use -- killing occupant...")
             killed_any = True
             if sys.platform == "win32":
                 # Use netstat + taskkill; run in cmd.exe via shell=True
@@ -159,7 +159,7 @@ def main() -> None:
                 break
         log("[CLEANUP] Ports released")
 
-    # ── 1. w1z4rd_api (port 8080) ────────────────────────────────────────────
+    # -- 1. w1z4rd_api (port 8080) --------------------------------------------
     api_bin = ROOT / "bin" / "w1z4rd_api.exe"
     if not is_port_open(8080):
         if api_bin.exists():
@@ -169,13 +169,13 @@ def main() -> None:
             if is_port_open(8080):
                 log("[OK] w1z4rd_api listening on :8080")
             else:
-                log("[WARN] w1z4rd_api may still be starting — continuing")
+                log("[WARN] w1z4rd_api may still be starting -- continuing")
         else:
-            log(f"[WARN] {api_bin} not found — skipping API")
+            log(f"[WARN] {api_bin} not found -- skipping API")
     else:
         log("[OK] w1z4rd_api already on :8080")
 
-    # ── 2. w1z4rd_node (port 8090, SENSOR/local mode) ───────────────────────
+    # -- 2. w1z4rd_node (port 8090, SENSOR/local mode) -----------------------
     node_bin    = ROOT / "bin" / "w1z4rd_node.exe"
     node_config = ROOT / "node_config_local.json"
     if not is_port_open(8090):
@@ -189,13 +189,13 @@ def main() -> None:
             if is_port_open(8090):
                 log("[OK] w1z4rd_node listening on :8090")
             else:
-                log("[WARN] Node may still be starting — check logs/node.log")
+                log("[WARN] Node may still be starting -- check logs/node.log")
         else:
-            log("[WARN] node binary or config missing — skipping node")
+            log("[WARN] node binary or config missing -- skipping node")
     else:
         log("[OK] w1z4rd_node already on :8090")
 
-    # ── 3. Chess training loop (skipped in --node-only mode) ────────────────
+    # -- 3. Chess training loop (skipped in --node-only mode) ----------------
     if not args.node_only:
         train_script = ROOT / "scripts" / "chess_training_loop.py"
         train_log    = ROOT / "logs" / "chess_training_out.txt"
@@ -209,7 +209,7 @@ def main() -> None:
         log(f"[TRAIN] Chess training loop started (max-games={args.max_games})")
         time.sleep(3)
 
-    # ── 4. Viz server (port 8765, skipped in --node-only mode) ──────────────
+    # -- 4. Viz server (port 8765, skipped in --node-only mode) --------------
     if not args.node_only:
         viz_script = ROOT / "scripts" / "live_viz_server.py"
         start_detached(
@@ -227,9 +227,9 @@ def main() -> None:
             webbrowser.open("http://localhost:8765")
             log("[VIZ] Opened http://localhost:8765 in browser")
         else:
-            log("[WARN] Viz server not yet up — check logs/viz_server.log")
+            log("[WARN] Viz server not yet up -- check logs/viz_server.log")
 
-    # ── 5. Dashboard GUI ─────────────────────────────────────────────────────
+    # -- 5. Dashboard GUI -----------------------------------------------------
     if args.node_only or args.dashboard:
         dash_bin = ROOT / "bin" / "w1z4rd_dashboard.exe"
         if dash_bin.exists():

@@ -23,7 +23,7 @@ BOOKSHELVES = [
 LIBRETEXTS_BOOKSHELF_URL = "https://{sub}.libretexts.org/Bookshelves"
 PDF_URL_TEMPLATE = "https://batch.libretexts.org/print/Letter/Finished/{print_id}/Full.pdf"
 
-# All project textbook directories — dedup across these
+# All project textbook directories -- dedup across these
 KNOWN_TEXTBOOK_DIRS = [
     Path("D:/Projects/StateOfLoci/textbooks"),
     Path("D:/w1z4rdv1510n-data/textbooks"),
@@ -157,7 +157,7 @@ def run(shelves: list[str], limit: int | None, dry_run: bool):
                 print(f"  [dry-run] would download: {filename}")
                 continue
 
-            print(f"  [fetch] {book['title']} → {filename}")
+            print(f"  [fetch] {book['title']} -> {filename}")
             ok = download_pdf(book["print_id"], dest)
             if ok:
                 size_kb = dest.stat().st_size // 1024

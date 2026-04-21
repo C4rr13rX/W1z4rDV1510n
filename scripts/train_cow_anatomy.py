@@ -14,7 +14,7 @@ learns:
   - Physical constraints (scale_m, mass_kg, speed_ms, gait)
 
 The fabric learns centroid positions for every label, building a spatial model
-of what a cow IS — so inference can reconstruct a full 3D cow from partial
+of what a cow IS -- so inference can reconstruct a full 3D cow from partial
 sensor data (e.g. a 2-D video frame identifying position + orientation).
 
 Usage:
@@ -30,7 +30,7 @@ DEFAULT_NODE = 'localhost:8090'
 DEFAULT_REPS = 3     # repeat full corpus N times to strengthen associations
 
 
-# ── Cow anatomy: body part positions in 3 poses ───────────────────────────────
+# -- Cow anatomy: body part positions in 3 poses -------------------------------
 # Coordinate frame: X=left/right (0=left, 0.5=centre, 1=right)
 #                   Y=up/down   (0=ground, 1=tallest point)
 #                   Z=front/back (0=rear, 1=nose)
@@ -39,7 +39,7 @@ DEFAULT_REPS = 3     # repeat full corpus N times to strengthen associations
 
 # Standing reference pose
 _STAND = {
-    # ── Head / face ────────────────────────────────────────────────────────
+    # -- Head / face --------------------------------------------------------
     'head':           (0.50, 0.86, 0.88),
     'muzzle':         (0.50, 0.76, 0.97),
     'lower_jaw':      (0.50, 0.74, 0.95),
@@ -53,12 +53,12 @@ _STAND = {
     'poll':           (0.50, 0.96, 0.85),
     'horn_L':         (0.41, 0.98, 0.83),   # not all breeds
     'horn_R':         (0.59, 0.98, 0.83),
-    # ── Neck / throat ──────────────────────────────────────────────────────
+    # -- Neck / throat ------------------------------------------------------
     'neck':           (0.50, 0.86, 0.77),
     'throat':         (0.50, 0.79, 0.80),
     'dewlap':         (0.50, 0.70, 0.80),
     'crest':          (0.50, 0.92, 0.73),
-    # ── Trunk / spine ──────────────────────────────────────────────────────
+    # -- Trunk / spine ------------------------------------------------------
     'withers':        (0.50, 0.94, 0.68),
     'back':           (0.50, 0.92, 0.53),
     'loin':           (0.50, 0.90, 0.40),
@@ -66,20 +66,20 @@ _STAND = {
     'tail_root':      (0.50, 0.84, 0.22),
     'tail_mid':       (0.50, 0.70, 0.15),
     'tail_switch':    (0.50, 0.54, 0.10),
-    # ── Chest / belly ──────────────────────────────────────────────────────
+    # -- Chest / belly ------------------------------------------------------
     'brisket':        (0.50, 0.68, 0.72),
     'sternum':        (0.50, 0.62, 0.65),
     'flank_L':        (0.36, 0.68, 0.42),
     'flank_R':        (0.64, 0.68, 0.42),
     'belly':          (0.50, 0.54, 0.48),
     'navel':          (0.50, 0.52, 0.50),
-    # ── Udder / reproduction ───────────────────────────────────────────────
+    # -- Udder / reproduction -----------------------------------------------
     'udder':          (0.50, 0.44, 0.42),
     'teat_LF':        (0.44, 0.38, 0.45),
     'teat_RF':        (0.56, 0.38, 0.45),
     'teat_LR':        (0.44, 0.38, 0.38),
     'teat_RR':        (0.56, 0.38, 0.38),
-    # ── Front legs (L = left, R = right) ───────────────────────────────────
+    # -- Front legs (L = left, R = right) -----------------------------------
     'shoulder_L':     (0.35, 0.84, 0.68),
     'shoulder_R':     (0.65, 0.84, 0.68),
     'elbow_L':        (0.35, 0.68, 0.68),
@@ -90,7 +90,7 @@ _STAND = {
     'front_fetlock_R':(0.64, 0.30, 0.66),
     'front_hoof_L':   (0.36, 0.04, 0.66),
     'front_hoof_R':   (0.64, 0.04, 0.66),
-    # ── Rear legs ──────────────────────────────────────────────────────────
+    # -- Rear legs ----------------------------------------------------------
     'hip_L':          (0.37, 0.84, 0.30),
     'hip_R':          (0.63, 0.84, 0.30),
     'stifle_L':       (0.37, 0.66, 0.30),
@@ -103,7 +103,7 @@ _STAND = {
     'rear_fetlock_R': (0.63, 0.18, 0.22),
     'rear_hoof_L':    (0.37, 0.04, 0.20),
     'rear_hoof_R':    (0.63, 0.04, 0.20),
-    # ── Centre of mass ─────────────────────────────────────────────────────
+    # -- Centre of mass -----------------------------------------------------
     'body_centre':    (0.50, 0.70, 0.50),
     'centre_of_mass': (0.50, 0.64, 0.50),
 }
@@ -116,7 +116,7 @@ def _pose_delta(base: dict, deltas: dict) -> dict:
         p[k] = (min(1, max(0, x+dx)), min(1, max(0, y+dy)), min(1, max(0, z+dz)))
     return p
 
-# ── Grazing pose: head / neck dropped to ground level ────────────────────────
+# -- Grazing pose: head / neck dropped to ground level ------------------------
 _GRAZE = _pose_delta(_STAND, {
     'head':           ( 0.00, -0.42,  0.06),
     'muzzle':         ( 0.00, -0.70,  0.02),
@@ -139,7 +139,7 @@ _GRAZE = _pose_delta(_STAND, {
     'front_fetlock_R':( 0.03,  0.00,  0.04),
 })
 
-# ── Walking step A: left-front / right-rear forward ──────────────────────────
+# -- Walking step A: left-front / right-rear forward --------------------------
 _WALK_A = _pose_delta(_STAND, {
     # Left front forward
     'front_hoof_L':   (-0.01, +0.08, +0.16),
@@ -154,7 +154,7 @@ _WALK_A = _pose_delta(_STAND, {
     'body_centre':    ( 0.00,  0.00,  0.00),
 })
 
-# ── Walking step B: right-front / left-rear forward ──────────────────────────
+# -- Walking step B: right-front / left-rear forward --------------------------
 _WALK_B = _pose_delta(_STAND, {
     'front_hoof_R':   ( 0.01, +0.08, +0.16),
     'front_fetlock_R':( 0.01, +0.08, +0.12),
@@ -165,7 +165,7 @@ _WALK_B = _pose_delta(_STAND, {
     'rear_cannon_L':  ( 0.00, +0.04, +0.06),
 })
 
-# ── Lying down ────────────────────────────────────────────────────────────────
+# -- Lying down ----------------------------------------------------------------
 _LIE = _pose_delta(_STAND, {
     'body_centre':    ( 0.00, -0.44,  0.00),
     'centre_of_mass': ( 0.00, -0.44,  0.00),
@@ -195,7 +195,7 @@ POSES = {
 }
 
 
-# ── Biology / taxonomy knowledge ──────────────────────────────────────────────
+# -- Biology / taxonomy knowledge ----------------------------------------------
 BIOLOGY = [
     # Taxonomy
     ('taxonomy_kingdom',  'Animalia',    (0.50, 0.99, 0.50)),
@@ -231,7 +231,7 @@ BIOLOGY = [
     ('smell_range_m',     '10000',       (0.50, 0.76, 0.97)),
 ]
 
-# ── Lifecycle stages ───────────────────────────────────────────────────────────
+# -- Lifecycle stages -----------------------------------------------------------
 LIFECYCLE = [
     # (stage, description, size_factor relative to adult, y_scale)
     ('lifecycle_embryo',   'embryo',         (0.50, 0.50, 0.50)),
@@ -245,9 +245,9 @@ LIFECYCLE = [
     ('lifecycle_elder',    'cow_elder',      (0.50, 0.90, 0.50)),
 ]
 
-# ── Environment contexts ───────────────────────────────────────────────────────
+# -- Environment contexts -------------------------------------------------------
 ENVIRONMENTS = [
-    # (env_id, description, x, y, z) — position in the world space
+    # (env_id, description, x, y, z) -- position in the world space
     ('env_grass_field',   'open_pasture',    (0.50, 0.02, 0.50)),
     ('env_sky',           'sky_above',       (0.50, 0.95, 0.50)),
     ('env_trees_distant', 'treeline_far',    (0.50, 0.55, 0.05)),
@@ -260,7 +260,7 @@ ENVIRONMENTS = [
     ('env_hay_feeder',    'feed_source',     (0.25, 0.35, 0.40)),
 ]
 
-# ── Behaviours ─────────────────────────────────────────────────────────────────
+# -- Behaviours -----------------------------------------------------------------
 BEHAVIOURS = [
     # (behaviour_id, context_description, position_hint)
     ('behaviour_grazing',    'eating_grass_head_down',  (0.50, 0.30, 0.80)),
@@ -284,7 +284,7 @@ BEHAVIOURS = [
     ('behaviour_head_butt',  'dominance_fight',         (0.50, 0.90, 0.90)),
 ]
 
-# ── Skin / coat colour patterns ────────────────────────────────────────────────
+# -- Skin / coat colour patterns ------------------------------------------------
 COAT_PATTERNS = [
     ('coat_colour_black',    'Holstein_Friesian',  (0.10, 0.10, 0.10)),
     ('coat_colour_brown',    'Hereford_body',      (0.60, 0.30, 0.10)),
@@ -297,7 +297,7 @@ COAT_PATTERNS = [
 ]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 def _sym(sym_id: str, sym_type: str, x: float, y: float, z: float,
          props: dict | None = None) -> dict:
     p = {'label': sym_id, 'type': sym_type}
@@ -335,7 +335,7 @@ def post_snapshot(node_host: str, snapshot: dict) -> bool:
         return False
 
 
-# ── Build training batches ─────────────────────────────────────────────────────
+# -- Build training batches -----------------------------------------------------
 def anatomy_snapshots() -> list:
     snaps = []
 
@@ -415,7 +415,7 @@ def movement_sequence_snapshots() -> list:
     return snaps
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--node', default=DEFAULT_NODE)
@@ -423,7 +423,7 @@ def main():
     args = ap.parse_args()
 
     all_snaps = (
-        anatomy_snapshots()          # 5 poses × 50+ parts
+        anatomy_snapshots()          # 5 poses x 50+ parts
         + biology_snapshots()        # taxonomy, organs, physics
         + lifecycle_snapshots()      # calf to elder
         + environment_snapshots()    # field, barn, water
@@ -433,7 +433,7 @@ def main():
     )
 
     total = len(all_snaps)
-    print(f'Training corpus: {total} snapshots × {args.reps} reps'
+    print(f'Training corpus: {total} snapshots x {args.reps} reps'
           f' = {total * args.reps} POSTs  ->  http://{args.node}/neuro/train')
 
     ok = fail = 0

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-neuro_client.py — Full-architecture client for the W1z4rD node API.
+neuro_client.py -- Full-architecture client for the W1z4rD node API.
 
 Every training call goes through here so nothing is skipped.
-Covers ALL endpoints that affect learning:
-  /media/train             — single-frame multimodal
-  /media/train_sequence    — temporal STDP multi-frame
-  /qa/ingest               — Q&A pair ingestion (internally fires STDP bridge)
-  /neuro/record_episode    — episodic learning from confirmed Q→A
-  /equations/ingest        — equation matrix (discipline-specific equations)
-  /knowledge/ingest        — structured knowledge documents
-  /neuro/checkpoint        — pool persistence
+Covers ALL endpoints that affect learning (pure neural pool -- no Q&A store):
+  /media/train             -- single-frame multimodal Hebbian
+  /media/train_sequence    -- temporal STDP multi-frame
+  /neuro/record_episode    -- episodic learning from confirmed observations
+  /equations/ingest        -- Environmental Equation Matrix
+  /knowledge/ingest        -- structured knowledge documents
+  /neuro/checkpoint        -- pool persistence
 
 Import and use NeuroClient in every training script.
 """
@@ -34,7 +33,7 @@ except ImportError:
     HAS_PILLOW = False
 
 # ---------------------------------------------------------------------------
-# Discipline detection — applied to every text block before equations/ingest
+# Discipline detection -- applied to every text block before equations/ingest
 # ---------------------------------------------------------------------------
 
 _DISCIPLINE_RULES: list[tuple[str, list[str]]] = [
@@ -46,7 +45,7 @@ _DISCIPLINE_RULES: list[tuple[str, list[str]]] = [
     ("electromagnetism",      ["electric", "magnetic", "current", "voltage", "charge",
                                 "electromagnetic", "capacitor", "inductor", "resistor",
                                 "maxwell", "coulomb", "ohm"]),
-    ("quantum_mechanics",     ["quantum", "wave function", "schrödinger", "photon",
+    ("quantum_mechanics",     ["quantum", "wave function", "schrodinger", "photon",
                                 "superposition", "eigenvalue", "heisenberg", "planck",
                                 "uncertainty principle", "spin", "orbital"]),
     ("statistical_mechanics", ["probability distribution", "boltzmann", "entropy",
@@ -91,7 +90,7 @@ def _has_formulas(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Span extraction — converts plain text into structured TextSpan list
+# Span extraction -- converts plain text into structured TextSpan list
 # ---------------------------------------------------------------------------
 
 def make_spans(text: str, source_label: str = "") -> list[dict]:
@@ -99,13 +98,13 @@ def make_spans(text: str, source_label: str = "") -> list[dict]:
     Split text into semantic spans with roles, positions, and emphasis.
 
     Roles (matching TextRole enum in Rust):
-      heading    — first sentence when it introduces a term (title case, short)
-      subheading — section headers within text
-      body       — regular prose
-      caption    — parenthetical or bracketed notes
-      code       — formulas and equations
-      list       — bullet / numbered list items
-      footnote   — trailing notes, references, footnote markers
+      heading    -- first sentence when it introduces a term (title case, short)
+      subheading -- section headers within text
+      body       -- regular prose
+      caption    -- parenthetical or bracketed notes
+      code       -- formulas and equations
+      list       -- bullet / numbered list items
+      footnote   -- trailing notes, references, footnote markers
     """
     if not text:
         return []
@@ -128,7 +127,7 @@ def make_spans(text: str, source_label: str = "") -> list[dict]:
             role = "heading"
             bold = True
             size_ratio = 1.2
-        elif sent.startswith(("- ", "• ", "* ", "1.", "2.", "3.")):
+        elif sent.startswith(("- ", "* ", "* ", "1.", "2.", "3.")):
             role = "list"
             bold = False
             size_ratio = 0.95
@@ -206,7 +205,7 @@ def image_bytes_to_b64(img_bytes: bytes, max_px: int = 512, quality: int = 75) -
 
 
 # ---------------------------------------------------------------------------
-# NeuroClient — wraps every API endpoint needed for full-architecture training
+# NeuroClient -- wraps every API endpoint needed for full-architecture training
 # ---------------------------------------------------------------------------
 
 class NeuroClient:
@@ -221,7 +220,7 @@ class NeuroClient:
         self.url    = node_url.rstrip("/")
         self.client = client
 
-    # ── Low-level helpers ────────────────────────────────────────────────────
+    # -- Low-level helpers ----------------------------------------------------
 
     async def _post(self, path: str, body: dict, timeout: float = 30.0) -> Optional[dict]:
         try:
@@ -232,10 +231,10 @@ class NeuroClient:
         except Exception:
             return None
 
-    # ── Single-frame media training ──────────────────────────────────────────
+    # -- Single-frame media training ------------------------------------------
 
     async def train_text(self, text: str, lr: float = 1.0) -> bool:
-        """Plain text → /media/train with structured spans."""
+        """Plain text -> /media/train with structured spans."""
         spans = make_spans(text)
         payload: dict = {"modality": "text", "lr_scale": lr}
         if spans:
@@ -245,7 +244,7 @@ class NeuroClient:
         return await self._post("/media/train", payload) is not None
 
     async def train_image(self, img_b64: str, caption: str = "", lr: float = 1.0) -> bool:
-        """Image (base64) + caption → /media/train page modality with caption spans."""
+        """Image (base64) + caption -> /media/train page modality with caption spans."""
         payload: dict = {"modality": "page", "data_b64": img_b64, "lr_scale": lr}
         if caption:
             spans = make_spans(caption)
@@ -253,7 +252,7 @@ class NeuroClient:
             payload["text"] = caption
         return await self._post("/media/train", payload) is not None
 
-    # ── Temporal sequence training — the primary training call ───────────────
+    # -- Temporal sequence training -- the primary training call ---------------
 
     async def train_sequence(
         self,
@@ -306,9 +305,9 @@ class NeuroClient:
     ) -> bool:
         """
         Train image + text as a 3-frame temporal sequence:
-          frame 0 (t=0.0): image — visual perception
-          frame 1 (t=0.5): text with spans — semantic association
-          frame 2 (t=1.0): structural context — where/what
+          frame 0 (t=0.0): image -- visual perception
+          frame 1 (t=0.5): text with spans -- semantic association
+          frame 2 (t=1.0): structural context -- where/what
         The STDP bridge links image neurons ↔ text neurons ↔ structural neurons.
         """
         spans = make_spans(text)
@@ -338,31 +337,19 @@ class NeuroClient:
             })
         return await self.train_sequence(frames, tau=tau)
 
-    # ── Q&A ingestion + episodic learning ────────────────────────────────────
-
-    async def ingest_qa(
-        self, pairs: list[dict], pool: str = "knowledge"
-    ) -> int:
-        """
-        POST /qa/ingest — stores Q&A pairs AND fires STDP bridge in the Hebbian graph.
-        Returns number ingested.
-        """
-        if not pairs:
-            return 0
-        resp = await self._post("/qa/ingest", {"candidates": pairs, "pool": pool})
-        return (resp or {}).get("ingested", 0)
+    # -- Temporal pair training + episodic learning ---------------------------
 
     async def record_episode(
         self, question: str, answer: str, surprise: float = 0.0
     ) -> bool:
         """
-        POST /neuro/record_episode — logs a resolved Q→A episode into the episodic store.
+        POST /neuro/record_episode -- logs a resolved Q->A episode into the episodic store.
 
         The fabric's conditional sufficiency tracker and inhibitory Hebbian updates
         fire automatically. Every correct Q&A pair should call this with surprise=0.0.
         For surprising/corrective pairs, use surprise=(1 - p_correct)^2.
         """
-        # Encode question as context labels — word-level tokens from the text
+        # Encode question as context labels -- word-level tokens from the text
         q_words = [
             f"txt:word_{w.lower().strip('.,;:!?()[]\"\'')}"
             for w in question.split()
@@ -386,26 +373,29 @@ class NeuroClient:
         record_episodes: bool = True,
     ) -> int:
         """
-        Full Q&A training pipeline:
-          1. /qa/ingest — Q&A store + internal STDP bridge
-          2. /media/train_sequence — Q frame (t=0) → A frame (t=1) as temporal sequence
-          3. /neuro/record_episode — episodic store for each pair
+        Full pair training through all neural pool pathways (no Q&A store):
+          1. /media/train          -- combined Q+A text, full Hebbian activation
+          2. /media/train_sequence -- Q frame (t=0) -> A frame (t=1) temporal STDP
+          3. /neuro/record_episode -- episodic store for each pair
+          4. /equations/ingest    -- equations extracted from answer text
 
-        Returns total ingested count.
+        Returns count of pairs fully trained.
         """
         if not pairs:
             return 0
 
-        ingested = await self.ingest_qa(pairs, pool=pool)
-
-        # Train each pair as a Q→A temporal sequence
+        trained = 0
         for pair in pairs:
             q = pair.get("question", "")
             a = pair.get("answer", "")
             if not q or not a:
                 continue
 
-            # Q→A temporal sequence: question at t=0, answer at t=1
+            # Pass 1: full combined text through Hebbian pool (single frame)
+            combined = f"{q} {a}"
+            await self.train_text(combined, lr=1.0)
+
+            # Pass 2: Q->A temporal sequence (question fires, then answer fires)
             q_spans = make_spans(q)
             a_spans = make_spans(a)
             frames = [
@@ -426,18 +416,21 @@ class NeuroClient:
             ]
             await self.train_sequence(frames, tau=2.0)
 
+            # Pass 3: episodic record
             if record_episodes:
                 await self.record_episode(q, a, surprise=0.0)
 
-        return ingested
+            trained += 1
 
-    # ── Equation matrix ──────────────────────────────────────────────────────
+        return trained
+
+    # -- Equation matrix ------------------------------------------------------
 
     async def ingest_equations(
         self, text: str, discipline: Optional[str] = None, confidence: float = 0.6,
     ) -> int:
         """
-        POST /equations/ingest — parses equations from text and feeds them
+        POST /equations/ingest -- parses equations from text and feeds them
         into the Environmental Equation Matrix.
 
         Auto-detects discipline from text if not provided.
@@ -454,13 +447,13 @@ class NeuroClient:
         resp = await self._post("/equations/ingest", payload)
         return (resp or {}).get("ingested", 0)
 
-    # ── Knowledge document ingestion ─────────────────────────────────────────
+    # -- Knowledge document ingestion -----------------------------------------
 
     async def ingest_knowledge(
         self, title: str, body: str, source: str = "", tags: list[str] | None = None,
     ) -> bool:
         """
-        POST /knowledge/ingest — structured knowledge document.
+        POST /knowledge/ingest -- structured knowledge document.
 
         Feeds into KnowledgeRuntime (separate from Hebbian pool and QA store).
         """
@@ -474,7 +467,7 @@ class NeuroClient:
         payload: dict = {"document": doc}
         return await self._post("/knowledge/ingest", payload) is not None
 
-    # ── Full concept training — uses every endpoint ──────────────────────────
+    # -- Full concept training -- uses every endpoint --------------------------
 
     async def train_concept_full(
         self,
@@ -489,16 +482,16 @@ class NeuroClient:
         """
         Train a single concept using the FULL architecture:
 
-          1. /media/train_sequence — text temporal sequence
+          1. /media/train_sequence -- text temporal sequence
                frame 0: definition with structured spans (heading + body)
                frame 1: wiki excerpt if available
-          2. /media/train_sequence — for each image:
+          2. /media/train_sequence -- for each image:
                frame 0: image (visual perception)
                frame 1: definition with spans (image ↔ concept association)
                frame 2: structural context tag
-          3. /equations/ingest — definition + wiki text (if scientific)
-          4. /knowledge/ingest — structured document with title + body
-          5. /qa/ingest + /neuro/record_episode — all Q&A pairs
+          3. /equations/ingest -- definition + wiki text (if scientific)
+          4. /knowledge/ingest -- structured document with title + body
+          5. /qa/ingest + /neuro/record_episode -- all Q&A pairs
         """
         stats = {"seq": 0, "img": 0, "eq": 0, "qa": 0, "ep": 0, "know": 0}
 
@@ -543,16 +536,16 @@ class NeuroClient:
             if ok:
                 stats["know"] += 1
 
-        # 5. Q&A pairs — full pipeline (ingest + sequence + episode)
+        # 5. Q&A pairs -- full pipeline (ingest + sequence + episode)
         if qa_pairs:
             n = await self.ingest_qa_full(qa_pairs, pool=pool, record_episodes=True)
             stats["qa"] += n
 
         return stats
 
-    # ── Checkpoint ───────────────────────────────────────────────────────────
+    # -- Checkpoint -----------------------------------------------------------
 
     async def checkpoint(self) -> bool:
-        """POST /neuro/checkpoint — persists the Hebbian pool to disk."""
+        """POST /neuro/checkpoint -- persists the Hebbian pool to disk."""
         resp = await self._post("/neuro/checkpoint", {}, timeout=120.0)
         return resp is not None

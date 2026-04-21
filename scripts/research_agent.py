@@ -27,7 +27,7 @@ from urllib.parse import quote, urljoin
 
 import aiohttp
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# -- Configuration -------------------------------------------------------------
 
 NODE_API = "http://localhost:8090"
 POLL_INTERVAL_SECS = 30
@@ -55,7 +55,7 @@ SOURCES = {
 
 USER_AGENT = "W1z4rDResearchAgent/1.0 (educational; contact: research@carrierx.dev)"
 
-# ── Data structures ───────────────────────────────────────────────────────────
+# -- Data structures -----------------------------------------------------------
 
 @dataclass
 class HypothesisEntry:
@@ -78,7 +78,7 @@ class ResearchResult:
     source_url: str = ""
 
 
-# ── Node API client ───────────────────────────────────────────────────────────
+# -- Node API client -----------------------------------------------------------
 
 class NodeClient:
     def __init__(self, base_url: str, session: aiohttp.ClientSession):
@@ -156,7 +156,7 @@ class NodeClient:
             return False
 
 
-# ── Knowledge fetchers ────────────────────────────────────────────────────────
+# -- Knowledge fetchers --------------------------------------------------------
 
 class WikipediaFetcher:
     """Fetches Wikipedia summaries via the MediaWiki REST API."""
@@ -256,7 +256,7 @@ class ArXivFetcher:
         except Exception:
             return None
 
-        # Parse Atom XML — find the first entry's summary
+        # Parse Atom XML -- find the first entry's summary
         try:
             import xml.etree.ElementTree as ET
             ns = {"atom": "http://www.w3.org/2005/Atom"}
@@ -287,7 +287,7 @@ class ArXivFetcher:
             return None
 
 
-# ── Research orchestrator ─────────────────────────────────────────────────────
+# -- Research orchestrator -----------------------------------------------------
 
 class ResearchAgent:
     def __init__(self, node_url: str, poll_interval: int):
@@ -302,7 +302,7 @@ class ResearchAgent:
             arxiv = ArXivFetcher(session)
             fetchers = [wiki, arxiv]
 
-            print(f"[research_agent] started — node={self.node_url}  poll={self.poll_interval}s")
+            print(f"[research_agent] started -- node={self.node_url}  poll={self.poll_interval}s")
             while True:
                 await self._cycle(node, fetchers)
                 await asyncio.sleep(self.poll_interval)
@@ -317,7 +317,7 @@ class ResearchAgent:
         resolved_any = False
 
         for hyp in pending[:5]:  # max 5 per cycle to stay polite
-            print(f"  → researching: {hyp.question!r}")
+            print(f"  -> researching: {hyp.question!r}")
             result: Optional[ResearchResult] = None
 
             for fetcher in fetchers:
@@ -332,7 +332,7 @@ class ResearchAgent:
                 print(f"    no result found for {hyp.question!r}")
                 continue
 
-            print(f"    found ({result.source}): {result.answer[:80]!r}…")
+            print(f"    found ({result.source}): {result.answer[:80]!r}...")
 
             # Feed into the node
             trained = await node.train_text(result.answer)
@@ -344,7 +344,7 @@ class ResearchAgent:
             # Mark resolved
             ok = await node.resolve_hypothesis(hyp.id, result.answer, result.confidence)
             if ok:
-                print(f"    ✓ resolved {hyp.id}")
+                print(f"    [ok] resolved {hyp.id}")
                 resolved_any = True
             else:
                 print(f"    [warn] resolve endpoint failed for {hyp.id}")
@@ -356,7 +356,7 @@ class ResearchAgent:
             await node.checkpoint()
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="W1z4rDV1510n Research Agent")

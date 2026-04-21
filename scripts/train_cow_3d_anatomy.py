@@ -18,11 +18,11 @@ import argparse, json, math, random, sys, time, urllib.request, urllib.error
 
 NODE = "http://localhost:8090"
 
-# ── Bovine anatomy 3D atlas ────────────────────────────────────────────────
+# -- Bovine anatomy 3D atlas ------------------------------------------------
 # Y-up, X = nose-to-tail, Z = left/right.  All values in cow-body units
-# (~1 = 1 m).  Head at X≈+1.5, rump at X≈-1.2, feet at Y=0, withers Y≈1.4.
+# (~1 = 1 m).  Head at X~=+1.5, rump at X~=-1.2, feet at Y=0, withers Y~=1.4.
 BOVINE_ANATOMY = [
-    # ─ Axial skeleton ─────────────────────────────────────────────────────
+    # - Axial skeleton -----------------------------------------------------
     ("cow_head",          1.40, 1.05, 0.00),
     ("cow_snout",         1.62, 0.90, 0.00),
     ("cow_brain",         1.36, 1.22, 0.00),
@@ -39,7 +39,7 @@ BOVINE_ANATOMY = [
     ("cow_tail_mid",     -1.35, 0.98, 0.00),
     ("cow_tail_tip",     -1.55, 0.78, 0.00),
 
-    # ─ Head features ──────────────────────────────────────────────────────
+    # - Head features ------------------------------------------------------
     ("cow_eye_L",         1.44, 1.18, 0.19),
     ("cow_eye_R",         1.44, 1.18,-0.19),
     ("cow_ear_L",         1.22, 1.28, 0.23),
@@ -49,7 +49,7 @@ BOVINE_ANATOMY = [
     ("cow_nostril_L",     1.64, 0.93, 0.06),
     ("cow_nostril_R",     1.64, 0.93,-0.06),
 
-    # ─ Thoracic organs ────────────────────────────────────────────────────
+    # - Thoracic organs ----------------------------------------------------
     ("cow_heart",         0.62, 1.10, 0.00),
     ("cow_lung_L",        0.45, 1.16, 0.24),
     ("cow_lung_R",        0.45, 1.16,-0.24),
@@ -57,8 +57,8 @@ BOVINE_ANATOMY = [
     ("cow_diaphragm",     0.08, 1.00, 0.00),
     ("cow_sternum",       0.50, 0.68, 0.00),
 
-    # ─ Digestive system ───────────────────────────────────────────────────
-    ("cow_rumen",        -0.28, 0.92, 0.24),   # largest — left side
+    # - Digestive system ---------------------------------------------------
+    ("cow_rumen",        -0.28, 0.92, 0.24),   # largest -- left side
     ("cow_rumen_dorsal", -0.20, 1.02, 0.26),
     ("cow_rumen_ventral",-0.36, 0.72, 0.22),
     ("cow_reticulum",     0.06, 0.88, 0.12),
@@ -70,7 +70,7 @@ BOVINE_ANATOMY = [
     ("cow_pancreas",      0.00, 0.80,-0.12),
     ("cow_spleen",       -0.15, 0.88, 0.28),
 
-    # ─ Urogenital ─────────────────────────────────────────────────────────
+    # - Urogenital ---------------------------------------------------------
     ("cow_kidney_L",     -0.24, 1.06, 0.20),
     ("cow_kidney_R",     -0.24, 1.06,-0.20),
     ("cow_bladder",      -0.50, 0.45, 0.00),
@@ -80,7 +80,7 @@ BOVINE_ANATOMY = [
     ("cow_teat_LR",      -0.44, 0.12, 0.10),
     ("cow_teat_RR",      -0.44, 0.12,-0.10),
 
-    # ─ Appendicular — front ───────────────────────────────────────────────
+    # - Appendicular -- front -----------------------------------------------
     ("cow_shoulder_L",    0.76, 1.12, 0.32),
     ("cow_shoulder_R",    0.76, 1.12,-0.32),
     ("cow_upper_arm_L",   0.78, 0.88, 0.30),
@@ -98,7 +98,7 @@ BOVINE_ANATOMY = [
     ("cow_hoof_FL",       0.80, 0.00, 0.22),
     ("cow_hoof_FR",       0.80, 0.00,-0.22),
 
-    # ─ Appendicular — hind ────────────────────────────────────────────────
+    # - Appendicular -- hind ------------------------------------------------
     ("cow_pelvis_L",     -0.70, 1.14, 0.34),
     ("cow_pelvis_R",     -0.70, 1.14,-0.34),
     ("cow_hip_L",        -0.80, 1.12, 0.33),
@@ -118,7 +118,7 @@ BOVINE_ANATOMY = [
     ("cow_hoof_BL",      -0.80, 0.00, 0.21),
     ("cow_hoof_BR",      -0.80, 0.00,-0.21),
 
-    # ─ Body surface reference zones ───────────────────────────────────────
+    # - Body surface reference zones ---------------------------------------
     ("cow_chest_wall",    0.58, 0.78, 0.00),
     ("cow_belly",         0.08, 0.38, 0.00),
     ("cow_flank_L",      -0.22, 0.82, 0.40),
@@ -126,7 +126,7 @@ BOVINE_ANATOMY = [
     ("cow_back",          0.00, 1.40, 0.00),
     ("cow_hide_dorsal",   0.00, 1.44, 0.00),
 
-    # ─ Alias / shorthand labels (legacy sensor-stream names — reset to correct canonical pos) ─
+    # - Alias / shorthand labels (legacy sensor-stream names -- reset to correct canonical pos) -
     ("cow_body",          0.00, 0.80, 0.00),   # body centroid
     ("cow_spine",         0.00, 1.30, 0.00),   # spine midpoint
     ("cow_neck",          1.04, 1.10, 0.00),   # neck midpoint
@@ -138,7 +138,7 @@ BOVINE_ANATOMY = [
     ("cow_leg_BR",       -0.80, 0.55,-0.22),   # back-right leg mid
 ]
 
-# ── Text labels co-trained with each frame ────────────────────────────────
+# -- Text labels co-trained with each frame --------------------------------
 # These are the raw word tokens the TextBitsEncoder produces for the
 # mesh/synthesize query string, plus semantic synonyms.
 QUERY_LABELS = [
@@ -198,7 +198,7 @@ def make_snapshot(noise=0.018, ts=None):
 
 
 def train_anatomy(n_frames, delay=0.04):
-    print(f"Training {n_frames} 3D anatomy frames …", flush=True)
+    print(f"Training {n_frames} 3D anatomy frames ...", flush=True)
     ok = 0
     for i in range(n_frames):
         try:
@@ -239,7 +239,7 @@ def test_mesh(min_act=0.005, hops=4):
         print(f"MESH OK: {nv} verts, {nf} faces  (v_count={r.get('vertex_count')} f_count={r.get('face_count')})",
               flush=True)
     else:
-        print(f"MESH null — reason: {r.get('reason')} | activated: {r.get('activated_count')}", flush=True)
+        print(f"MESH null -- reason: {r.get('reason')} | activated: {r.get('activated_count')}", flush=True)
     return r
 
 
@@ -261,7 +261,7 @@ def main():
 
     target = args.frames
     if cow_count >= 50:
-        print(f"Already have {cow_count} cow centroids — running {target//4} top-up frames", flush=True)
+        print(f"Already have {cow_count} cow centroids -- running {target//4} top-up frames", flush=True)
         train_anatomy(target // 4)
     else:
         train_anatomy(target)
@@ -273,7 +273,7 @@ def main():
     r = test_mesh()
 
     if not r.get("verts"):
-        print("\n>> Mesh still null — extra 200 frames + lower threshold …", flush=True)
+        print("\n>> Mesh still null -- extra 200 frames + lower threshold ...", flush=True)
         train_anatomy(200, delay=0.02)
         print("\n=== Phase 4: re-test mesh ===", flush=True)
         test_mesh(min_act=0.001, hops=5)

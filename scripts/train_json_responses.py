@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-scripts/train_json_responses.py — scoped JSON response training.
+scripts/train_json_responses.py -- scoped JSON response training.
 
-DESIGN PRINCIPLE — prevents over-training bias:
+DESIGN PRINCIPLE -- prevents over-training bias:
   Every batch is 50% JSON-request pairs + 50% natural-language pairs.
   JSON questions ALWAYS contain an explicit scope marker:
       "as JSON", "in JSON format", "return JSON", "JSON object", etc.
-  Natural-language questions NEVER contain "JSON" — they are answered in prose.
-  The node learns: "JSON scope marker present → output JSON,
-                    no JSON scope marker → output natural language."
+  Natural-language questions NEVER contain "JSON" -- they are answered in prose.
+  The node learns: "JSON scope marker present -> output JSON,
+                    no JSON scope marker -> output natural language."
 
 This interleaving means no matter how many batches you run, JSON answers
 can never dominate because for every JSON pair trained there is an equal
@@ -56,7 +56,7 @@ def _jp(obj: object) -> str:
 
 
 # ---------------------------------------------------------------------------
-# JSON pairs — question ALWAYS contains explicit JSON scope marker
+# JSON pairs -- question ALWAYS contains explicit JSON scope marker
 # ---------------------------------------------------------------------------
 JSON_PAIRS: list[tuple[str, str]] = [
     # Primitives
@@ -69,7 +69,7 @@ JSON_PAIRS: list[tuple[str, str]] = [
     ("Give me an empty JSON object", "{}"),
     ("Give me an empty JSON array", "[]"),
 
-    # Flat objects — every question says "JSON object" or "as JSON"
+    # Flat objects -- every question says "JSON object" or "as JSON"
     ("Return a JSON object with a name field set to Alice", _j({"name": "Alice"})),
     ("Return a JSON object with fields id equal to 1 and status equal to active", _j({"id": 1, "status": "active"})),
     ("Return a JSON object representing a user with username bob and age 30", _j({"username": "bob", "age": 30})),
@@ -129,14 +129,14 @@ JSON_PAIRS: list[tuple[str, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Natural-language pairs — NO "JSON" in question, prose answers only
+# Natural-language pairs -- NO "JSON" in question, prose answers only
 # These are trained alongside JSON pairs so the node learns the contrast.
 # ---------------------------------------------------------------------------
 NL_PAIRS: list[tuple[str, str]] = [
     # Science
     ("What is the Sun?", "The Sun is the star at the center of our solar system, a hot plasma sphere that generates energy through nuclear fusion in its core."),
     ("What is photosynthesis?", "Photosynthesis is the process plants use to convert sunlight, water, and carbon dioxide into glucose and oxygen."),
-    ("What is gravity?", "Gravity is the force of attraction between masses. On Earth it accelerates objects downward at 9.8 m/s²."),
+    ("What is gravity?", "Gravity is the force of attraction between masses. On Earth it accelerates objects downward at 9.8 m/s^2."),
     ("What is DNA?", "DNA is the molecule that carries genetic instructions for the development and function of all living organisms."),
     ("What is the speed of light?", "The speed of light in a vacuum is approximately 299,792,458 metres per second."),
     ("What is a black hole?", "A black hole is a region of spacetime where gravity is so strong that nothing, not even light, can escape its event horizon."),
@@ -193,7 +193,7 @@ def make_candidate(question: str, answer: str, book_id: str) -> dict:
         "answer": answer,
         "book_id": book_id,
         "confidence": 0.93,
-        "evidence": "Scoped training corpus — JSON only when explicitly requested",
+        "evidence": "Scoped training corpus -- JSON only when explicitly requested",
         "review_status": "approved",
     }
 
@@ -254,7 +254,7 @@ def main() -> None:
     json_pool = JSON_PAIRS[:]
     nl_pool = NL_PAIRS[:]
 
-    print(f"Scoped JSON training: {args.batches} batches × {BATCH_SIZE} pairs")
+    print(f"Scoped JSON training: {args.batches} batches x {BATCH_SIZE} pairs")
     print(f"  {BATCH_SIZE//2} JSON pairs + {BATCH_SIZE//2} natural-language pairs per batch")
     print(f"  Total: {args.batches * BATCH_SIZE} ingestions ({args.batches * BATCH_SIZE // 2} JSON, {args.batches * BATCH_SIZE // 2} NL)")
     print(f"  Node: {args.node}\n")

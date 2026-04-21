@@ -55,7 +55,7 @@ def post(path, body):
         return json.loads(r.read())
 
 N = 300
-print(f"Retraining {N} barrel-surface frames…", flush=True)
+print(f"Retraining {N} barrel-surface frames...", flush=True)
 ok = 0
 for i in range(N):
     try:

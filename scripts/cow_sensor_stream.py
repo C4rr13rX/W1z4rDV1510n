@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cow Sensor Stream — W1z4rD V1510n
+Cow Sensor Stream -- W1z4rD V1510n
 Reads pre-extracted Stage 2 JPEG frames, routes each through the neural fabric
 (/media/train cross-modal: image + anatomical text), reads /neuro/snapshot and
 /qa/query for semantic state, and broadcasts over WebSocket for the 3D world.
@@ -44,9 +44,9 @@ CONTEXTS = [
     "Dairy cattle poll forehead brow occipital bovine cranium",
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Pillow-based per-cow bounding box detection
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 DETECT_W, DETECT_H = 96, 54
 _PIL_AVAILABLE: Optional[bool] = None
@@ -59,7 +59,7 @@ def _check_pil() -> bool:
             from PIL import Image  # noqa: F401
             _PIL_AVAILABLE = True
         except ImportError:
-            print("  [WARN] Pillow not installed — per-cow detection disabled.")
+            print("  [WARN] Pillow not installed -- per-cow detection disabled.")
             print("         Run:  pip install Pillow   to enable multi-cow tracking")
             _PIL_AVAILABLE = False
     return _PIL_AVAILABLE
@@ -91,7 +91,7 @@ def detect_cows_pil(frame_path: Path) -> list:
         )
         pixels = list(img.getdata())
 
-        # ── Per-row median background ──────────────────────────────────────
+        # -- Per-row median background --------------------------------------
         row_med = []
         for y in range(DETECT_H):
             row = [pixels[y * DETECT_W + x] for x in range(DETECT_W)]
@@ -114,7 +114,7 @@ def detect_cows_pil(frame_path: Path) -> list:
                 if abs(r - mr) + abs(g - mg) + abs(b - mb) > DEVIATION:
                     mask[y * DETECT_W + x] = 1
 
-        # ── Column projection ──────────────────────────────────────────────
+        # -- Column projection ----------------------------------------------
         active_h = gnd_start - sky_end
         col_profile = [
             sum(mask[y * DETECT_W + x] for y in range(sky_end, gnd_start))
@@ -122,7 +122,7 @@ def detect_cows_pil(frame_path: Path) -> list:
         ]
         THRESH = max(2, active_h // 9)
 
-        # ── Horizontal runs with small-gap merging ─────────────────────────
+        # -- Horizontal runs with small-gap merging -------------------------
         MAX_GAP = 2
         runs: list[tuple[int, int]] = []
         in_run = False
@@ -140,8 +140,8 @@ def detect_cows_pil(frame_path: Path) -> list:
         if in_run:
             runs.append((run_start, DETECT_W - 1))
 
-        # ── Split / force-divide wide blobs ────────────────────────────────
-        # Target entity width ≤ 40% of frame.  For blobs wider than 55%, force
+        # -- Split / force-divide wide blobs --------------------------------
+        # Target entity width <= 40% of frame.  For blobs wider than 55%, force
         # an equal split so we always get multiple entities from dense herds.
         TARGET_W  = int(DETECT_W * 0.38)   # ideal max per entity
         SPLIT_THR = int(DETECT_W * 0.55)   # min blob width that triggers split
@@ -175,7 +175,7 @@ def detect_cows_pil(frame_path: Path) -> list:
             else:
                 split_runs.append((x0, x1))
 
-        # ── Build bboxes ───────────────────────────────────────────────────
+        # -- Build bboxes ---------------------------------------------------
         results = []
         for x0, x1 in split_runs:
             if x1 - x0 < 3:
@@ -186,7 +186,7 @@ def detect_cows_pil(frame_path: Path) -> list:
                 if mask[y * DETECT_W + x]
             ]
             if not y_set:
-                # No active pixels in this column range — still emit a bbox
+                # No active pixels in this column range -- still emit a bbox
                 # centred vertically so the entity has a reasonable crop region
                 y_set = [sky_end, gnd_start - 1]
             y_min, y_max = min(y_set), max(y_set)
@@ -265,9 +265,9 @@ def track_cows(prev_tracked: list, new_detections: list) -> list:
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Data loading
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def load_title_map() -> dict:
     result = {}
@@ -286,9 +286,9 @@ def get_all_frames() -> list:
         return []
     return sorted(FRAMES_DIR.glob("*.jpg"))
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Neural fabric API calls
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def call_media_train(frame_path: Path, text: str, node: str) -> dict:
     """Cross-modal train: image + anatomical text in one co-activation."""
@@ -307,7 +307,7 @@ def call_media_train(frame_path: Path, text: str, node: str) -> dict:
     except Exception:
         return {}
 
-# ── 3D spatial observation training ──────────────────────────────────────────
+# -- 3D spatial observation training ------------------------------------------
 import random as _random
 
 def _bbox_to_3d_parts(cow: dict) -> list:
@@ -315,9 +315,9 @@ def _bbox_to_3d_parts(cow: dict) -> list:
     Map a detected entity to canonical body-relative 3D anatomy positions.
 
     Coordinate system matches train_cow_3d_anatomy.py exactly:
-      X = head-to-tail axis  (snout ≈ +1.62, tail_tip ≈ -1.55)
-      Y = height             (hooves = 0, withers ≈ 1.42)
-      Z = lateral left/right (shoulders ≈ ±0.32)
+      X = head-to-tail axis  (snout ~= +1.62, tail_tip ~= -1.55)
+      Y = height             (hooves = 0, withers ~= 1.42)
+      Z = lateral left/right (shoulders ~= ±0.32)
 
     All positions are body-centred (not world-space).  This lets the neural
     fabric learn the correct anatomy regardless of where the cow appears in the
@@ -330,14 +330,14 @@ def _bbox_to_3d_parts(cow: dict) -> list:
     HALF_L   = 1.585  # (snout 1.62 + tail_tip 1.55) / 2
     HALF_W   = 0.32   # shoulder half-width
 
-    # Per-frame jitter magnitude — simulates natural pose/size variation
+    # Per-frame jitter magnitude -- simulates natural pose/size variation
     j = 0.025
     def jit():
         return _random.gauss(0, j)
 
     pts = []
 
-    # ── Dense surface grid in canonical body-relative space ───────────────────
+    # -- Dense surface grid in canonical body-relative space -------------------
     # X axis = head-to-tail (NX columns), Y axis = height (NY rows)
     # Z width follows cow's barrel cross-section: widest at belly, tapers top/bottom
     import math as _math
@@ -349,17 +349,17 @@ def _bbox_to_3d_parts(cow: dict) -> list:
             ty = iy / (NY - 1)     # 0 = top (withers), 1 = bottom (ground)
             y  = WITHER_H * (1.0 - ty) + jit()
 
-            # Barrel cross-section: widest at mid-belly (ty≈0.6), narrow at withers/hooves
+            # Barrel cross-section: widest at mid-belly (ty~=0.6), narrow at withers/hooves
             barrel = HALF_W * (0.25 + 0.75 * _math.sin(_math.pi * min(ty * 1.5, 1.0)) ** 0.7)
 
-            # Use grid indices for full spatial resolution (140 unique X×Y positions)
+            # Use grid indices for full spatial resolution (140 unique XxY positions)
             label = f"cow_surf_{iy:02d}_{ix:02d}"
 
             pts.append((label + "_L", x, max(0.0, y), +barrel + jit()))
             pts.append((label + "_R", x, max(0.0, y), -barrel - jit()))
             pts.append((label,        x, max(0.0, y),  0.0    + jit()))
 
-    # ── Named anatomy landmarks (matching anatomy atlas label names) ──────────
+    # -- Named anatomy landmarks (matching anatomy atlas label names) ----------
     pts += [
         ("cow_head",       1.40+jit(), 1.05+jit(),  0.00+jit()),
         ("cow_snout",      1.62+jit(), 0.90+jit(),  0.00+jit()),
@@ -484,9 +484,9 @@ def call_neuro_snapshot(node: str) -> dict:
     except Exception:
         return {}
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Motion proxy (fabric-native)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def motion_from_frame_delta(
     curr_label_count: int,
@@ -498,9 +498,9 @@ def motion_from_frame_delta(
     size_d  = abs(curr_file_size  - prev_file_size)   / max(prev_file_size,  1)
     return min(label_d * 0.6 + size_d * 0.4, 1.0)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Pose computation (fabric-driven)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def compute_pose(
     motion_mag: float,
@@ -550,9 +550,9 @@ def compute_pose(
         "narrative":       qa_answer[:120] if qa_answer else "",
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HTTP server
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_http_server(port: int):
     class Handler(SimpleHTTPRequestHandler):
@@ -564,9 +564,9 @@ def run_http_server(port: int):
     print(f"  HTTP  -> http://localhost:{port}")
     server.serve_forever()
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # WebSocket server
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 connected: set = set()
 
@@ -588,9 +588,9 @@ async def broadcast(msg: str):
             dead.add(ws)
     connected.difference_update(dead)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Sensor loop
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 async def sensor_loop(node: str, target_fps: float):
     frames = get_all_frames()
@@ -682,9 +682,9 @@ async def sensor_loop(node: str, target_fps: float):
         elapsed = time.monotonic() - t0
         await asyncio.sleep(max(0.0, interval - elapsed))
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 async def main(node: str, ws_port: int, http_port: int, fps: float):
     print("=" * 60)

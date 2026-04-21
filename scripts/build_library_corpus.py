@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-build_library_corpus.py — MIT-licensed library docs + Stack Overflow accepted answers
+build_library_corpus.py -- MIT-licensed library docs + Stack Overflow accepted answers
 
 Stage 23: MIT library documentation
   Fetches README + docs from pinned versions of popular MIT-licensed libraries.
@@ -11,7 +11,7 @@ Stage 23: MIT library documentation
 Stage 24: Stack Overflow accepted answers
   Fetches top-voted questions with accepted answers via the Stack Exchange API.
   ONLY trains: original question + accepted/highest-voted answer + explanation.
-  No unverified snippets — only community-validated, accepted answers.
+  No unverified snippets -- only community-validated, accepted answers.
   The question gives the "someone described a problem in English" signal;
   the accepted answer gives the verified resolution + explanation.
 
@@ -30,7 +30,7 @@ STAGES = {
     24: 'Stack Overflow: top accepted answers (question + explanation + code)',
 }
 
-# ── HTTP helpers ───────────────────────────────────────────────────────────────
+# -- HTTP helpers ---------------------------------------------------------------
 
 def _get(url: str, timeout=20, retries=3, headers=None) -> bytes | None:
     hdrs = {'User-Agent': 'W1z4rDV1510n-training/1.0 (educational corpus builder)'}
@@ -91,7 +91,7 @@ def _train_text(text: str, node: str):
         r.read()
 
 
-# ── Markdown code block parser ─────────────────────────────────────────────────
+# -- Markdown code block parser -------------------------------------------------
 
 def _extract_doc_pairs(markdown: str) -> list[dict]:
     """
@@ -132,7 +132,7 @@ def _extract_doc_pairs(markdown: str) -> list[dict]:
     return pairs
 
 
-# ── Stage 23: MIT Library Documentation ───────────────────────────────────────
+# -- Stage 23: MIT Library Documentation ---------------------------------------
 
 # Libraries: (display_name, license, github_org/repo, docs_paths)
 LIBRARIES = [
@@ -371,7 +371,7 @@ def build_library_corpus(node: str, args):
                     if len(pair['code']) < 15:
                         continue
                     text = (
-                        f'Library documentation example — {name} ({lang}, {license_} license).\n'
+                        f'Library documentation example -- {name} ({lang}, {license_} license).\n'
                         f'Repository: github.com/{repo}\n\n'
                         f'Description: {pair["description"][:400]}\n\n'
                         f'Language: {pair["lang"] or lang}\n'
@@ -408,16 +408,16 @@ def build_library_corpus(node: str, args):
 
             time.sleep(0.3)
 
-        print(f'    → {lib_trained} items trained')
+        print(f'    -> {lib_trained} items trained')
 
-    print(f'\n  Stage 23 done — {trained} total items trained from {len(LIBRARIES)} libraries')
+    print(f'\n  Stage 23 done -- {trained} total items trained from {len(LIBRARIES)} libraries')
 
 
-# ── Stage 24: Stack Overflow accepted answers ──────────────────────────────────
+# -- Stage 24: Stack Overflow accepted answers ----------------------------------
 #
 # Only trains: question title + question body + ACCEPTED (or highest-voted)
 # answer body + score context.
-# The model benefits from "programmer described X in plain English → solution"
+# The model benefits from "programmer described X in plain English -> solution"
 # patterns for troubleshooting and self-correction.
 
 SO_TAGS = [
@@ -468,7 +468,7 @@ def _so_fetch_questions(tag: str, page: int, pagesize: int) -> list | None:
     # Check for throttle
     quota = data.get('quota_remaining', 999)
     if quota < 5:
-        print(f'    [WARN] API quota low: {quota} remaining — slowing down')
+        print(f'    [WARN] API quota low: {quota} remaining -- slowing down')
         time.sleep(30)
     return data.get('items', [])
 
@@ -490,7 +490,7 @@ def _so_fetch_accepted_answer(question_id: int) -> dict | None:
 
 
 def build_stackoverflow_corpus(node: str, args):
-    print(f'\n[Stage 24] Stack Overflow — accepted answers\n')
+    print(f'\n[Stage 24] Stack Overflow -- accepted answers\n')
     print(f'  Only training: question + ACCEPTED/top-voted answer + explanation')
     print(f'  Tags: {len(SO_TAGS)}, max {args.so_per_tag} questions per tag\n')
 
@@ -542,7 +542,7 @@ def build_stackoverflow_corpus(node: str, args):
                 # Build training text: question + answer context
                 verdict = 'accepted answer' if is_accepted else f'top-voted answer (score: {ans_score})'
                 text = (
-                    f'Stack Overflow — programming Q&A. '
+                    f'Stack Overflow -- programming Q&A. '
                     f'Question score: {q_score}. Tags: {q_tags}.\n\n'
                     f'QUESTION: {q_title}\n\n'
                     f'{q_body[:800]}\n\n'
@@ -564,10 +564,10 @@ def build_stackoverflow_corpus(node: str, args):
 
         print(f'{tag_count} questions')
 
-    print(f'\n  Stage 24 done — {trained} Q&A pairs trained from {len(seen_ids)} unique questions')
+    print(f'\n  Stage 24 done -- {trained} Q&A pairs trained from {len(seen_ids)} unique questions')
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description='Build library docs + Stack Overflow corpus')
@@ -587,7 +587,7 @@ def main():
     node   = args.node
 
     print('=' * 70)
-    print('  W1z4rD V1510n — Library Docs + Stack Overflow Corpus Builder')
+    print('  W1z4rD V1510n -- Library Docs + Stack Overflow Corpus Builder')
     print('=' * 70)
     print(f'  Node:    http://{node}')
     print(f'  Stages:  {stages}')

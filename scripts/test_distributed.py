@@ -3,15 +3,15 @@
 Distributed training end-to-end test.
 
 Requires TWO running nodes:
-  NODE_A (Windows) — http://localhost:8090        (the existing node)
-  NODE_B (WSL)     — http://172.23.90.61:8090     (the new WSL node)
+  NODE_A (Windows) -- http://localhost:8090        (the existing node)
+  NODE_B (WSL)     -- http://172.23.90.61:8090     (the new WSL node)
 
 Run:
   python scripts/test_distributed.py
 """
 import httpx, time, sys, json
 
-NODE_A = "http://192.168.1.84:8090"       # Windows host node (LAN IP — 127.0.0.1 is stolen by WSL relay)
+NODE_A = "http://192.168.1.84:8090"       # Windows host node (LAN IP -- 127.0.0.1 is stolen by WSL relay)
 NODE_B = "http://172.23.90.61:8090"      # WSL node
 
 CLUSTER_PORT_A = "192.168.1.84:51611"    # Windows cluster addr (as seen by WSL)
@@ -38,7 +38,7 @@ def ok(msg):  print(f"  [OK]   {msg}")
 def fail(msg): print(f"  [FAIL] {msg}"); sys.exit(1)
 def info(msg): print(f"  ...    {msg}")
 
-# ── 1. Check both nodes are up ─────────────────────────────────────────────────
+# -- 1. Check both nodes are up -------------------------------------------------
 section("1. Node Health Check")
 try:
     ha = get(NODE_A, "/health")
@@ -52,29 +52,29 @@ try:
 except Exception as e:
     fail(f"Node B ({NODE_B}) unreachable: {e}")
 
-# ── 2. Reset cluster state ────────────────────────────────────────────────────
+# -- 2. Reset cluster state ----------------------------------------------------
 section("2. Reset Cluster (clean slate)")
 for node, name in [(NODE_A, "A"), (NODE_B, "B")]:
     st = get(node, "/cluster/status")
     if st.get("status") == "joined":
-        info(f"Node {name} in cluster — leaving...")
+        info(f"Node {name} in cluster -- leaving...")
         try:
             post(node, "/cluster/leave")
             ok(f"Node {name} left cluster")
         except Exception as e:
-            info(f"Node {name} leave failed ({e}) — may already be standalone")
+            info(f"Node {name} leave failed ({e}) -- may already be standalone")
     else:
         ok(f"Node {name} standalone")
 time.sleep(1)
 
-# ── 3. Cluster init on Node A ─────────────────────────────────────────────────
+# -- 3. Cluster init on Node A -------------------------------------------------
 section("3. Cluster Init (Node A -> Coordinator)")
 resp = post(NODE_A, "/cluster/init", {"bind": "0.0.0.0:51611", "otp_ttl_secs": 300})
 otp = resp["otp"]
 ok(f"Cluster initialised. OTP: {otp}")
 ok(f"Cluster ID: {resp['cluster_id']}")
 
-# ── 4. Cluster join on Node B ─────────────────────────────────────────────────
+# -- 4. Cluster join on Node B -------------------------------------------------
 section("4. Cluster Join (Node B -> Worker)")
 resp = post(NODE_B, "/cluster/join", {
     "coordinator": CLUSTER_PORT_A,
@@ -89,7 +89,7 @@ info("Refreshing peer lists via /cluster/status...")
 get(NODE_A, "/cluster/status")
 get(NODE_B, "/cluster/status")
 
-# ── 4. Verify distributed sync status ─────────────────────────────────────────
+# -- 4. Verify distributed sync status -----------------------------------------
 section("5. Distributed Sync Status")
 sync_a = get(NODE_A, "/cluster/sync/status")
 sync_b = get(NODE_B, "/cluster/sync/status")
@@ -97,7 +97,7 @@ info(f"Node A peers: {sync_a.get('peers', [])}")
 info(f"Node B peers: {sync_b.get('peers', [])}")
 
 if not sync_a.get("peers"):
-    fail("Node A has no distributed peers — cluster join may not have refreshed peer list")
+    fail("Node A has no distributed peers -- cluster join may not have refreshed peer list")
 if not sync_b.get("peers"):
     fail("Node B has no distributed peers")
 ok(f"Peer lists populated. A->{len(sync_a['peers'])} peers, B->{len(sync_b['peers'])} peers")
@@ -109,11 +109,11 @@ time.sleep(1.5)
 r = post(NODE_B, "/qa/query", {"question": "What is a distributed system?"})
 boot_results = r.get("report", {}).get("results", [])
 if boot_results and boot_results[0].get("answer"):
-    ok(f"Bootstrap sync OK — Node B has pre-existing knowledge (act={boot_results[0].get('activation',0):.3f})")
+    ok(f"Bootstrap sync OK -- Node B has pre-existing knowledge (act={boot_results[0].get('activation',0):.3f})")
 else:
-    info("Bootstrap: no prior QA knowledge to seed (clean node or first run — OK)")
+    info("Bootstrap: no prior QA knowledge to seed (clean node or first run -- OK)")
 
-# ── 5. Training round-robin test ───────────────────────────────────────────────
+# -- 5. Training round-robin test -----------------------------------------------
 section("6. Round-Robin Training Routing")
 # With 1 peer and self-inclusive round-robin (N+1 slots) we expect roughly
 # 50% local and 50% forwarded.  Send 8 calls: expect 4 each (±1 is fine).
@@ -135,13 +135,13 @@ for i in range(8):
 
 ok(f"Routed to peer: {train_remote}/8   Trained locally: {train_local}/8")
 if train_local == 0:
-    fail("Node A trained 0 calls locally — self not included in round-robin rotation")
+    fail("Node A trained 0 calls locally -- self not included in round-robin rotation")
 if train_remote == 0:
-    fail("0 calls forwarded — peer routing broken")
+    fail("0 calls forwarded -- peer routing broken")
 if abs(train_local - train_remote) > 2:
-    print(f"  [WARN] Uneven split ({train_local} local / {train_remote} remote) — expected ~4/4")
+    print(f"  [WARN] Uneven split ({train_local} local / {train_remote} remote) -- expected ~4/4")
 
-# ── 6. QA broadcast test ─────────────────────────────────────────────────────
+# -- 6. QA broadcast test -----------------------------------------------------
 section("7. QA Broadcast Replication")
 import uuid
 
@@ -169,10 +169,10 @@ top = results[0] if results else {}
 if top.get("answer"):
     ok(f"Node B has the answer (act={top.get('activation',0):.3f}): {top['answer'][:80]}")
 else:
-    print("  [WARN] Node B doesn't have the answer yet — broadcast may be async/delayed")
+    print("  [WARN] Node B doesn't have the answer yet -- broadcast may be async/delayed")
     info(f"  Full query response: {json.dumps(r, indent=2)[:300]}")
 
-# ── 7. Weight delta sync test ──────────────────────────────────────────────────
+# -- 7. Weight delta sync test --------------------------------------------------
 section("8. Weight Delta Sync (force sync)")
 # Train concepts directly on Node A (bypass round-robin with x-w1z-local header
 # equivalent: just use /neuro/train which goes straight to the local pool).
@@ -206,9 +206,9 @@ if mito_keys:
 else:
     top5 = list(activated.items())[:5] if isinstance(activated, dict) else list(activated)[:5]
     info(f"Propagation result (top 5): {top5}")
-    print("  [WARN] mitochondria not in Node B propagation — may need higher lr_scale")
+    print("  [WARN] mitochondria not in Node B propagation -- may need higher lr_scale")
 
-# ── Summary ────────────────────────────────────────────────────────────────────
+# -- Summary --------------------------------------------------------------------
 section("Test Complete")
 ok("All core distributed paths exercised.")
 print(f"""

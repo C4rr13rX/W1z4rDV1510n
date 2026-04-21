@@ -7,10 +7,10 @@ Seeds the neural fabric with DENSE 3D surface points covering ALL cow perspectiv
   - Body barrel surface ~200 pts, head ~30 pts, 4 legs ~80 pts, neck ~20 pts
 
 Labels use anatomy keyword substrings so /mesh/synthesize body/head/leg queries
-match many more centroids → richer convex hull → recognisable bovine shape.
+match many more centroids -> richer convex hull -> recognisable bovine shape.
 
 The user insight: "it's got to have seen the back and the side and the underside
-and the top side to know what a cow looks like" — XYZ labels are the 3D equivalent
+and the top side to know what a cow looks like" -- XYZ labels are the 3D equivalent
 of multi-view understanding from 2D video observations.
 
 Usage:
@@ -21,17 +21,17 @@ Usage:
 import argparse, json, math, random, time, urllib.request
 
 NODE  = "http://localhost:8090"
-# ─── Cow body dimensions (metres, Y-up, X=head→tail) ─────────────────────────
+# --- Cow body dimensions (metres, Y-up, X=head->tail) -------------------------
 WITHER_H  = 1.42   # withers height
-HALF_L    = 1.00   # body half-length (shoulder x~0.82 → hip x~-0.80 → half=1.0)
+HALF_L    = 1.00   # body half-length (shoulder x~0.82 -> hip x~-0.80 -> half=1.0)
 # Barrel cross-section width at normalised height ty (0=withers, 1=ground-belly)
 def barrel_hw(ty):
     """Half-width at normalised height ty. Widest ~ mid-rib."""
     return 0.34 * (0.25 + 0.75 * math.sin(math.pi * min(ty * 1.5, 1.0)) ** 0.7)
 
-# ─── Body surface points ──────────────────────────────────────────────────────
+# --- Body surface points ------------------------------------------------------
 # Generate a dense grid of points on the cow body barrel surface.
-# 16 columns along X (head→tail), 18 rows around the oval cross-section.
+# 16 columns along X (head->tail), 18 rows around the oval cross-section.
 # Label each point with the nearest anatomy keyword so the /mesh/synthesize
 # body query matches it.
 
@@ -65,7 +65,7 @@ for ix in range(NX_BODY):
     tx      = ix / (NX_BODY - 1)
     x_body  = HALF_L * (1.0 - 2 * tx)  # +1.0 at shoulder, -1.0 at rump
 
-    # Oval cross-section: height 0.30 (belly) → 1.42 (withers)
+    # Oval cross-section: height 0.30 (belly) -> 1.42 (withers)
     belly_y  = 0.30
     top_y    = 1.42
     mid_y    = (belly_y + top_y) / 2   # 0.86
@@ -74,7 +74,7 @@ for ix in range(NX_BODY):
     for ia in range(NA_BODY):
         angle = ia / NA_BODY * 2 * math.pi
         # Ellipse: width uses barrel_hw, height uses h_half
-        # angle=0 → top, angle=pi → bottom
+        # angle=0 -> top, angle=pi -> bottom
         raw_y = mid_y + h_half * math.cos(angle)
         ty    = 1.0 - (raw_y - belly_y) / (top_y - belly_y)  # 0=top, 1=bottom
         hw    = barrel_hw(max(0, min(1, ty)))
@@ -92,13 +92,13 @@ for ix in range(NX_BODY):
         label = f"cow_{prefix}_{region}_{side}_{ix:02d}_{ia:02d}"
         BODY_SURFACE.append((label, x_body, raw_y, raw_z))
 
-# ─── Head surface points ──────────────────────────────────────────────────────
+# --- Head surface points ------------------------------------------------------
 # Ellipsoid centred at (1.45, 1.10, 0), elongated along X.
 HEAD_SURFACE = []
 NX_HEAD = 6; NA_HEAD = 12
 for ix in range(NX_HEAD):
     tx    = ix / (NX_HEAD - 1)
-    x_h   = 1.28 + 0.35 * tx           # 1.28 → 1.63 (back of skull → snout)
+    x_h   = 1.28 + 0.35 * tx           # 1.28 -> 1.63 (back of skull -> snout)
     for ia in range(NA_HEAD):
         angle = ia / NA_HEAD * 2 * math.pi
         y_h   = 1.10 + 0.18 * math.cos(angle)
@@ -116,11 +116,11 @@ for ia in range(6):
     angle = ia / 6 * 2 * math.pi
     HEAD_SURFACE.append((f"cow_snout_nostril_{ia:02d}", 1.63, 0.90 + 0.04*math.cos(angle), 0.05*math.sin(angle)))
 
-# ─── Neck surface points ──────────────────────────────────────────────────────
+# --- Neck surface points ------------------------------------------------------
 NECK_SURFACE = []
 for ix in range(6):
     tx   = ix / 5
-    x_n  = 0.85 + 0.45 * tx   # 0.85 → 1.30 (withers → skull base)
+    x_n  = 0.85 + 0.45 * tx   # 0.85 -> 1.30 (withers -> skull base)
     y_n  = 0.95 + 0.23 * tx   # rises toward head
     for ia in range(8):
         angle = ia / 8 * 2 * math.pi
@@ -130,7 +130,7 @@ for ix in range(6):
         part  = "neck" if x_n < 1.1 else "throat"
         NECK_SURFACE.append((f"cow_{part}_{side}_{ix:02d}_{ia:02d}", x_n, y_n + y_off, z_off))
 
-# ─── Leg surface points ──────────────────────────────────────────────────────
+# --- Leg surface points ------------------------------------------------------
 # Each leg is a tapered cylinder from shoulder/hip to hoof.
 def _leg_surface(x_base, z_side, labels, prefix):
     """Generate surface points for one leg."""
@@ -138,7 +138,7 @@ def _leg_surface(x_base, z_side, labels, prefix):
     NY_LEG = 10
     for iy in range(NY_LEG):
         ty     = iy / (NY_LEG - 1)
-        y_leg  = 1.10 * (1.0 - ty)      # 1.10 → 0 (shoulder to hoof)
+        y_leg  = 1.10 * (1.0 - ty)      # 1.10 -> 0 (shoulder to hoof)
         r      = 0.10 - 0.04 * ty        # tapers slightly toward hoof
         for ia in range(8):
             angle = ia / 8 * 2 * math.pi
@@ -164,7 +164,7 @@ print(f"Dense surface atlas: {len(BODY_SURFACE)} body + {len(HEAD_SURFACE)} head
       f"{len(NECK_SURFACE)} neck + {len(LEG_SURFACE)} legs = {len(ALL_SURFACE)} total points",
       flush=True)
 
-# ─── Extra query labels (text tokens) ────────────────────────────────────────
+# --- Extra query labels (text tokens) ----------------------------------------
 QUERY_LABELS = [
     "txt:word_cow", "txt:word_dairy", "txt:word_bovine", "txt:word_Holstein",
     "txt:word_cattle", "txt:word_anatomy", "txt:word_body", "txt:word_skeleton",
@@ -180,7 +180,7 @@ QUERY_LABELS = [
     "cow_body", "bovine_anatomy", "cow_skeleton", "cow_surface",
 ]
 
-# ─── HTTP helper ──────────────────────────────────────────────────────────────
+# --- HTTP helper --------------------------------------------------------------
 def post_json(path, body, timeout=15):
     data = json.dumps(body).encode()
     req  = urllib.request.Request(
@@ -189,7 +189,7 @@ def post_json(path, body, timeout=15):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
-BATCH_SIZE = 80  # symbols per frame — keeps each request well under 15s timeout
+BATCH_SIZE = 80  # symbols per frame -- keeps each request well under 15s timeout
 
 def make_snapshot(subset, noise=0.015):
     """One EnvironmentSnapshot with a SUBSET of surface points + jitter."""

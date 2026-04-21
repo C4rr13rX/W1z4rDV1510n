@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-W1z4rD V1510n — Full Pipeline Trainer
+W1z4rD V1510n -- Full Pipeline Trainer
 ======================================
 Trains through EVERY architectural pathway simultaneously for each fact so
 the neural fabric builds maximally robust associations:
 
   1. MEDIA          /media/train          image card + text spans + keyboard
-  2. QA INGEST      /qa/ingest            Q→A pair, confidence 0.97
-  3. EPISODE        /neuro/record_episode context labels → answer reinforcement
-  4. ENTITY OBSERVE /entity/observe       concept as BehaviorInput entity →
-                                          Behavior → Physiology → Survival →
+  2. QA INGEST      /qa/ingest            Q->A pair, confidence 0.97
+  3. EPISODE        /neuro/record_episode context labels -> answer reinforcement
+  4. ENTITY OBSERVE /entity/observe       concept as BehaviorInput entity ->
+                                          Behavior -> Physiology -> Survival ->
                                           Narrative chain; neuro pool gets
                                           entity/species/latent/position labels
   5. DIRECT NEURO   /neuro/train          raw synonym/relation co-activation
@@ -57,9 +57,9 @@ try:
 except ImportError:
     sys.exit("Missing: pip install Pillow")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Config
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 NODE_URL = "http://127.0.0.1:8090"
 
 DOMAIN_COLORS: dict[str, tuple[int, int, int]] = {
@@ -75,9 +75,9 @@ DOMAIN_COLORS: dict[str, tuple[int, int, int]] = {
 
 DOMAIN_INDEX: dict[str, int] = {k: i for i, k in enumerate(DOMAIN_COLORS)}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fact dataset  — 50 curated Q/A pairs with domain and related concept chains
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Fact dataset  -- 50 curated Q/A pairs with domain and related concept chains
+# -----------------------------------------------------------------------------
 @dataclass
 class Fact:
     word:     str          # short concept name (used as entity_id)
@@ -89,7 +89,7 @@ class Fact:
 
 
 FACTS: list[Fact] = [
-    # ── Physics ─────────────────────────────────────────────────────────────
+    # -- Physics -------------------------------------------------------------
     Fact("gravity",
          "What is gravity?",
          "Gravity is a fundamental force that attracts objects with mass toward each other. "
@@ -121,7 +121,7 @@ FACTS: list[Fact] = [
     Fact("light",
          "What is light?",
          "Light is electromagnetic radiation visible to the human eye, traveling as waves and "
-         "photons at approximately 3×10^8 meters per second in a vacuum.",
+         "photons at approximately 3x10^8 meters per second in a vacuum.",
          "physics", ["light", "photon", "speed", "electromagnetic", "wave"],
          ["light", "photon", "electromagnetic", "radiation", "optics"]),
 
@@ -174,7 +174,7 @@ FACTS: list[Fact] = [
          "physics", ["pressure", "force", "area", "fluid", "atmosphere"],
          ["pressure", "force", "area", "pascal", "atmospheric"]),
 
-    # ── Biology ─────────────────────────────────────────────────────────────
+    # -- Biology -------------------------------------------------------------
     Fact("cell",
          "What is a cell?",
          "A cell is the basic structural and functional unit of all living organisms. "
@@ -231,7 +231,7 @@ FACTS: list[Fact] = [
          "biology", ["vaccine", "immune", "antibody", "virus", "disease"],
          ["vaccine", "immune", "antibody", "pathogen", "protection", "immunity"]),
 
-    # ── Chemistry ────────────────────────────────────────────────────────────
+    # -- Chemistry ------------------------------------------------------------
     Fact("atom",
          "What is an atom?",
          "An atom is the smallest unit of matter that retains the chemical properties of "
@@ -267,7 +267,7 @@ FACTS: list[Fact] = [
          "chemistry", ["osmosis", "membrane", "concentration", "water", "diffusion"],
          ["osmosis", "membrane", "diffusion", "concentration", "gradient"]),
 
-    # ── Earth Science ────────────────────────────────────────────────────────
+    # -- Earth Science --------------------------------------------------------
     Fact("atmosphere",
          "What is the atmosphere?",
          "The atmosphere is the layer of gases surrounding Earth, composed mainly of "
@@ -303,7 +303,7 @@ FACTS: list[Fact] = [
          "earth", ["ocean", "water", "climate", "salinity", "marine"],
          ["ocean", "sea", "saltwater", "marine", "depth", "current"]),
 
-    # ── Math ─────────────────────────────────────────────────────────────────
+    # -- Math -----------------------------------------------------------------
     Fact("prime",
          "What is a prime number?",
          "A prime number is a natural number greater than 1 that has no positive divisors "
@@ -313,7 +313,7 @@ FACTS: list[Fact] = [
 
     Fact("pi",
          "What is pi?",
-         "Pi (π) is the ratio of a circle's circumference to its diameter, approximately "
+         "Pi (pi) is the ratio of a circle's circumference to its diameter, approximately "
          "equal to 3.14159. It is an irrational and transcendental number.",
          "math", ["pi", "circle", "circumference", "geometry", "ratio"],
          ["pi", "circle", "circumference", "diameter", "ratio", "irrational"]),
@@ -346,7 +346,7 @@ FACTS: list[Fact] = [
          "math", ["algorithm", "computation", "logic", "binary", "program"],
          ["algorithm", "procedure", "step", "computation", "logic", "instructions"]),
 
-    # ── Computer Science ──────────────────────────────────────────────────────
+    # -- Computer Science ------------------------------------------------------
     Fact("binary",
          "What is binary code?",
          "Binary code represents data using only two digits: 0 and 1. All digital computers "
@@ -375,7 +375,7 @@ FACTS: list[Fact] = [
          "cs", ["network", "internet", "protocol", "data", "communication"],
          ["network", "internet", "protocol", "connection", "data", "communication"]),
 
-    # ── Anatomy ──────────────────────────────────────────────────────────────
+    # -- Anatomy --------------------------------------------------------------
     Fact("brain",
          "What is the brain?",
          "The brain is the central organ of the nervous system, controlling thought, memory, "
@@ -404,7 +404,7 @@ FACTS: list[Fact] = [
          "anatomy", ["immune", "antibody", "vaccine", "cell", "pathogen"],
          ["immune", "antibody", "defense", "pathogen", "lymphocyte", "innate"]),
 
-    # ── General Science ───────────────────────────────────────────────────────
+    # -- General Science -------------------------------------------------------
     Fact("black_hole",
          "What is a black hole?",
          "A black hole is a region of spacetime where gravity is so strong that nothing, "
@@ -436,7 +436,7 @@ FACTS: list[Fact] = [
     Fact("pythagorean",
          "What is the Pythagorean theorem?",
          "The Pythagorean theorem states that in a right triangle, the square of the hypotenuse "
-         "equals the sum of the squares of the other two sides: a² + b² = c².",
+         "equals the sum of the squares of the other two sides: a^2 + b^2 = c^2.",
          "general", ["pythagorean", "triangle", "geometry", "hypotenuse", "math"],
          ["pythagorean", "triangle", "hypotenuse", "geometry", "right", "square"]),
 ]
@@ -460,9 +460,9 @@ CHAINS: list[list[str]] = [
     ["sound", "wave", "frequency", "light", "photon", "energy"],
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
@@ -533,9 +533,9 @@ def make_concept_card(fact: Fact, width: int = 480, height: int = 320) -> bytes:
     img.save(buf, format="JPEG", quality=88)
     return buf.getvalue()
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # API helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _post(client: httpx.Client, path: str, payload: dict,
           label: str = "", retries: int = 2, timeout: float = 30) -> dict | None:
@@ -620,14 +620,14 @@ def api_episode(client: httpx.Client, fact: Fact) -> None:
 def api_entity_observe(client: httpx.Client, fact: Fact, ts: int) -> dict | None:
     """
     Encode the concept as a BehaviorInput so it flows through the full
-    Behavior → Physiology → Survival → Narrative runtime chain.
+    Behavior -> Physiology -> Survival -> Narrative runtime chain.
 
     Sensor encoding rationale:
       PHYSIOLOGY  arousal  = conceptual abstraction (0=concrete, 1=abstract)
                   valence  = certainty level (high for formulaic facts)
       ENVIRONMENT word presence bits for top domain keywords
       MOTION      semantic-space x/y derived from domain index and word hash
-      VOICE       definition length (normalized) — how "verbose" this concept is
+      VOICE       definition length (normalized) -- how "verbose" this concept is
 
     This gives the neuro pool a second independent pathway:
       entity:{word}, entity:{word}:dim{n}:{bin}, entity:{word}:x*, y*, z*
@@ -639,7 +639,7 @@ def api_entity_observe(client: httpx.Client, fact: Fact, ts: int) -> dict | None
     abstraction = min(1.0, len(fact.answer) / 500.0)
 
     # certainty: facts with '=' or formulas are very certain
-    certainty = 0.9 if any(c in fact.answer for c in ["=", "²", "³", "%", "km/s"]) else 0.6
+    certainty = 0.9 if any(c in fact.answer for c in ["=", "^2", "^3", "%", "km/s"]) else 0.6
 
     # semantic x/y position from domain + first word hash
     wh = int(hashlib.md5(fact.word.encode()).hexdigest()[:8], 16)
@@ -682,7 +682,7 @@ def api_entity_observe(client: httpx.Client, fact: Fact, ts: int) -> dict | None
     payload = {
         "entity_id": fact.word,
         "timestamp": {"unix": ts},
-        "species": "CONCEPT",   # → SpeciesKind::Other("CONCEPT")
+        "species": "CONCEPT",   # -> SpeciesKind::Other("CONCEPT")
         "sensors": sensors,
         "actions": [{
             "kind": "INTERACTION",
@@ -697,7 +697,7 @@ def api_entity_observe(client: httpx.Client, fact: Fact, ts: int) -> dict | None
 
 def api_neuro_train(client: httpx.Client, labels: list[str], lr: float = 1.1) -> bool:
     # /neuro/train expects a full EnvironmentSnapshot; use /media/train with
-    # the labels converted to a plain-text sentence instead — this creates
+    # the labels converted to a plain-text sentence instead -- this creates
     # Hebbian co-activations between all words in the text on the same pathway.
     words = []
     for l in labels:
@@ -727,9 +727,9 @@ def api_checkpoint(client: httpx.Client) -> None:
     _post(client, "/qa/checkpoint", {}, label="qa_checkpoint", timeout=40)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Training phases
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def train_fact(fact: Fact, card: bytes, client: httpx.Client,
                ts_base: int, idx: int, verbose: bool = False) -> dict:
@@ -750,7 +750,7 @@ def train_fact(fact: Fact, card: bytes, client: httpx.Client,
     entity_result = api_entity_observe(client, fact, ts)
     ok["entity"] = entity_result is not None
 
-    # 5. Direct neuro — synonym/relation co-activation
+    # 5. Direct neuro -- synonym/relation co-activation
     labels = [f"txt:word_{w}" for w in fact.synonyms]
     labels.append(f"entity:{fact.word}")
     ok["neuro"] = api_neuro_train(client, labels)
@@ -804,10 +804,10 @@ def run_training(facts: list[Fact], client: httpx.Client,
 
     for rnd in range(rounds):
         print(f"\n{'='*60}")
-        print(f"ROUND {rnd+1}/{rounds} — {len(facts)} facts, 5 pathways each")
+        print(f"ROUND {rnd+1}/{rounds} -- {len(facts)} facts, 5 pathways each")
         print(f"{'='*60}")
 
-        # ── Per-fact training ────────────────────────────────────────────────
+        # -- Per-fact training ------------------------------------------------
         total_ok = {"media": 0, "qa": 0, "entity": 0, "neuro": 0, "ep": 0}
         for i, fact in enumerate(facts):
             if (i % 10 == 0) or verbose:
@@ -823,7 +823,7 @@ def run_training(facts: list[Fact], client: httpx.Client,
         print(f"\n  Pathway hits: " +
               " | ".join(f"{k}:{v}/{len(facts)}" for k, v in total_ok.items()))
 
-        # ── Synonym relation groups (direct neuro) ───────────────────────────
+        # -- Synonym relation groups (direct neuro) ---------------------------
         print("\n  Direct synonym/relation batches...")
         relation_groups = _build_relation_groups(facts)
         rg_ok = 0
@@ -832,7 +832,7 @@ def run_training(facts: list[Fact], client: httpx.Client,
                 rg_ok += 1
         print(f"    {rg_ok}/{len(relation_groups)} groups trained")
 
-        # ── Temporal chains ──────────────────────────────────────────────────
+        # -- Temporal chains --------------------------------------------------
         print("\n  Temporal concept chains...")
         ch_ok = 0
         for chain in CHAINS:
@@ -841,7 +841,7 @@ def run_training(facts: list[Fact], client: httpx.Client,
                 ch_ok += 1
         print(f"    {ch_ok}/{len(CHAINS)} chains trained")
 
-    # ── Checkpoint ──────────────────────────────────────────────────────────
+    # -- Checkpoint ----------------------------------------------------------
     print("\nSaving QA store...")
     api_checkpoint(client)
     print("  Done.")
@@ -882,9 +882,9 @@ def _build_relation_groups(facts: list[Fact]) -> list[list[str]]:
     return groups
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Benchmark probe
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]", " ", text.lower()).split()
@@ -929,7 +929,7 @@ def generate_query(client: httpx.Client, question: str) -> str:
 
 def run_bench(facts: list[Fact], client: httpx.Client) -> None:
     print(f"\n{'='*60}")
-    print(f"BENCHMARK — {len(facts)} questions × 3 pathways")
+    print(f"BENCHMARK -- {len(facts)} questions x 3 pathways")
     print(f"{'='*60}")
     print(f"{'Concept':<22} {'QA':>6} {'Chat':>6} {'Gen':>6}")
     print("-" * 44)
@@ -956,7 +956,7 @@ def run_bench(facts: list[Fact], client: httpx.Client) -> None:
             totals["gen"].append(gen_score)
 
             def _fmt(grade, score, conf=None):
-                sym = {"exact": "✓", "partial": "~", "miss": "✗"}.get(grade, "?")
+                sym = {"exact": "[ok]", "partial": "~", "miss": "✗"}.get(grade, "?")
                 c = f"{conf:.2f}" if conf is not None else f"{score:.2f}"
                 return f"{sym}{c:>5}"
 
@@ -966,7 +966,7 @@ def run_bench(facts: list[Fact], client: httpx.Client) -> None:
 
     # Summary
     def avg(lst): return sum(lst) / len(lst) if lst else 0.0
-    print(f"\n{'─'*44}")
+    print(f"\n{'-'*44}")
     print(f"  {'MEAN SCORE':<22} "
           f"{'QA':>6} {'Chat':>6} {'Gen':>6}")
     print(f"  {'':22} "
@@ -986,9 +986,9 @@ def run_bench(facts: list[Fact], client: httpx.Client) -> None:
         print(f"  {pathway.upper():<22} exact={e}/{n} partial={p}/{n} miss={m}/{n}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Interactive chat
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_chat(client: httpx.Client) -> None:
     try:
@@ -997,7 +997,7 @@ def run_chat(client: httpx.Client) -> None:
         pass
 
     print("\n" + "="*60)
-    print("Interactive Chat — type /quit to exit, /help for commands")
+    print("Interactive Chat -- type /quit to exit, /help for commands")
     print("="*60 + "\n")
 
     while True:
@@ -1012,9 +1012,9 @@ def run_chat(client: httpx.Client) -> None:
             print("Bye!")
             break
         if raw == "/help":
-            print("  /qa     <q>   — query QA runtime directly")
-            print("  /gen    <q>   — auto-regressive generation")
-            print("  /quit         — exit")
+            print("  /qa     <q>   -- query QA runtime directly")
+            print("  /gen    <q>   -- auto-regressive generation")
+            print("  /quit         -- exit")
             continue
         if raw.startswith("/qa "):
             q = raw[4:]
@@ -1043,9 +1043,9 @@ def run_chat(client: httpx.Client) -> None:
                 print("\nW1z4rD: I don't have a clear answer to that yet.\n")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def main():
     global NODE_URL

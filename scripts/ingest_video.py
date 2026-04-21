@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-W1z4rD V1510n — Video/Audio Ingestion Script
+W1z4rD V1510n -- Video/Audio Ingestion Script
 =============================================
 Processes video files into multimodal training sequences for the node.
 
@@ -54,7 +54,7 @@ except ImportError:
         print()
 
 
-# ── ffmpeg helpers ─────────────────────────────────────────────────────────────
+# -- ffmpeg helpers -------------------------------------------------------------
 
 def require_ffmpeg():
     if shutil.which("ffmpeg") is None:
@@ -119,7 +119,7 @@ def extract_embedded_srt(video_path: str) -> str | None:
     return result.stdout
 
 
-# ── SRT parser ─────────────────────────────────────────────────────────────────
+# -- SRT parser -----------------------------------------------------------------
 
 def _srt_time_to_secs(ts: str) -> float:
     """Convert '00:01:23,456' to seconds."""
@@ -159,7 +159,7 @@ def subtitle_at(entries: list[tuple[float, float, str]], t: float) -> str | None
     return None
 
 
-# ── Node API ───────────────────────────────────────────────────────────────────
+# -- Node API -------------------------------------------------------------------
 
 def train_sequence(client: httpx.Client, node_url: str,
                    frames: list[dict], tau: float) -> dict:
@@ -178,7 +178,7 @@ def checkpoint(client: httpx.Client, node_url: str) -> None:
         tqdm.write(f"  Checkpoint failed: {resp.status_code}")
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# -- Main -----------------------------------------------------------------------
 
 def build_frames_for_chunk(
     video_path: str,
@@ -190,7 +190,7 @@ def build_frames_for_chunk(
     """
     Build the list of TrainSequenceFrame dicts for one time chunk.
     Each modality present becomes its own frame with the same t_secs.
-    Adjacent frames at the same t get max bridge strength (dt=0 → exp(0)=1).
+    Adjacent frames at the same t get max bridge strength (dt=0 -> exp(0)=1).
     """
     frames = []
 
@@ -264,7 +264,7 @@ def main():
     end   = min(args.end, total_dur) if args.end else total_dur
     if end <= start:
         sys.exit(f"Invalid range: {start}s to {end}s")
-    print(f"Video: {video_path} | range {start:.1f}s–{end:.1f}s | total {total_dur:.1f}s")
+    print(f"Video: {video_path} | range {start:.1f}s-{end:.1f}s | total {total_dur:.1f}s")
 
     # -- Subtitles
     subtitles: list[tuple[float, float, str]] = []
@@ -286,7 +286,7 @@ def main():
     with httpx.Client() as hc:
         try:
             health = hc.get(f"{args.node}/health", timeout=5).json()
-            print(f"Node: {health.get('node_id')} — {health.get('status')}")
+            print(f"Node: {health.get('node_id')} -- {health.get('status')}")
         except Exception as e:
             sys.exit(f"Node not reachable at {args.node}: {e}")
 

@@ -12,14 +12,14 @@ coordinates:
   z  0 = anterior      ->  1 = posterior
 
 Four scan phases cycle automatically:
-  full_body  (120 s) — axial sweep head->feet->head, ±6% y-slab
-  cardiac    ( 60 s) — heart + great vessels + lung bases zoomed
-  brain      ( 60 s) — full cranial contents
-  abdomen    ( 60 s) — liver, kidneys, gut, retroperitoneum
+  full_body  (120 s) -- axial sweep head->feet->head, ±6% y-slab
+  cardiac    ( 60 s) -- heart + great vessels + lung bases zoomed
+  brain      ( 60 s) -- full cranial contents
+  abdomen    ( 60 s) -- liver, kidneys, gut, retroperitoneum
 
 Physiological motion on every frame:
-  Cardiac  72 bpm   — chambers dilate/contract, aorta pulses
-  Resp     15 /min  — lungs translate, diaphragm descends, subdiaphragmatic
+  Cardiac  72 bpm   -- chambers dilate/contract, aorta pulses
+  Resp     15 /min  -- lungs translate, diaphragm descends, subdiaphragmatic
                        organs follow
 
 Usage:
@@ -31,7 +31,7 @@ Usage:
 import argparse, json, math, random, sys, time
 import urllib.request, urllib.error
 
-# ── Timing constants ──────────────────────────────────────────────────────────
+# -- Timing constants ----------------------------------------------------------
 FPS           = 10
 DT            = 1.0 / FPS
 CARDIAC_BPM   = 72
@@ -40,7 +40,7 @@ RESP_RATE     = 15                    # breaths per minute
 RESP_T        = 60.0 / RESP_RATE     # 4.0 s per breath
 BOUNDS        = {'x': 1.0, 'y': 1.0, 'z': 1.0}
 
-# ── Phase schedule ────────────────────────────────────────────────────────────
+# -- Phase schedule ------------------------------------------------------------
 PHASE_SCHEDULE = [
     ('full_body',  120),
     ('cardiac',     60),
@@ -49,7 +49,7 @@ PHASE_SCHEDULE = [
 ]
 PHASE_TOTAL = sum(d for _, d in PHASE_SCHEDULE)
 
-# ── Depth class mapping ───────────────────────────────────────────────────────
+# -- Depth class mapping -------------------------------------------------------
 def _depth(system):
     return {
         'bone':    'd0_skeletal',
@@ -61,17 +61,17 @@ def _depth(system):
         'gland':   'd2_organ',
     }.get(system, 'd2_organ')
 
-# ── Anatomical structure database ─────────────────────────────────────────────
+# -- Anatomical structure database ---------------------------------------------
 # (id, label, x, y, z, slice_r, scale_m, system)
-# slice_r  — half-width used for y-slab inclusion in full_body sweep
-# scale_m  — physical diameter in metres
+# slice_r  -- half-width used for y-slab inclusion in full_body sweep
+# scale_m  -- physical diameter in metres
 STRUCTURES = [
-    # ── SKULL & SCALP ──────────────────────────────────────────────────────
+    # -- SKULL & SCALP ------------------------------------------------------
     ('skull',            'skull',                  0.500, 0.910, 0.500, 0.115, 0.200, 'bone'),
     ('scalp',            'scalp',                  0.500, 0.910, 0.500, 0.115, 0.210, 'surface'),
     ('dura',             'dura_mater',             0.500, 0.905, 0.500, 0.105, 0.185, 'neural'),
 
-    # ── BRAIN ──────────────────────────────────────────────────────────────
+    # -- BRAIN --------------------------------------------------------------
     ('cerebrum',         'cerebral_cortex',        0.500, 0.905, 0.500, 0.085, 0.140, 'neural'),
     ('frontal_L',        'frontal_lobe',           0.415, 0.918, 0.360, 0.050, 0.070, 'neural'),
     ('frontal_R',        'frontal_lobe',           0.585, 0.918, 0.360, 0.050, 0.070, 'neural'),
@@ -124,7 +124,7 @@ STRUCTURES = [
     ('mastoid_L',        'mastoid_air_cells',      0.312, 0.882, 0.612, 0.015, 0.022, 'hollow'),
     ('mastoid_R',        'mastoid_air_cells',      0.688, 0.882, 0.612, 0.015, 0.022, 'hollow'),
 
-    # ── NECK ───────────────────────────────────────────────────────────────
+    # -- NECK ---------------------------------------------------------------
     ('thyroid_L',        'thyroid_gland',          0.448, 0.826, 0.400, 0.018, 0.025, 'gland'),
     ('thyroid_R',        'thyroid_gland',          0.552, 0.826, 0.400, 0.018, 0.025, 'gland'),
     ('parathyroid_LL',   'parathyroid_gland',      0.440, 0.822, 0.412, 0.005, 0.006, 'gland'),
@@ -144,7 +144,7 @@ STRUCTURES = [
     ('scm_L',            'sternocleidomastoid',    0.398, 0.822, 0.440, 0.022, 0.035, 'organ'),
     ('scm_R',            'sternocleidomastoid',    0.602, 0.822, 0.440, 0.022, 0.035, 'organ'),
 
-    # ── THORAX — HEART & GREAT VESSELS ────────────────────────────────────
+    # -- THORAX -- HEART & GREAT VESSELS ------------------------------------
     ('pericardium',      'pericardium',            0.460, 0.685, 0.522, 0.065, 0.135, 'organ'),
     ('heart',            'heart',                  0.455, 0.680, 0.530, 0.060, 0.120, 'organ'),
     ('lv',               'left_ventricle',         0.430, 0.672, 0.550, 0.040, 0.080, 'organ'),
@@ -176,7 +176,7 @@ STRUCTURES = [
     ('subclavian_L',     'left_subclavian_artery', 0.452, 0.748, 0.528, 0.008, 0.012, 'vessel'),
     ('common_carotid_aorta','left_common_carotid_artery',0.472,0.748,0.518,0.007,0.010,'vessel'),
 
-    # ── THORAX — LUNGS ────────────────────────────────────────────────────
+    # -- THORAX -- LUNGS ----------------------------------------------------
     ('lung_R',           'lung',                   0.672, 0.690, 0.518, 0.090, 0.140, 'organ'),
     ('lung_L',           'lung',                   0.328, 0.690, 0.518, 0.080, 0.120, 'organ'),
     ('rul',              'right_upper_lobe',       0.668, 0.728, 0.502, 0.050, 0.070, 'organ'),
@@ -198,7 +198,7 @@ STRUCTURES = [
     ('sternum',          'sternum',                0.500, 0.692, 0.410, 0.015, 0.180, 'bone'),
     ('thymus',           'thymus',                 0.500, 0.730, 0.470, 0.025, 0.040, 'gland'),
 
-    # ── ABDOMEN ───────────────────────────────────────────────────────────
+    # -- ABDOMEN -----------------------------------------------------------
     ('liver',            'liver',                  0.650, 0.565, 0.500, 0.090, 0.150, 'organ'),
     ('liver_R',          'liver_right_lobe',       0.680, 0.562, 0.510, 0.065, 0.120, 'organ'),
     ('liver_L',          'liver_left_lobe',        0.540, 0.568, 0.490, 0.038, 0.070, 'organ'),
@@ -246,7 +246,7 @@ STRUCTURES = [
     ('psoas_R',          'psoas_muscle',           0.572, 0.502, 0.648, 0.030, 0.045, 'organ'),
     ('psoas_L',          'psoas_muscle',           0.428, 0.502, 0.648, 0.030, 0.045, 'organ'),
 
-    # ── PELVIS ────────────────────────────────────────────────────────────
+    # -- PELVIS ------------------------------------------------------------
     ('bladder',          'urinary_bladder',        0.500, 0.305, 0.440, 0.040, 0.080, 'hollow'),
     ('rectum',           'rectum',                 0.500, 0.285, 0.620, 0.025, 0.040, 'hollow'),
     ('sigmoid_colon',    'sigmoid_colon',          0.440, 0.322, 0.540, 0.022, 0.040, 'hollow'),
@@ -266,7 +266,7 @@ STRUCTURES = [
     ('acetabulum_L',     'acetabulum',             0.352, 0.255, 0.540, 0.025, 0.050, 'bone'),
 ]
 
-# ── Phase focus sets ──────────────────────────────────────────────────────────
+# -- Phase focus sets ----------------------------------------------------------
 CARDIAC_FOCUS = frozenset({
     'pericardium','heart','lv','rv','la','ra','mvl','avl','tvl','pvl',
     'interventricular_septum','myocardium',
@@ -302,7 +302,7 @@ ABDOMEN_FOCUS = frozenset({
     'lumbar_spine','psoas_R','psoas_L',
 })
 
-# ── Physiological motion ──────────────────────────────────────────────────────
+# -- Physiological motion ------------------------------------------------------
 # Structures that move with the cardiac cycle
 _CARDIAC_MOBILE = {
     'lv':              ( 0.008, -0.010,  0.005),   # (dx_systole, dy_systole, dz_systole)
@@ -316,7 +316,7 @@ _CARDIAC_MOBILE = {
 }
 # Structures that move with the respiratory cycle
 _RESP_MOBILE = {
-    'lung_R':   (-0.005, -0.018, -0.002),  # (dx_insp, dy_insp, dz_insp) — descend & expand
+    'lung_R':   (-0.005, -0.018, -0.002),  # (dx_insp, dy_insp, dz_insp) -- descend & expand
     'lung_L':   ( 0.005, -0.018, -0.002),
     'rul':      (-0.004, -0.012, -0.002),
     'rml':      (-0.004, -0.015, -0.002),
@@ -381,7 +381,7 @@ def get_velocity(struct_id, t):
         round((z1 - z0) / eps, 5),
     )
 
-# ── Phase determination ───────────────────────────────────────────────────────
+# -- Phase determination -------------------------------------------------------
 def current_phase(t):
     cycle = t % PHASE_TOTAL
     accum = 0.0
@@ -427,7 +427,7 @@ def visible_structures(phase, phase_t, t, noise):
         results.append((sid, label, x, y, z, size_m, system))
     return results
 
-# ── Snapshot builder ──────────────────────────────────────────────────────────
+# -- Snapshot builder ----------------------------------------------------------
 def build_snapshot(structs, prev_pos, t, phase, scan_y):
     symbols = []
     for sid, label, x, y, z, size_m, system in structs:
@@ -441,7 +441,7 @@ def build_snapshot(structs, prev_pos, t, phase, scan_y):
                 'label':    label,
                 'system':   system,
                 'track_id': sid,
-                # Numerics — skipped by label extractor
+                # Numerics -- skipped by label extractor
                 'scale_m':   size_m,
                 'diameter_m': size_m,
             }
@@ -457,7 +457,7 @@ def build_snapshot(structs, prev_pos, t, phase, scan_y):
         }
     }
 
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
+# -- HTTP helpers --------------------------------------------------------------
 def post(host, port, path, body):
     url  = f'http://{host}:{port}{path}'
     data = json.dumps(body).encode()
@@ -480,7 +480,7 @@ def check_connection(host, port):
     except Exception:
         return False
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(
         description='Stream virtual CT anatomy scan into the neural fabric.')

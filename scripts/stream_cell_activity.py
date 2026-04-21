@@ -5,9 +5,9 @@ Cellular Activity Stream
 Simulates a mesophyll cell in real-time, feeding EnvironmentSnapshot frames
 into the neural fabric at ~10 fps.  Each symbol carries:
   - id          : persistent ID so the net learns continuity (cp0, mito3, ...)
-  - position    : x, y, z  (normalised 0.0–1.0, z=depth)
-  - velocity    : dx, dy  — the net learns motion dynamics
-  - properties  : label, scale_m, diameter_m  — semantic + physical context
+  - position    : x, y, z  (normalised 0.0-1.0, z=depth)
+  - velocity    : dx, dy  -- the net learns motion dynamics
+  - properties  : label, scale_m, diameter_m  -- semantic + physical context
 
 After training, GET /neuro/stream returns activation frames whose centroids
 reconstruct the cell spatial layout from neural state alone.
@@ -19,14 +19,14 @@ Usage:
 import argparse, json, math, random, time, sys
 import urllib.request, urllib.error
 
-# ── Simulation parameters ────────────────────────────────────────────────────
+# -- Simulation parameters ----------------------------------------------------
 FPS       = 10          # frames fed per second
 DT        = 1.0 / FPS  # physics timestep
 BOUNDS    = {'x': 1.0, 'y': 1.0, 'z': 0.15}   # normalised cell volume
 
-# ── Organelle definitions ─────────────────────────────────────────────────────
+# -- Organelle definitions -----------------------------------------------------
 # Each entry: id_prefix, label, count, radial_range, z_range, diameter_m, mass
-# mass controls Brownian amplitude: low mass → fast diffusion
+# mass controls Brownian amplitude: low mass -> fast diffusion
 ORGANELLE_SPECS = [
     # id_prefix  label                   n   r_min r_max  z_min z_max  diam_m   mass
     ('cp',       'chloroplast',         15,  0.18, 0.42,  0.04, 0.10,  5e-6,   4.0),
@@ -86,11 +86,11 @@ def step_physics(orgs, t, dt=DT):
 
         m = o['mass']
 
-        # Brownian force — inversely proportional to mass (Stokes-Einstein)
+        # Brownian force -- inversely proportional to mass (Stokes-Einstein)
         bx = random.gauss(0, noise_scale / math.sqrt(m))
         by = random.gauss(0, noise_scale / math.sqrt(m))
 
-        # Weak directed motion for chloroplasts — cytoplasmic streaming
+        # Weak directed motion for chloroplasts -- cytoplasmic streaming
         if o['label'] == 'chloroplast':
             # Follow a circular track around nucleus (simulates cytoplasmic streaming)
             ang = o['track_angle'] + t * 0.04   # slow orbit
@@ -142,14 +142,14 @@ def build_snapshot(orgs, t):
             'position': {'x': round(o['x'], 5), 'y': round(o['y'], 5), 'z': round(o['z'], 5)},
             'velocity': {'x': round(o['vx'], 6), 'y': round(o['vy'], 6), 'z': round(o['vz'], 6)},
             'properties': {
-                # Semantic label — primary Hebbian association
+                # Semantic label -- primary Hebbian association
                 'label':     o['label'],
-                # Physical dimensions — let the EEM calibrate z-axis
+                # Physical dimensions -- let the EEM calibrate z-axis
                 'scale_m':   str(o['diam_m']),
                 'diameter_m':str(o['diam_m']),
-                # Depth/layer context — maps to overlay depth model
+                # Depth/layer context -- maps to overlay depth model
                 'depth_class': _depth_class(o['label']),
-                # Continuity — the net learns that cp0 at t→t+1 is same object
+                # Continuity -- the net learns that cp0 at t->t+1 is same object
                 'track_id':  o['id'],
             }
         })
@@ -169,7 +169,7 @@ def build_snapshot(orgs, t):
 
 
 def _depth_class(label):
-    """Map label to conceptual depth layer — reinforces the overlay depth model."""
+    """Map label to conceptual depth layer -- reinforces the overlay depth model."""
     outer = {'cell_wall', 'plasma_membrane', 'vacuole'}
     membrane = {'endoplasmic_reticulum', 'mitochondria', 'golgi', 'centrosome'}
     molecular = {'ribosome', 'vesicle', 'microtubule_track'}
@@ -181,7 +181,7 @@ def _depth_class(label):
     return 'd2_organelle'
 
 
-# ── HTTP ────────────────────────────────────────────────────────────────────────
+# -- HTTP ------------------------------------------------------------------------
 def post(host, port, path, body):
     url  = f'http://{host}:{port}{path}'
     data = json.dumps(body).encode()
@@ -206,7 +206,7 @@ def check_connection(host, port):
         return False
 
 
-# ── Main loop ──────────────────────────────────────────────────────────────────
+# -- Main loop ------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='192.168.1.84')
@@ -220,7 +220,7 @@ def main():
         sys.exit(1)
     print('Connected. Starting cell activity stream.', flush=True)
     print(f'  {sum(s[2] for s in ORGANELLE_SPECS) + len(STATIC_SPECS)} organelles tracked', flush=True)
-    print(f'  {args.fps} fps  —  GET /neuro/stream for activation state', flush=True)
+    print(f'  {args.fps} fps  --  GET /neuro/stream for activation state', flush=True)
     print('Press Ctrl+C to stop.', flush=True)
 
     orgs = make_organelles()
@@ -247,7 +247,7 @@ def main():
         frame += 1
         t     += DT
 
-        # Rate limiting — maintain target fps
+        # Rate limiting -- maintain target fps
         elapsed = time.perf_counter() - t0
         wait    = interval - elapsed - drift
         if wait > 0:

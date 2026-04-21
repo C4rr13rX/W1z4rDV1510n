@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-PDF → images + text training pipeline.
+PDF -> images + text training pipeline.
 
 For each PDF page:
   1. Render page to high-res image (300 DPI)
   2. Extract text with positional/structural context
   3. POST to /media/train_sequence:
-       frame 0 (t=0.0): image modality — the rendered page
-       frame 1 (t=0.5): text modality  — extracted text with span annotations
-       frame 2 (t=1.0): text modality  — structural tags (section/appendix/title)
+       frame 0 (t=0.0): image modality -- the rendered page
+       frame 1 (t=0.5): text modality  -- extracted text with span annotations
+       frame 2 (t=1.0): text modality  -- structural tags (section/appendix/title)
 
 Cross-modal Hebbian fires: text neurons ↔ image neurons ↔ structural neurons.
 
@@ -35,14 +35,14 @@ try:
     HAS_PDF2IMAGE = True
 except ImportError:
     HAS_PDF2IMAGE = False
-    print("[warn] pdf2image not installed — image frames will be skipped")
+    print("[warn] pdf2image not installed -- image frames will be skipped")
 
 try:
     from pypdf import PdfReader
     HAS_PYPDF = True
 except ImportError:
     HAS_PYPDF = False
-    print("[warn] pypdf not installed — text extraction will be skipped")
+    print("[warn] pypdf not installed -- text extraction will be skipped")
 
 try:
     from PIL import Image
@@ -60,7 +60,7 @@ PROGRESS_FILE = Path("D:/w1z4rdv1510n-data/textbook_train_progress.json")
 DPI = 300
 MAX_IMAGE_BYTES = 4 * 1024 * 1024   # 4 MB per image after JPEG compress
 JPEG_QUALITY = 85
-POPPLER_PATH = None  # e.g. r"C:\poppler\bin" — set if not in PATH
+POPPLER_PATH = None  # e.g. r"C:\poppler\bin" -- set if not in PATH
 
 SESSION = requests.Session()
 
@@ -285,7 +285,7 @@ def run(dirs: list[Path], limit_pdfs: int | None, dry_run: bool):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PDF → multimodal training pipeline")
+    parser = argparse.ArgumentParser(description="PDF -> multimodal training pipeline")
     parser.add_argument("--dirs", nargs="+",
                         default=[str(d) for d in TEXTBOOK_DIRS],
                         help="Directories to scan for PDFs")

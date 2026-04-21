@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-W1z4rD V1510n — Stage 0 Validation Tests
+W1z4rD V1510n -- Stage 0 Validation Tests
 =========================================
 Small meaningful tests against the toddler-foundations training set.
 
@@ -27,12 +27,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Test cases
 # Each tuple: (label, question, expected_keyword_in_answer)
-# "expected_keyword" is just a loose word-level check — it does NOT need to
+# "expected_keyword" is just a loose word-level check -- it does NOT need to
 # match exactly.  It gives us a binary signal for scoring.
 # ---------------------------------------------------------------------------
 
 EXACT_QUESTIONS = [
-    # Exact phrases from TODDLER_CONCEPTS — should all score well.
+    # Exact phrases from TODDLER_CONCEPTS -- should all score well.
     # Keywords are checked as substrings in both /chat answer and /qa/query top result.
     # Multiple keywords separated by | mean ANY one match passes.
     ("eyes (exact)",       "What are eyes?",                    "see"),
@@ -53,7 +53,7 @@ EXACT_QUESTIONS = [
 ]
 
 REPHRASED_QUESTIONS = [
-    # Paraphrasings — tests whether Hebbian weight generalises across token variants
+    # Paraphrasings -- tests whether Hebbian weight generalises across token variants
     ("heart (rephrase)",   "Tell me about the heart.",          "pump|blood|muscle|cardiac"),
     ("rain (rephrase)",    "How does rain happen?",             "water|cloud|droplet|precipitat"),
     ("skin (rephrase)",    "Describe what skin does.",          "body|protect|organ|cover"),
@@ -65,8 +65,8 @@ REPHRASED_QUESTIONS = [
 ]
 
 EDGE_CASES = [
-    # Genuinely unknown / nonsense — expect low confidence.
-    # Note: as Wikipedia training proceeds, calculus/blockchain become known —
+    # Genuinely unknown / nonsense -- expect low confidence.
+    # Note: as Wikipedia training proceeds, calculus/blockchain become known --
     # only pure nonsense words remain reliably unknown.
     ("unknown: blockchain","What is a blockchain?",             None),
     ("nonsense",           "What is a flibbertigibbet?",        None),
@@ -76,7 +76,7 @@ EDGE_CASES = [
 ALL_TESTS = [
     ("=== EXACT QUESTIONS (trained verbatim) ===", EXACT_QUESTIONS),
     ("=== REPHRASED QUESTIONS (word-overlap only) ===", REPHRASED_QUESTIONS),
-    ("=== EDGE CASES (not trained — expect uncertainty) ===", EDGE_CASES),
+    ("=== EDGE CASES (not trained -- expect uncertainty) ===", EDGE_CASES),
 ]
 
 # ---------------------------------------------------------------------------
@@ -85,10 +85,10 @@ ALL_TESTS = [
 # The /chat endpoint returns normalized confidence (always 1.0 for the top
 # result) which is meaningless for thresholding.  We use /qa/query to get
 # the raw Hebbian activation score for all checks.
-PASS_ACT    = 0.12   # trained question: raw activation must be ≥ this
+PASS_ACT    = 0.12   # trained question: raw activation must be >= this
 EDGE_ACT    = 2.90   # edge case PASSES if top raw activation is < this
-                     # Activation floor rises as training scales — anchor bursts for
-                     # each concept push trained concepts to 3–9; common-token noise
+                     # Activation floor rises as training scales -- anchor bursts for
+                     # each concept push trained concepts to 3-9; common-token noise
                      # for unknown words lands ~2.79.  Set just below the lowest
                      # trained concept (circle ~2.99) to keep a clean gap.
 
@@ -98,7 +98,7 @@ EDGE_ACT    = 2.90   # edge case PASSES if top raw activation is < this
 # ---------------------------------------------------------------------------
 
 def neuro_ask(client: httpx.Client, node_url: str, question: str) -> dict:
-    """POST /chat → full response dict (same handler as /neuro/ask)."""
+    """POST /chat -> full response dict (same handler as /neuro/ask)."""
     try:
         r = client.post(
             f"{node_url}/chat",
@@ -112,7 +112,7 @@ def neuro_ask(client: httpx.Client, node_url: str, question: str) -> dict:
 
 
 def qa_query(client: httpx.Client, node_url: str, question: str) -> dict:
-    """POST /qa/query → QA report dict."""
+    """POST /qa/query -> QA report dict."""
     try:
         r = client.post(
             f"{node_url}/qa/query",
@@ -131,7 +131,7 @@ def extract_best_activation(qa_resp: dict) -> float:
     The normalized 'confidence' field in /chat is always 1.0 for the top
     result and is meaningless for thresholding.  Raw activation is the actual
     Hebbian score before normalization and is what the min_activation gate
-    in QaRuntime uses — it's the right metric for pass/fail decisions.
+    in QaRuntime uses -- it's the right metric for pass/fail decisions.
     """
     results = qa_resp.get("report", {}).get("results", [])
     if results:
@@ -283,11 +283,11 @@ def run_tests(node_url: str, verbose: bool) -> None:
     print(f"Overall: {total_pass}/{total} ({pct:.0f}%)")
 
     if pct >= 80:
-        print("\nArchitecture looks solid — ready for more training data.")
+        print("\nArchitecture looks solid -- ready for more training data.")
     elif pct >= 55:
-        print("\nPartially working — review failures above; may need tuning.")
+        print("\nPartially working -- review failures above; may need tuning.")
     else:
-        print("\nSignificant gaps — investigate before scaling training.")
+        print("\nSignificant gaps -- investigate before scaling training.")
 
 
 # ---------------------------------------------------------------------------

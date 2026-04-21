@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-test_code_examples.py — Verify code examples from PROG_CODE_EXAMPLES
+test_code_examples.py -- Verify code examples from PROG_CODE_EXAMPLES
 Runs each example in the appropriate environment, captures output,
 saves results to code_test_results.json for training enrichment.
 
@@ -28,7 +28,7 @@ DATA_DIR = Path('D:/w1z4rdv1510n-data')
 COMPILE_DIR = DATA_DIR / 'code_tests'
 RESULTS_DEFAULT = DATA_DIR / 'training/code_test_results.json'
 
-# ── Tool discovery ─────────────────────────────────────────────────────────────
+# -- Tool discovery -------------------------------------------------------------
 
 def find_tool(*names) -> str | None:
     for name in names:
@@ -45,7 +45,7 @@ def find_gcc() -> str | None:
     p = find_tool('gcc', 'gcc.exe')
     if p:
         return p
-    # QB64 bundles gcc (Clang) — use it as our C compiler
+    # QB64 bundles gcc (Clang) -- use it as our C compiler
     candidate = QB64_COMPILER_BIN / 'gcc.exe'
     if candidate.exists():
         return str(candidate)
@@ -101,7 +101,7 @@ def discover_tools():
     return TOOLS
 
 
-# ── Runner implementations ─────────────────────────────────────────────────────
+# -- Runner implementations -----------------------------------------------------
 
 def run_cmd(cmd: list, cwd=None, timeout=30, env=None, _retries=3) -> dict:
     for attempt in range(_retries):
@@ -120,7 +120,7 @@ def run_cmd(cmd: list, cwd=None, timeout=30, env=None, _retries=3) -> dict:
         except subprocess.TimeoutExpired:
             return {'stdout': '', 'stderr': 'TIMEOUT', 'exit_code': -1, 'timed_out': True}
         except OSError as e:
-            # WinError 1450: resource exhaustion; WinError 2: AV holds exe lock — retry both
+            # WinError 1450: resource exhaustion; WinError 2: AV holds exe lock -- retry both
             if e.winerror in (2, 1450) and attempt < _retries - 1:
                 time.sleep(1.0 * (attempt + 1))
                 continue
@@ -177,7 +177,7 @@ def _cpp_env():
     return env
 
 def compile_only_cpp(code: str, tmpdir: Path, std='c++11') -> dict:
-    """Compile C++ but do not run — for Arduino compile-check."""
+    """Compile C++ but do not run -- for Arduino compile-check."""
     f = tmpdir / 'prog.cpp'
     f.write_text(code, encoding='utf-8')
     out = tmpdir / 'prog.exe'
@@ -215,7 +215,7 @@ def run_cpp(code: str, tmpdir: Path, std='c++98') -> dict:
     if comp['exit_code'] != 0:
         return comp
     # QB64's Clang-built exes need the compiler's DLL directory in PATH
-    # AV may briefly hold the exe after creation — poll until it appears
+    # AV may briefly hold the exe after creation -- poll until it appears
     for _ in range(3):
         if out.exists():
             break
@@ -245,7 +245,7 @@ def run_qb64(code: str, tmpdir: Path) -> dict:
     return run_cmd([str(out)], timeout=10)
 
 
-# ── Language → runner dispatch ─────────────────────────────────────────────────
+# -- Language -> runner dispatch -------------------------------------------------
 
 SKIP_REASONS = {
     'REQUIRES_HARDWARE':   'Requires physical microcontroller hardware',
@@ -309,14 +309,14 @@ def dispatch(ex: dict, tmpdir: Path) -> dict:
         if 'int main()' not in modern and 'void main()' not in modern:
             modern = modern
         result = run_cpp(modern, tmpdir, std='c++98')
-        result['note'] = 'Modernised: <iostream.h>→<iostream>+using namespace std; void main→int main'
+        result['note'] = 'Modernised: <iostream.h>-><iostream>+using namespace std; void main->int main'
         return result
 
-    # Arduino C++ — compile-check with stub headers (check BEFORE C++ to avoid 'C++' in lang matching)
+    # Arduino C++ -- compile-check with stub headers (check BEFORE C++ to avoid 'C++' in lang matching)
     if 'Arduino' in lang:
         if not TOOLS['g++']:
             return {'stdout':'','stderr':'g++ not found','exit_code':-2,'timed_out':False}
-        # Strip Arduino framework includes — our stub replaces them
+        # Strip Arduino framework includes -- our stub replaces them
         clean = re.sub(r'#include\s*[<"][^>"]*\.h[>"]\s*\n?', '', code)
         stub = (
             '#include <stdint.h>\n#include <stdio.h>\n'
@@ -346,7 +346,7 @@ def dispatch(ex: dict, tmpdir: Path) -> dict:
         result = compile_only_cpp(stub, tmpdir, std='c++11')
         result['note'] = 'Compile-check only with Arduino stub headers; real execution requires board'
         if result['exit_code'] == 0:
-            result['stdout'] = '[Compiled successfully — requires Arduino board to run]'
+            result['stdout'] = '[Compiled successfully -- requires Arduino board to run]'
         return result
 
     if 'C++ (ISO' in lang or 'C++' in lang:
@@ -385,10 +385,10 @@ def dispatch(ex: dict, tmpdir: Path) -> dict:
     if 'Go ' in lang or lang.startswith('Go'):
         if not TOOLS['go']:
             return {'stdout':'','stderr':'go not found','exit_code':-2,'timed_out':False}
-        # HTTP server example never terminates — skip it
+        # HTTP server example never terminates -- skip it
         if 'ListenAndServe' in code:
             return {
-                'stdout': '[HTTP server — binds :8080 and serves requests; terminates manually]',
+                'stdout': '[HTTP server -- binds :8080 and serves requests; terminates manually]',
                 'stderr': '', 'exit_code': 0, 'timed_out': False,
                 'note': 'Server loop skipped (non-terminating); code verified to compile',
             }
@@ -419,7 +419,7 @@ def dispatch(ex: dict, tmpdir: Path) -> dict:
     return {'stdout':'','stderr':f'No runner for: {lang}','exit_code':-2,'timed_out':False}
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
@@ -506,7 +506,7 @@ def main():
             import urllib.request
             verdict = 'VERIFIED WORKING' if success else 'COMPILE/RUN ERROR'
             train_text = (
-                f'Code example test result — {verdict}. '
+                f'Code example test result -- {verdict}. '
                 f'Language: {lang}. Year: {year}. Platform: {ex.get("platform","")}. '
                 f'Tested on: {platform_info} ({time.strftime("%Y-%m-%d")}). '
                 f'Description: {desc}.\n'
@@ -525,7 +525,7 @@ def main():
             # Still train the example with skip context
             if not args.no_train:
                 train_text = (
-                    f'Code example — {lang} ({year}). {desc}.\n'
+                    f'Code example -- {lang} ({year}). {desc}.\n'
                     f'Platform requirement: {skip_reason}.\n'
                     f'Code:\n{ex["code"]}\n'
                     f'Notes: {ex.get("notes","")} '

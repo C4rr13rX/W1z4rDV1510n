@@ -152,7 +152,7 @@ def build_priors(
         outgoing[m1] += count
     for (m1, m2), count in transitions.items():
         denom = outgoing[m1] or 1
-        transition_probs[f"{m1}→{m2}"] = count / denom
+        transition_probs[f"{m1}->{m2}"] = count / denom
 
     role_topk = {role: finalize_topk(c, topk) for role, c in role_bins.items()}
     role_pair_topk = {pair: finalize_topk(c, topk) for pair, c in role_pair_bins.items()}

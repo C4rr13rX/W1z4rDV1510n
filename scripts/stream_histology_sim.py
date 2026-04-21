@@ -6,19 +6,19 @@ Simulates a motorised virtual microscope scanning across stained tissue slides,
 feeding EnvironmentSnapshot symbols into the neural fabric at 10 fps.
 
 Six tissue types cycle automatically (90 s each):
-  1. cardiac_muscle      — H&E cross/longitudinal section
-  2. cerebral_cortex     — Nissl-stained, all 6 cortical layers
-  3. kidney_cortex       — PAS-stained, glomeruli + tubules
-  4. liver_lobule        — H&E, hepatic plates + portal triads
-  5. lung_alveoli        — H&E, type I/II pneumocytes + capillaries
-  6. cortical_bone       — Ground section, Haversian systems
+  1. cardiac_muscle      -- H&E cross/longitudinal section
+  2. cerebral_cortex     -- Nissl-stained, all 6 cortical layers
+  3. kidney_cortex       -- PAS-stained, glomeruli + tubules
+  4. liver_lobule        -- H&E, hepatic plates + portal triads
+  5. lung_alveoli        -- H&E, type I/II pneumocytes + capillaries
+  6. cortical_bone       -- Ground section, Haversian systems
 
-All positions are normalised to the current microscope field of view (0–1).
+All positions are normalised to the current microscope field of view (0-1).
 scale_m encodes actual physical diameter in metres so the EEM can calibrate
 the z-axis to cellular/subcellular resolution.
 
 Virtual stage motion:
-  - Slow raster scan at ~18–25 µm/s (≈ motorised stage at 40×)
+  - Slow raster scan at ~18-25 um/s (~= motorised stage at 40x)
   - Slight z-focus oscillation mimics depth-of-field stepping
   - Red blood cells in capillaries drift with simulated blood velocity
 
@@ -31,31 +31,31 @@ Usage:
 import argparse, json, math, random, sys, time
 import urllib.request, urllib.error
 
-# ── Simulation parameters ─────────────────────────────────────────────────────
+# -- Simulation parameters -----------------------------------------------------
 FPS            = 10
 DT             = 1.0 / FPS
 TISSUE_DURATION = 90          # seconds per tissue before cycling
 BOUNDS         = {'x': 1.0, 'y': 1.0, 'z': 0.30}   # z = depth through section
 
-# Objective field-of-view widths (µm)
+# Objective field-of-view widths (um)
 FOV_UM = {10: 1800, 20: 900, 40: 450, 100: 180}
 
-# ── Tissue type definitions ───────────────────────────────────────────────────
+# -- Tissue type definitions ---------------------------------------------------
 # Each tissue spec:
-#   'fov_um'       : field-of-view width in µm at chosen magnification
-#   'slide_um'     : virtual slide width in µm (stage scans across this)
-#   'cells'        : list of cell-type dicts — see below
+#   'fov_um'       : field-of-view width in um at chosen magnification
+#   'slide_um'     : virtual slide width in um (stage scans across this)
+#   'cells'        : list of cell-type dicts -- see below
 #   'structures'   : list of large structural features (constant in every frame)
 #   'motile'       : list of motile element specs (e.g. RBCs in capillaries)
 
 TISSUES = {
 
-    # ── 1. Cardiac muscle (H&E, 40× equivalent) ───────────────────────────
+    # -- 1. Cardiac muscle (H&E, 40x equivalent) ---------------------------
     'cardiac_muscle': {
         'fov_um':     450,
         'slide_um':   2800,
         'context':    'cardiac_histology',
-        'description':'Ventricular myocardium — cardiomyocytes, intercalated discs, mitochondria',
+        'description':'Ventricular myocardium -- cardiomyocytes, intercalated discs, mitochondria',
         'cells': [
             # (label, count_per_fov, width_um, height_um, z_mean, depth_class, system)
             ('cardiomyocyte',        12, 18.0, 92.0, 0.12, 'd2_organ',     'muscle'),
@@ -69,7 +69,7 @@ TISSUES = {
             ('lipofuscin_granule',    8,  1.5,  1.5, 0.11, 'd3_molecular', 'organelle'),
         ],
         'structures': [
-            # (label, rel_x, rel_y, size_um, depth_class)  — relative to slide segment
+            # (label, rel_x, rel_y, size_um, depth_class)  -- relative to slide segment
             ('capillary',   0.25, 0.50, 12.0, 'd2_organ'),
             ('capillary',   0.72, 0.30, 10.0, 'd2_organ'),
             ('endomysium',  0.50, 0.50,  4.0, 'd2_organ'),
@@ -81,12 +81,12 @@ TISSUES = {
         'scan_speed_um_s': 22,
     },
 
-    # ── 2. Cerebral cortex (Nissl stain, 40×) ─────────────────────────────
+    # -- 2. Cerebral cortex (Nissl stain, 40x) -----------------------------
     'cerebral_cortex': {
         'fov_um':     450,
         'slide_um':   3000,
         'context':    'brain_histology',
-        'description':'Cerebral cortex layers I–VI — pyramidal neurons, glia, neuropil',
+        'description':'Cerebral cortex layers I-VI -- pyramidal neurons, glia, neuropil',
         'cells': [
             ('pyramidal_neuron_III',  4, 22.0, 30.0, 0.10, 'd1_neural',    'neuron'),
             ('pyramidal_neuron_V',    3, 35.0, 55.0, 0.10, 'd1_neural',    'neuron'),
@@ -121,12 +121,12 @@ TISSUES = {
         'scan_speed_um_s': 20,
     },
 
-    # ── 3. Kidney cortex (PAS stain, 40×) ────────────────────────────────
+    # -- 3. Kidney cortex (PAS stain, 40x) --------------------------------
     'kidney_cortex': {
         'fov_um':     450,
         'slide_um':   2500,
         'context':    'renal_histology',
-        'description':'Renal cortex — glomeruli, proximal/distal tubules, Bowman capsule',
+        'description':'Renal cortex -- glomeruli, proximal/distal tubules, Bowman capsule',
         'cells': [
             ('podocyte',             24,  8.0,  8.0, 0.10, 'd2_organ',     'kidney'),
             ('podocyte_foot_process', 48, 1.5,  4.0, 0.11, 'd3_molecular', 'kidney'),
@@ -156,12 +156,12 @@ TISSUES = {
         'scan_speed_um_s': 18,
     },
 
-    # ── 4. Liver lobule (H&E, 20×) ────────────────────────────────────────
+    # -- 4. Liver lobule (H&E, 20x) ----------------------------------------
     'liver_lobule': {
         'fov_um':     900,
         'slide_um':   4000,
         'context':    'hepatic_histology',
-        'description':'Liver lobule — hepatic plates, sinusoids, portal triads, central vein',
+        'description':'Liver lobule -- hepatic plates, sinusoids, portal triads, central vein',
         'cells': [
             ('hepatocyte',           80, 22.0, 25.0, 0.11, 'd2_organ',     'liver'),
             ('binucleate_hepatocyte', 12, 24.0, 26.0, 0.11, 'd2_organ',    'liver'),
@@ -194,12 +194,12 @@ TISSUES = {
         'scan_speed_um_s': 25,
     },
 
-    # ── 5. Lung alveoli (H&E, 40×) ───────────────────────────────────────
+    # -- 5. Lung alveoli (H&E, 40x) ---------------------------------------
     'lung_alveoli': {
         'fov_um':     450,
         'slide_um':   2600,
         'context':    'pulmonary_histology',
-        'description':'Lung parenchyma — alveoli, type I/II pneumocytes, capillary wall, surfactant',
+        'description':'Lung parenchyma -- alveoli, type I/II pneumocytes, capillary wall, surfactant',
         'cells': [
             ('type_I_pneumocyte',    20,  0.5, 80.0, 0.08, 'd2_organ',     'lung'),
             ('type_II_pneumocyte',    8,  8.0,  8.0, 0.11, 'd2_organ',     'lung'),
@@ -226,12 +226,12 @@ TISSUES = {
         'scan_speed_um_s': 20,
     },
 
-    # ── 6. Cortical bone — ground section (Haversian system) ─────────────
+    # -- 6. Cortical bone -- ground section (Haversian system) -------------
     'cortical_bone': {
         'fov_um':     450,
         'slide_um':   3200,
         'context':    'bone_histology',
-        'description':'Compact bone — osteons, Haversian canals, lacunae, canaliculi, lamellae',
+        'description':'Compact bone -- osteons, Haversian canals, lacunae, canaliculi, lamellae',
         'cells': [
             ('osteocyte',            20,  8.0, 10.0, 0.12, 'd2_organ',     'bone'),
             ('osteocyte_lacuna',     20, 12.0, 15.0, 0.12, 'd2_organ',     'bone'),
@@ -264,7 +264,7 @@ TISSUES = {
 
 TISSUE_ORDER = list(TISSUES.keys())
 
-# ── Virtual stage state ───────────────────────────────────────────────────────
+# -- Virtual stage state -------------------------------------------------------
 class VirtualStage:
     """Motorised XY stage with sinusoidal raster scan and z-focus dithering."""
 
@@ -275,7 +275,7 @@ class VirtualStage:
         # Start at random position
         self.x_um      = random.uniform(0, slide_um)
         self.y_um      = random.uniform(0, slide_um)
-        self.z_focus   = 0.12    # nominal focal plane (0–0.30)
+        self.z_focus   = 0.12    # nominal focal plane (0-0.30)
         self.dir_x     = 1.0
         self.row_step  = fov_um * 0.8
 
@@ -288,7 +288,7 @@ class VirtualStage:
             self.y_um  += self.row_step
             if self.y_um > self.slide_um:
                 self.y_um = 0.0
-        # Gentle z-focus oscillation (±0.005)
+        # Gentle z-focus oscillation (+/-0.005)
         self.z_focus = 0.12 + 0.005 * math.sin(time.perf_counter() * 0.7)
 
     @property
@@ -305,16 +305,16 @@ class VirtualStage:
                 self.fov_y0 - margin <= abs_y <= self.fov_y1 + margin)
 
     def to_norm(self, abs_x, abs_y):
-        """Map absolute slide coords to normalised FOV coords (0–1)."""
+        """Map absolute slide coords to normalised FOV coords (0-1)."""
         nx = (abs_x - self.fov_x0) / self.fov_um
         ny = (abs_y - self.fov_y0) / self.fov_um
         return round(nx, 5), round(ny, 5)
 
 
-# ── Tissue population generators ─────────────────────────────────────────────
+# -- Tissue population generators ---------------------------------------------
 def generate_tissue_layout(tissue_name: str, slide_um: float):
     """
-    Pre-generate a fixed spatial layout for a tissue type — a list of
+    Pre-generate a fixed spatial layout for a tissue type -- a list of
     (label, abs_x_um, abs_y_um, size_m, depth_class) entries.
     This is called once per tissue and cached for the 90 s duration.
     """
@@ -399,7 +399,7 @@ def step_motile(layout, dt, slide_um):
         e['ay'] = (e['ay'] + e['vy'] * dt) % slide_um
 
 
-# ── Snapshot builder ──────────────────────────────────────────────────────────
+# -- Snapshot builder ----------------------------------------------------------
 def build_snapshot(tissue_name, layout, stage, t, prev_pos):
     spec     = TISSUES[tissue_name]
     slide_um = spec['slide_um']
@@ -430,7 +430,7 @@ def build_snapshot(tissue_name, layout, stage, t, prev_pos):
                 'label':    e['label'],
                 'tissue':   tissue_name,
                 'track_id': uid,
-                # Numerics — skipped by label extractor
+                # Numerics -- skipped by label extractor
                 'scale_m':   e['size_m'],
                 'diameter_m': e['size_m'],
                 'fov_um':    spec['fov_um'],
@@ -449,7 +449,7 @@ def build_snapshot(tissue_name, layout, stage, t, prev_pos):
     }
 
 
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
+# -- HTTP helpers --------------------------------------------------------------
 def post(host, port, path, body):
     url  = f'http://{host}:{port}{path}'
     data = json.dumps(body).encode()
@@ -473,7 +473,7 @@ def check_connection(host, port):
         return False
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(
         description='Stream virtual histology microscopy into the neural fabric.')
@@ -508,7 +508,7 @@ def main():
     while True:
         t0 = time.perf_counter()
 
-        # ── Tissue cycling ───────────────────────────────────────────────
+        # -- Tissue cycling -----------------------------------------------
         if args.tissue:
             tissue_name = args.tissue
         else:
@@ -524,14 +524,14 @@ def main():
                                        spec['scan_speed_um_s'])
             prev_pos    = {}
             cur_tissue  = tissue_name
-            print(f'    Layout: {len(layout)} objects in {spec["slide_um"]} µm slide',
+            print(f'    Layout: {len(layout)} objects in {spec["slide_um"]} um slide',
                   flush=True)
 
-        # ── Step physics ─────────────────────────────────────────────────
+        # -- Step physics -------------------------------------------------
         step_motile(layout, interval, spec['slide_um'])
         stage.step(interval)
 
-        # ── Build + send ─────────────────────────────────────────────────
+        # -- Build + send -------------------------------------------------
         snap   = build_snapshot(tissue_name, layout, stage, t, prev_pos)
         result = post(args.host, args.port, '/neuro/train', {'snapshot': snap})
 

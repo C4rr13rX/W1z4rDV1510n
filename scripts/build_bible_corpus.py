@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-build_bible_corpus.py — Stage 29
-World English Bible (WEB) — complete 66-book corpus.
+build_bible_corpus.py -- Stage 29
+World English Bible (WEB) -- complete 66-book corpus.
 
 Source: scrollmapper/bible_databases on GitHub (public domain CSV)
   https://raw.githubusercontent.com/scrollmapper/bible_databases/master/csv/t_web.csv
@@ -10,14 +10,14 @@ Source: scrollmapper/bible_databases on GitHub (public domain CSV)
 Fallback: bible-api.com chapter-by-chapter fetching.
 
 Training format per chapter:
-  "World English Bible — Genesis, Chapter 1
+  "World English Bible -- Genesis, Chapter 1
 
    1 In the beginning, God created the heavens and the earth.
    2 The earth was formless and empty...
    ..."
 
 Each chapter is trained as one item so verse numbers appear in context,
-giving the model the full book → chapter → verse → text association.
+giving the model the full book -> chapter -> verse -> text association.
 
 Also trains book-level overviews (genre, themes, key passages) so the model
 understands the structure and purpose of each book.
@@ -40,12 +40,12 @@ UA = 'W1z4rDV1510n-Bible/1.0 (adamedsall@gmail.com; educational AI training)'
 WEB_CSV_URL = ('https://raw.githubusercontent.com/scrollmapper/'
                'bible_databases/master/csv/t_web.csv')
 
-STAGES = {29: 'World English Bible — complete 66-book corpus, book/chapter/verse/text'}
+STAGES = {29: 'World English Bible -- complete 66-book corpus, book/chapter/verse/text'}
 
-# ── Book catalogue ─────────────────────────────────────────────────────────────
+# -- Book catalogue -------------------------------------------------------------
 # (book_number, name, testament, abbrev)
 BOOKS = [
-    # ── Old Testament ─────────────────────────────────────────────────────────
+    # -- Old Testament ---------------------------------------------------------
     (1,  'Genesis',          'OT', 'Gen'),
     (2,  'Exodus',           'OT', 'Exo'),
     (3,  'Leviticus',        'OT', 'Lev'),
@@ -85,7 +85,7 @@ BOOKS = [
     (37, 'Haggai',           'OT', 'Hag'),
     (38, 'Zechariah',        'OT', 'Zec'),
     (39, 'Malachi',          'OT', 'Mal'),
-    # ── New Testament ─────────────────────────────────────────────────────────
+    # -- New Testament ---------------------------------------------------------
     (40, 'Matthew',          'NT', 'Mat'),
     (41, 'Mark',             'NT', 'Mrk'),
     (42, 'Luke',             'NT', 'Luk'),
@@ -115,8 +115,8 @@ BOOKS = [
     (66, 'Revelation',       'NT', 'Rev'),
 ]
 
-BOOK_BY_NUM  = {b[0]: b for b in BOOKS}   # num → (num, name, testament, abbrev)
-BOOK_BY_NAME = {b[1]: b for b in BOOKS}   # name → tuple
+BOOK_BY_NUM  = {b[0]: b for b in BOOKS}   # num -> (num, name, testament, abbrev)
+BOOK_BY_NAME = {b[1]: b for b in BOOKS}   # name -> tuple
 
 # Brief genre/theme overview per book for the book-level training item
 BOOK_OVERVIEWS = {
@@ -140,7 +140,7 @@ BOOK_OVERVIEWS = {
     'Job':             'Wisdom / Poetry. Job\'s suffering, friends\' arguments, God\'s answer from the whirlwind. Themes: theodicy, suffering, sovereignty.',
     'Psalms':          'Poetry / Worship. 150 songs and prayers covering lament, praise, thanksgiving, wisdom, and messianic expectation. Themes: worship, trust, suffering, redemption.',
     'Proverbs':        'Wisdom / Poetry. Practical wisdom for daily life: family, work, speech, wealth, integrity. Themes: wisdom, fear of the Lord.',
-    'Ecclesiastes':    'Wisdom / Philosophy. "Vanity of vanities" — the Preacher\'s search for meaning. Themes: meaning, mortality, fear God and keep His commandments.',
+    'Ecclesiastes':    'Wisdom / Philosophy. "Vanity of vanities" -- the Preacher\'s search for meaning. Themes: meaning, mortality, fear God and keep His commandments.',
     'Song of Solomon': 'Poetry / Love. Celebration of romantic love between a bride and groom. Themes: love, beauty, commitment.',
     'Isaiah':          'Prophecy. Judgment on Israel and nations, Servant Songs, messianic prophecies (Isaiah 53), comfort for exiles. Themes: holiness, salvation.',
     'Jeremiah':        'Prophecy. Jeremiah\'s call, Judah\'s sins, fall of Jerusalem, the New Covenant (Jer 31). Themes: judgment, weeping prophet, hope.',
@@ -177,7 +177,7 @@ BOOK_OVERVIEWS = {
     '2 Timothy':       'Epistle. Paul\'s final letter before execution: preach the word, Scripture is God-breathed (3:16), finish the race.',
     'Titus':           'Epistle. Pastoral letter: church leadership in Crete, sound doctrine, good works.',
     'Philemon':        'Epistle. Paul\'s appeal for runaway slave Onesimus. Themes: forgiveness, reconciliation, Christian brotherhood.',
-    'Hebrews':         'Epistle. Jesus as superior to angels, Moses, Aaron — the perfect high priest. Hall of Faith (ch.11). Themes: faith, perseverance.',
+    'Hebrews':         'Epistle. Jesus as superior to angels, Moses, Aaron -- the perfect high priest. Hall of Faith (ch.11). Themes: faith, perseverance.',
     'James':           'Epistle. Practical Christianity: faith and works, taming the tongue, prayer, care for the poor. "Faith without works is dead" (2:26).',
     '1 Peter':         'Epistle. Hope in suffering, living as strangers in the world, submission, "living stones" (2:4-5).',
     '2 Peter':         'Epistle. Warning against false teachers, promise of Christ\'s return, Scripture\'s divine origin (1:20-21).',
@@ -189,7 +189,7 @@ BOOK_OVERVIEWS = {
 }
 
 
-# ── HTTP session ───────────────────────────────────────────────────────────────
+# -- HTTP session ---------------------------------------------------------------
 
 def _make_session():
     s = requests.Session()
@@ -209,7 +209,7 @@ def _train(text, node, session):
         return False
 
 
-# ── WEB download ───────────────────────────────────────────────────────────────
+# -- WEB download ---------------------------------------------------------------
 
 def _download_web_csv(session) -> dict:
     """
@@ -253,12 +253,12 @@ def _fetch_chapter_fallback(book_name: str, chapter: int, session) -> dict:
         return {}
 
 
-# ── Training ───────────────────────────────────────────────────────────────────
+# -- Training -------------------------------------------------------------------
 
 def _train_book_overview(book_name: str, testament: str, node: str, session):
     overview = BOOK_OVERVIEWS.get(book_name, '')
     text = (
-        f'World English Bible — Book Overview\n\n'
+        f'World English Bible -- Book Overview\n\n'
         f'Book: {book_name}\n'
         f'Testament: {"Old Testament" if testament == "OT" else "New Testament"}\n'
     )
@@ -271,20 +271,20 @@ def _train_chapter(book_name: str, chapter: int, verses: dict,
                    node: str, session) -> bool:
     """
     Train one full chapter as a single text item with inline verse numbers.
-    Format: "World English Bible — Genesis, Chapter 1\n\n1 In the beginning..."
+    Format: "World English Bible -- Genesis, Chapter 1\n\n1 In the beginning..."
     """
-    lines = [f'World English Bible — {book_name}, Chapter {chapter}', '']
+    lines = [f'World English Bible -- {book_name}, Chapter {chapter}', '']
     for v in sorted(verses):
         lines.append(f'{v} {verses[v]}')
     text = '\n'.join(lines)
     return _train(text, node, session)
 
 
-# ── Stage 29 ───────────────────────────────────────────────────────────────────
+# -- Stage 29 -------------------------------------------------------------------
 
 def build_bible_corpus(out_dir: Path, node: str,
                        books_filter: list = None) -> list:
-    """Stage 29: Complete World English Bible — all 66 books, chapter by chapter."""
+    """Stage 29: Complete World English Bible -- all 66 books, chapter by chapter."""
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / 'checkpoint.json'
 
@@ -293,7 +293,7 @@ def build_bible_corpus(out_dir: Path, node: str,
     if ckpt_path.exists():
         try:
             trained = set(json.loads(ckpt_path.read_text(encoding='utf-8')))
-            print(f'  Resuming — {len(trained)} chapters already trained', flush=True)
+            print(f'  Resuming -- {len(trained)} chapters already trained', flush=True)
         except Exception:
             pass
 
@@ -383,7 +383,7 @@ def build_bible_corpus(out_dir: Path, node: str,
     return items
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
@@ -411,7 +411,7 @@ def main():
 
     train_dir = Path(args.data_dir) / 'training'
 
-    print('World English Bible Corpus Builder — Stage 29')
+    print('World English Bible Corpus Builder -- Stage 29')
     print(f'  Node   : {args.node}')
     print(f'  Books  : {books or "all 66"}')
 
@@ -429,7 +429,7 @@ def main():
     mpath = train_dir / 'stage29_manifest.json'
     mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    print(f'\nManifest → {mpath}')
+    print(f'\nManifest -> {mpath}')
     print('Done.')
 
 

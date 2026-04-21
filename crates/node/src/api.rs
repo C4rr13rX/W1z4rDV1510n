@@ -47,7 +47,6 @@ use w1z4rdv1510n::streaming::{
     HealthKnowledgeStore, KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue,
     KnowledgeQueueReport, KnowledgeRuntime, LabelQueueReport, NeuralFabricShare,
     NetworkPatternSummary, NlmJatsIngestor, SubnetworkReport, VisualLabelReport,
-    QaCandidateRecord, QaQueryReport, QaQueryResult, QaRuntime, QaRuntimeConfig,
     EquationMatrixRuntime, EquationMatrixConfig, Discipline, EemPeerPayload,
     ImageBitsConfig, ImageBitsEncoder,
     AudioBitsConfig, AudioBitsEncoder,
@@ -100,11 +99,6 @@ struct ApiState {
     metrics: Arc<ApiMetrics>,
     knowledge: Arc<Mutex<KnowledgeRuntime>>,
     knowledge_persist: KnowledgePersist,
-    qa_runtime: Arc<Mutex<QaRuntime>>,
-    /// Specialist pool: correction tasks (grammar, spelling, punctuation).
-    /// Isolated from the knowledge pool so correction training never
-    /// interferes with factual recall, and vice versa.
-    correction_qa: Arc<Mutex<QaRuntime>>,
     identity: Arc<Mutex<IdentityRuntime>>,
     label_state: Arc<Mutex<LabelQueueState>>,
     fabric_share_kind: String,
@@ -743,27 +737,6 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         config.api.rate_limit_window_secs,
     )));
     let (knowledge_runtime, knowledge_persist) = build_knowledge_runtime(&config.knowledge);
-    let qa_config = QaRuntimeConfig::default();
-
-    let qa_state_path = node_data_dir().join("qa_store.json");
-    let qa_runtime = if qa_state_path.exists() {
-        match QaRuntime::load(&qa_state_path, qa_config.clone()) {
-            Ok(rt) => { tracing::info!("QA knowledge pool loaded: {} pairs", rt.pairs_ingested()); rt }
-            Err(e) => { tracing::warn!("QA knowledge pool load failed ({}), starting fresh", e); QaRuntime::new(qa_config.clone()) }
-        }
-    } else {
-        QaRuntime::new(qa_config.clone())
-    };
-
-    let corr_state_path = node_data_dir().join("qa_correction_store.json");
-    let correction_qa = if corr_state_path.exists() {
-        match QaRuntime::load(&corr_state_path, qa_config.clone()) {
-            Ok(rt) => { tracing::info!("QA correction pool loaded: {} pairs", rt.pairs_ingested()); rt }
-            Err(e) => { tracing::warn!("QA correction pool load failed ({}), starting fresh", e); QaRuntime::new(qa_config) }
-        }
-    } else {
-        QaRuntime::new(qa_config)
-    };
     let identity_runtime = IdentityRuntime::new(config.identity.clone());
     let share_kind = config.streaming.share_payload_kind.clone();
     let neuro_pool_path = node_data_dir().join("neuro_pool.json");
@@ -810,8 +783,6 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         metrics: Arc::new(ApiMetrics::default()),
         knowledge: Arc::new(Mutex::new(knowledge_runtime)),
         knowledge_persist,
-        qa_runtime: Arc::new(Mutex::new(qa_runtime)),
-        correction_qa: Arc::new(Mutex::new(correction_qa)),
         identity: Arc::new(Mutex::new(identity_runtime)),
         label_state: Arc::new(Mutex::new(LabelQueueState::default())),
         fabric_share_kind: share_kind.clone(),
@@ -879,7 +850,6 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let label_neuro = Arc::clone(&state.neuro);
     let app_hypothesis_queue = Arc::clone(&state.hypothesis_queue);
     let app_neuro = Arc::clone(&state.neuro);
-    let app_qa = Arc::clone(&state.qa_runtime);
     // Pre-clone for the background peer-refresh task (state is consumed by with_state below).
     let bg_cluster = state.cluster.clone();
     let bg_dist    = state.distributed.clone();
@@ -930,8 +900,6 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/knowledge/ingest", post(submit_knowledge_ingest))
         .route("/knowledge/queue", get(get_knowledge_queue))
         .route("/knowledge/vote", post(submit_knowledge_vote))
-        .route("/qa/ingest", post(submit_qa_ingest))
-        .route("/qa/query", post(submit_qa_query))
         .route("/streaming/metacognition", post(tune_metacognition))
         .route("/streaming/labels", get(get_label_queue))
         .route("/streaming/visual-labels", get(get_visual_label_queue))
@@ -975,7 +943,6 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/media/playback",       post(media_playback))
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
-        .route("/qa/checkpoint",        post(qa_checkpoint))
         // ── Distributed training ─────────────────────────────────────────────
         // POST /neuro/delta/apply — receive a weight delta from a peer and merge
         // POST /neuro/sync        — force an immediate delta push to all peers
@@ -1068,9 +1035,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         {
             let hq = app_hypothesis_queue.clone();
             let neuro = app_neuro.clone();
-            let qa_arc = app_qa.clone();
             tokio::spawn(async move {
-                hypothesis_research_loop(hq, neuro, qa_arc).await;
+                hypothesis_research_loop(hq, neuro).await;
             });
         }
         // ── Background peer-list refresh ──────────────────────────────────────
@@ -2499,171 +2465,6 @@ async fn network_pattern_sources(
         "count": entries.len(),
         "patterns": entries,
     })))
-}
-
-// ─── Q&A fabric endpoints ─────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct QaIngestRequest {
-    /// One or more Q&A candidate records (same schema as qa_candidates.jsonl).
-    candidates: Vec<QaCandidateRecord>,
-    /// Which pool to ingest into: "knowledge" (default) or "correction".
-    /// Use "correction" for grammar, spelling, and punctuation correction pairs.
-    #[serde(default)]
-    pool: Option<String>,
-}
-
-#[derive(Serialize)]
-struct QaIngestResponse {
-    status: &'static str,
-    ingested: usize,
-    total_pairs: u64,
-    question_neurons: usize,
-    answer_entries: usize,
-}
-
-#[derive(Deserialize)]
-struct QaQueryRequest {
-    question: String,
-}
-
-#[derive(Serialize)]
-struct QaQueryResponse {
-    status: &'static str,
-    report: QaQueryReport,
-}
-
-async fn submit_qa_ingest(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
-        state.metrics.inc_rate_limit_hit();
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
-        );
-    }
-    if let Err(err) = authorize(&state, &headers) {
-        state.metrics.inc_auth_failure();
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
-        );
-    }
-    let request: QaIngestRequest = match serde_json::from_value(body.clone()) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
-    };
-    if request.candidates.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::to_value(ErrorResponse { error: "candidates must not be empty".into() }).unwrap_or_default()),
-        );
-    }
-    let now = now_timestamp();
-    let use_correction_pool = request.pool.as_deref() == Some("correction");
-    let (ingested, total_pairs, question_neurons, answer_entries) = if use_correction_pool {
-        let mut qa = state.correction_qa.lock().expect("corr mutex");
-        let before = qa.pairs_ingested();
-        qa.ingest_candidates(&request.candidates, now);
-        let after = qa.pairs_ingested();
-        ((after - before) as usize, after, qa.question_neuron_count(), qa.answer_count())
-    } else {
-        let mut qa = state.qa_runtime.lock().expect("qa mutex");
-        let before = qa.pairs_ingested();
-        qa.ingest_candidates(&request.candidates, now);
-        let after = qa.pairs_ingested();
-        ((after - before) as usize, after, qa.question_neuron_count(), qa.answer_count())
-    };
-    // Full STDP temporal sequence training from every ingested Q&A pair.
-    // Uses complete perceptual encoding (all label types: char, word, ngram,
-    // structural) — not just word tokens — so every level of the hierarchy
-    // feeds the Hebbian graph.  Q-frame then A-frame with a temporal bridge
-    // teaches the network that question patterns PREDICT answer patterns.
-    // Applied to both pools so the shared Hebbian graph learns from all training.
-    if ingested > 0 {
-        let neuro = state.neuro.clone();
-        let candidates = request.candidates.clone();
-        tokio::task::spawn_blocking(move || {
-            let enc = TextBitsEncoder::new(TextBitsConfig::default());
-            const TAU: f32 = 2.0; // temporal decay constant (seconds)
-            for candidate in &candidates {
-                // Full label set — character, word, ngram, positional, structural
-                let q_labels = enc.encode_plain(&candidate.question).labels;
-                let a_labels = enc.encode_plain(&candidate.answer).labels;
-                if q_labels.is_empty() || a_labels.is_empty() { continue; }
-                // Frame 0: within-question associations (cause)
-                neuro.train_weighted(&q_labels, 1.0, false);
-                // Frame 1: within-answer associations (effect)
-                neuro.train_weighted(&a_labels, 0.8, false);
-                // Temporal bridge: directed Q→A prediction (STDP)
-                // bridge_lr = 0.9 * exp(-1.0 / TAU) ≈ 0.55
-                let bridge_lr = 0.9_f32 * (-1.0_f32 / TAU).exp();
-                let mut bridge: Vec<String> = q_labels.iter()
-                    .chain(a_labels.iter()).cloned().collect();
-                bridge.sort_unstable();
-                bridge.dedup();
-                neuro.train_weighted(&bridge, bridge_lr, false);
-            }
-        });
-    }
-    // Fan-out to peers — skip if this call was already forwarded by a peer
-    // (header x-w1z-local present) to prevent replication loops.
-    if !headers.contains_key("x-w1z-local") {
-        let dist = state.distributed.clone();
-        let broadcast_body = body;
-        tokio::spawn(async move {
-            dist.broadcast_qa_ingest(broadcast_body).await;
-        });
-    }
-    (
-        StatusCode::OK,
-        Json(serde_json::to_value(QaIngestResponse {
-            status: "OK",
-            ingested,
-            total_pairs,
-            question_neurons,
-            answer_entries,
-        }).unwrap_or_default()),
-    )
-}
-
-async fn submit_qa_query(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<QaQueryRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Err(err) = rate_limit(&state, &headers, "knowledge") {
-        state.metrics.inc_rate_limit_hit();
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
-        );
-    }
-    if let Err(err) = authorize(&state, &headers) {
-        state.metrics.inc_auth_failure();
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::to_value(ErrorResponse { error: err.to_string() }).unwrap_or_default()),
-        );
-    }
-    if request.question.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::to_value(ErrorResponse { error: "question must not be empty".into() }).unwrap_or_default()),
-        );
-    }
-    let now = now_timestamp();
-    let report = {
-        let mut qa = state.qa_runtime.lock().expect("qa mutex");
-        qa.query(&request.question, now)
-    };
-    (
-        StatusCode::OK,
-        Json(serde_json::to_value(QaQueryResponse { status: "OK", report }).unwrap_or_default()),
-    )
 }
 
 async fn tune_metacognition(
@@ -4926,7 +4727,6 @@ async fn neuro_ask(
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
     let neuro              = state.neuro.clone();
-    let qa_arc             = state.qa_runtime.clone();
     let hq_arc             = state.hypothesis_queue.clone();
     let session_ctxs       = state.session_contexts.clone();
     let text               = req.text.clone();
@@ -4966,22 +4766,6 @@ async fn neuro_ask(
                     }
                 }
 
-                // Ingest into QA store so the answer can be retrieved next time.
-                let now = now_timestamp();
-                let ingested = {
-                    let mut qa = qa_arc.lock().expect("qa mutex");
-                    let qa_id = {
-                        let mut h = 0u64;
-                        for b in format!("conv|{ctx}|{text}").bytes() {
-                            h = h.wrapping_mul(31).wrapping_add(b as u64);
-                        }
-                        format!("{h:x}")
-                    };
-                    let before = qa.pairs_ingested();
-                    qa.ingest(ctx, text.trim(), "conversation", 0, 0.90, now);
-                    qa.pairs_ingested() > before
-                };
-
                 // Resolve the queued hypothesis for this question (if any).
                 {
                     let hyp_id = {
@@ -5002,7 +4786,7 @@ async fn neuro_ask(
                 // Dopamine: reward the path that asked the right question.
                 neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, 0.9);
                 neuro.flush_dopamine();
-                ingested
+                true
             } else { false }
         } else { false };
         let _ = context_trained; // used below for response tagging
@@ -5093,13 +4877,12 @@ async fn neuro_ask(
             .cloned()
             .collect();
 
-        // ── Pure Hebbian path — no QA store ──────────────────────────────────
-        // Answer comes entirely from Hebbian activation. QA module removed.
+        // ── Pure Hebbian path ────────────────────────────────────────────────
+        // Answer comes entirely from Hebbian activation.
         // The system speaks from what the Hebbian graph has learned, nothing else.
         let now = now_timestamp();
         let qa_answer_labels: Vec<String> = vec![];
         let qa_conf = 0.0_f32;
-        let _ = qa_arc; // QA store present but not used for inference
 
         // 1-hop Hebbian resonance — discriminates trained vs novel concepts
         // without QA score. Peak > threshold means the Hebbian graph has
@@ -5582,10 +5365,10 @@ fn detect_pipeline_scope(text: &str) -> PipelineScope {
 
 
 /// Returns false when a QA answer is off-topic for the question, using the
-/// QA fabric's own learned IDF statistics to determine which tokens are
+/// Hebbian pool's learned statistics to determine which tokens are
 /// discriminative — no hardcoded stop-word lists.
 ///
-/// `significant_tokens` is populated by `QaQueryReport` from the IDF computed
+/// `significant_tokens` is populated from IDF computed
 /// over training statistics: words like "what"/"is"/"the" appear in nearly
 /// every pair so they get near-zero IDF and are NOT significant. Specific words
 /// like "Texas" or "photosynthesis" appear rarely → high IDF → significant.
@@ -5800,13 +5583,11 @@ async fn hypothesis_resolve(
 // current neural state.  If training has raised activation above ANSWER_THRESHOLD
 // since the hypothesis was queued, the entry is automatically marked resolved.
 //
-// External research agents (research_agent.py) feed new knowledge via
-// /qa/ingest + /neuro/train, then either wait for this loop to pick it up or
-// call /hypothesis/resolve directly.
+// External research agents feed new knowledge via /media/train_sequence + /neuro/train,
+// then either wait for this loop to pick it up or call /hypothesis/resolve directly.
 async fn hypothesis_research_loop(
     hq: Arc<Mutex<Vec<HypothesisEntry>>>,
     neuro: NeuroRuntimeHandle,
-    qa_arc: Arc<Mutex<QaRuntime>>,
 ) {
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -5823,9 +5604,8 @@ async fn hypothesis_research_loop(
 
         // Re-evaluate: has new training raised activation above threshold?
         let outcome = tokio::task::spawn_blocking({
-            let neuro   = neuro.clone();
-            let qa_arc  = qa_arc.clone();
-            let q       = question.clone();
+            let neuro = neuro.clone();
+            let q     = question.clone();
             move || -> (f32, Option<String>) {
                 const STOP_WORDS: &[&str] = &[
                     "what","is","are","how","does","do","the","a","an","in","of",
@@ -5844,39 +5624,18 @@ async fn hypothesis_research_loop(
                     })
                     .cloned()
                     .collect();
-                let now = now_timestamp();
-                let qa_report = {
-                    let mut qa = qa_arc.lock().expect("qa mutex");
-                    qa.query(&q, now)
-                };
-                let best = qa_report.results.first();
-                let (qa_labels, qa_w): (Vec<String>, f32) = best
-                    .filter(|r| r.activation > 0.10)
-                    .map(|r| (enc.encode_plain(&r.answer).labels, (r.confidence * 1.5).min(1.0)))
-                    .unwrap_or_default();
-                // 1-hop discriminative check (same gate logic as neuro_ask)
+                // Pure Hebbian 1-hop discriminative check
                 let combined_1h = neuro.propagate_combined(
-                    &[
-                        (qlabels.as_slice(), 1.0_f32),
-                        (qa_labels.as_slice(), qa_w),
-                    ],
+                    &[(qlabels.as_slice(), 1.0_f32)],
                     1,
                     0.005,
                 );
-                let seed_set: std::collections::HashSet<String> = qlabels.iter()
-                    .chain(qa_labels.iter())
-                    .filter(|l| l.starts_with("txt:word_"))
-                    .cloned()
-                    .collect();
+                let seed_set: std::collections::HashSet<&String> = qlabels.iter().collect();
                 let peak_1h = combined_1h.iter()
-                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_") && !seed_set.contains(l.as_str()))
+                    .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_") && !seed_set.contains(l))
                     .map(|(_, &v)| v)
                     .fold(0.0f32, f32::max);
-                let qa_ok = best.filter(|r| r.activation > 0.10).is_some();
-                // Use QA confidence as the primary gate (same as neuro_ask)
-                let peak = if qa_ok { ANSWER_THRESHOLD } else { 0.0 };
-                let top_answer = best.map(|r| r.answer.clone());
-                (peak, top_answer)
+                (peak_1h, None)
             }
         }).await;
 
@@ -5896,75 +5655,23 @@ async fn hypothesis_research_loop(
 }
 
 /// POST /neuro/checkpoint
-/// Force-save the NeuronPool and QA store to disk.
-/// Both saves run on the blocking thread pool so the async executor stays free.
+/// Force-save the NeuronPool to disk.
 async fn neuro_checkpoint(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let pool_path = state.neuro.pool_state_path().unwrap_or("").to_string();
-    let qa_path = node_data_dir().join("qa_store.json");
-
-    let corr_path = node_data_dir().join("qa_correction_store.json");
-    let qa_snapshot   = { let qa = state.qa_runtime.lock().expect("qa mutex"); qa.clone() };
-    let corr_snapshot = { let cq = state.correction_qa.lock().expect("corr mutex"); cq.clone() };
-
     let pool_path_clone = pool_path.clone();
-    let qa_path_clone   = qa_path.clone();
-    let corr_path_clone = corr_path.clone();
-
-    let (pool_result, qa_result, corr_result) = tokio::task::spawn_blocking(move || {
-        let pr = state.neuro.save_pool();
-        let qr = qa_snapshot.save(&qa_path_clone);
-        let cr = corr_snapshot.save(&corr_path_clone);
-        (pr, qr, cr)
-    }).await.unwrap_or_else(|e| (
-        Err(e.to_string()),
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "join error")),
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "join error")),
-    ));
+    let pool_result = tokio::task::spawn_blocking(move || {
+        state.neuro.save_pool()
+    }).await.unwrap_or_else(|e| Err(e.to_string()));
     let _ = pool_path_clone;
-
-    match (pool_result, qa_result, corr_result) {
-        (Ok(()), Ok(()), Ok(())) => (StatusCode::OK, Json(serde_json::json!({
+    match pool_result {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({
             "saved": true,
             "pool_path": pool_path,
-            "qa_path":   qa_path.to_string_lossy(),
-            "corr_path": corr_path.to_string_lossy(),
         }))),
-        (Err(e), _, _) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("pool: {}", e) }))),
-        (_, Err(e), _) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("qa_store: {}", e) }))),
-        (_, _, Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("qa_correction_store: {}", e) }))),
-    }
-}
-
-/// POST /qa/checkpoint
-/// Save both QA pools to disk (knowledge + correction).
-async fn qa_checkpoint(
-    State(state): State<ApiState>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let qa_path   = node_data_dir().join("qa_store.json");
-    let corr_path = node_data_dir().join("qa_correction_store.json");
-    let qa_snap   = { state.qa_runtime.lock().expect("qa mutex").clone() };
-    let corr_snap = { state.correction_qa.lock().expect("corr mutex").clone() };
-    let qa_p = qa_path.clone(); let cr_p = corr_path.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        (qa_snap.save(&qa_p), corr_snap.save(&cr_p))
-    }).await;
-    match result {
-        Ok((Ok(()), Ok(()))) => (StatusCode::OK, Json(serde_json::json!({
-            "saved": true,
-            "qa_path":   qa_path.to_string_lossy(),
-            "corr_path": corr_path.to_string_lossy(),
-        }))),
-        Ok((Err(e), _)) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("qa_store: {}", e) }))),
-        Ok((_, Err(e))) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("correction_store: {}", e) }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("task: {}", e) }))),
+            Json(serde_json::json!({ "error": format!("pool: {}", e) }))),
     }
 }
 

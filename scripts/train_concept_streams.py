@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-W1z4rD V1510n — Rich Multi-Modal Concept Stream Trainer
+W1z4rD V1510n -- Rich Multi-Modal Concept Stream Trainer
 ========================================================
 Uses EVERY available modality simultaneously so the neural fabric builds
 cross-stream concept neurons that fire regardless of input channel:
 
-  IMAGE     — clean concept photograph or generated graphic
-  TEXT      — structured spans with spatial position (x_frac, y_frac)
-  KEYBOARD  — character-by-character typing triggers txt:word_ labels
-  AUDIO     — AWS Polly neural speech, 16 kHz PCM wrapped in WAV
-  TEMPORAL  — lifecycle sequences bridge frames via Hebbian decay
+  IMAGE     -- clean concept photograph or generated graphic
+  TEXT      -- structured spans with spatial position (x_frac, y_frac)
+  KEYBOARD  -- character-by-character typing triggers txt:word_ labels
+  AUDIO     -- AWS Polly neural speech, 16 kHz PCM wrapped in WAV
+  TEMPORAL  -- lifecycle sequences bridge frames via Hebbian decay
 
 DATA QUALITY IS THE FOUNDATION.
 Before any byte reaches the training endpoint it passes ALL gates:
@@ -29,7 +29,7 @@ VIDEO PIPELINE (Archive.org):
   16 kHz audio, trains as temporal image+audio sequences.
 
 USAGE:
-  # Quick experiment — 10 concepts, all modalities, probe results
+  # Quick experiment -- 10 concepts, all modalities, probe results
   python train_concept_streams.py --concepts 10
 
   # Full Stage 0 (82 concepts)
@@ -94,7 +94,7 @@ LR_ANCHOR   = 1.5   # first exposure: stamp hard
 LR_CONTEXT  = 1.2   # definition frame
 LR_SCENE    = 1.0   # scene composition / multi-object
 LR_SEQ      = 0.9   # sequence frames
-TEMP_TAU    = 2.0   # seconds — Hebbian temporal decay
+TEMP_TAU    = 2.0   # seconds -- Hebbian temporal decay
 
 # ---------------------------------------------------------------------------
 # Concept registry
@@ -370,7 +370,7 @@ META_STREAMS = {
     ],
 }
 
-# Scene pairs — concepts that naturally co-occur for decomposition training
+# Scene pairs -- concepts that naturally co-occur for decomposition training
 SCENE_PAIRS = [
     ("apple", "banana"), ("dog", "cat"), ("sun", "moon"),
     ("river", "mountain"), ("mother", "father"), ("circle", "square"),
@@ -378,7 +378,7 @@ SCENE_PAIRS = [
     ("science", "math"), ("art", "music"), ("question", "answer"),
 ]
 
-# Lifecycle sequences (concept → related chain, for temporal training)
+# Lifecycle sequences (concept -> related chain, for temporal training)
 LIFECYCLE_SEQUENCES = [
     ["seed", "sprout", "plant", "tree", "flower", "fruit", "apple", "eat", "energy"],
     ["rain", "cloud", "water", "river", "ocean", "evaporate", "cloud", "rain"],
@@ -463,7 +463,7 @@ def generate_text_card_image(concept: Concept) -> bytes:
     Universal fallback: a clean text card with the word large, definition below,
     and a colored top/bottom stripe keyed to concept type.
     Used when no photo or domain-specific synthetic image is available.
-    Semantically correct by construction — the word and definition are written
+    Semantically correct by construction -- the word and definition are written
     directly on the image.
     """
     TYPE_STRIPE = {
@@ -593,7 +593,7 @@ def download_wikimedia_images(wiki_title: str, client: httpx.Client,
     return images
 
 # ---------------------------------------------------------------------------
-# Image quality validation — STRICT gates
+# Image quality validation -- STRICT gates
 # ---------------------------------------------------------------------------
 
 def validate_image(data: bytes, concept_word: str, generated: bool = False) -> tuple[bool, str]:
@@ -601,7 +601,7 @@ def validate_image(data: bytes, concept_word: str, generated: bool = False) -> t
     Return (ok, reason).  Every piece of image data must pass before training.
     Generated images skip the variance check (we control their content exactly).
     """
-    # Generated images are correct by construction — skip the byte-size gate
+    # Generated images are correct by construction -- skip the byte-size gate
     # (a synthetic number on a plain background compresses to ~6 KB legitimately)
     if not generated and len(data) < MIN_FILE_BYTES:
         return False, f"too small ({len(data)} bytes < {MIN_FILE_BYTES})"
@@ -677,7 +677,7 @@ def keyboard_type(text: str, start_t: float = 0.0, delay: float = 0.11) -> list:
     return events
 
 # ---------------------------------------------------------------------------
-# Scene compositor — two concepts side by side with correct spatial labels
+# Scene compositor -- two concepts side by side with correct spatial labels
 # ---------------------------------------------------------------------------
 
 def compose_scene(img_left: bytes, img_right: bytes,
@@ -799,11 +799,11 @@ def train_concept(concept: Concept, images: list[bytes], audio: Optional[bytes],
                    client: httpx.Client, verbose: bool = False) -> dict:
     """
     Fire all modalities for one concept simultaneously, in the correct order:
-      1. Anchor frame  — image + label text + keyboard typing
-      2. Definition    — image + full definition + keyboard typing
-      3. Audio frame   — image + audio + text (if audio available)
-      4. QA ingest     — Hebbian Q→A pair with confidence 0.95
-      5. Episode       — record context→definition episode
+      1. Anchor frame  -- image + label text + keyboard typing
+      2. Definition    -- image + full definition + keyboard typing
+      3. Audio frame   -- image + audio + text (if audio available)
+      4. QA ingest     -- Hebbian Q->A pair with confidence 0.95
+      5. Episode       -- record context->definition episode
     Returns stats dict.
     """
     word = concept.word
@@ -900,7 +900,7 @@ def train_concept(concept: Concept, images: list[bytes], audio: Optional[bytes],
     }])
     stats["qa"] = ingested
 
-    # -- 5. Episode recording (context label → definition) --------------------
+    # -- 5. Episode recording (context label -> definition) --------------------
     api_record_episode(
         client,
         context_labels=[f"txt:word_{word}"],
@@ -1081,7 +1081,7 @@ def prep_concept_data(concepts: list[Concept], client: httpx.Client,
         images_validated: list[bytes] = []
         image_names: list[str] = []
 
-        # 1. Synthetic (abstract concepts) — perfect quality guaranteed
+        # 1. Synthetic (abstract concepts) -- perfect quality guaranteed
         synthetic = generate_synthetic(concept)
         if synthetic:
             ok, reason = validate_image(synthetic, word, generated=True)
@@ -1120,7 +1120,7 @@ def prep_concept_data(concepts: list[Concept], client: httpx.Client,
                 else:
                     print(f"  [REJECT] {word} extra_{i}: {reason}")
 
-        # 4. Text-card fallback — guarantees every concept has at least one image
+        # 4. Text-card fallback -- guarantees every concept has at least one image
         if not images_validated:
             try:
                 card = generate_text_card_image(concept)
@@ -1264,7 +1264,7 @@ def train_video_stream(title: str, frames: list[bytes], audio_wav: Optional[byte
             break
         frame_payloads = []
         for i, img in enumerate(chunk):
-            t = float(i) / 1.0  # 1fps → 1s per frame
+            t = float(i) / 1.0  # 1fps -> 1s per frame
             frame_payloads.append({
                 "t_secs": round(t, 2),
                 "modality": "image",
@@ -1311,7 +1311,7 @@ def run(args):
     print(f"{'='*60}\n")
 
     with httpx.Client() as client:
-        # ── PREP ────────────────────────────────────────────────────────────
+        # -- PREP ------------------------------------------------------------
         print("PHASE 1: DATA PREPARATION (strict validation)")
         print("-" * 42)
         all_images = prep_concept_data(
@@ -1327,7 +1327,7 @@ def run(args):
         if args.prep_only:
             return
 
-        # ── TRAIN CONCEPTS ──────────────────────────────────────────────────
+        # -- TRAIN CONCEPTS --------------------------------------------------
         print("PHASE 2: CONCEPT STREAM TRAINING (all modalities)")
         print("-" * 50)
         qa_batch = []
@@ -1341,7 +1341,7 @@ def run(args):
             print(f"  [OK] {concept.word:<16} {stats['frames']} frames  audio={'y' if stats['audio'] else 'n'}")
             time.sleep(0.05)
 
-        # ── LIFECYCLE SEQUENCES ─────────────────────────────────────────────
+        # -- LIFECYCLE SEQUENCES ---------------------------------------------
         print("\nPHASE 3: TEMPORAL LIFECYCLE SEQUENCES")
         print("-" * 40)
         # Build a flat map of best image per concept word
@@ -1354,9 +1354,9 @@ def run(args):
         for seq in LIFECYCLE_SEQUENCES:
             result = train_lifecycle_sequence(seq, client, best_img)
             icon = "[OK]" if result else "[XX]"
-            print(f"  {icon} {' → '.join(seq[:4])}{'→ ...' if len(seq)>4 else ''}")
+            print(f"  {icon} {' -> '.join(seq[:4])}{'-> ...' if len(seq)>4 else ''}")
 
-        # ── SCENE COMPOSITIONS ──────────────────────────────────────────────
+        # -- SCENE COMPOSITIONS ----------------------------------------------
         print("\nPHASE 4: SCENE COMPOSITION (spatial decomposition)")
         print("-" * 50)
         for word_l, word_r in SCENE_PAIRS:
@@ -1370,19 +1370,19 @@ def run(args):
                 continue
             result = train_scene_pair(c_l, c_r, imgs_l[0], imgs_r[0], client)
             icon = "[OK]" if result else "[XX]"
-            print(f"  {icon} {word_l} ↔ {word_r}")
+            print(f"  {icon} {word_l} <-> {word_r}")
 
-        # ── META-STREAMS ────────────────────────────────────────────────────
+        # -- META-STREAMS ----------------------------------------------------
         print("\nPHASE 5: DOMAIN META-STREAMS")
         print("-" * 30)
         train_meta_streams(client)
 
-        # ── QA CHECKPOINT ───────────────────────────────────────────────────
+        # -- QA CHECKPOINT ---------------------------------------------------
         print("\nSaving QA store...")
         if api_qa_checkpoint(client):
             print("  QA store saved.")
 
-        # ── PROBE ───────────────────────────────────────────────────────────
+        # -- PROBE -----------------------------------------------------------
         if not args.skip_probe:
             print("\nPHASE 6: CROSS-MODAL PROBE")
             print("-" * 30)
@@ -1397,9 +1397,9 @@ def run(args):
                 text_to_img = result.get("text_to_img", {})
                 n_img = text_to_img.get("img_labels_activated", 0)
                 related = text_to_img.get("related_words", [])
-                print(f"  '{word}' → {n_img} img labels fire | related: {related[:4]}")
+                print(f"  '{word}' -> {n_img} img labels fire | related: {related[:4]}")
 
-    # ── VIDEO PIPELINE (optional) ────────────────────────────────────────────
+    # -- VIDEO PIPELINE (optional) --------------------------------------------
     if args.video_prep or args.video_train:
         print("\nPHASE 7: ARCHIVE.ORG VIDEO PIPELINE")
         print("-" * 40)
@@ -1413,7 +1413,7 @@ def run(args):
             )
             print(f"  Found {len(items)} videos")
             for item in items:
-                print(f"  → {item['title']}")
+                print(f"  -> {item['title']}")
                 video_file = VIDEO_DIR / f"{item['identifier']}.mp4"
                 if args.video_train and not video_file.exists():
                     print(f"    Downloading...")

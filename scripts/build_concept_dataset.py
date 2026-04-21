@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-build_concept_dataset.py — Build developmental vocabulary dataset
+build_concept_dataset.py -- Build developmental vocabulary dataset
 =================================================================
-Produces data/foundation/concept_dataset.jsonl — one record per concept:
+Produces data/foundation/concept_dataset.jsonl -- one record per concept:
 
   {
     "concept":   "apple",
@@ -101,7 +101,7 @@ FIRST_WORDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Misconception → correction pairs
+# Misconception -> correction pairs
 # Key belief-breaks that should be part of the dataset at level 3+.
 # Format: (concept_key, misconception, correction, level)
 # ---------------------------------------------------------------------------
@@ -118,11 +118,11 @@ MISCONCEPTIONS = {
         "Energy can be created or destroyed.",
         "Energy cannot be created or destroyed, only converted from one form to another. "
         "This is the law of conservation of energy. When you burn wood, chemical energy "
-        "becomes heat and light — none disappears."
+        "becomes heat and light -- none disappears."
     ),
     "heat": (
         "Cold is a thing that enters objects to make them cold.",
-        "Cold is not a substance — it is the absence of heat. Heat always flows from "
+        "Cold is not a substance -- it is the absence of heat. Heat always flows from "
         "hotter objects to colder ones. When you feel cold, heat is leaving your body."
     ),
     # Biology
@@ -136,7 +136,7 @@ MISCONCEPTIONS = {
         "We only use 10% of our brain.",
         "This is a myth. Brain scans show that virtually all parts of the brain are "
         "active at some point. Different areas handle different tasks like vision, "
-        "movement, memory, and language — all of it gets used."
+        "movement, memory, and language -- all of it gets used."
     ),
     "plant": (
         "Plants get their food from the soil.",
@@ -147,7 +147,7 @@ MISCONCEPTIONS = {
     # Earth science
     "sun": (
         "The sun moves across the sky.",
-        "The sun does not move across the sky — Earth rotates on its axis once every "
+        "The sun does not move across the sky -- Earth rotates on its axis once every "
         "24 hours. From Earth's surface it looks like the sun is moving, but it is "
         "we who are spinning."
     ),
@@ -161,7 +161,7 @@ MISCONCEPTIONS = {
     # Chemistry / matter
     "water": (
         "Ice, liquid water, and steam are different substances.",
-        "Ice, liquid water, and steam are all the same substance — H2O — just in "
+        "Ice, liquid water, and steam are all the same substance -- H2O -- just in "
         "different states. Adding or removing heat changes the state but not what "
         "the substance is."
     ),
@@ -176,14 +176,14 @@ MISCONCEPTIONS = {
         "If a coin has come up heads 5 times in a row, tails is 'due' next.",
         "Each coin flip is independent. The coin has no memory. The probability of "
         "heads is always 50%, no matter what just happened. This is the gambler's "
-        "fallacy — past random events do not affect future ones."
+        "fallacy -- past random events do not affect future ones."
     ),
     # Physics (advanced)
     "light (science)": (
         "Light travels instantly.",
         "Light travels very fast (about 300,000 km per second) but not instantly. "
         "Sunlight takes about 8 minutes to reach Earth. Light from distant stars "
-        "takes years or millions of years — we see stars as they were in the past."
+        "takes years or millions of years -- we see stars as they were in the past."
     ),
     "atom": (
         "Atoms are the smallest things that exist.",
@@ -203,7 +203,7 @@ MISCONCEPTIONS = {
 
 SEED_TAXONOMY = [
 
-    # ── Level 0: Infant (0-18 months) ─────────────────────────────────
+    # -- Level 0: Infant (0-18 months) ---------------------------------
     # Body parts (first words a child learns by pointing)
     ("eye", "body", 0), ("ear", "body", 0), ("nose", "body", 0),
     ("mouth", "body", 0), ("hand", "body", 0), ("foot", "body", 0),
@@ -246,13 +246,13 @@ SEED_TAXONOMY = [
     ("sky", "nature", 0), ("rain", "nature", 0), ("tree", "nature", 0),
     ("flower", "nature", 0), ("grass", "nature", 0),
 
-    # First actions (Level 0 verbs — things babies do)
+    # First actions (Level 0 verbs -- things babies do)
     ("eat", "action", 0), ("sleep", "action", 0), ("cry", "action", 0),
     ("smile", "action", 0), ("sit", "action", 0), ("stand", "action", 0),
     ("walk", "action", 0), ("run", "action", 0), ("play", "action", 0),
     ("fall", "action", 0), ("drink", "action", 0), ("hold", "action", 0),
 
-    # ── Level 1: Toddler (18 months – 3 years) ───────────────────────
+    # -- Level 1: Toddler (18 months - 3 years) -----------------------
     # Expanded animals
     ("horse", "animal", 1), ("cow", "animal", 1), ("pig", "animal", 1),
     ("sheep", "animal", 1), ("chicken", "animal", 1), ("rabbit", "animal", 1),
@@ -387,7 +387,7 @@ SEED_TAXONOMY = [
     ("love", "emotion", 1), ("hate", "emotion", 1), ("afraid", "emotion", 1),
     ("shy", "emotion", 1), ("proud", "emotion", 1), ("confused", "emotion", 1),
 
-    # ── Level 2: Pre-Kindergarten (3–4 years) ────────────────────────
+    # -- Level 2: Pre-Kindergarten (3-4 years) ------------------------
     # People and roles
     ("teacher", "people", 2), ("doctor", "people", 2), ("nurse", "people", 2),
     ("police officer", "people", 2), ("firefighter", "people", 2),
@@ -486,7 +486,7 @@ SEED_TAXONOMY = [
     ("solution", "social", 2), ("idea", "social", 2), ("question", "social", 2),
     ("answer (concept)", "social", 2),
 
-    # ── Level 3: Kindergarten (4–5 years) ────────────────────────────
+    # -- Level 3: Kindergarten (4-5 years) ----------------------------
     # Science concepts
     ("energy", "science", 3), ("matter", "science", 3), ("force", "science", 3),
     ("motion", "science", 3), ("friction", "science", 3), ("pressure", "science", 3),
@@ -568,7 +568,7 @@ SEED_TAXONOMY = [
 ]
 
 # ---------------------------------------------------------------------------
-# Open Images v7 label map — concept → OI class ID
+# Open Images v7 label map -- concept -> OI class ID
 # (600 categories, CC-BY 4.0)
 # ---------------------------------------------------------------------------
 
@@ -715,13 +715,13 @@ def build_dataset(max_concepts: int, out_path: Path) -> None:
     seen = set()
     records = []
 
-    # ── Level -1: pre-linguistic first words ─────────────────────────────
+    # -- Level -1: pre-linguistic first words -----------------------------
     for concept, category, level in FIRST_WORDS:
         clean_key = re.sub(r"\s*\(.*?\)", "", concept).strip().lower()
         if clean_key in seen:
             continue
         seen.add(clean_key)
-        # First words don't need definitions — they need image + audio grounding
+        # First words don't need definitions -- they need image + audio grounding
         # Use a minimal sentence that a caregiver would actually say
         caregiver_sentences = {
             "no": "No means stop or do not do that.",
@@ -738,8 +738,8 @@ def build_dataset(max_concepts: int, out_path: Path) -> None:
             "little": "Little means something is small in size.",
             "wet": "Wet means covered with water or another liquid.",
             "dirty": "Dirty means something needs to be cleaned.",
-            "mama": "Mama is the word for mother — the woman who takes care of you.",
-            "dada": "Dada is the word for father — the man who takes care of you.",
+            "mama": "Mama is the word for mother -- the woman who takes care of you.",
+            "dada": "Dada is the word for father -- the man who takes care of you.",
             "ball": "A ball is a round toy you can throw, kick, or roll.",
             "milk": "Milk is a white drink that comes from cows or mothers.",
             "water": "Water is a clear liquid you drink to stay alive.",
@@ -836,7 +836,7 @@ def build_dataset(max_concepts: int, out_path: Path) -> None:
 
     print(f"  Seed taxonomy: {len(records):,} concepts")
 
-    # ── WordNet expansion ──────────────────────────────────────────────────
+    # -- WordNet expansion --------------------------------------------------
     # For noun categories, expand with hyponyms (more specific concepts)
     expandable = {"animal", "food", "vehicle", "clothing", "home", "nature",
                   "place", "health", "science"}
@@ -931,14 +931,14 @@ def build_dataset(max_concepts: int, out_path: Path) -> None:
         expand_synset(synset_name, cat_name, level)
     print(f"  After expansion: {len(records):,} concepts")
 
-    # ── Sort by level then frequency ──────────────────────────────────────
+    # -- Sort by level then frequency --------------------------------------
     records.sort(key=lambda r: (r["level"], -r["frequency"]))
 
-    # ── Match Wikipedia definitions ───────────────────────────────────────
+    # -- Match Wikipedia definitions ---------------------------------------
     print("  Matching Simple English Wikipedia definitions...")
     wiki_jsonl = out_path.parent / "simple_wiki_articles.jsonl"
     if wiki_jsonl.exists():
-        # Build a title → first_paragraph lookup (streaming, memory-efficient)
+        # Build a title -> first_paragraph lookup (streaming, memory-efficient)
         title_index: dict[str, str] = {}
         with open(wiki_jsonl, encoding="utf-8") as wfh:
             for line in wfh:
@@ -956,9 +956,9 @@ def build_dataset(max_concepts: int, out_path: Path) -> None:
                 matched += 1
         print(f"  Wikipedia matches: {matched:,}/{len(records):,}")
     else:
-        print("  (simple_wiki_articles.jsonl not found — skipping wiki match)")
+        print("  (simple_wiki_articles.jsonl not found -- skipping wiki match)")
 
-    # ── Write output ──────────────────────────────────────────────────────
+    # -- Write output ------------------------------------------------------
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
         for r in records:

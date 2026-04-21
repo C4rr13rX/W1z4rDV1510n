@@ -911,7 +911,16 @@ impl NeuronPool {
     ///    path for a node that is joining a cluster and inheriting a shared cold pool
     ///    for the first time.
     pub fn restore_cold_index(&mut self, cold_dir: &PathBuf) {
-        let index_path = cold_dir.join("cold_index.json");
+        // In shared-pool mode (W1Z4RDV1510N_COLD_DIR set), each node uses a
+        // per-node index file so nodes don't clobber each other's recency data.
+        let index_filename = if std::env::var("W1Z4RDV1510N_COLD_DIR").is_ok() {
+            let node_id = std::env::var("W1Z4RDV1510N_NODE_ID")
+                .unwrap_or_else(|_| "node".to_string());
+            format!("cold_index_{node_id}.json")
+        } else {
+            "cold_index.json".to_string()
+        };
+        let index_path = cold_dir.join(&index_filename);
         let meta_path  = cold_dir.join("meta.json");
 
         // ── Path 1: fast path — read cold_index.json ──────────────────────────
@@ -1070,16 +1079,26 @@ impl NeuronPool {
         index
     }
 
-    /// Persist `{ label → last_active_step }` to `cold_index.json`.
-    /// No node-local IDs — any node in the cluster can load this file.
+    /// Persist `{ label → last_active_step }` to the cold index file.
+    ///
+    /// File name: `cold_index.json` (default) or `cold_index_<NODE_ID>.json` when
+    /// `W1Z4RDV1510N_COLD_DIR` is set, so multiple cluster nodes sharing a pool
+    /// directory each maintain their own recency tracking without overwriting each other.
     fn save_cold_index(&self) {
         let cd = match &self.cold_dir { Some(d) => d, None => return };
+        let filename = if std::env::var("W1Z4RDV1510N_COLD_DIR").is_ok() {
+            let node_id = std::env::var("W1Z4RDV1510N_NODE_ID")
+                .unwrap_or_else(|_| "node".to_string());
+            format!("cold_index_{node_id}.json")
+        } else {
+            "cold_index.json".to_string()
+        };
         let index: HashMap<&str, u64> = self.neurons.iter().filter_map(|slot| {
             if let NeuronSlot::Cold { last_active_step, label } = slot {
                 Some((label.as_str(), *last_active_step))
             } else { None }
         }).collect();
-        let index_path = cd.join("cold_index.json");
+        let index_path = cd.join(&filename);
         if let Ok(json) = serde_json::to_string(&index) {
             let tmp = index_path.with_extension("tmp");
             let _ = std::fs::create_dir_all(cd);
@@ -3531,13 +3550,24 @@ impl NeuroRuntime {
         let mut state = NeuroState::new(config.neuro.clone(), config.motifs.clone());
         state.pool.cooccur_cap = hw_cap;
 
-        // Derive cold-tier directory alongside the pool checkpoint file.
-        let cold_dir = config.pool_state_path.as_deref().map(|p| {
-            let pb = std::path::Path::new(p);
-            let stem = pb.file_stem().unwrap_or_default().to_string_lossy();
-            pb.parent().unwrap_or(std::path::Path::new("."))
-                .join(format!("{stem}_cold"))
-        });
+        // Derive cold-tier directory.
+        //
+        // Precedence:
+        //   1. W1Z4RDV1510N_COLD_DIR env var — explicit override, enables shared-pool
+        //      clustering: each node has its own hot checkpoint but all read/write the
+        //      same label-named cold files.  The cold_index.json is per-node when this
+        //      override is active (prefixed with the node_id).
+        //   2. Alongside the pool checkpoint: `<stem>_cold/` next to neuro_pool.json.
+        let cold_dir = if let Ok(env_cd) = std::env::var("W1Z4RDV1510N_COLD_DIR") {
+            Some(PathBuf::from(env_cd))
+        } else {
+            config.pool_state_path.as_deref().map(|p| {
+                let pb = std::path::Path::new(p);
+                let stem = pb.file_stem().unwrap_or_default().to_string_lossy();
+                pb.parent().unwrap_or(std::path::Path::new("."))
+                    .join(format!("{stem}_cold"))
+            })
+        };
 
         // Auto-load pool if a state path is configured and the file exists.
         if let Some(ref path) = config.pool_state_path {

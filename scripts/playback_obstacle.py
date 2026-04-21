@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-W1z4rD V1510n — Obstacle Course Playback Script
+W1z4rD V1510n -- Obstacle Course Playback Script
 ================================================
 After training with train_obstacle.py, this script opens the obstacle course
 and accepts an English command. It:
@@ -8,7 +8,7 @@ and accepts an English command. It:
   1. Takes a screenshot of the current page state
   2. POSTs goal text + screenshot to /media/playback
   3. Reads the predicted motion zone and click
-  4. Moves the mouse there and clicks — the model drives the cursor
+  4. Moves the mouse there and clicks -- the model drives the cursor
 
 This demonstrates that the pool has learned the spatial association between
 the goal language, the visual scene, and the required action.
@@ -38,14 +38,14 @@ COMMANDS = [
     "click the purple button",
 ]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 async def screenshot_b64(page):
     png = await page.screenshot(type="jpeg", quality=70)
     return base64.b64encode(png).decode()
 
 async def ask_playback(client, goal, screen_b64, hops=1):
-    # 1 hop: only direct text→motion associations fire.
+    # 1 hop: only direct text->motion associations fire.
     # More hops add indirect cross-goal noise (shared words like "click" activate all zones).
     # The screenshot is skipped here because the obstacle course looks identical for all goals,
     # so image labels add noise rather than discrimination.
@@ -59,7 +59,7 @@ def zone_to_pixel(zx, zy, vw, vh, grid=8):
     y = int((zy + 0.5) / grid * vh)
     return x, y
 
-# ── Playback ──────────────────────────────────────────────────────────────────
+# -- Playback ------------------------------------------------------------------
 
 async def run_playback(goal: str, auto: bool):
     async with async_playwright() as pw:
@@ -97,7 +97,7 @@ async def run_playback(goal: str, auto: bool):
                     print(f"    {a['label']:45s}  {a['strength']:.3f}")
 
                 if action.get("type") == "none":
-                    print("  X No prediction — pool may need more training")
+                    print("  X No prediction -- pool may need more training")
                     return
 
                 # Convert to screen coordinates
@@ -124,9 +124,9 @@ async def run_playback(goal: str, auto: bool):
                 await page.wait_for_timeout(600)
 
             if auto:
-                print("\nAuto mode — cycling through all commands twice...\n")
+                print("\nAuto mode -- cycling through all commands twice...\n")
                 for round_ in range(2):
-                    print(f"— Round {round_+1} —")
+                    print(f"-- Round {round_+1} --")
                     for cmd in COMMANDS:
                         await execute_command(cmd)
                         await page.wait_for_timeout(800)
@@ -138,7 +138,7 @@ async def run_playback(goal: str, auto: bool):
 
         await browser.close()
 
-# ── Entry ─────────────────────────────────────────────────────────────────────
+# -- Entry ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Obstacle course playback")
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     NODE_URL = args.node
 
-    print(f"\nW1z4rD V1510n — Obstacle Course Playback")
+    print(f"\nW1z4rD V1510n -- Obstacle Course Playback")
     print(f"  Node: {NODE_URL}")
     if args.auto:
         print(f"  Mode: AUTO (all commands)")

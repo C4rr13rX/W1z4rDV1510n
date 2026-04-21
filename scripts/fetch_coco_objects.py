@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-fetch_coco_objects.py — Download COCO 2017 val + annotations for foundation training
+fetch_coco_objects.py -- Download COCO 2017 val + annotations for foundation training
 ======================================================================================
 Downloads COCO 2017 validation set (5,000 images) and captions annotations.
 Produces a JSONL index at data/foundation/coco_val_index.jsonl where each line:
@@ -23,7 +23,7 @@ Requires:
   pip install requests
 
 Data license: CC-BY 4.0 (COCO dataset, Microsoft)
-Images license: Flickr (various CC licenses — val set is CC-BY 2.0 or similar)
+Images license: Flickr (various CC licenses -- val set is CC-BY 2.0 or similar)
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ COCO_ANNOTATIONS_URL     = "http://images.cocodataset.org/annotations/annotation
 
 def download_file(url: str, dest: Path, chunk_size: int = 1 << 20) -> None:
     if dest.exists():
-        print(f"  Already exists: {dest.name} — skipping download")
+        print(f"  Already exists: {dest.name} -- skipping download")
         return
     print(f"  Downloading: {url}")
     r = requests.get(url, stream=True, timeout=120)
@@ -89,10 +89,10 @@ def build_index(out_dir: Path) -> None:
     instances_file = ann_dir / "instances_val2017.json"
 
     if not captions_file.exists():
-        print(f"ERROR: {captions_file} not found — annotations not extracted?")
+        print(f"ERROR: {captions_file} not found -- annotations not extracted?")
         return
     if not instances_file.exists():
-        print(f"WARNING: {instances_file} not found — skipping category labels")
+        print(f"WARNING: {instances_file} not found -- skipping category labels")
 
     print("Building per-image index...")
 
@@ -100,19 +100,19 @@ def build_index(out_dir: Path) -> None:
     with open(captions_file, encoding="utf-8") as fh:
         captions_data = json.load(fh)
 
-    # image_id → list of caption strings
+    # image_id -> list of caption strings
     cap_map: dict[int, list[str]] = {}
     for ann in captions_data["annotations"]:
         cap_map.setdefault(ann["image_id"], []).append(ann["caption"])
 
-    # image_id → image metadata
+    # image_id -> image metadata
     img_meta: dict[int, dict] = {}
     for img in captions_data["images"]:
         img_meta[img["id"]] = img
 
     # Load category names for instance labels
-    cat_map: dict[int, str] = {}    # category_id → name
-    inst_map: dict[int, list[str]] = {}  # image_id → list of category names
+    cat_map: dict[int, str] = {}    # category_id -> name
+    inst_map: dict[int, list[str]] = {}  # image_id -> list of category names
     if instances_file.exists():
         with open(instances_file, encoding="utf-8") as fh:
             inst_data = json.load(fh)
@@ -165,7 +165,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.index_only:
-        # Download annotations (small — ~241MB)
+        # Download annotations (small -- ~241MB)
         print("\n[1/2] Annotations:")
         ann_zip = out_dir / "annotations_trainval2017.zip"
         download_file(COCO_ANNOTATIONS_URL, ann_zip)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-W1z4rD V1510n — OpenStax K-12 Ingestion Script
+W1z4rD V1510n -- OpenStax K-12 Ingestion Script
 ===============================================
 Downloads OpenStax textbook PDFs and trains the node on each page using
 multimodal co-activation: page image + structured text spans together.
@@ -58,8 +58,8 @@ except ImportError:
             yield x
         print()
 
-# ── OpenStax CDN PDF map ───────────────────────────────────────────────────────
-# Each entry: display name → direct PDF URL from the OpenStax CDN.
+# -- OpenStax CDN PDF map -------------------------------------------------------
+# Each entry: display name -> direct PDF URL from the OpenStax CDN.
 # Verified working as of 2025.  Run with --list to print all available subjects.
 OPENSTAX_BOOKS = {
     "biology":       "https://openstax.org/apps/archive/latest/books/185cbf87-c72e-48f5-b51e-f14f21b5eaeb/files/",
@@ -82,9 +82,9 @@ OPENSTAX_BOOKS = {
 }
 
 
-# ── Page rendering ─────────────────────────────────────────────────────────────
+# -- Page rendering -------------------------------------------------------------
 
-DPI = 144  # 2× screen density — good balance of zone resolution vs payload size
+DPI = 144  # 2x screen density -- good balance of zone resolution vs payload size
 JPEG_QUALITY = 75
 
 
@@ -95,13 +95,13 @@ def render_page_jpeg(page: "fitz.Page") -> bytes:
     return pix.tobytes("jpeg", jpg_quality=JPEG_QUALITY)
 
 
-# ── Text extraction ────────────────────────────────────────────────────────────
+# -- Text extraction ------------------------------------------------------------
 
 def extract_spans(page: "fitz.Page", page_w: float, page_h: float) -> list[dict]:
     """
     Extract text spans from a page as structured TextSpanReq dicts.
 
-    PyMuPDF's get_text("dict") gives us blocks → lines → spans with:
+    PyMuPDF's get_text("dict") gives us blocks -> lines -> spans with:
       - bbox: (x0, y0, x1, y1) in points
       - size: font size in points
       - flags: bold/italic bits
@@ -176,7 +176,7 @@ def extract_spans(page: "fitz.Page", page_w: float, page_h: float) -> list[dict]
     return result
 
 
-# ── Node API ───────────────────────────────────────────────────────────────────
+# -- Node API -------------------------------------------------------------------
 
 def train_page(client: httpx.Client, node_url: str,
                jpeg_bytes: bytes, spans: list[dict],
@@ -203,7 +203,7 @@ def checkpoint(client: httpx.Client, node_url: str) -> None:
         print(f"  Checkpoint failed: {resp.status_code}")
 
 
-# ── Download ───────────────────────────────────────────────────────────────────
+# -- Download -------------------------------------------------------------------
 
 def download_pdf(url: str, cache_dir: Path) -> Path:
     """Download a PDF from url, caching by filename under cache_dir."""
@@ -229,7 +229,7 @@ def download_pdf(url: str, cache_dir: Path) -> Path:
     return dest
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# -- Main -----------------------------------------------------------------------
 
 def parse_page_range(spec: str | None, total: int) -> range:
     """Parse '1-50', '10', or None (all pages). Pages are 1-indexed."""
@@ -283,7 +283,7 @@ def main():
     with httpx.Client() as hc:
         try:
             health = hc.get(f"{args.node}/health", timeout=5).json()
-            print(f"Node: {health.get('node_id')} — {health.get('status')}")
+            print(f"Node: {health.get('node_id')} -- {health.get('status')}")
         except Exception as e:
             sys.exit(f"Node not reachable at {args.node}: {e}")
 
@@ -305,7 +305,7 @@ def main():
             spans = extract_spans(page, pw, ph)
 
             if not spans and len(jpeg_bytes) < 2000:
-                # Blank or near-blank page — skip
+                # Blank or near-blank page -- skip
                 skipped += 1
                 continue
 

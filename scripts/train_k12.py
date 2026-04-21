@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-W1z4rD V1510n — K-12 Staged Training Pipeline
+W1z4rD V1510n -- K-12 Staged Training Pipeline
 ===============================================
 Trains the neural fabric through three stages:
 
-  Stage 0  Toddler foundations — basic vocabulary, concepts, associations
-  Stage 1  Language / introductory — accessible textbooks from the collection
-  Stage 2  Full K-12 curriculum — all remaining LibreTexts PDFs
+  Stage 0  Toddler foundations -- basic vocabulary, concepts, associations
+  Stage 1  Language / introductory -- accessible textbooks from the collection
+  Stage 2  Full K-12 curriculum -- all remaining LibreTexts PDFs
 
 Each stage uses:
-  /media/train         — multimodal page training (image + text spans, or plain text)
-  /media/train_sequence — STDP-ordered temporal sequence training
-  /qa/ingest           — Q&A pair batch ingestion
-  /neuro/checkpoint    — periodic pool persistence
+  /media/train         -- multimodal page training (image + text spans, or plain text)
+  /media/train_sequence -- STDP-ordered temporal sequence training
+  /qa/ingest           -- Q&A pair batch ingestion
+  /neuro/checkpoint    -- periodic pool persistence
 
 Architecture notes (updated for current build):
-  - kWTA (top 2% per hop) enforces cortical sparsity — training populates sparse codes
+  - kWTA (top 2% per hop) enforces cortical sparsity -- training populates sparse codes
   - STDP is asymmetric: earlier tokens in a sequence become pre-synaptic (LTP on fwd edge,
-    LTD on backward edge). Stage 0 sequences are ordered causal→effect for this reason.
-  - Homeostatic scaling runs every 500 steps — repeated passes improve consolidation
+    LTD on backward edge). Stage 0 sequences are ordered causal->effect for this reason.
+  - Homeostatic scaling runs every 500 steps -- repeated passes improve consolidation
     without causing saturation; 3 passes over Stage 0 is intentional.
-  - Neuromodulator-gated LR: effective_lr = lr_scale × ACh × (1 + NE × 2.0).
+  - Neuromodulator-gated LR: effective_lr = lr_scale x ACh x (1 + NE x 2.0).
     lr_scale here is the base before neuromodulator amplification.
 
 Usage:
@@ -39,6 +39,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import re
 import sys
 import time
@@ -71,7 +72,11 @@ if _scripts_dir not in _sys.path:
 from neuro_client import detect_discipline
 
 ROOT = Path(__file__).resolve().parents[1]
-TEXTBOOKS_DIR = ROOT / "textbooks"
+# Default to data-dir textbooks (populated by fetch_textbooks.py)
+# Can override with --textbooks arg
+TEXTBOOKS_DIR = Path(
+    os.environ.get("W1Z4RDV1510N_DATA_DIR", "D:/w1z4rdv1510n-data")
+) / "textbooks"
 PROGRESS_FILE = ROOT / "data" / "k12_progress.json"
 
 # -- PDF rendering --------------------------------------------------------------
@@ -129,8 +134,8 @@ def page_body_text(page: "fitz.Page") -> str:
     """Extract only body-role text from the page (no headings, footnotes, page numbers).
 
     Uses the same span-role heuristic as extract_spans(): body text is at the
-    median font size.  Headings (>=1.5× median), subheadings (>=1.2×), and
-    footnotes (<0.85×) are excluded.  This gives cleaner text for cross-page
+    median font size.  Headings (>=1.5x median), subheadings (>=1.2x), and
+    footnotes (<0.85x) are excluded.  This gives cleaner text for cross-page
     sentence stitching and QA extraction because page numbers, chapter titles,
     and margin notes can't pollute the carry buffer.
     """
@@ -187,7 +192,7 @@ _SKIP_SUBJECTS = {
 # Subjects containing these patterns refer to contextual things, not named concepts
 _CONTEXT_SUBJECT_RE = re.compile(r"\b(of the|of a|of an|in the|in a|by the|for the)\b", re.I)
 # Answers that are purely mathematical/numeric notation
-_MATH_ONLY_RE = re.compile(r'^[\d\s\+\-\*\/\=\.\,\(\)\[\]\\<>%°±×÷√π]+$')
+_MATH_ONLY_RE = re.compile(r'^[\d\s\+\-\*\/\=\.\,\(\)\[\]\\<>%deg±x÷√pi]+$')
 
 def extract_qa_from_text(text: str, book_id: str, page_idx: int,
                          max_per_page: int = 4) -> list[dict]:
@@ -256,7 +261,7 @@ def api_post(client: httpx.Client, url: str, payload: dict,
             resp = client.post(url, json=payload, timeout=45)
             if resp.status_code == 429:
                 wait = base_delay * (2 ** attempt)
-                tqdm.write(f"  Rate limited — waiting {wait:.0f}s…")
+                tqdm.write(f"  Rate limited -- waiting {wait:.0f}s...")
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
@@ -306,7 +311,7 @@ def checkpoint(client: httpx.Client, node_url: str) -> None:
             tqdm.write(f"  QA store saved -> {r.json().get('qa_path', '?')}")
     except Exception as e:
         tqdm.write(f"  QA checkpoint failed: {e}")
-    # Full neuro pool checkpoint — may take several minutes for large pools.
+    # Full neuro pool checkpoint -- may take several minutes for large pools.
     # Fire the request but don't wait long; the node will finish in background.
     try:
         resp = client.post(f"{node_url}/neuro/checkpoint", timeout=600)
@@ -339,7 +344,7 @@ def ingest_knowledge(client: httpx.Client, node_url: str,
 
 def record_episode(client: httpx.Client, node_url: str,
                    question: str, answer: str, surprise: float = 0.0) -> bool:
-    """Log a resolved Q→A episode into the episodic store."""
+    """Log a resolved Q->A episode into the episodic store."""
     q_words = [
         f"txt:word_{w.lower().strip('.,;:!?()[]\"\'')}"
         for w in question.split()
@@ -361,9 +366,9 @@ def ingest_qa_full(client: httpx.Client, node_url: str,
                    candidates: list[dict], pool: str = "knowledge") -> int:
     """
     Full Q&A training:
-      1. /qa/ingest — Q&A store + STDP bridge
-      2. /media/train_sequence — Q→A temporal frame pair per candidate
-      3. /neuro/record_episode — episodic learning per candidate
+      1. /qa/ingest -- Q&A store + STDP bridge
+      2. /media/train_sequence -- Q->A temporal frame pair per candidate
+      3. /neuro/record_episode -- episodic learning per candidate
     """
     if not candidates:
         return 0
@@ -373,7 +378,7 @@ def ingest_qa_full(client: httpx.Client, node_url: str,
         a = pair.get("answer", "")
         if not q or not a:
             continue
-        # Q→A temporal sequence
+        # Q->A temporal sequence
         api_post(client, f"{node_url}/media/train_sequence", {
             "frames": [
                 {"modality": "text", "text": q, "t_secs": 0.0, "lr_scale": 1.0},
@@ -392,11 +397,11 @@ def train_sequence(client: httpx.Client, node_url: str,
     """Train a temporal sequence of text frames via STDP-ordered bridge training.
 
     STDP note: earlier frames become pre-synaptic to later frames. Sequences
-    should be ordered causally (cause → effect, context → concept) to produce
+    should be ordered causally (cause -> effect, context -> concept) to produce
     forward LTP edges and backward LTD edges in the pool.
 
     Also sends the sequence as a flat joined text so TextBitsEncoder builds
-    co-occurrence labels for the full span — complements the frame-level STDP.
+    co-occurrence labels for the full span -- complements the frame-level STDP.
     """
     frames = [{"modality": "text", "text": t, "lr_scale": lr_scale} for t in texts]
     ok_seq = api_post(client, f"{node_url}/media/train_sequence",
@@ -502,7 +507,7 @@ TODDLER_CONCEPTS = [
     ("What is the number one?", "One is the first counting number. It represents a single item.",
      "One is the first positive integer. It represents a single unit or item."),
     ("What is the number two?", "Two is a number that represents a pair of things.",
-     "Two is the second positive integer. A pair of items — like two hands or two eyes — represents the number two."),
+     "Two is the second positive integer. A pair of items -- like two hands or two eyes -- represents the number two."),
     ("What is the number ten?", "Ten is the number after nine. We count in groups of ten because humans have ten fingers.",
      "Ten is a significant number in mathematics. Our decimal number system is based on ten because humans have ten fingers."),
     ("What is a hundred?", "A hundred is the number equal to ten times ten, written as 100.",
@@ -524,7 +529,7 @@ TODDLER_CONCEPTS = [
     ("What is a tree?", "A tree is a tall plant with a woody trunk, branches, and leaves.",
      "A tree is a large perennial plant with a single woody trunk, branches, and leaves. Trees provide oxygen, shade, and habitat for animals."),
     ("What is the sun?", "The sun is the star at the center of our solar system. It provides light and heat for all life on Earth.",
-     "The sun is a star — a massive ball of burning gas — at the center of our solar system. It provides light, warmth, and energy for all life on Earth."),
+     "The sun is a star -- a massive ball of burning gas -- at the center of our solar system. It provides light, warmth, and energy for all life on Earth."),
     ("What is the moon?", "The moon is the large natural satellite that orbits Earth. It causes tides and lights the night sky.",
      "The moon is Earth's only natural satellite. It orbits Earth roughly every 28 days and reflects sunlight to illuminate the night sky."),
     ("What is rain?", "Rain is water that falls from clouds in the sky to the ground.",
@@ -580,7 +585,7 @@ TODDLER_CONCEPTS = [
     ("What does hard mean?", "Hard means difficult to scratch or bend, solid and firm. Rocks and metal are hard.",
      "Hard describes something resistant to deformation. Rocks, metal, and wood are hard. Hard is the opposite of soft."),
     ("What does fast mean?", "Fast means moving or happening quickly.",
-     "Fast describes high speed — moving or happening in a short time. A cheetah is fast. Light travels extremely fast."),
+     "Fast describes high speed -- moving or happening in a short time. A cheetah is fast. Light travels extremely fast."),
     ("What does slow mean?", "Slow means moving or happening at a low speed.",
      "Slow describes low speed. A turtle moves slowly. Slow is the opposite of fast."),
 
@@ -699,11 +704,11 @@ TODDLER_CONCEPTS = [
      "People argue when they want different things or see things differently. Arguing is a way of trying to work out disagreements, but it works best when people listen to each other instead of just shouting.",
      "Conflict arises from competing needs, values, or perceptions. Constructive disagreement involves perspective-taking and communication. Destructive conflict escalates when emotional regulation fails."),
     ("What is fair?",
-     "Something is fair when everyone is treated equally and gets what they need. Fair does not always mean everyone gets exactly the same thing — it means everyone is treated with respect and gets what is right for them.",
+     "Something is fair when everyone is treated equally and gets what they need. Fair does not always mean everyone gets exactly the same thing -- it means everyone is treated with respect and gets what is right for them.",
      "Fairness involves equitable treatment, impartiality, and justice. Psychological research shows humans and some animals have an innate sense of fairness and respond strongly to perceived inequity."),
 ]
 
-# Temporal sequences for neuro fabric — teaches conceptual associations over time
+# Temporal sequences for neuro fabric -- teaches conceptual associations over time
 TODDLER_SEQUENCES = [
     ["apple", "fruit", "sweet", "red", "round", "food", "eat", "tree", "grow"],
     ["dog", "animal", "pet", "loyal", "bark", "run", "play", "fur", "friend"],
@@ -751,11 +756,11 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
     Stage 0: Toddler Foundations
 
     Three-pass consolidation strategy:
-      Pass 1 (lr=1.5): encode definition sentences — establishes initial sparse codes
-      Pass 2 (lr=1.0): STDP-ordered Q→A text pairs — pre-synaptic context fires
+      Pass 1 (lr=1.5): encode definition sentences -- establishes initial sparse codes
+      Pass 2 (lr=1.0): STDP-ordered Q->A text pairs -- pre-synaptic context fires
                        before post-synaptic answer, building causal forward edges
-      Pass 3 (lr=0.7): low-rate consolidation pass — homeostatic scaling has now
-                       run ≥1 cycle; this pass refines weights without saturation
+      Pass 3 (lr=0.7): low-rate consolidation pass -- homeostatic scaling has now
+                       run >=1 cycle; this pass refines weights without saturation
 
     kWTA note: with top-2% active per hop, the pool must see each concept from
     multiple angles (definition, Q+A, sequence) before the sparse code stabilizes.
@@ -764,19 +769,19 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
     print("\n-- Stage 0: Toddler Foundations --")
     n = len(TODDLER_CONCEPTS)
 
-    # ── Pass 1: definition sentences at elevated LR ──────────────────────────
-    print(f"  Pass 1 of 3 — definition sentences ({n} concepts, lr=1.5)...")
+    # -- Pass 1: definition sentences at elevated LR --------------------------
+    print(f"  Pass 1 of 3 -- definition sentences ({n} concepts, lr=1.5)...")
     trained = 0
     for _q, _a, definition in tqdm(TODDLER_CONCEPTS, desc="  Defs-P1", unit="def"):
         if train_text(client, node_url, definition, lr_scale=1.5):
             trained += 1
     print(f"  Pass 1 complete: {trained}/{n}")
 
-    # ── Pass 2: STDP-ordered Q+A text pairs ──────────────────────────────────
+    # -- Pass 2: STDP-ordered Q+A text pairs ----------------------------------
     # Send each as a single text block: definition first, then "Q: ... A: ..."
-    # This makes the definition context pre-synaptic to the Q→A binding —
-    # the causal order (definition → question → answer) builds forward LTP edges.
-    print(f"  Pass 2 of 3 — STDP Q+A pairs ({n} concepts, lr=1.0)...")
+    # This makes the definition context pre-synaptic to the Q->A binding --
+    # the causal order (definition -> question -> answer) builds forward LTP edges.
+    print(f"  Pass 2 of 3 -- STDP Q+A pairs ({n} concepts, lr=1.0)...")
     p2 = 0
     for question, answer, definition in tqdm(TODDLER_CONCEPTS, desc="  QA-P2  ", unit="qa"):
         # Pack: context (definition) fires before question fires before answer
@@ -785,7 +790,7 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
             p2 += 1
     print(f"  Pass 2 complete: {p2}/{n}")
 
-    # ── Full Q&A pipeline: ingest + Q→A sequence + episodic record ───────────
+    # -- Full Q&A pipeline: ingest + Q->A sequence + episodic record -----------
     print(f"  Full Q&A pipeline ({n} pairs)...")
     candidates = []
     for question, answer, _ in TODDLER_CONCEPTS:
@@ -797,14 +802,14 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
     ingested = ingest_qa_full(client, node_url, candidates, pool="knowledge")
     print(f"  Full pipeline: {ingested} pairs ingested + Q->A sequences + episodes")
 
-    # ── Knowledge document — structured toddler curriculum ───────────────────
+    # -- Knowledge document -- structured toddler curriculum -------------------
     body = "\n\n".join(f"Q: {q}\nA: {a}" for q, a, _ in TODDLER_CONCEPTS)
     ingest_knowledge(client, node_url, "Toddler Foundations", body,
                      source="toddler_foundations", tags=["stage0", "toddler"])
 
-    # ── Train temporal concept sequences (STDP-ordered chains) ───────────────
-    # Sequences are ordered causally: apple→fruit→sweet→... so earlier tokens
-    # become pre-synaptic to later ones — forward edges get LTP, backward LTD.
+    # -- Train temporal concept sequences (STDP-ordered chains) ---------------
+    # Sequences are ordered causally: apple->fruit->sweet->... so earlier tokens
+    # become pre-synaptic to later ones -- forward edges get LTP, backward LTD.
     print(f"  Training {len(TODDLER_SEQUENCES)} STDP-ordered concept chains...")
     for seq in tqdm(TODDLER_SEQUENCES, desc="  Chains ", unit="seq"):
         train_sequence(client, node_url, seq, tau=1.5, lr_scale=0.9)
@@ -812,11 +817,11 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
 
     checkpoint(client, node_url)
 
-    # ── Pass 3: low-rate consolidation after homeostatic scaling ─────────────
+    # -- Pass 3: low-rate consolidation after homeostatic scaling -------------
     # By now the pool has done at least a couple of homeostatic cycles (every 500
     # steps). This light pass refines the sparse codes that survived kWTA without
     # re-saturating neurons that homeostasis just brought back to baseline.
-    print(f"  Pass 3 of 3 — consolidation sweep ({n} concepts, lr=0.7)...")
+    print(f"  Pass 3 of 3 -- consolidation sweep ({n} concepts, lr=0.7)...")
     p3 = 0
     for _q, _a, definition in tqdm(TODDLER_CONCEPTS, desc="  Defs-P3", unit="def"):
         if train_text(client, node_url, definition, lr_scale=0.7):
@@ -871,7 +876,7 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
             spans = extract_spans(page)
             # Use body-only text for QA extraction and sentence stitching.
             # page_body_text() strips headings, subheadings, footnotes, and
-            # page numbers — the noise that pollutes cross-page carry buffers.
+            # page numbers -- the noise that pollutes cross-page carry buffers.
             raw_text = page_body_text(page)
 
             if not spans and len(jpeg) < 3000:
@@ -923,7 +928,7 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
             )
 
             if trained_pages > 0 and trained_pages % ckpt_every == 0:
-                tqdm.write(f"  [{trained_pages} pages] checkpointing…")
+                tqdm.write(f"  [{trained_pages} pages] checkpointing...")
                 checkpoint(client, node_url)
 
         except Exception as e:
@@ -932,14 +937,14 @@ def process_book(client: httpx.Client, node_url: str, pdf_path: Path,
 
     doc.close()
 
-    # Full Q&A pipeline for this book: ingest + Q→A sequences + episodes
+    # Full Q&A pipeline for this book: ingest + Q->A sequences + episodes
     if qa_candidates:
         ingested = ingest_qa_full(client, node_url, qa_candidates, pool="knowledge")
         tqdm.write(f"  QA full pipeline: {ingested}/{len(qa_candidates)} pairs + episodes")
     else:
         ingested = 0
 
-    # Knowledge document — book summary
+    # Knowledge document -- book summary
     ingest_knowledge(client, node_url, book_id,
                      body=f"Textbook: {book_id}. Pages: {trained_pages}.",
                      source="k12_textbook", tags=["k12", book_id])
@@ -963,7 +968,8 @@ def is_language_book(pdf_path: Path) -> bool:
 def collect_pdfs(textbook_dir: Path) -> list[Path]:
     if not textbook_dir.exists():
         return []
-    return sorted(textbook_dir.glob("*.pdf"))
+    # Scan recursively -- fetch_textbooks.py stores books in shelf subdirs
+    return sorted(textbook_dir.rglob("*.pdf"))
 
 # -- Main pipeline --------------------------------------------------------------
 
@@ -972,11 +978,11 @@ def run_stages(node_url: str, stages: list[int], max_books: int | None,
     prog = load_progress() if resume else {"done_books": [], "stages_complete": []}
 
     with httpx.Client() as client:
-        # Health check — retry up to 12 times (60s total) to handle node under load
+        # Health check -- retry up to 12 times (60s total) to handle node under load
         for attempt in range(12):
             try:
                 health = client.get(f"{node_url}/health", timeout=30).json()
-                print(f"Node: {health.get('node_id', '?')} — {health.get('status', '?')}")
+                print(f"Node: {health.get('node_id', '?')} -- {health.get('status', '?')}")
                 break
             except Exception as e:
                 if attempt < 11:
@@ -991,7 +997,7 @@ def run_stages(node_url: str, stages: list[int], max_books: int | None,
                 prog["stages_complete"].append("stage0")
                 save_progress(prog)
             else:
-                print("Stage 0 already complete — skipping (use --no-resume to repeat)")
+                print("Stage 0 already complete -- skipping (use --no-resume to repeat)")
 
         all_pdfs = collect_pdfs(textbook_dir)
         if not all_pdfs and (1 in stages or 2 in stages):

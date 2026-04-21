@@ -11,8 +11,6 @@
 //!    their `POST /neuro/delta/apply` endpoint.  Recipients merge with
 //!    `max(local, remote)` so knowledge only accumulates.
 //!
-//!  • **QA broadcast** — every `/qa/ingest` call is fanned out to all peers so
-//!    the QA store is fully replicated across the cluster instantly.
 //!
 //! No node is special once the cluster is formed.  Any node can receive any
 //! API call; the coordinator role (for routing purposes) is determined by
@@ -277,28 +275,6 @@ impl DistributedCoordinator {
         });
 
         self.last_sync_step.store(to_step, Ordering::Relaxed);
-    }
-
-    // ── QA broadcast ─────────────────────────────────────────────────────────
-
-    /// Fan-out a QA ingest body to all peers' `/qa/ingest` endpoints.
-    /// Fire-and-forget — does not block the caller.
-    pub async fn broadcast_qa_ingest(&self, body: serde_json::Value) {
-        let peers = self.peers.read().await.clone();
-        if peers.is_empty() { return; }
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            for peer in &peers {
-                let url = format!("{peer}/qa/ingest");
-                let c = client.clone();
-                let b = body.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = c.post(&url).header("x-w1z-local", "1").json(&b).send().await {
-                        warn!("qa broadcast to {url} failed: {e}");
-                    }
-                });
-            }
-        });
     }
 
     // ── New-worker bootstrap ──────────────────────────────────────────────────

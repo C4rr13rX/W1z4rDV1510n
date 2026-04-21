@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import cv2
 import numpy as np
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
+# -- Defaults ------------------------------------------------------------------
 DEFAULT_VIDEO  = 'D:/w1z4rdv1510n-data/videos/cow_field.webm'
 DEFAULT_NEURO  = 'localhost:8090'
 FRAME_PORT     = 9001
@@ -40,7 +40,7 @@ TARGET_H       = 480
 STREAM_FPS     = 25
 
 
-# ── Depth estimation (no ML required) ────────────────────────────────────────
+# -- Depth estimation (no ML required) ----------------------------------------
 def estimate_depth(frame_bgr: np.ndarray,
                    bg_sub: cv2.BackgroundSubtractor) -> np.ndarray:
     """
@@ -62,7 +62,7 @@ def estimate_depth(frame_bgr: np.ndarray,
     depth = yg.copy()
 
     # 2. Sky: blue-dominant pixels -> push far.
-    # Limit to upper 50% only — avoids misidentifying white cow markings as sky.
+    # Limit to upper 50% only -- avoids misidentifying white cow markings as sky.
     sky_blue  = np.clip((B - np.maximum(R, G) * 1.05) / (B + 0.01), 0, 1).astype(np.float32)
     sky_mask  = np.clip(1.5 - yg * 3.0, 0, 1).astype(np.float32)   # upper 50% of frame only
     sky_conf  = sky_blue * sky_mask
@@ -94,10 +94,10 @@ def estimate_depth(frame_bgr: np.ndarray,
     return depth8       # shape (H, W)  dtype uint8
 
 
-# ── Image-bits encoder — Python mirror of ImageBitsEncoder in image_bits.rs ───
+# -- Image-bits encoder -- Python mirror of ImageBitsEncoder in image_bits.rs ---
 #
 # Converts a BGR frame into label tokens that the neural fabric understands:
-#   img:zX_Y         spatial zone X,Y in an 8×8 grid
+#   img:zX_Y         spatial zone X,Y in an 8x8 grid
 #   img:hN           hue bin N  (16 bins, colour wheel)
 #   img:sN           saturation bin N  (8 bins)
 #   img:vN           value (brightness) bin N  (8 bins)
@@ -108,7 +108,7 @@ def estimate_depth(frame_bgr: np.ndarray,
 #   img:edgeD2_zX_Y  diagonal \ edge
 #
 # These are co-trained with body-part observations in the same /neuro/train
-# call so the fabric builds Hebbian connections: "warm hue in zone 7_2 → cow_head".
+# call so the fabric builds Hebbian connections: "warm hue in zone 7_2 -> cow_head".
 # Over time the fabric can PREDICT body-part positions just from visual tokens.
 
 def encode_image_bits(frame_bgr: np.ndarray,
@@ -118,10 +118,10 @@ def encode_image_bits(frame_bgr: np.ndarray,
                       tag: str = 'img') -> list[str]:
     """
     Python mirror of ImageBitsEncoder::encode_rgb() (image_bits.rs).
-    Works on a down-sampled frame (64×64 target) for speed.
+    Works on a down-sampled frame (64x64 target) for speed.
     Returns a deduplicated sorted list of label strings.
     """
-    # Down-sample to a small fixed size — enough for zone/colour/edge statistics
+    # Down-sample to a small fixed size -- enough for zone/colour/edge statistics
     small = cv2.resize(frame_bgr, (64, 64), interpolation=cv2.INTER_AREA)
     H, W = small.shape[:2]
 
@@ -134,7 +134,7 @@ def encode_image_bits(frame_bgr: np.ndarray,
 
     # Convert to HSV (cv2: H∈[0,180], S∈[0,255], V∈[0,255])
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV).astype(np.float32)
-    H_ch = hsv[:, :, 0] / 180.0   # → [0, 1)
+    H_ch = hsv[:, :, 0] / 180.0   # -> [0, 1)
     S_ch = hsv[:, :, 1] / 255.0
     V_ch = hsv[:, :, 2] / 255.0
 
@@ -184,7 +184,7 @@ def encode_image_bits(frame_bgr: np.ndarray,
     return sorted(labels)
 
 
-# ── Per-frame cow sensor: drives the neural fabric with body-part observations ─
+# -- Per-frame cow sensor: drives the neural fabric with body-part observations -
 #
 # Every video frame is treated as a sensor reading.  Computer-vision heuristics
 # (colour, shape, background subtraction) estimate the 3D positions of visible
@@ -217,21 +217,21 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
       Z ∈ [0,1]  front-back: rear=0, nose=1
 
     SIDE-VIEW MAPPING
-    ─────────────────
+    -----------------
     In a side-view video the camera looks along the cow's bilateral X axis.
     The observable image axes are:
-      • image horizontal (pixel_x) → cow Z (front-back)  [directly measurable]
-      • image vertical   (pixel_y) → cow Y (height)      [directly measurable]
-      • bilateral X → NOT observable from the side; use anatomy prior offsets
+      * image horizontal (pixel_x) -> cow Z (front-back)  [directly measurable]
+      * image vertical   (pixel_y) -> cow Y (height)      [directly measurable]
+      * bilateral X -> NOT observable from the side; use anatomy prior offsets
 
-    The bilateral X offset is fixed per body part (0.5 for midline, ±0.12–0.15
+    The bilateral X offset is fixed per body part (0.5 for midline, ±0.12-0.15
     for bilateral pairs) so the video sensor only updates Y and Z.
     """
     f   = frame_bgr.astype(np.float32) / 255.0
     R, G, B = f[:, :, 2], f[:, :, 1], f[:, :, 0]
     symbols = []
 
-    # ── Cow body: brown / warm colours ────────────────────────────────────
+    # -- Cow body: brown / warm colours ------------------------------------
     warm_mask  = ((R - B) > 0.14) & (R > 0.22) & (G > 0.12) & (G < 0.80)
     black_mask = (R < 0.18) & (G < 0.18) & (B < 0.18)   # Holstein black
     cow_mask   = warm_mask | black_mask
@@ -241,7 +241,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
         _add_env_symbols(symbols, f, R, G, B, W, H)
         return symbols
 
-    # ── Bounding box ───────────────────────────────────────────────────────
+    # -- Bounding box -------------------------------------------------------
     x1, x2 = int(xs.min()), int(xs.max())
     y1, y2 = int(ys.min()), int(ys.max())
     bw, bh = x2 - x1, y2 - y1
@@ -252,7 +252,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
     cy_img    = (y1 + y2) / 2 / H
     area_frac = len(xs) / (W * H)
 
-    # ── Facing direction: which end has the head? ─────────────────────────
+    # -- Facing direction: which end has the head? -------------------------
     # The head end of a cow is narrower at the top (poll/muzzle protrude less
     # horizontally than the broad rump). Detect by comparing top-half pixel
     # density in left vs right thirds of the bounding box.
@@ -274,8 +274,8 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
     else:
         facing = 'right'   # default assumption
 
-    # ── Coordinate converters ─────────────────────────────────────────────
-    # to_z: image pixel_x (0–W) → neural Z (rear=0, nose=1)
+    # -- Coordinate converters ---------------------------------------------
+    # to_z: image pixel_x (0-W) -> neural Z (rear=0, nose=1)
     if facing == 'right':
         def to_z(px): return float(np.clip(px / W, 0.0, 1.0))
     else:
@@ -283,7 +283,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
 
     def to_y(py): return float(np.clip(1.0 - py / H, 0.0, 1.0))
 
-    # ── Region centroid helpers (returns absolute pixel coords) ───────────
+    # -- Region centroid helpers (returns absolute pixel coords) -----------
     def _centroid_px(mask_region, col_off, row_off):
         """Returns (mean_px_x, mean_px_y) in frame pixels, or None."""
         ry, rx = np.where(mask_region)
@@ -291,7 +291,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
             return None
         return (float(rx.mean()) + col_off, float(ry.mean()) + row_off)
 
-    # ── Pose estimation ───────────────────────────────────────────────────
+    # -- Pose estimation ---------------------------------------------------
     upper_n = int(np.sum(cow_mask[:H//2, :]))
     lower_n = int(np.sum(cow_mask[H//2:, :]))
     head_low   = lower_n > upper_n * 1.6
@@ -308,7 +308,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
     else:
         behaviour = 'standing'
 
-    # ── Locate body regions in pixel space ────────────────────────────────
+    # -- Locate body regions in pixel space --------------------------------
     # The bounding box horizontal axis = cow front-back.
     # Split into zones by fraction of bbox width:
     #   head zone:    forward 25% (nearest nose end)
@@ -346,7 +346,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
     fhoof_c = _centroid_px(cow_mask[leg_y1:leg_y2, front_leg_x1:front_leg_x2], front_leg_x1, leg_y1)
     rhoof_c = _centroid_px(cow_mask[leg_y1:leg_y2, rear_leg_x1:rear_leg_x2],   rear_leg_x1,  leg_y1)
 
-    # ── Build symbol for a midline part ───────────────────────────────────
+    # -- Build symbol for a midline part -----------------------------------
     def emit_mid(key, px, py, x_bilateral=0.50):
         z = to_z(px); y = to_y(py)
         symbols.append(_sym(f'cow_{key}', x_bilateral, y, z,
@@ -362,7 +362,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
                             {'label': f'cow_{key_r}', 'pose': behaviour,
                              'type_label': 'body_part', 'scale_m': 1.4}))
 
-    # ── HEAD ──────────────────────────────────────────────────────────────
+    # -- HEAD --------------------------------------------------------------
     if head_c:
         hpx, hpy = head_c
         emit_mid('head',   hpx, hpy)
@@ -371,14 +371,14 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
         emit_pair('eye_L', 'eye_R', hpx, hpy, xl=0.45, xr=0.55)
         emit_pair('ear_L', 'ear_R', hpx, hpy - bh * 0.04, xl=0.37, xr=0.63)
 
-    # ── NECK / WITHERS ────────────────────────────────────────────────────
+    # -- NECK / WITHERS ----------------------------------------------------
     if neck_c:
         npx, npy = neck_c
         emit_mid('neck',    npx, npy)
         emit_mid('withers', npx, npy - bh * 0.05)   # withers: top of shoulders, just above neck line
         emit_pair('shoulder_L', 'shoulder_R', npx, npy + bh * 0.06)
 
-    # ── BODY (back / belly / brisket) ─────────────────────────────────────
+    # -- BODY (back / belly / brisket) -------------------------------------
     if body_c:
         bpx, bpy = body_c
         emit_mid('back',          bpx, bpy - bh * 0.08)   # back is near top of body
@@ -390,7 +390,7 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
         if neck_c:
             emit_mid('brisket', neck_c[0], bpy + bh * 0.08)
 
-    # ── RUMP / TAIL ───────────────────────────────────────────────────────
+    # -- RUMP / TAIL -------------------------------------------------------
     if rump_c:
         rpx, rpy = rump_c
         emit_mid('rump',      rpx, rpy)
@@ -398,14 +398,14 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
         emit_mid('tail_mid',  rpx, rpy + bh * 0.15)
         emit_pair('hip_L', 'hip_R', rpx, rpy, xl=0.37, xr=0.63)
 
-    # ── FRONT HOOVES ──────────────────────────────────────────────────────
+    # -- FRONT HOOVES ------------------------------------------------------
     if fhoof_c:
         fpx, _ = fhoof_c
         emit_pair('front_hoof_L',   'front_hoof_R',   fpx, y2 - 2, xl=0.36, xr=0.64)
         emit_pair('front_cannon_L', 'front_cannon_R', fpx, y2 - bh*0.22, xl=0.36, xr=0.64)
         emit_pair('elbow_L',        'elbow_R',        fpx, y2 - bh*0.42, xl=0.35, xr=0.65)
 
-    # ── REAR HOOVES ───────────────────────────────────────────────────────
+    # -- REAR HOOVES -------------------------------------------------------
     if rhoof_c:
         rpx2, _ = rhoof_c
         emit_pair('rear_hoof_L',   'rear_hoof_R',   rpx2, y2 - 2, xl=0.37, xr=0.63)
@@ -414,18 +414,18 @@ def detect_objects(frame_bgr: np.ndarray, W: int, H: int,
         if rump_c:
             emit_pair('stifle_L',  'stifle_R',      rpx2, y2 - bh*0.54, xl=0.37, xr=0.63)
 
-    # ── Udder (lower middle-rear of body) ─────────────────────────────────
+    # -- Udder (lower middle-rear of body) ---------------------------------
     if body_c and rump_c:
         udder_px = (body_c[0] + rump_c[0]) / 2
         emit_mid('udder', udder_px, y2 - bh * 0.15)
 
-    # ── Top-level cow entity ───────────────────────────────────────────────
+    # -- Top-level cow entity -----------------------------------------------
     symbols.append(_sym('cow', 0.50, to_y(y1 + bh//2), to_z(cx_img * W),
                         {'label': 'cow', 'pose': behaviour, 'behaviour': behaviour,
                          'facing': facing, 'type_label': 'animal',
                          'scale_m': 2.4, 'motion': float(motion)}))
 
-    # ── Environment symbols ────────────────────────────────────────────────
+    # -- Environment symbols ------------------------------------------------
     _add_env_symbols(symbols, f, R, G, B, W, H)
     return symbols
 
@@ -444,7 +444,7 @@ def _add_env_symbols(symbols: list, f, R, G, B, W: int, H: int) -> None:
                             {'label': 'env_grass', 'type_label': 'environment', 'scale_m': 50.0}))
 
 
-# ── Shared frame state ────────────────────────────────────────────────────────
+# -- Shared frame state --------------------------------------------------------
 class FrameState:
     def __init__(self):
         self.payload = b'{}'
@@ -453,7 +453,7 @@ class FrameState:
 _state = FrameState()
 
 
-# ── HTTP handler ──────────────────────────────────────────────────────────────
+# -- HTTP handler --------------------------------------------------------------
 class FrameHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass   # silence access logs
@@ -493,14 +493,14 @@ def _run_http():
     server.serve_forever()
 
 
-# ── Neuro poster ──────────────────────────────────────────────────────────────
+# -- Neuro poster --------------------------------------------------------------
 def _post_neuro(neuro_host: str, symbols: list,
                 extra_labels: list | None = None) -> bool:
     """Post an EnvironmentSnapshot + raw image_bits labels to /neuro/train.
 
     extra_labels (e.g. img:z3_2, img:h5, img:edgeV_z3_2) are co-trained with
     the body-part snapshot so Hebbian connections form between visual features
-    and body-part positions — the visual→world-model link.
+    and body-part positions -- the visual->world-model link.
     """
     snapshot = {
         'timestamp': {'unix': int(time.time() * 1000)},
@@ -523,7 +523,7 @@ def _post_neuro(neuro_host: str, symbols: list,
         return False
 
 
-# ── Capture loop (main thread) ────────────────────────────────────────────────
+# -- Capture loop (main thread) ------------------------------------------------
 def capture_loop(video_path: str, neuro_host: str, fps: int,
                  target_w: int, target_h: int):
     cap = cv2.VideoCapture(video_path)
@@ -587,7 +587,7 @@ def capture_loop(video_path: str, neuro_host: str, fps: int,
         # Post to neuro every 6 frames.
         # 1. Detect structured body-part symbols (positions in 3-D anatomy space).
         # 2. Extract raw image_bits tokens (visual zone/colour/edge labels) from
-        #    the current frame — co-trained with body-part symbols so the fabric
+        #    the current frame -- co-trained with body-part symbols so the fabric
         #    learns that "warm hue in zone 7_2 = cow_head at (0.87, 0.72, 0.85)".
         if frame_num % 6 == 0:
             syms = detect_objects(frame, target_w, target_h, bg_sub)
@@ -612,7 +612,7 @@ def capture_loop(video_path: str, neuro_host: str, fps: int,
             drift = -wait * 0.1
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# -- Entry point ---------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description='Real video -> photorealistic frame server')
     ap.add_argument('--video',   default=DEFAULT_VIDEO, help='Video file path')

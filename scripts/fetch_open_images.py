@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-fetch_open_images.py — Download Open Images v7 images for concept dataset
+fetch_open_images.py -- Download Open Images v7 images for concept dataset
 =========================================================================
 Reads data/foundation/concept_dataset.jsonl.
 For each concept that has an open_images_class ID, downloads N images
@@ -115,7 +115,7 @@ def build_class_to_image_urls(
     Returns {class_id: [image_url, ...]} for the requested class IDs.
     Uses bbox annotations to find images containing each class.
     """
-    # Step 1: Load bbox annotations → {image_id: set(class_ids)}
+    # Step 1: Load bbox annotations -> {image_id: set(class_ids)}
     print(f"  Loading bbox annotations from {bbox_csv.name}...")
     img_to_classes: dict[str, set[str]] = {}
     with open(bbox_csv, encoding="utf-8") as fh:
@@ -126,13 +126,13 @@ def build_class_to_image_urls(
             if cid in wanted_class_ids:
                 img_to_classes.setdefault(iid, set()).add(cid)
 
-    # Invert: class → image_ids
+    # Invert: class -> image_ids
     class_to_imgs: dict[str, list[str]] = {}
     for img_id, classes in img_to_classes.items():
         for cid in classes:
             class_to_imgs.setdefault(cid, []).append(img_id)
 
-    # Step 2: Load image URLs from images CSV → {image_id: url}
+    # Step 2: Load image URLs from images CSV -> {image_id: url}
     print(f"  Loading image URLs from {images_csv.name}...")
     needed_ids = set()
     for imgs in class_to_imgs.values():
@@ -228,7 +228,7 @@ async def main_async(args: argparse.Namespace) -> None:
         sys.exit(f"Concept dataset not found: {concept_jsonl}\n"
                  "Run build_concept_dataset.py first.")
 
-    # ── Load concept dataset ──────────────────────────────────────────────
+    # -- Load concept dataset ----------------------------------------------
     records = []
     with open(concept_jsonl, encoding="utf-8") as fh:
         for line in fh:
@@ -265,7 +265,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
     print(f"Fetching images for {len(wanted)} concept classes, {args.per_concept} each...")
 
-    # ── Download OI metadata ──────────────────────────────────────────────
+    # -- Download OI metadata ----------------------------------------------
     class_desc_csv = meta_dir / "oidv6-class-descriptions.csv"
     val_images_csv = meta_dir / "validation-images-boxable.csv"
     val_bbox_csv   = meta_dir / "validation-annotations-bbox.csv"
@@ -279,7 +279,7 @@ async def main_async(args: argparse.Namespace) -> None:
     print("\n[3/3] Validation bounding box annotations:")
     download_csv(OI_VAL_BBOX_URL, val_bbox_csv)
 
-    # ── Build class → image URL map ───────────────────────────────────────
+    # -- Build class -> image URL map ---------------------------------------
     print("\nBuilding class-to-image map...")
     class_to_urls = build_class_to_image_urls(
         val_images_csv, val_bbox_csv, wanted, args.per_concept * 3
@@ -290,14 +290,14 @@ async def main_async(args: argparse.Namespace) -> None:
     if found < len(wanted) // 2:
         print("  NOTE: val set has limited coverage; consider adding train chunks")
 
-    # ── Download images ───────────────────────────────────────────────────
+    # -- Download images ---------------------------------------------------
     print(f"\nDownloading images to {out_dir}/...")
     class_to_local = await download_all_images(
         class_to_urls, class_to_concept, out_dir,
         args.per_concept, args.concurrency
     )
 
-    # ── Update concept dataset with image paths ───────────────────────────
+    # -- Update concept dataset with image paths ---------------------------
     print("\nUpdating concept_dataset.jsonl with image paths...")
     updated = 0
     updated_records = []

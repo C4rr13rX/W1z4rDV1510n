@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-build_medical_corpus.py — Stages 30-33
+build_medical_corpus.py -- Stages 30-33
 Medical, psychological, genetic, and longevity science corpus.
 All content sourced exclusively from peer-reviewed literature via
 the NCBI/NLM E-utilities API (PubMed + PubMed Central).
 
-Every training item carries its provenance: PMID, journal, year, article type —
+Every training item carries its provenance: PMID, journal, year, article type --
 so the model learns both the content and its authoritative source.
 
 Stages:
-  30 — Clinical Medicine: full physician-level knowledge (all specialties)
-  31 — Clinical Psychology & Psychiatry: DSM-5, therapy modalities, neuro
-  32 — Genetic Engineering: CRISPR, gene therapy, genomics, epigenetics
-  33 — Reverse Aging & Longevity: hallmarks of aging, senolytics, NAD+, clocks
+  30 -- Clinical Medicine: full physician-level knowledge (all specialties)
+  31 -- Clinical Psychology & Psychiatry: DSM-5, therapy modalities, neuro
+  32 -- Genetic Engineering: CRISPR, gene therapy, genomics, epigenetics
+  33 -- Reverse Aging & Longevity: hallmarks of aging, senolytics, NAD+, clocks
 
 Data quality:
-  • PubMed-indexed = peer-reviewed by definition
-  • Filtered to: Review, Systematic Review, Meta-Analysis, Practice Guideline
-  • PMC open-access full text for landmark review articles (full body text)
-  • Rate-limited to comply with NCBI policy (0.34s between calls, or 0.1s with key)
+  * PubMed-indexed = peer-reviewed by definition
+  * Filtered to: Review, Systematic Review, Meta-Analysis, Practice Guideline
+  * PMC open-access full text for landmark review articles (full body text)
+  * Rate-limited to comply with NCBI policy (0.34s between calls, or 0.1s with key)
 
 Usage:
   python scripts/build_medical_corpus.py --node localhost:8090
@@ -43,19 +43,19 @@ EMAIL            = 'adamedsall@gmail.com'
 UA               = 'W1z4rDV1510n-Medical/1.0 (adamedsall@gmail.com; educational AI)'
 
 STAGES = {
-    30: 'Clinical Medicine — physician-level knowledge across all specialties',
-    31: 'Clinical Psychology & Psychiatry — DSM-5, therapies, neuroscience',
-    32: 'Genetic Engineering — CRISPR, gene therapy, genomics, synthetic biology',
-    33: 'Reverse Aging & Longevity — hallmarks of aging, senolytics, epigenetic clocks',
+    30: 'Clinical Medicine -- physician-level knowledge across all specialties',
+    31: 'Clinical Psychology & Psychiatry -- DSM-5, therapies, neuroscience',
+    32: 'Genetic Engineering -- CRISPR, gene therapy, genomics, synthetic biology',
+    33: 'Reverse Aging & Longevity -- hallmarks of aging, senolytics, epigenetic clocks',
 }
 
 # Search filter for high-quality article types only
 QUALITY_FILTER = '(Review[ptyp] OR "Systematic Review"[ptyp] OR "Meta-Analysis"[ptyp] OR "Practice Guideline"[ptyp])'
 
-# ── Search term lists ──────────────────────────────────────────────────────────
+# -- Search term lists ----------------------------------------------------------
 
 STAGE30_QUERIES = [
-    # ── Cardiology ────────────────────────────────────────────────────────────
+    # -- Cardiology ------------------------------------------------------------
     'heart failure[MeSH] AND ' + QUALITY_FILTER,
     'coronary artery disease[MeSH] AND ' + QUALITY_FILTER,
     'atrial fibrillation[MeSH] AND ' + QUALITY_FILTER,
@@ -64,7 +64,7 @@ STAGE30_QUERIES = [
     'valvular heart disease[MeSH] AND ' + QUALITY_FILTER,
     'cardiomyopathy[MeSH] AND ' + QUALITY_FILTER,
     'cardiac arrhythmia[MeSH] AND ' + QUALITY_FILTER,
-    # ── Pulmonology ───────────────────────────────────────────────────────────
+    # -- Pulmonology -----------------------------------------------------------
     'asthma[MeSH] AND ' + QUALITY_FILTER,
     'pulmonary disease chronic obstructive[MeSH] AND ' + QUALITY_FILTER,
     'pneumonia[MeSH] AND ' + QUALITY_FILTER,
@@ -73,7 +73,7 @@ STAGE30_QUERIES = [
     'lung neoplasms[MeSH] AND ' + QUALITY_FILTER,
     'pulmonary hypertension[MeSH] AND ' + QUALITY_FILTER,
     'obstructive sleep apnea[MeSH] AND ' + QUALITY_FILTER,
-    # ── Gastroenterology ──────────────────────────────────────────────────────
+    # -- Gastroenterology ------------------------------------------------------
     'inflammatory bowel disease[MeSH] AND ' + QUALITY_FILTER,
     'liver cirrhosis[MeSH] AND ' + QUALITY_FILTER,
     'gastroesophageal reflux[MeSH] AND ' + QUALITY_FILTER,
@@ -82,13 +82,13 @@ STAGE30_QUERIES = [
     'pancreatitis[MeSH] AND ' + QUALITY_FILTER,
     'celiac disease[MeSH] AND ' + QUALITY_FILTER,
     'peptic ulcer[MeSH] AND ' + QUALITY_FILTER,
-    # ── Nephrology ────────────────────────────────────────────────────────────
+    # -- Nephrology ------------------------------------------------------------
     'chronic kidney disease[MeSH] AND ' + QUALITY_FILTER,
     'acute kidney injury[MeSH] AND ' + QUALITY_FILTER,
     'glomerulonephritis[MeSH] AND ' + QUALITY_FILTER,
     'renal replacement therapy[MeSH] AND ' + QUALITY_FILTER,
     'nephrotic syndrome[MeSH] AND ' + QUALITY_FILTER,
-    # ── Neurology ─────────────────────────────────────────────────────────────
+    # -- Neurology -------------------------------------------------------------
     'stroke[MeSH] AND ' + QUALITY_FILTER,
     'multiple sclerosis[MeSH] AND ' + QUALITY_FILTER,
     'epilepsy[MeSH] AND ' + QUALITY_FILTER,
@@ -97,7 +97,7 @@ STAGE30_QUERIES = [
     'migraine[MeSH] AND ' + QUALITY_FILTER,
     'dementia[MeSH] AND ' + QUALITY_FILTER,
     'amyotrophic lateral sclerosis[MeSH] AND ' + QUALITY_FILTER,
-    # ── Endocrinology ─────────────────────────────────────────────────────────
+    # -- Endocrinology ---------------------------------------------------------
     'diabetes mellitus type 2[MeSH] AND ' + QUALITY_FILTER,
     'diabetes mellitus type 1[MeSH] AND ' + QUALITY_FILTER,
     'thyroid diseases[MeSH] AND ' + QUALITY_FILTER,
@@ -105,7 +105,7 @@ STAGE30_QUERIES = [
     'metabolic syndrome[MeSH] AND ' + QUALITY_FILTER,
     'adrenal gland diseases[MeSH] AND ' + QUALITY_FILTER,
     'pituitary diseases[MeSH] AND ' + QUALITY_FILTER,
-    # ── Hematology / Oncology ─────────────────────────────────────────────────
+    # -- Hematology / Oncology -------------------------------------------------
     'leukemia[MeSH] AND ' + QUALITY_FILTER,
     'lymphoma[MeSH] AND ' + QUALITY_FILTER,
     'anemia[MeSH] AND ' + QUALITY_FILTER,
@@ -113,7 +113,7 @@ STAGE30_QUERIES = [
     'prostate neoplasms[MeSH] AND ' + QUALITY_FILTER,
     'immunotherapy antineoplastic[MeSH] AND ' + QUALITY_FILTER,
     'chimeric antigen receptor T-cell therapy[tw] AND ' + QUALITY_FILTER,
-    # ── Infectious Disease ────────────────────────────────────────────────────
+    # -- Infectious Disease ----------------------------------------------------
     'sepsis[MeSH] AND ' + QUALITY_FILTER,
     'HIV infections[MeSH] AND ' + QUALITY_FILTER,
     'tuberculosis[MeSH] AND ' + QUALITY_FILTER,
@@ -121,30 +121,30 @@ STAGE30_QUERIES = [
     'COVID-19[MeSH] AND ' + QUALITY_FILTER,
     'hepatitis B[MeSH] AND ' + QUALITY_FILTER,
     'hepatitis C[MeSH] AND ' + QUALITY_FILTER,
-    # ── Rheumatology / Immunology ─────────────────────────────────────────────
+    # -- Rheumatology / Immunology ---------------------------------------------
     'rheumatoid arthritis[MeSH] AND ' + QUALITY_FILTER,
     'systemic lupus erythematosus[MeSH] AND ' + QUALITY_FILTER,
     'autoimmune diseases[MeSH] AND ' + QUALITY_FILTER,
     'vasculitis[MeSH] AND ' + QUALITY_FILTER,
-    # ── Pharmacology ──────────────────────────────────────────────────────────
+    # -- Pharmacology ----------------------------------------------------------
     'drug-drug interactions[MeSH] AND ' + QUALITY_FILTER,
     'pharmacokinetics[MeSH] AND ' + QUALITY_FILTER,
     'adverse drug reactions[MeSH] AND ' + QUALITY_FILTER,
     'anticoagulants[MeSH] AND ' + QUALITY_FILTER,
     'antibiotics[MeSH] AND ' + QUALITY_FILTER,
     'antihypertensive agents[MeSH] AND ' + QUALITY_FILTER,
-    # ── Anatomy / Physiology ──────────────────────────────────────────────────
+    # -- Anatomy / Physiology --------------------------------------------------
     'cardiac physiology[tw] AND ' + QUALITY_FILTER,
     'renal physiology[tw] AND ' + QUALITY_FILTER,
     'neuroanatomy[MeSH] AND ' + QUALITY_FILTER,
     'blood pressure physiology[tw] AND ' + QUALITY_FILTER,
-    # ── Diagnostics ───────────────────────────────────────────────────────────
+    # -- Diagnostics -----------------------------------------------------------
     'clinical laboratory techniques[MeSH] AND ' + QUALITY_FILTER,
     'electrocardiography[MeSH] AND ' + QUALITY_FILTER,
     'magnetic resonance imaging[MeSH] AND ' + QUALITY_FILTER,
     'point of care testing[MeSH] AND ' + QUALITY_FILTER,
     'biomarkers[MeSH] AND ' + QUALITY_FILTER,
-    # ── Surgery / Emergency ───────────────────────────────────────────────────
+    # -- Surgery / Emergency ---------------------------------------------------
     'surgical procedures operative[MeSH] AND ' + QUALITY_FILTER,
     'critical care[MeSH] AND ' + QUALITY_FILTER,
     'trauma surgery[tw] AND ' + QUALITY_FILTER,
@@ -152,7 +152,7 @@ STAGE30_QUERIES = [
 ]
 
 STAGE31_QUERIES = [
-    # ── DSM-5 Disorders ───────────────────────────────────────────────────────
+    # -- DSM-5 Disorders -------------------------------------------------------
     'major depressive disorder[MeSH] AND ' + QUALITY_FILTER,
     'bipolar disorder[MeSH] AND ' + QUALITY_FILTER,
     'schizophrenia[MeSH] AND ' + QUALITY_FILTER,
@@ -169,7 +169,7 @@ STAGE31_QUERIES = [
     'somatic symptom disorder[tw] AND ' + QUALITY_FILTER,
     'dissociative disorders[MeSH] AND ' + QUALITY_FILTER,
     'sleep wake disorders[MeSH] AND ' + QUALITY_FILTER,
-    # ── Psychotherapy Modalities ──────────────────────────────────────────────
+    # -- Psychotherapy Modalities ----------------------------------------------
     'cognitive behavioral therapy[MeSH] AND ' + QUALITY_FILTER,
     'dialectical behavior therapy[tw] AND ' + QUALITY_FILTER,
     'acceptance commitment therapy[tw] AND ' + QUALITY_FILTER,
@@ -178,14 +178,14 @@ STAGE31_QUERIES = [
     'motivational interviewing[MeSH] AND ' + QUALITY_FILTER,
     'mindfulness-based cognitive therapy[tw] AND ' + QUALITY_FILTER,
     'exposure therapy[tw] AND ' + QUALITY_FILTER,
-    # ── Psychiatric Pharmacology ──────────────────────────────────────────────
+    # -- Psychiatric Pharmacology ----------------------------------------------
     'antidepressive agents[MeSH] AND ' + QUALITY_FILTER,
     'antipsychotic agents[MeSH] AND ' + QUALITY_FILTER,
     'mood stabilizers[tw] AND ' + QUALITY_FILTER,
     'anxiolytics[MeSH] AND ' + QUALITY_FILTER,
     'psychostimulants[tw] AND ' + QUALITY_FILTER,
     'ketamine depression treatment[tw] AND ' + QUALITY_FILTER,
-    # ── Neuropsychology ───────────────────────────────────────────────────────
+    # -- Neuropsychology -------------------------------------------------------
     'neuropsychological tests[MeSH] AND ' + QUALITY_FILTER,
     'brain plasticity[MeSH] AND ' + QUALITY_FILTER,
     'default mode network[tw] AND ' + QUALITY_FILTER,
@@ -194,23 +194,23 @@ STAGE31_QUERIES = [
     'hippocampus memory[tw] AND ' + QUALITY_FILTER,
     'dopamine reward[tw] AND ' + QUALITY_FILTER,
     'serotonin depression[tw] AND ' + QUALITY_FILTER,
-    # ── Assessment / Diagnosis ────────────────────────────────────────────────
+    # -- Assessment / Diagnosis ------------------------------------------------
     'psychological tests[MeSH] AND ' + QUALITY_FILTER,
     'psychiatric diagnosis[tw] AND ' + QUALITY_FILTER,
     'mental health assessment[tw] AND ' + QUALITY_FILTER,
-    # ── Developmental / Lifespan ──────────────────────────────────────────────
+    # -- Developmental / Lifespan ----------------------------------------------
     'child psychology development[tw] AND ' + QUALITY_FILTER,
     'adolescent mental health[tw] AND ' + QUALITY_FILTER,
     'geriatric psychiatry[MeSH] AND ' + QUALITY_FILTER,
     'trauma childhood adverse experiences[tw] AND ' + QUALITY_FILTER,
-    # ── Neuroscience of Mental Health ─────────────────────────────────────────
+    # -- Neuroscience of Mental Health -----------------------------------------
     'neuroinflammation mental health[tw] AND ' + QUALITY_FILTER,
     'gut brain axis psychiatry[tw] AND ' + QUALITY_FILTER,
     'psychoneuroimmunology[MeSH] AND ' + QUALITY_FILTER,
 ]
 
 STAGE32_QUERIES = [
-    # ── CRISPR Technology ─────────────────────────────────────────────────────
+    # -- CRISPR Technology -----------------------------------------------------
     'CRISPR-Cas9 gene editing[tw] AND ' + QUALITY_FILTER,
     'CRISPR base editing[tw] AND ' + QUALITY_FILTER,
     'CRISPR prime editing[tw] AND ' + QUALITY_FILTER,
@@ -219,7 +219,7 @@ STAGE32_QUERIES = [
     'off-target effects CRISPR[tw] AND ' + QUALITY_FILTER,
     'CRISPR delivery mechanisms[tw] AND ' + QUALITY_FILTER,
     'CRISPR sickle cell disease[tw] AND ' + QUALITY_FILTER,
-    # ── Gene Therapy ──────────────────────────────────────────────────────────
+    # -- Gene Therapy ----------------------------------------------------------
     'gene therapy[MeSH] AND ' + QUALITY_FILTER,
     'adeno-associated virus gene therapy[tw] AND ' + QUALITY_FILTER,
     'lentiviral vector gene therapy[tw] AND ' + QUALITY_FILTER,
@@ -228,7 +228,7 @@ STAGE32_QUERIES = [
     'in vivo gene editing[tw] AND ' + QUALITY_FILTER,
     'RNA therapeutics[tw] AND ' + QUALITY_FILTER,
     'mRNA therapy[tw] AND ' + QUALITY_FILTER,
-    # ── Genomics ──────────────────────────────────────────────────────────────
+    # -- Genomics --------------------------------------------------------------
     'human genome sequencing[tw] AND ' + QUALITY_FILTER,
     'whole genome sequencing clinical[tw] AND ' + QUALITY_FILTER,
     'genome-wide association studies[MeSH] AND ' + QUALITY_FILTER,
@@ -236,25 +236,25 @@ STAGE32_QUERIES = [
     'structural variation genome[tw] AND ' + QUALITY_FILTER,
     'pharmacogenomics[MeSH] AND ' + QUALITY_FILTER,
     'liquid biopsy circulating DNA[tw] AND ' + QUALITY_FILTER,
-    # ── Epigenetics ───────────────────────────────────────────────────────────
+    # -- Epigenetics -----------------------------------------------------------
     'epigenetics[MeSH] AND ' + QUALITY_FILTER,
     'DNA methylation disease[tw] AND ' + QUALITY_FILTER,
     'histone modification[MeSH] AND ' + QUALITY_FILTER,
     'chromatin remodeling[MeSH] AND ' + QUALITY_FILTER,
     'epigenetic inheritance[tw] AND ' + QUALITY_FILTER,
     'non-coding RNA epigenetics[tw] AND ' + QUALITY_FILTER,
-    # ── Synthetic Biology ─────────────────────────────────────────────────────
+    # -- Synthetic Biology -----------------------------------------------------
     'synthetic biology[MeSH] AND ' + QUALITY_FILTER,
     'metabolic engineering[MeSH] AND ' + QUALITY_FILTER,
     'protein engineering[MeSH] AND ' + QUALITY_FILTER,
     'cell-free synthetic biology[tw] AND ' + QUALITY_FILTER,
     'biosafety genetic engineering[tw] AND ' + QUALITY_FILTER,
-    # ── Molecular Tools ───────────────────────────────────────────────────────
+    # -- Molecular Tools -------------------------------------------------------
     'zinc finger nucleases[MeSH] AND ' + QUALITY_FILTER,
     'transcription activator-like effector nucleases[MeSH] AND ' + QUALITY_FILTER,
     'RNA interference therapeutics[tw] AND ' + QUALITY_FILTER,
     'antisense oligonucleotides[MeSH] AND ' + QUALITY_FILTER,
-    # ── Applications ──────────────────────────────────────────────────────────
+    # -- Applications ----------------------------------------------------------
     'gene therapy cancer[tw] AND ' + QUALITY_FILTER,
     'gene editing inherited disease[tw] AND ' + QUALITY_FILTER,
     'genetic engineering agriculture[tw] AND ' + QUALITY_FILTER,
@@ -263,7 +263,7 @@ STAGE32_QUERIES = [
 ]
 
 STAGE33_QUERIES = [
-    # ── Hallmarks of Aging ────────────────────────────────────────────────────
+    # -- Hallmarks of Aging ----------------------------------------------------
     'hallmarks of aging[tw] AND ' + QUALITY_FILTER,
     'cellular senescence[MeSH] AND ' + QUALITY_FILTER,
     'telomere shortening aging[tw] AND ' + QUALITY_FILTER,
@@ -276,41 +276,41 @@ STAGE33_QUERIES = [
     'intercellular communication aging[tw] AND ' + QUALITY_FILTER,
     'genomic instability aging[tw] AND ' + QUALITY_FILTER,
     'disabled macroautophagy aging[tw] AND ' + QUALITY_FILTER,
-    # ── Senolytics / Senomorphics ─────────────────────────────────────────────
+    # -- Senolytics / Senomorphics ---------------------------------------------
     'senolytics[tw] AND ' + QUALITY_FILTER,
     'dasatinib quercetin senolytic[tw] AND ' + QUALITY_FILTER,
     'navitoclax senolytic[tw] AND ' + QUALITY_FILTER,
     'senomorphics SASP[tw] AND ' + QUALITY_FILTER,
     'senescent cell clearance[tw] AND ' + QUALITY_FILTER,
-    # ── NAD+ and Sirtuins ─────────────────────────────────────────────────────
+    # -- NAD+ and Sirtuins -----------------------------------------------------
     'NAD+ aging metabolism[tw] AND ' + QUALITY_FILTER,
     'nicotinamide riboside NMN aging[tw] AND ' + QUALITY_FILTER,
     'sirtuins longevity[tw] AND ' + QUALITY_FILTER,
     'SIRT1 aging metabolism[tw] AND ' + QUALITY_FILTER,
-    # ── mTOR and Caloric Restriction ──────────────────────────────────────────
+    # -- mTOR and Caloric Restriction ------------------------------------------
     'rapamycin longevity[tw] AND ' + QUALITY_FILTER,
     'mTOR pathway aging[tw] AND ' + QUALITY_FILTER,
     'caloric restriction lifespan[tw] AND ' + QUALITY_FILTER,
     'intermittent fasting longevity[tw] AND ' + QUALITY_FILTER,
     'dietary restriction aging mechanisms[tw] AND ' + QUALITY_FILTER,
-    # ── Epigenetic Reprogramming ───────────────────────────────────────────────
+    # -- Epigenetic Reprogramming -----------------------------------------------
     'epigenetic clock aging[tw] AND ' + QUALITY_FILTER,
     'Horvath clock methylation[tw] AND ' + QUALITY_FILTER,
     'partial reprogramming aging[tw] AND ' + QUALITY_FILTER,
     'Yamanaka factors aging reversal[tw] AND ' + QUALITY_FILTER,
     'biological age reversal[tw] AND ' + QUALITY_FILTER,
-    # ── Telomere Biology ──────────────────────────────────────────────────────
+    # -- Telomere Biology ------------------------------------------------------
     'telomerase aging cancer[tw] AND ' + QUALITY_FILTER,
     'telomere length disease[tw] AND ' + QUALITY_FILTER,
     'telomere restoration therapy[tw] AND ' + QUALITY_FILTER,
-    # ── Longevity Pathways ────────────────────────────────────────────────────
+    # -- Longevity Pathways ----------------------------------------------------
     'IGF-1 insulin signaling aging[tw] AND ' + QUALITY_FILTER,
     'AMPK aging exercise[tw] AND ' + QUALITY_FILTER,
     'autophagy aging disease[tw] AND ' + QUALITY_FILTER,
     'klotho anti-aging[tw] AND ' + QUALITY_FILTER,
     'GDF11 aging reversal[tw] AND ' + QUALITY_FILTER,
     'parabiosis heterochronic aging[tw] AND ' + QUALITY_FILTER,
-    # ── Clinical / Interventional ─────────────────────────────────────────────
+    # -- Clinical / Interventional ---------------------------------------------
     'metformin aging clinical trial[tw] AND ' + QUALITY_FILTER,
     'TAME trial metformin longevity[tw] AND ' + QUALITY_FILTER,
     'resveratrol aging[tw] AND ' + QUALITY_FILTER,
@@ -330,7 +330,7 @@ STAGE_QUERIES = {
 }
 
 
-# ── HTTP session ───────────────────────────────────────────────────────────────
+# -- HTTP session ---------------------------------------------------------------
 
 def _make_session():
     s = requests.Session()
@@ -352,7 +352,7 @@ def _train(text, node, session):
         return False
 
 
-# ── NCBI E-utilities helpers ───────────────────────────────────────────────────
+# -- NCBI E-utilities helpers ---------------------------------------------------
 
 def _ncbi_params(api_key=None):
     p = {'tool': TOOL, 'email': EMAIL}
@@ -499,7 +499,7 @@ def _parse_pmc_xml(xml_text):
     return '\n'.join(parts)
 
 
-# ── Stage builder ──────────────────────────────────────────────────────────────
+# -- Stage builder --------------------------------------------------------------
 
 def build_stage(stage_num, queries, domain_label, out_dir, node,
                 max_per_query, api_key, train_pmc_fulltext,
@@ -519,7 +519,7 @@ def build_stage(stage_num, queries, domain_label, out_dir, node,
             state = json.loads(ckpt_path.read_text(encoding='utf-8'))
             trained_pmids = set(state.get('pmids', []))
             trained_pmc   = set(state.get('pmc', []))
-            print(f'  [Stage {stage_num}] Resuming — '
+            print(f'  [Stage {stage_num}] Resuming -- '
                   f'{len(trained_pmids)} abstracts, {len(trained_pmc)} full texts',
                   flush=True)
         except Exception:
@@ -532,14 +532,14 @@ def build_stage(stage_num, queries, domain_label, out_dir, node,
 
     ok = 0
     header = (f'PEER-REVIEWED MEDICAL LITERATURE\n'
-              f'Source: National Library of Medicine — PubMed/NCBI\n'
+              f'Source: National Library of Medicine -- PubMed/NCBI\n'
               f'Domain: {domain_label}\n\n')
 
     for qi, query in enumerate(queries):
         short_q = query.split('[')[0].strip()[:60]
         print(f'  [{stage_num}] ({qi+1}/{len(queries)}) {short_q}...', flush=True)
 
-        # ── PubMed abstracts ──────────────────────────────────────────────────
+        # -- PubMed abstracts --------------------------------------------------
         pmids = search_pubmed(query, max_per_query, api_key, session)
         new_pmids = [p for p in pmids if p not in trained_pmids]
 
@@ -556,7 +556,7 @@ def build_stage(stage_num, queries, domain_label, out_dir, node,
             for pmid in batch:
                 trained_pmids.add(pmid)
 
-        # ── PMC full text (selected reviews) ─────────────────────────────────
+        # -- PMC full text (selected reviews) ---------------------------------
         if train_pmc_fulltext:
             pmc_ids = search_pmc_fulltext(query, 5, api_key, session)
             for pmc_id in pmc_ids:
@@ -564,7 +564,7 @@ def build_stage(stage_num, queries, domain_label, out_dir, node,
                     continue
                 full_text = fetch_pmc_fulltext(pmc_id, api_key, session)
                 if full_text and len(full_text) > 500:
-                    text = (f'PEER-REVIEWED FULL TEXT — Open Access\n'
+                    text = (f'PEER-REVIEWED FULL TEXT -- Open Access\n'
                             f'Source: PubMed Central, National Library of Medicine\n'
                             f'Domain: {domain_label}\n'
                             f'PMC: {pmc_id}\n\n'
@@ -579,7 +579,7 @@ def build_stage(stage_num, queries, domain_label, out_dir, node,
             print(f'  [Stage {stage_num}] {ok} items trained so far...', flush=True)
 
     save_ckpt()
-    print(f'  [Stage {stage_num}] Complete — {ok} items trained '
+    print(f'  [Stage {stage_num}] Complete -- {ok} items trained '
           f'({len(trained_pmids)} abstracts, {len(trained_pmc)} full texts)',
           flush=True)
     return [{'stage': stage_num, 'domain': domain_label, 'trained': ok,
@@ -587,7 +587,7 @@ def build_stage(stage_num, queries, domain_label, out_dir, node,
              'tags': ['medical', 'peer-reviewed', 'ncbi', domain_label.lower()]}]
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
@@ -612,15 +612,15 @@ def main():
     api_key   = args.ncbi_api_key
     pmc_ft    = not args.no_fulltext
 
-    print('Medical Corpus Builder — Stages 30-33')
+    print('Medical Corpus Builder -- Stages 30-33')
     print(f'  Node        : {args.node}')
     print(f'  Stages      : {sorted(stages)}')
     print(f'  Max/query   : {args.max_per_query}')
-    print(f'  NCBI API key: {"YES (10 req/s)" if api_key else "NO (3 req/s — get a free key!)"}')
+    print(f'  NCBI API key: {"YES (10 req/s)" if api_key else "NO (3 req/s -- get a free key!)"}')
     print(f'  Full text   : {"yes (PMC open access)" if pmc_ft else "no (abstracts only)"}')
     if not api_key:
         print('\n  TIP: Get a free NCBI API key at https://www.ncbi.nlm.nih.gov/account/')
-        print('       Then re-run with --ncbi-api-key YOUR_KEY for 3× faster fetching.\n')
+        print('       Then re-run with --ncbi-api-key YOUR_KEY for 3x faster fetching.\n')
 
     ncbi_session  = _make_session()
     train_session = _make_session()
@@ -644,7 +644,7 @@ def main():
     mpath = train_dir / 'stage30_33_manifest.json'
     mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    print(f'\nManifest → {mpath}')
+    print(f'\nManifest -> {mpath}')
     print('Done.')
 
 

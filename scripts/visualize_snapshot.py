@@ -220,7 +220,7 @@ def main() -> None:
 
     def render_once() -> bool:
         if not src.exists():
-            print(f"  waiting for {src} …", flush=True)
+            print(f"  waiting for {src} ...", flush=True)
             return False
         raw = src.read_text(encoding="utf-8", errors="replace")
         data = json.loads(raw)
@@ -239,7 +239,7 @@ def main() -> None:
         print(f"Wrote visualization to {args.output}")
         return
 
-    # Live polling mode — write a wrapper HTML with auto-refresh pointing at the
+    # Live polling mode -- write a wrapper HTML with auto-refresh pointing at the
     # inner visualization file, then keep regenerating the inner file.
     wrapper = args.output.parent / ("live_" + args.output.name)
     wrapper.write_text(make_live_html(args.output), encoding="utf-8")

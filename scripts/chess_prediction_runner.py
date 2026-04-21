@@ -8,21 +8,21 @@ so the trio self-refines toward the most accurate combination.
 
 The three models and what makes each one distinct:
 
-  CLASSICAL  — Simulated annealing only.  Pure energy-minimisation over piece
+  CLASSICAL  -- Simulated annealing only.  Pure energy-minimisation over piece
                 positions using the stack-history alignment energy (w_stack_hash).
                 Treats the sequence of prior board states as a positional
                 "signature" and searches for the next state that is most
-                consistent with it — analogous to finding a preimage that matches
+                consistent with it -- analogous to finding a preimage that matches
                 an observed hash series.  No quantum effects, no learned priors.
 
-  QUANTUM    — Quantum Trotter-slice annealing.  Same energy landscape as
+  QUANTUM    -- Quantum Trotter-slice annealing.  Same energy landscape as
                 classical but the proposal distribution is shaped by imaginary-time
                 path integrals (worldlines across Trotter slices).  Quantum
                 tunnelling lets it escape local energy minima the classical
                 annealer misses.  Excels when the correct next move involves a
                 non-obvious piece interaction.
 
-  NEURO      — Neuro-fabric guided annealing.  Hebbian learning accumulates
+  NEURO      -- Neuro-fabric guided annealing.  Hebbian learning accumulates
                 across every ply seen.  The w_neuro_alignment energy pulls
                 particle trajectories toward centroid positions learned by the
                 fabric.  After enough plies the fabric "remembers" where each
@@ -31,14 +31,14 @@ The three models and what makes each one distinct:
                 as training deepens.
 
 Fine-tuning feedback loops:
-  - Classical → Neuro: classical best_state is added to Neuro's stack_history,
+  - Classical -> Neuro: classical best_state is added to Neuro's stack_history,
     so Neuro's next call has a richer temporal context.
-  - Quantum   → Classical: quantum best_energy is compared to classical
+  - Quantum   -> Classical: quantum best_energy is compared to classical
     best_energy; if quantum is lower (found better state), classical n_iters
     is bumped up to compensate.
-  - Neuro     → Classical + Quantum: when Neuro is correct and others are
+  - Neuro     -> Classical + Quantum: when Neuro is correct and others are
     wrong, its vote weight rises; others' lr_scale increases to catch up.
-  - Collective → individual ledgers: which model was in the majority vs
+  - Collective -> individual ledgers: which model was in the majority vs
     correct adjusts all three weights each ply.
 
 The stack-hash interpretation:
@@ -46,7 +46,7 @@ The stack-hash interpretation:
   of the game.  Finding the minimum-energy next state given that fingerprint
   is structurally identical to quantum-annealing a constraint-satisfaction
   problem where the constraint is "be consistent with this hash chain."
-  This is sensible and intentional — it is one of the core motivations for
+  This is sensible and intentional -- it is one of the core motivations for
   using quantum annealing in this context.
 
 Usage:
@@ -97,7 +97,7 @@ HOURLY_LOG  = ROOT / "logs" / "chess_hourly_checkpoints.jsonl"
 METRICS_LOG = ROOT / "logs" / "chess_training_metrics.log"
 GAMES_FILE  = ROOT / "data" / "chess" / "processed_games.jsonl"
 
-# Node service URL — if the persistent w1z4rd_api node is running, use it.
+# Node service URL -- if the persistent w1z4rd_api node is running, use it.
 # Falls back to predict_state.exe subprocess automatically.
 NODE_URL    = "http://localhost:8080"
 
@@ -107,7 +107,7 @@ CFG_NEURO     = ROOT / "run_config_chess_ply_neuro.json"
 
 NEURO_LIVE    = ROOT / "logs" / "chess_ply_neuro_live.json"
 
-# ── Run config helpers ────────────────────────────────────────────────────────
+# -- Run config helpers --------------------------------------------------------
 
 def load_cfg(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
@@ -117,7 +117,7 @@ def load_cfg(path: Path) -> dict:
 def make_ply_cfg(base: dict, n_iters: int, seed_offset: int = 0) -> dict:
     cfg = json.loads(json.dumps(base))
     cfg["schedule"]["n_iterations"] = n_iters
-    # Debug builds are ~15–50x slower than release; aggressively cap so each ply
+    # Debug builds are ~15-50x slower than release; aggressively cap so each ply
     # completes in <10 seconds even with 32 chess pieces on the board.
     _is_debug = "debug" in str(PREDICT_EXE) and "release" not in str(PREDICT_EXE)
     if _is_debug:
@@ -140,7 +140,7 @@ def make_ply_cfg(base: dict, n_iters: int, seed_offset: int = 0) -> dict:
     return cfg
 
 
-# ── Snapshot builder ──────────────────────────────────────────────────────────
+# -- Snapshot builder ----------------------------------------------------------
 
 def board_symbol_states(board: chess.Board) -> Dict[str, Any]:
     states: Dict[str, Any] = {}
@@ -163,7 +163,7 @@ def board_symbol_states(board: chess.Board) -> Dict[str, Any]:
 def _classify_move_vector(dx: int, dy: int) -> str:
     """
     Classify a (dx, dy) displacement into a canonical move geometry.
-    This is the label-free motif signal — the same geometry will always
+    This is the label-free motif signal -- the same geometry will always
     cluster together regardless of which piece or square it came from.
     """
     ax, ay = abs(dx), abs(dy)
@@ -179,7 +179,7 @@ def _classify_move_vector(dx: int, dy: int) -> str:
 
 
 def _piece_position_map(board: chess.Board) -> Dict[str, Tuple[int, int]]:
-    """Map piece_type_key (e.g. 'white_N') → list of (file, rank) positions."""
+    """Map piece_type_key (e.g. 'white_N') -> list of (file, rank) positions."""
     result: Dict[str, List[Tuple[int, int]]] = {}
     for sq, piece in board.piece_map().items():
         color = "white" if piece.color == chess.WHITE else "black"
@@ -199,7 +199,7 @@ def build_snapshot(
     Build an EnvironmentSnapshot for the annealer.
 
     Each symbol now carries full motion data:
-      - velocity: (dx, dy) from the previous board state — the primary motif signal
+      - velocity: (dx, dy) from the previous board state -- the primary motif signal
       - trajectory: last N (x, y) positions for this piece
       - move_geometry: classified move type ("diagonal", "orthogonal", "L_shape", ...)
 
@@ -212,12 +212,12 @@ def build_snapshot(
     """
     current = board_symbol_states(board)
 
-    # ── Compute velocity vectors from previous board state ────────────────────
+    # -- Compute velocity vectors from previous board state --------------------
     # For each piece in current board, find where it was one ply ago.
     # We match by piece type+color (same as goal matching) since the square ID
     # changes when a piece moves.
-    vel_map: Dict[str, Tuple[int, int]] = {}  # sid → (dx, dy)
-    traj_map: Dict[str, List[Tuple[int, int]]] = {}  # sid → [(x,y), ...]
+    vel_map: Dict[str, Tuple[int, int]] = {}  # sid -> (dx, dy)
+    traj_map: Dict[str, List[Tuple[int, int]]] = {}  # sid -> [(x,y), ...]
 
     if ply_history:
         prev_board = ply_history[-1]
@@ -276,7 +276,7 @@ def build_snapshot(
             for sid, cf, cr in curr_list:
                 traj_map[sid] = traj_tail + [(cf, cr)]
 
-    # ── Build goal map from next_board ────────────────────────────────────────
+    # -- Build goal map from next_board ----------------------------------------
     goal_map: Dict[str, Tuple[int, int]] = {}
     if next_board is not None:
         next_states = board_symbol_states(next_board)
@@ -313,7 +313,7 @@ def build_snapshot(
                     goal_map[sid] = best
                     used2.add(best)
 
-    # ── Assemble symbol list ──────────────────────────────────────────────────
+    # -- Assemble symbol list --------------------------------------------------
     symbols = []
     for sid, s in current.items():
         dx, dy = vel_map.get(sid, (0, 0))
@@ -323,7 +323,7 @@ def build_snapshot(
             "color":         s["internal_state"]["color"],
             "role":          s["internal_state"]["role"],
             "radius":        0.45,
-            # Motion vectors — the primary motif signal for the neuro fabric
+            # Motion vectors -- the primary motif signal for the neuro fabric
             "velocity_dx":   float(dx),
             "velocity_dy":   float(dy),
             "move_geometry": _classify_move_vector(dx, dy),
@@ -350,7 +350,7 @@ def build_snapshot(
         for i, b in enumerate(ply_history)
     ]
 
-    # ── Rich metadata — labels that travel with every frame ───────────────────
+    # -- Rich metadata -- labels that travel with every frame -------------------
     meta: Dict[str, Any] = {
         "source":       "chess_prediction_runner",
         "side_to_move": "white" if board.turn == chess.WHITE else "black",
@@ -379,7 +379,7 @@ def build_snapshot(
     }
 
 
-# ── Subprocess-based engine client ───────────────────────────────────────────
+# -- Subprocess-based engine client -------------------------------------------
 # Uses predict_state.exe (already compiled, not named "service.exe" so antivirus
 # doesn't block it).  For each call: write snapshot + patched config to temp
 # files, run the binary, read results JSON.
@@ -456,7 +456,7 @@ def subprocess_predict(
         return None
 
 
-# ── Node HTTP client ─────────────────────────────────────────────────────────
+# -- Node HTTP client ---------------------------------------------------------
 
 _node_available: Optional[bool] = None  # None = not yet probed
 
@@ -471,9 +471,9 @@ def _probe_node() -> bool:
     except Exception:
         _node_available = False
     if _node_available:
-        print(f"  [node] W1z4rDV1510n node active at {NODE_URL} — routing predictions through node", flush=True)
+        print(f"  [node] W1z4rDV1510n node active at {NODE_URL} -- routing predictions through node", flush=True)
     else:
-        print(f"  [node] Node not reachable at {NODE_URL} — using subprocess fallback", flush=True)
+        print(f"  [node] Node not reachable at {NODE_URL} -- using subprocess fallback", flush=True)
     return _node_available
 
 
@@ -529,7 +529,7 @@ def predict(
     return subprocess_predict(snapshot, cfg, model_name, timeout_s, exe)
 
 
-# ── Decode best_state → chess move ───────────────────────────────────────────
+# -- Decode best_state -> chess move -------------------------------------------
 
 def decode_move(board: chess.Board, best_state: dict, side: chess.Color) -> Optional[str]:
     """
@@ -539,11 +539,11 @@ def decode_move(board: chess.Board, best_state: dict, side: chess.Color) -> Opti
     it moves it to a new position.  So we match by piece type+color, not by
     the full ID, finding each annealer piece position and looking for the
     current-board piece of the same type that is closest to it but at a
-    different square — then check legality.
+    different square -- then check legality.
     """
     side_str = "white" if side == chess.WHITE else "black"
 
-    # Build a map: piece-type → list of predicted (file, rank) positions
+    # Build a map: piece-type -> list of predicted (file, rank) positions
     pred_by_type: Dict[str, List[Tuple[int, int]]] = {}
     for sid, st in best_state.get("symbol_states", {}).items():
         if not sid.startswith(side_str):
@@ -558,7 +558,7 @@ def decode_move(board: chess.Board, best_state: dict, side: chess.Color) -> Opti
         if 0 <= f <= 7 and 0 <= r <= 7:
             pred_by_type.setdefault(piece_sym, []).append((f, r))
 
-    # Current board: piece-type → list of (square, file, rank)
+    # Current board: piece-type -> list of (square, file, rank)
     curr_by_type: Dict[str, List[Tuple[int, int, int]]] = {}
     for sq, piece in board.piece_map().items():
         if piece.color != side:
@@ -626,7 +626,7 @@ def neuro_decode_move(board: chess.Board, neuro_json: dict, side: chess.Color) -
     return decode_move(board, {"symbol_states": fake_states}, side)
 
 
-# ── Per-model ledger for accuracy and weight adjustment ───────────────────────
+# -- Per-model ledger for accuracy and weight adjustment -----------------------
 
 @dataclass
 class ModelLedger:
@@ -671,7 +671,7 @@ class ModelLedger:
         return self.n_iters_delta
 
 
-# ── Heat map from best_state displacements ────────────────────────────────────
+# -- Heat map from best_state displacements ------------------------------------
 
 def displacement_heat(best_state: dict, board: chess.Board) -> List[List[float]]:
     heat = [[0.0] * 8 for _ in range(8)]
@@ -699,7 +699,7 @@ def merge_heats(heats: List[Tuple[List[List[float]], float]]) -> List[List[float
     return result
 
 
-# ── Live probability helpers ──────────────────────────────────────────────────
+# -- Live probability helpers --------------------------------------------------
 
 _PIECE_CP = {
     chess.PAWN: 100, chess.KNIGHT: 325, chess.BISHOP: 325,
@@ -754,7 +754,7 @@ def energy_to_prob(energies: Dict[str, float]) -> Dict[str, float]:
     return {n: round(e / total, 4) for n, e in zip(names, exps)}
 
 
-# ── Board JSON ────────────────────────────────────────────────────────────────
+# -- Board JSON ----------------------------------------------------------------
 
 def pieces_list(board: chess.Board) -> List[dict]:
     pieces = []
@@ -772,7 +772,7 @@ def pieces_list(board: chess.Board) -> List[dict]:
 
 def write_board(data: dict) -> None:
     """
-    Write the live board JSON.  Never raises — a failed write is logged and
+    Write the live board JSON.  Never raises -- a failed write is logged and
     skipped so the training loop continues uninterrupted.
 
     Windows-specific strategy: write to a sibling temp file in the SAME
@@ -788,7 +788,7 @@ def write_board(data: dict) -> None:
         return
 
     tmp = BOARD_JSON.with_suffix(".tmp")
-    # Step 1 — write the new content to temp
+    # Step 1 -- write the new content to temp
     for attempt in range(3):
         try:
             tmp.write_text(payload, encoding="utf-8")
@@ -799,7 +799,7 @@ def write_board(data: dict) -> None:
                 return
             time.sleep(0.05)
 
-    # Step 2 — atomically rename into place (retry on transient lock)
+    # Step 2 -- atomically rename into place (retry on transient lock)
     for attempt in range(5):
         try:
             os.replace(str(tmp), str(BOARD_JSON))
@@ -807,7 +807,7 @@ def write_board(data: dict) -> None:
         except (PermissionError, OSError):
             time.sleep(0.04)
 
-    # Step 3 — last resort: truncating write in place
+    # Step 3 -- last resort: truncating write in place
     try:
         with open(str(BOARD_JSON), "w", encoding="utf-8") as fh:
             fh.write(payload)
@@ -823,7 +823,7 @@ def write_board(data: dict) -> None:
 def _build_model_breakdown(model_preds: List[dict]) -> List[dict]:
     """
     Build per-model breakdown with Boltzmann probabilities derived from
-    best_energy.  Lower energy → higher probability.
+    best_energy.  Lower energy -> higher probability.
     """
     raw_energies = {mp["model"]: mp.get("energy", float("inf")) for mp in model_preds}
     probs = energy_to_prob(raw_energies)
@@ -930,7 +930,7 @@ def board_frame(
     }
 
 
-# ── Hourly checkpoint ─────────────────────────────────────────────────────────
+# -- Hourly checkpoint ---------------------------------------------------------
 
 class HourlyMonitor:
     def __init__(self) -> None:
@@ -958,7 +958,7 @@ class HourlyMonitor:
         self.base_iters[weakest.name] = min(self.base_iters[weakest.name] + 60, 600)
 
         stagnating = delta < 0.002 and sum(ld.total for ld in ledgers) > 500
-        adj_msg = f"  → boosting {weakest.name} to {self.base_iters[weakest.name]} iters"
+        adj_msg = f"  -> boosting {weakest.name} to {self.base_iters[weakest.name]} iters"
         if stagnating:
             for k in self.base_iters:
                 self.base_iters[k] = min(self.base_iters[k] + 40, 600)
@@ -994,11 +994,11 @@ class HourlyMonitor:
         )
 
 
-# ── Game loader ───────────────────────────────────────────────────────────────
+# -- Game loader ---------------------------------------------------------------
 
 def load_test_games(max_games: int) -> List[dict]:
     if not GAMES_FILE.exists():
-        raise SystemExit(f"Missing {GAMES_FILE} — run preprocess_chess_games.py first")
+        raise SystemExit(f"Missing {GAMES_FILE} -- run preprocess_chess_games.py first")
     games = []
     with GAMES_FILE.open("r", encoding="utf-8") as f:
         for i, line in enumerate(f):
@@ -1010,7 +1010,7 @@ def load_test_games(max_games: int) -> List[dict]:
     return games
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -1021,23 +1021,23 @@ def main() -> None:
     ap.add_argument("--log-file", type=Path, default=METRICS_LOG)
     args = ap.parse_args()
 
-    # ── Locate binary ─────────────────────────────────────────────────────────
+    # -- Locate binary ---------------------------------------------------------
     exe = find_predict_exe()
     print(f"Using engine binary: {exe}", flush=True)
 
-    # ── Load configs ──────────────────────────────────────────────────────────
+    # -- Load configs ----------------------------------------------------------
     cfg_classical = load_cfg(CFG_CLASSICAL)
     cfg_quantum   = load_cfg(CFG_QUANTUM)
     cfg_neuro     = load_cfg(CFG_NEURO)
 
-    # ── Games ─────────────────────────────────────────────────────────────────
-    print("Loading games …", flush=True)
+    # -- Games -----------------------------------------------------------------
+    print("Loading games ...", flush=True)
     test_games = load_test_games(args.max_games)
     rng = random.Random(42)
     rng.shuffle(test_games)
     print(f"  {len(test_games)} test games loaded.", flush=True)
 
-    # ── Model ledgers ─────────────────────────────────────────────────────────
+    # -- Model ledgers ---------------------------------------------------------
     ldg_classical = ModelLedger("classical")
     ldg_quantum   = ModelLedger("quantum")
     ldg_neuro     = ModelLedger("neuro")
@@ -1053,11 +1053,11 @@ def main() -> None:
     game_iter  = iter(test_games)
     game_count = 0
 
-    print("\n─── W1z4rDV1510n Prediction Trio ───────────────────────────\n", flush=True)
-    print("  classical  → energy-minimisation over stack-hash fingerprint", flush=True)
-    print("  quantum    → Trotter-slice tunnelling through local minima", flush=True)
-    print("  neuro      → Hebbian fabric alignment, learns across all plies", flush=True)
-    print("  collective → weighted vote; weights adjust from ply-by-ply accuracy\n", flush=True)
+    print("\n--- W1z4rDV1510n Prediction Trio ---------------------------\n", flush=True)
+    print("  classical  -> energy-minimisation over stack-hash fingerprint", flush=True)
+    print("  quantum    -> Trotter-slice tunnelling through local minima", flush=True)
+    print("  neuro      -> Hebbian fabric alignment, learns across all plies", flush=True)
+    print("  collective -> weighted vote; weights adjust from ply-by-ply accuracy\n", flush=True)
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         while True:
@@ -1110,7 +1110,7 @@ def main() -> None:
 
                 iters = monitor.base_iters.copy()
 
-                # ── 3 parallel engine calls ───────────────────────────────────
+                # -- 3 parallel engine calls -----------------------------------
                 def call_model(name, cfg, n_iters, seed_off):
                     c = make_ply_cfg(cfg, n_iters, seed_off)
                     t0 = time.time()
@@ -1138,7 +1138,7 @@ def main() -> None:
                     name, bs, be, elapsed = fut.result()
                     results_by_name[name] = {"best_state": bs, "best_energy": be, "elapsed": elapsed}
 
-                # ── Decode each model's predicted move ────────────────────────
+                # -- Decode each model's predicted move ------------------------
                 neuro_json = {}
                 try:
                     if NEURO_LIVE.exists():
@@ -1160,14 +1160,14 @@ def main() -> None:
                     else:
                         preds[name] = decode_move(board, res["best_state"], side)
 
-                # ── Fallback: first legal move ────────────────────────────────
+                # -- Fallback: first legal move --------------------------------
                 legal_list = list(board.legal_moves)
                 fallback_san = board.san(legal_list[0]) if legal_list else None
                 for name in ("classical", "quantum", "neuro"):
                     if preds.get(name) is None:
                         preds[name] = fallback_san
 
-                # ── Collective weighted vote ──────────────────────────────────
+                # -- Collective weighted vote ----------------------------------
                 vote_scores: Dict[str, float] = {}
                 for ld in ledgers:
                     p = preds.get(ld.name)
@@ -1176,7 +1176,7 @@ def main() -> None:
 
                 collective_san = max(vote_scores, key=vote_scores.get) if vote_scores else fallback_san
 
-                # ── Score ─────────────────────────────────────────────────────
+                # -- Score -----------------------------------------------------
                 correct_by = {name: (preds[name] == actual_san) for name in ("classical", "quantum", "neuro")}
                 collective_correct = (collective_san == actual_san)
 
@@ -1187,7 +1187,7 @@ def main() -> None:
                     "neuro":     correct_by["classical"] or correct_by["quantum"],
                 }
 
-                # Quantum → Classical energy feedback: if quantum found lower energy, bump classical iters
+                # Quantum -> Classical energy feedback: if quantum found lower energy, bump classical iters
                 q_energy = energies.get("quantum", float("inf"))
                 c_energy = energies.get("classical", float("inf"))
                 if math.isfinite(q_energy) and math.isfinite(c_energy) and q_energy < c_energy * 0.9:
@@ -1212,7 +1212,7 @@ def main() -> None:
                 game_correct += int(collective_correct)
                 game_total   += 1
 
-                # ── Parse actual move metadata ────────────────────────────────
+                # -- Parse actual move metadata --------------------------------
                 try:
                     actual_mv = board.parse_san(actual_san)
                     lm = {
@@ -1313,9 +1313,9 @@ def main() -> None:
                 ))
 
                 # Console
-                c_sym = "✓" if collective_correct else "✗"
+                c_sym = "[ok]" if collective_correct else "✗"
                 ind_syms = "".join(
-                    ("✓" if correct_by[n] else "✗") + n[0].upper()
+                    ("[ok]" if correct_by[n] else "✗") + n[0].upper()
                     for n in ("classical", "quantum", "neuro")
                 )
                 print(
@@ -1334,9 +1334,9 @@ def main() -> None:
             # End of game
             game_acc = game_correct / game_total if game_total else 0.0
             print(
-                f"\n  ── game {game_count} [{game_id}]  {result}  "
+                f"\n  -- game {game_count} [{game_id}]  {result}  "
                 f"plies={game_total}  game={game_acc:.1%}  "
-                f"global={acc_global.global_acc():.1%} ──\n",
+                f"global={acc_global.global_acc():.1%} --\n",
                 flush=True,
             )
             log_handle.write(json.dumps({

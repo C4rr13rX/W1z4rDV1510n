@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-train_foundation.py — Feed English foundation corpus into the neural node
+train_foundation.py -- Feed English foundation corpus into the neural node
 =========================================================================
 Full-architecture training pipeline.  Uses every available API endpoint:
 
-  /media/train_sequence  — temporal STDP (image+text, text+context, Q→A)
-  /equations/ingest      — Environmental Equation Matrix
-  /knowledge/ingest      — structured knowledge documents
-  /qa/ingest             — Q&A store + internal STDP bridge
-  /neuro/record_episode  — episodic learning from confirmed Q→A pairs
-  /neuro/checkpoint      — pool persistence
+  /media/train_sequence  -- temporal STDP (image+text, text+context, Q->A)
+  /equations/ingest      -- Environmental Equation Matrix
+  /knowledge/ingest      -- structured knowledge documents
+  /qa/ingest             -- Q&A store + internal STDP bridge
+  /neuro/record_episode  -- episodic learning from confirmed Q->A pairs
+  /neuro/checkpoint      -- pool persistence
 
 Three passes:
-  Pass 0 (CONCEPTS)  — concept_dataset.jsonl (first-words → kindergarten)
-  Pass 1 (TEXT)      — simple_wiki_articles.jsonl
-  Pass 2 (IMAGES)    — coco_val_index.jsonl
+  Pass 0 (CONCEPTS)  -- concept_dataset.jsonl (first-words -> kindergarten)
+  Pass 1 (TEXT)      -- simple_wiki_articles.jsonl
+  Pass 2 (IMAGES)    -- coco_val_index.jsonl
 
 Usage:
   python scripts/train_foundation.py [--node http://127.0.0.1:8090]
@@ -77,7 +77,7 @@ _SKIP_SUBJECTS = {
     "for", "with", "by", "from", "of", "in", "on", "at", "as", "to",
 }
 _CONTEXT_SUBJ_RE = re.compile(r"\b(of the|of a|of an|in the|in a|by the|for the)\b", re.I)
-_MATH_ONLY_RE    = re.compile(r"^[\d\s+\-*/=.,()[\]\\<>%°±×÷√π]+$")
+_MATH_ONLY_RE    = re.compile(r"^[\d\s+\-*/=.,()[\]\\<>%deg±x÷√pi]+$")
 
 
 def extract_qa_from_text(text: str, source_id: str) -> list[dict]:
@@ -122,7 +122,7 @@ def _is_misconception_question(q: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Pass 0 — Concept dataset
+# Pass 0 -- Concept dataset
 # ---------------------------------------------------------------------------
 
 LEVEL_NAMES = {-1: "first-words", 0: "infant", 1: "toddler",
@@ -133,7 +133,7 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
                            concurrency: int, batch_size: int) -> None:
     jsonl = data_dir / "concept_dataset.jsonl"
     if not jsonl.exists():
-        print(f"[concepts] {jsonl} not found — run build_concept_dataset.py first")
+        print(f"[concepts] {jsonl} not found -- run build_concept_dataset.py first")
         return
 
     records = []
@@ -149,7 +149,7 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
         records = records[:limit]
 
     total = len(records)
-    print(f"\n[CONCEPT PASS] {total:,} concepts — full architecture training")
+    print(f"\n[CONCEPT PASS] {total:,} concepts -- full architecture training")
     print(f"  Endpoints: train_sequence | equations/ingest | knowledge/ingest | qa/ingest | record_episode")
 
     sem     = asyncio.Semaphore(concurrency)
@@ -198,7 +198,7 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
                         if ok:
                             stats["img"] += 1
 
-                # 3. Equation matrix — scientific text
+                # 3. Equation matrix -- scientific text
                 disc = detect_discipline(full_text)
                 if disc:
                     n = await nc.ingest_equations(full_text, discipline=disc)
@@ -242,7 +242,7 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
                     for _ in range(repeats):
                         qa_buf.append(qa_with_source)
 
-            # Flush QA buffers — full pipeline: ingest + sequence + episode
+            # Flush QA buffers -- full pipeline: ingest + sequence + episode
             while len(qa_buf) >= batch_size:
                 batch = qa_buf[:batch_size]
                 del qa_buf[:batch_size]
@@ -285,14 +285,14 @@ async def run_concept_pass(node_url: str, data_dir: Path, limit: int | None,
 
 
 # ---------------------------------------------------------------------------
-# Pass 1 — Simple English Wikipedia
+# Pass 1 -- Simple English Wikipedia
 # ---------------------------------------------------------------------------
 
 async def run_text_pass(node_url: str, data_dir: Path, limit: int | None,
                         concurrency: int, batch_size: int) -> None:
     jsonl = data_dir / "simple_wiki_articles.jsonl"
     if not jsonl.exists():
-        print(f"[text] {jsonl} not found — run fetch_simple_wikipedia.py first")
+        print(f"[text] {jsonl} not found -- run fetch_simple_wikipedia.py first")
         return
 
     print(f"\n[TEXT PASS] {jsonl}")
@@ -379,14 +379,14 @@ async def run_text_pass(node_url: str, data_dir: Path, limit: int | None,
 
 
 # ---------------------------------------------------------------------------
-# Pass 2 — COCO scene images
+# Pass 2 -- COCO scene images
 # ---------------------------------------------------------------------------
 
 async def run_images_pass(node_url: str, data_dir: Path, limit: int | None,
                           concurrency: int, batch_size: int) -> None:
     jsonl = data_dir / "coco_val_index.jsonl"
     if not jsonl.exists():
-        print(f"[images] {jsonl} not found — run fetch_coco_objects.py first")
+        print(f"[images] {jsonl} not found -- run fetch_coco_objects.py first")
         return
 
     print(f"\n[IMAGES PASS] {jsonl}")
@@ -522,7 +522,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Foundation training pipeline — full architecture")
+    parser = argparse.ArgumentParser(description="Foundation training pipeline -- full architecture")
     parser.add_argument("--node",        default=NODE_URL)
     parser.add_argument("--pass",        dest="mode",
                         choices=["concepts", "text", "images", "all"], default="concepts")

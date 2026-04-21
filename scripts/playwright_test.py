@@ -73,7 +73,7 @@ with sync_playwright() as pw:
     time.sleep(5)
     shoot(page, '05_final')
 
-    # ── NEURAL mode: click ◈ NEURAL button and capture the 3D cow ─────────
+    # -- NEURAL mode: click ◈ NEURAL button and capture the 3D cow ---------
     print('\nSwitching to NEURAL mode...')
     neural_btn = page.query_selector('#neural-btn')
     if neural_btn:

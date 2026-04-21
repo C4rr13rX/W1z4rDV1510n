@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-build_language_corpus.py — Language, literature and technical documentation corpus
+build_language_corpus.py -- Language, literature and technical documentation corpus
 
 Stages:
-  18 — Project Gutenberg: literature, philosophy, science, math history
-  19 — Wikibooks: computing, programming, science textbooks
-  20 — MDN Web Docs: HTML/CSS/JavaScript reference (CC BY-SA)
-  21 — Rust Book + Go Tour + Python Tutorial (official, MIT/open)
-  22 — IETF RFCs: HTTP, TLS, WebSocket, TCP/IP, web standards
+  18 -- Project Gutenberg: literature, philosophy, science, math history
+  19 -- Wikibooks: computing, programming, science textbooks
+  20 -- MDN Web Docs: HTML/CSS/JavaScript reference (CC BY-SA)
+  21 -- Rust Book + Go Tour + Python Tutorial (official, MIT/open)
+  22 -- IETF RFCs: HTTP, TLS, WebSocket, TCP/IP, web standards
 
-All sources are free/open-licensed. No untested code is trained —
+All sources are free/open-licensed. No untested code is trained --
 code blocks from docs are labeled as examples, not verified executables.
 
 Usage:
@@ -31,7 +31,7 @@ STAGES = {
     22: 'IETF RFCs: HTTP, TLS, WebSocket, TCP/IP, DNS, OAuth',
 }
 
-# ── HTTP helpers ───────────────────────────────────────────────────────────────
+# -- HTTP helpers ---------------------------------------------------------------
 
 def _get(url: str, timeout=20, retries=3) -> bytes | None:
     headers = {'User-Agent': 'W1z4rDV1510n-training/1.0 (educational corpus builder)'}
@@ -87,11 +87,11 @@ def _train_text(text: str, node: str):
         r.read()
 
 
-# ── Stage 18: Project Gutenberg ───────────────────────────────────────────────
+# -- Stage 18: Project Gutenberg -----------------------------------------------
 
 # Categories to pull from Gutendex (free Project Gutenberg API)
 GUTENBERG_SEARCHES = [
-    ('philosophy',          30, 'Philosophy and logic — classical texts'),
+    ('philosophy',          30, 'Philosophy and logic -- classical texts'),
     ('mathematics',         20, 'Mathematics history and foundations'),
     ('physics',             15, 'Classical physics texts'),
     ('astronomy',           10, 'Astronomy and cosmology'),
@@ -171,7 +171,7 @@ def build_gutenberg_corpus(node: str, args):
                 if not raw or len(raw) < 500:
                     continue
                 passages = _extract_gutenberg_passages(raw, max_chars=args.gutenberg_chars)
-                header = f'Project Gutenberg text — "{title}" by {authors}. Category: {label}.\n\n'
+                header = f'Project Gutenberg text -- "{title}" by {authors}. Category: {label}.\n\n'
                 for passage in passages[:args.gutenberg_passages]:
                     try:
                         _train_text(header + passage, node)
@@ -179,17 +179,17 @@ def build_gutenberg_corpus(node: str, args):
                     except Exception as e:
                         print(f'    [WARN] train failed: {e}')
                 fetched += 1
-                print(f'    [{fetched}/{max_books}] {title[:60]} — {len(passages)} passages')
+                print(f'    [{fetched}/{max_books}] {title[:60]} -- {len(passages)} passages')
                 time.sleep(0.5)
             if not data.get('next'):
                 break
             page += 1
             time.sleep(0.3)
 
-    print(f'  Stage 18 done — {trained} passages trained from {len(seen_ids)} books')
+    print(f'  Stage 18 done -- {trained} passages trained from {len(seen_ids)} books')
 
 
-# ── Stage 19: Wikibooks ────────────────────────────────────────────────────────
+# -- Stage 19: Wikibooks --------------------------------------------------------
 
 WIKIBOOKS_TITLES = [
     # Programming languages
@@ -252,7 +252,7 @@ def build_wikibooks_corpus(node: str, args):
             continue
         # Split into ~1000-char chunks
         chunks = [text[i:i+1200] for i in range(0, min(len(text), args.wikibooks_chars), 1200)]
-        header = f'Wikibooks — "{title}". Free educational textbook.\n\n'
+        header = f'Wikibooks -- "{title}". Free educational textbook.\n\n'
         count = 0
         for chunk in chunks:
             if len(chunk.strip()) < 100:
@@ -265,10 +265,10 @@ def build_wikibooks_corpus(node: str, args):
                 print(f'  [WARN] {e}')
         print(f'  {title[:55]}: {count} chunks')
         time.sleep(0.4)
-    print(f'  Stage 19 done — {trained} chunks trained')
+    print(f'  Stage 19 done -- {trained} chunks trained')
 
 
-# ── Stage 20: MDN Web Docs ─────────────────────────────────────────────────────
+# -- Stage 20: MDN Web Docs -----------------------------------------------------
 
 # Popular CSS properties to document
 CSS_PROPERTIES = [
@@ -381,7 +381,7 @@ def build_mdn_corpus(node: str, args):
         if text:
             try:
                 _train_text(
-                    f'MDN Web Docs — CSS property: {prop}.\n'
+                    f'MDN Web Docs -- CSS property: {prop}.\n'
                     f'Source: developer.mozilla.org (CC BY-SA 2.5)\n\n{text[:2000]}',
                     node
                 )
@@ -397,7 +397,7 @@ def build_mdn_corpus(node: str, args):
         if text:
             try:
                 _train_text(
-                    f'MDN Web Docs — HTML element: <{elem}>.\n'
+                    f'MDN Web Docs -- HTML element: <{elem}>.\n'
                     f'Source: developer.mozilla.org (CC BY-SA 2.5)\n\n{text[:2000]}',
                     node
                 )
@@ -416,7 +416,7 @@ def build_mdn_corpus(node: str, args):
             try:
                 name = topic.split('/')[-1].replace('_', ' ')
                 _train_text(
-                    f'MDN Web Docs — JavaScript: {name}.\n'
+                    f'MDN Web Docs -- JavaScript: {name}.\n'
                     f'Source: developer.mozilla.org (CC BY-SA 2.5)\n\n{text[:2000]}',
                     node
                 )
@@ -426,10 +426,10 @@ def build_mdn_corpus(node: str, args):
         time.sleep(0.3)
     print(f'  JS: {len(JS_TOPICS)} topics processed')
 
-    print(f'  Stage 20 done — {trained} MDN pages trained')
+    print(f'  Stage 20 done -- {trained} MDN pages trained')
 
 
-# ── Stage 21: Official language docs ──────────────────────────────────────────
+# -- Stage 21: Official language docs ------------------------------------------
 
 # Rust Book chapters (GitHub raw)
 RUST_BOOK_CHAPTERS = [
@@ -570,7 +570,7 @@ def build_official_docs_corpus(node: str, args):
                 continue
             try:
                 _train_text(
-                    f'Effective Go — idiomatic Go programming guide (go.dev, BSD).\n\n{chunk.strip()}',
+                    f'Effective Go -- idiomatic Go programming guide (go.dev, BSD).\n\n{chunk.strip()}',
                     node
                 )
                 trained += 1
@@ -600,7 +600,7 @@ def build_official_docs_corpus(node: str, args):
         if len(clean) > 500:
             try:
                 _train_text(
-                    f'MDN JavaScript Guide — {section.replace("_", " ")} '
+                    f'MDN JavaScript Guide -- {section.replace("_", " ")} '
                     f'(developer.mozilla.org, CC BY-SA 2.5).\n\n{clean[200:3000]}',
                     node
                 )
@@ -609,10 +609,10 @@ def build_official_docs_corpus(node: str, args):
                 print(f'  [WARN] {e}')
         time.sleep(0.4)
 
-    print(f'  Stage 21 done — {trained} doc sections trained')
+    print(f'  Stage 21 done -- {trained} doc sections trained')
 
 
-# ── Stage 22: IETF RFCs ────────────────────────────────────────────────────────
+# -- Stage 22: IETF RFCs --------------------------------------------------------
 
 RFC_LIST = [
     # HTTP
@@ -699,7 +699,7 @@ def build_rfc_corpus(node: str, args):
                 continue
             try:
                 _train_text(
-                    f'IETF RFC {rfc_num} — {title}.\n'
+                    f'IETF RFC {rfc_num} -- {title}.\n'
                     f'Source: rfc-editor.org (public domain)\n\n{section.strip()}',
                     node
                 )
@@ -709,10 +709,10 @@ def build_rfc_corpus(node: str, args):
         print(f'  RFC {rfc_num} ({title[:40]}): {len(sections)} sections')
         time.sleep(0.5)
 
-    print(f'  Stage 22 done — {trained} RFC sections trained')
+    print(f'  Stage 22 done -- {trained} RFC sections trained')
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description='Build language + docs corpus')
@@ -730,7 +730,7 @@ def main():
     node   = args.node
 
     print('=' * 70)
-    print('  W1z4rD V1510n — Language + Documentation Corpus Builder')
+    print('  W1z4rD V1510n -- Language + Documentation Corpus Builder')
     print('=' * 70)
     print(f'  Node:    http://{node}')
     print(f'  Stages:  {stages}')

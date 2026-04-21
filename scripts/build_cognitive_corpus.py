@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-build_cognitive_corpus.py — Stages 27 & 28
+build_cognitive_corpus.py -- Stages 27 & 28
 
-Stage 27 — Cognitive / IQ / logical reasoning
-  • Hand-crafted corpus: number sequences, analogies, syllogisms, logic
+Stage 27 -- Cognitive / IQ / logical reasoning
+  * Hand-crafted corpus: number sequences, analogies, syllogisms, logic
     puzzles, spatial reasoning, lateral thinking, critical thinking
-  • OEIS API: top integer sequences with descriptions and formulas
-  • Wikipedia: articles on reasoning, logic, cognitive biases, heuristics
+  * OEIS API: top integer sequences with descriptions and formulas
+  * Wikipedia: articles on reasoning, logic, cognitive biases, heuristics
 
-Stage 28 — Sorting & searching algorithms
-  • Every major sorting algorithm: description, step-by-step walkthrough,
+Stage 28 -- Sorting & searching algorithms
+  * Every major sorting algorithm: description, step-by-step walkthrough,
     complexity analysis, stability/in-place/adaptive properties, when to
     use vs avoid, interview Q&A
-  • Implementations in Python, C++, and Rust for each algorithm
-  • Searching algorithms: binary search, interpolation search, etc.
-  • Common interview patterns and pitfalls
+  * Implementations in Python, C++, and Rust for each algorithm
+  * Searching algorithms: binary search, interpolation search, etc.
+  * Common interview patterns and pitfalls
 
 Usage:
   python scripts/build_cognitive_corpus.py --node localhost:8090
@@ -32,11 +32,11 @@ DEFAULT_DATA_DIR = 'D:/w1z4rdv1510n-data'
 DEFAULT_NODE     = 'localhost:8090'
 UA = 'W1z4rDV1510n-Cognitive/1.0 (adamedsall@gmail.com; educational AI)'
 STAGES = {
-    27: 'Cognitive / IQ reasoning — sequences, logic, analogies, lateral thinking',
-    28: 'Sorting & searching algorithms — all major algorithms, multi-language impls',
+    27: 'Cognitive / IQ reasoning -- sequences, logic, analogies, lateral thinking',
+    28: 'Sorting & searching algorithms -- all major algorithms, multi-language impls',
 }
 
-# ── HTTP ───────────────────────────────────────────────────────────────────────
+# -- HTTP -----------------------------------------------------------------------
 
 def _make_session():
     s = requests.Session()
@@ -55,43 +55,43 @@ def _train(text, node, session):
         print(f'  [WARN] train: {e}', flush=True)
         return False
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STAGE 27 — COGNITIVE CORPUS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# STAGE 27 -- COGNITIVE CORPUS
+# ==============================================================================
 
 COGNITIVE_PROBLEMS = [
-    # ── Number sequences ──────────────────────────────────────────────────────
+    # -- Number sequences ------------------------------------------------------
     {
         'type': 'Number Sequence',
         'problem': 'What comes next: 2, 6, 12, 20, 30, 42, ?',
         'reasoning': (
-            'Examine first differences: 4, 6, 8, 10, 12 — increasing by 2 each time.\n'
+            'Examine first differences: 4, 6, 8, 10, 12 -- increasing by 2 each time.\n'
             'Second differences are constant: 2. This is a second-order arithmetic sequence.\n'
             'Next first difference: 12 + 2 = 14. Next term: 42 + 14 = 56.\n'
-            'Formula: n(n+1) for n=1,2,3... → 2,6,12,20,30,42,56. These are pronic (oblong) numbers.'
+            'Formula: n(n+1) for n=1,2,3... -> 2,6,12,20,30,42,56. These are pronic (oblong) numbers.'
         ),
         'answer': '56',
     },
     {
         'type': 'Number Sequence',
         'problem': 'What comes next: 1, 4, 9, 16, 25, 36, ?',
-        'reasoning': 'These are perfect squares: 1²=1, 2²=4, 3²=9, 4²=16, 5²=25, 6²=36, 7²=49.',
+        'reasoning': 'These are perfect squares: 1^2=1, 2^2=4, 3^2=9, 4^2=16, 5^2=25, 6^2=36, 7^2=49.',
         'answer': '49',
     },
     {
         'type': 'Number Sequence',
         'problem': 'What comes next: 3, 6, 11, 18, 27, 38, ?',
         'reasoning': (
-            'First differences: 3, 5, 7, 9, 11 — odd numbers increasing by 2.\n'
+            'First differences: 3, 5, 7, 9, 11 -- odd numbers increasing by 2.\n'
             'Next difference: 13. Next term: 38 + 13 = 51.\n'
-            'Formula: n² + 2 for n=1,2,3...'
+            'Formula: n^2 + 2 for n=1,2,3...'
         ),
         'answer': '51',
     },
     {
         'type': 'Number Sequence',
         'problem': 'What comes next: 1, 2, 4, 8, 16, 32, ?',
-        'reasoning': 'Powers of 2: each term multiplied by 2. 32 × 2 = 64.',
+        'reasoning': 'Powers of 2: each term multiplied by 2. 32 x 2 = 64.',
         'answer': '64',
     },
     {
@@ -99,7 +99,7 @@ COGNITIVE_PROBLEMS = [
         'problem': 'What comes next: 1, 1, 2, 3, 5, 8, 13, 21, ?',
         'reasoning': (
             'Fibonacci sequence: each term is the sum of the two preceding terms.\n'
-            '13 + 21 = 34. The ratio of consecutive terms converges to φ ≈ 1.618 (golden ratio).'
+            '13 + 21 = 34. The ratio of consecutive terms converges to φ ~= 1.618 (golden ratio).'
         ),
         'answer': '34',
     },
@@ -114,14 +114,14 @@ COGNITIVE_PROBLEMS = [
         'problem': 'What comes next: 1, 3, 6, 10, 15, 21, 28, ?',
         'reasoning': (
             'Triangular numbers: T(n) = n(n+1)/2. Differences: 2,3,4,5,6,7,8.\n'
-            'T(8) = 8×9/2 = 36. These count objects arranged in equilateral triangles.'
+            'T(8) = 8x9/2 = 36. These count objects arranged in equilateral triangles.'
         ),
         'answer': '36',
     },
     {
         'type': 'Number Sequence',
         'problem': 'What comes next: 1, 8, 27, 64, 125, 216, ?',
-        'reasoning': 'Perfect cubes: 1³=1, 2³=8, 3³=27, 4³=64, 5³=125, 6³=216, 7³=343.',
+        'reasoning': 'Perfect cubes: 1^3=1, 2^3=8, 3^3=27, 4^3=64, 5^3=125, 6^3=216, 7^3=343.',
         'answer': '343',
     },
     {
@@ -129,7 +129,7 @@ COGNITIVE_PROBLEMS = [
         'problem': 'What comes next: 0, 1, 3, 7, 15, 31, 63, ?',
         'reasoning': (
             'Each term = 2^n - 1 for n=0,1,2,3... Or: double previous term and add 1.\n'
-            '63×2+1=127. These are Mersenne numbers: 2^7-1=127.'
+            '63x2+1=127. These are Mersenne numbers: 2^7-1=127.'
         ),
         'answer': '127',
     },
@@ -143,8 +143,8 @@ COGNITIVE_PROBLEMS = [
         'type': 'Number Sequence',
         'problem': 'What comes next: 4, 7, 12, 19, 28, 39, ?',
         'reasoning': (
-            'First differences: 3, 5, 7, 9, 11 — odd numbers.\n'
-            'Next difference: 13. 39 + 13 = 52. Formula: n² + 3.'
+            'First differences: 3, 5, 7, 9, 11 -- odd numbers.\n'
+            'Next difference: 13. 39 + 13 = 52. Formula: n^2 + 3.'
         ),
         'answer': '52',
     },
@@ -154,11 +154,11 @@ COGNITIVE_PROBLEMS = [
         'reasoning': 'Each term divided by 2 (geometric sequence, ratio 1/2). 6.25 / 2 = 3.125.',
         'answer': '3.125',
     },
-    # ── Verbal Analogies ──────────────────────────────────────────────────────
+    # -- Verbal Analogies ------------------------------------------------------
     {
         'type': 'Verbal Analogy',
         'problem': 'Doctor : Hospital :: Teacher : ?',
-        'reasoning': 'A doctor works in a hospital. A teacher works in a school. Relationship: professional → workplace.',
+        'reasoning': 'A doctor works in a hospital. A teacher works in a school. Relationship: professional -> workplace.',
         'answer': 'School',
     },
     {
@@ -170,7 +170,7 @@ COGNITIVE_PROBLEMS = [
     {
         'type': 'Verbal Analogy',
         'problem': 'Glove : Hand :: Shoe : ?',
-        'reasoning': 'A glove covers a hand. A shoe covers a foot. Relationship: covering → body part.',
+        'reasoning': 'A glove covers a hand. A shoe covers a foot. Relationship: covering -> body part.',
         'answer': 'Foot',
     },
     {
@@ -197,14 +197,14 @@ COGNITIVE_PROBLEMS = [
         'reasoning': 'Books are stored in a library. Paintings are stored in a gallery/museum.',
         'answer': 'Gallery / Museum',
     },
-    # ── Logical Deduction / Syllogisms ────────────────────────────────────────
+    # -- Logical Deduction / Syllogisms ----------------------------------------
     {
         'type': 'Syllogism',
         'problem': 'All mammals are warm-blooded. Whales are mammals. Therefore?',
         'reasoning': (
             'Valid syllogism (Barbara form: All M are P; All S are M; Therefore All S are P).\n'
-            'Premise 1: All mammals → warm-blooded.\n'
-            'Premise 2: Whales → mammals.\n'
+            'Premise 1: All mammals -> warm-blooded.\n'
+            'Premise 2: Whales -> mammals.\n'
             'Conclusion follows necessarily: whales are warm-blooded.'
         ),
         'answer': 'Whales are warm-blooded.',
@@ -214,7 +214,7 @@ COGNITIVE_PROBLEMS = [
         'problem': 'Some doctors are musicians. All musicians are creative. What can we conclude?',
         'reasoning': (
             'Premise 1: Some doctors are musicians (partial overlap).\n'
-            'Premise 2: All musicians → creative.\n'
+            'Premise 2: All musicians -> creative.\n'
             'Since SOME doctors are musicians, those doctors are creative.\n'
             'Conclusion: Some doctors are creative. (Cannot say ALL doctors are creative.)'
         ),
@@ -226,7 +226,7 @@ COGNITIVE_PROBLEMS = [
         'reasoning': (
             'Premise 1: No reptiles have fur.\n'
             'Premise 2: All snakes are reptiles.\n'
-            'If X is a snake → X is a reptile → X has no fur.\n'
+            'If X is a snake -> X is a reptile -> X has no fur.\n'
             'Conclusion: No snakes have fur.'
         ),
         'answer': 'No snakes have fur.',
@@ -234,18 +234,18 @@ COGNITIVE_PROBLEMS = [
     {
         'type': 'Logic Puzzle',
         'problem': (
-            'Three friends — Alice, Bob, Carol — each like a different sport: '
+            'Three friends -- Alice, Bob, Carol -- each like a different sport: '
             'tennis, swimming, cycling. Alice does not like tennis. '
             'Bob does not like swimming or cycling. Who likes what?'
         ),
         'reasoning': (
-            'Step 1: Bob does not like swimming or cycling → Bob likes tennis.\n'
+            'Step 1: Bob does not like swimming or cycling -> Bob likes tennis.\n'
             'Step 2: Alice does not like tennis (given), and tennis is taken by Bob.\n'
             '        Alice likes swimming or cycling.\n'
             'Step 3: Carol gets whichever Alice does not take. No more constraints, '
             '        so Alice could like swimming or cycling. But since no further '
             '        distinction is given, both are valid unless another clue exists.\n'
-            'Definite: Bob → tennis. Alice and Carol split swimming and cycling.'
+            'Definite: Bob -> tennis. Alice and Carol split swimming and cycling.'
         ),
         'answer': 'Bob: tennis. Alice and Carol: one each takes swimming and cycling.',
     },
@@ -257,9 +257,9 @@ COGNITIVE_PROBLEMS = [
         ),
         'reasoning': (
             'Assume A is a knight (tells truth). Statement "at least one of us is a knave" '
-            'would be true → B is a knave. Consistent.\n'
-            'Assume A is a knave (lies). Statement would be false → neither is a knave, '
-            'but A is a knave — contradiction.\n'
+            'would be true -> B is a knave. Consistent.\n'
+            'Assume A is a knave (lies). Statement would be false -> neither is a knave, '
+            'but A is a knave -- contradiction.\n'
             'Therefore A is a knight (truth-teller) and B is a knave.'
         ),
         'answer': 'A is a knight; B is a knave.',
@@ -275,7 +275,7 @@ COGNITIVE_PROBLEMS = [
         'reasoning': (
             'Constraint: blue is first (position 1).\n'
             'Constraint: red is middle (position 3).\n'
-            'Constraint: green is immediately left of white → green-white are consecutive.\n'
+            'Constraint: green is immediately left of white -> green-white are consecutive.\n'
             'Positions 1=blue, 3=red. Remaining: 2,4,5 for yellow, green, white.\n'
             'Green-white must be consecutive: options are (2,3), (3,4), or (4,5).\n'
             '(2,3) fails because 3=red. (3,4) fails same reason.\n'
@@ -284,23 +284,23 @@ COGNITIVE_PROBLEMS = [
         ),
         'answer': 'Blue, Yellow, Red, Green, White.',
     },
-    # ── Matrix / Pattern Completion ────────────────────────────────────────────
+    # -- Matrix / Pattern Completion --------------------------------------------
     {
         'type': 'Matrix Pattern',
         'problem': (
-            'In a 3×3 matrix:\n'
+            'In a 3x3 matrix:\n'
             'Row 1: ○ □ △\n'
-            'Row 2: ●  ■ ▲\n'
-            'Row 3: ○ ■ ?\n'
+            'Row 2: *  # ▲\n'
+            'Row 3: ○ # ?\n'
             'What fills the ?'
         ),
         'reasoning': (
-            'Column pattern: col 1 alternates hollow/filled: ○●○ → hollow.\n'
-            'Column pattern: col 2: □■■ → filled.\n'
-            'Column pattern: col 3: △▲? — follows filled/hollow rule from column.\n'
-            'Row pattern: row 3 has hollow ○ and filled ■ → mix.\n'
+            'Column pattern: col 1 alternates hollow/filled: ○*○ -> hollow.\n'
+            'Column pattern: col 2: □## -> filled.\n'
+            'Column pattern: col 3: △▲? -- follows filled/hollow rule from column.\n'
+            'Row pattern: row 3 has hollow ○ and filled # -> mix.\n'
             'Shape rule: col 3 has triangle. Shape stays, fill toggles between rows.\n'
-            'Row 1: △ hollow; Row 2: ▲ filled; Row 3 col 1 is hollow again → △ hollow.'
+            'Row 1: △ hollow; Row 2: ▲ filled; Row 3 col 1 is hollow again -> △ hollow.'
         ),
         'answer': '△ (hollow triangle)',
     },
@@ -313,9 +313,9 @@ COGNITIVE_PROBLEMS = [
             '| 4  16  ? |'
         ),
         'reasoning': (
-            'Row 1: 2, 2², 2³ — powers of the row-start value.\n'
-            'Row 2: 3, 3², 3³ — same pattern.\n'
-            'Row 3: 4, 4², 4³ = 4, 16, 64.\n'
+            'Row 1: 2, 2^2, 2^3 -- powers of the row-start value.\n'
+            'Row 2: 3, 3^2, 3^3 -- same pattern.\n'
+            'Row 3: 4, 4^2, 4^3 = 4, 16, 64.\n'
             'Pattern: column n contains the row-start raised to power n.'
         ),
         'answer': '64',
@@ -329,23 +329,23 @@ COGNITIVE_PROBLEMS = [
         ),
         'reasoning': (
             'Row differences: all rows differ by +4 across columns.\n'
-            'Column differences: col 1: 6,15,28 → diff 9,13 → diff of diffs = 4.\n'
-            'Col 2: 10,19,? → same pattern → diff 9, then 13 → 19+13=32.'
+            'Column differences: col 1: 6,15,28 -> diff 9,13 -> diff of diffs = 4.\n'
+            'Col 2: 10,19,? -> same pattern -> diff 9, then 13 -> 19+13=32.'
         ),
         'answer': '32',
     },
-    # ── Spatial Reasoning ─────────────────────────────────────────────────────
+    # -- Spatial Reasoning -----------------------------------------------------
     {
         'type': 'Spatial Reasoning',
         'problem': (
             'A cube has each face painted a different color: red (top), blue (bottom), '
             'green (front), yellow (back), orange (left), white (right). '
-            'If you rotate the cube 90° to the right (right face goes down), '
+            'If you rotate the cube 90deg to the right (right face goes down), '
             'which color is now on top?'
         ),
         'reasoning': (
             'Start: top=red, bottom=blue, front=green, back=yellow, left=orange, right=white.\n'
-            'Rotation 90° right means the right face goes down, left goes up.\n'
+            'Rotation 90deg right means the right face goes down, left goes up.\n'
             'New positions: top=orange (was left), bottom=white (was right), '
             'left=blue (was bottom), right=red (was top).\n'
             'Front and back unchanged: front=green, back=yellow.'
@@ -355,33 +355,33 @@ COGNITIVE_PROBLEMS = [
     {
         'type': 'Spatial Reasoning',
         'problem': (
-            'How many cubes are needed to build a 4×4×4 solid cube? '
+            'How many cubes are needed to build a 4x4x4 solid cube? '
             'If the outside is painted, how many small cubes have exactly two painted faces?'
         ),
         'reasoning': (
-            'Total cubes: 4×4×4 = 64.\n'
+            'Total cubes: 4x4x4 = 64.\n'
             'Two painted faces = edge cubes (not corners, not face-only).\n'
-            'Edges of a cube: 12 edges × (4-2) interior cubes per edge = 12×2 = 24.\n'
+            'Edges of a cube: 12 edges x (4-2) interior cubes per edge = 12x2 = 24.\n'
             '(Subtract 2 from each edge for the corner cubes shared between 3 faces.)'
         ),
         'answer': '64 total; 24 with exactly 2 painted faces.',
     },
-    # ── Probability & Combinatorics ───────────────────────────────────────────
+    # -- Probability & Combinatorics -------------------------------------------
     {
         'type': 'Probability',
         'problem': 'A bag has 3 red and 5 blue marbles. Two drawn without replacement. P(both red)?',
         'reasoning': (
             'P(first red) = 3/8.\n'
             'P(second red | first red) = 2/7 (one fewer red, one fewer total).\n'
-            'P(both red) = (3/8) × (2/7) = 6/56 = 3/28 ≈ 0.107.'
+            'P(both red) = (3/8) x (2/7) = 6/56 = 3/28 ~= 0.107.'
         ),
-        'answer': '3/28 ≈ 10.7%',
+        'answer': '3/28 ~= 10.7%',
     },
     {
         'type': 'Combinatorics',
         'problem': 'How many ways to arrange the letters in MENSA?',
         'reasoning': (
-            'MENSA has 5 distinct letters. Number of arrangements = 5! = 5×4×3×2×1 = 120.\n'
+            'MENSA has 5 distinct letters. Number of arrangements = 5! = 5x4x3x2x1 = 120.\n'
             'If letters repeated, divide by factorial of repeat count (none here).'
         ),
         'answer': '120',
@@ -390,9 +390,9 @@ COGNITIVE_PROBLEMS = [
         'type': 'Probability',
         'problem': 'Two fair dice rolled. P(sum = 7)?',
         'reasoning': (
-            'Total outcomes: 6×6 = 36.\n'
-            'Pairs summing to 7: (1,6),(2,5),(3,4),(4,3),(5,2),(6,1) — 6 pairs.\n'
-            'P(sum=7) = 6/36 = 1/6 ≈ 16.7%.'
+            'Total outcomes: 6x6 = 36.\n'
+            'Pairs summing to 7: (1,6),(2,5),(3,4),(4,3),(5,2),(6,1) -- 6 pairs.\n'
+            'P(sum=7) = 6/36 = 1/6 ~= 16.7%.'
         ),
         'answer': '1/6',
     },
@@ -400,24 +400,24 @@ COGNITIVE_PROBLEMS = [
         'type': 'Combinatorics',
         'problem': 'How many ways to choose 3 people from a group of 10?',
         'reasoning': (
-            'Combination (order does not matter): C(10,3) = 10! / (3! × 7!) = 120.\n'
-            'C(n,k) = n(n-1)(n-2).../ k! = (10×9×8)/(3×2×1) = 720/6 = 120.'
+            'Combination (order does not matter): C(10,3) = 10! / (3! x 7!) = 120.\n'
+            'C(n,k) = n(n-1)(n-2).../ k! = (10x9x8)/(3x2x1) = 720/6 = 120.'
         ),
         'answer': '120',
     },
-    # ── Lateral Thinking ──────────────────────────────────────────────────────
+    # -- Lateral Thinking ------------------------------------------------------
     {
         'type': 'Lateral Thinking',
         'problem': 'A man walks into a restaurant and orders albatross soup. After one sip he goes home and kills himself. Why?',
         'reasoning': (
             'He was shipwrecked with his wife. She died. His companion told him he was eating '
-            '"albatross soup" — but it was actually his wife\'s flesh. When he tasted real '
+            '"albatross soup" -- but it was actually his wife\'s flesh. When he tasted real '
             'albatross soup in the restaurant, he realized what he had really eaten before, '
             'overwhelming him with guilt.'
         ),
         'answer': (
             'He realized the "albatross soup" he ate during the shipwreck was not '
-            'actually albatross — it was his deceased wife. The guilt was unbearable.'
+            'actually albatross -- it was his deceased wife. The guilt was unbearable.'
         ),
     },
     {
@@ -433,9 +433,9 @@ COGNITIVE_PROBLEMS = [
         'type': 'Lateral Thinking',
         'problem': 'How can you drop a raw egg onto a concrete floor without breaking it?',
         'reasoning': 'Concrete floors are very hard. A raw egg will not break the concrete floor.',
-        'answer': 'Drop it — concrete floors are very hard and will not break from an egg.',
+        'answer': 'Drop it -- concrete floors are very hard and will not break from an egg.',
     },
-    # ── Mathematical Reasoning ────────────────────────────────────────────────
+    # -- Mathematical Reasoning ------------------------------------------------
     {
         'type': 'Mathematical Reasoning',
         'problem': (
@@ -443,8 +443,8 @@ COGNITIVE_PROBLEMS = [
         ),
         'reasoning': (
             'Total distance to clear platform = train length + platform length = 200+400=600 m.\n'
-            'Speed = 60 km/h = 60×1000/3600 = 16.67 m/s.\n'
-            'Time = distance/speed = 600/16.67 ≈ 36 seconds.'
+            'Speed = 60 km/h = 60x1000/3600 = 16.67 m/s.\n'
+            'Time = distance/speed = 600/16.67 ~= 36 seconds.'
         ),
         'answer': '36 seconds',
     },
@@ -452,11 +452,11 @@ COGNITIVE_PROBLEMS = [
         'type': 'Mathematical Reasoning',
         'problem': 'A clock reads 3:00. What is the angle between the hour and minute hands?',
         'reasoning': (
-            'The clock face is 360°, divided into 12 hours = 30° per hour.\n'
-            'At 3:00: minute hand at 12 (0°), hour hand at 3 (90°).\n'
-            'Angle between them = 90°.'
+            'The clock face is 360deg, divided into 12 hours = 30deg per hour.\n'
+            'At 3:00: minute hand at 12 (0deg), hour hand at 3 (90deg).\n'
+            'Angle between them = 90deg.'
         ),
-        'answer': '90°',
+        'answer': '90deg',
     },
     {
         'type': 'Mathematical Reasoning',
@@ -475,16 +475,16 @@ COGNITIVE_PROBLEMS = [
         'reasoning': (
             'Divide into groups of 4-4-4.\n'
             'Weigh group 1 vs group 2:\n'
-            '  If balanced → heavy coin in group 3. Weigh 2 from group 3 vs 2 others.\n'
-            '  If unbalanced → heavy coin in heavier group of 4.\n'
+            '  If balanced -> heavy coin in group 3. Weigh 2 from group 3 vs 2 others.\n'
+            '  If unbalanced -> heavy coin in heavier group of 4.\n'
             'Subdivide the suspect group of 4 into 2-2, weigh them. '
             'The heavier side has 2 suspects.\n'
-            'Weigh the 2 suspects against each other → heavier one found.\n'
-            '3 weighings total: log₃(12) ≈ 2.26 → 3 is sufficient.'
+            'Weigh the 2 suspects against each other -> heavier one found.\n'
+            '3 weighings total: log₃(12) ~= 2.26 -> 3 is sufficient.'
         ),
         'answer': '3 weighings using divide-by-3 strategy.',
     },
-    # ── Critical Thinking / Argument Analysis ─────────────────────────────────
+    # -- Critical Thinking / Argument Analysis ---------------------------------
     {
         'type': 'Critical Thinking',
         'problem': (
@@ -492,7 +492,7 @@ COGNITIVE_PROBLEMS = [
             'My umbrella must prevent rain." Identify the flaw.'
         ),
         'reasoning': (
-            'Flaw: Post hoc ergo propter hoc (correlation ≠ causation).\n'
+            'Flaw: Post hoc ergo propter hoc (correlation != causation).\n'
             'The person carries an umbrella BECAUSE rain is likely. When they carry it '
             'and it does not rain, that is coincidence or selection bias (they perhaps '
             'carry it less on clearly sunny days). The umbrella has no causal power over weather.'
@@ -508,7 +508,7 @@ COGNITIVE_PROBLEMS = [
         'reasoning': (
             'False dilemma / false dichotomy: assumes only two options exist (their product or ours). '
             'There may be many other competitors. Also a non sequitur: competitor failure does not '
-            'establish that your product is the BEST — only that theirs failed.'
+            'establish that your product is the BEST -- only that theirs failed.'
         ),
         'answer': 'False dilemma (false dichotomy) and non sequitur.',
     },
@@ -521,7 +521,7 @@ COGNITIVE_WIKI_TOPICS = [
     'Lateral_thinking', 'Critical_thinking', 'Abstract_reasoning',
     'Working_memory', 'Fluid_and_crystallized_intelligence',
     'IQ_classification', 'Mensa_International',
-    'Dunning–Kruger_effect', 'Occam\'s_razor',
+    'Dunning-Kruger_effect', 'Occam\'s_razor',
     'Game_theory', 'Decision_theory', 'Bayesian_inference',
     'Mathematical_puzzle', 'Logic_puzzle', 'Brain_teaser',
 ]
@@ -580,7 +580,7 @@ def build_cognitive(out_dir: Path, node: str) -> list:
     print(f'  Cognitive: {len(COGNITIVE_PROBLEMS)} hand-crafted problems', flush=True)
     for p in COGNITIVE_PROBLEMS:
         text = (
-            f'Cognitive reasoning — {p["type"]}\n\n'
+            f'Cognitive reasoning -- {p["type"]}\n\n'
             f'Problem: {p["problem"]}\n\n'
             f'Step-by-step reasoning:\n{p["reasoning"]}\n\n'
             f'Answer: {p["answer"]}'
@@ -594,7 +594,7 @@ def build_cognitive(out_dir: Path, node: str) -> list:
     for title in COGNITIVE_WIKI_TOPICS:
         extract = _wiki_text(title, session)
         if extract and len(extract) > 100:
-            text = f'Cognitive science / reasoning — {title.replace("_"," ")}\n\n{extract}'
+            text = f'Cognitive science / reasoning -- {title.replace("_"," ")}\n\n{extract}'
             if _train(text, node, session):
                 ok += 1
         time.sleep(0.15)
@@ -614,9 +614,9 @@ def build_cognitive(out_dir: Path, node: str) -> list:
     return items
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STAGE 28 — SORTING & ALGORITHMS CORPUS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# STAGE 28 -- SORTING & ALGORITHMS CORPUS
+# ==============================================================================
 
 SORTING_ALGORITHMS = [
     {
@@ -627,15 +627,15 @@ SORTING_ALGORITHMS = [
             'if they are in the wrong order. Each pass "bubbles" the largest unsorted element '
             'to its correct position at the end.'
         ),
-        'complexity': {'best': 'O(n)', 'average': 'O(n²)', 'worst': 'O(n²)', 'space': 'O(1)'},
+        'complexity': {'best': 'O(n)', 'average': 'O(n^2)', 'worst': 'O(n^2)', 'space': 'O(1)'},
         'properties': 'Stable: YES. In-place: YES. Adaptive: YES (O(n) when nearly sorted with early-exit).',
         'use_when': 'Nearly sorted data; teaching/demonstration; n < 20.',
         'avoid_when': 'Large datasets. Never use in production for n > 1000.',
         'walkthrough': (
             'Array: [5, 3, 1, 4, 2]\n'
-            'Pass 1: compare(5,3)→swap → [3,5,1,4,2]; compare(5,1)→swap → [3,1,5,4,2]; '
-            'compare(5,4)→swap → [3,1,4,5,2]; compare(5,2)→swap → [3,1,4,2,5]. Max(5) placed.\n'
-            'Pass 2: → [1,3,2,4,5] (4 placed).\n'
+            'Pass 1: compare(5,3)->swap -> [3,5,1,4,2]; compare(5,1)->swap -> [3,1,5,4,2]; '
+            'compare(5,4)->swap -> [3,1,4,5,2]; compare(5,2)->swap -> [3,1,4,2,5]. Max(5) placed.\n'
+            'Pass 2: -> [1,3,2,4,5] (4 placed).\n'
             'Continue until sorted: [1,2,3,4,5].'
         ),
         'python': '''\
@@ -647,7 +647,7 @@ def bubble_sort(arr):
             if arr[j] > arr[j + 1]:
                 arr[j], arr[j + 1] = arr[j + 1], arr[j]
                 swapped = True
-        if not swapped:   # already sorted — O(n) best case
+        if not swapped:   # already sorted -- O(n) best case
             break
     return arr''',
         'cpp': '''\
@@ -672,8 +672,8 @@ fn bubble_sort(arr: &mut Vec<i32>) {
     }
 }''',
         'interview': [
-            ('Why is bubble sort O(n) best case?', 'With the swapped flag, if no swaps occur in a pass, the array is sorted — we exit after one O(n) pass.'),
-            ('Is bubble sort stable?', 'Yes — it only swaps adjacent elements when a[j] > a[j+1], never when equal, preserving relative order.'),
+            ('Why is bubble sort O(n) best case?', 'With the swapped flag, if no swaps occur in a pass, the array is sorted -- we exit after one O(n) pass.'),
+            ('Is bubble sort stable?', 'Yes -- it only swaps adjacent elements when a[j] > a[j+1], never when equal, preserving relative order.'),
         ],
     },
     {
@@ -683,15 +683,15 @@ fn bubble_sort(arr: &mut Vec<i32>) {
             'Divides the array into a sorted and unsorted region. On each pass, finds the minimum '
             'element in the unsorted region and swaps it to the end of the sorted region.'
         ),
-        'complexity': {'best': 'O(n²)', 'average': 'O(n²)', 'worst': 'O(n²)', 'space': 'O(1)'},
+        'complexity': {'best': 'O(n^2)', 'average': 'O(n^2)', 'worst': 'O(n^2)', 'space': 'O(1)'},
         'properties': 'Stable: NO (standard version). In-place: YES. Adaptive: NO.',
-        'use_when': 'When writes are expensive (minimizes swaps — exactly n-1 swaps). Small arrays.',
+        'use_when': 'When writes are expensive (minimizes swaps -- exactly n-1 swaps). Small arrays.',
         'avoid_when': 'Large data; when stability required (use insertion sort instead).',
         'walkthrough': (
             'Array: [5, 3, 1, 4, 2]\n'
-            'Pass 1: min of [5,3,1,4,2]=1 at idx 2. Swap idx 0 and 2 → [1,3,5,4,2].\n'
-            'Pass 2: min of [3,5,4,2]=2 at idx 4. Swap idx 1 and 4 → [1,2,5,4,3].\n'
-            'Pass 3: min of [5,4,3]=3 at idx 4. Swap idx 2 and 4 → [1,2,3,4,5].\n'
+            'Pass 1: min of [5,3,1,4,2]=1 at idx 2. Swap idx 0 and 2 -> [1,3,5,4,2].\n'
+            'Pass 2: min of [3,5,4,2]=2 at idx 4. Swap idx 1 and 4 -> [1,2,5,4,3].\n'
+            'Pass 3: min of [5,4,3]=3 at idx 4. Swap idx 2 and 4 -> [1,2,3,4,5].\n'
             'Done in n-1=4 swaps.'
         ),
         'python': '''\
@@ -722,8 +722,8 @@ fn selection_sort(arr: &mut Vec<i32>) {
     }
 }''',
         'interview': [
-            ('Why is selection sort always O(n²)?', 'It always scans the entire remaining unsorted section to find the minimum, regardless of input order.'),
-            ('When would you choose selection sort over insertion sort?', 'When writes/swaps are very expensive — selection sort does at most n-1 swaps vs insertion sort\'s O(n²) shifts.'),
+            ('Why is selection sort always O(n^2)?', 'It always scans the entire remaining unsorted section to find the minimum, regardless of input order.'),
+            ('When would you choose selection sort over insertion sort?', 'When writes/swaps are very expensive -- selection sort does at most n-1 swaps vs insertion sort\'s O(n^2) shifts.'),
         ],
     },
     {
@@ -734,16 +734,16 @@ fn selection_sort(arr: &mut Vec<i32>) {
             'and inserting it at the correct position in the already-sorted prefix. '
             'Works like sorting a hand of playing cards.'
         ),
-        'complexity': {'best': 'O(n)', 'average': 'O(n²)', 'worst': 'O(n²)', 'space': 'O(1)'},
+        'complexity': {'best': 'O(n)', 'average': 'O(n^2)', 'worst': 'O(n^2)', 'space': 'O(1)'},
         'properties': 'Stable: YES. In-place: YES. Adaptive: YES (O(nk) for k inversions).',
         'use_when': 'Small arrays (n<50); nearly sorted data; online sorting (elements arrive one by one); as base case for hybrid sorts (Timsort).',
         'avoid_when': 'Large reverse-sorted arrays.',
         'walkthrough': (
             'Array: [5, 3, 1, 4, 2]\n'
-            'i=1: key=3. 5>3 → shift 5. Insert 3: [3,5,1,4,2].\n'
-            'i=2: key=1. 5>1,3>1 → shift both. Insert 1: [1,3,5,4,2].\n'
-            'i=3: key=4. 5>4 → shift. Insert 4: [1,3,4,5,2].\n'
-            'i=4: key=2. 5>2,4>2,3>2 → shift. Insert 2: [1,2,3,4,5].'
+            'i=1: key=3. 5>3 -> shift 5. Insert 3: [3,5,1,4,2].\n'
+            'i=2: key=1. 5>1,3>1 -> shift both. Insert 1: [1,3,5,4,2].\n'
+            'i=3: key=4. 5>4 -> shift. Insert 4: [1,3,4,5,2].\n'
+            'i=4: key=2. 5>2,4>2,3>2 -> shift. Insert 2: [1,2,3,4,5].'
         ),
         'python': '''\
 def insertion_sort(arr):
@@ -836,7 +836,7 @@ fn merge_sort(arr: &[i32]) -> Vec<i32> {
     res.extend_from_slice(&l[i..]); res.extend_from_slice(&r[j..]); res
 }''',
         'interview': [
-            ('Why is merge sort preferred for linked lists?', 'Linked list merge sort runs in O(1) extra space — pointer rewiring instead of copying. Array merge sort needs O(n).'),
+            ('Why is merge sort preferred for linked lists?', 'Linked list merge sort runs in O(1) extra space -- pointer rewiring instead of copying. Array merge sort needs O(n).'),
             ('What makes merge sort stable?', 'The merge step takes from the left half when left[i] == right[j] (using <=), preserving relative order.'),
             ('How do you sort a large file that does not fit in RAM?', 'External merge sort: split into sorted chunks, merge k-way. Classic algorithm for external storage.'),
         ],
@@ -849,10 +849,10 @@ fn merge_sort(arr: &[i32]) -> Vec<i32> {
             'before it and all greater after it, then recursively sorts both partitions. '
             'In-place and cache-friendly. Fastest in practice for most inputs.'
         ),
-        'complexity': {'best': 'O(n log n)', 'average': 'O(n log n)', 'worst': 'O(n²)', 'space': 'O(log n) stack'},
+        'complexity': {'best': 'O(n log n)', 'average': 'O(n log n)', 'worst': 'O(n^2)', 'space': 'O(log n) stack'},
         'properties': 'Stable: NO. In-place: YES. Adaptive: somewhat (degenerate on sorted input without randomization).',
         'use_when': 'General-purpose sorting. Best average performance. Cache-friendly. std::sort in most languages uses introsort (quicksort + heapsort + insertion sort).',
-        'avoid_when': 'When worst-case O(n²) is unacceptable (use introsort/heapsort). When stability required.',
+        'avoid_when': 'When worst-case O(n^2) is unacceptable (use introsort/heapsort). When stability required.',
         'walkthrough': (
             'Array: [3,6,8,10,1,2,1], pivot=last(1)\n'
             'Partition: elements < 1 go left, >= go right.\n'
@@ -903,7 +903,7 @@ fn partition(arr: &mut [i32]) -> usize {
     arr.swap(i, hi); i
 }''',
         'interview': [
-            ('How do you prevent quicksort O(n²) worst case?', 'Use random pivot selection or median-of-three pivot. Introsort switches to heapsort after depth exceeds 2·log(n).'),
+            ('How do you prevent quicksort O(n^2) worst case?', 'Use random pivot selection or median-of-three pivot. Introsort switches to heapsort after depth exceeds 2.log(n).'),
             ('Why is quicksort faster than merge sort in practice?', 'Better cache locality (in-place), smaller constant factors, and the average case is very close to O(n log n) with good pivot selection.'),
             ('What is Dutch National Flag partitioning (3-way quicksort)?', 'Handles many duplicate keys efficiently. Partitions into <pivot, ==pivot, >pivot regions. O(n) for all-equal arrays.'),
         ],
@@ -925,7 +925,7 @@ fn partition(arr: &mut [i32]) -> usize {
             'Build max-heap: [10, 5, 3, 4, 1]\n'
             'Extract max (10), swap with last: [1, 5, 3, 4, 10]. Heapify [1,5,3,4].\n'
             'Extract 5, swap: [4, 1, 3, 5, 10]. Heapify [4,1,3].\n'
-            'Extract 4: [3, 1, 4, 5, 10]. Continue → [1, 3, 4, 5, 10].'
+            'Extract 4: [3, 1, 4, 5, 10]. Continue -> [1, 3, 4, 5, 10].'
         ),
         'python': '''\
 def heapify(arr, n, i):
@@ -969,7 +969,7 @@ fn heap_sort(arr: &mut Vec<i32>) {
 }''',
         'interview': [
             ('Why is heap sort not cache-friendly?', 'Heap accesses jump between distant memory locations (parent/child relationships span the array), causing many cache misses vs quicksort\'s sequential access.'),
-            ('What is the time to build a heap?', 'O(n) — not O(n log n). Heapifying from n/2 down to 0 is linear because most nodes are near the bottom.'),
+            ('What is the time to build a heap?', 'O(n) -- not O(n log n). Heapifying from n/2 down to 0 is linear because most nodes are near the bottom.'),
         ],
     },
     {
@@ -986,7 +986,7 @@ fn heap_sort(arr: &mut Vec<i32>) {
         'use_when': 'This IS the sort for general-purpose use. Python built-in uses it.',
         'avoid_when': 'Embedded/memory-constrained (use introsort or heapsort). Pure performance in C++ (std::sort uses introsort).',
         'walkthrough': (
-            'minrun ≈ 32-64 (chosen so n/minrun is a power of 2).\n'
+            'minrun ~= 32-64 (chosen so n/minrun is a power of 2).\n'
             '1. Scan array for natural ascending/descending runs. Reverse descending runs.\n'
             '2. If run is shorter than minrun, extend with insertion sort.\n'
             '3. Push runs onto a stack. Merge adjacent runs when stack balance invariant violated.\n'
@@ -1012,10 +1012,10 @@ fn heap_sort(arr: &mut Vec<i32>) {
         ),
         'complexity': {'best': 'O(n+k)', 'average': 'O(n+k)', 'worst': 'O(n+k)', 'space': 'O(n+k)'},
         'properties': 'Stable: YES. In-place: NO. Non-comparison-based.',
-        'use_when': 'Integer data with small range k. Radix sort uses it as subroutine. k ≤ 10×n.',
+        'use_when': 'Integer data with small range k. Radix sort uses it as subroutine. k <= 10xn.',
         'avoid_when': 'Large range k (e.g. sorting 32-bit integers: k=4B). Non-integer data.',
         'walkthrough': (
-            'Array: [1, 3, 1, 2, 0, 3], k=4 (values 0–3)\n'
+            'Array: [1, 3, 1, 2, 0, 3], k=4 (values 0-3)\n'
             'Count: [1, 2, 1, 2] (index=value, value=count)\n'
             'Prefix sum: [1, 3, 4, 6]\n'
             'Place elements right-to-left: output[prefix[arr[i]]-1] = arr[i], decrement.\n'
@@ -1042,7 +1042,7 @@ vector<int> counting_sort(vector<int>& a, int k) {
 }''',
         'rust': '// Rust: use counting_sort for u8/u16 data; BTreeMap for generic integer sort',
         'interview': [
-            ('Why iterate right-to-left when placing elements?', 'It preserves stability — equal elements keep their original relative order from the input.'),
+            ('Why iterate right-to-left when placing elements?', 'It preserves stability -- equal elements keep their original relative order from the input.'),
             ('What is the relationship between counting sort and radix sort?', 'Radix sort uses counting sort as a stable subroutine, applying it digit by digit from least to most significant.'),
         ],
     },
@@ -1052,12 +1052,12 @@ vector<int> counting_sort(vector<int>& a, int k) {
         'description': (
             'Sorts integers digit by digit from least significant digit (LSD) to most '
             'significant digit (MSD), using a stable sort (counting sort) at each digit level. '
-            'O(d × n) where d is number of digits.'
+            'O(d x n) where d is number of digits.'
         ),
-        'complexity': {'best': 'O(d·n)', 'average': 'O(d·n)', 'worst': 'O(d·n)', 'space': 'O(n+b)'},
+        'complexity': {'best': 'O(d.n)', 'average': 'O(d.n)', 'worst': 'O(d.n)', 'space': 'O(n+b)'},
         'properties': 'Stable: YES. In-place: NO. Non-comparison-based.',
         'use_when': 'Fixed-width integers/strings. Sorting IP addresses, phone numbers, fixed-length codes. When d is small.',
-        'avoid_when': 'Floating point (complex digit extraction). Variable-length strings (use MSD radix). When d × n > n log n.',
+        'avoid_when': 'Floating point (complex digit extraction). Variable-length strings (use MSD radix). When d x n > n log n.',
         'walkthrough': (
             'Array: [170, 45, 75, 90, 802, 24, 2, 66]\n'
             'Sort by 1s digit: [170,90,802,2,24,45,75,66]\n'
@@ -1085,7 +1085,7 @@ def counting_sort_by_digit(arr, exp):
         'cpp': '// Similar to Python; use d passes of counting_sort on each digit position.',
         'rust': '// Rust: radix sort available in rdst crate. Manual impl uses counting sort per digit.',
         'interview': [
-            ('LSD vs MSD radix sort — what is the difference?', 'LSD (least significant digit first) is iterative, stable, simpler. MSD (most significant first) is recursive, can short-circuit early, natural for variable-length strings.'),
+            ('LSD vs MSD radix sort -- what is the difference?', 'LSD (least significant digit first) is iterative, stable, simpler. MSD (most significant first) is recursive, can short-circuit early, natural for variable-length strings.'),
         ],
     },
     {
@@ -1096,10 +1096,10 @@ def counting_sort_by_digit(arr, exp):
             '(typically with insertion sort), then concatenates. Works well for uniformly '
             'distributed floating-point data.'
         ),
-        'complexity': {'best': 'O(n+k)', 'average': 'O(n + n²/k + k)', 'worst': 'O(n²)', 'space': 'O(n+k)'},
+        'complexity': {'best': 'O(n+k)', 'average': 'O(n + n^2/k + k)', 'worst': 'O(n^2)', 'space': 'O(n+k)'},
         'properties': 'Stable: depends on sub-sort. In-place: NO.',
         'use_when': 'Uniform distribution over known range. Floating-point in [0,1). Parallel sort.',
-        'avoid_when': 'Skewed distributions (all elements in one bucket → O(n²)).',
+        'avoid_when': 'Skewed distributions (all elements in one bucket -> O(n^2)).',
         'walkthrough': (
             'Array: [0.78, 0.17, 0.39, 0.26, 0.72, 0.94, 0.21, 0.12, 0.23, 0.68]\n'
             'Create 10 buckets for [0,0.1), [0.1,0.2) ... [0.9,1.0)\n'
@@ -1120,7 +1120,7 @@ def bucket_sort(arr, k=10):
         'cpp': '// k buckets as vector<vector<double>>; sort each; concatenate.',
         'rust': '// Similar to Python; Vec<Vec<f64>> for buckets.',
         'interview': [
-            ('What is the average-case analysis of bucket sort?', 'With n elements and n buckets uniformly distributed, expected bucket size is 1 → insertion sort on each is O(1) → total O(n).'),
+            ('What is the average-case analysis of bucket sort?', 'With n elements and n buckets uniformly distributed, expected bucket size is 1 -> insertion sort on each is O(1) -> total O(n).'),
         ],
     },
     {
@@ -1131,14 +1131,14 @@ def bucket_sort(arr, k=10):
             'reducing the gap. Uses a sequence of decreasing gap sizes (e.g. n/2, n/4, ..., 1). '
             'Last pass is insertion sort on a nearly sorted array.'
         ),
-        'complexity': {'best': 'O(n log n)', 'average': 'O(n^1.5) or O(n log²n)', 'worst': 'O(n²)', 'space': 'O(1)'},
+        'complexity': {'best': 'O(n log n)', 'average': 'O(n^1.5) or O(n log^2n)', 'worst': 'O(n^2)', 'space': 'O(1)'},
         'properties': 'Stable: NO. In-place: YES. Adaptive: YES.',
-        'use_when': 'Medium-sized arrays (~1000–5000). Embedded without recursion. Simple implementation with decent performance.',
+        'use_when': 'Medium-sized arrays (~1000-5000). Embedded without recursion. Simple implementation with decent performance.',
         'avoid_when': 'Large n (use introsort/timsort). When exact complexity guarantees needed.',
         'walkthrough': (
             'Array: [8,7,6,5,4,3,2,1], gap=4\n'
-            'Sort pairs 4 apart: compare [8,4],[7,3],[6,2],[5,1] → swap all → [4,3,2,1,8,7,6,5]\n'
-            'gap=2: → [2,1,4,3,6,5,8,7] ... gap=1 (insertion sort): → [1,2,3,4,5,6,7,8]'
+            'Sort pairs 4 apart: compare [8,4],[7,3],[6,2],[5,1] -> swap all -> [4,3,2,1,8,7,6,5]\n'
+            'gap=2: -> [2,1,4,3,6,5,8,7] ... gap=1 (insertion sort): -> [1,2,3,4,5,6,7,8]'
         ),
         'python': '''\
 def shell_sort(arr):
@@ -1184,29 +1184,29 @@ SORTING ALGORITHM COMPARISON TABLE
 ===================================
 Algorithm      | Best      | Average   | Worst     | Space    | Stable | In-Place
 ---------------|-----------|-----------|-----------|----------|--------|----------
-Bubble Sort    | O(n)      | O(n²)     | O(n²)     | O(1)     | YES    | YES
-Selection Sort | O(n²)     | O(n²)     | O(n²)     | O(1)     | NO     | YES
-Insertion Sort | O(n)      | O(n²)     | O(n²)     | O(1)     | YES    | YES
-Shell Sort     | O(n log n)| O(n^1.5)  | O(n²)     | O(1)     | NO     | YES
+Bubble Sort    | O(n)      | O(n^2)     | O(n^2)     | O(1)     | YES    | YES
+Selection Sort | O(n^2)     | O(n^2)     | O(n^2)     | O(1)     | NO     | YES
+Insertion Sort | O(n)      | O(n^2)     | O(n^2)     | O(1)     | YES    | YES
+Shell Sort     | O(n log n)| O(n^1.5)  | O(n^2)     | O(1)     | NO     | YES
 Merge Sort     | O(n log n)| O(n log n)| O(n log n)| O(n)     | YES    | NO
-Quicksort      | O(n log n)| O(n log n)| O(n²)     | O(log n) | NO     | YES
+Quicksort      | O(n log n)| O(n log n)| O(n^2)     | O(log n) | NO     | YES
 Heap Sort      | O(n log n)| O(n log n)| O(n log n)| O(1)     | NO     | YES
 Timsort        | O(n)      | O(n log n)| O(n log n)| O(n)     | YES    | NO
 Counting Sort  | O(n+k)    | O(n+k)    | O(n+k)    | O(n+k)   | YES    | NO
-Radix Sort     | O(d·n)    | O(d·n)    | O(d·n)    | O(n+b)   | YES    | NO
-Bucket Sort    | O(n+k)    | O(n+k)    | O(n²)     | O(n+k)   | *      | NO
+Radix Sort     | O(d.n)    | O(d.n)    | O(d.n)    | O(n+b)   | YES    | NO
+Bucket Sort    | O(n+k)    | O(n+k)    | O(n^2)     | O(n+k)   | *      | NO
 
 DECISION GUIDE:
-  General purpose (unknown input):     → Timsort (Python) / Introsort (C++)
-  Need guaranteed O(n log n), O(1):    → Heap Sort
-  Need stable, guaranteed O(n log n):  → Merge Sort
-  Small array (n < 50):                → Insertion Sort
-  Integer data, small range:           → Counting Sort → Radix Sort
-  Uniform floats [0,1):                → Bucket Sort
-  Nearly sorted data:                  → Insertion Sort or Timsort
+  General purpose (unknown input):     -> Timsort (Python) / Introsort (C++)
+  Need guaranteed O(n log n), O(1):    -> Heap Sort
+  Need stable, guaranteed O(n log n):  -> Merge Sort
+  Small array (n < 50):                -> Insertion Sort
+  Integer data, small range:           -> Counting Sort -> Radix Sort
+  Uniform floats [0,1):                -> Bucket Sort
+  Nearly sorted data:                  -> Insertion Sort or Timsort
 
 LOWER BOUND: Any comparison-based sort requires Ω(n log n) comparisons.
-Proof: Decision tree has n! leaves (permutations); tree height ≥ log₂(n!) = Ω(n log n).
+Proof: Decision tree has n! leaves (permutations); tree height >= log₂(n!) = Ω(n log n).
 Non-comparison sorts (counting/radix/bucket) beat this by using numeric properties.
 """
 
@@ -1308,7 +1308,7 @@ def build_sorting(out_dir: Path, node: str) -> list:
         if r.ok:
             extract = r.json().get('extract', '')
             if extract:
-                if _train(f'Algorithms — {title.replace("_"," ")}\n\n{extract}', node, session):
+                if _train(f'Algorithms -- {title.replace("_"," ")}\n\n{extract}', node, session):
                     ok += 1
         time.sleep(0.15)
 
@@ -1318,7 +1318,7 @@ def build_sorting(out_dir: Path, node: str) -> list:
     return items
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description='Stages 27-28: Cognitive + Sorting corpus')
@@ -1330,7 +1330,7 @@ def main():
     stages    = {int(s.strip()) for s in args.stages.split(',')}
     train_dir = Path(args.data_dir) / 'training'
 
-    print('Cognitive + Sorting Corpus Builder — Stages 27/28')
+    print('Cognitive + Sorting Corpus Builder -- Stages 27/28')
     print(f'  Node   : {args.node}')
     print(f'  Stages : {sorted(stages)}')
 
@@ -1349,7 +1349,7 @@ def main():
     mpath = train_dir / 'stage27_28_manifest.json'
     mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    print(f'\nManifest → {mpath}')
+    print(f'\nManifest -> {mpath}')
 
 
 if __name__ == '__main__':

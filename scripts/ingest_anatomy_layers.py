@@ -5,12 +5,12 @@ Multi-scale anatomy ingestion for layered physiology demo.
 Ingests text describing a game console at 5 biological/physical scales,
 trains the neuro pool, then registers calibration scales via the API.
 
-Scales (outermost → deepest):
-  0  — phenotype  (whole device, ~30 cm)
-  1  — subsystem  (PCB/board level, ~10 cm)
-  2  — component  (chip/IC, ~1 cm)
-  3  — circuit    (transistor/gate, ~10 µm → 100 nm)
-  4  — atomic     (silicon lattice, ~0.5 nm)
+Scales (outermost -> deepest):
+  0  -- phenotype  (whole device, ~30 cm)
+  1  -- subsystem  (PCB/board level, ~10 cm)
+  2  -- component  (chip/IC, ~1 cm)
+  3  -- circuit    (transistor/gate, ~10 µm -> 100 nm)
+  4  -- atomic     (silicon lattice, ~0.5 nm)
 
 Usage:
   python scripts/ingest_anatomy_layers.py [--host 192.168.1.84] [--port 8090]
@@ -42,15 +42,15 @@ def get(host, port, path):
         print(f"  ERROR GET {path}: {e}")
         return {}
 
-# ── Scale-annotated training corpus ─────────────────────────────────────────
+# -- Scale-annotated training corpus -----------------------------------------
 # Each block has: title, text (rich prose), scale label, known_scale_m
 CORPUS = [
-    # ── Scale 0: phenotype (whole device) ───────────────────────────────────
+    # -- Scale 0: phenotype (whole device) -----------------------------------
     {
         "scale_label": "game_console",
         "known_scale_m": 0.30,
         "depth_hint": 0,
-        "title": "Game console — exterior design and housing",
+        "title": "Game console -- exterior design and housing",
         "text": """
 A gaming console is an electronic device designed to output a video signal or image
 to display a video game. The outer shell and housing is typically injection-molded
@@ -62,7 +62,7 @@ Rubber feet on the underside prevent sliding. The chassis holds all internal
 components in spatial alignment. Heat dissipation requires that the surface have
 carefully designed vent openings. The outer shell protects the circuit board from
 dust, moisture, and physical damage. The exterior is the primary phenotypic feature
-observed by the user — shape, color, surface texture, and port arrangement all
+observed by the user -- shape, color, surface texture, and port arrangement all
 constitute the visible phenotype of the device.
 """
     },
@@ -81,22 +81,22 @@ voltages required by the components. The hard disk drive or SSD storage module
 is mounted in a bay on the chassis interior. The HDMI output board, USB controller
 board, and Bluetooth/Wi-Fi radio module are subsidiary boards connected to the
 motherboard via flex cables and connectors. The internal layout follows thermal
-management principles — heat-producing components are near vents, and airflow
+management principles -- heat-producing components are near vents, and airflow
 channels direct heat away from sensitive flash memory and analog components.
 """
     },
 
-    # ── Scale 1: subsystem / PCB ─────────────────────────────────────────────
+    # -- Scale 1: subsystem / PCB ---------------------------------------------
     {
         "scale_label": "pcb",
         "known_scale_m": 0.10,
         "depth_hint": 1,
-        "title": "Printed circuit board — traces, pads, and layers",
+        "title": "Printed circuit board -- traces, pads, and layers",
         "text": """
 The printed circuit board (PCB) in a gaming console is a multi-layer fiberglass
 substrate with copper traces etched into each layer. Typical designs use 6 to 12
 copper layers separated by insulating prepreg. Surface-mount components are soldered
-onto pads on the top and bottom layers. The board dimensions are roughly 10 cm × 15 cm.
+onto pads on the top and bottom layers. The board dimensions are roughly 10 cm x 15 cm.
 Copper traces carry signals between the CPU, GPU, memory, and peripheral controllers.
 Ground and power planes occupy dedicated internal layers to minimize impedance and
 electromagnetic interference. Via holes connect traces between layers using copper-
@@ -113,12 +113,12 @@ high-speed DDR memory lanes and PCIe lanes connecting the CPU and GPU.
         "title": "Board-level components: capacitors, resistors, inductors",
         "text": """
 On the PCB surface hundreds of passive components populate the board. Bypass
-capacitors filter power supply noise at each IC power pin — typical values
+capacitors filter power supply noise at each IC power pin -- typical values
 range from 100 nF to 10 µF in 0402 and 0201 package sizes. Bulk capacitors
 near the voltage regulators store charge for transient current demand during
 processor load spikes. Ferrite bead inductors on power rails filter high-
 frequency noise. Pull-up and pull-down resistors set logic levels on I2C,
-SPI, and GPIO lines. Crystal oscillators provide the reference clock frequency —
+SPI, and GPIO lines. Crystal oscillators provide the reference clock frequency --
 typically 25 MHz for Ethernet PHY and 27 MHz for video clock generation.
 Series resistors dampen signal ringing on high-speed traces. Electrostatic
 discharge protection diodes guard the USB and HDMI connectors. The board is
@@ -127,7 +127,7 @@ network to maintain stable voltages under dynamic load conditions.
 """
     },
 
-    # ── Scale 2: chip / IC ───────────────────────────────────────────────────
+    # -- Scale 2: chip / IC ---------------------------------------------------
     {
         "scale_label": "integrated_circuit",
         "known_scale_m": 0.012,
@@ -137,7 +137,7 @@ network to maintain stable voltages under dynamic load conditions.
 The heart of a modern gaming console is a custom system-on-chip (SoC) fabricated
 in a 7 nm or 5 nm CMOS process. The SoC integrates a multi-core CPU based on the
 ARM Cortex-A or x86-64 architecture with a high-performance GPU sharing an on-
-package memory subsystem. The die size is approximately 200 to 300 mm² for high-
+package memory subsystem. The die size is approximately 200 to 300 mm^2 for high-
 end designs. Unified memory architecture places GDDR6 or LPDDR5 memory in close
 proximity to the processor die using a high-bandwidth memory interface with data
 rates exceeding 400 GB/s. The SoC die contains billions of transistors laid out
@@ -168,7 +168,7 @@ silicon vias (TSV) to minimize package latency.
 """
     },
 
-    # ── Scale 3: circuit / transistor (10 nm range) ─────────────────────────
+    # -- Scale 3: circuit / transistor (10 nm range) -------------------------
     {
         "scale_label": "transistor",
         "known_scale_m": 7e-9,
@@ -176,14 +176,14 @@ silicon vias (TSV) to minimize package latency.
         "title": "FinFET transistor geometry at 7 nm node",
         "text": """
 At the 7 nm process node, transistors are FinFET (fin field-effect transistor)
-structures with silicon fins approximately 5–7 nm wide. The fin height is
+structures with silicon fins approximately 5-7 nm wide. The fin height is
 approximately 50 nm. The gate wraps around three sides of the fin to improve
 electrostatic control and reduce short-channel leakage. The gate dielectric is
 hafnium oxide (HfO2) with an equivalent oxide thickness below 1 nm. The gate
 length (Lg) is approximately 12 nm. Metal gate electrodes replace polysilicon to
 reduce gate resistance at these dimensions. Source and drain regions are strained
 silicon-germanium epitaxially grown to enhance carrier mobility. The contacted
-poly pitch (CPP) determines transistor density — at 7 nm this is approximately
+poly pitch (CPP) determines transistor density -- at 7 nm this is approximately
 56 nm. Local interconnects connect transistors within a standard cell using
 cobalt or ruthenium fill metals at M0 and M1 layers. The gate cut is defined by
 extreme ultraviolet (EUV) lithography with a wavelength of 13.5 nm.
@@ -198,7 +198,7 @@ extreme ultraviolet (EUV) lithography with a wavelength of 13.5 nm.
 Standard cells in a 7 nm library implement logic gates using networks of NMOS and
 PMOS FinFET transistors. An inverter uses one NMOS and one PMOS transistor in
 series between VDD and VSS. A NAND2 gate uses two NMOS transistors in series and
-two PMOS in parallel. Standard cell height is typically 6 to 8 metal track heights —
+two PMOS in parallel. Standard cell height is typically 6 to 8 metal track heights --
 at 7 nm this corresponds to approximately 240 to 320 nm. The transistor gate pitch
 within a cell is the contacted poly pitch of 56 nm. Cells are abutted horizontally
 to share power rails. Placement and route tools fill the die with millions of
@@ -210,7 +210,7 @@ requires careful buffering of long interconnects to meet setup and hold constrai
 """
     },
 
-    # ── Scale 4: atomic / crystal lattice ───────────────────────────────────
+    # -- Scale 4: atomic / crystal lattice -----------------------------------
     {
         "scale_label": "silicon_crystal",
         "known_scale_m": 5.43e-10,
@@ -222,12 +222,12 @@ Silicon crystallizes in the diamond cubic structure with a lattice constant of
 neighbors in a tetrahedral geometry with a bond length of 2.35 Å. The (100) surface
 planes are used for CMOS device fabrication because they support the highest
 carrier mobility. Crystal defects such as dislocations, vacancies, and interstitials
-affect dopant diffusion and carrier lifetime. Dopant atoms — phosphorus (n-type)
-and boron (p-type) — occupy substitutional sites in the silicon lattice. The
+affect dopant diffusion and carrier lifetime. Dopant atoms -- phosphorus (n-type)
+and boron (p-type) -- occupy substitutional sites in the silicon lattice. The
 covalent radius of silicon is 1.11 Å. The electron mean free path in bulk silicon
 at room temperature is approximately 10 to 40 nm depending on doping concentration.
 Phonon scattering limits carrier mobility. Quantum confinement effects emerge when
-silicon dimensions approach the de Broglie wavelength of electrons (~5–10 nm at
+silicon dimensions approach the de Broglie wavelength of electrons (~5-10 nm at
 room temperature), leading to quantized energy subbands in ultra-thin fin structures.
 """
     },
@@ -239,13 +239,13 @@ room temperature), leading to quantized energy subbands in ultra-thin fin struct
         "text": """
 In nanometer-scale silicon transistors quantum mechanical effects dominate device
 behavior. The electron wavefunction extends beyond the classical depletion region
-boundary — this quantum tunneling allows gate leakage current even through thin
+boundary -- this quantum tunneling allows gate leakage current even through thin
 gate dielectrics. The de Broglie wavelength of an electron in silicon at room
 temperature is approximately 5 to 12 nm, comparable to the channel length at
 advanced nodes. Energy quantization splits the conduction band into discrete
 subbands. Band-to-band tunneling in highly doped junctions generates leakage
 current that scales adversely with voltage scaling. The Heisenberg uncertainty
-principle limits the simultaneous precision of electron momentum and position —
+principle limits the simultaneous precision of electron momentum and position --
 at the scale of a 5 nm transistor this fundamentally constrains device design.
 Coulomb blockade can occur in the smallest nanowire transistors, where single
 electrons control the channel conductance. Spin-orbit coupling influences carrier
@@ -254,7 +254,7 @@ transport in strained silicon and germanium channels at these atomic dimensions.
     },
 ]
 
-# ── Calibration scales for each entity type ─────────────────────────────────
+# -- Calibration scales for each entity type ---------------------------------
 CALIBRATIONS = [
     ("game_console",      0.30),
     ("pcb",               0.10),
@@ -305,7 +305,7 @@ def main():
         # Fall back to bridge info endpoint.
         status = get(h, p, "/neuro/snapshot") or {}
     if not status:
-        print(f"ERROR: cannot reach {h}:{p} — start the node first.")
+        print(f"ERROR: cannot reach {h}:{p} -- start the node first.")
         sys.exit(1)
     print(f"Connected to {h}:{p}")
 

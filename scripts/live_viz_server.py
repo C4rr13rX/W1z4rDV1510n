@@ -25,7 +25,7 @@ import webbrowser
 from pathlib import Path
 from typing import Optional, Tuple
 
-# ── Colour palette constants used by the browser-side plasma shader ──────────
+# -- Colour palette constants used by the browser-side plasma shader ----------
 # (passed as JS config; not rendered server-side)
 PLASMA_STOPS = ["#0d0221", "#190a4a", "#3d0c7a", "#7b1fa2", "#c2185b",
                 "#ff5722", "#ff9800", "#ffeb3b", "#ffffff"]
@@ -34,7 +34,7 @@ HTML = r"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>W1z4rd — Chess Prediction Visualizer</title>
+  <title>W1z4rd -- Chess Prediction Visualizer</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html, body {
@@ -46,7 +46,7 @@ HTML = r"""<!doctype html>
       overflow: hidden;
     }
 
-    /* ── Layout ──────────────────────────────────────────────────────── */
+    /* -- Layout -------------------------------------------------------- */
     #root {
       display: grid;
       grid-template-columns: 1fr 280px;
@@ -55,7 +55,7 @@ HTML = r"""<!doctype html>
       gap: 0;
     }
 
-    /* ── Top bar ─────────────────────────────────────────────────────── */
+    /* -- Top bar ------------------------------------------------------- */
     #topbar {
       grid-column: 1 / -1;
       display: flex; align-items: center; justify-content: space-between;
@@ -67,7 +67,7 @@ HTML = r"""<!doctype html>
     #hud   { font-size: 13px; color: #7dd3fc; }
     #accuracy-bar { font-size: 12px; color: #4ade80; }
 
-    /* ── Board area ──────────────────────────────────────────────────── */
+    /* -- Board area ---------------------------------------------------- */
     #board-wrap {
       position: relative;
       display: flex; align-items: center; justify-content: center;
@@ -75,7 +75,7 @@ HTML = r"""<!doctype html>
     }
     #board-canvas { position: absolute; top: 0; left: 0; }
 
-    /* ── Right panel ─────────────────────────────────────────────────── */
+    /* -- Right panel --------------------------------------------------- */
     #side-panel {
       background: rgba(0,0,0,0.55);
       border-left: 1px solid #2a1060;
@@ -137,7 +137,7 @@ HTML = r"""<!doctype html>
     #flash-overlay.green { background: rgba(74,222,128,0.12); }
     #flash-overlay.red   { background: rgba(248,113,113,0.12); }
 
-    /* ── Bottom console ──────────────────────────────────────────────── */
+    /* -- Bottom console ------------------------------------------------ */
     #console {
       grid-column: 1 / -1;
       background: rgba(0,0,0,0.7);
@@ -160,8 +160,8 @@ HTML = r"""<!doctype html>
   <!-- Top bar -->
   <div id="topbar">
     <div id="title">W1Z4RD :: CHESS PREDICTION FABRIC</div>
-    <div id="hud">Connecting…</div>
-    <div id="accuracy-bar">─</div>
+    <div id="hud">Connecting...</div>
+    <div id="accuracy-bar">-</div>
     <div id="tick">tick 0</div>
   </div>
 
@@ -206,25 +206,25 @@ HTML = r"""<!doctype html>
 
     <div class="panel-section">
       <div class="panel-label">Running Accuracy</div>
-      <div class="metric-row"><span>Move top-1</span><span id="m-top1" class="metric-val">—</span></div>
-      <div class="metric-row"><span>Move top-3</span><span id="m-top3" class="metric-val dim">—</span></div>
-      <div class="metric-row"><span>Outcome</span><span id="m-out" class="metric-val dim">—</span></div>
-      <div class="metric-row"><span>Session plies</span><span id="m-plies" class="metric-val dim">—</span></div>
+      <div class="metric-row"><span>Move top-1</span><span id="m-top1" class="metric-val">--</span></div>
+      <div class="metric-row"><span>Move top-3</span><span id="m-top3" class="metric-val dim">--</span></div>
+      <div class="metric-row"><span>Outcome</span><span id="m-out" class="metric-val dim">--</span></div>
+      <div class="metric-row"><span>Session plies</span><span id="m-plies" class="metric-val dim">--</span></div>
     </div>
 
     <div class="panel-section">
       <div class="panel-label">Game Info</div>
       <div style="font-size:11px;line-height:1.8">
-        <div id="g-id" style="color:#a78bfa">—</div>
-        <div id="g-ply">ply — / —</div>
-        <div id="g-side">to move: —</div>
-        <div id="g-count">game #—</div>
+        <div id="g-id" style="color:#a78bfa">--</div>
+        <div id="g-ply">ply -- / --</div>
+        <div id="g-side">to move: --</div>
+        <div id="g-count">game #--</div>
       </div>
     </div>
 
     <div>
       <div class="panel-label">Hourly Checkpoints</div>
-      <div id="hourly-list" style="font-size:11px;color:#888;line-height:1.6">—</div>
+      <div id="hourly-list" style="font-size:11px;color:#888;line-height:1.6">--</div>
     </div>
 
   </div>
@@ -235,13 +235,13 @@ HTML = r"""<!doctype html>
 </div>
 
 <script>
-// ── Configuration ────────────────────────────────────────────────────────────
+// -- Configuration ------------------------------------------------------------
 const BOARD_URL   = '/board';
 const FRAME_URL   = '/frame';
 const NEURO_URL   = '/neuro';
 const POLL_MS     = 300;
 
-// Plasma colour ramp (cool → hot)
+// Plasma colour ramp (cool -> hot)
 const PLASMA = [
   [13, 2, 33],
   [25, 10, 74],
@@ -266,7 +266,7 @@ function plasmaColor(t) {
   return `rgb(${r},${g},${bl})`;
 }
 
-// ── DOM refs ─────────────────────────────────────────────────────────────────
+// -- DOM refs -----------------------------------------------------------------
 const canvas     = document.getElementById('board-canvas');
 const ctx        = canvas.getContext('2d');
 const wrap       = document.getElementById('board-wrap');
@@ -276,7 +276,7 @@ const accBarEl   = document.getElementById('accuracy-bar');
 const tickEl     = document.getElementById('tick');
 const flashEl    = document.getElementById('flash-overlay');
 
-// ── Board geometry ────────────────────────────────────────────────────────────
+// -- Board geometry ------------------------------------------------------------
 let CELL = 64, ORIG_X = 0, ORIG_Y = 0, BOARD_PX = 512;
 
 function resizeCanvas() {
@@ -294,7 +294,7 @@ function resizeCanvas() {
 window.addEventListener('resize', () => { resizeCanvas(); renderAll(); });
 resizeCanvas();
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// -- State ---------------------------------------------------------------------
 let boardData  = null;   // chess_live_board.json
 let frameData  = null;   // live_frame.json (fallback)
 let neuroData  = null;   // live_neuro.json
@@ -307,11 +307,11 @@ const TWEEN_SPEED = 0.22;  // fraction of distance per frame (exponential ease-o
 let tick = 0;
 let animHandle = null;
 
-// ── Coordinate helpers ────────────────────────────────────────────────────────
+// -- Coordinate helpers --------------------------------------------------------
 function squareCX(file) { return ORIG_X + file * CELL + CELL / 2; }
 function squareCY(rank) { return ORIG_Y + (7 - rank) * CELL + CELL / 2; }
 
-// ── Drawing ───────────────────────────────────────────────────────────────────
+// -- Drawing -------------------------------------------------------------------
 const PIECE_SYMBOLS = {
   K: '♔', Q: '♕', R: '♖', B: '♗', N: '♘', P: '♙',
 };
@@ -322,7 +322,7 @@ const PIECE_SYMBOLS_BLACK = {
 function drawBoard(heat, lastMove, predictions, revealPhase) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // ── Board squares with heat overlay ──────────────────────────────────────
+  // -- Board squares with heat overlay --------------------------------------
   for (let rank = 0; rank < 8; rank++) {
     for (let file = 0; file < 8; file++) {
       const x = ORIG_X + file * CELL;
@@ -342,7 +342,7 @@ function drawBoard(heat, lastMove, predictions, revealPhase) {
     }
   }
 
-  // ── Last-move highlight ───────────────────────────────────────────────────
+  // -- Last-move highlight ---------------------------------------------------
   if (lastMove && revealPhase) {
     const pairs = [
       [lastMove.from_file, lastMove.from_rank],
@@ -359,7 +359,7 @@ function drawBoard(heat, lastMove, predictions, revealPhase) {
     }
   }
 
-  // ── Prediction target highlights ──────────────────────────────────────────
+  // -- Prediction target highlights ------------------------------------------
   if (predictions && !revealPhase) {
     for (let i = 0; i < Math.min(3, predictions.length); i++) {
       const p = predictions[i];
@@ -380,7 +380,7 @@ function drawBoard(heat, lastMove, predictions, revealPhase) {
     }
   }
 
-  // ── Grid lines ────────────────────────────────────────────────────────────
+  // -- Grid lines ------------------------------------------------------------
   ctx.strokeStyle = 'rgba(80,40,160,0.25)';
   ctx.lineWidth = 0.5;
   for (let i = 0; i <= 8; i++) {
@@ -394,7 +394,7 @@ function drawBoard(heat, lastMove, predictions, revealPhase) {
     ctx.stroke();
   }
 
-  // ── Rank / file labels ────────────────────────────────────────────────────
+  // -- Rank / file labels ----------------------------------------------------
   ctx.fillStyle = '#5b4080';
   ctx.font = '10px Consolas';
   for (let i = 0; i < 8; i++) {
@@ -402,7 +402,7 @@ function drawBoard(heat, lastMove, predictions, revealPhase) {
     ctx.fillText(String(i + 1), ORIG_X - 16, ORIG_Y + (7 - i) * CELL + CELL / 2 + 4);
   }
 
-  // ── Neuro centroids overlay ───────────────────────────────────────────────
+  // -- Neuro centroids overlay -----------------------------------------------
   if (neuroData) {
     const centroids = neuroData.neuro?.centroids || {};
     Object.values(centroids).forEach(c => {
@@ -462,7 +462,7 @@ function renderAll() {
   drawPieces();
 }
 
-// ── Piece animation loop ──────────────────────────────────────────────────────
+// -- Piece animation loop ------------------------------------------------------
 function stepAnimation() {
   let needsRedraw = false;
   for (const ps of Object.values(pieceState)) {
@@ -488,7 +488,7 @@ function stepAnimation() {
 }
 stepAnimation();
 
-// ── Sync pieces to board data ─────────────────────────────────────────────────
+// -- Sync pieces to board data -------------------------------------------------
 function syncPieces(pieces, lastMove, reveal) {
   // Mark all dead, then revive from current pieces list
   for (const ps of Object.values(pieceState)) ps.alive = false;
@@ -526,7 +526,7 @@ function syncPieces(pieces, lastMove, reveal) {
   }
 }
 
-// ── Flash overlay ─────────────────────────────────────────────────────────────
+// -- Flash overlay -------------------------------------------------------------
 let flashTimer = null;
 function flash(correct) {
   flashEl.className = correct ? 'green' : 'red';
@@ -535,8 +535,8 @@ function flash(correct) {
   flashTimer = setTimeout(() => { flashEl.style.opacity = '0'; flashTimer = null; }, 320);
 }
 
-// ── UI updates ────────────────────────────────────────────────────────────────
-function fmtPct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '—'; }
+// -- UI updates ----------------------------------------------------------------
+function fmtPct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '--'; }
 
 function updateSidePanel(data) {
   if (!data) return;
@@ -573,10 +573,10 @@ function updateSidePanel(data) {
   if (breakdown.length > 0) {
     breakdownEl.innerHTML = breakdown.map(m => {
       const cls    = m.correct ? 'correct' : 'wrong';
-      const pct    = m.energy_prob != null ? (m.energy_prob * 100).toFixed(1) + '%' : '—';
-      const eStr   = m.energy != null ? m.energy.toFixed(2) : '—';
+      const pct    = m.energy_prob != null ? (m.energy_prob * 100).toFixed(1) + '%' : '--';
+      const eStr   = m.energy != null ? m.energy.toFixed(2) : '--';
       const barW   = m.energy_prob != null ? Math.round(m.energy_prob * 100) : 0;
-      const moveStr = m.move || '—';
+      const moveStr = m.move || '--';
       const shortName = m.model === 'classical' ? 'CLASS' : m.model === 'quantum' ? 'QUANT' : 'NEURO';
       return `<div class="model-row ${cls}">
         <span class="model-name">${shortName}</span>
@@ -603,13 +603,13 @@ function updateSidePanel(data) {
   document.getElementById('m-plies').textContent = (run.total_plies || 0).toLocaleString();
 
   // Game info
-  document.getElementById('g-id').textContent    = data.game_id || '—';
-  document.getElementById('g-ply').textContent   = `ply ${(data.ply ?? '—') + 1} / ${data.total_plies || '—'}`;
-  document.getElementById('g-side').textContent  = `to move: ${data.side_to_move || '—'}`;
-  document.getElementById('g-count').textContent = `game #${data.game_count || '—'}`;
+  document.getElementById('g-id').textContent    = data.game_id || '--';
+  document.getElementById('g-ply').textContent   = `ply ${(data.ply ?? '--') + 1} / ${data.total_plies || '--'}`;
+  document.getElementById('g-side').textContent  = `to move: ${data.side_to_move || '--'}`;
+  document.getElementById('g-count').textContent = `game #${data.game_count || '--'}`;
 
   // HUD
-  const top1 = run.move_top1 != null ? (run.move_top1 * 100).toFixed(1) + '%' : '—';
+  const top1 = run.move_top1 != null ? (run.move_top1 * 100).toFixed(1) + '%' : '--';
   const op2   = data.outcome_probs || {};
   const wPct2 = op2['1-0']     != null ? (op2['1-0']     * 100).toFixed(0) : '?';
   const bPct2 = op2['0-1']     != null ? (op2['0-1']     * 100).toFixed(0) : '?';
@@ -618,11 +618,11 @@ function updateSidePanel(data) {
 
   // Hourly checkpoints (last 5)
   const chk = (data.hourly_checkpoints || []).slice(-5).reverse();
-  document.getElementById('hourly-list').innerHTML = chk.length === 0 ? '—'
+  document.getElementById('hourly-list').innerHTML = chk.length === 0 ? '--'
     : chk.map(c => `hr ${c.hour}: top1=${fmtPct(c.move_top1)} (Δ${c.delta_top1 >= 0 ? '+' : ''}${fmtPct(c.delta_top1)})`).join('<br>');
 }
 
-// ── Console logger ────────────────────────────────────────────────────────────
+// -- Console logger ------------------------------------------------------------
 const MAX_LINES = 40;
 const logLines = [];
 function logLine(msg) {
@@ -632,7 +632,7 @@ function logLine(msg) {
   consoleEl.innerHTML = logLines.slice().reverse().map(l => `<div class="log-line">${l}</div>`).join('');
 }
 
-// ── Polling ───────────────────────────────────────────────────────────────────
+// -- Polling -------------------------------------------------------------------
 let prevReveal = null;
 let prevPly    = null;
 
@@ -648,7 +648,7 @@ async function poll() {
   tick++;
   tickEl.textContent = `tick ${tick}`;
 
-  // Chess board mode — accept board data as long as it has a game_id field,
+  // Chess board mode -- accept board data as long as it has a game_id field,
   // even if pieces is temporarily empty (e.g. during the write window).
   const bd = await fetchJson(BOARD_URL);
   if (bd && (bd.game_id || bd.iteration)) {
@@ -661,7 +661,7 @@ async function poll() {
 
     // Always sync pieces + redraw when ply changes or when reveal phase flips.
     // Also force a redraw every ~2 s even without ply change so the side panel
-    // and outcome bars stay live (tick % 7 ≈ every 2.1 s at POLL_MS=300).
+    // and outcome bars stay live (tick % 7 ~= every 2.1 s at POLL_MS=300).
     if (isNewPly || isReveal !== prevReveal || tick % 7 === 0) {
       if (hasPieces) {
         syncPieces(bd.pieces, bd.last_move, isReveal);
@@ -670,7 +670,7 @@ async function poll() {
 
       if (isReveal && wasPredict && isNewPly) {
         flash(bd.prediction_correct_top1);
-        const correctStr = bd.prediction_correct_top1 ? '✓ correct' : '✗ miss';
+        const correctStr = bd.prediction_correct_top1 ? '[ok] correct' : '✗ miss';
         logLine(`ply ${(bd.ply ?? 0) + 1}  predicted=${(bd.predictions || [])[0]?.san || '?'}  actual=${bd.actual_move?.san || '?'}  ${correctStr}`);
       }
 
@@ -699,7 +699,7 @@ async function poll() {
   setTimeout(poll, POLL_MS);
 }
 
-// ── Annealer fallback ─────────────────────────────────────────────────────────
+// -- Annealer fallback ---------------------------------------------------------
 function syncAnnealerFrame(frame) {
   for (const ps of Object.values(pieceState)) ps.alive = false;
   for (const sym of (frame.symbols || [])) {
@@ -720,8 +720,8 @@ function syncAnnealerFrame(frame) {
   }
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
-logLine('Visualizer ready. Polling for chess_live_board.json …');
+// -- Boot ----------------------------------------------------------------------
+logLine('Visualizer ready. Polling for chess_live_board.json ...');
 poll();
 </script>
 </body>

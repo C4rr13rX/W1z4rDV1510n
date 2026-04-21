@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-mesh_from_neuro.py — Developer template: W1z4rD neural mesh synthesis.
+mesh_from_neuro.py -- Developer template: W1z4rD neural mesh synthesis.
 
 Shows three patterns for pulling 3D geometry out of the neural fabric:
 
-  Pattern A — Query-driven mesh (text query activates neural memory)
-  Pattern B — Image-driven mesh (image activates visual memory → mesh)
-  Pattern C — Raw world3d centroid cloud (bypass synthesis, use directly)
+  Pattern A -- Query-driven mesh (text query activates neural memory)
+  Pattern B -- Image-driven mesh (image activates visual memory -> mesh)
+  Pattern C -- Raw world3d centroid cloud (bypass synthesis, use directly)
 
-The node does the heavy lifting — this script just calls the HTTP API and
+The node does the heavy lifting -- this script just calls the HTTP API and
 saves the resulting OBJ + MTL files ready for Three.js or any 3D viewer.
 
 Usage:
@@ -25,7 +25,7 @@ from pathlib import Path
 DEFAULT_NODE = "localhost:8090"
 
 
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
+# -- HTTP helpers --------------------------------------------------------------
 
 def _post(node: str, path: str, body: dict) -> dict:
     url = f"http://{node}{path}"
@@ -46,7 +46,7 @@ def _get(node: str, path: str) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
-# ── Pattern A: text query → mesh ──────────────────────────────────────────────
+# -- Pattern A: text query -> mesh ----------------------------------------------
 
 def query_mesh(
     node: str,
@@ -59,7 +59,7 @@ def query_mesh(
     out_dir: str = ".",
 ) -> dict:
     """
-    POST /mesh/synthesize — activate the fabric with `query`, synthesize mesh.
+    POST /mesh/synthesize -- activate the fabric with `query`, synthesize mesh.
 
     Returns the API response dict; also saves .obj + .mtl if format='obj'.
     """
@@ -72,7 +72,7 @@ def query_mesh(
     if categories:
         body["categories"] = categories
 
-    print(f"[mesh] POST /mesh/synthesize — query: {query!r}")
+    print(f"[mesh] POST /mesh/synthesize -- query: {query!r}")
     result = _post(node, "/mesh/synthesize", body)
 
     if result.get("mesh") is None and "reason" in result:
@@ -88,7 +88,7 @@ def query_mesh(
     return result
 
 
-# ── Pattern B: image → mesh ───────────────────────────────────────────────────
+# -- Pattern B: image -> mesh ---------------------------------------------------
 
 def image_mesh(
     node: str,
@@ -100,7 +100,7 @@ def image_mesh(
     out_dir: str = ".",
 ) -> dict:
     """
-    POST /mesh/from_image — encode image through ImageBitsEncoder,
+    POST /mesh/from_image -- encode image through ImageBitsEncoder,
     propagate labels through the fabric, synthesize mesh.
 
     The resulting mesh reflects the spatial structure of what the node
@@ -117,7 +117,7 @@ def image_mesh(
     if categories:
         body["categories"] = categories
 
-    print(f"[mesh] POST /mesh/from_image — {Path(image_path).name}")
+    print(f"[mesh] POST /mesh/from_image -- {Path(image_path).name}")
     result = _post(node, "/mesh/from_image", body)
 
     if result.get("mesh") is None and "reason" in result:
@@ -131,11 +131,11 @@ def image_mesh(
     return result
 
 
-# ── Pattern C: raw world3d centroid cloud ─────────────────────────────────────
+# -- Pattern C: raw world3d centroid cloud -------------------------------------
 
 def world3d_cloud(node: str, *, out: str = "world3d_cloud.json") -> dict:
     """
-    GET /neuro/world3d — dump all centroid positions + colours as JSON.
+    GET /neuro/world3d -- dump all centroid positions + colours as JSON.
 
     Use this to drive a custom Three.js point cloud or as input to your
     own meshing algorithm without going through the node's synthesizer.
@@ -163,14 +163,14 @@ def world3d_cloud(node: str, *, out: str = "world3d_cloud.json") -> dict:
     print(f"  total_centroids={total}, active_count={active}")
 
     Path(out).write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(f"  saved → {out}")
+    print(f"  saved -> {out}")
     return result
 
 
-# ── Three.js loader snippet ───────────────────────────────────────────────────
+# -- Three.js loader snippet ---------------------------------------------------
 
 THREEJS_SNIPPET = """
-// ── Three.js integration (copy this into your Vue/React/vanilla component) ──
+// -- Three.js integration (copy this into your Vue/React/vanilla component) --
 
 import * as THREE from 'three';
 import { OBJLoader }  from 'three/addons/loaders/OBJLoader.js';
@@ -207,13 +207,13 @@ async function addNeuroMesh(scene, query, { hops=2, minActivation=0.05, categori
   scene.add(mesh);
   URL.revokeObjectURL(mtlBlob);
   URL.revokeObjectURL(objBlob);
-  console.log(`[neuro mesh] loaded — ${data.vertex_count} verts, ${data.face_count} faces`);
+  console.log(`[neuro mesh] loaded -- ${data.vertex_count} verts, ${data.face_count} faces`);
   return mesh;
 }
 
 /**
  * Render the raw centroid cloud as a Three.js Points object.
- * Lower overhead than full mesh — good for exploration / debug.
+ * Lower overhead than full mesh -- good for exploration / debug.
  */
 async function addCentroidCloud(scene, { minActivation=0.0 } = {}) {
   const res = await fetch(`${NODE_URL}/neuro/world3d`);
@@ -242,24 +242,24 @@ export { addNeuroMesh, addCentroidCloud };
 """
 
 
-# ── Developer tips ────────────────────────────────────────────────────────────
+# -- Developer tips ------------------------------------------------------------
 
 def print_tips(node: str):
     """Fetch /mesh/template and print developer guidance."""
     try:
         data = _get(node, "/mesh/template")
-        print("\n── /mesh/template ──────────────────────────────────────────────")
+        print("\n-- /mesh/template ----------------------------------------------")
         for step in data.get("pipeline", []):
             print(f"  {step}")
         print()
         print("  Architecture note:")
         print(f"  {data.get('architecture_note', '')}")
-        print("────────────────────────────────────────────────────────────────\n")
+        print("----------------------------------------------------------------\n")
     except Exception as e:
         print(f"  [WARN] Could not fetch /mesh/template: {e}")
 
 
-# ── OBJ/MTL save helper ───────────────────────────────────────────────────────
+# -- OBJ/MTL save helper -------------------------------------------------------
 
 def _save_obj(result: dict, out_dir: str, name: str):
     d = Path(out_dir)
@@ -270,15 +270,15 @@ def _save_obj(result: dict, out_dir: str, name: str):
     mtl_path.write_text(result.get("mtl", ""), encoding="utf-8")
     v = result.get("vertex_count", "?")
     f = result.get("face_count",   "?")
-    print(f"  saved → {obj_path}  ({v} verts, {f} faces)")
-    print(f"  saved → {mtl_path}")
+    print(f"  saved -> {obj_path}  ({v} verts, {f} faces)")
+    print(f"  saved -> {mtl_path}")
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# -- CLI -----------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
-        description="W1z4rD neural mesh synthesis — developer template"
+        description="W1z4rD neural mesh synthesis -- developer template"
     )
     ap.add_argument("--node",           default=DEFAULT_NODE, help="node host:port")
     ap.add_argument("--pattern",        default="A", choices=["A", "B", "C", "tips"],
@@ -297,7 +297,7 @@ def main():
 
     args = ap.parse_args()
 
-    print(f"\nW1z4rD Mesh Dev Template — node: http://{args.node}\n")
+    print(f"\nW1z4rD Mesh Dev Template -- node: http://{args.node}\n")
 
     if args.pattern == "tips":
         print_tips(args.node)

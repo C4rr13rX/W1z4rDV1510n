@@ -31,7 +31,7 @@ def main():
         sys.exit("No pairs found in qa_store.json")
 
     if args.dry_run:
-        print(f"DRY RUN — would re-ingest {len(pairs)} pairs from {QA_PATH}")
+        print(f"DRY RUN -- would re-ingest {len(pairs)} pairs from {QA_PATH}")
         for _, p in list(pairs.items())[:5]:
             print(f"  Q: {p['question'][:70]}")
         return
@@ -74,7 +74,7 @@ def main():
         print(f"  pool={d.get('pool_path','?')}")
         print(f"  qa  ={d.get('qa_path','?')}")
 
-    print(f"\nDone — re-ingested {total_ingested}/{len(candidates)} pairs")
+    print(f"\nDone -- re-ingested {total_ingested}/{len(candidates)} pairs")
 
 if __name__ == "__main__":
     main()

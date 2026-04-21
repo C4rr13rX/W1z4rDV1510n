@@ -24,7 +24,7 @@ NODE   = "localhost:8090"
 DATA   = "D:/w1z4rdv1510n-data"
 SCRIPTS = "D:/Projects/W1z4rDV1510n/scripts"
 
-# ── Probe definitions ──────────────────────────────────────────────────────────
+# -- Probe definitions ----------------------------------------------------------
 # Each probe specifies a question and what the answer must contain.
 # After each training phase we run ALL probes and report pass/fail.
 # A probe "fails" if:
@@ -40,7 +40,7 @@ class Probe:
     phase_introduced: int = 0       # first phase where this should pass
 
 PROBES: list[Probe] = [
-    # ── Foundation / basic facts ──────────────────────────────────────────────
+    # -- Foundation / basic facts ----------------------------------------------
     Probe("What is the sun?",
           ["star", "solar", "light", "energy", "nuclear"], phase_introduced=1),
     Probe("What is water?",
@@ -51,22 +51,22 @@ PROBES: list[Probe] = [
           ["plant", "sunlight", "chlorophyll", "glucose", "carbon"], phase_introduced=1),
     Probe("What is the speed of light?",
           ["299", "300", "kilometer", "metre", "second", "fast"], phase_introduced=1),
-    # ── K-12 geography ────────────────────────────────────────────────────────
+    # -- K-12 geography --------------------------------------------------------
     Probe("What is the capital of France?",
           ["paris", "Paris"], phase_introduced=2),
     Probe("What is the capital of the United States?",
           ["washington", "Washington", "D.C", "D.C."], phase_introduced=2),
-    # ── Science ───────────────────────────────────────────────────────────────
+    # -- Science ---------------------------------------------------------------
     Probe("What is DNA?",
           ["genetic", "gene", "nucleotide", "chromosome", "deoxyribonucleic"], phase_introduced=2),
     Probe("What is an atom?",
           ["proton", "neutron", "electron", "nucleus", "element"], phase_introduced=2),
-    # ── Math ──────────────────────────────────────────────────────────────────
+    # -- Math ------------------------------------------------------------------
     Probe("What is pi?",
           ["3.14", "circle", "circumference", "ratio", "diameter"], phase_introduced=3),
     Probe("What is a prime number?",
           ["divisible", "factor", "only", "itself", "one"], phase_introduced=3),
-    # ── Corrections (correction pool) ─────────────────────────────────────────
+    # -- Corrections (correction pool) -----------------------------------------
     Probe("Correct the grammar: Me and him went to the store.",
           ["I", "He", "went"], pool="correction", scope_prefix="", phase_introduced=4),
     Probe("Correct the grammar: She don't know the answer.",
@@ -75,7 +75,7 @@ PROBES: list[Probe] = [
           ["receive", "ei", "i before e"], pool="correction", phase_introduced=4),
 ]
 
-# ── Training phases ────────────────────────────────────────────────────────────
+# -- Training phases ------------------------------------------------------------
 # Each phase runs one or more scripts, then probes run.
 # Batches per phase controls how much training before the next check.
 
@@ -87,7 +87,7 @@ class Phase:
 
 def phases(node: str) -> list[Phase]:
     return [
-        Phase("Foundation (Stage 0 — K-12 books)", 1, [
+        Phase("Foundation (Stage 0 -- K-12 books)", 1, [
             [PYTHON, f"{SCRIPTS}/train_foundation.py", "--node", f"http://{node}"],
         ]),
         Phase("Foundational fact seeds (15x)", 1, [
@@ -127,7 +127,7 @@ def phases(node: str) -> list[Phase]:
     ]
 
 
-# ── HTTP helpers ───────────────────────────────────────────────────────────────
+# -- HTTP helpers ---------------------------------------------------------------
 
 def post(node: str, path: str, body: dict, timeout: int = 30) -> dict:
     data = json.dumps(body).encode()
@@ -150,14 +150,14 @@ def probe_pipeline(node: str, probe: Probe) -> tuple[bool, str]:
         return False, f"ERROR: {resp['error']}"
 
     if resp.get("hypothesis") or not resp.get("answer"):
-        return False, "(no answer — hypothesis)"
+        return False, "(no answer -- hypothesis)"
 
     answer = (resp.get("answer") or "").lower()
     passed = any(kw.lower() in answer for kw in probe.require_any)
     return passed, resp.get("answer", "")[:120]
 
 
-# ── Report ─────────────────────────────────────────────────────────────────────
+# -- Report ---------------------------------------------------------------------
 
 def run_probes(node: str, phase_index: int) -> dict:
     results = []
@@ -186,14 +186,14 @@ def print_report(phase_name: str, report: dict) -> None:
     print(f"  Score: {p}/{total} ({pct}%)")
     print(f"{'='*70}")
     for r in report["results"]:
-        icon = "✓" if r["passed"] else "✗"
+        icon = "[ok]" if r["passed"] else "✗"
         print(f"  {icon}  {r['question']}")
         if not r["passed"]:
-            print(f"       → {r['answer']}")
+            print(f"       -> {r['answer']}")
     print()
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# -- Main -----------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -202,7 +202,7 @@ def main() -> None:
                         help="Skip phases before this index (1-based, for resuming)")
     args = parser.parse_args()
 
-    print(f"\nMonitored training — node: {args.node}")
+    print(f"\nMonitored training -- node: {args.node}")
     print(f"Probes defined: {len(PROBES)}")
     print("Pools cleared, starting fresh.\n")
 
@@ -215,9 +215,9 @@ def main() -> None:
             print(f"  [skip] Phase {phase.index}: {phase.name}")
             continue
 
-        print(f"\n{'─'*70}")
+        print(f"\n{'-'*70}")
         print(f"  Phase {phase.index}: {phase.name}")
-        print(f"{'─'*70}")
+        print(f"{'-'*70}")
 
         for cmd in phase.commands:
             print(f"\n  Running: {' '.join(cmd[1:3])}...")
@@ -246,9 +246,9 @@ def main() -> None:
 
         # Alert on regression
         if report["failed"] > 0:
-            print(f"  ⚠  {report['failed']} probe(s) failing — check for interference.")
+            print(f"  [!]  {report['failed']} probe(s) failing -- check for interference.")
         else:
-            print(f"  All probes passing ✓")
+            print(f"  All probes passing [ok]")
 
     print("\n" + "="*70)
     print("  TRAINING COMPLETE")

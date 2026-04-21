@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-playwright_cow_compare.py — W1z4rD V1510n visual feedback loop.
+playwright_cow_compare.py -- W1z4rD V1510n visual feedback loop.
 
 Takes screenshots of the 3D world and the video sensor feed,
 compares entity counts and visual similarity, and reports pass/fail.
@@ -21,7 +21,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# ─── Deps ─────────────────────────────────────────────────────────────────────
+# --- Deps ---------------------------------------------------------------------
 
 try:
     from playwright.sync_api import sync_playwright
@@ -34,11 +34,11 @@ try:
     PIL_OK = True
 except ImportError:
     PIL_OK = False
-    print("[WARN] Pillow not installed — visual diff disabled.  pip install Pillow")
+    print("[WARN] Pillow not installed -- visual diff disabled.  pip install Pillow")
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "playwright_captures"
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# --- Helpers ------------------------------------------------------------------
 
 def _pil_from_b64(b64_str: str) -> "Image.Image":
     data = base64.b64decode(b64_str.split(",", 1)[-1])
@@ -78,7 +78,7 @@ def _count_non_green_blobs(img: "Image.Image") -> int:
     return blobs
 
 
-# ─── Main comparison run ──────────────────────────────────────────────────────
+# --- Main comparison run ------------------------------------------------------
 
 def run_comparison(url: str, iteration: int, page) -> dict:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,7 +89,7 @@ def run_comparison(url: str, iteration: int, page) -> dict:
     try:
         page.wait_for_function("window.__getCowCount && window.__getCowCount() > 0", timeout=25_000)
     except Exception:
-        pass  # continue anyway — will report 0 cows
+        pass  # continue anyway -- will report 0 cows
 
     # Settle for texture / position update
     page.wait_for_timeout(1500)
@@ -145,12 +145,12 @@ def run_comparison(url: str, iteration: int, page) -> dict:
         f"  3D cows={cow_count_3d}"
         f"  vid cows={cow_count_vid if cow_count_vid is not None else '?'}"
         f"  sim={result['sim_score'] if result['sim_score'] is not None else '?'}"
-        f"  → {'PASS ✓' if result['pass'] else 'FAIL ✗'}"
+        f"  -> {'PASS [ok]' if result['pass'] else 'FAIL ✗'}"
     )
     return result
 
 
-# ─── Entry point ──────────────────────────────────────────────────────────────
+# --- Entry point --------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="W1z4rD cow world visual feedback loop")
@@ -186,10 +186,10 @@ def main():
                 if r["pass"] and i > 1:
                     # Two consecutive passes = done
                     if results[-2]["pass"]:
-                        print("\n  ✓ Two consecutive passes — scene looks correct.")
+                        print("\n  [ok] Two consecutive passes -- scene looks correct.")
                         break
             except Exception as ex:
-                print(f"  iter {i}: ERROR — {ex}")
+                print(f"  iter {i}: ERROR -- {ex}")
             if i < iters:
                 time.sleep(args.interval)
 

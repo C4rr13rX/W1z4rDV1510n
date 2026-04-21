@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-build_libretexts_corpus.py — Stage 25
+build_libretexts_corpus.py -- Stage 25
 Comprehensive LibreTexts open textbook corpus: all 13 domains, all bookshelves.
 
-Uses the Mindtouch CXone REST API to walk every book → chapter → section.
+Uses the Mindtouch CXone REST API to walk every book -> chapter -> section.
 For each page:
-  • Trains the full text via {"modality": "text", "text": "..."}
-  • Extracts every <figure>/<img> block, downloads the image, and trains it
+  * Trains the full text via {"modality": "text", "text": "..."}
+  * Extracts every <figure>/<img> block, downloads the image, and trains it
     paired with its caption + surrounding paragraph context via
     {"modality": "page", "data_b64": "...", "text": "..."} so the image pixels
     and their textual description co-activate in the same Hebbian pass.
@@ -34,7 +34,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ── Configuration ──────────────────────────────────────────────────────────────
+# -- Configuration --------------------------------------------------------------
 
 DEFAULT_DATA_DIR = 'D:/w1z4rdv1510n-data'
 DEFAULT_NODE     = 'localhost:8090'
@@ -75,7 +75,7 @@ DOMAIN_LABELS = {
     'k12':       'K-12 Education',
 }
 
-STAGES = {25: 'LibreTexts comprehensive corpus — all 13 domains, all bookshelves'}
+STAGES = {25: 'LibreTexts comprehensive corpus -- all 13 domains, all bookshelves'}
 
 # Walk depth: 0=Bookshelves root, 1=Book, 2=Unit/Chapter, 3=Section, 4=Subsection
 MAX_DEPTH      = 5
@@ -87,7 +87,7 @@ TRAIN_DELAY    = 0.10      # seconds between /media/train calls
 CKPT_EVERY     = 50        # checkpoint every N pages
 
 
-# ── HTTP session ───────────────────────────────────────────────────────────────
+# -- HTTP session ---------------------------------------------------------------
 
 def _make_session() -> requests.Session:
     s = requests.Session()
@@ -103,7 +103,7 @@ def _make_session() -> requests.Session:
     return s
 
 
-# ── HTML parsing ───────────────────────────────────────────────────────────────
+# -- HTML parsing ---------------------------------------------------------------
 
 _MATH_RE   = re.compile(r'\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$|\$[^\n$]+\$', re.S)
 _TAG_RE    = re.compile(r'<[^>]+>')
@@ -117,7 +117,7 @@ _ALT_RE    = re.compile(r'\balt=["\']([^"\']*)["\']',  re.I)
 _HTML_ENTITIES = {
     '&nbsp;': ' ', '&#160;': ' ', '&lt;': '<', '&gt;': '>',
     '&amp;': '&', '&quot;': '"', '&#39;': "'", '&apos;': "'",
-    '&mdash;': '—', '&ndash;': '–', '&hellip;': '...',
+    '&mdash;': '--', '&ndash;': '-', '&hellip;': '...',
     '&ldquo;': '"', '&rdquo;': '"', '&lsquo;': "'", '&rsquo;': "'",
 }
 
@@ -137,11 +137,11 @@ def _parse_page(html: str) -> tuple:
     Split an HTML page into plain text + a list of figure dicts.
 
     Returns:
-      plain_text : str  — full page text with [Figure N: caption] placeholders
-      figures    : list — each item:
+      plain_text : str  -- full page text with [Figure N: caption] placeholders
+      figures    : list -- each item:
                      { 'src': str, 'alt': str, 'caption': str,
-                       'before': str (≤600 chars of text before the figure),
-                       'after':  str (≤400 chars of text after the figure) }
+                       'before': str (<=600 chars of text before the figure),
+                       'after':  str (<=400 chars of text after the figure) }
     """
     # Split HTML at figure block boundaries so we can collect before/after context.
     parts = _FIGURE_RE.split(html)
@@ -153,7 +153,7 @@ def _parse_page(html: str) -> tuple:
 
     for i, part in enumerate(parts):
         if i % 2 == 0:
-            # Plain HTML segment — strip standalone <img> tags too
+            # Plain HTML segment -- strip standalone <img> tags too
             def _replace_standalone_img(m):
                 alt_m = _ALT_RE.search(m.group(0))
                 alt = alt_m.group(1).strip() if alt_m else ''
@@ -220,7 +220,7 @@ def _is_skip_src(src: str) -> bool:
     return any(kw in low for kw in skip_keywords)
 
 
-# ── LibreTexts API helpers ─────────────────────────────────────────────────────
+# -- LibreTexts API helpers -----------------------------------------------------
 
 def _get_json(session: requests.Session, url: str, params: dict = None,
               timeout: int = 25):
@@ -299,7 +299,7 @@ def _download_image(session: requests.Session, url: str) -> bytes | None:
         return None
 
 
-# ── Training helpers ───────────────────────────────────────────────────────────
+# -- Training helpers -----------------------------------------------------------
 
 def _train_text(text: str, node: str, session: requests.Session) -> bool:
     try:
@@ -325,7 +325,7 @@ def _train_figure(img_bytes: bytes, fig: dict, crumb: str, label: str,
     before  = fig.get('before', '').strip()
     after   = fig.get('after',  '').strip()
 
-    parts = [f'LibreTexts {label} — figure.', f'Topic: {crumb}']
+    parts = [f'LibreTexts {label} -- figure.', f'Topic: {crumb}']
     if caption:
         parts.append(f'Caption: {caption}')
     if before:
@@ -351,7 +351,7 @@ def _train_figure(img_bytes: bytes, fig: dict, crumb: str, label: str,
         return False
 
 
-# ── Domain walker ──────────────────────────────────────────────────────────────
+# -- Domain walker --------------------------------------------------------------
 
 def _walk_domain(api_session: requests.Session, train_session: requests.Session,
                  domain: str, base_api: str, label: str, node: str,
@@ -368,7 +368,7 @@ def _walk_domain(api_session: requests.Session, train_session: requests.Session,
     if ckpt_path.exists():
         try:
             trained = set(json.loads(ckpt_path.read_text(encoding='utf-8')))
-            print(f'  [{domain}] Resuming — {len(trained)} pages already done',
+            print(f'  [{domain}] Resuming -- {len(trained)} pages already done',
                   flush=True)
         except Exception:
             pass
@@ -408,7 +408,7 @@ def _walk_domain(api_session: requests.Session, train_session: requests.Session,
                 # Train page text
                 if text and len(text) >= MIN_CONTENT:
                     train_str = (
-                        f'LibreTexts open textbook — {label}\n'
+                        f'LibreTexts open textbook -- {label}\n'
                         f'Topic: {crumb}\n\n'
                         f'{text[:MAX_CONTENT]}'
                     )
@@ -447,12 +447,12 @@ def _walk_domain(api_session: requests.Session, train_session: requests.Session,
                     stack.append((sp['id'], breadcrumb + [sp['title']], depth + 1))
 
     save_ckpt()
-    print(f'  [{domain}] Done — {ok} new pages trained ({len(trained)} total)',
+    print(f'  [{domain}] Done -- {ok} new pages trained ({len(trained)} total)',
           flush=True)
     return ok
 
 
-# ── Stage 25 orchestrator ──────────────────────────────────────────────────────
+# -- Stage 25 orchestrator ------------------------------------------------------
 
 def build_libretexts_corpus(out_dir: Path, node: str,
                             max_pages_per_domain: int = 5000,
@@ -474,7 +474,7 @@ def build_libretexts_corpus(out_dir: Path, node: str,
 
     for domain, base_api in targets:
         label = DOMAIN_LABELS[domain]
-        print(f'\n  ══ {label} ({domain}) ══', flush=True)
+        print(f'\n  == {label} ({domain}) ==', flush=True)
         n = _walk_domain(
             api_session, train_session,
             domain, base_api, label, node,
@@ -496,7 +496,7 @@ def build_libretexts_corpus(out_dir: Path, node: str,
     return items
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
@@ -530,7 +530,7 @@ def main():
     train_images = not args.no_images
     train_dir    = Path(args.data_dir) / 'training'
 
-    print('LibreTexts Corpus Builder — Stage 25')
+    print('LibreTexts Corpus Builder -- Stage 25')
     print(f'  Node     : {args.node}')
     print(f'  Data dir : {args.data_dir}')
     print(f'  Stages   : {sorted(stages)}')
@@ -554,7 +554,7 @@ def main():
     mpath = train_dir / 'stage25_manifest.json'
     mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    print(f'\nManifest → {mpath}')
+    print(f'\nManifest -> {mpath}')
     print('Done.')
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-fetch_simple_wikipedia.py — Download and parse Simple English Wikipedia
+fetch_simple_wikipedia.py -- Download and parse Simple English Wikipedia
 =======================================================================
 Downloads the latest Simple English Wikipedia XML dump, extracts article
 body text (no markup, no tables, no headers), and writes one article per
@@ -9,7 +9,7 @@ line to data/foundation/simple_wiki_articles.jsonl.
 Each JSON line:
   { "id": "...", "title": "...", "text": "..." }
 
-Where "text" is clean prose paragraphs only — no wiki markup, no section
+Where "text" is clean prose paragraphs only -- no wiki markup, no section
 headings, no template garbage.  This is the raw English foundation corpus.
 
 Usage:
@@ -110,7 +110,7 @@ def clean_wikitext(raw: str) -> str:
     # Remove remaining HTML tags
     text = _HTML_TAG_RE.sub("", text)
 
-    # Collapse section headings (== Heading ==) → blank line
+    # Collapse section headings (== Heading ==) -> blank line
     text = re.sub(r"={2,}[^=\n]+={2,}", "", text)
 
     # Collapse runs of blank lines
@@ -222,7 +222,7 @@ def main() -> None:
             else:
                 raise
     else:
-        print(f"Skipping download — using existing {bz2_dest}")
+        print(f"Skipping download -- using existing {bz2_dest}")
 
     process_dump(bz2_dest, jsonl_out, args.limit)
 

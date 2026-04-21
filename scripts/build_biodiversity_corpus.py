@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-build_biodiversity_corpus.py — Stage 26
+build_biodiversity_corpus.py -- Stage 26
 Plant and animal visual-identification corpus via multimodal Hebbian training.
 
 Sources:
-  • iNaturalist API  — species list, photos, observation counts
-  • iNaturalist taxa — full Linnaean taxonomy via ancestor_ids batch lookup
-  • Wikipedia REST   — species description (opening paragraph)
+  * iNaturalist API  -- species list, photos, observation counts
+  * iNaturalist taxa -- full Linnaean taxonomy via ancestor_ids batch lookup
+  * Wikipedia REST   -- species description (opening paragraph)
 
 For each species the node trains:
   1. {"modality": "page", "data_b64": <photo>, "text": <name + taxonomy + description>}
-     — image pixels co-activate with the binomial name, common name, kingdom,
+     -- image pixels co-activate with the binomial name, common name, kingdom,
        order, family, and description in one Hebbian pass.
   2. {"modality": "text", "text": <full taxonomy block>}
-     — text-only pass so taxonomy associations form even for photo-less species.
+     -- text-only pass so taxonomy associations form even for photo-less species.
 
 Covers 11 iconic taxon groups (sorted by observation count so best-known
 species are trained first):
-  Plantae · Aves · Insecta · Mammalia · Reptilia · Amphibia
-  Actinopterygii · Arachnida · Mollusca · Fungi · Animalia
+  Plantae . Aves . Insecta . Mammalia . Reptilia . Amphibia
+  Actinopterygii . Arachnida . Mollusca . Fungi . Animalia
 
 Usage:
   python scripts/build_biodiversity_corpus.py --node localhost:8090
@@ -38,7 +38,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ── Configuration ──────────────────────────────────────────────────────────────
+# -- Configuration --------------------------------------------------------------
 
 DEFAULT_DATA_DIR = 'D:/w1z4rdv1510n-data'
 DEFAULT_NODE     = 'localhost:8090'
@@ -47,7 +47,7 @@ UA = ('W1z4rDV1510n-Biodiversity/1.0 '
       '(https://github.com/C4rr13rX/W1z4rDV1510n; adamedsall@gmail.com; '
       'educational AI training; polite crawler)')
 
-STAGES = {26: 'Biodiversity visual-ID corpus — plants, animals, fungi via iNaturalist + Wikipedia'}
+STAGES = {26: 'Biodiversity visual-ID corpus -- plants, animals, fungi via iNaturalist + Wikipedia'}
 
 # iNaturalist iconic_taxa group names (in processing order)
 ICONIC_GROUPS = [
@@ -92,7 +92,7 @@ CKPT_EVERY     = 100         # checkpoint every N species trained
 TAXONOMY_RANKS = ['kingdom', 'phylum', 'class', 'order', 'family', 'genus']
 
 
-# ── HTTP sessions ──────────────────────────────────────────────────────────────
+# -- HTTP sessions --------------------------------------------------------------
 
 def _make_session() -> requests.Session:
     s = requests.Session()
@@ -105,9 +105,9 @@ def _make_session() -> requests.Session:
     return s
 
 
-# ── Ancestor taxonomy cache ────────────────────────────────────────────────────
+# -- Ancestor taxonomy cache ----------------------------------------------------
 
-_anc_cache: dict[int, dict] = {}   # id → {rank, name}
+_anc_cache: dict[int, dict] = {}   # id -> {rank, name}
 
 def _fetch_ancestors(ids: list[int], session: requests.Session):
     """Batch-fetch ancestor taxa by ID and populate _anc_cache."""
@@ -129,7 +129,7 @@ def _fetch_ancestors(ids: list[int], session: requests.Session):
 
 def _build_taxonomy(taxon: dict, session: requests.Session) -> dict:
     """
-    Return dict of rank→name for the main Linnaean ranks using ancestor_ids.
+    Return dict of rank->name for the main Linnaean ranks using ancestor_ids.
     Caches lookups so repeated ranks (e.g. Plantae) are free.
     """
     anc_ids = taxon.get('ancestor_ids', [])
@@ -146,7 +146,7 @@ def _build_taxonomy(taxon: dict, session: requests.Session) -> dict:
     return taxonomy
 
 
-# ── Wikipedia helper ───────────────────────────────────────────────────────────
+# -- Wikipedia helper -----------------------------------------------------------
 
 _wiki_cache: dict[str, str] = {}
 
@@ -171,7 +171,7 @@ def _wiki_summary(name: str, session: requests.Session) -> str:
         time.sleep(WIKI_DELAY)
 
 
-# ── Image download ─────────────────────────────────────────────────────────────
+# -- Image download -------------------------------------------------------------
 
 def _download_image(url: str, session: requests.Session) -> bytes | None:
     if not url:
@@ -192,7 +192,7 @@ def _download_image(url: str, session: requests.Session) -> bytes | None:
         time.sleep(IMG_DELAY)
 
 
-# ── Training helpers ───────────────────────────────────────────────────────────
+# -- Training helpers -----------------------------------------------------------
 
 def _build_train_text(taxon: dict, taxonomy: dict, description: str) -> str:
     """Build the text payload for a species training item."""
@@ -249,7 +249,7 @@ def _train_page(img_bytes: bytes | None, text: str,
         return False
 
 
-# ── Group processor ────────────────────────────────────────────────────────────
+# -- Group processor ------------------------------------------------------------
 
 def _process_group(group: str, out_dir: Path, node: str,
                    max_species: int, train_images: bool,
@@ -266,7 +266,7 @@ def _process_group(group: str, out_dir: Path, node: str,
     if ckpt_path.exists():
         try:
             state = json.loads(ckpt_path.read_text(encoding='utf-8'))
-            print(f'  [{group}] Resuming — {len(state["trained"])} already done',
+            print(f'  [{group}] Resuming -- {len(state["trained"])} already done',
                   flush=True)
         except Exception:
             pass
@@ -339,12 +339,12 @@ def _process_group(group: str, out_dir: Path, node: str,
         state['next_page'] = page
 
     save()
-    print(f'  [{group}] Done — {ok} species trained ({len(trained_ids)} total)',
+    print(f'  [{group}] Done -- {ok} species trained ({len(trained_ids)} total)',
           flush=True)
     return ok
 
 
-# ── Stage 26 orchestrator ──────────────────────────────────────────────────────
+# -- Stage 26 orchestrator ------------------------------------------------------
 
 def build_biodiversity_corpus(out_dir: Path, node: str,
                               max_per_group: int = 2000,
@@ -366,7 +366,7 @@ def build_biodiversity_corpus(out_dir: Path, node: str,
 
     for group in groups:
         label = GROUP_LABELS[group]
-        print(f'\n  ══ {label} ({group}) ══', flush=True)
+        print(f'\n  == {label} ({group}) ==', flush=True)
         n = _process_group(
             group, out_dir / group.lower(), node,
             max_per_group, train_images,
@@ -388,7 +388,7 @@ def build_biodiversity_corpus(out_dir: Path, node: str,
     return items
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
@@ -422,7 +422,7 @@ def main():
     max_per = args.max_per_group if args.max_per_group > 0 else 10_000_000
     train_dir = Path(args.data_dir) / 'training'
 
-    print('Biodiversity Corpus Builder — Stage 26')
+    print('Biodiversity Corpus Builder -- Stage 26')
     print(f'  Node        : {args.node}')
     print(f'  Data dir    : {args.data_dir}')
     print(f'  Stages      : {sorted(stages)}')
@@ -446,7 +446,7 @@ def main():
     mpath = train_dir / 'stage26_manifest.json'
     mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    print(f'\nManifest → {mpath}')
+    print(f'\nManifest -> {mpath}')
     print('Done.')
 
 

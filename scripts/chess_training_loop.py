@@ -84,13 +84,13 @@ ANCHOR_STRIDE = 4  # interval for anchor motif counters
 BEAM_WIDTH = 8
 BEAM_STEPS = 3
 
-# ── Node / service bridge ─────────────────────────────────────────────────────
+# -- Node / service bridge -----------------------------------------------------
 # The w1z4rd_api service (port 8080) exposes:
-#   POST /neuro/train    — observe an EnvironmentSnapshot → Hebbian weight update
-#   POST /neuro/activate — input labels → target-stream activations
-#   GET  /neuro/snapshot — current neuro state
+#   POST /neuro/train    -- observe an EnvironmentSnapshot -> Hebbian weight update
+#   POST /neuro/activate -- input labels -> target-stream activations
+#   GET  /neuro/snapshot -- current neuro state
 # The node (port 8090) exposes:
-#   POST /qa/ingest      — push Q&A examples for the QA runtime
+#   POST /qa/ingest      -- push Q&A examples for the QA runtime
 # All calls are fire-and-forget (background queue) so training throughput is
 # unaffected when the services are busy or unavailable.
 
@@ -114,14 +114,14 @@ except ImportError:
 
 class ResourceMonitor:
     """
-    Adaptive resource governor — no hard-coded limits anywhere.
+    Adaptive resource governor -- no hard-coded limits anywhere.
 
     Polls system CPU and RAM usage for this process vs the whole machine.
     Keeps a reserved headroom for the OS and interactive use (mouse, windows).
     Ramps the training workload UP in small steps when resources are plentiful,
     ramps DOWN quickly when the machine is under pressure.
 
-    Emitted scale factor (0 < scale ≤ 1.0) is applied by the training loop to
+    Emitted scale factor (0 < scale <= 1.0) is applied by the training loop to
     batch_size, game_count, and sleep_secs.
     """
 
@@ -131,7 +131,7 @@ class ResourceMonitor:
     _RAM_HEADROOM   = 0.25   # reserve at least 25% RAM for OS / user
     _RAMP_UP_STEP   = 0.10   # increase scale by 10% per check when under budget
     _RAMP_DOWN_STEP = 0.30   # decrease scale by 30% per check when over budget
-    _SCALE_MIN      = 0.05   # never go below 5% — keep the loop alive
+    _SCALE_MIN      = 0.05   # never go below 5% -- keep the loop alive
     _SCALE_MAX      = 1.00
 
     def __init__(self) -> None:
@@ -144,7 +144,7 @@ class ResourceMonitor:
         if self._proc is not None:
             self._proc.cpu_percent(interval=None)
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # -- Public API ------------------------------------------------------------
 
     def poll(self) -> float:
         """
@@ -152,7 +152,7 @@ class ResourceMonitor:
         Call this once per training iteration (non-blocking).
         """
         if not _PSUTIL_AVAILABLE:
-            return self._scale  # can't measure → stay at current scale
+            return self._scale  # can't measure -> stay at current scale
 
         try:
             # Process CPU as fraction of one logical core, normalised to [0,1]
@@ -172,7 +172,7 @@ class ResourceMonitor:
                 self._scale = max(self._SCALE_MIN, self._scale - self._RAMP_DOWN_STEP)
 
         except Exception:
-            pass  # psutil hiccup — keep current scale
+            pass  # psutil hiccup -- keep current scale
 
         return self._scale
 
@@ -212,13 +212,13 @@ class NodeBridge:
     """
     Fire-and-forget client for w1z4rd_api and node services.
 
-    • Neuro training (POST /neuro/train): each chess position is sent as an
+    * Neuro training (POST /neuro/train): each chess position is sent as an
       EnvironmentSnapshot.  The neuro fabric learns which pieces co-occur in
       good/bad positions and builds Hebbian weight patterns.
-    • Neuro activation (POST /neuro/activate): query what the fabric predicts
-      given the current position's piece labels — used as an additional move
+    * Neuro activation (POST /neuro/activate): query what the fabric predicts
+      given the current position's piece labels -- used as an additional move
       prior that strengthens as training deepens.
-    • QA ingest (POST /qa/ingest to node): push (context_moves → next_move)
+    * QA ingest (POST /qa/ingest to node): push (context_moves -> next_move)
       pairs so the QA runtime builds a retrieval index for move prediction.
 
     All network I/O runs in a daemon worker thread; the main training thread
@@ -242,7 +242,7 @@ class NodeBridge:
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
 
-    # ── probe ─────────────────────────────────────────────────────────────────
+    # -- probe -----------------------------------------------------------------
 
     def _probe(self, url: str, path: str) -> bool:
         try:
@@ -275,7 +275,7 @@ class NodeBridge:
             self._node_ok = result
         return bool(self._node_ok)
 
-    # ── background worker ─────────────────────────────────────────────────────
+    # -- background worker -----------------------------------------------------
 
     def _enqueue(self, target: str, payload: dict) -> None:
         with self._lock:
@@ -303,7 +303,7 @@ class NodeBridge:
             except Exception:
                 pass  # fire-and-forget: silently discard on network error
 
-    # ── public API ────────────────────────────────────────────────────────────
+    # -- public API ------------------------------------------------------------
 
     def send_neuro_train(self, snapshot: dict) -> None:
         """POST snapshot to /neuro/train on both services.  Non-blocking.
@@ -343,7 +343,7 @@ class NodeBridge:
         Called after each training iteration so the fabric's episodic store
         accumulates chess-specific prediction outcomes.  The fabric's
         ConditionalSufficiencyTracker and Hebbian inhibitory updates fire
-        automatically on receipt — no additional wiring needed.
+        automatically on receipt -- no additional wiring needed.
 
         `surprise` = (1 - p_correct)^2 for correct predictions (small gradient)
                    = p_confidence^2     for wrong predictions  (large gradient)
@@ -367,7 +367,7 @@ class NodeBridge:
         timeout_s: float = 1.0,
     ) -> Dict[str, float]:
         """
-        Query /neuro/activate synchronously.  Returns label→strength map.
+        Query /neuro/activate synchronously.  Returns label->strength map.
         Falls back to empty dict on timeout or error.
         """
         if not self.service_available:
@@ -597,7 +597,7 @@ def write_live_board(
             pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 # ------------------------
 # Relational / motif utils
@@ -708,9 +708,9 @@ def deterministic_split(identifier: str) -> bool:
 @dataclass(frozen=True)
 class GameRecord:
     """
-    Lean game record — board_vectors and symbol_states are NOT stored here.
+    Lean game record -- board_vectors and symbol_states are NOT stored here.
     They are computed on-demand from the raw SAN moves to keep RAM proportional
-    to the number of games loaded, not to the number of plies × feature dimensions.
+    to the number of games loaded, not to the number of plies x feature dimensions.
 
     Use replay_board_vectors(ply_limit) or replay_symbol_states(ply) to access
     position data; the callers are responsible for discarding the results once done.
@@ -1031,7 +1031,7 @@ class OutcomeNetwork:
         return logits, h1, h2, z1
 
     # γ (gamma) for focal loss: 2.0 is the standard value.
-    # High γ → confident wrong predictions get a proportionally larger gradient;
+    # High γ -> confident wrong predictions get a proportionally larger gradient;
     # easy correct predictions get suppressed.  Mirrors dopaminergic prediction error.
     FOCAL_GAMMA: float = 2.0
 
@@ -1051,7 +1051,7 @@ class OutcomeNetwork:
             exp = np.exp(logits, dtype=np.float32)
             probs = exp / exp.sum(axis=1, keepdims=True)
 
-            # ── Focal loss ──────────────────────────────────────────────────
+            # -- Focal loss --------------------------------------------------
             # Standard cross-entropy: diff = probs - y_onehot
             # Focal modulation: scale each sample's gradient by (1 - p_t)^γ
             # where p_t = probability assigned to the correct class.
@@ -1062,7 +1062,7 @@ class OutcomeNetwork:
             y_onehot = np.zeros_like(probs)
             y_onehot[np.arange(yb.shape[0]), yb] = 1.0
             diff = focal_weight * (probs - y_onehot)               # focal-scaled gradient
-            # ────────────────────────────────────────────────────────────────
+            # ----------------------------------------------------------------
 
             grad_W3 = h2.T @ diff / yb.shape[0] + self.l2 * self.W3
             grad_b3 = diff.mean(axis=0)
@@ -1435,7 +1435,7 @@ def evaluate_move_models(
                 if base_p > PRIOR_EPS:
                     scores[target] += base_p * prior_blend
                 if motif_next:
-                    trans_key = f"{motif_prev}→{motif_next}"
+                    trans_key = f"{motif_prev}->{motif_next}"
                     trans_p = float(transition_probs.get(trans_key, 0.0))
                     if trans_p > PRIOR_EPS:
                         scores[target] += trans_p * prior_blend
@@ -1934,7 +1934,7 @@ def main() -> None:
 
     print_runtime_banner(outcome_scopes, move_horizons, context_window, context_stride)
 
-    # ── Node / service bridge (fire-and-forget; never blocks training) ────────
+    # -- Node / service bridge (fire-and-forget; never blocks training) --------
     bridge = NodeBridge(SERVICE_URL, NODE_URL)
     # Probe eagerly so "UP / unreachable" prints before the first iteration.
     _ = bridge.service_available
@@ -1942,7 +1942,7 @@ def main() -> None:
 
     all_games = load_games(args.max_games)
 
-    # ── Ply animator (starts immediately so board shows something right away) ──
+    # -- Ply animator (starts immediately so board shows something right away) --
     animator = PlyAnimator()
     if all_games:
         animator.update(
@@ -1965,13 +1965,13 @@ def main() -> None:
     total_plies_actual = sum(len(g.moves) for g in all_games)
     print(f"Dataset: {len(all_games):,} games | {total_plies_actual:,} total plies")
     # Tracks plies sent to the node in THIS session only (resets to 0 each run).
-    # The viz shows this as "Plies seen" so clearing node data shows 0 → growing.
+    # The viz shows this as "Plies seen" so clearing node data shows 0 -> growing.
     session_plies_processed = 0
 
     result_names = {0: "1-0", 1: "1/2-1/2", 2: "0-1"}
 
-    # ── Initial neuro train primer (small, resource-aware) ────────────────────
-    # We send only a tiny sample of board positions at startup — enough to give
+    # -- Initial neuro train primer (small, resource-aware) --------------------
+    # We send only a tiny sample of board positions at startup -- enough to give
     # the fabric its first observations before the first training iteration.
     # The per-iteration burst (throttled by ResourceMonitor) handles the bulk.
     # Sending 40,000 snapshots at startup pinned the CPU for 2+ minutes because
@@ -1980,7 +1980,7 @@ def main() -> None:
     if bridge.service_available:
         ts_base = int(time.time())
         n_sent = 0
-        primer_games = min(5, len(all_games))   # max 5 games × 20 plies = 100 snapshots
+        primer_games = min(5, len(all_games))   # max 5 games x 20 plies = 100 snapshots
         for gi in range(primer_games):
             game = all_games[gi]
             for pi in range(min(NEURO_MAX_PLIES_PER_GAME, len(game.moves))):
@@ -1994,7 +1994,7 @@ def main() -> None:
                 session_plies_processed += 1
         print(f"  [bridge] Queued {n_sent} primer neuro-train snapshots ({primer_games} games)", flush=True)
 
-    # ── Initial QA primer (small, resource-aware) ─────────────────────────────
+    # -- Initial QA primer (small, resource-aware) -----------------------------
     # Same reasoning: cap to 10 games / 200 examples at startup; per-iteration
     # bursts in the main loop grow this organically as resources allow.
     if bridge.node_available:
@@ -2204,7 +2204,7 @@ def main() -> None:
         last_move_acc = move_acc
         last_outcome_energy = outcome_energy
 
-        # ── Node feedback loop ────────────────────────────────────────────────
+        # -- Node feedback loop ------------------------------------------------
         # 1. Update the ply animator with latest stats.  The animator runs in a
         #    background thread and writes chess_live_board.json every 0.8 s,
         #    cycling through plies independently of training speed.
@@ -2236,8 +2236,8 @@ def main() -> None:
         #    cap plies per game to 5 (was 20) to halve the replay work.
         if bridge.service_available and iteration % 2 == 0:
             ts_now = int(time.time())
-            # game_count(16) = monitor-scaled; at scale=1.0 → 16 games × 5 plies = 80 snapshots
-            # (was 32 games × 20 plies = 640 replay_symbol_states calls per burst)
+            # game_count(16) = monitor-scaled; at scale=1.0 -> 16 games x 5 plies = 80 snapshots
+            # (was 32 games x 20 plies = 640 replay_symbol_states calls per burst)
             neuro_sample_n = monitor.game_count(16)
             neuro_plies    = 5  # 5 plies max per game (was NEURO_MAX_PLIES_PER_GAME=20)
             sample_indices = rng.sample(range(len(all_games)), min(neuro_sample_n, len(all_games)))
@@ -2252,15 +2252,15 @@ def main() -> None:
                     bridge.send_neuro_train(snap)
                     session_plies_processed += 1
 
-        # ── Virtual-sensor episode recording ─────────────────────────────────
+        # -- Virtual-sensor episode recording ---------------------------------
         # Feed prediction outcomes into the fabric's episodic store so the
         # neural fabric learns from chess model right/wrong calls the same way
-        # hardware sensors do — no per-domain neuroscience knowledge required.
+        # hardware sensors do -- no per-domain neuroscience knowledge required.
         #
         # For each outcome scope, sample a small batch of test examples, run
         # the model, and record each resolved episode.  Focal-loss surprise:
-        #   correct:  (1 - p_correct)^2  → small gradient for easy wins
-        #   wrong:    p_confidence^2     → large gradient for confident misses
+        #   correct:  (1 - p_correct)^2  -> small gradient for easy wins
+        #   wrong:    p_confidence^2     -> large gradient for confident misses
         if bridge.service_available and outcome_models and outcome_data:
             episode_batch_size = max(1, monitor.game_count(8))
             for scope in outcome_scopes:
@@ -2311,7 +2311,7 @@ def main() -> None:
                 rng,
             )
 
-        # Adaptive sleep — longer when under pressure so the OS breathes
+        # Adaptive sleep -- longer when under pressure so the OS breathes
         idle = monitor.sleep_secs(0.5)
         if idle > 0.0:
             time.sleep(idle)
