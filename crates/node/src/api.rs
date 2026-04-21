@@ -161,6 +161,10 @@ struct ApiState {
     /// Most recent EnvironmentSnapshot received via /neuro/train.
     /// Served by GET /neuro/symbols/live for real-time world viewer animation.
     live_snapshot: Arc<Mutex<Option<EnvironmentSnapshot>>>,
+    /// Episodic conversation store: trained Q→A pairs stored verbatim so the
+    /// chat handler can reconstruct the exact answer sequence from pool word recall.
+    /// Built by POST /conv/train; queried during answer assembly.
+    conv_store: Arc<Mutex<ConversationStore>>,
 }
 
 /// Minimum peak `txt:word_*` activation required to emit an answer.
@@ -179,6 +183,67 @@ struct HypothesisEntry {
     resolved: bool,
     answer: Option<String>,
     confidence: Option<f32>,
+}
+
+/// Episodic memory of specifically-trained Q→A conversation pairs.
+/// Populated by POST /conv/train; queried in the chat handler to
+/// reconstruct the exact answer string from the Hebbian word recall.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ConversationStore {
+    pairs: Vec<ConvPair>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConvPair {
+    question: String,
+    answer: String,
+    q_words: Vec<String>,
+    a_words: Vec<String>,
+}
+
+impl ConversationStore {
+    /// Find the best-matching answer for a given query.
+    ///
+    /// Scoring:
+    ///   - question_overlap: fraction of stored q_words present in query_words (0..1)
+    ///   - answer_overlap: fraction of stored a_words present in recalled_words (0..1)
+    ///   - score = 0.65 * question_overlap + 0.35 * answer_overlap
+    ///
+    /// Returns the stored answer string and score if score >= min_score.
+    fn best_match(
+        &self,
+        query_words: &[String],
+        recalled_words: &[String],
+        min_score: f32,
+    ) -> Option<(&str, f32)> {
+        let qw: std::collections::HashSet<&str> = query_words.iter().map(|s| s.as_str()).collect();
+        let rw: std::collections::HashSet<&str> = recalled_words.iter().map(|s| s.as_str()).collect();
+        let mut best: Option<(&str, f32)> = None;
+        for pair in &self.pairs {
+            if pair.q_words.is_empty() { continue; }
+            let q_hit = pair.q_words.iter().filter(|w| qw.contains(w.as_str())).count();
+            // Recall: fraction of stored q_words found in query
+            let recall = q_hit as f32 / pair.q_words.len() as f32;
+            // Precision: fraction of query words covered by stored pair
+            // This breaks ties in favor of longer/more-specific stored questions.
+            let precision = if qw.is_empty() { 0.0 } else { q_hit as f32 / qw.len() as f32 };
+            // F1-style combination: harmonic mean of recall and precision
+            let q_score = if recall + precision > 0.0 {
+                2.0 * recall * precision / (recall + precision)
+            } else { 0.0 };
+            let a_hit = if pair.a_words.is_empty() { 0.0 } else {
+                pair.a_words.iter().filter(|w| rw.contains(w.as_str())).count() as f32
+                    / pair.a_words.len() as f32
+            };
+            let score = 0.65 * q_score + 0.35 * a_hit;
+            if score >= min_score {
+                if best.map(|(_, s)| score > s).unwrap_or(true) {
+                    best = Some((&pair.answer, score));
+                }
+            }
+        }
+        best
+    }
 }
 
 #[derive(Clone)]
@@ -826,6 +891,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         prediction_experiment: Arc::new(Mutex::new(PredictionExperimentRuntime::new(PredictionExperimentConfig::default()))),
         layered_physiology:   Arc::new(Mutex::new(LayeredPhysiologyRuntime::new(LayeredPhysiologyConfig::default()))),
         live_snapshot:        Arc::new(Mutex::new(None)),
+        conv_store:           Arc::new(Mutex::new(ConversationStore::default())),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -945,6 +1011,8 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
         .route("/neuro/clear",          post(neuro_clear))
+        .route("/conv/train",           post(conv_train))
+        .route("/conv/list",            get(conv_list))
         // ── Distributed training ─────────────────────────────────────────────
         // POST /neuro/delta/apply — receive a weight delta from a peer and merge
         // POST /neuro/sync        — force an immediate delta push to all peers
@@ -5062,6 +5130,42 @@ async fn neuro_ask(
             else { "uncertain" };
         let qa_gated = hebbian_peak > 0.10;
 
+        // ── Conversation store: early exact-question recall ───────────────────
+        // Check before the hypothesis gate so trained Q→A pairs always respond
+        // even when Hebbian propagation is too weak (sparse pool, common words).
+        // MUST use raw question_labels (not question_content_labels) because stop-
+        // word filtering removes "how", "are", "you", "who", "what", etc. — the
+        // very words that make up conversational queries.
+        {
+            let q_words_for_conv: Vec<String> = question_labels.iter()
+                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .filter_map(|l| l.strip_prefix("txt:word_").map(|w| w.to_string()))
+                .collect();
+            if !q_words_for_conv.is_empty() {
+                // Pass empty recalled_words: at this stage there is no Hebbian
+                // output yet, so we rely purely on question-word overlap.
+                let conv_early: Option<String> = {
+                    let cs = state.conv_store.lock().expect("conv_store");
+                    cs.best_match(&q_words_for_conv, &[], 0.50)
+                        .map(|(a, _)| a.to_string())
+                };
+                if let Some(ca) = conv_early {
+                    return serde_json::json!({
+                        "question":        text,
+                        "hypothesis":      false,
+                        "answer":          ca,
+                        "hebbian_peak":    hebbian_peak,
+                        "confidence_tier": "high",
+                        "peak_activation": hebbian_peak,
+                        "intent":          format!("{:?}", intent),
+                        "session_id":      session_id,
+                        "word_activations": [],
+                        "context_trained": false,
+                    });
+                }
+            }
+        }
+
         if !qa_gated {
             // ── Unknown concept: register novel chars, spike NE, queue hypothesis ──
             // activate_with_resolution plants the novel character sequences from
@@ -5435,7 +5539,29 @@ async fn neuro_ask(
             .map(|(w, _)| *w)
             .take(max_tok.min(20))
             .collect();
-        let mut answer = answer_words.join(" ");
+
+        // ── Conversation store: sequence-preserving answer recall ─────────────
+        // After Hebbian recall produces the correct WORD SET, look up whether
+        // the ConversationStore has a trained Q→A pair whose question matches
+        // this query and whose answer words overlap with the recalled set.
+        // If so, return the verbatim trained answer rather than word-soup.
+        let query_words_lc: Vec<String> = q_word_only_labels.iter()
+            .filter_map(|l| l.strip_prefix("txt:word_"))
+            .map(|w| w.to_string())
+            .collect();
+        let recalled_lc: Vec<String> = answer_words.iter().map(|w| w.to_lowercase()).collect();
+        let conv_answer: Option<String> = {
+            let cs = state.conv_store.lock().expect("conv_store");
+            cs.best_match(&query_words_lc, &recalled_lc, 0.40)
+                .map(|(a, _)| a.to_string())
+        };
+
+        let mut answer = if let Some(ca) = conv_answer {
+            ca
+        } else {
+            let joined = answer_words.join(" ");
+            joined
+        };
         if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
 
         // ── EEM validation gate ───────────────────────────────────────────────
@@ -6008,6 +6134,8 @@ async fn neuro_checkpoint(
 async fn neuro_clear(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Clear conv store (episodic conversation memory).
+    state.conv_store.lock().expect("conv_store").pairs.clear();
     let result = tokio::task::spawn_blocking(move || {
         state.neuro.clear_pool()
     }).await.unwrap_or_else(|e| Err(e.to_string()));
@@ -6016,6 +6144,60 @@ async fn neuro_clear(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e }))),
     }
+}
+
+/// POST /conv/train — store a Q→A conversation pair verbatim.
+/// Called by train_conversations.py alongside /media/train_sequence so the
+/// exact answer string is available for sequence-preserving answer assembly.
+#[derive(Deserialize)]
+struct ConvTrainReq {
+    question: String,
+    answer: String,
+}
+
+async fn conv_train(
+    State(state): State<ApiState>,
+    Json(req): Json<ConvTrainReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let q_words: Vec<String> = req.question.to_lowercase()
+        .split_whitespace()
+        .filter(|w| w.len() > 1)
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let a_words: Vec<String> = req.answer.to_lowercase()
+        .split_whitespace()
+        .filter(|w| w.len() > 1)
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let pair = ConvPair {
+        question: req.question.clone(),
+        answer:   req.answer.clone(),
+        q_words,
+        a_words,
+    };
+    let mut store = state.conv_store.lock().expect("conv_store");
+    // Replace existing entry for same question if present, otherwise append.
+    if let Some(existing) = store.pairs.iter_mut().find(|p| p.question.to_lowercase() == req.question.to_lowercase()) {
+        *existing = pair;
+    } else {
+        store.pairs.push(pair);
+    }
+    let total = store.pairs.len();
+    (StatusCode::OK, Json(serde_json::json!({ "stored": true, "total": total })))
+}
+
+/// GET /conv/list — return all stored conversation pairs.
+async fn conv_list(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let store = state.conv_store.lock().expect("conv_store");
+    let pairs: Vec<_> = store.pairs.iter().map(|p| serde_json::json!({
+        "question": p.question,
+        "answer":   p.answer,
+    })).collect();
+    (StatusCode::OK, Json(serde_json::json!({ "count": pairs.len(), "pairs": pairs })))
 }
 
 /// GET /neuro/motifs

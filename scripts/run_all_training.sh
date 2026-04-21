@@ -59,7 +59,7 @@ reinforce_foundations() {
 reinforce_conversations() {
     local rounds="${1:-5}"
     echo "[$(date)] Reinforcing conversational identity (${rounds} rounds)..." | tee -a "$LOG_DIR/run_all.log"
-    PYTHONIOENCODING=utf-8 python "$SCRIPTS/train_conversations.py" \
+    PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_conversations.py" \
         --node "$NODE" \
         --rounds "$rounds" \
         --passes 15 \
@@ -86,7 +86,7 @@ reinforce_conversations 5
 
 # ─── PHASE 3: TODDLER STAGE 0 ────────────────────────────────────────────────
 echo "[$(date)] Starting Stage 0 (toddler foundations)..." | tee -a "$LOG_DIR/run_all.log"
-python "$SCRIPTS/train_k12.py" \
+python3 "$SCRIPTS/train_k12.py" \
     --node "$NODE" \
     --stages 0 \
     --resume \
@@ -98,7 +98,7 @@ reinforce_conversations 5
 
 # ─── PHASE 4: K-12 TEXTBOOK CURRICULUM ──────────────────────────────────────
 echo "[$(date)] Starting Stages 1-2 (K-12 textbooks)..." | tee -a "$LOG_DIR/run_all.log"
-python "$SCRIPTS/train_k12.py" \
+python3 "$SCRIPTS/train_k12.py" \
     --node "$NODE" \
     --stages 1,2 \
     --resume \
@@ -110,7 +110,7 @@ reinforce_conversations 5
 
 # ─── PHASE 5: CODE / TERMINAL / AGENT CORPUS ────────────────────────────────
 echo "[$(date)] Starting code+terminal+agent corpus..." | tee -a "$LOG_DIR/run_all.log"
-python "$SCRIPTS/build_code_corpus.py" \
+python3 "$SCRIPTS/build_code_corpus.py" \
     --node "localhost:8090" \
     --repeats 20 \
     2>&1 | tee -a "$LOG_DIR/code_corpus.log"
@@ -121,7 +121,7 @@ reinforce_conversations 5
 
 # ─── PHASE 6: STEM (stages 10-17) ────────────────────────────────────────────
 echo "[$(date)] Starting Stages 10-17 (STEM training)..." | tee -a "$LOG_DIR/run_all.log"
-python "$SCRIPTS/build_stem_dataset.py" \
+python3 "$SCRIPTS/build_stem_dataset.py" \
     --stages 10,11,12,13,14,15,16,17 \
     --node localhost:8090 \
     --data-dir "$DATA" \
@@ -136,7 +136,7 @@ reinforce_conversations 5
 
 # ─── PHASE 7: LANGUAGE / DOCUMENTATION CORPUS (stages 18-22) ────────────────
 echo "[$(date)] Starting Stages 18-22 (language + documentation)..." | tee -a "$LOG_DIR/run_all.log"
-python "$SCRIPTS/build_language_corpus.py" \
+python3 "$SCRIPTS/build_language_corpus.py" \
     --stages 18,19,20,21,22 \
     --node localhost:8090 \
     --gutenberg-chars 60000 \

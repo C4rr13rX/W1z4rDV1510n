@@ -3685,18 +3685,15 @@ impl NeuroRuntime {
             fresh.pool.cooccur_cap = guard.pool.cooccur_cap;
             *guard = fresh;
         }
-        // Delete pool file and cold-tier files so the next checkpoint saves the empty state.
+        // Delete pool file and entire cold-tier directory tree.
         if let Some(ref path) = path_opt {
             let _ = std::fs::remove_file(path);
-            // Also remove the .tmp leftover if any.
             let _ = std::fs::remove_file(format!("{path}.tmp"));
-            // Clear cold-tier directory.
+            // Remove the whole cold-tier tree (contains shard subdirs with many files).
             let cold_dir = format!("{}_cold", path.trim_end_matches(".json"));
-            if let Ok(entries) = std::fs::read_dir(&cold_dir) {
-                for entry in entries.flatten() {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+            let _ = std::fs::remove_dir_all(&cold_dir);
+            // Recreate the empty directory so the node can write the cold index later.
+            let _ = std::fs::create_dir_all(&cold_dir);
         }
         Ok(())
     }

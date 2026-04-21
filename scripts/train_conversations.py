@@ -163,8 +163,19 @@ def train_contrastive_pass(node: str, question: str, correct: str,
         return False
 
 
+def register_conv_pair(node: str, question: str, answer: str) -> None:
+    """Register the Q→A pair in the conv store for sequence-preserving recall."""
+    payload = json.dumps({"question": question, "answer": answer}).encode()
+    try:
+        _post(f"{node}/conv/train", payload)
+    except Exception as exc:
+        print(f"  conv/train failed: {exc}", file=sys.stderr)
+
+
 def train_pair(node: str, question: str, answer: str, rounds: int,
                seq_passes: int = DEFAULT_PASSES, lr: float = DEFAULT_LR) -> bool:
+    # Register in conv store on first training (Hebbian + episodic together).
+    register_conv_pair(node, question, answer)
     for rnd in range(rounds):
         if not train_sequence_passes(node, question, answer, seq_passes, lr):
             return False
