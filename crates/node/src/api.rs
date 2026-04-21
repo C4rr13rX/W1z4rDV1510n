@@ -944,6 +944,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/media/playback",       post(media_playback))
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
+        .route("/neuro/clear",          post(neuro_clear))
         // ── Distributed training ─────────────────────────────────────────────
         // POST /neuro/delta/apply — receive a weight delta from a peer and merge
         // POST /neuro/sync        — force an immediate delta push to all peers
@@ -5998,6 +5999,22 @@ async fn neuro_checkpoint(
         }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("pool: {}", e) }))),
+    }
+}
+
+/// POST /neuro/clear
+/// Reset the in-memory pool to empty and delete pool files on disk.
+/// Use before a fresh training run so the curriculum starts from a blank slate.
+async fn neuro_clear(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let result = tokio::task::spawn_blocking(move || {
+        state.neuro.clear_pool()
+    }).await.unwrap_or_else(|e| Err(e.to_string()));
+    match result {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "cleared": true }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e }))),
     }
 }
 

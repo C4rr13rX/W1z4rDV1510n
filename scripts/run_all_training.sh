@@ -50,10 +50,41 @@ reinforce_foundations() {
     echo "[$(date)] Foundation reinforcement done" | tee -a "$LOG_DIR/run_all.log"
 }
 
-# ─── PHASE 1: ANCHOR FOUNDATIONS ────────────────────────────────────────────
-reinforce_foundations 3
+# Helper: re-anchor conversational identity after each major phase.
+# Uses LR=7.5 (near max clamp) to saturate greeting connections so they
+# compete with corpus-trained words in kWTA. Without this, the code/docs
+# corpus progressively overwrites the "hello" -> greeting associations.
+# Initial call: --rounds 20 (saturates all 35 pairs to max_weight=4.0)
+# Subsequent reinforcement calls: --rounds 5 (re-anchors drift without over-training)
+reinforce_conversations() {
+    local rounds="${1:-5}"
+    echo "[$(date)] Reinforcing conversational identity (${rounds} rounds)..." | tee -a "$LOG_DIR/run_all.log"
+    PYTHONIOENCODING=utf-8 python "$SCRIPTS/train_conversations.py" \
+        --node "$NODE" \
+        --rounds "$rounds" \
+        --passes 15 \
+        --lr 7.5 \
+        2>&1 | tee -a "$LOG_DIR/conversations.log" | tail -2
+    echo "[$(date)] Conversational reinforcement done" | tee -a "$LOG_DIR/run_all.log"
+}
 
-# ─── PHASE 2: TODDLER STAGE 0 ────────────────────────────────────────────────
+# ─── PHASE 0: CLEAR POOL ─────────────────────────────────────────────────────
+echo "[$(date)] Clearing pool for fresh start..." | tee -a "$LOG_DIR/run_all.log"
+curl -s -X POST "$NODE/neuro/clear" | tee -a "$LOG_DIR/run_all.log"
+echo "" | tee -a "$LOG_DIR/run_all.log"
+sleep 1
+echo "[$(date)] Pool cleared — starting fresh curriculum" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 1: SATURATE CONVERSATIONAL IDENTITY ───────────────────────────────
+# All 35 pairs trained at LR=7.5 x 15 passes x 20 rounds = max_weight=4.0
+# This establishes greeting/identity responses before any corpus can compete.
+reinforce_conversations 20
+
+# ─── PHASE 2: ANCHOR FOUNDATIONS ─────────────────────────────────────────────
+reinforce_foundations 3
+reinforce_conversations 5
+
+# ─── PHASE 3: TODDLER STAGE 0 ────────────────────────────────────────────────
 echo "[$(date)] Starting Stage 0 (toddler foundations)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/train_k12.py" \
     --node "$NODE" \
@@ -63,8 +94,9 @@ python "$SCRIPTS/train_k12.py" \
 echo "[$(date)] Stage 0 done" | tee -a "$LOG_DIR/run_all.log"
 
 reinforce_foundations 2
+reinforce_conversations 5
 
-# ─── PHASE 3: K-12 TEXTBOOK CURRICULUM ──────────────────────────────────────
+# ─── PHASE 4: K-12 TEXTBOOK CURRICULUM ──────────────────────────────────────
 echo "[$(date)] Starting Stages 1-2 (K-12 textbooks)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/train_k12.py" \
     --node "$NODE" \
@@ -74,8 +106,9 @@ python "$SCRIPTS/train_k12.py" \
 echo "[$(date)] Stages 1-2 done" | tee -a "$LOG_DIR/run_all.log"
 
 reinforce_foundations 2
+reinforce_conversations 5
 
-# ─── PHASE 4: CODE / TERMINAL / AGENT CORPUS ────────────────────────────────
+# ─── PHASE 5: CODE / TERMINAL / AGENT CORPUS ────────────────────────────────
 echo "[$(date)] Starting code+terminal+agent corpus..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_code_corpus.py" \
     --node "localhost:8090" \
@@ -84,8 +117,9 @@ python "$SCRIPTS/build_code_corpus.py" \
 echo "[$(date)] Code corpus done" | tee -a "$LOG_DIR/run_all.log"
 
 reinforce_foundations 2
+reinforce_conversations 5
 
-# ─── PHASE 5: STEM (stages 10-17) ────────────────────────────────────────────
+# ─── PHASE 6: STEM (stages 10-17) ────────────────────────────────────────────
 echo "[$(date)] Starting Stages 10-17 (STEM training)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_stem_dataset.py" \
     --stages 10,11,12,13,14,15,16,17 \
@@ -98,8 +132,9 @@ python "$SCRIPTS/build_stem_dataset.py" \
 echo "[$(date)] Stages 10-17 done" | tee -a "$LOG_DIR/run_all.log"
 
 reinforce_foundations 1
+reinforce_conversations 5
 
-# ─── PHASE 6: LANGUAGE / DOCUMENTATION CORPUS (stages 18-22) ────────────────
+# ─── PHASE 7: LANGUAGE / DOCUMENTATION CORPUS (stages 18-22) ────────────────
 echo "[$(date)] Starting Stages 18-22 (language + documentation)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_language_corpus.py" \
     --stages 18,19,20,21,22 \
@@ -111,8 +146,9 @@ python "$SCRIPTS/build_language_corpus.py" \
 echo "[$(date)] Stages 18-22 done" | tee -a "$LOG_DIR/run_all.log"
 
 reinforce_foundations 1
+reinforce_conversations 5
 
-# ─── PHASE 7: LIBRARY DOCS + STACK OVERFLOW (stages 23-24) ──────────────────
+# ─── PHASE 8: LIBRARY DOCS + STACK OVERFLOW (stages 23-24) ──────────────────
 echo "[$(date)] Starting Stages 23-24 (library docs + Stack Overflow)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_library_corpus.py" \
     --stages 23,24 \
@@ -125,8 +161,9 @@ python "$SCRIPTS/build_library_corpus.py" \
 echo "[$(date)] Stages 23-24 done" | tee -a "$LOG_DIR/run_all.log"
 
 reinforce_foundations 1
+reinforce_conversations 5
 
-# ─── PHASE 8: LIBRETEXTS COMPREHENSIVE (stage 25) ───────────────────────────
+# ─── PHASE 9: LIBRETEXTS COMPREHENSIVE (stage 25) ───────────────────────────
 echo "[$(date)] Starting Stage 25 (LibreTexts comprehensive corpus)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_libretexts_corpus.py" \
     --stages 25 \
@@ -136,7 +173,9 @@ python "$SCRIPTS/build_libretexts_corpus.py" \
     2>&1 | tee -a "$LOG_DIR/libretexts.log"
 echo "[$(date)] Stage 25 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 9: BIODIVERSITY (stage 26) ────────────────────────────────────────
+reinforce_conversations 3
+
+# ─── PHASE 10: BIODIVERSITY (stage 26) ────────────────────────────────────────
 echo "[$(date)] Starting Stage 26 (biodiversity visual-ID corpus)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_biodiversity_corpus.py" \
     --stages 26 \
@@ -146,7 +185,9 @@ python "$SCRIPTS/build_biodiversity_corpus.py" \
     2>&1 | tee -a "$LOG_DIR/biodiversity.log"
 echo "[$(date)] Stage 26 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 10: COGNITIVE + SORTING (stages 27-28) ───────────────────────────
+reinforce_conversations 3
+
+# ─── PHASE 11: COGNITIVE + SORTING (stages 27-28) ───────────────────────────
 echo "[$(date)] Starting Stages 27-28 (cognitive + sorting)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_cognitive_corpus.py" \
     --stages 27,28 \
@@ -155,7 +196,7 @@ python "$SCRIPTS/build_cognitive_corpus.py" \
     2>&1 | tee -a "$LOG_DIR/cognitive.log"
 echo "[$(date)] Stages 27-28 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 11: BIBLE (stage 29) ─────────────────────────────────────────────
+# ─── PHASE 12: BIBLE (stage 29) ─────────────────────────────────────────────
 echo "[$(date)] Starting Stage 29 (World English Bible)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_bible_corpus.py" \
     --stages 29 \
@@ -164,7 +205,9 @@ python "$SCRIPTS/build_bible_corpus.py" \
     2>&1 | tee -a "$LOG_DIR/bible.log"
 echo "[$(date)] Stage 29 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 12: MEDICAL / PSYCHOLOGY (stages 30-33) ──────────────────────────
+reinforce_conversations 3
+
+# ─── PHASE 13: MEDICAL / PSYCHOLOGY (stages 30-33) ──────────────────────────
 echo "[$(date)] Starting Stages 30-33 (medical corpus from NCBI/NLM)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_medical_corpus.py" \
     --stages 30,31,32,33 \
@@ -174,7 +217,9 @@ python "$SCRIPTS/build_medical_corpus.py" \
     2>&1 | tee -a "$LOG_DIR/medical.log"
 echo "[$(date)] Stages 30-33 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 13: MATHEMATICS (stage 34) ───────────────────────────────────────
+reinforce_conversations 3
+
+# ─── PHASE 14: MATHEMATICS (stage 34) ───────────────────────────────────────
 echo "[$(date)] Starting Stage 34 (mathematics corpus)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_math_corpus.py" \
     --stages 34 \
@@ -183,7 +228,9 @@ python "$SCRIPTS/build_math_corpus.py" \
     2>&1 | tee -a "$LOG_DIR/math.log"
 echo "[$(date)] Stage 34 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 14: PEDAGOGY (stage 35) ──────────────────────────────────────────
+reinforce_conversations 3
+
+# ─── PHASE 15: PEDAGOGY (stage 35) ──────────────────────────────────────────
 echo "[$(date)] Starting Stage 35 (pedagogy & curriculum design)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_pedagogy_corpus.py" \
     --stages 35 \
@@ -193,7 +240,9 @@ python "$SCRIPTS/build_pedagogy_corpus.py" \
     2>&1 | tee -a "$LOG_DIR/pedagogy.log"
 echo "[$(date)] Stage 35 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 15: COW MESH (stage 9) ────────────────────────────────────────────
+reinforce_conversations 3
+
+# ─── PHASE 16: COW MESH (stage 9) ────────────────────────────────────────────
 echo "[$(date)] Starting Stage 9 (mesh training)..." | tee -a "$LOG_DIR/run_all.log"
 python "$SCRIPTS/build_cow_dataset.py" \
     --stages 9 \
@@ -202,7 +251,8 @@ python "$SCRIPTS/build_cow_dataset.py" \
     2>&1 | tee -a "$LOG_DIR/stage9.log" | tail -1
 echo "[$(date)] Stage 9 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── FINAL: RE-ANCHOR FOUNDATIONS ────────────────────────────────────────────
+# ─── FINAL: RE-ANCHOR FOUNDATIONS + CONVERSATIONS ────────────────────────────
 reinforce_foundations 3
+reinforce_conversations 10
 
 echo "===== Full curriculum training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"

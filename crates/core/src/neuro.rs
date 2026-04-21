@@ -3671,6 +3671,36 @@ impl NeuroRuntime {
         self.config.pool_state_path.as_deref()
     }
 
+    /// Replace the in-memory pool with a fresh empty one and delete pool files on disk.
+    /// Called by POST /neuro/clear so training scripts can reset without restarting the node.
+    pub fn clear_pool(&self) -> Result<(), String> {
+        let path_opt = self.config.pool_state_path.clone();
+        let neuro_cfg = self.config.neuro.clone();
+        let motif_cfg = self.config.motifs.clone();
+        {
+            let mut guard = self.inner.lock();
+            let mut fresh = NeuroState::new(neuro_cfg, motif_cfg);
+            // Preserve cold-tier directory path from the old pool.
+            fresh.pool.cold_dir = guard.pool.cold_dir.clone();
+            fresh.pool.cooccur_cap = guard.pool.cooccur_cap;
+            *guard = fresh;
+        }
+        // Delete pool file and cold-tier files so the next checkpoint saves the empty state.
+        if let Some(ref path) = path_opt {
+            let _ = std::fs::remove_file(path);
+            // Also remove the .tmp leftover if any.
+            let _ = std::fs::remove_file(format!("{path}.tmp"));
+            // Clear cold-tier directory.
+            let cold_dir = format!("{}_cold", path.trim_end_matches(".json"));
+            if let Ok(entries) = std::fs::read_dir(&cold_dir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn observe_states<'a, I>(&self, states: I)
     where
         I: IntoIterator<Item = &'a DynamicState>,

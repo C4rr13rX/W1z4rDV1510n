@@ -18,9 +18,9 @@ import urllib.request
 import uuid
 
 DEFAULT_NODE   = "http://localhost:8090"
-DEFAULT_ROUNDS = 3    # full contrastive rounds per pair
-SEQ_PASSES     = 10   # train_sequence passes per round
-SEQ_LR         = 0.50 # elevated LR — deliberate, not background training
+DEFAULT_ROUNDS = 20   # full contrastive rounds per pair (saturates to max_weight at LR=0.50)
+DEFAULT_PASSES = 10   # train_sequence passes per round
+DEFAULT_LR     = 7.5  # saturation LR — 11 passes hits max_weight=4.0, dominates corpus noise
 CONTRASTIVE_LR = 0.45
 
 
@@ -114,7 +114,8 @@ def propagate(node: str, question: str) -> list[str]:
         return []
 
 
-def train_sequence_passes(node: str, question: str, answer: str, passes: int, lr: float) -> bool:
+def train_sequence_passes(node: str, question: str, answer: str, passes: int, lr: float,
+                          contrastive_lr: float = CONTRASTIVE_LR) -> bool:
     for i in range(passes):
         sid = str(uuid.uuid4())
         payload = json.dumps({
@@ -157,14 +158,12 @@ def train_contrastive_pass(node: str, question: str, correct: str,
         return False
 
 
-def train_pair(node: str, question: str, answer: str, rounds: int) -> bool:
+def train_pair(node: str, question: str, answer: str, rounds: int,
+               seq_passes: int = DEFAULT_PASSES, lr: float = DEFAULT_LR) -> bool:
     for rnd in range(rounds):
-        # 1. Sequence passes to strengthen correct association
-        if not train_sequence_passes(node, question, answer, SEQ_PASSES, SEQ_LR):
+        if not train_sequence_passes(node, question, answer, seq_passes, lr):
             return False
-        # 2. Get current noisy words from pool and use as wrong answer in contrastive pass
         noisy = propagate(node, question)
-        # Remove correct answer words from noisy list
         correct_words = set(answer.lower().split())
         noisy = [w for w in noisy if w not in correct_words]
         if noisy:
@@ -176,6 +175,10 @@ def main():
     ap = argparse.ArgumentParser(description="Seed conversational training data")
     ap.add_argument("--node",   default=DEFAULT_NODE)
     ap.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    ap.add_argument("--passes", type=int, default=DEFAULT_PASSES,
+                    help="train_sequence passes per round (default %(default)s)")
+    ap.add_argument("--lr",     type=float, default=DEFAULT_LR,
+                    help="sequence learning rate (default %(default)s; 7.5 saturates to max_weight in ~11 passes)")
     args = ap.parse_args()
 
     # Health check
@@ -192,12 +195,12 @@ def main():
     for i, (q, a) in enumerate(CONVERSATIONS, 1):
         print(f"[{i:3d}/{total}] {q!r:40s} -> {a[:50]!r}")
         sys.stdout.flush()
-        if train_pair(args.node, q, a, args.rounds):
+        if train_pair(args.node, q, a, args.rounds, args.passes, args.lr):
             ok += 1
         else:
             print(f"  FAILED")
 
-    print(f"\nDone: {ok}/{total} pairs ({args.rounds} rounds x {SEQ_PASSES} seq passes + contrastive)")
+    print(f"\nDone: {ok}/{total} pairs ({args.rounds} rounds x {args.passes} seq passes @ LR={args.lr} + contrastive)")
 
 
 if __name__ == "__main__":
