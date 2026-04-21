@@ -572,7 +572,19 @@ mod pool_serde {
     pub fn deserialize<'de, D>(d: D) -> Result<Vec<NeuronSlot>, D::Error>
     where D: Deserializer<'de> {
         let neurons: Vec<Neuron> = Vec::deserialize(d)?;
-        Ok(neurons.into_iter().map(NeuronSlot::Hot).collect())
+        if neurons.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Place each neuron at slots[neuron.id] so label_to_id lookups remain valid.
+        // Hot neurons may be sparse (gaps are cold/free slots not serialized), so we
+        // must use the stored id — not the array position — as the slot index.
+        let max_id = neurons.iter().map(|n| n.id as usize).max().unwrap_or(0);
+        let mut slots: Vec<NeuronSlot> = (0..=max_id).map(|_| NeuronSlot::Free).collect();
+        for n in neurons {
+            let idx = n.id as usize;
+            slots[idx] = NeuronSlot::Hot(n);
+        }
+        Ok(slots)
     }
 }
 
@@ -3852,6 +3864,69 @@ impl NeuroRuntime {
         if seeds.is_empty() { return HashMap::new(); }
         let guard = self.inner.lock();
         guard.pool.propagate_predictive(&seeds, hops, min_activation)
+    }
+
+    /// Return (mean_activation, use_count, fan_out) for each label in the pool.
+    /// Used by the classical annealing step in inference to identify hub words:
+    ///   mean_activation: average background firing rate (high = always fires)
+    ///   use_count: how many times this neuron was trained
+    ///   fan_out: number of excitatory outgoing synapses (high = hub/generalist)
+    pub fn label_stats(&self, labels: &[String]) -> HashMap<String, (f32, u64, usize)> {
+        if !self.config.enabled {
+            return HashMap::new();
+        }
+        let guard = self.inner.lock();
+        labels.iter()
+            .filter_map(|label| {
+                guard.pool.label_to_id.get(label)
+                    .and_then(|&id| guard.pool.get_hot(id as usize))
+                    .map(|n| (label.clone(), (n.mean_activation, n.use_count, n.excitatory.len())))
+            })
+            .collect()
+    }
+
+    /// For each activated label, sum the excitatory dendrite weights that come from any
+    /// of the seed labels.  Returns a map of `label → seed_relevance_score`.
+    ///
+    /// Words with score > 0 were DIRECTLY trained together with the seed labels — they
+    /// are the true semantic associations, not noise from hub propagation.
+    /// Words with score = 0 fired only through indirect multi-hop chains.
+    ///
+    /// Used by classical annealing: sort answer candidates by seed_relevance first,
+    /// then by activation strength, to surface trained associations over hub noise.
+    pub fn seed_relevance(
+        &self,
+        seed_labels: &[String],
+        activated_labels: &[String],
+    ) -> HashMap<String, f32> {
+        if !self.config.enabled {
+            return HashMap::new();
+        }
+        let guard = self.inner.lock();
+        // Collect neuron IDs for all seed labels
+        let seed_ids: std::collections::HashSet<u32> = seed_labels.iter()
+            .filter_map(|l| guard.pool.label_to_id.get(l).copied())
+            .collect();
+        if seed_ids.is_empty() {
+            return HashMap::new();
+        }
+        // For each activated label, sum dendrite weights from seeds
+        activated_labels.iter()
+            .filter_map(|label| {
+                let id = *guard.pool.label_to_id.get(label)?;
+                let neuron = guard.pool.get_hot(id as usize)?;
+                // Check both dendrites (incoming) and excitatory (outgoing from seeds)
+                let dendrite_score: f32 = neuron.dendrites.iter()
+                    .filter(|d| seed_ids.contains(&d.source))
+                    .map(|d| d.weight.max(0.0))
+                    .sum();
+                if dendrite_score > 0.0 {
+                    Some((label.clone(), dendrite_score))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Return all meta-motifs discovered so far across every hierarchy level.

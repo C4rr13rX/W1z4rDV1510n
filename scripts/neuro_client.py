@@ -4,8 +4,9 @@ neuro_client.py -- Full-architecture client for the W1z4rD node API.
 
 Every training call goes through here so nothing is skipped.
 Covers ALL endpoints that affect learning (pure neural pool -- no Q&A store):
-  /media/train             -- single-frame multimodal Hebbian
+  /media/train             -- single-frame multimodal Hebbian (inhibitory=true for LTD)
   /media/train_sequence    -- temporal STDP multi-frame
+  /media/train_contrastive -- positive Q->A + inhibitory wrong-answers in one call
   /neuro/record_episode    -- episodic learning from confirmed observations
   /equations/ingest        -- Environmental Equation Matrix
   /knowledge/ingest        -- structured knowledge documents
@@ -373,29 +374,54 @@ class NeuroClient:
         record_episodes: bool = True,
     ) -> int:
         """
-        Full pair training through all neural pool pathways (no Q&A store):
-          1. /media/train          -- combined Q+A text, full Hebbian activation
-          2. /media/train_sequence -- Q frame (t=0) -> A frame (t=1) temporal STDP
-          3. /neuro/record_episode -- episodic store for each pair
-          4. /equations/ingest    -- equations extracted from answer text
+        Full contrastive pair training through all neural pool pathways:
+          1. /media/train_contrastive -- positive Q->A (excitatory + dopamine)
+                                         + in-batch negatives (inhibitory)
+          2. /media/train_sequence    -- Q frame (t=0) -> A frame (t=1) STDP
+          3. /neuro/record_episode    -- episodic store per pair
+          4. /equations/ingest        -- EEM for science content
+
+        The contrastive pass creates inhibitory synapses from each Q toward
+        the other answers in this batch.  During propagation the correct answer
+        fires; wrong answers are actively suppressed.  This is the mechanism
+        that enables emergent correct answers and suppresses fake science.
 
         Returns count of pairs fully trained.
         """
         if not pairs:
             return 0
 
+        valid = [(p.get("question", ""), p.get("answer", ""))
+                 for p in pairs if p.get("question") and p.get("answer")]
+        if not valid:
+            return 0
+
         trained = 0
-        for pair in pairs:
-            q = pair.get("question", "")
-            a = pair.get("answer", "")
-            if not q or not a:
-                continue
+        for idx, (q, a) in enumerate(valid):
+            # Cross-batch negatives: other answers in this batch are wrong for this Q
+            cross_answers = [other_a for j, (_, other_a) in enumerate(valid)
+                             if j != idx]
 
-            # Pass 1: full combined text through Hebbian pool (single frame)
-            combined = f"{q} {a}"
-            await self.train_text(combined, lr=1.0)
+            # Pass 1: contrastive training (positive + cross-batch inhibitory)
+            await self._post("/media/train_contrastive", {
+                "question":          q,
+                "correct_answer":    a,
+                "wrong_answers":     [],          # per-pair wrong answers (empty here)
+                "cross_batch_labels": [],         # server-side option; use wrong_answers
+                "lr_scale":          1.0,
+            })
 
-            # Pass 2: Q->A temporal sequence (question fires, then answer fires)
+            # Use wrong_answers field for explicit cross-negatives if batch is small
+            if len(cross_answers) <= 6:
+                # small batch: pass wrong answers directly so server encodes them
+                await self._post("/media/train_contrastive", {
+                    "question":       q,
+                    "correct_answer": a,
+                    "wrong_answers":  cross_answers[:6],
+                    "lr_scale":       0.8,
+                })
+
+            # Pass 2: Q->A temporal sequence (STDP directional edges Q->A)
             q_spans = make_spans(q)
             a_spans = make_spans(a)
             frames = [

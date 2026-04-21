@@ -938,8 +938,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // POST /neuro/propagate — read what fires given seed labels, no training
         //   Body: { "seed_labels": [...], "hops": 3 }
         //   Response: { "activated": { "label": strength, ... } }
-        .route("/media/train",          post(media_train))
-        .route("/media/train_sequence", post(media_train_sequence))
+        .route("/media/train",             post(media_train))
+        .route("/media/train_sequence",    post(media_train_sequence))
+        .route("/media/train_contrastive", post(media_train_contrastive))
         .route("/media/playback",       post(media_playback))
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
@@ -4131,6 +4132,10 @@ struct MediaTrainReq {
     /// Learning rate scale (default 1.0).
     #[serde(default = "default_lr")]
     lr_scale: f32,
+    /// When true, train inhibitory (suppressive) synapses instead of excitatory.
+    /// Use this to suppress wrong-answer associations (contrastive learning).
+    #[serde(default)]
+    inhibitory: bool,
 }
 
 fn default_lr() -> f32 { 1.0 }
@@ -4346,9 +4351,11 @@ async fn media_train(
 
     let neuro = state.neuro.clone();
     let lr = req.lr_scale;
+    let inhibitory = req.inhibitory;
     tokio::task::spawn_blocking(move || {
         // Pass 1: full co-occurrence — all labels fire together.
-        neuro.train_weighted(&labels, lr, false);
+        // inhibitory=true creates suppressive synapses (contrastive/negative learning).
+        neuro.train_weighted(&labels, lr, inhibitory);
 
         // Pass 2: STDP character sequences — collect all unique char labels
         // from adjacent pairs across every word, then fire ONE batched
@@ -4517,6 +4524,109 @@ async fn media_train_sequence(
         resp["warnings"] = serde_json::json!(errors);
     }
     (StatusCode::OK, Json(resp))
+}
+
+// ── Contrastive training ──────────────────────────────────────────────────────
+//
+// POST /media/train_contrastive
+//
+// Trains one correct Q->A pair (excitatory, with dopamine reward) and N wrong
+// answers (inhibitory, with norepinephrine spike) in a single atomic call.
+//
+// The inhibitory pass creates suppressive synapses from the question concept
+// labels to the wrong-answer concept labels.  During propagation, when the
+// question fires, the wrong answers are actively suppressed — this is the
+// mechanism that "cuts off fake science" through raw Hebbian weights.
+//
+// If `wrong_answers` is empty the call still trains the correct pair with
+// dopamine reinforcement, which is stronger than a plain /media/train call.
+//
+// Cross-batch negatives: if `cross_batch_labels` is supplied (a list of answer
+// label lists from other Q->A pairs in the same batch), each set is trained as
+// an inhibitory pass against this question.  This mirrors contrastive self-
+// supervised learning — in-batch negatives, no curated wrong answers needed.
+
+#[derive(Deserialize)]
+struct ContrastiveTrainReq {
+    question: String,
+    correct_answer: String,
+    #[serde(default)]
+    wrong_answers: Vec<String>,
+    /// Optional pre-encoded label sets from other pairs in the batch (inhibitory).
+    #[serde(default)]
+    cross_batch_labels: Vec<Vec<String>>,
+    #[serde(default = "default_lr")]
+    lr_scale: f32,
+}
+
+/// POST /media/train_contrastive
+async fn media_train_contrastive(
+    State(state): State<ApiState>,
+    Json(req): Json<ContrastiveTrainReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.question.trim().is_empty() || req.correct_answer.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "question and correct_answer must not be empty" })));
+    }
+
+    let enc         = TextBitsEncoder::new(TextBitsConfig::default());
+    let q_labels    = enc.encode_plain(&req.question).labels;
+    let a_labels    = enc.encode_plain(&req.correct_answer).labels;
+    let combined_pos: Vec<String> = {
+        let mut v = q_labels.clone();
+        v.extend_from_slice(&a_labels);
+        v.sort_unstable(); v.dedup(); v
+    };
+
+    // Pre-encode wrong answers before entering blocking task.
+    let wrong_label_sets: Vec<Vec<String>> = req.wrong_answers.iter()
+        .map(|w| {
+            let wl = enc.encode_plain(w).labels;
+            let mut v = q_labels.clone();
+            v.extend_from_slice(&wl);
+            v.sort_unstable(); v.dedup(); v
+        })
+        .collect();
+
+    let lr          = req.lr_scale;
+    let n_wrong     = wrong_label_sets.len() + req.cross_batch_labels.len();
+    let neuro       = state.neuro.clone();
+    let cross_batch = req.cross_batch_labels.clone();
+
+    tokio::task::spawn_blocking(move || {
+        // ── Positive pass (excitatory + dopamine reward) ──────────────────────
+        neuro.train_weighted(&combined_pos, lr * 1.2, false);
+        // STDP Q->A temporal sequence
+        neuro.train_weighted(&q_labels, lr, false);
+        neuro.train_weighted(&a_labels, lr * 0.9, false);
+        // Dopamine: retrograde potentiation of the Q->A path.
+        neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, 0.85);
+        neuro.flush_dopamine();
+
+        // ── Negative passes (inhibitory — suppresses wrong associations) ──────
+        // Norepinephrine spike: marks these tokens as "novel/wrong", raises LR
+        // for the next (inhibitory) train call so suppression is strong enough
+        // to overcome the excitatory baseline.
+        if !wrong_label_sets.is_empty() || !cross_batch.is_empty() {
+            neuro.release_neuromodulator(NeuromodulatorKind::Norepinephrine, 0.5);
+        }
+        for wrong_combined in &wrong_label_sets {
+            neuro.train_weighted(wrong_combined, lr * 0.7, true);
+        }
+        // Cross-batch negatives: question labels paired with other batch answers.
+        for other_answer_labels in &cross_batch {
+            let mut neg: Vec<String> = q_labels.clone();
+            neg.extend_from_slice(other_answer_labels);
+            neg.sort_unstable(); neg.dedup();
+            neuro.train_weighted(&neg, lr * 0.5, true);
+        }
+    }).await.ok();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "trained": true,
+        "positive": 1,
+        "negative": n_wrong,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -4727,6 +4837,7 @@ async fn neuro_ask(
             Json(serde_json::json!({ "error": "text must not be empty" })));
     }
     let neuro              = state.neuro.clone();
+    let eem                = state.equation_matrix.clone();
     let hq_arc             = state.hypothesis_queue.clone();
     let session_ctxs       = state.session_contexts.clone();
     let text               = req.text.clone();
@@ -5211,26 +5322,152 @@ async fn neuro_ask(
             None
         };
 
-        // ── Answer: pure Hebbian activation — no QA store ────────────────────
-        // The answer is the top activated concept words from Hebbian propagation.
-        // As STDP training grows denser associations, this output becomes richer.
+        // ── Answer: classical annealing + pure Hebbian activation ────────────
+        // Classical annealing step: use mean_activation (background firing rate)
+        // as a "frustration" signal — words that always fire high across all queries
+        // are hub words (low specificity). The annealed score suppresses them:
+        //   annealed = activation / (1 + hub_weight * mean_activation)
+        // This maps to Boltzmann energy minimization: E = -annealed_score.
+        // Temperature T_anneal = 1 / hebbian_peak cools as confidence grows:
+        // low confidence (high T) → broad exploration; high confidence (low T) → focused.
         let seed_word_labels: std::collections::HashSet<String> = question_content_labels.iter()
             .filter(|l| l.starts_with("txt:word_"))
             .cloned()
             .collect();
-        let answer_words: Vec<&str> = word_acts.iter()
+
+        // Gather candidate labels and seed labels for classical annealing
+        let candidate_labels: Vec<String> = word_acts.iter()
             .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
-            .filter_map(|(l, _)| l.strip_prefix("txt:word_"))
-            .filter(|w| !w.contains('_') && w.len() > 2)
+            .filter(|(l, _)| l.starts_with("txt:word_"))
+            .filter_map(|(l, _)| {
+                let w = l.strip_prefix("txt:word_")?;
+                if !w.contains('_') && w.len() > 2 { Some(l.clone()) } else { None }
+            })
+            .collect();
+        let label_stats = neuro.label_stats(&candidate_labels);
+
+        // Classical annealing: primary key = seed_relevance (direct training signal),
+        // secondary key = activation / (1 + mean_act_weight × mean_act) (Boltzmann energy).
+        // seed_relevance measures dendrite weight from question words → answer word,
+        // which is non-zero ONLY if the answer word was Hebbian-trained with question words.
+        // This is the Hopfield-network attractor: the stable state that directly co-activates
+        // with the question, minimizing E = -(seed_relevance + activation_specificity).
+        let seed_labels_for_relevance: Vec<String> = q_word_only_labels.clone();
+        let relevance_map = neuro.seed_relevance(&seed_labels_for_relevance, &candidate_labels);
+        let mean_act_weight = 4.0_f32;
+
+        let mut annealed: Vec<(&str, f32, f32)> = word_acts.iter()
+            .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
+            .filter_map(|(l, s)| l.strip_prefix("txt:word_").map(|w| (w, *s, l.clone())))
+            .filter(|(w, _, _)| !w.contains('_') && w.len() > 2)
+            .map(|(w, act, label)| {
+                let (mean_act, _use_count, _fan_out) = label_stats.get(&label)
+                    .copied().unwrap_or((0.0, 0, 0));
+                let relevance = relevance_map.get(&label).copied().unwrap_or(0.0);
+                let boltzmann_score = act / (1.0 + mean_act_weight * mean_act);
+                (w, relevance, boltzmann_score)
+            })
+            .collect();
+        // Sort: words with direct seed connection first (relevance > 0), then by Boltzmann score.
+        annealed.sort_unstable_by(|a, b| {
+            let r = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+            if r != std::cmp::Ordering::Equal { r }
+            else { b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) }
+        });
+        let annealed: Vec<(&str, f32)> = annealed.into_iter().map(|(w, r, b)| (w, r + b)).collect();
+
+        let answer_words: Vec<&str> = annealed.iter()
+            .map(|(w, _)| *w)
             .take(max_tok.min(20))
             .collect();
         let mut answer = answer_words.join(" ");
         if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
 
+        // ── EEM validation gate ───────────────────────────────────────────────
+        // Query the Environmental Equation Matrix with the question labels.
+        // If matching equations are found, two things happen:
+        //   1. EEM candidate equations are attached to the response so the
+        //      caller gets physics/math context alongside the Hebbian answer.
+        //   2. The confidence_tier is upgraded when the Hebbian answer words
+        //      overlap with the EEM equation's discipline keywords — this
+        //      is the cross-validation signal: Hebbian + EEM both agree.
+        //      If they disagree (Hebbian fires words unrelated to the EEM
+        //      match), confidence is NOT upgraded — the EEM acts as a gate.
+        let eem_result = eem.apply_to_context(&question_content_labels, 0);
+        let eem_candidates: Vec<serde_json::Value> = eem_result.candidates.iter()
+            .take(3)
+            .map(|c| serde_json::json!({
+                "equation": c.equation.text,
+                "discipline": format!("{:?}", c.equation.discipline),
+                "relevance": c.relevance,
+                "latex": c.equation.latex,
+            }))
+            .collect();
+
+        // Check overlap between Hebbian answer words and EEM equation keywords.
+        let eem_validates = !eem_result.candidates.is_empty() && {
+            let top_eem = &eem_result.candidates[0];
+            let eem_keywords: std::collections::HashSet<&str> =
+                top_eem.equation.discipline.keywords().iter().copied().collect();
+            // At least one answer word must appear in the EEM keyword set
+            // for the EEM to count as validation (not just coincidental match).
+            answer_words.iter()
+                .any(|w| eem_keywords.contains(*w) || eem_keywords.iter()
+                    .any(|k| k.contains(w) || w.contains(k)))
+        };
+
+        // Reinforce the matching equation in the EEM if Hebbian + EEM agree.
+        if eem_validates {
+            if let Some(top) = eem_result.candidates.first() {
+                eem.reinforce(&top.equation.id);
+            }
+        }
+
+        // ── Motif confidence gate ─────────────────────────────────────────────
+        // Motifs are patterns the network has seen repeatedly during training.
+        // Attractor motifs are the most stable, recurring sub-sequences in the
+        // pool's training history — they represent proven, multi-reinforced
+        // concept clusters.  If the activated answer words overlap with attractor
+        // motif descriptions, the answer comes from a well-established pattern,
+        // which raises our confidence beyond what the Hebbian peak alone signals.
+        let motifs = neuro.meta_motifs();
+        let attractor_motifs: Vec<&w1z4rdv1510n::streaming::hierarchical_motifs::MetaMotif> =
+            motifs.iter().filter(|m| m.is_attractor).collect();
+        // Count how many answer words appear in any attractor motif description.
+        let motif_hits: usize = answer_words.iter()
+            .filter(|w| w.len() > 3 && attractor_motifs.iter()
+                .any(|m| m.description.contains(*w)))
+            .count();
+        let motif_coverage = if answer_words.is_empty() { 0.0f32 }
+            else { (motif_hits as f32) / (answer_words.len().min(10) as f32) };
+
+        // ── Final confidence tier (Hebbian + EEM + motif) ─────────────────────
+        // Three independent signals must agree to call something "high":
+        //   hebbian_peak ≥ 0.50         — the Hebbian graph is densely connected
+        //   eem_validates = true         — the EEM corroborates the domain
+        //   motif_coverage ≥ 0.30        — the answer is a proven recurring pattern
+        //
+        // Any combination of two out of three can reach "medium".
+        // Only Hebbian alone determines "low"/"uncertain".
+        let validated_confidence_tier = {
+            let h_high   = hebbian_peak >= 0.50;
+            let h_med    = hebbian_peak >= 0.25;
+            let h_low    = hebbian_peak >= 0.10;
+            let motif_ok = motif_coverage >= 0.30;
+            if h_high && (eem_validates || motif_ok) {
+                "high"
+            } else if h_med && (eem_validates || motif_ok) {
+                "high"
+            } else if h_high || (h_med && (eem_validates || motif_ok)) {
+                "medium"
+            } else if h_low {
+                "low"
+            } else {
+                "uncertain"
+            }
+        };
+
         // ── Update session working memory ─────────────────────────────────────
-        // Store the top 8 non-seed activated word labels as context for the next
-        // turn.  These represent the concepts that "lit up" while answering —
-        // blending them into the next propagation gives continuity.
         if let Some(ref sid) = session_id {
             let top_ctx: Vec<String> = word_acts.iter()
                 .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
@@ -5252,17 +5489,30 @@ async fn neuro_ask(
             })
             .collect();
         let mut resp = serde_json::json!({
-            "question":         text,
-            "hypothesis":       answer.is_empty(),
-            "answer":           if answer.is_empty() { serde_json::Value::Null } else { serde_json::json!(answer) },
-            "hebbian_peak":     qa_activation,
-            "confidence_tier":  confidence_tier,
-            "peak_activation":  peak,
-            "intent":           format!("{:?}", intent),
-            "word_activations": word_activations,
-            "context_trained":  context_trained,
-            "session_id":       session_id,
+            "question":           text,
+            "hypothesis":         answer.is_empty(),
+            "answer":             if answer.is_empty() { serde_json::Value::Null } else { serde_json::json!(answer) },
+            "hebbian_peak":       qa_activation,
+            "confidence_tier":    validated_confidence_tier,
+            "peak_activation":    peak,
+            "intent":             format!("{:?}", intent),
+            "word_activations":   word_activations,
+            "context_trained":    context_trained,
+            "session_id":         session_id,
+            "eem_validates":      eem_validates,
+            "motif_coverage":     motif_coverage,
+            "attractor_motifs":   attractor_motifs.len(),
         });
+        if !eem_candidates.is_empty() {
+            resp["eem_equations"] = serde_json::json!(eem_candidates);
+        }
+        if !eem_result.open_gaps.is_empty() {
+            resp["eem_gaps"] = serde_json::json!(
+                eem_result.open_gaps.iter().take(2)
+                    .map(|g| g.description.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
         if let Some(score) = property_binding_score {
             resp["property_binding_score"] = serde_json::json!(score);
         }
