@@ -795,7 +795,7 @@ def stage0_toddler(client: httpx.Client, node_url: str) -> None:
                             "confidence": 0.95, "evidence": answer,
                             "review_status": "VERIFIED"})
     ingested = ingest_qa_full(client, node_url, candidates, pool="knowledge")
-    print(f"  Full pipeline: {ingested} pairs ingested + Q→A sequences + episodes")
+    print(f"  Full pipeline: {ingested} pairs ingested + Q->A sequences + episodes")
 
     # ── Knowledge document — structured toddler curriculum ───────────────────
     body = "\n\n".join(f"Q: {q}\nA: {a}" for q, a, _ in TODDLER_CONCEPTS)

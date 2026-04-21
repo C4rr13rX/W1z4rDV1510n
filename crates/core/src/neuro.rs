@@ -112,7 +112,7 @@ impl Default for NeuroConfig {
             hebbian_lr: 0.05,
             decay: 0.99,
             composite_threshold: 25,
-            max_neurons: 100_000,
+            max_neurons: usize::MAX,
             inhibitory_scale: 0.5,
             excitatory_scale: 1.0,
             fatigue_increment: 0.02,
@@ -497,9 +497,9 @@ mod cooccur_serde {
 #[derive(Debug, Clone)]
 enum NeuronSlot {
     Hot(Neuron),
-    /// Neuron evicted to disk.  `last_active_step` is the step it was frozen at,
-    /// used to apply lazy geometric decay when the neuron is warmed back up.
-    Cold { last_active_step: u64 },
+    /// Neuron evicted to disk.  Stores the label so we can derive the file path
+    /// (label-based naming: `<cold_dir>/<prefix>/<suffix>.json`).
+    Cold { last_active_step: u64, label: String },
     /// Recycled/unused slot — ID available via the free list.
     Free,
 }
@@ -603,8 +603,27 @@ impl NeuronPool {
 
     // ── Internal hot/cold helpers ──────────────────────────────────────────────
 
-    /// Path to a cold neuron file for the given ID.
-    fn cold_path(&self, id: u32) -> Option<PathBuf> {
+    /// Path to a cold neuron file derived from the neuron's label.
+    /// `txt:word_hello` → `<cold_dir>/txt/word_hello.json`
+    /// Labels without a colon fall into `misc/`.
+    fn cold_path_for_label(&self, label: &str) -> Option<PathBuf> {
+        let base = self.cold_dir.as_ref()?;
+        let (dir_part, file_part) = if let Some(pos) = label.find(':') {
+            (&label[..pos], &label[pos + 1..])
+        } else {
+            ("misc", label)
+        };
+        // Sanitize characters invalid in Windows filenames (the dir_part prefix
+        // should already be clean, but sanitize the suffix to be safe).
+        let safe: String = file_part.chars().map(|c| match c {
+            '\\' | '/' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c => c,
+        }).collect();
+        Some(base.join(dir_part).join(format!("{}.json", safe)))
+    }
+
+    /// Legacy ID-based shard path — used only when migrating old cold files.
+    fn cold_path_legacy(&self, id: u32) -> Option<PathBuf> {
         let base = self.cold_dir.as_ref()?;
         let shard = format!("shard_{:04x}", id / 1000);
         Some(base.join(shard).join(format!("n_{:06}.json", id)))
@@ -614,34 +633,30 @@ impl NeuronPool {
     /// applies lazy geometric decay, then replaces the Cold slot with Hot.
     /// No-op if already hot. Does nothing if cold_dir is not configured.
     fn ensure_hot(&mut self, id: u32) {
-        let slot = match self.neurons.get(id as usize) {
-            Some(NeuronSlot::Cold { .. }) => true,
+        if !matches!(self.neurons.get(id as usize), Some(NeuronSlot::Cold { .. })) {
+            return;
+        }
+
+        let (frozen_step, label) = match self.neurons.get(id as usize) {
+            Some(NeuronSlot::Cold { last_active_step, label }) => (*last_active_step, label.clone()),
             _ => return,
         };
-        if !slot { return; }
 
-        let frozen_step = if let Some(NeuronSlot::Cold { last_active_step }) = self.neurons.get(id as usize) {
-            *last_active_step
-        } else { return; };
+        // Try label-based path first; fall back to legacy shard path for pre-migration neurons.
+        let path = self.cold_path_for_label(&label)
+            .filter(|p| p.exists())
+            .or_else(|| self.cold_path_legacy(id).filter(|p| p.exists()));
 
-        let path = match self.cold_path(id) {
-            Some(p) => p,
-            None => return,
-        };
-
-        let mut neuron = if path.exists() {
-            match std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Neuron>(&s).ok()) {
-                Some(n) => n,
-                None => {
-                    // File corrupt or missing — recreate a blank neuron at this ID
-                    let mut n = Neuron::new(id, None, self.step);
+        let mut neuron = if let Some(ref p) = path {
+            std::fs::read_to_string(p).ok()
+                .and_then(|s| serde_json::from_str::<Neuron>(&s).ok())
+                .unwrap_or_else(|| {
+                    let mut n = Neuron::new(id, Some(label.clone()), self.step);
                     n.last_active_step = frozen_step;
                     n
-                }
-            }
+                })
         } else {
-            // File was never written (should not happen, but be defensive)
-            let mut n = Neuron::new(id, None, self.step);
+            let mut n = Neuron::new(id, Some(label.clone()), self.step);
             n.last_active_step = frozen_step;
             n
         };
@@ -661,12 +676,14 @@ impl NeuronPool {
     }
 
     /// Write a neuron to its cold file and replace the slot with Cold.
+    /// Files are stored under `<cold_dir>/<prefix>/<suffix>.json` derived from the label.
     fn evict_to_cold(&mut self, id: u32) {
         let neuron = match self.neurons.get(id as usize) {
             Some(NeuronSlot::Hot(n)) => n.clone(),
             _ => return,
         };
-        if let Some(path) = self.cold_path(id) {
+        let label = neuron.label.clone().unwrap_or_else(|| format!("unlabeled:{}", id));
+        if let Some(path) = self.cold_path_for_label(&label) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -678,7 +695,7 @@ impl NeuronPool {
             }
         }
         let last_active_step = neuron.last_active_step;
-        self.neurons[id as usize] = NeuronSlot::Cold { last_active_step };
+        self.neurons[id as usize] = NeuronSlot::Cold { last_active_step, label };
         self.hot_count -= 1;
     }
 
@@ -722,43 +739,89 @@ impl NeuronPool {
         }
     }
 
-    /// Scan the cold directory and mark all evicted neurons as Cold slots in the slot array.
+    /// Scan the cold directory index and mark all evicted neurons as Cold slots in the slot array.
     /// Called on startup when a checkpoint is loaded alongside an existing cold directory.
+    ///
+    /// Supports two meta.json formats:
+    ///   New: `{ "txt:word_hello": [42, 1234567], ... }`  (label → [id, step])
+    ///   Old: `{ "42": 1234567, ... }`                    (id → step)
+    ///
+    /// Old-format files are migrated on first load: each shard file is read once to recover
+    /// the label, then the new format is saved so subsequent boots are fast.
     pub fn restore_cold_index(&mut self, cold_dir: &PathBuf) {
         let meta_path = cold_dir.join("meta.json");
-        if let Ok(json) = std::fs::read_to_string(&meta_path) {
-            if let Ok(index) = serde_json::from_str::<HashMap<u32, u64>>(&json) {
-                for (id, last_active_step) in index {
-                    let idx = id as usize;
-                    // Grow slot array if needed (cold neurons beyond current hot count).
-                    while self.neurons.len() <= idx {
-                        self.neurons.push(NeuronSlot::Free);
-                    }
-                    // Only mark as Cold if not already Hot (hot checkpoint wins).
-                    if !matches!(self.neurons.get(idx), Some(NeuronSlot::Hot(_))) {
-                        self.neurons[idx] = NeuronSlot::Cold { last_active_step };
-                        // Restore label_to_id mapping from cold file if not present.
-                        if let Some(label) = self.read_cold_label(id) {
-                            self.label_to_id.entry(label).or_insert(id);
-                        }
-                    }
+        let json = match std::fs::read_to_string(&meta_path) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let value: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => return,
+        };
+
+        // Detect format by inspecting the first key.
+        let is_old_format = obj.keys().next()
+            .map(|k| k.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false);
+
+        if is_old_format {
+            // Old format: key = numeric id string, value = step u64.
+            // One-time migration: read each shard file to recover the label.
+            let entries: Vec<(u32, u64)> = obj.iter().filter_map(|(k, v)| {
+                Some((k.parse::<u32>().ok()?, v.as_u64()?))
+            }).collect();
+            for (id, last_active_step) in entries {
+                let idx = id as usize;
+                while self.neurons.len() <= idx { self.neurons.push(NeuronSlot::Free); }
+                if matches!(self.neurons.get(idx), Some(NeuronSlot::Hot(_))) { continue; }
+                let label = self.read_cold_label_legacy(id)
+                    .unwrap_or_else(|| format!("unlabeled:{}", id));
+                self.neurons[idx] = NeuronSlot::Cold { last_active_step, label: label.clone() };
+                self.label_to_id.entry(label).or_insert(id);
+            }
+            // Persist new format immediately so future boots skip the migration.
+            self.save_cold_index();
+        } else {
+            // New format: key = label string, value = [id, step].
+            for (label, val) in obj {
+                let (id, last_active_step) = match val.as_array() {
+                    Some(arr) => match (arr.first().and_then(|v| v.as_u64()),
+                                        arr.get(1).and_then(|v| v.as_u64())) {
+                        (Some(id), Some(step)) => (id as u32, step),
+                        _ => continue,
+                    },
+                    None => continue,
+                };
+                let idx = id as usize;
+                while self.neurons.len() <= idx { self.neurons.push(NeuronSlot::Free); }
+                if !matches!(self.neurons.get(idx), Some(NeuronSlot::Hot(_))) {
+                    self.neurons[idx] = NeuronSlot::Cold {
+                        last_active_step,
+                        label: label.clone(),
+                    };
+                    self.label_to_id.entry(label.clone()).or_insert(id);
                 }
             }
         }
-        // Recount hot slots after restoration.
+
         self.hot_count = self.neurons.iter().filter(|s| matches!(s, NeuronSlot::Hot(_))).count();
     }
 
-    /// Persist cold-tier index (id → last_active_step) so it can be restored on next boot.
+    /// Persist cold-tier index as `{ label: [id, step] }` so it can be restored on next boot.
     fn save_cold_index(&self) {
         let cd = match &self.cold_dir { Some(d) => d, None => return };
-        let index: HashMap<u32, u64> = self.neurons.iter().enumerate().filter_map(|(idx, slot)| {
-            if let NeuronSlot::Cold { last_active_step } = slot {
-                Some((idx as u32, *last_active_step))
-            } else { None }
-        }).collect();
+        let mut map = serde_json::Map::new();
+        for (idx, slot) in self.neurons.iter().enumerate() {
+            if let NeuronSlot::Cold { last_active_step, label } = slot {
+                map.insert(label.clone(), serde_json::json!([idx as u32, last_active_step]));
+            }
+        }
         let meta_path = cd.join("meta.json");
-        if let Ok(json) = serde_json::to_string(&index) {
+        if let Ok(json) = serde_json::to_string(&map) {
             let tmp = meta_path.with_extension("tmp");
             let _ = std::fs::create_dir_all(cd);
             if std::fs::write(&tmp, &json).is_ok() {
@@ -767,11 +830,10 @@ impl NeuronPool {
         }
     }
 
-    /// Read the label of a cold neuron without warming it up (label_for read-only path).
-    fn read_cold_label(&self, id: u32) -> Option<String> {
-        let path = self.cold_path(id)?;
+    /// Read the label from an old-format shard file (migration path only).
+    fn read_cold_label_legacy(&self, id: u32) -> Option<String> {
+        let path = self.cold_path_legacy(id)?;
         let json = std::fs::read_to_string(&path).ok()?;
-        // Fast path: extract "label" field without full parse
         serde_json::from_str::<serde_json::Value>(&json).ok()
             .and_then(|v| v.get("label")?.as_str().map(|s| s.to_string()))
     }
@@ -943,9 +1005,6 @@ impl NeuronPool {
             id
         } else {
             let id = self.neurons.len() as u32;
-            if self.neurons.len() >= self.config.max_neurons {
-                return id.saturating_sub(1);
-            }
             let mut neuron = Neuron::new(id, Some(label.to_string()), self.step);
             neuron.symbol_id = label.strip_prefix("id::").map(|s| s.to_string());
             self.neurons.push(NeuronSlot::Hot(neuron));
@@ -1161,7 +1220,7 @@ impl NeuronPool {
     pub fn label_for(&self, id: u32) -> Option<String> {
         match self.neurons.get(id as usize) {
             Some(NeuronSlot::Hot(n)) => n.label.clone(),
-            Some(NeuronSlot::Cold { .. }) => self.read_cold_label(id),
+            Some(NeuronSlot::Cold { label, .. }) => Some(label.clone()),
             _ => None,
         }
     }
