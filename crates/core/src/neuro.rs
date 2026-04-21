@@ -3885,15 +3885,16 @@ impl NeuroRuntime {
             .collect()
     }
 
-    /// For each activated label, sum the excitatory dendrite weights that come from any
-    /// of the seed labels.  Returns a map of `label → seed_relevance_score`.
+    /// For each activated label, compute the **specificity** of its connection to
+    /// the seed labels: what fraction of this word's total dendritic weight comes
+    /// from the question seeds vs from everything else in the corpus.
     ///
-    /// Words with score > 0 were DIRECTLY trained together with the seed labels — they
-    /// are the true semantic associations, not noise from hub propagation.
-    /// Words with score = 0 fired only through indirect multi-hop chains.
+    /// Specificity = seed_weight / total_weight
     ///
-    /// Used by classical annealing: sort answer candidates by seed_relevance first,
-    /// then by activation strength, to surface trained associations over hub noise.
+    /// Hub/corpus words connected to everything score LOW; words specifically
+    /// trained together with these seeds score HIGH — even with fewer training passes.
+    /// This correctly elevates freshly trained conversational responses above
+    /// deeply ingrained corpus noise.
     pub fn seed_relevance(
         &self,
         seed_labels: &[String],
@@ -3903,25 +3904,34 @@ impl NeuroRuntime {
             return HashMap::new();
         }
         let guard = self.inner.lock();
-        // Collect neuron IDs for all seed labels
         let seed_ids: std::collections::HashSet<u32> = seed_labels.iter()
             .filter_map(|l| guard.pool.label_to_id.get(l).copied())
             .collect();
         if seed_ids.is_empty() {
             return HashMap::new();
         }
-        // For each activated label, sum dendrite weights from seeds
         activated_labels.iter()
             .filter_map(|label| {
                 let id = *guard.pool.label_to_id.get(label)?;
                 let neuron = guard.pool.get_hot(id as usize)?;
-                // Check both dendrites (incoming) and excitatory (outgoing from seeds)
-                let dendrite_score: f32 = neuron.dendrites.iter()
+                let seed_weight: f32 = neuron.dendrites.iter()
                     .filter(|d| seed_ids.contains(&d.source))
                     .map(|d| d.weight.max(0.0))
                     .sum();
-                if dendrite_score > 0.0 {
-                    Some((label.clone(), dendrite_score))
+                if seed_weight <= 0.0 {
+                    return None;
+                }
+                // Specificity = fraction of this neuron's total dendritic weight
+                // that came from the question seeds. Hub words trained with every
+                // document in the corpus get low specificity; words trained only
+                // (or primarily) together with these seeds get high specificity.
+                let total_weight: f32 = neuron.dendrites.iter()
+                    .map(|d| d.weight.abs())
+                    .sum::<f32>()
+                    .max(1.0);
+                let specificity = seed_weight / total_weight;
+                if specificity > 0.0 {
+                    Some((label.clone(), specificity))
                 } else {
                     None
                 }

@@ -4492,13 +4492,18 @@ async fn media_train_sequence(
     let neuro = state.neuro.clone();
     let trained_frames = frame_labels.iter().filter(|l| !l.is_empty()).count();
     tokio::task::spawn_blocking(move || {
-        // Pass 1: each frame independently.
+        // Pass 1: each frame independently (within-frame co-occurrence).
         for (labels, lr) in frame_labels.iter().zip(frame_lrs.iter()) {
             if !labels.is_empty() {
                 neuro.train_weighted(labels, *lr, false);
             }
         }
         // Pass 2: bridge adjacent frames.
+        // Sorted-combined bridge works for close labels but misses alphabetically
+        // distant word pairs (e.g. "hello" ↔ "w1z4rd") because HEBBIAN_WINDOW=20
+        // doesn't reach them in a 100+ label sorted set.  To guarantee direct
+        // cross-frame word↔word pairing, we build a small focused bridge from the
+        // word-only labels of each frame and train them explicitly together.
         for i in 1..frame_labels.len() {
             let prev = &frame_labels[i - 1];
             let curr = &frame_labels[i];
@@ -4507,10 +4512,29 @@ async fn media_train_sequence(
             let base_lr = (frame_lrs[i - 1] + frame_lrs[i]) * 0.5;
             let bridge_lr = base_lr * (-dt / tau).exp();
             if bridge_lr < 1e-4 { continue; }
+
+            // Full label bridge (sorted) — handles nearby-alphabet pairs.
             let mut bridge: Vec<String> = prev.iter().chain(curr.iter()).cloned().collect();
             bridge.sort_unstable();
             bridge.dedup();
             neuro.train_weighted(&bridge, bridge_lr, false);
+
+            // Focused word-only bridge: prev word labels ordered first, then curr
+            // word labels.  The window now always reaches from first question word to
+            // last answer word because we exclude the hundreds of char/zone labels
+            // that spread out the sorted combined set.
+            let prev_words: Vec<String> = prev.iter()
+                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .cloned().collect();
+            let curr_words: Vec<String> = curr.iter()
+                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .cloned().collect();
+            if !prev_words.is_empty() && !curr_words.is_empty() {
+                let mut word_bridge: Vec<String> = prev_words.iter()
+                    .chain(curr_words.iter()).cloned().collect();
+                word_bridge.dedup();
+                neuro.train_weighted(&word_bridge, bridge_lr, false);
+            }
         }
     }).await.ok();
 
@@ -4848,6 +4872,22 @@ async fn neuro_ask(
     let session_id         = req.session_id.clone();
 
     let result = tokio::task::spawn_blocking(move || {
+        // Detect greeting inputs so that if inference returns empty we can fall
+        // back to a bootstrap response instead of sending a null hypothesis.
+        // Trained greeting responses (from /api/wizard-chat/train/) always win —
+        // this check is only used as a last resort after inference runs.
+        let is_greeting = {
+            let tl = text.trim().to_lowercase();
+            let triggers = [
+                "hello", "hi", "hey", "sup", "howdy", "greetings",
+                "how are you", "how are you?", "what's up", "whats up",
+                "good morning", "good afternoon", "good evening", "good night",
+            ];
+            triggers.iter().any(|g| tl == *g
+                || tl.trim_end_matches('!') == *g
+                || tl.trim_end_matches('.') == *g)
+        };
+
         // ── Context training: user is answering a previous system question ─────
         // When `context` is provided the current `text` is a reply — treat the
         // (context → text) pair as direct teaching.  Train it into the neuro pool,
@@ -5374,7 +5414,21 @@ async fn neuro_ask(
             if r != std::cmp::Ordering::Equal { r }
             else { b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) }
         });
-        let annealed: Vec<(&str, f32)> = annealed.into_iter().map(|(w, r, b)| (w, r + b)).collect();
+        // Keep only words with direct seed relevance in the final answer.
+        // If no word has a trained dendrite connection from the question seeds, the
+        // Boltzmann fallback would emit hub noise (TypeScript docs, common words) that
+        // is worse than silence. An empty answer → hypothesis queue, which is honest.
+        let relevant_words: Vec<(&str, f32)> = annealed.iter()
+            .filter(|(_, r, _)| *r > 0.0)
+            .map(|(w, r, b)| (*w, r + b))
+            .collect();
+        // Boltzmann-only fallback: used ONLY when some relevance exists as a secondary sort.
+        let annealed: Vec<(&str, f32)> = if relevant_words.is_empty() {
+            // No direct training signal — return empty so hypothesis path fires.
+            vec![]
+        } else {
+            relevant_words
+        };
 
         let answer_words: Vec<&str> = annealed.iter()
             .map(|(w, _)| *w)
@@ -5488,14 +5542,36 @@ async fn neuro_ask(
                 serde_json::json!({ "word": word, "strength": strength })
             })
             .collect();
+        // Greeting fallback: if inference produced no trained response and the
+        // input is a social greeting, substitute a bootstrap reply so the user
+        // sees something sensible.  Any trained response (seed_relevance > 0)
+        // from `/api/wizard-chat/train/` will have already produced answer words
+        // above, so this branch only fires before conversational training exists.
+        let (final_answer, final_tier, final_hypothesis, final_intent) =
+            if answer.is_empty() && is_greeting {
+                (
+                    "Hello! I'm W1z4rD — ask me anything.".to_string(),
+                    "high",
+                    false,
+                    "Greeting".to_string(),
+                )
+            } else {
+                (
+                    answer.clone(),
+                    validated_confidence_tier,
+                    answer.is_empty(),
+                    format!("{:?}", intent),
+                )
+            };
+
         let mut resp = serde_json::json!({
             "question":           text,
-            "hypothesis":         answer.is_empty(),
-            "answer":             if answer.is_empty() { serde_json::Value::Null } else { serde_json::json!(answer) },
+            "hypothesis":         final_hypothesis,
+            "answer":             if final_answer.is_empty() { serde_json::Value::Null } else { serde_json::json!(final_answer) },
             "hebbian_peak":       qa_activation,
-            "confidence_tier":    validated_confidence_tier,
+            "confidence_tier":    final_tier,
             "peak_activation":    peak,
-            "intent":             format!("{:?}", intent),
+            "intent":             final_intent,
             "word_activations":   word_activations,
             "context_trained":    context_trained,
             "session_id":         session_id,
