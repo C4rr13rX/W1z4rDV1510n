@@ -232,7 +232,7 @@ async def train_seeds(node: str, repeats: int) -> None:
         elapsed = time.time() - t0
         print(f"\nDone in {elapsed:.0f}s")
         print(f"  QA ingested  : {stats['qa']}")
-        print(f"  Q→A sequences: {stats['seq']}")
+        print(f"  Q->A sequences: {stats['seq']}")
         print(f"  Episodes     : {stats['ep']}")
         print(f"  Equations    : {stats['eq']}")
         print(f"  Knowledge doc: {stats['know']}")
