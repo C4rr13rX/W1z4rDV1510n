@@ -1386,16 +1386,38 @@ def _train_text(text, node):
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
-def _qa_ingest(pairs, node):
-    body = json.dumps({'pairs': pairs}).encode()
-    req  = urllib.request.Request(f'http://{node}/qa/ingest', data=body,
-           headers={'Content-Type': 'application/json'}, method='POST')
+def _train_qa_pair(q, a, node):
+    """Train a Q->A pair via pure neural path (no QA store)."""
+    # Pass 1: combined Hebbian
+    _train_text(f"{q} {a}", node)
+    # Pass 2: Q->A temporal sequence
+    body = json.dumps({
+        'frames': [
+            {'modality': 'text', 'text': q, 't_secs': 0.0, 'lr_scale': 1.0},
+            {'modality': 'text', 'text': a, 't_secs': 1.0, 'lr_scale': 0.9},
+        ],
+        'temporal_tau': 2.0,
+    }).encode()
+    req = urllib.request.Request(f'http://{node}/media/train_sequence', data=body,
+          headers={'Content-Type': 'application/json'}, method='POST')
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read())
+        with urllib.request.urlopen(req, timeout=10): pass
     except Exception as e:
-        print(f'  [WARN] qa/ingest: {e}')
-        return {}
+        print(f'  [WARN] train_sequence: {e}')
+    # Pass 3: episodic record
+    q_words = [f"txt:word_{w.lower().strip('.,;:!?()')}" for w in q.split() if len(w) > 2][:10]
+    if q_words:
+        ep_body = json.dumps({
+            'context_labels': q_words,
+            'predicted': a[:500], 'actual': a[:500],
+            'streams': [], 'surprise': 0.0,
+        }).encode()
+        ep_req = urllib.request.Request(f'http://{node}/neuro/record_episode', data=ep_body,
+                 headers={'Content-Type': 'application/json'}, method='POST')
+        try:
+            with urllib.request.urlopen(ep_req, timeout=10): pass
+        except Exception as e:
+            print(f'  [WARN] record_episode: {e}')
 
 def _wiki_extract(title):
     url = ('https://en.wikipedia.org/api/rest_v1/page/summary/'
@@ -1655,26 +1677,17 @@ def build_cad_3d_corpus(node: str) -> list:
 
 
 def build_stem_qa(node: str) -> list:
-    """Stage 14: Ingest STEM Q&A pairs via /qa/ingest."""
+    """Stage 14: Train STEM Q&A pairs via pure neural path."""
     items = []
-
-    # Batch by 20
-    batch_size = 20
-    batches = [STEM_QA_PAIRS[i:i+batch_size]
-               for i in range(0, len(STEM_QA_PAIRS), batch_size)]
-
     ok = 0
-    for i, batch in enumerate(tqdm(batches, desc='STEM Q&A')):
-        pairs = [{'question': q, 'answer': a} for q, a in batch]
-        r = _qa_ingest(pairs, node)
-        if r.get('ingested'):
-            ok += len(batch)
-        items.extend({'stage': 14, 'type': 'qa_pair', 'question': q,
-                       'modality': 'qa', 'tags': ['stem', 'qa']}
-                     for q, _ in batch)
-        time.sleep(0.1)
+    for q, a in tqdm(STEM_QA_PAIRS, desc='STEM Q&A'):
+        _train_qa_pair(q, a, node)
+        ok += 1
+        items.append({'stage': 14, 'type': 'qa_pair', 'question': q,
+                      'modality': 'text', 'tags': ['stem', 'qa']})
+        time.sleep(0.05)
 
-    print(f'  STEM Q&A: {ok}/{len(STEM_QA_PAIRS)} pairs ingested')
+    print(f'  STEM Q&A: {ok}/{len(STEM_QA_PAIRS)} pairs trained')
     return items
 
 

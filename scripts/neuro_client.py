@@ -491,7 +491,7 @@ class NeuroClient:
                frame 2: structural context tag
           3. /equations/ingest -- definition + wiki text (if scientific)
           4. /knowledge/ingest -- structured document with title + body
-          5. /qa/ingest + /neuro/record_episode -- all Q&A pairs
+          5. /neuro/record_episode -- all Q&A pairs via episodic memory
         """
         stats = {"seq": 0, "img": 0, "eq": 0, "qa": 0, "ep": 0, "know": 0}
 

@@ -1915,53 +1915,66 @@ BOVINE_QA_PAIRS: list[tuple[str, str]] = [
 
 
 def build_bovine_qa(out_dir: Path, node: str) -> list[dict]:
-    """Ingest embedded bovine anatomy Q&A pairs via /qa/ingest and return item list."""
+    """Train embedded bovine anatomy Q&A pairs via pure neural path."""
     out_dir.mkdir(parents=True, exist_ok=True)
     base = f'http://{node}'
     items = []
+    total_trained = 0
 
-    # Batch into groups of 20 for the ingest API
-    batch_size = 20
-    total_posted = 0
-    for i in range(0, len(BOVINE_QA_PAIRS), batch_size):
-        batch = BOVINE_QA_PAIRS[i:i + batch_size]
-        candidates = [
-            {
-                'qa_id': f'bovine_qa_{i + j:04d}',
-                'question': q,
-                'answer': a,
-                'confidence': 0.95,
-            }
-            for j, (q, a) in enumerate(batch)
-        ]
-        payload = json.dumps({'candidates': candidates}).encode()
+    for q, a in BOVINE_QA_PAIRS:
+        combined = f"{q} {a}"
+        # Pass 1: combined Hebbian
         req = urllib.request.Request(
-            f'{base}/qa/ingest',
-            data=payload,
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
+            f'{base}/media/train',
+            data=json.dumps({'modality': 'text', 'text': combined[:6000]}).encode(),
+            headers={'Content-Type': 'application/json'}, method='POST')
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                result = json.loads(r.read())
-            n = result.get('ingested', len(batch))
-            total_posted += n
-        except Exception as e:
-            print(f'  [WARN] qa/ingest batch {i//batch_size}: {e}')
+            with urllib.request.urlopen(req, timeout=10): pass
+        except Exception: pass
 
-        for j, (q, a) in enumerate(batch):
-            items.append({
-                'stage': 6,
-                'type': 'qa_pair',
-                'source': 'embedded_bovine_qa',
-                'title': q[:80],
-                'text': f'Q: {q}\nA: {a}',
-                'modality': 'text',
-                'tags': ['qa', 'bovine', 'anatomy', 'chat'],
-            })
-        time.sleep(0.1)
+        # Pass 2: Q->A temporal sequence
+        seq_req = urllib.request.Request(
+            f'{base}/media/train_sequence',
+            data=json.dumps({
+                'frames': [
+                    {'modality': 'text', 'text': q, 't_secs': 0.0, 'lr_scale': 1.0},
+                    {'modality': 'text', 'text': a, 't_secs': 1.0, 'lr_scale': 0.9},
+                ],
+                'temporal_tau': 2.0,
+            }).encode(),
+            headers={'Content-Type': 'application/json'}, method='POST')
+        try:
+            with urllib.request.urlopen(seq_req, timeout=10): pass
+        except Exception: pass
 
-    print(f'  Ingested {total_posted} Q&A pairs via /qa/ingest ({len(items)} items total)')
+        # Pass 3: episodic record
+        q_words = [f"txt:word_{w.lower().strip('.,;:!?()')}" for w in q.split() if len(w) > 2][:10]
+        if q_words:
+            ep_req = urllib.request.Request(
+                f'{base}/neuro/record_episode',
+                data=json.dumps({
+                    'context_labels': q_words,
+                    'predicted': a[:500], 'actual': a[:500],
+                    'streams': [], 'surprise': 0.0,
+                }).encode(),
+                headers={'Content-Type': 'application/json'}, method='POST')
+            try:
+                with urllib.request.urlopen(ep_req, timeout=10): pass
+            except Exception: pass
+
+        total_trained += 1
+        items.append({
+            'stage': 6,
+            'type': 'qa_pair',
+            'source': 'embedded_bovine_qa',
+            'title': q[:80],
+            'text': f'Q: {q}\nA: {a}',
+            'modality': 'text',
+            'tags': ['bovine', 'anatomy', 'chat'],
+        })
+        time.sleep(0.05)
+
+    print(f'  Trained {total_trained} bovine Q&A pairs ({len(items)} items total)')
     return items
 
 

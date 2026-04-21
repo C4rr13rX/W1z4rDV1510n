@@ -9,10 +9,12 @@ Trains the neural fabric through three stages:
   Stage 2  Full K-12 curriculum -- all remaining LibreTexts PDFs
 
 Each stage uses:
-  /media/train         -- multimodal page training (image + text spans, or plain text)
+  /media/train          -- multimodal page training (image + text spans, or plain text)
   /media/train_sequence -- STDP-ordered temporal sequence training
-  /qa/ingest           -- Q&A pair batch ingestion
-  /neuro/checkpoint    -- periodic pool persistence
+  /neuro/record_episode -- episodic memory per Q->A pair
+  /equations/ingest     -- Environmental Equation Matrix for science text
+  /knowledge/ingest     -- structured knowledge documents
+  /neuro/checkpoint     -- periodic pool persistence
 
 Architecture notes (updated for current build):
   - kWTA (top 2% per hop) enforces cortical sparsity -- training populates sparse codes
@@ -294,25 +296,7 @@ def train_text(client: httpx.Client, node_url: str, text: str,
     })
     return result is not None
 
-def ingest_qa_batch(client: httpx.Client, node_url: str,
-                    candidates: list[dict]) -> int:
-    if not candidates:
-        return 0
-    result = api_post(client, f"{node_url}/qa/ingest", {"candidates": candidates})
-    if result:
-        return result.get("ingested", 0)
-    return 0
-
 def checkpoint(client: httpx.Client, node_url: str) -> None:
-    # Save QA store first (fast, < 1 MB) via dedicated endpoint.
-    try:
-        r = client.post(f"{node_url}/qa/checkpoint", timeout=30)
-        if r.is_success:
-            tqdm.write(f"  QA store saved -> {r.json().get('qa_path', '?')}")
-    except Exception as e:
-        tqdm.write(f"  QA checkpoint failed: {e}")
-    # Full neuro pool checkpoint -- may take several minutes for large pools.
-    # Fire the request but don't wait long; the node will finish in background.
     try:
         resp = client.post(f"{node_url}/neuro/checkpoint", timeout=600)
         if resp.is_success:
@@ -364,21 +348,22 @@ def record_episode(client: httpx.Client, node_url: str,
 
 def ingest_qa_full(client: httpx.Client, node_url: str,
                    candidates: list[dict], pool: str = "knowledge") -> int:
-    """
-    Full Q&A training:
-      1. /qa/ingest -- Q&A store + STDP bridge
-      2. /media/train_sequence -- Q->A temporal frame pair per candidate
-      3. /neuro/record_episode -- episodic learning per candidate
+    """Pure neural Q->A training (no QA store):
+      1. /media/train -- combined Q+A Hebbian activation
+      2. /media/train_sequence -- Q->A temporal STDP pair
+      3. /neuro/record_episode -- episodic memory
     """
     if not candidates:
         return 0
-    ingested = ingest_qa_batch(client, node_url, candidates)
+    trained = 0
     for pair in candidates:
         q = pair.get("question", "")
         a = pair.get("answer", "")
         if not q or not a:
             continue
-        # Q->A temporal sequence
+        # Pass 1: combined Hebbian
+        train_text(client, node_url, f"{q} {a}", lr_scale=1.0)
+        # Pass 2: Q->A temporal sequence
         api_post(client, f"{node_url}/media/train_sequence", {
             "frames": [
                 {"modality": "text", "text": q, "t_secs": 0.0, "lr_scale": 1.0},
@@ -386,9 +371,10 @@ def ingest_qa_full(client: httpx.Client, node_url: str,
             ],
             "temporal_tau": 2.0,
         })
-        # Episodic record
+        # Pass 3: episodic record
         record_episode(client, node_url, q, a, surprise=0.0)
-    return ingested
+        trained += 1
+    return trained
 
 
 def train_sequence(client: httpx.Client, node_url: str,
