@@ -459,10 +459,12 @@ fn tokenize_text(text: &str) -> Vec<Token> {
     tokens
 }
 
-/// Map a punctuation character to its label name.
-/// Returns `None` for whitespace and characters we genuinely don't care about.
+/// Map a character to its label name for non-alphanumeric signal.
+/// Spaces and tabs are neurons — word boundaries are meaningful structure,
+/// not mere separators. Every character fires.
 fn punct_name(ch: char) -> Option<&'static str> {
     match ch {
+        ' ' | '\t' => Some("space"),
         ','  => Some("comma"),
         '.'  => Some("period"),
         '?'  => Some("question"),

@@ -161,10 +161,6 @@ struct ApiState {
     /// Most recent EnvironmentSnapshot received via /neuro/train.
     /// Served by GET /neuro/symbols/live for real-time world viewer animation.
     live_snapshot: Arc<Mutex<Option<EnvironmentSnapshot>>>,
-    /// Episodic conversation store: trained Q→A pairs stored verbatim so the
-    /// chat handler can reconstruct the exact answer sequence from pool word recall.
-    /// Built by POST /conv/train; queried during answer assembly.
-    conv_store: Arc<Mutex<ConversationStore>>,
 }
 
 /// Minimum peak `txt:word_*` activation required to emit an answer.
@@ -183,67 +179,6 @@ struct HypothesisEntry {
     resolved: bool,
     answer: Option<String>,
     confidence: Option<f32>,
-}
-
-/// Episodic memory of specifically-trained Q→A conversation pairs.
-/// Populated by POST /conv/train; queried in the chat handler to
-/// reconstruct the exact answer string from the Hebbian word recall.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ConversationStore {
-    pairs: Vec<ConvPair>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConvPair {
-    question: String,
-    answer: String,
-    q_words: Vec<String>,
-    a_words: Vec<String>,
-}
-
-impl ConversationStore {
-    /// Find the best-matching answer for a given query.
-    ///
-    /// Scoring:
-    ///   - question_overlap: fraction of stored q_words present in query_words (0..1)
-    ///   - answer_overlap: fraction of stored a_words present in recalled_words (0..1)
-    ///   - score = 0.65 * question_overlap + 0.35 * answer_overlap
-    ///
-    /// Returns the stored answer string and score if score >= min_score.
-    fn best_match(
-        &self,
-        query_words: &[String],
-        recalled_words: &[String],
-        min_score: f32,
-    ) -> Option<(&str, f32)> {
-        let qw: std::collections::HashSet<&str> = query_words.iter().map(|s| s.as_str()).collect();
-        let rw: std::collections::HashSet<&str> = recalled_words.iter().map(|s| s.as_str()).collect();
-        let mut best: Option<(&str, f32)> = None;
-        for pair in &self.pairs {
-            if pair.q_words.is_empty() { continue; }
-            let q_hit = pair.q_words.iter().filter(|w| qw.contains(w.as_str())).count();
-            // Recall: fraction of stored q_words found in query
-            let recall = q_hit as f32 / pair.q_words.len() as f32;
-            // Precision: fraction of query words covered by stored pair
-            // This breaks ties in favor of longer/more-specific stored questions.
-            let precision = if qw.is_empty() { 0.0 } else { q_hit as f32 / qw.len() as f32 };
-            // F1-style combination: harmonic mean of recall and precision
-            let q_score = if recall + precision > 0.0 {
-                2.0 * recall * precision / (recall + precision)
-            } else { 0.0 };
-            let a_hit = if pair.a_words.is_empty() { 0.0 } else {
-                pair.a_words.iter().filter(|w| rw.contains(w.as_str())).count() as f32
-                    / pair.a_words.len() as f32
-            };
-            let score = 0.65 * q_score + 0.35 * a_hit;
-            if score >= min_score {
-                if best.map(|(_, s)| score > s).unwrap_or(true) {
-                    best = Some((&pair.answer, score));
-                }
-            }
-        }
-        best
-    }
 }
 
 #[derive(Clone)]
@@ -891,7 +826,6 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         prediction_experiment: Arc::new(Mutex::new(PredictionExperimentRuntime::new(PredictionExperimentConfig::default()))),
         layered_physiology:   Arc::new(Mutex::new(LayeredPhysiologyRuntime::new(LayeredPhysiologyConfig::default()))),
         live_snapshot:        Arc::new(Mutex::new(None)),
-        conv_store:           Arc::new(Mutex::new(ConversationStore::default())),
     };
     let data_limit = if config.data.enabled {
         config.data.max_payload_bytes.saturating_mul(2)
@@ -1011,8 +945,6 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
         .route("/neuro/clear",          post(neuro_clear))
-        .route("/conv/train",           post(conv_train))
-        .route("/conv/list",            get(conv_list))
         // ── Distributed training ─────────────────────────────────────────────
         // POST /neuro/delta/apply — receive a weight delta from a peer and merge
         // POST /neuro/sync        — force an immediate delta push to all peers
@@ -4491,6 +4423,10 @@ struct TrainSequenceFrame {
     #[serde(default)] motion: Option<Vec<MotionPointReq>>,
     #[serde(default)] keys: Option<Vec<KeyEventReq>>,
     #[serde(default = "default_lr")] lr_scale: f32,
+    /// Two-pool namespace: "q" for question pool, "a" for answer pool, None for shared.
+    /// When set, all word labels are prefixed with "q:" or "a:" respectively.
+    /// This separates Q and A representations so Q→A is a directed cross-pool connection.
+    #[serde(default)] pool_namespace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4540,7 +4476,28 @@ async fn media_train_sequence(
             frame.motion.as_deref(),
             frame.keys.as_deref(),
         ) {
-            Ok(labels) if !labels.is_empty() => {
+            Ok(raw_labels) if !raw_labels.is_empty() => {
+                // Apply pool namespace prefix to word labels when specified.
+                // "q:" prefix = question pool, "a:" prefix = answer pool.
+                // Non-word labels (char, phonetic, zone) are shared across pools
+                // so they are NOT prefixed — they carry sub-lexical signal that
+                // links phonetically similar Q and A words together.
+                let labels: Vec<String> = if let Some(ns) = &frame.pool_namespace {
+                    raw_labels.into_iter().map(|l| {
+                        // Prefix both word and punct labels — punct encodes word-boundary
+                        // and sentence-structure signal that discriminates Q inputs
+                        // (e.g. "hello" vs "hello!") in the Q-pool.
+                        if (l.starts_with("txt:word_") || l.starts_with("txt:punct_"))
+                            && !l.contains("_zone_")
+                        {
+                            format!("{}:{}", ns, l)
+                        } else {
+                            l
+                        }
+                    }).collect()
+                } else {
+                    raw_labels
+                };
                 total_labels += labels.len();
                 frame_labels.push(labels);
             }
@@ -4582,21 +4539,40 @@ async fn media_train_sequence(
             let bridge_lr = base_lr * (-dt / tau).exp();
             if bridge_lr < 1e-4 { continue; }
 
-            // Full label bridge (sorted) — handles nearby-alphabet pairs.
-            let mut bridge: Vec<String> = prev.iter().chain(curr.iter()).cloned().collect();
+            // Full label bridge for sub-word labels only (char, phonetic, zone).
+            // Word and punct labels (namespaced or bare) are excluded here — they are
+            // directional Q→A signals and sorting would reverse their STDP direction.
+            // The directed word bridge below handles all of them in correct order.
+            let mut bridge: Vec<String> = prev.iter().chain(curr.iter())
+                .filter(|l| !l.starts_with("txt:word_")
+                         && !l.starts_with("q:txt:word_")
+                         && !l.starts_with("a:txt:word_")
+                         && !l.starts_with("txt:punct_")
+                         && !l.starts_with("q:txt:punct_")
+                         && !l.starts_with("a:txt:punct_"))
+                .cloned().collect();
             bridge.sort_unstable();
             bridge.dedup();
-            neuro.train_weighted(&bridge, bridge_lr, false);
+            if !bridge.is_empty() {
+                neuro.train_weighted(&bridge, bridge_lr, false);
+            }
 
-            // Focused word-only bridge: prev word labels ordered first, then curr
-            // word labels.  The window now always reaches from first question word to
-            // last answer word because we exclude the hundreds of char/zone labels
-            // that spread out the sorted combined set.
+            // Directed word+punct bridge: prev labels ordered first, then curr.
+            // Includes namespace-prefixed word and punct labels so Q→A cross-pool
+            // edges are created with correct STDP direction.
+            // Punct labels (e.g. q:txt:punct_exclaim) in the Q frame connect to the
+            // first A word, giving the decoder Q-context signal that discriminates
+            // inputs like "hello" vs "hello!" at the pool level.
+            fn is_word_label(l: &str) -> bool {
+                (l.starts_with("txt:word_") || l.starts_with("q:txt:word_") || l.starts_with("a:txt:word_")
+                 || l.starts_with("txt:punct_") || l.starts_with("q:txt:punct_") || l.starts_with("a:txt:punct_"))
+                    && !l.contains("_zone_")
+            }
             let prev_words: Vec<String> = prev.iter()
-                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .filter(|l| is_word_label(l))
                 .cloned().collect();
             let curr_words: Vec<String> = curr.iter()
-                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+                .filter(|l| is_word_label(l))
                 .cloned().collect();
             if !prev_words.is_empty() && !curr_words.is_empty() {
                 let mut word_bridge: Vec<String> = prev_words.iter()
@@ -4665,19 +4641,19 @@ async fn media_train_contrastive(
     let enc         = TextBitsEncoder::new(TextBitsConfig::default());
     let q_labels    = enc.encode_plain(&req.question).labels;
     let a_labels    = enc.encode_plain(&req.correct_answer).labels;
+    // Q→A ordered (not sorted): q labels first so STDP creates Q→A LTP direction.
     let combined_pos: Vec<String> = {
         let mut v = q_labels.clone();
         v.extend_from_slice(&a_labels);
-        v.sort_unstable(); v.dedup(); v
+        v  // no sort — preserve temporal Q→A order for STDP
     };
-
     // Pre-encode wrong answers before entering blocking task.
     let wrong_label_sets: Vec<Vec<String>> = req.wrong_answers.iter()
         .map(|w| {
             let wl = enc.encode_plain(w).labels;
             let mut v = q_labels.clone();
             v.extend_from_slice(&wl);
-            v.sort_unstable(); v.dedup(); v
+            v.sort_unstable(); v.dedup(); v  // wrong answers: sorted is fine (directionality doesn't matter for inhibitory)
         })
         .collect();
 
@@ -4687,9 +4663,10 @@ async fn media_train_contrastive(
     let cross_batch = req.cross_batch_labels.clone();
 
     tokio::task::spawn_blocking(move || {
-        // ── Positive pass (excitatory + dopamine reward) ──────────────────────
+        // ── Positive pass: temporal Q→A STDP reinforcement ────────────────────
+        // combined_pos has Q labels before A labels — train_weighted uses array
+        // order for STDP direction: Q neurons fire → A neurons = LTP on Q→A edges.
         neuro.train_weighted(&combined_pos, lr * 1.2, false);
-        // STDP Q->A temporal sequence
         neuro.train_weighted(&q_labels, lr, false);
         neuro.train_weighted(&a_labels, lr * 0.9, false);
         // Dopamine: retrograde potentiation of the Q->A path.
@@ -5023,20 +5000,6 @@ async fn neuro_ask(
             vec![]
         };
 
-        // English stop words — excluded from propagation seed.
-        // These function words appear in almost every sentence; their Hebbian
-        // edges connect to nearly every concept, so seeding them would fire
-        // the whole pool uniformly and destroy the discrimination signal.
-        // Question words (why, where, when, who, which) are also excluded here
-        // because their intent is captured separately below.
-        const STOP_WORDS: &[&str] = &[
-            "what","is","are","how","does","do","the","a","an","in","of",
-            "to","and","or","it","this","that","be","was","were","can","will",
-            "would","could","should","did","have","has","had","for","with","by",
-            "at","as","but","not","he","she","they","we","you","i","its","get",
-            "about","tell","me","describe","explain","define",
-            "why","where","when","who","which",
-        ];
 
         // ── Question intent detection ─────────────────────────────────────────
         // The first meaningful token determines the question's intent class.
@@ -5082,20 +5045,26 @@ async fn neuro_ask(
         let enc = TextBitsEncoder::new(TextBitsConfig::default());
         let question_labels: Vec<String> = enc.encode_plain(&text).labels;
 
-        // Content-word-only seed: exclude stop-word txt:word_* labels.
-        // Non-word labels (phonetic, char-sequence, zone) are kept as-is —
-        // the encoder already grew those from the character level up, and they
-        // carry sub-lexical signal that helps with novel/partial words.
-        let question_content_labels: Vec<String> = question_labels.iter()
-            .filter(|l| {
-                if let Some(w) = l.strip_prefix("txt:word_") {
-                    !STOP_WORDS.contains(&w)
-                } else {
-                    true
-                }
-            })
-            .cloned()
+        // Build Q-pool labels: word labels prefixed with "q:" for the two-pool
+        // Q→A architecture. Seeding with both the raw labels (corpus connections)
+        // and Q-pool labels (conversational Q→A connections) ensures both paths fire.
+        // Q-pool seeds: prefix both word and punct labels — punct discriminates
+        // inputs that share the same words (e.g. "hello" vs "hello!").
+        let q_pool_labels: Vec<String> = question_labels.iter()
+            .filter(|l| (l.starts_with("txt:word_") || l.starts_with("txt:punct_"))
+                     && !l.contains("_zone_"))
+            .map(|l| format!("q:{}", l))
             .collect();
+
+        // All labels seed propagation — no word exclusions.
+        // The Hebbian graph is trained with all words; IDF and seed_relevance
+        // provide discrimination without artificial stop-word removal.
+        // Include Q-pool labels so conversational Q→A bridges fire.
+        let question_content_labels: Vec<String> = {
+            let mut v = question_labels.clone();
+            v.extend_from_slice(&q_pool_labels);
+            v
+        };
 
         // ── Pure Hebbian path ────────────────────────────────────────────────
         // Answer comes entirely from Hebbian activation.
@@ -5104,11 +5073,11 @@ async fn neuro_ask(
         let qa_answer_labels: Vec<String> = vec![];
         let qa_conf = 0.0_f32;
 
-        // 1-hop Hebbian resonance — discriminates trained vs novel concepts
-        // without QA score. Peak > threshold means the Hebbian graph has
-        // associations built for this concept cluster; below means hypothesis.
+        // 1-hop Hebbian resonance: seed with Q-pool labels + raw word labels.
+        // A-pool answer labels (a:txt:word_*) should activate from Q-pool seeds.
         let q_word_only_pre: Vec<String> = question_content_labels.iter()
-            .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .filter(|l| (l.starts_with("txt:word_") || l.starts_with("q:txt:word_"))
+                     && !l.contains("_zone_"))
             .cloned()
             .collect();
         let pre_1hop = if q_word_only_pre.is_empty() {
@@ -5117,8 +5086,12 @@ async fn neuro_ask(
             neuro.propagate_combined(&[(q_word_only_pre.as_slice(), 1.0_f32)], 1, 0.001)
         };
         let q_pre_set: std::collections::HashSet<&String> = q_word_only_pre.iter().collect();
+        // Check both corpus (txt:word_*) and A-pool (a:txt:word_*) for answer signal.
         let hebbian_peak = pre_1hop.iter()
-            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .filter(|(l, _)| {
+                (l.starts_with("txt:word_") || l.starts_with("a:txt:word_"))
+                && !l.contains("_zone_")
+            })
             .filter(|(l, _)| !q_pre_set.contains(l))
             .map(|(_, &v)| v)
             .fold(0.0f32, f32::max);
@@ -5129,42 +5102,6 @@ async fn neuro_ask(
             else if hebbian_peak >= 0.10 { "low" }
             else { "uncertain" };
         let qa_gated = hebbian_peak > 0.10;
-
-        // ── Conversation store: early exact-question recall ───────────────────
-        // Check before the hypothesis gate so trained Q→A pairs always respond
-        // even when Hebbian propagation is too weak (sparse pool, common words).
-        // MUST use raw question_labels (not question_content_labels) because stop-
-        // word filtering removes "how", "are", "you", "who", "what", etc. — the
-        // very words that make up conversational queries.
-        {
-            let q_words_for_conv: Vec<String> = question_labels.iter()
-                .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
-                .filter_map(|l| l.strip_prefix("txt:word_").map(|w| w.to_string()))
-                .collect();
-            if !q_words_for_conv.is_empty() {
-                // Pass empty recalled_words: at this stage there is no Hebbian
-                // output yet, so we rely purely on question-word overlap.
-                let conv_early: Option<String> = {
-                    let cs = state.conv_store.lock().expect("conv_store");
-                    cs.best_match(&q_words_for_conv, &[], 0.50)
-                        .map(|(a, _)| a.to_string())
-                };
-                if let Some(ca) = conv_early {
-                    return serde_json::json!({
-                        "question":        text,
-                        "hypothesis":      false,
-                        "answer":          ca,
-                        "hebbian_peak":    hebbian_peak,
-                        "confidence_tier": "high",
-                        "peak_activation": hebbian_peak,
-                        "intent":          format!("{:?}", intent),
-                        "session_id":      session_id,
-                        "word_activations": [],
-                        "context_trained": false,
-                    });
-                }
-            }
-        }
 
         if !qa_gated {
             // ── Unknown concept: register novel chars, spike NE, queue hypothesis ──
@@ -5349,8 +5286,10 @@ async fn neuro_ask(
         // This is the discriminative signal between "well-trained concept" and
         // "novel/untrained concept" — not qa_activation (which measures QA
         // store IDF matching) but pure Hebbian resonance of the concept itself.
+        // Include Q-pool labels in the word-only seed to activate A-pool labels.
         let q_word_only_labels: Vec<String> = question_content_labels.iter()
-            .filter(|l| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .filter(|l| (l.starts_with("txt:word_") || l.starts_with("q:txt:word_"))
+                     && !l.contains("_zone_"))
             .cloned()
             .collect();
         let q_only_1hop = if q_word_only_labels.is_empty() {
@@ -5359,13 +5298,16 @@ async fn neuro_ask(
             neuro.propagate_combined(
                 &[(q_word_only_labels.as_slice(), 1.0_f32)],
                 1,
-                0.001,  // lower floor to capture weak but real connections
+                0.001,
             )
         };
         let q_seed_word_set: std::collections::HashSet<&String> =
             q_word_only_labels.iter().collect();
         let peak = q_only_1hop.iter()
-            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .filter(|(l, _)| {
+                (l.starts_with("txt:word_") || l.starts_with("a:txt:word_"))
+                && !l.contains("_zone_")
+            })
             .filter(|(l, _)| !q_seed_word_set.contains(l))
             .map(|(_, &v)| v)
             .fold(0.0f32, f32::max);
@@ -5386,9 +5328,14 @@ async fn neuro_ask(
             hops,
             0.005,
         );
+        // Include A-pool labels (a:txt:word_*) — answer neurons from the two-pool
+        // Q→A architecture fire here and carry the trained answer sequence.
         let mut word_acts: Vec<(String, f32)> = combined
             .iter()
-            .filter(|(l, _)| l.starts_with("txt:word_") && !l.contains("_zone_"))
+            .filter(|(l, _)| {
+                (l.starts_with("txt:word_") || l.starts_with("a:txt:word_"))
+                && !l.contains("_zone_")
+            })
             .map(|(l, &v)| (l.clone(), v))
             .collect();
         word_acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1)
@@ -5475,19 +5422,21 @@ async fn neuro_ask(
         // This maps to Boltzmann energy minimization: E = -annealed_score.
         // Temperature T_anneal = 1 / hebbian_peak cools as confidence grows:
         // low confidence (high T) → broad exploration; high confidence (low T) → focused.
+        // Seed word labels: all question pool labels (q: and txt:) to exclude from answers.
         let seed_word_labels: std::collections::HashSet<String> = question_content_labels.iter()
-            .filter(|l| l.starts_with("txt:word_"))
+            .filter(|l| l.starts_with("txt:word_") || l.starts_with("q:txt:word_"))
             .cloned()
             .collect();
 
-        // Gather candidate labels and seed labels for classical annealing
+        // Gather candidate labels: A-pool labels (a:txt:word_*) first (highest priority),
+        // then corpus labels (txt:word_*) as fallback for non-conversational questions.
         let candidate_labels: Vec<String> = word_acts.iter()
             .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
-            .filter(|(l, _)| l.starts_with("txt:word_"))
-            .filter_map(|(l, _)| {
-                let w = l.strip_prefix("txt:word_")?;
-                if !w.contains('_') && w.len() > 2 { Some(l.clone()) } else { None }
+            .filter(|(l, _)| {
+                (l.starts_with("txt:word_") || l.starts_with("a:txt:word_"))
+                && !l.contains("_zone_")
             })
+            .map(|(l, _)| l.clone())
             .collect();
         let label_stats = neuro.label_stats(&candidate_labels);
 
@@ -5503,8 +5452,15 @@ async fn neuro_ask(
 
         let mut annealed: Vec<(&str, f32, f32)> = word_acts.iter()
             .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
-            .filter_map(|(l, s)| l.strip_prefix("txt:word_").map(|w| (w, *s, l.clone())))
-            .filter(|(w, _, _)| !w.contains('_') && w.len() > 2)
+            .filter(|(l, _)| !l.contains("_zone_"))
+            .filter_map(|(l, s)| {
+                // Strip either "a:txt:word_" (A-pool) or "txt:word_" (corpus).
+                // A-pool labels are prioritized by appearing in word_acts first
+                // (sorted by activation strength above).
+                let w = l.strip_prefix("a:txt:word_")
+                    .or_else(|| l.strip_prefix("txt:word_"));
+                w.map(|w| (w, *s, l.clone()))
+            })
             .map(|(w, act, label)| {
                 let (mean_act, _use_count, _fan_out) = label_stats.get(&label)
                     .copied().unwrap_or((0.0, 0, 0));
@@ -5535,33 +5491,88 @@ async fn neuro_ask(
             relevant_words
         };
 
+        // answer_words: seed-relevance-sorted list used for EEM/motif checks below
         let answer_words: Vec<&str> = annealed.iter()
             .map(|(w, _)| *w)
             .take(max_tok.min(20))
             .collect();
 
-        // ── Conversation store: sequence-preserving answer recall ─────────────
-        // After Hebbian recall produces the correct WORD SET, look up whether
-        // the ConversationStore has a trained Q→A pair whose question matches
-        // this query and whose answer words overlap with the recalled set.
-        // If so, return the verbatim trained answer rather than word-soup.
-        let query_words_lc: Vec<String> = q_word_only_labels.iter()
-            .filter_map(|l| l.strip_prefix("txt:word_"))
-            .map(|w| w.to_string())
+        // ── Greedy conditioned sequence decode ────────────────────────────────
+        // Directed STDP sequence edges: W(word_i → word_i+1) = lr × exp(-dt/tau)
+        // with dt=0.15s, tau=2.0 → 0.928 per step from per-word timed training.
+        // First word:  argmax seed_relevance(Q→w).
+        // Each next:   argmax { seq_act(cur→w) + 0.5 × seed_relevance(Q→w) }.
+        // This reconstructs sentence order purely from the trained Hebbian graph.
+        let word_rel_map: std::collections::HashMap<&str, f32> = annealed.iter()
+            .map(|(w, r)| (*w, *r))
             .collect();
-        let recalled_lc: Vec<String> = answer_words.iter().map(|w| w.to_lowercase()).collect();
-        let conv_answer: Option<String> = {
-            let cs = state.conv_store.lock().expect("conv_store");
-            cs.best_match(&query_words_lc, &recalled_lc, 0.40)
-                .map(|(a, _)| a.to_string())
-        };
+        // remaining = ALL activated A-pool + corpus word labels minus question seeds.
+        // Seed-relevance only picks the FIRST word; intra-A sequence edges then pull
+        // subsequent words. Without this, only seed-relevant words (direct Q→A edges)
+        // appear in remaining, truncating the answer after the first word.
+        let mut seen_r: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut remaining: Vec<&str> = word_acts.iter()
+            .filter(|(l, _)| !seed_word_labels.contains(l.as_str()) && !l.contains("_zone_"))
+            .filter_map(|(l, _)| {
+                l.strip_prefix("a:txt:word_").or_else(|| l.strip_prefix("txt:word_"))
+            })
+            .filter(|w| seen_r.insert(*w))
+            .collect();
+        let mut decoded: Vec<String> = Vec::new();
+        let max_words = max_tok.min(20) as usize;
 
-        let mut answer = if let Some(ca) = conv_answer {
-            ca
-        } else {
-            let joined = answer_words.join(" ");
-            joined
-        };
+        if let Some(pos) = remaining.iter().enumerate()
+            .max_by(|(_, a), (_, b)| {
+                word_rel_map.get(*a).unwrap_or(&0.0)
+                    .partial_cmp(word_rel_map.get(*b).unwrap_or(&0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+        {
+            let first = remaining.remove(pos);
+            decoded.push(first.to_string());
+            while decoded.len() < max_words && !remaining.is_empty() {
+                // Probe sequence edges from the A-pool label of the current word.
+                // A-pool intra-sequence edges (a:txt:word_i → a:txt:word_{i+1})
+                // were trained with directed STDP by the two-pool architecture.
+                let cur_word = decoded.last().unwrap();
+                let cur_labels = vec![
+                    format!("a:txt:word_{}", cur_word),
+                    format!("txt:word_{}", cur_word),
+                ];
+                // Sustain Q context through every decode step — Q punct/word labels
+                // provide discriminating signal (e.g. q:txt:punct_exclaim biases
+                // toward the answer trained with "hello!" vs plain "hello").
+                let seq_acts = neuro.propagate_combined(
+                    &[
+                        (cur_labels.as_slice(), 1.0_f32),
+                        (q_pool_labels.as_slice(), 0.35_f32),
+                    ],
+                    1, 0.001
+                );
+                if let Some(pos) = remaining.iter().enumerate()
+                    .max_by(|(_, a), (_, b)| {
+                        let la_a = format!("a:txt:word_{}", a);
+                        let la_b = format!("a:txt:word_{}", b);
+                        let sa = seq_acts.get(&la_a).copied().unwrap_or(0.0)
+                            .max(seq_acts.get(&format!("txt:word_{}", a)).copied().unwrap_or(0.0))
+                            + 0.5 * word_rel_map.get(*a).unwrap_or(&0.0);
+                        let sb = seq_acts.get(&la_b).copied().unwrap_or(0.0)
+                            .max(seq_acts.get(&format!("txt:word_{}", b)).copied().unwrap_or(0.0))
+                            + 0.5 * word_rel_map.get(*b).unwrap_or(&0.0);
+                        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(i, _)| i)
+                {
+                    let next = remaining.remove(pos);
+                    decoded.push(next.to_string());
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let mut answer = decoded.join(" ");
         if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
 
         // ── EEM validation gate ───────────────────────────────────────────────
@@ -6060,23 +6071,8 @@ async fn hypothesis_research_loop(
             let neuro = neuro.clone();
             let q     = question.clone();
             move || -> (f32, Option<String>) {
-                const STOP_WORDS: &[&str] = &[
-                    "what","is","are","how","does","do","the","a","an","in","of",
-                    "to","and","or","it","this","that","be","was","were","can","will",
-                    "would","could","should","did","have","has","had","for","with","by",
-                    "at","as","but","not","he","she","they","we","you","i","its","get",
-                    "about","tell","me","describe","explain","define",
-                ];
                 let enc = TextBitsEncoder::new(TextBitsConfig::default());
-                let all_labels = enc.encode_plain(&q).labels;
-                let qlabels: Vec<String> = all_labels.iter()
-                    .filter(|l| {
-                        if let Some(w) = l.strip_prefix("txt:word_") {
-                            !STOP_WORDS.contains(&w)
-                        } else { true }
-                    })
-                    .cloned()
-                    .collect();
+                let qlabels: Vec<String> = enc.encode_plain(&q).labels;
                 // Pure Hebbian 1-hop discriminative check
                 let combined_1h = neuro.propagate_combined(
                     &[(qlabels.as_slice(), 1.0_f32)],
@@ -6134,8 +6130,6 @@ async fn neuro_checkpoint(
 async fn neuro_clear(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Clear conv store (episodic conversation memory).
-    state.conv_store.lock().expect("conv_store").pairs.clear();
     let result = tokio::task::spawn_blocking(move || {
         state.neuro.clear_pool()
     }).await.unwrap_or_else(|e| Err(e.to_string()));
@@ -6144,60 +6138,6 @@ async fn neuro_clear(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e }))),
     }
-}
-
-/// POST /conv/train — store a Q→A conversation pair verbatim.
-/// Called by train_conversations.py alongside /media/train_sequence so the
-/// exact answer string is available for sequence-preserving answer assembly.
-#[derive(Deserialize)]
-struct ConvTrainReq {
-    question: String,
-    answer: String,
-}
-
-async fn conv_train(
-    State(state): State<ApiState>,
-    Json(req): Json<ConvTrainReq>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let q_words: Vec<String> = req.question.to_lowercase()
-        .split_whitespace()
-        .filter(|w| w.len() > 1)
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|w| !w.is_empty())
-        .collect();
-    let a_words: Vec<String> = req.answer.to_lowercase()
-        .split_whitespace()
-        .filter(|w| w.len() > 1)
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|w| !w.is_empty())
-        .collect();
-    let pair = ConvPair {
-        question: req.question.clone(),
-        answer:   req.answer.clone(),
-        q_words,
-        a_words,
-    };
-    let mut store = state.conv_store.lock().expect("conv_store");
-    // Replace existing entry for same question if present, otherwise append.
-    if let Some(existing) = store.pairs.iter_mut().find(|p| p.question.to_lowercase() == req.question.to_lowercase()) {
-        *existing = pair;
-    } else {
-        store.pairs.push(pair);
-    }
-    let total = store.pairs.len();
-    (StatusCode::OK, Json(serde_json::json!({ "stored": true, "total": total })))
-}
-
-/// GET /conv/list — return all stored conversation pairs.
-async fn conv_list(
-    State(state): State<ApiState>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let store = state.conv_store.lock().expect("conv_store");
-    let pairs: Vec<_> = store.pairs.iter().map(|p| serde_json::json!({
-        "question": p.question,
-        "answer":   p.answer,
-    })).collect();
-    (StatusCode::OK, Json(serde_json::json!({ "count": pairs.len(), "pairs": pairs })))
 }
 
 /// GET /neuro/motifs
