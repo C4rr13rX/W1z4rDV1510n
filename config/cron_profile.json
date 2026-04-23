@@ -1,0 +1,112 @@
+{
+  "discovery": {
+    "also_add_to_ghost": true,
+    "chains": [
+      "base",
+      "ethereum",
+      "arbitrum",
+      "optimism",
+      "polygon"
+    ],
+    "limit": 40,
+    "max_age_hours": 36,
+    "max_tokens": 25,
+    "min_change_1h": -5,
+    "min_change_24h": -30,
+    "min_liquidity_usd": 25000,
+    "min_volume_usd": 50000,
+    "watchlist_target": "stream"
+  },
+  "downloads": {
+    "chains": [
+      "base",
+      "ethereum",
+      "arbitrum",
+      "optimism",
+      "polygon"
+    ],
+    "max_pairs": 256
+  },
+  "enabled": true,
+  "max_concurrent_tasks": 1,
+  "news": {
+    "default_tokens": [
+      "BTC",
+      "ETH",
+      "USDC",
+      "SOL",
+      "AVAX"
+    ],
+    "lookback_hours": 72,
+    "max_pages": 2,
+    "max_tokens": 8
+  },
+  "production": {
+    "chains": [
+      "base",
+      "ethereum",
+      "arbitrum",
+      "optimism",
+      "polygon"
+    ],
+    "enabled": true,
+    "min_chains_ready": 1,
+    "min_files_per_chain": 1,
+    "require_pair_index": true
+  },
+  "profile_version": 1,
+  "recommendations": {
+    "enabled": true,
+    "lookback_days": 30,
+    "low_fee_chains": [
+      "base",
+      "arbitrum",
+      "optimism",
+      "polygon"
+    ],
+    "max_age_hours": 0,
+    "max_tokens": 8,
+    "min_age_hours": 72,
+    "min_liquidity_usd": 50000,
+    "min_score": 0.0,
+    "min_volume_usd": 100000,
+    "wallet_bias": true
+  },
+  "tasks": [
+    {
+      "enabled": true,
+      "id": "auto_pipeline",
+      "interval_minutes": 180,
+      "jitter_seconds": 120,
+      "label": "Auto pipeline bootstrap",
+      "requires_mnemonic": false,
+      "steps": [
+        "downloads",
+        "news",
+        "training",
+        "production"
+      ]
+    },
+    {
+      "enabled": true,
+      "id": "weekly_bootstrap",
+      "interval_minutes": 10080,
+      "jitter_seconds": 300,
+      "label": "Weekly bootstrap",
+      "requires_mnemonic": false,
+      "steps": [
+        "discovery",
+        "watchlists",
+        "recommendations",
+        "downloads",
+        "news",
+        "training"
+      ]
+    }
+  ],
+  "training": {
+    "batch_size": 16,
+    "enabled": true,
+    "epochs": 1
+  }
+}

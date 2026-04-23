@@ -491,6 +491,39 @@ fn punct_name(ch: char) -> Option<&'static str> {
     }
 }
 
+/// Inverse of `punct_name` — map a punct label name back to its character.
+/// Used by the decoder to render `txt:punct_*` labels into output text.
+/// This is the deserialization inverse, not an NLP rule — strictly the
+/// inverse lookup of the encoder's `punct_name`.
+pub fn name_to_char(name: &str) -> Option<char> {
+    match name {
+        "space"       => Some(' '),
+        "comma"       => Some(','),
+        "period"      => Some('.'),
+        "question"    => Some('?'),
+        "exclaim"     => Some('!'),
+        "apostrophe"  => Some('\''),
+        "hyphen"      => Some('-'),
+        "colon"       => Some(':'),
+        "semicolon"   => Some(';'),
+        "quote"       => Some('"'),
+        "paren_open"  => Some('('),
+        "paren_close" => Some(')'),
+        "slash"       => Some('/'),
+        "at"          => Some('@'),
+        "hash"        => Some('#'),
+        "plus"        => Some('+'),
+        "equals"      => Some('='),
+        "lt"          => Some('<'),
+        "gt"          => Some('>'),
+        "star"        => Some('*'),
+        "amp"         => Some('&'),
+        "percent"     => Some('%'),
+        "dollar"      => Some('$'),
+        _             => None,
+    }
+}
+
 /// Generate character n-grams of length `n` for a word.
 /// "duck" with n=2 → ["du", "uc", "ck"]
 fn char_ngrams(word: &str, n: usize) -> Vec<String> {

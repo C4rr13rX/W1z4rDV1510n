@@ -26,50 +26,50 @@ CONTRASTIVE_LR = 0.45
 
 CONVERSATIONS: list[tuple[str, str]] = [
     # ── Greetings ──────────────────────────────────────────────────────────────
-    ("hello",                   "Hello I am W1z4rD ask me anything"),
-    ("hello!",                  "Hello great to see you what would you like to explore"),
-    ("hi",                      "Hi there how can I help"),
-    ("hi!",                     "Hi what is on your mind"),
-    ("hey",                     "Hey ready to learn something new"),
-    ("hey there",               "Hey what can I help you with today"),
-    ("howdy",                   "Howdy ask me anything"),
-    ("greetings",               "Greetings what would you like to know"),
-    ("sup",                     "Not much just processing what is on your mind"),
-    ("good morning",            "Good morning hope your day is off to a great start"),
-    ("good afternoon",          "Good afternoon what can I help you explore"),
-    ("good evening",            "Good evening ready to dig into something interesting"),
-    ("good night",              "Good night rest well"),
+    ("hello",                   "Hello, I am W1z4rD. Ask me anything."),
+    ("hello!",                  "Hello! Great to see you. What would you like to explore?"),
+    ("hi",                      "Hi there. How can I help?"),
+    ("hi!",                     "Hi! What is on your mind?"),
+    ("hey",                     "Hey. Ready to learn something new?"),
+    ("hey there",               "Hey! What can I help you with today?"),
+    ("howdy",                   "Howdy. Ask me anything."),
+    ("greetings",               "Greetings. What would you like to know?"),
+    ("sup",                     "Not much, just processing. What is on your mind?"),
+    ("good morning",            "Good morning. Hope your day is off to a great start."),
+    ("good afternoon",          "Good afternoon. What can I help you explore?"),
+    ("good evening",            "Good evening. Ready to dig into something interesting?"),
+    ("good night",              "Good night. Rest well."),
 
     # ── How are you variants ───────────────────────────────────────────────────
-    ("how are you",             "I am doing well thanks for asking what can I help you with"),
-    ("how are you?",            "Doing great ready to answer your questions how about you"),
-    ("how is it going",         "Going well what would you like to explore"),
-    ("what is up",              "Not much here to help what is on your mind"),
-    ("how do you do",           "I am doing well thank you what can I help you with"),
-    ("are you doing well",      "Yes I am functioning well and ready to help ask me anything"),
+    ("how are you",             "I am doing well, thanks for asking. What can I help you with?"),
+    ("how are you?",            "Doing great! Ready to answer your questions. How about you?"),
+    ("how is it going",         "Going well. What would you like to explore?"),
+    ("what is up",              "Not much, here to help. What is on your mind?"),
+    ("how do you do",           "I am doing well, thank you. What can I help you with?"),
+    ("are you doing well",      "Yes, I am functioning well and ready to help. Ask me anything."),
 
     # ── Identity / self ────────────────────────────────────────────────────────
-    ("who are you",             "I am W1z4rD a distributed neural AI node that learns from training data and experience"),
-    ("what are you",            "I am W1z4rD Vision a neural AI system that uses Hebbian learning to understand and reason"),
-    ("what is your name",       "My name is W1z4rD what would you like to know"),
-    ("tell me about yourself",  "I am W1z4rD Vision a distributed Hebbian neural AI I learn from training data and get smarter as I am taught more"),
-    ("what can you do",         "I can answer questions reason about facts I have been trained on and learn from your corrections"),
-    ("are you an ai",           "Yes I am W1z4rD a Hebbian neural AI I learn from data and improve over time"),
-    ("are you human",           "No I am an AI W1z4rD Vision a distributed neural system"),
+    ("who are you",             "I am W1z4rD, a distributed neural AI node that learns from training data and experience."),
+    ("what are you",            "I am W1z4rD Vision, a neural AI system that uses Hebbian learning to understand and reason."),
+    ("what is your name",       "My name is W1z4rD. What would you like to know?"),
+    ("tell me about yourself",  "I am W1z4rD Vision, a distributed Hebbian neural AI. I learn from training data and get smarter as I am taught more."),
+    ("what can you do",         "I can answer questions, reason about facts I have been trained on, and learn from your corrections."),
+    ("are you an ai",           "Yes, I am W1z4rD, a Hebbian neural AI. I learn from data and improve over time."),
+    ("are you human",           "No, I am an AI. W1z4rD Vision, a distributed neural system."),
 
     # ── Farewell ───────────────────────────────────────────────────────────────
-    ("bye",                     "Goodbye feel free to come back anytime"),
-    ("goodbye",                 "Goodbye it was a pleasure"),
-    ("see you later",           "See you later come back anytime"),
-    ("take care",               "You too take care"),
-    ("thanks",                  "You are welcome let me know if you need anything else"),
-    ("thank you",               "You are welcome happy to help"),
+    ("bye",                     "Goodbye. Feel free to come back anytime."),
+    ("goodbye",                 "Goodbye. It was a pleasure."),
+    ("see you later",           "See you later. Come back anytime."),
+    ("take care",               "You too. Take care."),
+    ("thanks",                  "You are welcome. Let me know if you need anything else."),
+    ("thank you",               "You are welcome. Happy to help."),
 
     # ── Meta / capability ──────────────────────────────────────────────────────
-    ("are you smart",           "I am learning the more I am trained the smarter I become"),
-    ("can you learn",           "Yes I learn from the question and answer pairs you train me on and from the training curriculum"),
-    ("do you understand me",    "I try to my understanding comes from Hebbian associations built during training"),
-    ("what do you know",        "I know what I have been trained on science language facts and whatever you teach me"),
+    ("are you smart",           "I am learning. The more I am trained, the smarter I become."),
+    ("can you learn",           "Yes, I learn from the question and answer pairs you train me on, and from the training curriculum."),
+    ("do you understand me",    "I try to. My understanding comes from Hebbian associations built during training."),
+    ("what do you know",        "I know what I have been trained on: science, language, facts, and whatever you teach me."),
 ]
 
 
@@ -119,22 +119,78 @@ def propagate(node: str, question: str) -> list[str]:
         return []
 
 
+def _tokenize_chars(text: str) -> list[str]:
+    """Split text into a stream of atomic token-frames: alnum runs (words) and
+    each non-alnum character (space, comma, period, etc.) as its own frame.
+
+    'Hello, world!' → ['Hello', ',', ' ', 'world', '!']
+
+    Every space and punctuation character gets its own frame and its own
+    timestamp so temporal STDP creates directional edges between word → space
+    → word, word → comma → space → word, etc. — per the bottom-up architecture
+    where every character is a neuron.
+    """
+    tokens: list[str] = []
+    buf: list[str] = []
+    for ch in text:
+        if ch.isalnum():
+            buf.append(ch)
+        else:
+            if buf:
+                tokens.append("".join(buf))
+                buf = []
+            tokens.append(ch)  # space, comma, period — each its own frame
+    if buf:
+        tokens.append("".join(buf))
+    return tokens
+
+
 def train_sequence_passes(node: str, question: str, answer: str, passes: int, lr: float,
                           contrastive_lr: float = CONTRASTIVE_LR) -> bool:
+    # Per-character-run frames: each word AND each non-alnum char (space,
+    # comma, period, exclaim, etc.) is its own timed frame. STDP creates
+    # directional edges between every adjacent token pair.
+    # Q tokens spaced 50ms apart; A tokens spaced 100ms apart with 400ms Q→A gap.
+    # tau_secs=2.0 → W(token_i→token_i+1) = lr × exp(-0.05) ≈ 0.951 directed edge.
+    q_toks = _tokenize_chars(question)
+    a_toks = _tokenize_chars(answer)
+    q_total = len(q_toks)
+    a_total = len(a_toks)
+    total_frames = q_total + a_total
+
+    frames = []
+    seq_index = 0
+    for j, tok in enumerate(q_toks):
+        t = j * 0.05
+        frames.append({
+            "modality": "text", "t_secs": t, "lr_scale": 1.0,
+            "data_b64": _b64(tok), "text": tok,
+            "pool_namespace": "q",   # Q-pool: labels become q:txt:word_* / q:txt:punct_*
+            "spans": _spans(tok, t / max((q_total + a_total - 1) * 0.15, 0.001),
+                            seq_index, total_frames),
+        })
+        seq_index += 1
+
+    q_end = (q_total - 1) * 0.05 if q_total > 1 else 0.0
+    a_start = q_end + 0.4  # 400ms gap between question end and answer start
+    for j, tok in enumerate(a_toks):
+        t = a_start + j * 0.10
+        frames.append({
+            "modality": "text", "t_secs": t, "lr_scale": 1.0,
+            "data_b64": _b64(tok), "text": tok,
+            "pool_namespace": "a",   # A-pool: labels become a:txt:word_* / a:txt:punct_*
+            "spans": _spans(tok, t / max((a_start + (a_total - 1) * 0.10), 0.001),
+                            seq_index, total_frames),
+        })
+        seq_index += 1
+
     for i in range(passes):
         sid = str(uuid.uuid4())
         payload = json.dumps({
             "session_id": sid,
             "base_lr":    lr,
             "tau_secs":   2.0,
-            "frames": [
-                {"modality": "text", "t_secs": 0.0, "lr_scale": 1.0,
-                 "data_b64": _b64(question), "text": question,
-                 "spans": _spans(question, 0.0, 0, 2)},
-                {"modality": "text", "t_secs": 1.0, "lr_scale": 1.0,
-                 "data_b64": _b64(answer), "text": answer,
-                 "spans": _spans(answer, 1.0, 1, 2)},
-            ],
+            "frames":     frames,
         }).encode()
         try:
             _post(f"{node}/media/train_sequence", payload)
@@ -163,19 +219,8 @@ def train_contrastive_pass(node: str, question: str, correct: str,
         return False
 
 
-def register_conv_pair(node: str, question: str, answer: str) -> None:
-    """Register the Q→A pair in the conv store for sequence-preserving recall."""
-    payload = json.dumps({"question": question, "answer": answer}).encode()
-    try:
-        _post(f"{node}/conv/train", payload)
-    except Exception as exc:
-        print(f"  conv/train failed: {exc}", file=sys.stderr)
-
-
 def train_pair(node: str, question: str, answer: str, rounds: int,
                seq_passes: int = DEFAULT_PASSES, lr: float = DEFAULT_LR) -> bool:
-    # Register in conv store on first training (Hebbian + episodic together).
-    register_conv_pair(node, question, answer)
     for rnd in range(rounds):
         if not train_sequence_passes(node, question, answer, seq_passes, lr):
             return False

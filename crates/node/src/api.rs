@@ -51,6 +51,7 @@ use w1z4rdv1510n::streaming::{
     ImageBitsConfig, ImageBitsEncoder,
     AudioBitsConfig, AudioBitsEncoder,
     TextBitsConfig, TextBitsEncoder, TextSpan, TextRole, TextEmphasis,
+    name_to_char,
     MotionBitsConfig, MotionBitsEncoder, MotionSample,
     KeyboardBitsConfig, KeyboardBitsEncoder, KeyEvent,
     // Simulation / entity runtimes
@@ -4647,6 +4648,27 @@ async fn media_train_contrastive(
         v.extend_from_slice(&a_labels);
         v  // no sort — preserve temporal Q→A order for STDP
     };
+    // Q-pool + A-pool namespaced combined: creates DIRECT q:txt:* → a:txt:* edges for
+    // EVERY answer word within HEBBIAN_WINDOW. seed_relevance then gives a non-zero
+    // signal for each trained answer word, not just the first (which is all the
+    // adjacent-frame-only word bridge in train_sequence provides).
+    // Critically: q:txt:punct_exclaim only appears in "hello!" (not "hello"), so
+    // its connections to a:txt:word_great are unique — this is the discriminator.
+    let combined_pool: Vec<String> = {
+        let q_pool: Vec<String> = q_labels.iter()
+            .filter(|l| (l.starts_with("txt:word_") || l.starts_with("txt:punct_"))
+                     && !l.contains("_zone_"))
+            .map(|l| format!("q:{}", l))
+            .collect();
+        let a_pool: Vec<String> = a_labels.iter()
+            .filter(|l| (l.starts_with("txt:word_") || l.starts_with("txt:punct_"))
+                     && !l.contains("_zone_"))
+            .map(|l| format!("a:{}", l))
+            .collect();
+        let mut v = q_pool;
+        v.extend(a_pool);
+        v
+    };
     // Pre-encode wrong answers before entering blocking task.
     let wrong_label_sets: Vec<Vec<String>> = req.wrong_answers.iter()
         .map(|w| {
@@ -4669,6 +4691,11 @@ async fn media_train_contrastive(
         neuro.train_weighted(&combined_pos, lr * 1.2, false);
         neuro.train_weighted(&q_labels, lr, false);
         neuro.train_weighted(&a_labels, lr * 0.9, false);
+        // Q-pool → A-pool directed bridge: creates q:txt:word_* → a:txt:word_* edges
+        // for every answer word reachable within HEBBIAN_WINDOW. These are the edges
+        // seed_relevance measures — only Q-pool labels are used for relevance scoring
+        // so this is the only path that drives precise Q→A answer selection.
+        neuro.train_weighted(&combined_pool, lr * 1.0, false);
         // Dopamine: retrograde potentiation of the Q->A path.
         neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, 0.85);
         neuro.flush_dopamine();
@@ -5446,7 +5473,15 @@ async fn neuro_ask(
         // which is non-zero ONLY if the answer word was Hebbian-trained with question words.
         // This is the Hopfield-network attractor: the stable state that directly co-activates
         // with the question, minimizing E = -(seed_relevance + activation_specificity).
-        let seed_labels_for_relevance: Vec<String> = q_word_only_labels.clone();
+        // Use only Q-pool prefixed labels for seed_relevance — raw corpus labels
+        // (txt:word_*) have been trained against many answer words via combined_pos
+        // in train_contrastive, so their relevance is noisy across all pairs.
+        // Q-pool labels (q:txt:word_*, q:txt:punct_*) are trained ONLY via the
+        // directed word bridge in train_sequence, giving precise Q→A edges.
+        let seed_labels_for_relevance: Vec<String> = q_word_only_labels.iter()
+            .filter(|l| l.starts_with("q:txt:"))
+            .cloned()
+            .collect();
         let relevance_map = neuro.seed_relevance(&seed_labels_for_relevance, &candidate_labels);
         let mean_act_weight = 4.0_f32;
 
@@ -5498,51 +5533,81 @@ async fn neuro_ask(
             .collect();
 
         // ── Greedy conditioned sequence decode ────────────────────────────────
-        // Directed STDP sequence edges: W(word_i → word_i+1) = lr × exp(-dt/tau)
-        // with dt=0.15s, tau=2.0 → 0.928 per step from per-word timed training.
-        // First word:  argmax seed_relevance(Q→w).
-        // Each next:   argmax { seq_act(cur→w) + 0.5 × seed_relevance(Q→w) }.
-        // This reconstructs sentence order purely from the trained Hebbian graph.
+        // Directed STDP token edges: W(tok_i → tok_i+1) = lr × exp(-dt/tau) from
+        // per-character-run timed training (Q at 50ms, A at 100ms, Q→A 400ms gap).
+        // Every space, comma, period is its own neuron — directed edges wire
+        // word → space → word, word → comma → space → word, etc.
+        // First token (word only):  argmax seed_relevance(Q→w).
+        // Each next token:          argmax { seq_act(cur→tok) + 0.5 × seed_relevance }.
+        // Output = concatenation of word text + name_to_char(punct_name) — no
+        // join-space insertion; spaces come from punct_space neurons in the graph.
         let word_rel_map: std::collections::HashMap<&str, f32> = annealed.iter()
             .map(|(w, r)| (*w, *r))
             .collect();
-        // remaining = ALL activated A-pool + corpus word labels minus question seeds.
-        // Seed-relevance only picks the FIRST word; intra-A sequence edges then pull
-        // subsequent words. Without this, only seed-relevant words (direct Q→A edges)
-        // appear in remaining, truncating the answer after the first word.
-        let mut seen_r: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut remaining: Vec<&str> = word_acts.iter()
-            .filter(|(l, _)| !seed_word_labels.contains(l.as_str()) && !l.contains("_zone_"))
-            .filter_map(|(l, _)| {
-                l.strip_prefix("a:txt:word_").or_else(|| l.strip_prefix("txt:word_"))
+        // token_acts = all activated A-pool + corpus word AND punct labels.
+        // Punct labels enter the decode stream so trained STDP edges
+        // (word → space → word, word → comma → space, word → period_END)
+        // reconstruct inter-word spacing and end punctuation from the graph.
+        let token_acts: Vec<(String, f32)> = combined.iter()
+            .filter(|(l, _)| {
+                (l.starts_with("txt:word_")
+                 || l.starts_with("a:txt:word_")
+                 || l.starts_with("txt:punct_")
+                 || l.starts_with("a:txt:punct_"))
+                && !l.contains("_zone_")
             })
-            .filter(|w| seen_r.insert(*w))
+            .map(|(l, &v)| (l.clone(), v))
             .collect();
-        let mut decoded: Vec<String> = Vec::new();
-        let max_words = max_tok.min(20) as usize;
 
-        if let Some(pos) = remaining.iter().enumerate()
+        // remaining holds FULL labels (e.g. "a:txt:word_hello", "a:txt:punct_space",
+        // "a:txt:punct_period"). Dedupe by label; strip-prefix rendering happens
+        // at output time.
+        let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut remaining: Vec<String> = token_acts.iter()
+            .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
+            .map(|(l, _)| l.clone())
+            .filter(|l| seen_labels.insert(l.clone()))
+            .collect();
+
+        // Helper: extract "word" suffix from any pool variant, or "punct_NAME"
+        // from any punct variant. Used for seed_relevance lookup and rendering.
+        fn label_word(l: &str) -> Option<&str> {
+            l.strip_prefix("a:txt:word_").or_else(|| l.strip_prefix("txt:word_"))
+        }
+        fn label_punct_name(l: &str) -> Option<&str> {
+            l.strip_prefix("a:txt:punct_").or_else(|| l.strip_prefix("txt:punct_"))
+        }
+
+        let mut decoded_labels: Vec<String> = Vec::new();
+        let max_steps = max_tok.min(40) as usize;
+
+        // First token: highest-relevance WORD label (answers don't start with punct).
+        let first_idx = remaining.iter().enumerate()
+            .filter(|(_, l)| label_word(l).is_some())
             .max_by(|(_, a), (_, b)| {
-                word_rel_map.get(*a).unwrap_or(&0.0)
-                    .partial_cmp(word_rel_map.get(*b).unwrap_or(&0.0))
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                let ra = label_word(a).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
+                let rb = label_word(b).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
+                ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|(i, _)| i)
-        {
+            .map(|(i, _)| i);
+
+        if let Some(pos) = first_idx {
             let first = remaining.remove(pos);
-            decoded.push(first.to_string());
-            while decoded.len() < max_words && !remaining.is_empty() {
-                // Probe sequence edges from the A-pool label of the current word.
-                // A-pool intra-sequence edges (a:txt:word_i → a:txt:word_{i+1})
-                // were trained with directed STDP by the two-pool architecture.
-                let cur_word = decoded.last().unwrap();
-                let cur_labels = vec![
-                    format!("a:txt:word_{}", cur_word),
-                    format!("txt:word_{}", cur_word),
-                ];
-                // Sustain Q context through every decode step — Q punct/word labels
-                // provide discriminating signal (e.g. q:txt:punct_exclaim biases
-                // toward the answer trained with "hello!" vs plain "hello").
+            decoded_labels.push(first);
+            while decoded_labels.len() < max_steps && !remaining.is_empty() {
+                // Probe sequence edges from current token (both A-pool and corpus variants).
+                // Directed STDP edges from train_sequence chain token_i → token_i+1.
+                let cur = decoded_labels.last().unwrap().clone();
+                let cur_labels: Vec<String> = if let Some(suf) = cur.strip_prefix("a:txt:") {
+                    vec![cur.clone(), format!("txt:{}", suf)]
+                } else if let Some(suf) = cur.strip_prefix("txt:") {
+                    vec![cur.clone(), format!("a:txt:{}", suf)]
+                } else {
+                    vec![cur.clone()]
+                };
+                // Sustain Q context so discriminating punct in the question
+                // (e.g. q:txt:punct_exclaim for "hello!") keeps biasing the A-pool
+                // trajectory, not just the first token.
                 let seq_acts = neuro.propagate_combined(
                     &[
                         (cur_labels.as_slice(), 1.0_f32),
@@ -5550,29 +5615,55 @@ async fn neuro_ask(
                     ],
                     1, 0.001
                 );
+                // Score every remaining label by seq_act + 0.5×relevance.
+                // For a candidate at "a:txt:word_foo", probe seq_acts at both
+                // a:txt:word_foo and txt:word_foo and take max.
+                let score = |l: &str| -> f32 {
+                    let variants: Vec<String> = if let Some(suf) = l.strip_prefix("a:txt:") {
+                        vec![l.to_string(), format!("txt:{}", suf)]
+                    } else if let Some(suf) = l.strip_prefix("txt:") {
+                        vec![l.to_string(), format!("a:txt:{}", suf)]
+                    } else {
+                        vec![l.to_string()]
+                    };
+                    let s = variants.iter()
+                        .map(|v| seq_acts.get(v).copied().unwrap_or(0.0))
+                        .fold(0.0_f32, f32::max);
+                    let r = label_word(l).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
+                    s + 0.5 * r
+                };
                 if let Some(pos) = remaining.iter().enumerate()
                     .max_by(|(_, a), (_, b)| {
-                        let la_a = format!("a:txt:word_{}", a);
-                        let la_b = format!("a:txt:word_{}", b);
-                        let sa = seq_acts.get(&la_a).copied().unwrap_or(0.0)
-                            .max(seq_acts.get(&format!("txt:word_{}", a)).copied().unwrap_or(0.0))
-                            + 0.5 * word_rel_map.get(*a).unwrap_or(&0.0);
-                        let sb = seq_acts.get(&la_b).copied().unwrap_or(0.0)
-                            .max(seq_acts.get(&format!("txt:word_{}", b)).copied().unwrap_or(0.0))
-                            + 0.5 * word_rel_map.get(*b).unwrap_or(&0.0);
-                        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                        score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(i, _)| i)
                 {
+                    // Stop if the winning score is essentially zero — no trained
+                    // continuation from the current token. Silence beats noise.
+                    if score(&remaining[pos]) <= 0.0 {
+                        break;
+                    }
                     let next = remaining.remove(pos);
-                    decoded.push(next.to_string());
+                    decoded_labels.push(next);
                 } else {
                     break;
                 }
             }
         }
 
-        let mut answer = decoded.join(" ");
+        // Render: word suffix → text; punct name → char via name_to_char.
+        // No artificial join-space — spaces are their own neurons and appear
+        // in decoded_labels as txt:punct_space.
+        let mut answer = String::new();
+        for l in &decoded_labels {
+            if let Some(w) = label_word(l) {
+                answer.push_str(w);
+            } else if let Some(name) = label_punct_name(l) {
+                if let Some(ch) = name_to_char(name) {
+                    answer.push(ch);
+                }
+            }
+        }
         if let Some(c) = answer.get_mut(0..1) { c.make_ascii_uppercase(); }
 
         // ── EEM validation gate ───────────────────────────────────────────────

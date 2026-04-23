@@ -298,9 +298,11 @@ impl HierarchicalMotifRuntime {
         }
         self.tick += 1;
 
-        let mut ids: Vec<String> = labels.to_vec();
-        ids.sort_unstable();
-        ids.dedup();
+        let mut seen = std::collections::HashSet::new();
+        let ids: Vec<String> = labels.iter()
+            .filter(|l| seen.insert((*l).clone()))
+            .cloned()
+            .collect();
         let durations: Vec<f64> = vec![duration_per_label.max(0.001); ids.len()];
 
         let mut newly_promoted: Vec<MetaMotif> = Vec::new();

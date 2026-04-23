@@ -148,6 +148,7 @@ pub use audio_bits::{AudioBitsConfig, AudioBitsEncoder, AudioBitsOutput};
 pub use text_bits::{
     TextBitsConfig, TextBitsEncoder, TextBitsOutput,
     TextEmphasis, TextRole, TextSize, TextSpan,
+    name_to_char,
 };
 pub use motion_bits::{MotionBitsConfig, MotionBitsEncoder, MotionBitsOutput, MotionSample};
 pub use keyboard_bits::{KeyboardBitsConfig, KeyboardBitsEncoder, KeyboardBitsOutput, KeyEvent};
