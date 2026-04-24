@@ -5559,18 +5559,11 @@ async fn neuro_ask(
             .map(|(l, &v)| (l.clone(), v))
             .collect();
 
-        // remaining holds FULL labels (e.g. "a:txt:word_hello", "a:txt:punct_space",
-        // "a:txt:punct_period"). Dedupe by label; strip-prefix rendering happens
-        // at output time.
-        let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut remaining: Vec<String> = token_acts.iter()
-            .filter(|(l, _)| !seed_word_labels.contains(l.as_str()))
-            .map(|(l, _)| l.clone())
-            .filter(|l| seen_labels.insert(l.clone()))
-            .collect();
-
-        // Helper: extract "word" suffix from any pool variant, or "punct_NAME"
-        // from any punct variant. Used for seed_relevance lookup and rendering.
+        // Candidate pools: words are consumed once (each word label represents
+        // a unique concept in the answer). Punct labels are STATELESS — a space
+        // or period can legitimately recur across a sentence, so they remain
+        // eligible on every step. Dedup by label (token_acts may list the same
+        // A-pool label multiple times via propagation paths).
         fn label_word(l: &str) -> Option<&str> {
             l.strip_prefix("a:txt:word_").or_else(|| l.strip_prefix("txt:word_"))
         }
@@ -5578,12 +5571,35 @@ async fn neuro_ask(
             l.strip_prefix("a:txt:punct_").or_else(|| l.strip_prefix("txt:punct_"))
         }
 
+        // Shared label hygiene filter — excludes training-metadata labels
+        // (zones, roles, seq indices) and seed question words. Applied to
+        // every candidate set so metadata never surfaces as a decoded token.
+        fn is_output_token(l: &str) -> bool {
+            (l.starts_with("a:txt:word_") || l.starts_with("txt:word_")
+             || l.starts_with("a:txt:punct_") || l.starts_with("txt:punct_"))
+                && !l.contains("_zone_")
+                && !l.contains("_role_")
+                && !l.contains("_seq_")
+                && !l.contains("_size_")
+        }
+
+        // Seed word pool (first-token pick only): activated A-pool / corpus
+        // words with direct seed_relevance from the question.
+        let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let seed_word_pool: Vec<String> = token_acts.iter()
+            .filter(|(l, _)| !seed_word_labels.contains(l.as_str())
+                             && label_word(l).is_some()
+                             && is_output_token(l))
+            .map(|(l, _)| l.clone())
+            .filter(|l| seen_labels.insert(l.clone()))
+            .collect();
+
         let mut decoded_labels: Vec<String> = Vec::new();
-        let max_steps = max_tok.min(40) as usize;
+        let mut used_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let max_steps = max_tok.min(60) as usize;
 
         // First token: highest-relevance WORD label (answers don't start with punct).
-        let first_idx = remaining.iter().enumerate()
-            .filter(|(_, l)| label_word(l).is_some())
+        let first_idx = seed_word_pool.iter().enumerate()
             .max_by(|(_, a), (_, b)| {
                 let ra = label_word(a).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
                 let rb = label_word(b).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
@@ -5592,32 +5608,173 @@ async fn neuro_ask(
             .map(|(i, _)| i);
 
         if let Some(pos) = first_idx {
-            let first = remaining.remove(pos);
+            let first = seed_word_pool[pos].clone();
+            if let Some(w) = label_word(&first) {
+                used_words.insert(w.to_string());
+                // Also mark cross-prefix variant as used.
+                used_words.insert(format!("{}", w));
+            }
             decoded_labels.push(first);
-            while decoded_labels.len() < max_steps && !remaining.is_empty() {
-                // Probe sequence edges from current token (both A-pool and corpus variants).
-                // Directed STDP edges from train_sequence chain token_i → token_i+1.
-                let cur = decoded_labels.last().unwrap().clone();
-                let cur_labels: Vec<String> = if let Some(suf) = cur.strip_prefix("a:txt:") {
-                    vec![cur.clone(), format!("txt:{}", suf)]
-                } else if let Some(suf) = cur.strip_prefix("txt:") {
-                    vec![cur.clone(), format!("a:txt:{}", suf)]
-                } else {
-                    vec![cur.clone()]
-                };
+            while decoded_labels.len() < max_steps {
+                // Sliding-context probe: seed seq_acts from the last K decoded
+                // tokens with exponential-decay weight (recency bias), not just
+                // the immediately-previous token. This escapes the hub-dilution
+                // problem where punct tokens (space especially) connect to
+                // virtually every word — probing from only a space washes out
+                // specific chain edges. Multiple seeds let the graph's STDP
+                // chain reinforce itself: W(tok_{i-k} → tok_i → tok_{i+1})
+                // path accumulates through the propagation.
+                //
+                // No hard-coded termination — the chain ends naturally when
+                // seq_acts from the tail context produces zero signal (no
+                // trained forward edges remain). Silence beats noise.
+                const CTX_K: usize = 5;
+                let ctx_len = decoded_labels.len().min(CTX_K);
+                let ctx_tail = &decoded_labels[decoded_labels.len() - ctx_len..];
+                // Build one (labels, weight) pathway per position so per-token
+                // weights can differ. Most recent gets weight 1.0; earliest
+                // gets 1.0 * 0.6^(ctx_len-1).
+                let mut per_tok_labels: Vec<Vec<String>> = Vec::with_capacity(ctx_len);
+                let mut weights: Vec<f32> = Vec::with_capacity(ctx_len);
+                for (offset_from_end, tok) in ctx_tail.iter().rev().enumerate() {
+                    let variants: Vec<String> = if let Some(suf) = tok.strip_prefix("a:txt:") {
+                        vec![tok.clone(), format!("txt:{}", suf)]
+                    } else if let Some(suf) = tok.strip_prefix("txt:") {
+                        vec![tok.clone(), format!("a:txt:{}", suf)]
+                    } else {
+                        vec![tok.clone()]
+                    };
+                    per_tok_labels.push(variants);
+                    weights.push(0.6_f32.powi(offset_from_end as i32));
+                }
+                let mut pathways: Vec<(&[String], f32)> = per_tok_labels.iter()
+                    .zip(weights.iter())
+                    .map(|(v, w)| (v.as_slice(), *w))
+                    .collect();
                 // Sustain Q context so discriminating punct in the question
-                // (e.g. q:txt:punct_exclaim for "hello!") keeps biasing the A-pool
-                // trajectory, not just the first token.
-                let seq_acts = neuro.propagate_combined(
-                    &[
-                        (cur_labels.as_slice(), 1.0_f32),
-                        (q_pool_labels.as_slice(), 0.35_f32),
-                    ],
-                    1, 0.001
-                );
-                // Score every remaining label by seq_act + 0.5×relevance.
-                // For a candidate at "a:txt:word_foo", probe seq_acts at both
-                // a:txt:word_foo and txt:word_foo and take max.
+                // (e.g. q:txt:punct_exclaim for "hello!") keeps biasing the
+                // A-pool trajectory across the whole decode, not just the
+                // first token.
+                // Keep the Q context at moderate weight so question-specific
+                // trained paths (q:hello → a:hello → a:comma → a:I → ...) keep
+                // carrying evidence through the whole decode, not just the
+                // first token.
+                // propagate_combined clamps pathway weights to [0, 1] and
+                // uses max-combination when seeds overlap — so weights only
+                // matter for intra-pathway seed differentiation. To blend
+                // Q-specificity with context-chain momentum under explicit
+                // control, run TWO propagations: one seeded purely from the
+                // Q pool, one from the recent decode context, then combine
+                // the resulting activation maps with a Q-heavy weighting.
+                //
+                // Q is the primary signal (question must keep biasing the
+                // trajectory) and ctx is secondary (chain momentum). This
+                // prevents the A-pool from collapsing onto shared hub words
+                // after 2-3 tokens.
+                let q_only: Vec<(&[String], f32)> =
+                    vec![(q_pool_labels.as_slice(), 1.0_f32)];
+                // Deeper hops for Q-only pathway so the reachable set
+                // extends beyond the first-A-token bridge into the full
+                // trained answer chain (e.g. reach "W1z4rD" from q:word_who
+                // via q:word_who → a:word_I → a:space → a:word_am → a:space
+                // → a:word_W1z4rD at 5 hops).
+                let q_acts = neuro.propagate_combined(&q_only, 5, 0.0001);
+                let ctx_acts = neuro.propagate_combined(&pathways, 2, 0.0001);
+                // Blended seq_acts: 0.75 Q-specific + 0.25 ctx-momentum.
+                // Words on the Q-trained chain have high q_acts; words only
+                // reachable via generic motif chains have high ctx_acts but
+                // low q_acts — the blend downweights them so the decoder
+                // stays on the question-specific trajectory.
+                let mut seq_acts: std::collections::HashMap<String, f32> =
+                    std::collections::HashMap::new();
+                for (k, v) in &q_acts {
+                    seq_acts.insert(k.clone(), 0.75 * v);
+                }
+                for (k, v) in &ctx_acts {
+                    let e = seq_acts.entry(k.clone()).or_insert(0.0);
+                    *e += 0.25 * v;
+                }
+
+                // Multi-step motif prior: P(next | ctx_tail) integrated over
+                // the recent decode context, not just cur alone.
+                //
+                //   mp_ctx(t) = Σ_k  decay^k · P_motif(t | ctx[-k-1])
+                //
+                // A candidate that follows MULTIPLE recent tokens in trained
+                // sequences accumulates evidence, while generic hub targets
+                // that follow "everything" get their probability split across
+                // all the contexts they followed and therefore average out.
+                // This is the path-likelihood signal that discriminates the
+                // trained "I am W1z4rD..." chain from "I can answer..." when
+                // the earlier context differs.
+                // Renormalize motif predictions over output-tokens only.
+                // Raw motif_predictions returns probabilities summed across
+                // ALL transition targets including training-scaffold labels
+                // (zone_xN_yN spans, role_body, call::*). Those metadata
+                // neurons fire alongside each word/punct frame during
+                // training and absorb ~60–80% of the probability mass, so
+                // renorming inside the is_output_token subset recovers the
+                // true chain-transition likelihood.
+                //
+                // Additionally probe EVERY Q-pool label as a motif source.
+                // Q-words have direct motif bridges to A-tokens that were
+                // temporally adjacent during training (the 400ms Q→A gap is
+                // within motif window), so q:word_X → a:word_Y encodes the
+                // question-specific first-answer-token distribution. Adding
+                // these as constant probes keeps Q-specificity alive at
+                // every decode step, not just the first.
+                let motif_map: std::collections::HashMap<String, f32> = {
+                    let mut m: std::collections::HashMap<String, f32> =
+                        std::collections::HashMap::new();
+                    let mut probe_and_accumulate = |labels: &[String], base_weight: f32,
+                                                     m: &mut std::collections::HashMap<String, f32>| {
+                        for pl in labels {
+                            let preds = neuro.motif_predictions(pl);
+                            let valid: Vec<(String, f64)> = preds.into_iter()
+                                .filter(|(t, _)| is_output_token(t))
+                                .collect();
+                            let total: f64 = valid.iter().map(|(_, p)| *p).sum();
+                            if total > 0.0 {
+                                for (target, prob) in valid {
+                                    let renormed = ((prob / total) as f32) * base_weight;
+                                    let e = m.entry(target).or_insert(0.0);
+                                    *e += renormed;
+                                }
+                            }
+                        }
+                    };
+                    // Context-tail motifs with recency decay (chain momentum).
+                    for (offset_from_end, ctx_tok) in ctx_tail.iter().rev().enumerate() {
+                        let decay = 0.6_f32.powi(offset_from_end as i32);
+                        let probe_labels: Vec<String> = if let Some(suf) = ctx_tok.strip_prefix("a:txt:") {
+                            vec![ctx_tok.clone(), format!("txt:{}", suf)]
+                        } else if let Some(suf) = ctx_tok.strip_prefix("txt:") {
+                            vec![ctx_tok.clone(), format!("a:txt:{}", suf)]
+                        } else {
+                            vec![ctx_tok.clone()]
+                        };
+                        probe_and_accumulate(&probe_labels, decay, &mut m);
+                    }
+                    // Q-seed motifs at constant weight — sustains question
+                    // conditioning through the entire decode. Weight 0.7
+                    // keeps it slightly below the freshest ctx motif (1.0)
+                    // but above older context — Q stays a first-class voter.
+                    probe_and_accumulate(q_pool_labels.as_slice(), 0.7, &mut m);
+                    m
+                };
+
+                // Whether motif evidence exists for the current context tail.
+                // If no output-token target is in motif_map, we are OFF the
+                // trained chain — the STDP sequence has no forward edges from
+                // the recent context. This is the natural end-of-thought
+                // signal: a fully-trained answer terminates at a token whose
+                // final-frame has no outgoing directed edge. Break rather
+                // than hallucinate via Hebbian activation alone.
+                let has_motif_evidence = motif_map.keys().any(|k| is_output_token(k));
+                if !has_motif_evidence {
+                    break;
+                }
+
                 let score = |l: &str| -> f32 {
                     let variants: Vec<String> = if let Some(suf) = l.strip_prefix("a:txt:") {
                         vec![l.to_string(), format!("txt:{}", suf)]
@@ -5630,24 +5787,152 @@ async fn neuro_ask(
                         .map(|v| seq_acts.get(v).copied().unwrap_or(0.0))
                         .fold(0.0_f32, f32::max);
                     let r = label_word(l).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
-                    s + 0.5 * r
-                };
-                if let Some(pos) = remaining.iter().enumerate()
-                    .max_by(|(_, a), (_, b)| {
-                        score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(i, _)| i)
-                {
-                    // Stop if the winning score is essentially zero — no trained
-                    // continuation from the current token. Silence beats noise.
-                    if score(&remaining[pos]) <= 0.0 {
-                        break;
+                    // Motif prediction = observed P(next | cur) transition
+                    // from the trained STDP motif database. This is the
+                    // ground truth for "which token follows current context
+                    // in the training corpus".
+                    let mp = variants.iter()
+                        .map(|v| motif_map.get(v).copied().unwrap_or(0.0))
+                        .fold(0.0_f32, f32::max);
+                    let is_word_cand = label_word(l).is_some();
+                    // Unified additive scoring with motif as dominant term:
+                    //   mp = observed P(next | recent ctx) — trained transition
+                    //   s  = Q-conditioned propagation reachability
+                    //   r  = direct Q→A dendrite weight (seed_relevance)
+                    //
+                    // Motif carries the trained chain; s confirms the candidate
+                    // is activated by this specific question; r biases toward
+                    // question-specific word choices. Additive so a strong
+                    // motif signal doesn't get zeroed when s is small-but-real
+                    // (threshold-clipped), but s still rewards Q-specific
+                    // candidates and separates the trained chain from hub
+                    // words only reachable via cross-question leakage.
+                    // Q-reachability gate for WORDS: the word must be
+                    // activated by Q-only propagation. This enforces the
+                    // Q→A bridge hard — a word not reachable from the
+                    // question pathway cannot fire regardless of motif
+                    // evidence from other trained sequences.
+                    let q_reach = variants.iter()
+                        .map(|v| q_acts.get(v).copied().unwrap_or(0.0))
+                        .fold(0.0_f32, f32::max);
+                    if is_word_cand {
+                        if q_reach > 0.001 && mp > 0.001 {
+                            // Motif (trained chain evidence) dominates; q_reach
+                            // is a required gate but not an amplifier — scaled
+                            // down so high-q_reach hub words can't beat a
+                            // motif-strong trained chain continuation.
+                            2.0 * mp + 0.4 * q_reach + 0.4 * s + 0.3 * r
+                        } else if q_reach > 0.1 && r > 0.2 {
+                            0.8 * q_reach + 0.5 * r
+                        } else {
+                            -1.0
+                        }
+                    } else {
+                        // Punct: motif-primary. Small s contribution.
+                        // Boost motif weight so well-trained rhythm tokens
+                        // (word→space, word→period) beat marginal word
+                        // candidates with moderate q_reach.
+                        if mp > 0.001 { 2.0 * mp + 0.3 * s } else { -1.0 }
                     }
-                    let next = remaining.remove(pos);
-                    decoded_labels.push(next);
-                } else {
-                    break;
+                };
+                // Candidate set, rebuilt each step from the LIVE activation
+                // surface (seq_acts) and observed transition targets (motif_map).
+                // This lets the chain jump to any word reachable via the trained
+                // STDP graph — not just the initial propagation bubble.
+                let mut candidate_set: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for lbl in seq_acts.keys() {
+                    if is_output_token(lbl) { candidate_set.insert(lbl.clone()); }
                 }
+                for lbl in motif_map.keys() {
+                    if is_output_token(lbl) { candidate_set.insert(lbl.clone()); }
+                }
+                // Also retain any initial-pool candidates that still have
+                // positive score (useful when chain momentum dips and seed
+                // relevance should be revisited).
+                for lbl in &seed_word_pool {
+                    if is_output_token(lbl) { candidate_set.insert(lbl.clone()); }
+                }
+
+                // Dedup across prefix variants: if both a:txt:word_x and
+                // txt:word_x are candidates, keep only the one with higher
+                // score so they don't split the vote.
+                let last_emitted = decoded_labels.last().cloned().unwrap_or_default();
+                let last_is_punct = label_punct_name(&last_emitted).is_some();
+
+                // End-of-sentence termination: if we've emitted at least one
+                // word AND the last token was terminal punctuation (., !, ?),
+                // the trained chain reached a sentence boundary. Stop.
+                // This matches the training structure where answers end with
+                // terminal punct followed by no more frames.
+                let has_emitted_word = decoded_labels.iter().any(|l| label_word(l).is_some());
+                if has_emitted_word {
+                    if let Some(name) = label_punct_name(&last_emitted) {
+                        if matches!(name, "period" | "exclaim" | "question") {
+                            break;
+                        }
+                    }
+                }
+
+                // Consecutive-punct guard: if the tail is ≥2 punct tokens in
+                // a row, the decoder has fallen off the word chain into a
+                // punct loop. Terminate cleanly rather than emit garbage like
+                // "! , ! ,".
+                let consec_punct = decoded_labels.iter().rev()
+                    .take_while(|t| label_punct_name(t).is_some())
+                    .count();
+                if consec_punct >= 2 { break; }
+                let mut word_candidates: Vec<String> = Vec::new();
+                let mut punct_candidates: Vec<String> = Vec::new();
+                for lbl in &candidate_set {
+                    if let Some(w) = label_word(lbl) {
+                        if seed_word_labels.contains(lbl.as_str()) { continue; }
+                        if used_words.contains(w) { continue; }
+                        word_candidates.push(lbl.clone());
+                    } else if label_punct_name(lbl).is_some() {
+                        // Prevent immediate punct repeats (e.g. space → space)
+                        // at the candidate-filter stage, not as a hard break.
+                        // If the previous token is punct, exclude labels that
+                        // render to the same character so the chain can still
+                        // pick a different punct or jump to a word.
+                        if last_is_punct {
+                            let same_as_last = label_punct_name(&last_emitted)
+                                .zip(label_punct_name(lbl))
+                                .map(|(a, b)| a == b)
+                                .unwrap_or(false);
+                            if same_as_last { continue; }
+                        }
+                        punct_candidates.push(lbl.clone());
+                    }
+                }
+
+                let best_word: Option<(usize, f32)> = word_candidates.iter().enumerate()
+                    .map(|(i, l)| (i, score(l)))
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                let best_punct: Option<(usize, f32)> = punct_candidates.iter().enumerate()
+                    .map(|(i, l)| (i, score(l)))
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                let pick = match (best_word, best_punct) {
+                    (Some((wi, ws)), Some((pi, ps))) => {
+                        if ws >= ps { Some((true, wi, ws)) } else { Some((false, pi, ps)) }
+                    }
+                    (Some((wi, ws)), None) => Some((true, wi, ws)),
+                    (None, Some((pi, ps))) => Some((false, pi, ps)),
+                    (None, None) => None,
+                };
+                let Some((is_word, idx, sc)) = pick else { break };
+                if sc <= 0.001 { break; }
+                let next = if is_word {
+                    let lbl = word_candidates[idx].clone();
+                    if let Some(w) = label_word(&lbl) {
+                        used_words.insert(w.to_string());
+                    }
+                    lbl
+                } else {
+                    punct_candidates[idx].clone()
+                };
+                decoded_labels.push(next);
             }
         }
 

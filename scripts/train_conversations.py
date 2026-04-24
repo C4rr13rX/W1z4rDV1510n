@@ -83,7 +83,7 @@ def _spans(text: str, y: float, idx: int, total: int) -> list:
              "seq_index": idx, "seq_total": total}]
 
 
-def _post(url: str, payload: bytes, timeout: float = 20) -> dict:
+def _post(url: str, payload: bytes, timeout: float = 90) -> dict:
     req = urllib.request.Request(url, data=payload,
                                   headers={"Content-Type": "application/json"},
                                   method="POST")
