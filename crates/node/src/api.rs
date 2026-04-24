@@ -51,7 +51,7 @@ use w1z4rdv1510n::streaming::{
     ImageBitsConfig, ImageBitsEncoder,
     AudioBitsConfig, AudioBitsEncoder,
     TextBitsConfig, TextBitsEncoder, TextSpan, TextRole, TextEmphasis,
-    name_to_char,
+    name_to_char, char_label, label_to_char,
     MotionBitsConfig, MotionBitsEncoder, MotionSample,
     KeyboardBitsConfig, KeyboardBitsEncoder, KeyEvent,
     // Simulation / entity runtimes
@@ -4915,16 +4915,126 @@ struct AskReq {
 fn default_ask_top_k() -> usize { 20 }
 fn default_ask_min_strength() -> f32 { 0.05 }
 
+/// Raw-codepoint character-chain decoder.
+///
+/// Walks the Hebbian fabric one codepoint at a time starting from the
+/// question's character atoms. Returns `None` when the chain produces no
+/// output, or `Some(string)` containing the decoded answer.
+///
+/// The decoder is modality-agnostic in principle — it operates on `txt:`
+/// atom labels only because those are the output-side neurons, but the same
+/// chain-walk shape would apply to any source stream.
+fn decode_char_chain(
+    neuro: &NeuroRuntimeHandle,
+    question: &str,
+    max_chars: usize,
+    hops: usize,
+    min_strength: f32,
+) -> Option<String> {
+    let q_atoms: Vec<String> = question.chars().map(char_label).collect();
+    if q_atoms.is_empty() {
+        return None;
+    }
+
+    // Seed weights: full question at 1.0, tail-biased overlay at 0.5 so
+    // continuation pressure is higher near the last character.
+    let tail_start = q_atoms.len().saturating_sub(3);
+    let tail_seed: Vec<String> = q_atoms[tail_start..].to_vec();
+
+    let mut out_atoms: Vec<String> = Vec::new();
+    let mut out_chars: Vec<char> = Vec::new();
+    let mut stopped_empty = true;
+
+    for _ in 0..max_chars {
+        // Rolling seed: question + tail + the last few output atoms (if any).
+        let recent_tail_start = out_atoms.len().saturating_sub(3);
+        let recent_seed: Vec<String> = out_atoms[recent_tail_start..].to_vec();
+
+        let acts = match recent_seed.is_empty() {
+            true => neuro.propagate_combined(
+                &[
+                    (q_atoms.as_slice(),   1.0_f32),
+                    (tail_seed.as_slice(), 0.5_f32),
+                ],
+                hops,
+                min_strength,
+            ),
+            false => neuro.propagate_combined(
+                &[
+                    (q_atoms.as_slice(),     0.6_f32),
+                    (tail_seed.as_slice(),   0.3_f32),
+                    (recent_seed.as_slice(), 1.0_f32),
+                ],
+                hops,
+                min_strength,
+            ),
+        };
+
+        // Pick the highest-activation txt: atom (single codepoint) that isn't
+        // an immediate echo of the last emitted char (3-char lookback).
+        let recent_set: std::collections::HashSet<&str> =
+            out_atoms.iter().rev().take(3).map(|s| s.as_str()).collect();
+
+        let mut best: Option<(String, char, f32)> = None;
+        for (label, act) in acts.iter() {
+            if *act < min_strength {
+                continue;
+            }
+            if recent_set.contains(label.as_str()) {
+                continue;
+            }
+            let Some(ch) = label_to_char(label) else {
+                // Composite / non-atom label — skip. Decoding composites
+                // requires member traversal which is not yet wired here.
+                continue;
+            };
+            if let Some((_, _, best_act)) = &best {
+                if *act <= *best_act {
+                    continue;
+                }
+            }
+            best = Some((label.clone(), ch, *act));
+        }
+
+        let Some((label, ch, _)) = best else {
+            break;
+        };
+        stopped_empty = false;
+
+        // Break three-in-a-row repeats — the fabric occasionally gets stuck
+        // on a single atom when the chain is shallow.
+        if out_chars.len() >= 2
+            && out_chars[out_chars.len() - 1] == ch
+            && out_chars[out_chars.len() - 2] == ch
+        {
+            break;
+        }
+
+        out_atoms.push(label);
+        out_chars.push(ch);
+
+        // Natural terminators: newline or end-of-sentence punctuation in a
+        // sensible position.
+        if ch == '\n' {
+            break;
+        }
+        if matches!(ch, '.' | '?' | '!') && out_chars.len() > 2 {
+            break;
+        }
+    }
+
+    if stopped_empty {
+        return None;
+    }
+    Some(out_chars.into_iter().collect::<String>().trim().to_string())
+}
+
 /// POST /neuro/ask  (also POST /chat)
 ///
-/// Multi-pathway convergence inference:
-///   1. Encode question → Pathway A seed labels (weight 1.0)
-///   2. QA recall → encode best answer text → Pathway B seed labels (weight conf × 1.5)
-///   3. Single unified propagation pass (`propagate_combined`) — inhibitory edges
-///      from one pathway can suppress noise from another
-///   4. Read converged `txt:word_*` activation state
-///   5. If peak < ANSWER_THRESHOLD → add to hypothesis queue, return null answer
-///   6. Sequential auto-regressive decode from the pre-seeded combined activation
+/// Character-chain decoder under the raw-data-bit architecture. See
+/// [`decode_char_chain`] — the whole inference is: seed from the question's
+/// codepoint atoms, propagate one hop, pick the highest-activation next
+/// codepoint, repeat.
 async fn neuro_ask(
     State(state): State<ApiState>,
     Json(req): Json<AskReq>,
@@ -4945,10 +5055,46 @@ async fn neuro_ask(
     let session_id         = req.session_id.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        // Detect greeting inputs so that if inference returns empty we can fall
-        // back to a bootstrap response instead of sending a null hypothesis.
-        // Trained greeting responses (from /api/wizard-chat/train/) always win —
-        // this check is only used as a last resort after inference runs.
+        // ── Raw-codepoint character-chain decoder ───────────────────────────
+        // Under the raw-data-bit architecture, every neuron label is
+        // `txt:<base64url(codepoint)>` — no predefined word/punct/role
+        // categories. The decoder walks the Hebbian chain one codepoint at
+        // a time: seed from the question's character atoms, propagate one
+        // hop, pick the highest-activation next codepoint atom, append,
+        // repeat.
+        let char_chain = decode_char_chain(
+            &neuro,
+            &text,
+            120,
+            hops.max(1),
+            min_str.max(0.001),
+        );
+        if let Some(answer) = char_chain {
+            return serde_json::json!({
+                "question":        text,
+                "answer":          answer,
+                "decoder":         "char_chain",
+                "hops":            hops,
+                "min_strength":    min_str,
+                "session_id":      session_id,
+            });
+        }
+        // Empty chain — the fabric had no reachable next-character edges.
+        // Return an explicit null answer rather than falling through to the
+        // legacy word-level decoder (which expects predefined labels that
+        // no longer exist under the raw-codepoint scheme).
+        return serde_json::json!({
+            "question":     text,
+            "answer":       serde_json::Value::Null,
+            "decoder":      "char_chain",
+            "reason":       "no-chain",
+            "hops":         hops,
+            "min_strength": min_str,
+            "session_id":   session_id,
+        });
+
+        // ── Legacy word-level decoder (dead under raw-codepoint scheme) ─────
+        #[allow(unreachable_code)]
         let is_greeting = {
             let tl = text.trim().to_lowercase();
             let triggers = [
@@ -5595,27 +5741,119 @@ async fn neuro_ask(
             .collect();
 
         let mut decoded_labels: Vec<String> = Vec::new();
-        let mut used_words: std::collections::HashSet<String> = std::collections::HashSet::new();
         let max_steps = max_tok.min(60) as usize;
 
-        // First token: highest-relevance WORD label (answers don't start with punct).
-        let first_idx = seed_word_pool.iter().enumerate()
-            .max_by(|(_, a), (_, b)| {
-                let ra = label_word(a).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
-                let rb = label_word(b).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
-                ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(i, _)| i);
+        // ── Beam search over Hebbian chain trajectories ──────────────────────
+        // Greedy decoding is fundamentally limited here because motif
+        // transitions are stored per-token (1-gram). After emitting "I", the
+        // a-pool motifs predict "space" deterministically, but after "space"
+        // the distribution is hub-shaped over every word that ever followed a
+        // space in training. Greedy picks the highest-scoring word step-by-step
+        // and converges to hub chains ("I you to help me...").
+        //
+        // Beam search maintains multiple partial chains and scores each by
+        // LOG-CUMULATIVE evidence. The trained chain "I am W1z4rD, a dist-
+        // ributed neural AI..." has LOW-ENTROPY transitions after the first
+        // word because rare tokens (W1z4rD, distributed, Hebbian) have very
+        // few outgoing motif targets — their log-probabilities are near 0
+        // rather than -3 for hub tokens. Cumulative log-score therefore
+        // ranks trained-chain trajectories above hub-walks.
+        #[derive(Clone)]
+        struct Beam {
+            labels: Vec<String>,
+            used: std::collections::HashSet<String>,
+            score: f32,
+            done: bool,
+        }
+        const BEAM_WIDTH: usize = 5;
+        const EXPAND_PER_BEAM: usize = 4;
 
-        if let Some(pos) = first_idx {
-            let first = seed_word_pool[pos].clone();
-            if let Some(w) = label_word(&first) {
-                used_words.insert(w.to_string());
-                // Also mark cross-prefix variant as used.
-                used_words.insert(format!("{}", w));
+        // First token: seeded from DIRECT Q→A motif transitions. Each
+        // q:txt:word_X label's motif_predictions(·) returns the set of
+        // tokens that followed within the motif window during training.
+        // Because Q→A frames are temporally adjacent (same training pair,
+        // <1s gap within the motif horizon), this is the cleanest signal
+        // for "given this question, what is the first answer word?"
+        //
+        // Aggregated over all Q-pool labels, words unique to this
+        // question's trained answer dominate, while cross-question
+        // contamination (e.g. "I" appearing in many answers) is
+        // out-voted by the specific Q tokens' transitions.
+        //
+        // Annealed seed_relevance is used only as a tiebreaker so
+        // candidates with zero Q→A motif evidence still rank coherently.
+        let mut first_scores: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        for q_label in q_pool_labels.iter() {
+            for (target, prob) in neuro.motif_predictions(q_label) {
+                if !is_output_token(&target) { continue; }
+                if label_word(&target).is_none() { continue; }
+                if seed_word_labels.contains(target.as_str()) { continue; }
+                *first_scores.entry(target).or_insert(0.0) += prob as f32;
             }
-            decoded_labels.push(first);
-            while decoded_labels.len() < max_steps {
+        }
+        let mut first_ranked: Vec<(String, f32)> = if !first_scores.is_empty() {
+            first_scores.into_iter().collect()
+        } else {
+            // Fallback: pure seed_relevance (pre-motif decoder state,
+            // e.g. if training window excluded Q→A cross-pool motifs).
+            seed_word_pool.iter()
+                .map(|l| {
+                    let r = label_word(l).and_then(|w| word_rel_map.get(w)).copied().unwrap_or(0.0);
+                    (l.clone(), r)
+                })
+                .collect()
+        };
+        first_ranked.sort_by(|a, b|
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        first_ranked.truncate(BEAM_WIDTH);
+
+        let mut beams: Vec<Beam> = Vec::new();
+        for (first_label, _r) in &first_ranked {
+            let mut used = std::collections::HashSet::<String>::new();
+            if let Some(w) = label_word(first_label) {
+                used.insert(w.to_string());
+            }
+            beams.push(Beam {
+                labels: vec![first_label.clone()],
+                used,
+                score: 0.0,
+                done: false,
+            });
+        }
+
+        let mut debug_beam_trace: Vec<serde_json::Value> = Vec::new();
+        if !beams.is_empty() {
+            let step_loop_limit = max_steps.saturating_sub(1);
+            for _step in 0..step_loop_limit {
+                if beams.iter().all(|b| b.done) { break; }
+                let mut new_beams: Vec<Beam> = Vec::with_capacity(beams.len() * EXPAND_PER_BEAM);
+                for beam in beams.iter() {
+                    if beam.done {
+                        new_beams.push(beam.clone());
+                        continue;
+                    }
+                    let decoded_labels = &beam.labels;
+                    let used_words = &beam.used;
+                    if debug_beam_trace.len() < 10 {
+                        // Sample motif_predictions on Q-pool labels directly
+                        // to verify motif DB lookups work inside this scope.
+                        let q_probe_counts: Vec<serde_json::Value> = q_pool_labels.iter()
+                            .take(4)
+                            .map(|ql| {
+                                let preds = neuro.motif_predictions(ql);
+                                serde_json::json!({"label": ql, "preds_len": preds.len(),
+                                    "sample": preds.iter().take(3).map(|(t, p)|
+                                        serde_json::json!({"t": t, "p": p})).collect::<Vec<_>>()})
+                            })
+                            .collect();
+                        debug_beam_trace.push(serde_json::json!({
+                            "phase": "enter_beam",
+                            "beam_labels": decoded_labels,
+                            "used": used_words.iter().cloned().collect::<Vec<_>>(),
+                            "q_probe": q_probe_counts,
+                        }));
+                    }
                 // Sliding-context probe: seed seq_acts from the last K decoded
                 // tokens with exponential-decay weight (recency bias), not just
                 // the immediately-previous token. This escapes the hub-dilution
@@ -5771,8 +6009,30 @@ async fn neuro_ask(
                 // final-frame has no outgoing directed edge. Break rather
                 // than hallucinate via Hebbian activation alone.
                 let has_motif_evidence = motif_map.keys().any(|k| is_output_token(k));
-                if !has_motif_evidence {
-                    break;
+                // Accept seq_acts (Hebbian edge propagation) as evidence
+                // when motif DB is empty — motifs are in-memory only and
+                // may be wiped between restarts, but STDP edge weights
+                // persist in the pool snapshot. The graph walk alone can
+                // drive coherent chain continuation when motif transitions
+                // haven't been recorded yet.
+                let has_seq_evidence = seq_acts.iter()
+                    .any(|(k, v)| is_output_token(k) && *v > 0.001);
+                if debug_beam_trace.len() < 10 {
+                    debug_beam_trace.push(serde_json::json!({
+                        "phase": "post_motif_build",
+                        "beam_labels": beam.labels,
+                        "motif_map_len": motif_map.len(),
+                        "has_motif_evidence": has_motif_evidence,
+                        "has_seq_evidence": has_seq_evidence,
+                        "seq_acts_len": seq_acts.len(),
+                        "q_pool_labels_len": q_pool_labels.len(),
+                    }));
+                }
+                if !has_motif_evidence && !has_seq_evidence {
+                    let mut nb = beam.clone();
+                    nb.done = true;
+                    new_beams.push(nb);
+                    continue;
                 }
 
                 let score = |l: &str| -> f32 {
@@ -5816,23 +6076,30 @@ async fn neuro_ask(
                         .map(|v| q_acts.get(v).copied().unwrap_or(0.0))
                         .fold(0.0_f32, f32::max);
                     if is_word_cand {
-                        if q_reach > 0.001 && mp > 0.001 {
-                            // Motif (trained chain evidence) dominates; q_reach
-                            // is a required gate but not an amplifier — scaled
-                            // down so high-q_reach hub words can't beat a
-                            // motif-strong trained chain continuation.
-                            2.0 * mp + 0.4 * q_reach + 0.4 * s + 0.3 * r
+                        if q_reach > 0.001 && (mp > 0.001 || s > 0.001) {
+                            // Hebbian edge strength (s) is the STDP-trained
+                            // chain weight; motif (mp) is a redundant
+                            // frequency-count of observed transitions. They
+                            // are correlated but s is cleaner because it is
+                            // reinforcement-weighted. Balance them equally
+                            // and use q_reach as a small amplifier (not a
+                            // dominant axis — cross-question contamination
+                            // makes hub words q-reachable from any query).
+                            1.2 * s + 1.0 * mp + 0.3 * q_reach + 0.4 * r
                         } else if q_reach > 0.1 && r > 0.2 {
                             0.8 * q_reach + 0.5 * r
                         } else {
                             -1.0
                         }
                     } else {
-                        // Punct: motif-primary. Small s contribution.
-                        // Boost motif weight so well-trained rhythm tokens
-                        // (word→space, word→period) beat marginal word
-                        // candidates with moderate q_reach.
-                        if mp > 0.001 { 2.0 * mp + 0.3 * s } else { -1.0 }
+                        // Punct: Hebbian edge strength dominant so that
+                        // word→space rhythm (heavily reinforced during
+                        // character-run training) beats noisy word→word
+                        // motif hallucinations. Punct is stateless (can
+                        // recur) so no q-reach gate — rhythm tokens must
+                        // always be available.
+                        if mp > 0.001 || s > 0.001 { 1.5 * s + 1.0 * mp }
+                        else { -1.0 }
                     }
                 };
                 // Candidate set, rebuilt each step from the LIVE activation
@@ -5869,7 +6136,10 @@ async fn neuro_ask(
                 if has_emitted_word {
                     if let Some(name) = label_punct_name(&last_emitted) {
                         if matches!(name, "period" | "exclaim" | "question") {
-                            break;
+                            let mut nb = beam.clone();
+                            nb.done = true;
+                            new_beams.push(nb);
+                            continue;
                         }
                     }
                 }
@@ -5881,7 +6151,12 @@ async fn neuro_ask(
                 let consec_punct = decoded_labels.iter().rev()
                     .take_while(|t| label_punct_name(t).is_some())
                     .count();
-                if consec_punct >= 2 { break; }
+                if consec_punct >= 2 {
+                    let mut nb = beam.clone();
+                    nb.done = true;
+                    new_beams.push(nb);
+                    continue;
+                }
                 let mut word_candidates: Vec<String> = Vec::new();
                 let mut punct_candidates: Vec<String> = Vec::new();
                 for lbl in &candidate_set {
@@ -5906,35 +6181,130 @@ async fn neuro_ask(
                     }
                 }
 
-                let best_word: Option<(usize, f32)> = word_candidates.iter().enumerate()
-                    .map(|(i, l)| (i, score(l)))
-                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-                let best_punct: Option<(usize, f32)> = punct_candidates.iter().enumerate()
-                    .map(|(i, l)| (i, score(l)))
-                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                // ── Beam expansion ───────────────────────────────────────
+                // Rank all candidates (words + punct) by step score, then
+                // fork the top EXPAND_PER_BEAM into separate new beams. Each
+                // child beam accumulates LOG-additive score, which rewards
+                // low-entropy trained transitions (rare tokens with near-1
+                // motif probability → log ≈ 0) over hub walks (common tokens
+                // with spread-out motif probability → log ≈ -3).
+                let mut scored: Vec<(String, f32, bool)> =
+                    Vec::with_capacity(word_candidates.len() + punct_candidates.len());
+                for l in &word_candidates {
+                    let sc = score(l);
+                    if sc > 0.001 { scored.push((l.clone(), sc, true)); }
+                }
+                for l in &punct_candidates {
+                    let sc = score(l);
+                    if sc > 0.001 { scored.push((l.clone(), sc, false)); }
+                }
+                scored.sort_by(|a, b|
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-                let pick = match (best_word, best_punct) {
-                    (Some((wi, ws)), Some((pi, ps))) => {
-                        if ws >= ps { Some((true, wi, ws)) } else { Some((false, pi, ps)) }
+                if debug_beam_trace.len() < 10 {
+                    let motif_preview: Vec<serde_json::Value> = motif_map.iter()
+                        .take(6)
+                        .map(|(k, v)| serde_json::json!({"k": k, "v": v}))
+                        .collect();
+                    let seq_preview: Vec<serde_json::Value> = {
+                        let mut v: Vec<(String, f32)> = seq_acts.iter()
+                            .map(|(k, v)| (k.clone(), *v))
+                            .collect();
+                        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        v.into_iter().take(8)
+                            .map(|(k, v)| serde_json::json!({"k": k, "v": v}))
+                            .collect()
+                    };
+                    debug_beam_trace.push(serde_json::json!({
+                        "beam_labels": beam.labels,
+                        "scored_len": scored.len(),
+                        "top_scored": scored.iter().take(6)
+                            .map(|(l, s, w)| serde_json::json!({"l": l, "s": s, "is_word": w}))
+                            .collect::<Vec<_>>(),
+                        "word_cand_len": word_candidates.len(),
+                        "punct_cand_len": punct_candidates.len(),
+                        "motif_preview": motif_preview,
+                        "seq_preview": seq_preview,
+                    }));
+                }
+
+                if scored.is_empty() {
+                    let mut nb = beam.clone();
+                    nb.done = true;
+                    new_beams.push(nb);
+                    continue;
+                }
+
+                for (lbl, sc, is_word) in scored.into_iter().take(EXPAND_PER_BEAM) {
+                    let mut nb = beam.clone();
+                    nb.labels.push(lbl.clone());
+                    if is_word {
+                        if let Some(w) = label_word(&lbl) {
+                            nb.used.insert(w.to_string());
+                        }
                     }
-                    (Some((wi, ws)), None) => Some((true, wi, ws)),
-                    (None, Some((pi, ps))) => Some((false, pi, ps)),
-                    (None, None) => None,
-                };
-                let Some((is_word, idx, sc)) = pick else { break };
-                if sc <= 0.001 { break; }
-                let next = if is_word {
-                    let lbl = word_candidates[idx].clone();
-                    if let Some(w) = label_word(&lbl) {
-                        used_words.insert(w.to_string());
+                    nb.score += (sc + 1e-6).ln();
+                    if let Some(name) = label_punct_name(&lbl) {
+                        if matches!(name, "period" | "exclaim" | "question")
+                            && nb.labels.iter().any(|l| label_word(l).is_some()) {
+                            nb.done = true;
+                        }
                     }
-                    lbl
-                } else {
-                    punct_candidates[idx].clone()
-                };
-                decoded_labels.push(next);
+                    new_beams.push(nb);
+                }
+                }
+                // Prune to top-BEAM_WIDTH by length-normalized cumulative
+                // log-score — prevents short beams that stop emitting early
+                // from dominating, while still favouring dense-evidence
+                // trajectories on a per-token basis.
+                new_beams.sort_by(|a, b| {
+                    let la = a.score / (a.labels.len() as f32).max(1.0);
+                    let lb = b.score / (b.labels.len() as f32).max(1.0);
+                    lb.partial_cmp(&la).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                new_beams.truncate(BEAM_WIDTH);
+                beams = new_beams;
             }
+            // Select winning beam — highest length-normalized cumulative
+            // log-score. A short fully-trained sentence beats a long
+            // mediocre walk because the per-token evidence is stronger.
+            beams.sort_by(|a, b| {
+                let la = a.score / (a.labels.len() as f32).max(1.0);
+                let lb = b.score / (b.labels.len() as f32).max(1.0);
+                lb.partial_cmp(&la).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            decoded_labels = beams.into_iter().next()
+                .map(|b| b.labels)
+                .unwrap_or_default();
         }
+
+        // ── Diagnostic: motif transitions from first decoded token ────────
+        // Lets us verify whether motif_predictions returns useful
+        // continuations from the a-pool first answer word. If empty, the
+        // motif DB isn't storing a-pool → a-pool chains (explains why beam
+        // dies after one token).
+        let debug_first_token_motifs: Vec<serde_json::Value> =
+            if let Some(first) = decoded_labels.first() {
+                let preds = neuro.motif_predictions(first);
+                preds.into_iter().take(10)
+                    .map(|(t, p)| serde_json::json!({"target": t, "prob": p}))
+                    .collect()
+            } else { Vec::new() };
+        let debug_first_token_seq_acts: Vec<serde_json::Value> =
+            if let Some(first) = decoded_labels.first() {
+                let variants: Vec<String> = if let Some(suf) = first.strip_prefix("a:txt:") {
+                    vec![first.clone(), format!("txt:{}", suf)]
+                } else if let Some(suf) = first.strip_prefix("txt:") {
+                    vec![first.clone(), format!("a:txt:{}", suf)]
+                } else { vec![first.clone()] };
+                let pathways: Vec<(&[String], f32)> = vec![(variants.as_slice(), 1.0)];
+                let acts = neuro.propagate_combined(&pathways, 2, 0.0001);
+                let mut sorted: Vec<(String, f32)> = acts.into_iter().collect();
+                sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.into_iter().take(10)
+                    .map(|(t, v)| serde_json::json!({"target": t, "act": v}))
+                    .collect()
+            } else { Vec::new() };
 
         // Render: word suffix → text; punct name → char via name_to_char.
         // No artificial join-space — spaces are their own neurons and appear
@@ -6092,6 +6462,10 @@ async fn neuro_ask(
             "eem_validates":      eem_validates,
             "motif_coverage":     motif_coverage,
             "attractor_motifs":   attractor_motifs.len(),
+            "debug_decoded_labels": decoded_labels,
+            "debug_first_token_motifs": debug_first_token_motifs,
+            "debug_first_token_seq_acts": debug_first_token_seq_acts,
+            "debug_beam_trace": debug_beam_trace,
         });
         if !eem_candidates.is_empty() {
             resp["eem_equations"] = serde_json::json!(eem_candidates);
