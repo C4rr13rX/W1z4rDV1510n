@@ -970,6 +970,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/mesh/from_image",      post(mesh_from_image))
         .route("/mesh/template",        get(mesh_template))
         .route("/chat",                 post(neuro_ask))
+        // ── Two-pool bidirectional associative memory ─────────────────────────
+        // POST /two_pool/train_pair — { "input": "hello", "output": "Hi there" }
+        // POST /two_pool/ask        — { "text": "hello", "direction": "in_to_out" }
+        // GET  /two_pool/stats      — sizes & cross-pool weight count
+        .route("/two_pool/train_pair", post(two_pool_train_pair))
+        .route("/two_pool/ask",        post(two_pool_ask))
+        .route("/two_pool/stats",      get(two_pool_stats))
         // ── Hypothesis queue ──────────────────────────────────────────────────
         // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
         .route("/hypothesis/queue",     get(hypothesis_queue_list))
@@ -4975,50 +4982,75 @@ fn decode_char_chain(
         let recent_set: std::collections::HashSet<&str> =
             out_atoms.iter().rev().take(3).map(|s| s.as_str()).collect();
 
-        let mut best: Option<(String, char, f32)> = None;
+        // Pick highest-activation `txt:`-source label.  If the label is a
+        // concept (composite) neuron, walk its members back to atoms before
+        // emitting.  Atoms are emitted directly.  Concepts emit the whole
+        // member sequence in one decoder step — that's the consumption
+        // behavior: a concept fires as one unit.
+        let mut best: Option<(String, f32)> = None;
         for (label, act) in acts.iter() {
             if *act < min_strength {
+                continue;
+            }
+            if !label.starts_with("txt:") {
                 continue;
             }
             if recent_set.contains(label.as_str()) {
                 continue;
             }
-            let Some(ch) = label_to_char(label) else {
-                // Composite / non-atom label — skip. Decoding composites
-                // requires member traversal which is not yet wired here.
-                continue;
-            };
-            if let Some((_, _, best_act)) = &best {
+            if let Some((_, best_act)) = &best {
                 if *act <= *best_act {
                     continue;
                 }
             }
-            best = Some((label.clone(), ch, *act));
+            best = Some((label.clone(), *act));
         }
 
-        let Some((label, ch, _)) = best else {
+        let Some((label, _)) = best else {
             break;
         };
+
+        // Expand to atom labels — atoms return themselves.
+        let atom_labels = neuro.composite_constituents(&label);
+        let chars: Vec<char> = atom_labels
+            .iter()
+            .filter_map(|al| label_to_char(al))
+            .collect();
+        if chars.is_empty() {
+            break;
+        }
+
         stopped_empty = false;
 
-        // Break three-in-a-row repeats — the fabric occasionally gets stuck
-        // on a single atom when the chain is shallow.
-        if out_chars.len() >= 2
-            && out_chars[out_chars.len() - 1] == ch
-            && out_chars[out_chars.len() - 2] == ch
+        // Break three-in-a-row repeats of the same single char (only for
+        // single-char emissions; multi-char concepts are units).
+        if chars.len() == 1
+            && out_chars.len() >= 2
+            && out_chars[out_chars.len() - 1] == chars[0]
+            && out_chars[out_chars.len() - 2] == chars[0]
         {
             break;
         }
 
-        out_atoms.push(label);
-        out_chars.push(ch);
-
-        // Natural terminators: newline or end-of-sentence punctuation in a
-        // sensible position.
-        if ch == '\n' {
-            break;
+        // Append the whole concept's atom labels and chars.
+        let mut hit_terminator = false;
+        for (al, ch) in atom_labels.iter().zip(chars.iter()) {
+            out_atoms.push(al.clone());
+            out_chars.push(*ch);
+            if *ch == '\n' {
+                hit_terminator = true;
+                break;
+            }
+            if matches!(*ch, '.' | '?' | '!') && out_chars.len() > 2 {
+                hit_terminator = true;
+                break;
+            }
+            if out_chars.len() >= max_chars {
+                hit_terminator = true;
+                break;
+            }
         }
-        if matches!(ch, '.' | '?' | '!') && out_chars.len() > 2 {
+        if hit_terminator {
             break;
         }
     }
@@ -5027,6 +5059,99 @@ fn decode_char_chain(
         return None;
     }
     Some(out_chars.into_iter().collect::<String>().trim().to_string())
+}
+
+// ── Two-pool bidirectional associative memory handlers ───────────────────────
+
+#[derive(Debug, Deserialize)]
+struct TwoPoolTrainReq {
+    input:   String,
+    output:  String,
+    #[serde(default = "default_two_pool_passes")]
+    passes:  usize,
+    #[serde(default = "default_two_pool_lr")]
+    lr:      f32,
+}
+fn default_two_pool_passes() -> usize { 30 }
+fn default_two_pool_lr() -> f32 { 0.3 }
+
+#[derive(Debug, Deserialize)]
+struct TwoPoolAskReq {
+    text:      String,
+    /// "in_to_out" (default) sends `text` to pool_in and reads pool_out;
+    /// "out_to_in" sends `text` to pool_out and reads pool_in.
+    #[serde(default = "default_two_pool_direction")]
+    direction: String,
+    #[serde(default = "default_two_pool_hops")]
+    hops:        usize,
+    #[serde(default = "default_two_pool_min_strength")]
+    min_strength: f32,
+}
+fn default_two_pool_direction() -> String { "in_to_out".to_string() }
+fn default_two_pool_hops() -> usize { 3 }
+fn default_two_pool_min_strength() -> f32 { 0.05 }
+
+/// POST /two_pool/train_pair
+async fn two_pool_train_pair(
+    State(state): State<ApiState>,
+    Json(req): Json<TwoPoolTrainReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.input.trim().is_empty() || req.output.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "input and output must not be empty" })));
+    }
+    let neuro = state.neuro.clone();
+    let in_atoms: Vec<String> = req.input.chars().map(char_label).collect();
+    let out_atoms: Vec<String> = req.output.chars().map(char_label).collect();
+    let passes = req.passes.max(1);
+    let lr = req.lr;
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..passes {
+            neuro.two_pool_train_pair(&in_atoms, &out_atoms, lr);
+        }
+    }).await.ok();
+    let stats = state.neuro.two_pool_stats();
+    (StatusCode::OK, Json(serde_json::json!({
+        "status":  "ok",
+        "passes":  passes,
+        "stats":   stats,
+    })))
+}
+
+/// POST /two_pool/ask
+async fn two_pool_ask(
+    State(state): State<ApiState>,
+    Json(req): Json<TwoPoolAskReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "text must not be empty" })));
+    }
+    let dir = match req.direction.as_str() {
+        "in_to_out" => w1z4rdv1510n::neuro::AssocDirection::InToOut,
+        "out_to_in" => w1z4rdv1510n::neuro::AssocDirection::OutToIn,
+        other => return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("unknown direction: {}", other) }))),
+    };
+    let atoms: Vec<String> = req.text.chars().map(char_label).collect();
+    let neuro = state.neuro.clone();
+    let hops = req.hops;
+    let min_s = req.min_strength;
+    let answer = tokio::task::spawn_blocking(move || {
+        neuro.two_pool_query(&atoms, dir, hops, min_s)
+    }).await.ok().flatten();
+    (StatusCode::OK, Json(serde_json::json!({
+        "input":     req.text,
+        "direction": req.direction,
+        "answer":    answer,
+    })))
+}
+
+/// GET /two_pool/stats
+async fn two_pool_stats(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(state.neuro.two_pool_stats()))
 }
 
 /// POST /neuro/ask  (also POST /chat)

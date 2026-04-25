@@ -287,6 +287,10 @@ pub struct ColdNeuron {
     pub dopamine_tag:     f32,
     pub symbol_id:        Option<String>,
     pub influence_history: Vec<InfluenceRecord>,
+    /// Member labels for composite/concept neurons (ordered).
+    /// Empty for leaf atoms.  Cluster-portable as label strings.
+    #[serde(default)]
+    pub members:          Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +333,12 @@ pub struct Neuron {
     /// recently-active paths for retrograde three-factor Hebbian potentiation.
     #[serde(default)]
     pub dopamine_tag: f32,
+    /// Ordered list of constituent neuron IDs for composite/concept neurons.
+    /// Empty for leaf atoms. When a concept fires, the decoder walks this
+    /// list (recursively) to recover the underlying atom sequence.
+    /// Order matches the firing order observed at promotion time.
+    #[serde(default)]
+    pub members: Vec<u32>,
 }
 
 impl Neuron {
@@ -351,6 +361,7 @@ impl Neuron {
             mean_activation: 0.0,
             prediction: 0.0,
             dopamine_tag: 0.0,
+            members: Vec::new(),
         }
     }
 
@@ -604,6 +615,24 @@ pub struct NeuronPool {
     /// Maximum cooccur entries before pruning low-rate entries.  `usize::MAX` = unlimited.
     cooccur_cap: usize,
 
+    // ── Sequential consumption (concept-formation substrate) ──────────────────
+    /// Streaming buffer of recently-fired atom/concept IDs.  When concepts
+    /// fire, they replace their member-tail in this buffer (single slot per
+    /// concept), so K bounds *visual depth*, not sequence length.
+    #[serde(skip)]
+    recent_atoms: std::collections::VecDeque<u32>,
+    /// Cap on the streaming buffer length.  Set to 12 atoms by default.
+    #[serde(skip, default = "default_recent_cap")]
+    recent_cap: usize,
+    /// Ordered-sequence frequency map.  Key = run of atom IDs as observed,
+    /// Value = EMA-decayed count.  Replaces pair-only cooccur tracking.
+    #[serde(skip)]
+    sequences: HashMap<Vec<u32>, f32>,
+    /// Successor histogram per sequence: how often each next atom followed it.
+    /// Drives the branching-entropy promotion criterion.
+    #[serde(skip)]
+    successors: HashMap<Vec<u32>, HashMap<u32, f32>>,
+
     // ── Hot/cold paging ────────────────────────────────────────────────────────
     /// Base directory for cold neuron files.  None = eviction disabled (in-memory only).
     #[serde(skip)]
@@ -624,6 +653,9 @@ pub struct NeuronPool {
 }
 
 const COOCCUR_EMA_ALPHA: f32 = 0.97;
+/// Default streaming-buffer length (atoms / concepts).
+const DEFAULT_RECENT_CAP: usize = 12;
+fn default_recent_cap() -> usize { DEFAULT_RECENT_CAP }
 /// Default: evict neurons idle for 2000 steps (~3 minutes at normal training cadence).
 const DEFAULT_EVICTION_IDLE_STEPS: u64 = 2000;
 /// Default hot-tier cap: 80K neurons in RAM regardless of idle threshold.
@@ -639,6 +671,10 @@ impl NeuronPool {
             config,
             step: 0,
             cooccur_cap: usize::MAX,
+            recent_atoms: std::collections::VecDeque::with_capacity(DEFAULT_RECENT_CAP),
+            recent_cap: DEFAULT_RECENT_CAP,
+            sequences: HashMap::new(),
+            successors: HashMap::new(),
             cold_dir: None,
             eviction_idle_steps: DEFAULT_EVICTION_IDLE_STEPS,
             hot_tier_max: DEFAULT_HOT_TIER_MAX,
@@ -771,6 +807,11 @@ impl NeuronPool {
                 n.dopamine_tag     = cold.dopamine_tag;
                 n.symbol_id        = cold.symbol_id;
                 n.influence_history = cold.influence_history;
+                // Resolve member labels back to local IDs.
+                n.members = cold.members
+                    .iter()
+                    .map(|lbl| self.get_or_create_no_ensure(lbl))
+                    .collect();
                 n
             } else if let Ok(mut old) = serde_json::from_str::<Neuron>(json) {
                 // Legacy format — synapse targets are already local IDs for this node.
@@ -846,6 +887,9 @@ impl NeuronPool {
             dopamine_tag:     neuron.dopamine_tag,
             symbol_id:        neuron.symbol_id.clone(),
             influence_history: neuron.influence_history.clone(),
+            members:          neuron.members.iter()
+                .filter_map(|mid| self.label_for(*mid))
+                .collect(),
         };
 
         if let Some(path) = self.cold_path_for_label(&label) {
@@ -1360,23 +1404,28 @@ impl NeuronPool {
                 }
             }
         }
-        // co-occurrence tracking
+        // Streaming sequence consumption (sequence-aware concept formation).
+        // This is the primary substrate.  Atoms (and any already-promoted
+        // concepts on this side of the buffer) drive sequence counts +
+        // successor histograms; concepts emerge by branching entropy and
+        // re-enter the buffer in place of their members.
+        self.consume_atoms(&ids);
+
+        // Legacy pair-cooccur — kept for cluster delta sync portability.
+        // No longer drives composite spawning; that's now sequence-based.
         let mut uniq: Vec<String> = symbols.iter().cloned().collect();
         uniq.sort();
         uniq.dedup();
         for i in 0..uniq.len() {
             for j in (i + 1)..uniq.len() {
                 let key = (uniq[i].clone(), uniq[j].clone());
-                // EMA-based co-occurrence rate: converges to ~33 if seen every frame.
                 let entry = self.cooccur.entry(key).or_insert(0.0);
                 *entry = *entry * COOCCUR_EMA_ALPHA + 1.0;
             }
         }
-        // On constrained hardware, prune low-rate cooccur entries to bound memory.
         if self.cooccur.len() > self.cooccur_cap {
             self.cooccur.retain(|_, v| *v > 1.5);
         }
-        self.maybe_spawn_composites();
         // Hebbian strengthening between active pairs — scale delta by within-batch pair count.
         // If the same two IDs appear together multiple times in this call, the delta is proportionally larger.
         let mut pair_counts: HashMap<(u32, u32), u32> = HashMap::new();
@@ -1767,6 +1816,245 @@ impl NeuronPool {
                 }
             })
             .collect()
+    }
+
+    // ── Composite labels (modality-agnostic) ──────────────────────────────────
+    //
+    // A concept neuron's label is `{src}:{concat-of-payloads}` where each
+    // member contributes the payload portion of its own label.  Atoms have
+    // labels of the form `txt:<b64>` / `img:<b64>` / `aud:<b64>` etc.  When
+    // a composite is formed from atoms (or other composites with the same
+    // source prefix), the label is built by concatenating the payloads in
+    // member order.  This means:
+    //
+    //   atoms [txt:aA, txt:aB, txt:aC]   →   label "txt:aAaBaC"
+    //
+    // Two composites with the same atoms in the same order produce the same
+    // label, so the pool de-duplicates naturally.  Composites built from
+    // labels with different source prefixes (cross-modal) return None — we
+    // do not yet build cross-modal composites at this layer; that's a
+    // separate cross-pool wiring concern.
+
+    /// Build the canonical concept label for an ordered list of member IDs.
+    /// Returns None when:
+    ///   * any member is missing a label,
+    ///   * members do not share a single source prefix.
+    pub fn composite_label_for_members(&self, members: &[u32]) -> Option<String> {
+        if members.is_empty() {
+            return None;
+        }
+        let mut source: Option<String> = None;
+        let mut payload = String::new();
+        for &id in members {
+            let label = self.get_hot(id as usize)
+                .and_then(|n| n.label.as_ref())
+                .cloned()?;
+            let (src, pay) = label.split_once(':')?;
+            match &source {
+                None => source = Some(src.to_string()),
+                Some(s) if s == src => {},
+                _ => return None,
+            }
+            payload.push_str(pay);
+        }
+        Some(format!("{}:{}", source.unwrap(), payload))
+    }
+
+    /// Walk a concept neuron's member tree to produce the leaf-atom label sequence.
+    /// Atoms (no members) return [self_label].  Concepts recurse depth-first.
+    pub fn composite_constituents(&self, label: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let id = match self.label_to_id.get(label) {
+            Some(&id) => id,
+            None => return vec![label.to_string()],
+        };
+        let neuron = match self.get_hot(id as usize) {
+            Some(n) => n,
+            None => return vec![label.to_string()],
+        };
+        if neuron.members.is_empty() {
+            return vec![label.to_string()];
+        }
+        // Snapshot member labels then recurse — avoids holding a borrow.
+        let member_labels: Vec<String> = neuron.members.iter()
+            .filter_map(|mid| self.get_hot(*mid as usize)
+                .and_then(|n| n.label.clone()))
+            .collect();
+        for ml in member_labels {
+            out.extend(self.composite_constituents(&ml));
+        }
+        out
+    }
+
+    // ── Streaming sequence consumption (replaces pair-only cooccur) ───────────
+    //
+    // On every training call, atoms (or already-promoted concepts) are
+    // pushed into a sliding buffer.  Each new atom updates counts for the
+    // ordered run of length 2..=K ending at the new atom, and the
+    // successor histogram for each prefix.  This is the substrate for
+    // branching-entropy concept promotion.
+
+    /// Push a sequence of fired IDs into the streaming buffer and update
+    /// sequence counts + successor histograms.  Caller must already have
+    /// activated the neurons.
+    pub fn consume_atoms(&mut self, ids: &[u32]) {
+        if ids.is_empty() { return; }
+        for &x in ids {
+            // Update successor histograms for every suffix already in the
+            // buffer that this new atom continues.
+            let buf_len = self.recent_atoms.len();
+            for l in 1..=buf_len {
+                let prefix: Vec<u32> = self.recent_atoms
+                    .iter()
+                    .skip(buf_len - l)
+                    .copied()
+                    .collect();
+                let entry = self.successors
+                    .entry(prefix)
+                    .or_default();
+                let cnt = entry.entry(x).or_insert(0.0);
+                *cnt = *cnt * COOCCUR_EMA_ALPHA + 1.0;
+            }
+            // Push the new atom.
+            self.recent_atoms.push_back(x);
+            while self.recent_atoms.len() > self.recent_cap {
+                self.recent_atoms.pop_front();
+            }
+            // Bump sequence counts for every suffix ending at the new atom,
+            // length 2..=buffer_len.
+            let len = self.recent_atoms.len();
+            for l in 2..=len {
+                let seq: Vec<u32> = self.recent_atoms
+                    .iter()
+                    .skip(len - l)
+                    .copied()
+                    .collect();
+                let entry = self.sequences.entry(seq).or_insert(0.0);
+                *entry = *entry * COOCCUR_EMA_ALPHA + 1.0;
+            }
+        }
+        self.maybe_promote_concepts();
+        self.maybe_concept_reentry();
+    }
+
+    /// Branching-entropy concept promotion.
+    ///
+    /// A sequence `s` is promoted to a concept neuron when:
+    ///   1. `count(s) ≥ θ_N`  — frequent enough,
+    ///   2. `H(next|s) ≥ θ_branch`  — what follows is unpredictable,
+    ///   3. for every prefix `s[:i]`, `H(next|s[:i]) ≤ θ_internal`
+    ///      — within `s`, each atom predicts the next.
+    ///
+    /// This is the streaming-NLP word-segmentation criterion (Tanaka-Ishii,
+    /// Chinese segmentation by branching entropy) generalized to any
+    /// modality.  Spaces, punctuation, and silence emerge as concept
+    /// boundaries automatically because they have many possible neighbors.
+    fn maybe_promote_concepts(&mut self) {
+        const THETA_N:        f32 = 8.0;     // min count
+        const THETA_BRANCH:   f32 = 0.7;     // nats — boundary entropy
+        const THETA_INTERNAL: f32 = 0.5;     // nats — internal predictability
+
+        let candidates: Vec<Vec<u32>> = self.sequences
+            .iter()
+            .filter(|&(_, &c)| c >= THETA_N)
+            .map(|(s, _)| s.clone())
+            .collect();
+
+        for seq in candidates {
+            // Skip if a concept for this sequence already exists.
+            let label = match self.composite_label_for_members(&seq) {
+                Some(l) => l,
+                None => continue,
+            };
+            if self.label_to_id.contains_key(&label) {
+                continue;
+            }
+            // External branching entropy (boundary check).
+            let h_next = self.branching_entropy(&seq);
+            if h_next < THETA_BRANCH {
+                continue;
+            }
+            // Internal predictability — every prefix must be "tight".
+            let mut internal_ok = true;
+            for i in 1..seq.len() {
+                let prefix = &seq[..i];
+                let h_prefix = self.branching_entropy(prefix);
+                if h_prefix > THETA_INTERNAL {
+                    internal_ok = false;
+                    break;
+                }
+            }
+            if !internal_ok {
+                continue;
+            }
+            // Promote.
+            let id = self.get_or_create(&label);
+            if let Some(n) = self.get_hot_mut(id as usize) {
+                n.members = seq.clone();
+            }
+            // Wire member → concept dendrites so partial member firing can
+            // partially activate the concept.  Symmetric within-pool.
+            let scale = self.config.excitatory_scale;
+            for &mid in &seq {
+                self.hebbian_pair(mid, id, scale, false);
+            }
+        }
+    }
+
+    /// Shannon entropy of the next-atom distribution following `seq`.
+    /// Returns 0.0 when `seq` has no recorded successors.
+    fn branching_entropy(&self, seq: &[u32]) -> f32 {
+        let hist = match self.successors.get(seq) {
+            Some(h) if !h.is_empty() => h,
+            _ => return 0.0,
+        };
+        let total: f32 = hist.values().sum();
+        if total <= 0.0 { return 0.0; }
+        let mut h = 0.0f32;
+        for &c in hist.values() {
+            if c <= 0.0 { continue; }
+            let p = c / total;
+            h -= p * p.ln();
+        }
+        h
+    }
+
+    /// If the tail of the streaming buffer matches the member-sequence of
+    /// some concept neuron, replace the matched tail with [concept.id].
+    /// This is the "consumption" step that gives unlimited concept depth
+    /// without growing the buffer cap.
+    fn maybe_concept_reentry(&mut self) {
+        // Walk longest tails first so the deepest concept wins.
+        let buf_len = self.recent_atoms.len();
+        if buf_len < 2 { return; }
+        for l in (2..=buf_len).rev() {
+            let tail: Vec<u32> = self.recent_atoms
+                .iter()
+                .skip(buf_len - l)
+                .copied()
+                .collect();
+            let label = match self.composite_label_for_members(&tail) {
+                Some(l) => l,
+                None => continue,
+            };
+            let cid = match self.label_to_id.get(&label) {
+                Some(&id) => id,
+                None => continue,
+            };
+            // Verify this concept's members match (de-dup via different
+            // sequences mapping to same payload, which shouldn't happen with
+            // our label format but check anyway).
+            let members_match = self.get_hot(cid as usize)
+                .map(|n| n.members == tail)
+                .unwrap_or(false);
+            if !members_match { continue; }
+            // Pop the tail, push the concept ID.
+            for _ in 0..l {
+                self.recent_atoms.pop_back();
+            }
+            self.recent_atoms.push_back(cid);
+            return;
+        }
     }
 
     /// Hebbian pairing with STDP asymmetry.
@@ -2625,9 +2913,91 @@ impl PositionAccumulator {
     }
 }
 
+/// Bidirectional associative cross-pool synapses.
+///
+/// Stores label-keyed weights between two pools.  Symmetric: `pair(a, b, η)`
+/// strengthens both `a→b` and `b→a` by the same amount (a single entry in the
+/// weight map is interpreted bidirectionally).  Used to wire input-pool
+/// concepts to output-pool concepts during training.
+///
+/// At inference, `forward(in_label) → Vec<(out_label, weight)>` lists all
+/// out-pool labels reachable from `in_label`; `reverse(out_label)` lists
+/// in-pool labels reachable from `out_label`.  Either direction reads the
+/// same underlying weight.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CrossPoolSynapses {
+    /// (in_label, out_label) → weight.  Bidirectional read.
+    weights: HashMap<(String, String), f32>,
+    #[serde(skip)]
+    cap: usize,
+}
+
+const DEFAULT_CROSS_POOL_CAP: usize = 200_000;
+const CROSS_POOL_MAX_WEIGHT: f32 = 4.0;
+
+impl CrossPoolSynapses {
+    pub fn new() -> Self {
+        Self { weights: HashMap::new(), cap: DEFAULT_CROSS_POOL_CAP }
+    }
+
+    /// Strengthen the bidirectional association `in_label ↔ out_label` by `lr`.
+    /// Saturates at `CROSS_POOL_MAX_WEIGHT`.
+    pub fn pair(&mut self, in_label: &str, out_label: &str, lr: f32) {
+        let key = (in_label.to_string(), out_label.to_string());
+        let w = self.weights.entry(key).or_insert(0.0);
+        *w = (*w + lr).min(CROSS_POOL_MAX_WEIGHT);
+        if self.cap > 0 && self.weights.len() > self.cap {
+            // Evict weakest 5%
+            let target = (self.cap as f32 * 0.95) as usize;
+            let mut sorted: Vec<(_, f32)> = self.weights.iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            for (k, _) in sorted.into_iter().take(self.weights.len() - target) {
+                self.weights.remove(&k);
+            }
+        }
+    }
+
+    /// Forward read: `in_label` → all reachable `(out_label, weight)`.
+    pub fn forward(&self, in_label: &str) -> Vec<(String, f32)> {
+        self.weights.iter()
+            .filter_map(|((a, b), w)| if a == in_label { Some((b.clone(), *w)) } else { None })
+            .collect()
+    }
+
+    /// Reverse read: `out_label` → all reachable `(in_label, weight)`.
+    pub fn reverse(&self, out_label: &str) -> Vec<(String, f32)> {
+        self.weights.iter()
+            .filter_map(|((a, b), w)| if b == out_label { Some((a.clone(), *w)) } else { None })
+            .collect()
+    }
+
+    pub fn len(&self) -> usize { self.weights.len() }
+    pub fn is_empty(&self) -> bool { self.weights.is_empty() }
+}
+
+/// Direction for two-pool associative recall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssocDirection {
+    /// Send input to `pool_in`, retrieve from `pool_out`.
+    InToOut,
+    /// Send input to `pool_out`, retrieve from `pool_in`.
+    OutToIn,
+}
+
 #[derive(Debug)]
 struct NeuroState {
     pool: NeuronPool,
+    /// Two-pool input pool — used by /two_pool/* endpoints for bidirectional
+    /// associative training.  Independent of the primary `pool`.
+    pool_in: NeuronPool,
+    /// Two-pool output pool — paired with `pool_in` via `cross_pool` weights.
+    pool_out: NeuronPool,
+    /// Symmetric cross-pool synapses: weight is the same whether queried by
+    /// (in_label, out_label) or (out_label, in_label) under the bidirectional
+    /// associative model.  Strengthened on co-firing during /two_pool/train_pair.
+    cross_pool: CrossPoolSynapses,
     networks: Vec<NeuralNetwork>,
     label_to_network: HashMap<String, u32>,
     minicolumns: Vec<MiniColumn>,
@@ -2659,7 +3029,10 @@ struct NeuroState {
 impl NeuroState {
     fn new(config: NeuroConfig, motif_config: HierarchicalMotifConfig) -> Self {
         Self {
-            pool: NeuronPool::new(config),
+            pool: NeuronPool::new(config.clone()),
+            pool_in:  NeuronPool::new(config.clone()),
+            pool_out: NeuronPool::new(config),
+            cross_pool: CrossPoolSynapses::default(),
             networks: Vec::new(),
             label_to_network: HashMap::new(),
             minicolumns: Vec::new(),
@@ -4292,6 +4665,197 @@ impl NeuroRuntime {
         }
         let guard = self.inner.lock();
         guard.pool.propagate_weighted(&seeds, hops, min_activation)
+    }
+
+    /// Walk a concept neuron's member tree and return the leaf-atom labels
+    /// in firing order.  Atoms (no members) return [self].  Unknown labels
+    /// also return [self].  Used by the decoder to expand concept activations
+    /// back into atoms before emission.
+    pub fn composite_constituents(&self, label: &str) -> Vec<String> {
+        let guard = self.inner.lock();
+        guard.pool.composite_constituents(label)
+    }
+
+    /// Same as above but resolves on the two-pool `pool_out`.  Used by the
+    /// reverse-direction decoder reading an input-pool member tree, etc.
+    pub fn composite_constituents_for(&self, label: &str, dir: AssocDirection) -> Vec<String> {
+        let guard = self.inner.lock();
+        match dir {
+            AssocDirection::InToOut => guard.pool_out.composite_constituents(label),
+            AssocDirection::OutToIn => guard.pool_in.composite_constituents(label),
+        }
+    }
+
+    // ── Two-pool associative training & recall ────────────────────────────────
+    //
+    // Independent of the primary `pool` — these methods drive `pool_in`,
+    // `pool_out`, and the `cross_pool` synapse table for the bidirectional
+    // associative-memory test described in the architecture mandate.
+    //
+    // Training: feed input atoms to `pool_in` and output atoms to `pool_out`
+    // simultaneously, let concept formation run in each, then strengthen
+    // cross-pool synapses for every (in-active, out-active) label pair.
+    //
+    // Recall: clamp input atoms in one pool, propagate within that pool to
+    // light up its concepts, route via cross-pool synapses to the other pool,
+    // propagate within that pool to spread to atoms, decode by walking
+    // concept members.  Symmetric: works in either direction.
+
+    /// Train a single (input, output) pair on the two-pool substrate.
+    /// `lr` is the cross-pool learning rate per co-firing event.
+    pub fn two_pool_train_pair(&self, input_atoms: &[String], output_atoms: &[String], lr: f32) {
+        if input_atoms.is_empty() || output_atoms.is_empty() {
+            return;
+        }
+        let mut guard = self.inner.lock();
+        // Train within each pool — atoms fire, concepts emerge via streaming
+        // consumption + branching-entropy promotion.
+        guard.pool_in.train_weighted(input_atoms, 1.0, false);
+        guard.pool_out.train_weighted(output_atoms, 1.0, false);
+
+        // Snapshot active labels (atoms + any concepts that fired) in each pool.
+        let in_active: Vec<String> = guard.pool_in.active_labels(0.05).into_iter().collect();
+        let out_active: Vec<String> = guard.pool_out.active_labels(0.05).into_iter().collect();
+
+        // Cross-pool symmetric Hebbian: every active in × every active out.
+        // Bidirectional by construction (single weight stored per pair).
+        for a in &in_active {
+            for b in &out_active {
+                guard.cross_pool.pair(a, b, lr);
+            }
+        }
+    }
+
+    /// Bidirectional associative recall.
+    ///
+    /// 1. Tokenize `text` into atoms with `txt:` prefix.
+    /// 2. Activate atoms in source pool, propagate within (concepts fire).
+    /// 3. For each active source-pool label, look up cross-pool weights to
+    ///    target-pool labels; sum into a target-pool seed map.
+    /// 4. Activate target seeds, propagate within target pool.
+    /// 5. Pick highest-activation target concept (or atom-chain) and walk
+    ///    members to atoms.
+    ///
+    /// Returns the decoded text from the target pool, or None when the chain
+    /// produces nothing.
+    pub fn two_pool_query(
+        &self,
+        atoms: &[String],
+        dir: AssocDirection,
+        hops: usize,
+        min_activation: f32,
+    ) -> Option<String> {
+        if atoms.is_empty() {
+            return None;
+        }
+        let mut guard = self.inner.lock();
+
+        // Activate atoms in source pool to fire concepts.  We use the
+        // existing record_symbols path for a non-learning activation pass;
+        // train_weighted with lr_scale=0 is a no-op so we just call
+        // record_symbols directly.
+        let src_active: HashMap<String, f32> = match dir {
+            AssocDirection::InToOut => {
+                guard.pool_in.record_symbols(atoms);
+                guard.pool_in.active_labels(min_activation)
+                    .into_iter()
+                    .filter_map(|lbl| {
+                        let id = guard.pool_in.label_to_id.get(&lbl).copied()?;
+                        let act = guard.pool_in.get_hot(id as usize)?.activation;
+                        Some((lbl, act))
+                    })
+                    .collect()
+            }
+            AssocDirection::OutToIn => {
+                guard.pool_out.record_symbols(atoms);
+                guard.pool_out.active_labels(min_activation)
+                    .into_iter()
+                    .filter_map(|lbl| {
+                        let id = guard.pool_out.label_to_id.get(&lbl).copied()?;
+                        let act = guard.pool_out.get_hot(id as usize)?.activation;
+                        Some((lbl, act))
+                    })
+                    .collect()
+            }
+        };
+        if src_active.is_empty() {
+            return None;
+        }
+
+        // Cross-pool propagation.  For each active source label, route weight
+        // through cross_pool to the target pool.
+        let mut tgt_seeds: HashMap<String, f32> = HashMap::new();
+        for (src_label, src_act) in &src_active {
+            let edges = match dir {
+                AssocDirection::InToOut => guard.cross_pool.forward(src_label),
+                AssocDirection::OutToIn => guard.cross_pool.reverse(src_label),
+            };
+            for (tgt_label, w) in edges {
+                let entry = tgt_seeds.entry(tgt_label).or_insert(0.0);
+                *entry = (*entry + src_act * w).min(1.0);
+            }
+        }
+        if tgt_seeds.is_empty() {
+            return None;
+        }
+
+        // Propagate within target pool to spread the cross-pool seeds.
+        let tgt_acts = match dir {
+            AssocDirection::InToOut => guard.pool_out.propagate_weighted(&tgt_seeds, hops, min_activation),
+            AssocDirection::OutToIn => guard.pool_in.propagate_weighted(&tgt_seeds, hops, min_activation),
+        };
+        if tgt_acts.is_empty() {
+            return None;
+        }
+
+        // Pick the highest-activation target label that decomposes to txt:
+        // atoms.  Concept neurons win over atoms when present.
+        let mut best: Option<(String, f32)> = None;
+        for (lbl, act) in &tgt_acts {
+            if !lbl.starts_with("txt:") {
+                continue;
+            }
+            if let Some((_, best_act)) = &best {
+                if act <= best_act {
+                    continue;
+                }
+            }
+            best = Some((lbl.clone(), *act));
+        }
+        let (best_label, _) = best?;
+
+        // Walk best_label members to atoms.
+        let atom_labels = match dir {
+            AssocDirection::InToOut => guard.pool_out.composite_constituents(&best_label),
+            AssocDirection::OutToIn => guard.pool_in.composite_constituents(&best_label),
+        };
+        let chars: String = atom_labels.iter()
+            .filter_map(|al| crate::streaming::label_to_char(al))
+            .collect();
+        if chars.is_empty() {
+            None
+        } else {
+            Some(chars)
+        }
+    }
+
+    /// Snapshot a summary of the two-pool state — sizes, top concepts, etc.
+    /// Used by /two_pool/stats to verify training.
+    pub fn two_pool_stats(&self) -> serde_json::Value {
+        let guard = self.inner.lock();
+        serde_json::json!({
+            "pool_in": {
+                "neurons":   guard.pool_in.label_to_id.len(),
+                "sequences": guard.pool_in.sequences.len(),
+            },
+            "pool_out": {
+                "neurons":   guard.pool_out.label_to_id.len(),
+                "sequences": guard.pool_out.sequences.len(),
+            },
+            "cross_pool": {
+                "weights":   guard.cross_pool.len(),
+            }
+        })
     }
 
     // ── Resolution-aware activation + concept promotion ──────────────────────
