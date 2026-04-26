@@ -18,9 +18,9 @@ The learning stack implements the current neuroscience canon in software:
 - **Three-factor Hebbian / dopamine retrograde potentiation** — Neurons with high activation trace are tagged at dopamine release. `flush_dopamine_potentiation()` applies `Δw = lr × dopamine_tag × weight` to their outgoing synapses. This is the computational correlate of reward-modulated STDP — the reward signal (dopamine) potentiates the connections that led to the outcome.
 - **Predictive coding** — `propagate_predictive()` implements a first-order hierarchical predictive coding loop. Hop 0 propagates full activation. Subsequent hops propagate only the residual `(actual − prediction).max(0.0)`. Neurons that activate exactly as predicted pass zero signal upstream — only surprise propagates. Prediction EMAs update online each training pass (`α = 0.10`).
 - **Neuromodulator-gated learning rate** — In `train_weighted_with_meta()`: `effective_lr = lr_scale × ACh × (1 + NE × 2.0)`. When the hypothesis queue fires a NE spike (failed QA gate), the next training run runs at elevated learning rate — attention sharpens on surprising inputs.
-- **Dual memory systems (CLS theory)** — The QA store is the hippocampus: fast one-shot episodic retrieval. The NeuronPool is the neocortex: slow statistical learning. They interact — a QA hit seeds a specific pool activation pattern, combining the precision of episodic memory with the generalization of distributed representations.
-- **Multi-pathway convergence inference** — `propagate_combined()` accepts question labels (weight 1.0) and QA answer labels (weight = `qa_conf × 1.5`) simultaneously, biasing propagation toward the answer's territory before the pool activates. Confidence gate: `qa_confidence ≥ 0.5 AND active_question_neurons > 0`.
-- **Hypothesis → research feedback loop** — Questions that fall below the QA confidence gate are queued in the hypothesis queue. `research_agent.py` polls the queue, fetches Wikipedia and ArXiv answers, ingests them via `/qa/ingest` + `/media/train`, and resolves them via `/hypothesis/resolve`, which triggers a DA flush — reward signal for correct prediction resolution.
+- **Dual memory systems (CLS theory)** — The N-pool associative fabric is the hippocampus: fast bidirectional paired-association retrieval across an arbitrary number of named pools (in/out/emo/equation/motion/…). The slow NeuronPool is the neocortex: distributed statistical learning. They interact — an N-pool hit seeds a specific pool activation pattern, combining the precision of episodic recall with the generalization of distributed representations. CLS-style replay periodically consolidates N-pool concept neurons back into the slow pool.
+- **Multi-pool convergence inference** — A single input fired into one pool causes every connected pool to produce its own decoded prediction in parallel. Cross-modal training (e.g., one query input mapped simultaneously to an answer pool, an emotion pool, and an equation pool) means all those substrates fire from one query.
+- **Hypothesis → research feedback loop** — Questions for which the multi-pool fabric returns no answer are queued in the hypothesis queue. `research_agent.py` polls the queue, fetches Wikipedia and ArXiv answers, ingests them via `/multi_pool/train_pair` + `/media/train`, and resolves them via `/hypothesis/resolve`, which triggers a DA flush — reward signal for correct prediction resolution.
 
 **For architects:** The system is designed to be observable at every level. Every neuron records its influence history. Every synapse carries provenance. The neuromodulator state is readable via API. The hypothesis queue is an explicit epistemic state — the system knows what it doesn't know and acts on it.
 
@@ -169,10 +169,11 @@ Silence and uncertainty are first-class outputs here. A tokenized model cannot p
 
 | Task | Score | Notes |
 |------|-------|-------|
-| QA retrieval accuracy | **0.951** | Hebbian Q&A fabric, `POST /qa/query` |
+| Multi-pool fwd/rev recall (8-pair small + 30-45k char large corpus) | **1.000 / 8-of-8** | `POST /multi_pool/ask` after architectural fix; 7/7 Rust + 30/30 Python integration tests pass |
+| Multi-pool 32-pair encyclopedia (cross-domain) | **0.987 / 32-of-32 fwd** | Same path, harder corpus |
 | Chat / generate quality | **0.630** | `POST /chat`, `POST /neuro/generate` |
 
-These scores are corpus-dependent — they shift as more training data is ingested. Both endpoints use the dual-memory (CLS) architecture: QA store for high-confidence fast retrieval, neuro pool for generalization. Expect QA accuracy to improve significantly with a larger domain-specific Q&A corpus.
+These scores are corpus-dependent — they shift as more training data is ingested. `/chat` uses the dual-memory (CLS) architecture: N-pool fabric as the high-confidence fast path, slow NeuronPool char-chain decoder as the fallback. Expect both numbers to improve with broader training corpora; the multi-pool path is exact-recall by construction once a pair is trained.
 
 ---
 
@@ -280,7 +281,8 @@ When the EEM can't explain a label cluster — when something is happening that 
 │         Chat API  ── /chat  /neuro/generate                         │
 │         Hyp  API  ── /hypothesis/queue  /hypothesis/resolve         │
 │         EEM  API  ── /equations/*  /causal/graph                    │
-│         QA   API  ── /qa/ingest  /qa/query                          │
+│         MP   API  ── /multi_pool/{register,train_pair,             │
+│                       train_fanout,ask,stats}                        │
 │         Cluster   ── ClusterNode  ── HashRing ── OtpRegistry        │
 │         Dist      ── DistributedCoordinator (round-robin, delta sync)│
 │                                                                      │
@@ -633,8 +635,12 @@ W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 | `/equations/peer_sync` | POST | Receive `EemPeerPayload` from a peer node |
 | `/causal/graph` | GET | Named-process causal graph: sensor clusters → physics processes |
 | `/network/patterns/sources` | GET | First-reporter origin index for cross-node source tracing |
-| `/qa/ingest` | POST | Ingest Q&A pairs into the Hebbian fabric |
-| `/qa/query` | POST | Query the Q&A fabric |
+| `/multi_pool/register` | POST | Register a new named pool in the N-pool fabric |
+| `/multi_pool/train_pair` | POST | Train (src, tgt) across two named pools — symmetric |
+| `/multi_pool/train_fanout` | POST | Train one source pool against many targets at once |
+| `/multi_pool/ask` | POST | Send text to a source pool — every other pool fires its prediction |
+| `/multi_pool/stats` | GET | Per-pool sizes + total cross-edge count |
+| `/two_pool/*` | POST/GET | Legacy thin wrappers around `/multi_pool/*` using pool ids `"in"`/`"out"` |
 | `/knowledge/ingest` | POST | Ingest documents into the knowledge graph |
 | `/knowledge/vote` | POST | Vote on knowledge associations |
 | `/streaming/labels` | GET | Label queue for human annotation |
@@ -868,7 +874,7 @@ The node exposes a generic API. Scripts define the domain. Below are four catego
 
 ### Conversational / LLM-style
 
-Feed conversation pairs through `/qa/ingest` (`question → answer`). At inference time `/chat` or `/qa/query` fires question tokens through the dual-memory CLS architecture — QA store for high-confidence fast retrieval, neuro pool for generalization and cross-domain bleed. `/neuro/generate` uses the pre-computed activation map decode (single propagation pass + rank sort) for free-form generation.
+Feed conversation pairs through `/multi_pool/train_pair` with `src_pool: "in", tgt_pool: "out"` (`question → answer`). At inference time `/chat` fires question atoms through the multi-pool fabric — exact recall when the trained pair matches; nearest-neighbor recall for paraphrases and OOD inputs. The slow NeuronPool char-chain decoder is the fallback when the fabric has no associative bridge. Additional pools (emotion, equation, motion) trained against the same source pool fire in parallel — `/chat` returns the main answer plus `predictions` for every other connected pool.
 
 This is associative retrieval + predictive coding, not autoregressive generation. Responses are activated from trained state rather than generated token-by-token. Suitable for factual recall, domain Q&A, and follow-up questions that share vocabulary with prior exchanges.
 
@@ -1162,53 +1168,58 @@ curl -s -X POST http://127.0.0.1:8090/chat \
 
 ---
 
-### 7. QA store query and ingest
+### 7. Multi-pool training and query
 
 ```bash
-# Query the Hebbian QA fabric directly (returns raw activation scores)
-curl -s -X POST http://127.0.0.1:8090/qa/query \
+# Register an additional pool (in/out are pre-registered)
+curl -s -X POST http://127.0.0.1:8090/multi_pool/register \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is the sun?"}'
+  -d '{"pool_id": "emo"}'
 
-# Ingest one or more QA pairs
-curl -s -X POST http://127.0.0.1:8090/qa/ingest \
+# Train a Q -> A pair on the default in/out pools
+curl -s -X POST http://127.0.0.1:8090/multi_pool/train_pair \
   -H "Content-Type: application/json" \
   -d '{
-    "candidates": [{
-      "qa_id": "my-pair-001",
-      "question": "What is photosynthesis?",
-      "answer": "Photosynthesis is the process plants use to convert sunlight into food.",
-      "confidence": 0.9
-    }]
+    "src_pool": "in",  "src": "what is photosynthesis",
+    "tgt_pool": "out", "tgt": "the process plants use to convert sunlight into food",
+    "passes": 30, "lr": 0.5
   }'
+
+# Train one source against many targets (color + category + emotion)
+curl -s -X POST http://127.0.0.1:8090/multi_pool/train_fanout \
+  -H "Content-Type: application/json" \
+  -d '{
+    "src_pool": "in", "src": "hello",
+    "targets": [
+      { "tgt_pool": "out", "tgt": "Hello there friend." },
+      { "tgt_pool": "emo", "tgt": "warm" }
+    ],
+    "passes": 30, "lr": 0.5
+  }'
+
+# Query — every connected pool fires its own decoded prediction
+curl -s -X POST http://127.0.0.1:8090/multi_pool/ask \
+  -H "Content-Type: application/json" \
+  -d '{"src_pool": "in", "text": "hello"}'
+# -> {"predictions": {"out": "Hello there friend.", "emo": "warm"}, ...}
+
+# Per-pool sizes + total cross-edges
+curl http://127.0.0.1:8090/multi_pool/stats
 ```
+
+The legacy `/two_pool/train_pair` and `/two_pool/ask` endpoints are thin
+wrappers around the same fabric using pool ids `"in"` and `"out"`.
 
 ---
 
-### 8. Checkpoint (save pool + QA store to disk)
+### 8. Checkpoint (save pool to disk)
 
 The node accumulates learning in RAM. Checkpoint persists it.
 Training scripts call this automatically, but you can trigger it manually:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8090/neuro/checkpoint
-# Returns: {"saved":true,"pool_path":"...","qa_path":"..."}
-```
-
----
-
-### 9. Recover QA store after corruption
-
-If the QA store's `answer_index` becomes corrupted (e.g. after manual surgery),
-re-ingest all pairs from the intact `pairs` dict in the JSON file:
-
-```bash
-python scripts/recover_qa_store.py \
-  --node http://127.0.0.1:8090 \
-  --qa-store D:/w1z4rdv1510n-data/qa_store.json
-
-# Preview what would be ingested without touching the node
-python scripts/recover_qa_store.py --dry-run
+# Returns: {"saved":true,"pool_path":"..."}
 ```
 
 ---
