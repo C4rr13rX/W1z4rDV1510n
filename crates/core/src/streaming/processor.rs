@@ -757,7 +757,6 @@ pub struct StreamingInference {
     dynamic_pools: DynamicPoolRegistry,
     organic_encoder: OrganicEncoder,
     sensor_registry: SensorRegistry,
-    qa_runtime: crate::streaming::qa_runtime::QaRuntime,
     fabric_trainer: FabricTrainer,
     threat_scene: crate::threat::ThreatScene,
     run_config: RunConfig,
@@ -859,9 +858,6 @@ impl StreamingInference {
         let dynamic_pools = DynamicPoolRegistry::new(run_config.streaming.dynamic_pools.clone());
         let organic_encoder = OrganicEncoder::new(run_config.streaming.organic_encoder.clone());
         let sensor_registry = SensorRegistry::new(run_config.streaming.sensor_registry.clone());
-        let qa_runtime = crate::streaming::qa_runtime::QaRuntime::new(
-            run_config.streaming.qa_runtime.clone(),
-        );
         let fabric_trainer = FabricTrainer::new(run_config.streaming.fabric_trainer.clone());
         Self {
             processor,
@@ -899,7 +895,6 @@ impl StreamingInference {
             dynamic_pools,
             organic_encoder,
             sensor_registry,
-            qa_runtime,
             fabric_trainer,
             threat_scene: crate::threat::ThreatScene::new(),
             run_config,
@@ -988,42 +983,6 @@ impl StreamingInference {
 
     pub fn submit_knowledge_vote(&mut self, vote: AssociationVote) -> Option<crate::streaming::knowledge::KnowledgeAssociation> {
         self.knowledge.submit_vote(vote)
-    }
-
-    /// Ingest a Q&A pair into the Hebbian fabric.
-    pub fn ingest_qa(
-        &mut self,
-        question: &str,
-        answer: &str,
-        book_id: &str,
-        page_index: usize,
-        confidence: f32,
-        timestamp: crate::schema::Timestamp,
-    ) -> crate::streaming::qa_runtime::QaIngestReport {
-        self.qa_runtime.ingest(question, answer, book_id, page_index, confidence, timestamp)
-    }
-
-    /// Bulk-ingest a slice of Q&A candidate records (from qa_candidates.jsonl).
-    pub fn ingest_qa_candidates(
-        &mut self,
-        candidates: &[crate::streaming::qa_runtime::QaCandidateRecord],
-        timestamp: crate::schema::Timestamp,
-    ) {
-        self.qa_runtime.ingest_candidates(candidates, timestamp);
-    }
-
-    /// Query the Hebbian Q&A fabric — fires the input network, reads the output.
-    pub fn query_qa(
-        &mut self,
-        question: &str,
-        timestamp: crate::schema::Timestamp,
-    ) -> crate::streaming::qa_runtime::QaQueryReport {
-        self.qa_runtime.query(question, timestamp)
-    }
-
-    /// Runtime status report for the Q&A fabric.
-    pub fn qa_report(&self, timestamp: crate::schema::Timestamp) -> crate::streaming::qa_runtime::QaRuntimeReport {
-        self.qa_runtime.report(timestamp)
     }
 
     pub fn take_last_fabric_share(&mut self, node_id: String) -> Option<NeuralFabricShare> {

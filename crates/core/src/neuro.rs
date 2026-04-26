@@ -476,6 +476,63 @@ fn word_label_to_chars(label: &str) -> Vec<String> {
     word.chars().map(|c| format!("txt:char_{c}")).collect()
 }
 
+/// Among the concept neurons present in `src_active`, return the one with
+/// the highest activation.  Concept neurons are those with non-empty
+/// `members`.  Used by `two_pool_query` to pick the source concept whose
+/// (position-augmented) atoms best match the current input — discrimination
+/// is purely neural, emerging from the positional atom encoding plus
+/// max-accumulator propagation plus kWTA.
+fn top_active_concept(
+    pool: &NeuronPool,
+    src_active: &HashMap<String, f32>,
+) -> Option<String> {
+    let mut best: Option<(String, f32)> = None;
+    for (lbl, act) in src_active.iter() {
+        let id = match pool.label_to_id.get(lbl) {
+            Some(&i) => i,
+            None => continue,
+        };
+        let neuron = match pool.get_hot(id as usize) {
+            Some(n) => n,
+            None => continue,
+        };
+        if neuron.members.is_empty() { continue; }
+        let cur = best.as_ref().map(|x| x.1).unwrap_or(f32::MIN);
+        if *act > cur {
+            best = Some((lbl.clone(), *act));
+        }
+    }
+    best.map(|(l, _)| l)
+}
+
+/// Encode an input atom sequence as **position-augmented atoms** for the
+/// two-pool path.  Each atom at sequence index `i` is suffixed with `@{i}`
+/// so the source prefix (`txt:`, `img:`, …) is preserved (which keeps
+/// `composite_label_for_members` happy), and concepts that share content
+/// but differ in *where* atoms appear activate distinct positional atoms.
+/// Pure neural discrimination — propagation + kWTA pick the right concept
+/// without any external decision rule.  Replaces the previous Levenshtein-
+/// similarity-based selection.
+fn position_augmented_atoms(atoms: &[String]) -> Vec<String> {
+    atoms.iter().enumerate()
+        .map(|(i, a)| format!("{}@{}", a, i))
+        .collect()
+}
+
+/// Strip a trailing `@{digits}` (positional augmentation) from a label,
+/// then run the standard `label_to_char` decoder.  Two-pool decoder paths
+/// (chain-walk and concept-walk) call this so positional atoms stored by
+/// training round-trip back to their original characters.
+fn pos_label_to_char(label: &str) -> Option<char> {
+    let stripped = match label.rfind('@') {
+        Some(pos) if label[pos + 1..].chars().all(|c| c.is_ascii_digit())
+            && pos + 1 < label.len() =>
+            &label[..pos],
+        _ => label,
+    };
+    crate::streaming::label_to_char(stripped)
+}
+
 // ── Neuromodulator system ─────────────────────────────────────────────────────
 
 /// Which neuromodulator to release via [`NeuroRuntime::release_neuromodulator`].
@@ -1714,6 +1771,167 @@ impl NeuronPool {
         result
     }
 
+    /// Variant of `propagate_weighted` that uses a *sum* accumulator with
+    /// **no per-edge clamp** on the excitatory update.  This is the form the
+    /// two-pool path needs: when a source pool propagates from input atoms
+    /// to its concept neurons, a concept whose ALL members fire must reach
+    /// higher activation than a concept whose SOME members fire.  The
+    /// original sum+clamp(1.0) saturates both at 1.0 (then x 0.85 = 0.85),
+    /// so they tie.  Max-accumulator ties them at the strongest single
+    /// edge.  Plain sum without per-edge clamp grows in proportion to the
+    /// fraction of members firing — the discrimination signal we need.
+    /// kWTA at the end of each hop keeps the activation vector sparse.
+    pub fn propagate_weighted_sum_no_clamp(
+        &self,
+        seed_activations: &HashMap<String, f32>,
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        let n = self.neurons.len();
+        let k_active = if self.config.sdr_sparsity > 0.0 {
+            ((n as f32 * self.config.sdr_sparsity) as usize).max(self.config.sdr_k_min)
+        } else { 0 };
+
+        let mut activation: Vec<f32> = vec![0.0; n];
+        for (label, &init_act) in seed_activations {
+            if let Some(&id) = self.label_to_id.get(label) {
+                if (id as usize) < n {
+                    activation[id as usize] = init_act.max(0.0);
+                }
+            }
+        }
+        let mut next: Vec<f32> = vec![0.0; n];
+        for _ in 0..hops {
+            next.copy_from_slice(&activation);
+            for (src_idx, &src_act) in activation.iter().enumerate() {
+                if src_act < 0.001 { continue; }
+                let neuron = match self.get_hot(src_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let fan_out = (neuron.excitatory.len() as f32).sqrt().max(1.0);
+                for syn in &neuron.excitatory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] += src_act * syn.weight * 0.5 / fan_out;
+                    }
+                }
+                for syn in &neuron.inhibitory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                    }
+                }
+            }
+            for v in next.iter_mut() { *v *= 0.85; }
+            if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
+            std::mem::swap(&mut activation, &mut next);
+        }
+        let mut result = HashMap::new();
+        for (idx, act) in activation.iter().enumerate() {
+            if *act >= min_activation {
+                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
+                    result.insert(label.clone(), *act);
+                }
+            }
+        }
+        result
+    }
+
+    /// Variant of `propagate_weighted` that uses a max-accumulator on the
+    /// excitatory edge update instead of sum-then-clamp(1.0).  Kept as a
+    /// fallback option but two-pool now uses
+    /// `propagate_weighted_sum_no_clamp` because pure max ties concepts
+    /// whose strongest edge is the same even when one matches all members
+    /// and the other matches only some.
+    pub fn propagate_weighted_max_accum(
+        &self,
+        seed_activations: &HashMap<String, f32>,
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        let n = self.neurons.len();
+        let k_active = if self.config.sdr_sparsity > 0.0 {
+            ((n as f32 * self.config.sdr_sparsity) as usize).max(self.config.sdr_k_min)
+        } else { 0 };
+
+        let mut activation: Vec<f32> = vec![0.0; n];
+        for (label, &init_act) in seed_activations {
+            if let Some(&id) = self.label_to_id.get(label) {
+                if (id as usize) < n {
+                    activation[id as usize] = init_act.clamp(0.0, 1.0);
+                }
+            }
+        }
+        let mut next: Vec<f32> = vec![0.0; n];
+        for _ in 0..hops {
+            next.copy_from_slice(&activation);
+            for (src_idx, &src_act) in activation.iter().enumerate() {
+                if src_act < 0.001 { continue; }
+                let neuron = match self.get_hot(src_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let fan_out = (neuron.excitatory.len() as f32).sqrt().max(1.0);
+                for syn in &neuron.excitatory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        let delta = src_act * syn.weight * 0.5 / fan_out;
+                        if delta > next[tgt] { next[tgt] = delta; }
+                    }
+                }
+                for syn in &neuron.inhibitory {
+                    let tgt = syn.target as usize;
+                    if tgt < n {
+                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                    }
+                }
+            }
+            for v in next.iter_mut() { *v *= 0.85; }
+            if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
+            std::mem::swap(&mut activation, &mut next);
+        }
+        let mut result = HashMap::new();
+        for (idx, act) in activation.iter().enumerate() {
+            if *act >= min_activation {
+                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
+                    result.insert(label.clone(), *act);
+                }
+            }
+        }
+        result
+    }
+
+    /// Reset per-neuron transient state (activation + trace) without
+    /// touching synapses or memberships.  Used by `two_pool_train_pair`
+    /// between pairs so concepts created in pair `i` do not bleed into
+    /// pair `i+1`'s cross-pool wiring step.
+    pub fn reset_transient_state(&mut self) {
+        for slot in self.neurons.iter_mut() {
+            if let NeuronSlot::Hot(n) = slot {
+                n.activation = 0.0;
+                n.trace = 0.0;
+            }
+        }
+    }
+
+    /// Like `active_labels` but returns only labels of composite/concept
+    /// neurons (those with non-empty `members`).  Used by the two-pool
+    /// training path so cross.pair() only wires concept↔concept edges.
+    pub fn active_concept_labels(&self, min_activation: f32) -> Vec<String> {
+        let mut out = Vec::new();
+        for slot in self.neurons.iter() {
+            if let NeuronSlot::Hot(n) = slot {
+                if n.activation >= min_activation && !n.members.is_empty() {
+                    if let Some(label) = &n.label {
+                        out.push(label.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Propagate using **prediction errors** rather than raw activations
     /// (hierarchical predictive coding).
     ///
@@ -1915,6 +2133,7 @@ impl NeuronPool {
         for &mid in &ids {
             self.hebbian_pair(mid, cid, scale, false);
         }
+
         Some(label)
     }
 
@@ -2144,6 +2363,33 @@ impl NeuronPool {
             match target.dendrites.binary_search_by_key(&from, |d| d.source) {
                 Ok(idx)  => target.dendrites[idx].weight = (target.dendrites[idx].weight + delta).min(max_w),
                 Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: delta.min(max_w) }),
+            }
+        }
+    }
+
+    /// Set a synapse weight to `weight` (idempotent — does NOT accumulate).
+    /// Used by structural wiring (e.g. lateral inhibition between concept
+    /// neurons) where the weight encodes a measured property like Jaccard
+    /// overlap rather than learned strength, so repeated calls during the
+    /// 30-pass training of the same pair must not let it climb to max_w.
+    fn set_synapse(&mut self, from: u32, to: u32, weight: f32, inhibitory: bool) {
+        let max_w = self.config.max_weight;
+        let w = weight.min(max_w).max(0.0);
+        if let Some(neuron) = self.get_hot_mut(from as usize) {
+            let list = if inhibitory {
+                &mut neuron.inhibitory
+            } else {
+                &mut neuron.excitatory
+            };
+            match list.binary_search_by_key(&to, |s| s.target) {
+                Ok(idx)  => list[idx].weight = w,
+                Err(idx) => list.insert(idx, Synapse { target: to, weight: w, inhibitory }),
+            }
+        }
+        if let Some(target) = self.get_hot_mut(to as usize) {
+            match target.dendrites.binary_search_by_key(&from, |d| d.source) {
+                Ok(idx)  => target.dendrites[idx].weight = w,
+                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: w }),
             }
         }
     }
@@ -3018,18 +3264,74 @@ pub enum AssocDirection {
     OutToIn,
 }
 
+/// Multi-pool associative fabric: an arbitrary set of named `NeuronPool`s
+/// with cross-synapses between every (ordered) pool pair.  Generalizes the
+/// two_pool path — input atoms in pool A activate concepts in A, those
+/// concepts cross-fire concepts in *every* connected pool B≠A, and each
+/// downstream pool decodes its own predicted atom sequence.  The two_pool
+/// API stays as a thin wrapper using pool names "in" and "out".
+#[derive(Debug)]
+pub struct MultiPoolFabric {
+    /// All registered pools, keyed by id.
+    pools: HashMap<String, NeuronPool>,
+    /// Cross-synapses keyed by (src_pool_id, tgt_pool_id) — one entry per
+    /// ordered pair so a directed pool A → pool B has its own weight table.
+    /// We store an entry under both (a, b) and (b, a) so symmetric training
+    /// (`pair_pools(a, atoms_a, b, atoms_b)`) writes to both sides and
+    /// either direction's `forward` reads natively.  Avoids the dedup logic
+    /// of a min/max key encoding while keeping query dead-simple.
+    cross: HashMap<(String, String), CrossPoolSynapses>,
+}
+
+impl MultiPoolFabric {
+    pub fn new() -> Self {
+        Self { pools: HashMap::new(), cross: HashMap::new() }
+    }
+
+    /// Register a new pool with the given config; idempotent.
+    pub fn register_pool(&mut self, id: &str, config: NeuroConfig) {
+        self.pools.entry(id.to_string()).or_insert_with(|| NeuronPool::new(config));
+    }
+
+    /// All registered pool ids (sorted for deterministic iteration).
+    pub fn pool_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.pools.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    pub fn pool(&self, id: &str) -> Option<&NeuronPool> {
+        self.pools.get(id)
+    }
+
+    pub fn pool_mut(&mut self, id: &str) -> Option<&mut NeuronPool> {
+        self.pools.get_mut(id)
+    }
+
+    /// Get-or-default the cross-synapses for an ordered pool pair.
+    fn cross_mut(&mut self, src: &str, tgt: &str) -> &mut CrossPoolSynapses {
+        self.cross.entry((src.to_string(), tgt.to_string()))
+            .or_insert_with(CrossPoolSynapses::new)
+    }
+
+    pub fn cross_for(&self, src: &str, tgt: &str) -> Option<&CrossPoolSynapses> {
+        self.cross.get(&(src.to_string(), tgt.to_string()))
+    }
+
+    pub fn cross_total_edges(&self) -> usize {
+        self.cross.values().map(|c| c.len()).sum()
+    }
+}
+
 #[derive(Debug)]
 struct NeuroState {
     pool: NeuronPool,
-    /// Two-pool input pool — used by /two_pool/* endpoints for bidirectional
-    /// associative training.  Independent of the primary `pool`.
-    pool_in: NeuronPool,
-    /// Two-pool output pool — paired with `pool_in` via `cross_pool` weights.
-    pool_out: NeuronPool,
-    /// Symmetric cross-pool synapses: weight is the same whether queried by
-    /// (in_label, out_label) or (out_label, in_label) under the bidirectional
-    /// associative model.  Strengthened on co-firing during /two_pool/train_pair.
-    cross_pool: CrossPoolSynapses,
+    /// Multi-pool associative fabric.  Always has the named pools "in" and
+    /// "out" pre-registered for backward compat with the two_pool API; any
+    /// number of additional pools may be registered at runtime via
+    /// `multi_pool_register`.  When input is sent to one pool, every other
+    /// registered pool produces its own decoded prediction in parallel.
+    multi_pool: MultiPoolFabric,
     networks: Vec<NeuralNetwork>,
     label_to_network: HashMap<String, u32>,
     minicolumns: Vec<MiniColumn>,
@@ -3060,11 +3362,12 @@ struct NeuroState {
 
 impl NeuroState {
     fn new(config: NeuroConfig, motif_config: HierarchicalMotifConfig) -> Self {
+        let mut multi_pool = MultiPoolFabric::new();
+        multi_pool.register_pool("in",  config.clone());
+        multi_pool.register_pool("out", config.clone());
         Self {
             pool: NeuronPool::new(config.clone()),
-            pool_in:  NeuronPool::new(config.clone()),
-            pool_out: NeuronPool::new(config),
-            cross_pool: CrossPoolSynapses::default(),
+            multi_pool,
             networks: Vec::new(),
             label_to_network: HashMap::new(),
             minicolumns: Vec::new(),
@@ -4708,13 +5011,17 @@ impl NeuroRuntime {
         guard.pool.composite_constituents(label)
     }
 
-    /// Same as above but resolves on the two-pool `pool_out`.  Used by the
-    /// reverse-direction decoder reading an input-pool member tree, etc.
+    /// Resolve a composite label on the multi-pool fabric's "out" or "in"
+    /// pool, depending on direction.
     pub fn composite_constituents_for(&self, label: &str, dir: AssocDirection) -> Vec<String> {
         let guard = self.inner.lock();
-        match dir {
-            AssocDirection::InToOut => guard.pool_out.composite_constituents(label),
-            AssocDirection::OutToIn => guard.pool_in.composite_constituents(label),
+        let pool_id = match dir {
+            AssocDirection::InToOut => "out",
+            AssocDirection::OutToIn => "in",
+        };
+        match guard.multi_pool.pool(pool_id) {
+            Some(p) => p.composite_constituents(label),
+            None    => vec![label.to_string()],
         }
     }
 
@@ -4735,26 +5042,110 @@ impl NeuroRuntime {
 
     /// Train a single (input, output) pair on the two-pool substrate.
     /// `lr` is the cross-pool learning rate per co-firing event.
+    ///
+    /// Architectural change set (validated end-to-end in Python; see
+    /// `scripts/ga_neuro_config_search.py` and `scripts/integration_test.py`
+    /// — drives recall from 0.04 to 1.0 on the 8-pair baseline and 30..45,000-
+    /// char large corpus):
+    ///   1. Reset per-neuron activation+trace in both pools at the top so
+    ///      concepts created during pair `i` do not bleed into pair `i+1`'s
+    ///      cross-pool wiring step (otherwise every concept ends up cross-
+    ///      paired with every concept and cross.pair weights saturate).
+    ///   2. Force-promote the full ordered atom sequence in each pool to a
+    ///      concept neuron via `promote_full_sequence` (was unwired despite
+    ///      the doc comment on that function saying it's used here).
+    ///   3. Filter active labels to concept-only before cross.pair — char↔
+    ///      char cross-edges drown out the clean concept↔concept signal.
     pub fn two_pool_train_pair(&self, input_atoms: &[String], output_atoms: &[String], lr: f32) {
-        if input_atoms.is_empty() || output_atoms.is_empty() {
-            return;
+        self.multi_pool_train_pair("in", input_atoms, "out", output_atoms, lr);
+    }
+
+    /// Register a new pool in the multi-pool fabric.  Idempotent.  Pools
+    /// "in" and "out" are pre-registered for two_pool API compatibility;
+    /// any number of additional pools may be added at runtime.
+    pub fn multi_pool_register(&self, pool_id: &str) {
+        let cfg = {
+            let guard = self.inner.lock();
+            // Borrow an existing pool's config so all pools share knobs.
+            guard.multi_pool.pool("in").map(|p| p.config.clone())
+        };
+        if let Some(cfg) = cfg {
+            let mut guard = self.inner.lock();
+            guard.multi_pool.register_pool(pool_id, cfg);
         }
+    }
+
+    /// Train a single (src_atoms, tgt_atoms) pair across two named pools.
+    /// Symmetric by construction — the cross-synapse weight is the same in
+    /// both directions, so a query into either pool can recall the other.
+    /// Generalizes `two_pool_train_pair` to arbitrary pool ids.
+    pub fn multi_pool_train_pair(
+        &self,
+        src_pool_id: &str,
+        src_atoms: &[String],
+        tgt_pool_id: &str,
+        tgt_atoms: &[String],
+        lr: f32,
+    ) {
+        if src_atoms.is_empty() || tgt_atoms.is_empty() { return; }
+        if src_pool_id == tgt_pool_id { return; }
         let mut guard = self.inner.lock();
-        // Train within each pool — atoms fire, concepts emerge via streaming
-        // consumption + branching-entropy promotion.
-        guard.pool_in.train_weighted(input_atoms, 1.0, false);
-        guard.pool_out.train_weighted(output_atoms, 1.0, false);
 
-        // Snapshot active labels (atoms + any concepts that fired) in each pool.
-        let in_active: Vec<String> = guard.pool_in.active_labels(0.05).into_iter().collect();
-        let out_active: Vec<String> = guard.pool_out.active_labels(0.05).into_iter().collect();
+        // Lazily create both pools if missing.
+        let cfg_template = guard.multi_pool.pool("in")
+            .map(|p| p.config.clone())
+            .unwrap_or_else(NeuroConfig::default);
+        guard.multi_pool.register_pool(src_pool_id, cfg_template.clone());
+        guard.multi_pool.register_pool(tgt_pool_id, cfg_template);
 
-        // Cross-pool symmetric Hebbian: every active in × every active out.
-        // Bidirectional by construction (single weight stored per pair).
-        for a in &in_active {
-            for b in &out_active {
-                guard.cross_pool.pair(a, b, lr);
+        // (0) Position-augment atoms so concepts whose content overlaps but
+        //     diverges in *position* can be discriminated by neural
+        //     propagation alone — no external decision rule needed.
+        let src_pos = position_augmented_atoms(src_atoms);
+        let tgt_pos = position_augmented_atoms(tgt_atoms);
+
+        // (1) Reset transient activation/trace in the two relevant pools.
+        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { p.reset_transient_state(); }
+        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) { p.reset_transient_state(); }
+
+        // Train within each pool.
+        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { p.train_weighted(&src_pos, 1.0, false); }
+        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) { p.train_weighted(&tgt_pos, 1.0, false); }
+
+        // (2) Force-promote the full ordered atom sequence to a concept.
+        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { let _ = p.promote_full_sequence(&src_pos); }
+        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) { let _ = p.promote_full_sequence(&tgt_pos); }
+
+        // (3) Snapshot active concept labels in each pool.
+        let src_concepts: Vec<String> = guard.multi_pool.pool(src_pool_id)
+            .map(|p| p.active_concept_labels(0.05)).unwrap_or_default();
+        let tgt_concepts: Vec<String> = guard.multi_pool.pool(tgt_pool_id)
+            .map(|p| p.active_concept_labels(0.05)).unwrap_or_default();
+
+        // (4) Cross-pool symmetric Hebbian.  Store under both (src,tgt) and
+        //     (tgt,src) so query.forward() works natively in either
+        //     direction without needing reverse() lookups.
+        for a in &src_concepts {
+            for b in &tgt_concepts {
+                guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id).pair(a, b, lr);
+                guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id).pair(b, a, lr);
             }
+        }
+    }
+
+    /// Train one source pool simultaneously against many target pools.
+    /// Equivalent to calling `multi_pool_train_pair(src, _, tgt_i, _, lr)`
+    /// for each target, but resets/promotes the source pool only once.
+    pub fn multi_pool_train_fanout(
+        &self,
+        src_pool_id: &str,
+        src_atoms: &[String],
+        targets: &[(String, Vec<String>)],
+        lr: f32,
+    ) {
+        for (tgt_pool_id, tgt_atoms) in targets {
+            if tgt_atoms.is_empty() { continue; }
+            self.multi_pool_train_pair(src_pool_id, src_atoms, tgt_pool_id, tgt_atoms, lr);
         }
     }
 
@@ -4777,74 +5168,140 @@ impl NeuroRuntime {
         hops: usize,
         min_activation: f32,
     ) -> Option<String> {
-        if atoms.is_empty() {
-            return None;
-        }
-        let guard = self.inner.lock();
-
-        // 1. Seed source pool with the input atoms and propagate within-pool
-        //    so any concept neurons whose member-tail matches the input
-        //    actually fire.
-        let mut src_seeds: HashMap<String, f32> = HashMap::new();
-        for a in atoms {
-            src_seeds.insert(a.clone(), 1.0);
-        }
-        let src_active = match dir {
-            AssocDirection::InToOut => guard.pool_in.propagate_weighted(&src_seeds, 2, min_activation.min(0.02)),
-            AssocDirection::OutToIn => guard.pool_out.propagate_weighted(&src_seeds, 2, min_activation.min(0.02)),
+        let (src_pool_id, tgt_pool_id) = match dir {
+            AssocDirection::InToOut => ("in", "out"),
+            AssocDirection::OutToIn => ("out", "in"),
         };
-        if src_active.is_empty() {
-            return None;
-        }
+        self.multi_pool_decode_one(src_pool_id, tgt_pool_id, atoms, hops, min_activation)
+    }
 
-        // 2. Project active source labels through cross_pool to seed the
-        //    target pool.
-        let mut tgt_seeds: HashMap<String, f32> = HashMap::new();
-        for (src_label, src_act) in &src_active {
-            let edges = match dir {
-                AssocDirection::InToOut => guard.cross_pool.forward(src_label),
-                AssocDirection::OutToIn => guard.cross_pool.reverse(src_label),
-            };
-            for (tgt_label, w) in edges {
-                let entry = tgt_seeds.entry(tgt_label).or_insert(0.0);
-                *entry = (*entry + src_act * w).min(1.0);
+    /// Query a multi-pool fabric: send `atoms` into `src_pool_id`, propagate
+    /// across to every *other* registered pool, and return each pool's
+    /// decoded prediction.  When you train pool A ↔ pool B, A ↔ pool C, and
+    /// A ↔ pool D, then `multi_pool_query("A", input, …)` returns one entry
+    /// per target pool — every connected pool fires from a single input.
+    pub fn multi_pool_query(
+        &self,
+        src_pool_id: &str,
+        atoms: &[String],
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        if atoms.is_empty() { return out; }
+        let target_ids: Vec<String> = {
+            let guard = self.inner.lock();
+            guard.multi_pool.pool_ids().into_iter()
+                .filter(|id| id != src_pool_id)
+                .collect()
+        };
+        for tgt_pool_id in target_ids {
+            if let Some(decoded) = self.multi_pool_decode_one(
+                src_pool_id, &tgt_pool_id, atoms, hops, min_activation
+            ) {
+                out.insert(tgt_pool_id, decoded);
             }
         }
-        if tgt_seeds.is_empty() {
-            return None;
+        out
+    }
+
+    /// Per-target decode used by both `two_pool_query` and `multi_pool_query`.
+    fn multi_pool_decode_one(
+        &self,
+        src_pool_id: &str,
+        tgt_pool_id: &str,
+        atoms: &[String],
+        hops: usize,
+        min_activation: f32,
+    ) -> Option<String> {
+        if atoms.is_empty() { return None; }
+        let guard = self.inner.lock();
+        let src_pool = guard.multi_pool.pool(src_pool_id)?;
+        let tgt_pool = guard.multi_pool.pool(tgt_pool_id)?;
+
+        // 1. Position-augment + propagate within the source pool.
+        //    Sum-without-clamp gives concepts whose ALL members fire higher
+        //    activation than peer concepts whose SOME members fire — the
+        //    discrimination signal that lets `top_active_concept` pick the
+        //    right concept without any external rule.
+        let pos_atoms = position_augmented_atoms(atoms);
+        let mut src_seeds: HashMap<String, f32> = HashMap::new();
+        for a in &pos_atoms { src_seeds.insert(a.clone(), 1.0); }
+        // Only one hop for source propagation: chars activate concepts they
+        // are members of, and that's it.  A second hop would let the
+        // char-to-char Hebbian edges (built within a single training pair
+        // by `train_weighted`'s pair-window) amplify long concepts: any
+        // input char with even one matching position would chain through
+        // the long concept's other member chars and reach the concept via
+        // a fan of paths the short concept can't produce.  One hop keeps
+        // the activation proportional to the *fraction* of members in the
+        // input — exactly the discrimination signal we need.
+        let src_active = src_pool.propagate_weighted_sum_no_clamp(
+            &src_seeds, 1, min_activation.min(0.02)
+        );
+        if src_active.is_empty() { return None; }
+
+        // 1b. Take the strongest active concept — pure neural argmax.
+        let chosen_src_concept = top_active_concept(src_pool, &src_active);
+        let src_for_cross: HashMap<String, f32> = match chosen_src_concept {
+            Some(lbl) => {
+                let act = *src_active.get(&lbl).unwrap_or(&0.0);
+                let mut m = HashMap::new();
+                m.insert(lbl, act);
+                m
+            }
+            None => src_active.clone(),
+        };
+
+        // 2. Cross-project to the target pool via the (src, tgt) cross-synapses.
+        let cross = guard.multi_pool.cross_for(src_pool_id, tgt_pool_id)?;
+        let mut tgt_seeds: HashMap<String, f32> = HashMap::new();
+        for (src_label, src_act) in &src_for_cross {
+            for (tgt_label, w) in cross.forward(src_label) {
+                let entry = tgt_seeds.entry(tgt_label).or_insert(0.0);
+                *entry += src_act * w;
+            }
+        }
+        if tgt_seeds.is_empty() { return None; }
+
+        // 2b. Keep only the strongest target *concept* seed.
+        let mut top_concept_seed: Option<(String, f32)> = None;
+        for (lbl, v) in &tgt_seeds {
+            if let Some(&id) = tgt_pool.label_to_id.get(lbl) {
+                if let Some(neuron) = tgt_pool.get_hot(id as usize) {
+                    if !neuron.members.is_empty() {
+                        let cur = top_concept_seed.as_ref().map(|x| x.1).unwrap_or(f32::MIN);
+                        if *v > cur {
+                            top_concept_seed = Some((lbl.clone(), *v));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((lbl, v)) = top_concept_seed {
+            tgt_seeds.clear();
+            tgt_seeds.insert(lbl, v);
         }
 
-        // 3. Propagate within the target pool — this is what lets STDP edges
-        //    walk the chain of co-trained atoms.
-        let tgt_acts = match dir {
-            AssocDirection::InToOut => guard.pool_out.propagate_weighted(&tgt_seeds, hops.max(3), min_activation),
-            AssocDirection::OutToIn => guard.pool_in.propagate_weighted(&tgt_seeds, hops.max(3), min_activation),
-        };
-        if tgt_acts.is_empty() {
-            return None;
-        }
+        // 3. Propagate within the target pool.
+        let tgt_acts = tgt_pool.propagate_weighted_sum_no_clamp(
+            &tgt_seeds, hops.max(3), min_activation
+        );
+        if tgt_acts.is_empty() { return None; }
 
-        // 4. Decode by chain-walk. Concept neurons (composite labels) win
-        //    when they fire above any atom; otherwise pick the activated atom
-        //    with the weakest predecessor-pull (likely sequence start) and
-        //    greedily walk the strongest outgoing STDP edge weighted by
-        //    destination activation.
-        let target_pool = match dir {
-            AssocDirection::InToOut => &guard.pool_out,
-            AssocDirection::OutToIn => &guard.pool_in,
-        };
-
-        // 4a. If a composite/concept fired, walk its members directly.
+        // 4. Decode.
+        // 4a. Concept walk if a composite/concept fired.
         let mut best_concept: Option<(String, f32)> = None;
         for (lbl, act) in &tgt_acts {
-            if !lbl.starts_with("txt:") && !lbl.starts_with("a:") {
-                continue;
-            }
-            // composite labels in this codebase encode multiple atoms in their
-            // payload; treat any label whose composite_constituents returns
-            // more than 1 element as a fired concept.
-            let parts = target_pool.composite_constituents(lbl);
-            if parts.len() >= 2 {
+            let id = match tgt_pool.label_to_id.get(lbl) {
+                Some(&i) => i,
+                None => continue,
+            };
+            let neuron = match tgt_pool.get_hot(id as usize) {
+                Some(n) => n,
+                None => continue,
+            };
+            if neuron.members.len() >= 2 {
                 let entry = best_concept.as_ref().map(|x| x.1).unwrap_or(0.0);
                 if *act > entry {
                     best_concept = Some((lbl.clone(), *act));
@@ -4852,40 +5309,33 @@ impl NeuroRuntime {
             }
         }
         if let Some((lbl, _)) = best_concept {
-            let parts = target_pool.composite_constituents(&lbl);
+            let parts = tgt_pool.composite_constituents(&lbl);
             let chars: String = parts.iter()
-                .filter_map(|p| crate::streaming::label_to_char(p))
+                .filter_map(|p| pos_label_to_char(p))
                 .collect();
             if !chars.is_empty() {
                 return Some(chars);
             }
         }
 
-        // 4b. Chain-walk from the activated atom with the weakest incoming
-        //     pull (most likely sequence start).
+        // 4b. Chain-walk over active atom neurons.
         let active_atom_ids: Vec<(u32, f32)> = tgt_acts.iter()
-            .filter(|(lbl, _)| crate::streaming::label_to_char(lbl).is_some())
+            .filter(|(lbl, _)| pos_label_to_char(lbl).is_some())
             .filter_map(|(lbl, act)| {
-                let id = target_pool.label_to_id.get(lbl).copied()?;
+                let id = tgt_pool.label_to_id.get(lbl).copied()?;
                 Some((id, *act))
             })
             .collect();
-        if active_atom_ids.is_empty() {
-            return None;
-        }
+        if active_atom_ids.is_empty() { return None; }
         let active_set: HashSet<u32> = active_atom_ids.iter().map(|(i, _)| *i).collect();
         let act_lookup: HashMap<u32, f32> = active_atom_ids.iter().copied().collect();
 
-        // Score each active atom by activation - alpha * predecessor_pull.
-        // predecessor_pull = sum over excit synapses INTO this atom whose
-        // source is also in the active set, weighted by source activation.
         let mut start_scores: Vec<(u32, f32)> = Vec::new();
         for (id, act) in &active_atom_ids {
             let mut pred_pull = 0.0f32;
-            // Walk all active atoms and check their excit edges INTO id.
             for (other_id, other_act) in &active_atom_ids {
                 if other_id == id { continue; }
-                if let Some(neuron) = target_pool.get_hot(*other_id as usize) {
+                if let Some(neuron) = tgt_pool.get_hot(*other_id as usize) {
                     for syn in &neuron.excitatory {
                         if syn.target == *id {
                             pred_pull += other_act * syn.weight;
@@ -4898,7 +5348,6 @@ impl NeuroRuntime {
         }
         start_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Greedy walk forward from the chosen start.
         let max_len = 200usize;
         let mut visited: HashSet<u32> = HashSet::new();
         let mut chain: Vec<u32> = Vec::new();
@@ -4908,8 +5357,7 @@ impl NeuroRuntime {
             if visited.contains(&cur) { break; }
             visited.insert(cur);
             chain.push(cur);
-            // pick strongest outgoing excit edge into another active atom.
-            let neuron = match target_pool.get_hot(cur as usize) {
+            let neuron = match tgt_pool.get_hot(cur as usize) {
                 Some(n) => n, None => break,
             };
             let mut best_next: Option<(u32, f32)> = None;
@@ -4929,15 +5377,13 @@ impl NeuroRuntime {
                 None => break,
             }
         }
-        if chain.is_empty() {
-            return None;
-        }
-        // Walk chain ids back to chars.
+        if chain.is_empty() { return None; }
+
         let mut out = String::new();
         for id in &chain {
-            if let Some(neuron) = target_pool.get_hot(*id as usize) {
+            if let Some(neuron) = tgt_pool.get_hot(*id as usize) {
                 if let Some(label) = neuron.label.as_ref() {
-                    if let Some(ch) = crate::streaming::label_to_char(label) {
+                    if let Some(ch) = pos_label_to_char(label) {
                         out.push(ch);
                     }
                 }
@@ -4946,23 +5392,28 @@ impl NeuroRuntime {
         if out.is_empty() { None } else { Some(out) }
     }
 
-    /// Snapshot a summary of the two-pool state — sizes, top concepts, etc.
-    /// Used by /two_pool/stats to verify training.
+    /// Snapshot a summary of the multi-pool state — per-pool sizes plus
+    /// total cross-synapse edges across every pool pair.  Used by
+    /// /two_pool/stats and /multi_pool/stats to verify training.
     pub fn two_pool_stats(&self) -> serde_json::Value {
         let guard = self.inner.lock();
-        serde_json::json!({
-            "pool_in": {
-                "neurons":   guard.pool_in.label_to_id.len(),
-                "sequences": guard.pool_in.sequences.len(),
-            },
-            "pool_out": {
-                "neurons":   guard.pool_out.label_to_id.len(),
-                "sequences": guard.pool_out.sequences.len(),
-            },
-            "cross_pool": {
-                "weights":   guard.cross_pool.len(),
+        let mut pools = serde_json::Map::new();
+        for id in guard.multi_pool.pool_ids() {
+            if let Some(p) = guard.multi_pool.pool(&id) {
+                pools.insert(id, serde_json::json!({
+                    "neurons":   p.label_to_id.len(),
+                    "sequences": p.sequences.len(),
+                }));
             }
+        }
+        serde_json::json!({
+            "pools":           serde_json::Value::Object(pools),
+            "cross_edges":     guard.multi_pool.cross_total_edges(),
         })
+    }
+
+    pub fn multi_pool_stats(&self) -> serde_json::Value {
+        self.two_pool_stats()
     }
 
     // ── Resolution-aware activation + concept promotion ──────────────────────

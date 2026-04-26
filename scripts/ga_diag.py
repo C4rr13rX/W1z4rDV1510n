@@ -42,31 +42,55 @@ def run():
 
     qhops = g['query_hops']
     qmin  = g['query_min_activation']
+    p_maxacc = bool(g.get('prop_max_accum', False))
+    p_noclmp = bool(g.get('prop_no_clamp', False))
+    src_arg  = bool(g.get('src_concept_argmax', False))
+    tgt_arg  = bool(g.get('tgt_concept_argmax', False))
+    no_clamp = bool(g.get('cross_seed_no_clamp', False))
+    print(f"\nQuery toggles: prop_max_accum={p_maxacc} src_argmax={src_arg} "
+          f"tgt_argmax={tgt_arg} cross_seed_no_clamp={no_clamp}")
 
     for i, (q, a) in enumerate(pairs):
         # Manually replay query() to inspect intermediates.
         atoms = text_to_atoms(q)
         src_seeds = {at: 1.0 for at in atoms}
-        src_active = tp.pool_in.propagate_weighted(src_seeds, 2,
-                                                   min(qmin, 0.02))
+        src_active = tp.pool_in.propagate_weighted(
+            src_seeds, 2, min(qmin, 0.02),
+            prop_no_clamp=p_noclmp, prop_max_accum=p_maxacc)
         # Top-5 src_active labels by activation
         sorted_src = sorted(src_active.items(), key=lambda x: -x[1])[:5]
         src_concepts = [(l, v) for l, v in src_active.items()
                         if l.startswith("concept::")]
 
-        # cross-project (no clamp, no argmax — see raw signal)
+        # cross-project — apply src argmax if enabled
+        src_for_cross = src_active
+        if src_arg:
+            cs = {l: v for l, v in src_active.items()
+                  if l.startswith("concept::")}
+            if cs:
+                top = max(cs, key=cs.get)
+                src_for_cross = {top: cs[top]}
         tgt_seeds = {}
-        for src_lbl, src_act in src_active.items():
+        for src_lbl, src_act in src_for_cross.items():
             for tgt_lbl, w in tp.cross.forward(src_lbl):
-                tgt_seeds[tgt_lbl] = min(1.0,
-                    tgt_seeds.get(tgt_lbl, 0.0) + src_act * w)
+                accum = tgt_seeds.get(tgt_lbl, 0.0) + src_act * w
+                if not no_clamp:
+                    accum = min(1.0, accum)
+                tgt_seeds[tgt_lbl] = accum
         tgt_concept_seeds = sorted(
             [(l, v) for l, v in tgt_seeds.items() if l.startswith("concept::")],
             key=lambda x: -x[1])[:3]
+        if tgt_arg:
+            cs = {l: v for l, v in tgt_seeds.items()
+                  if l.startswith("concept::")}
+            if cs:
+                top = max(cs, key=cs.get)
+                tgt_seeds = {top: cs[top]}
 
         # propagate within target
         tgt_acts = tp.pool_out.propagate_weighted(
-            tgt_seeds, max(qhops, 3), qmin)
+            tgt_seeds, max(qhops, 3), qmin,
+            prop_no_clamp=p_noclmp, prop_max_accum=p_maxacc)
         # Find concept fires
         tgt_concept_acts = sorted(
             [(l, v) for l, v in (tgt_acts or {}).items()
@@ -88,8 +112,14 @@ def run():
                             if _label_to_char(p) is not None)
             pred_concept = chars
 
-        # Run the actual query method (concept-only off, no_clamp off)
-        pred_actual = tp.query(text_to_atoms(q), "fwd", qhops, qmin) or ""
+        # Run the actual query method with all toggles from genome.
+        pred_actual = tp.query(
+            text_to_atoms(q), "fwd", qhops, qmin,
+            cross_seed_no_clamp=no_clamp,
+            src_concept_argmax=src_arg,
+            tgt_concept_argmax=tgt_arg,
+            prop_no_clamp=p_noclmp,
+            prop_max_accum=p_maxacc) or ""
 
         print(f"\n=== pair {i} ===")
         print(f"  q[:40] = {q[:40]!r}")

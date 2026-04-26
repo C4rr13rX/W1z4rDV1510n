@@ -13,7 +13,6 @@ use crate::streaming::hierarchical_motifs::HierarchicalMotifConfig;
 use crate::streaming::motif_label_bridge::MotifLabelBridgeConfig;
 use crate::streaming::organic_encoder::OrganicEncoderConfig;
 use crate::streaming::sensor_registry::SensorRegistryConfig;
-use crate::streaming::qa_runtime::QaRuntimeConfig;
 use crate::streaming::fabric_trainer::FabricTrainerConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1479,8 +1478,6 @@ pub struct StreamingConfig {
     #[serde(default)]
     pub motif_label_bridge: MotifLabelBridgeConfig,
     #[serde(default)]
-    pub qa_runtime: QaRuntimeConfig,
-    #[serde(default)]
     pub fabric_trainer: FabricTrainerConfig,
 }
 
@@ -1519,7 +1516,6 @@ impl Default for StreamingConfig {
             dynamic_pools: DynamicPoolConfig::default(),
             sensor_registry: SensorRegistryConfig::default(),
             motif_label_bridge: MotifLabelBridgeConfig::default(),
-            qa_runtime: QaRuntimeConfig::default(),
             fabric_trainer: FabricTrainerConfig::default(),
         }
     }

@@ -977,6 +977,24 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/two_pool/train_pair", post(two_pool_train_pair))
         .route("/two_pool/ask",        post(two_pool_ask))
         .route("/two_pool/stats",      get(two_pool_stats))
+        // ── N-pool fabric: any pool can be paired with any other pool ──
+        // POST /multi_pool/register   — { "pool_id": "color" }
+        // POST /multi_pool/train_pair — { "src_pool": "lang", "src": "hello",
+        //                                  "tgt_pool": "ans",  "tgt": "hi",
+        //                                  "passes": 30, "lr": 0.5 }
+        // POST /multi_pool/train_fanout — { "src_pool": "lang", "src": "hello",
+        //                                    "targets": [{ "tgt_pool": "ans", "tgt": "hi" },
+        //                                                { "tgt_pool": "emo", "tgt": "warm" }],
+        //                                    "passes": 30, "lr": 0.5 }
+        // POST /multi_pool/ask        — { "src_pool": "lang", "text": "hello",
+        //                                  "hops": 3, "min_strength": 0.05 }
+        //                                returns { "predictions": { "ans": "hi", "emo": "warm" } }
+        // GET  /multi_pool/stats      — per-pool sizes + total cross-edges
+        .route("/multi_pool/register",      post(multi_pool_register))
+        .route("/multi_pool/train_pair",    post(multi_pool_train_pair))
+        .route("/multi_pool/train_fanout",  post(multi_pool_train_fanout))
+        .route("/multi_pool/ask",           post(multi_pool_ask))
+        .route("/multi_pool/stats",         get(multi_pool_stats))
         // ── Hypothesis queue ──────────────────────────────────────────────────
         // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
         .route("/hypothesis/queue",     get(hypothesis_queue_list))
@@ -5154,6 +5172,160 @@ async fn two_pool_stats(
     (StatusCode::OK, Json(state.neuro.two_pool_stats()))
 }
 
+// ── Multi-pool (N-pool) fabric handlers ──────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct MultiPoolRegisterReq {
+    pool_id: String,
+}
+
+/// POST /multi_pool/register — register a new pool by name (idempotent).
+async fn multi_pool_register(
+    State(state): State<ApiState>,
+    Json(req): Json<MultiPoolRegisterReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.pool_id.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "pool_id must not be empty" })));
+    }
+    state.neuro.multi_pool_register(&req.pool_id);
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "pool_id": req.pool_id })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiPoolTrainPairReq {
+    src_pool: String,
+    src:      String,
+    tgt_pool: String,
+    tgt:      String,
+    #[serde(default = "default_two_pool_passes")]
+    passes:   usize,
+    #[serde(default = "default_two_pool_lr")]
+    lr:       f32,
+}
+
+/// POST /multi_pool/train_pair — train (src_atoms, tgt_atoms) across two
+/// named pools.  Symmetric — query in either direction recalls the other.
+async fn multi_pool_train_pair(
+    State(state): State<ApiState>,
+    Json(req): Json<MultiPoolTrainPairReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.src.trim().is_empty() || req.tgt.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "src and tgt must not be empty" })));
+    }
+    let neuro = state.neuro.clone();
+    let src_atoms: Vec<String> = req.src.chars().map(char_label).collect();
+    let tgt_atoms: Vec<String> = req.tgt.chars().map(char_label).collect();
+    let passes = req.passes.max(1);
+    let lr = req.lr;
+    let src_pool = req.src_pool.clone();
+    let tgt_pool = req.tgt_pool.clone();
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..passes {
+            neuro.multi_pool_train_pair(&src_pool, &src_atoms, &tgt_pool, &tgt_atoms, lr);
+        }
+    }).await.ok();
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "ok",
+        "passes": passes,
+        "stats":  state.neuro.multi_pool_stats(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiPoolTargetReq {
+    tgt_pool: String,
+    tgt:      String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiPoolTrainFanoutReq {
+    src_pool: String,
+    src:      String,
+    targets:  Vec<MultiPoolTargetReq>,
+    #[serde(default = "default_two_pool_passes")]
+    passes:   usize,
+    #[serde(default = "default_two_pool_lr")]
+    lr:       f32,
+}
+
+/// POST /multi_pool/train_fanout — train one source pool against many target
+/// pools simultaneously.  Reset/promote the source once per pass; pair with
+/// every target in turn.  Useful when a single input has multiple labelled
+/// "answer surfaces" (color + category, motion + caption, etc.).
+async fn multi_pool_train_fanout(
+    State(state): State<ApiState>,
+    Json(req): Json<MultiPoolTrainFanoutReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.src.trim().is_empty() || req.targets.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "src and at least one target required" })));
+    }
+    let neuro = state.neuro.clone();
+    let src_atoms: Vec<String> = req.src.chars().map(char_label).collect();
+    let targets: Vec<(String, Vec<String>)> = req.targets.into_iter()
+        .filter(|t| !t.tgt.trim().is_empty())
+        .map(|t| (t.tgt_pool, t.tgt.chars().map(char_label).collect()))
+        .collect();
+    let passes = req.passes.max(1);
+    let lr = req.lr;
+    let src_pool = req.src_pool.clone();
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..passes {
+            neuro.multi_pool_train_fanout(&src_pool, &src_atoms, &targets, lr);
+        }
+    }).await.ok();
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "ok",
+        "passes": passes,
+        "stats":  state.neuro.multi_pool_stats(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiPoolAskReq {
+    src_pool: String,
+    text:     String,
+    #[serde(default = "default_two_pool_hops")]
+    hops:     usize,
+    #[serde(default = "default_two_pool_min_strength")]
+    min_strength: f32,
+}
+
+/// POST /multi_pool/ask — send `text` into `src_pool` and return each
+/// connected target pool's decoded prediction.  Every pool registered in
+/// the fabric (other than `src_pool`) gets a chance to fire.
+async fn multi_pool_ask(
+    State(state): State<ApiState>,
+    Json(req): Json<MultiPoolAskReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "text must not be empty" })));
+    }
+    let neuro = state.neuro.clone();
+    let atoms: Vec<String> = req.text.chars().map(char_label).collect();
+    let hops = req.hops;
+    let min_s = req.min_strength;
+    let src_pool = req.src_pool.clone();
+    let predictions = tokio::task::spawn_blocking(move || {
+        neuro.multi_pool_query(&src_pool, &atoms, hops, min_s)
+    }).await.ok().unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::json!({
+        "src_pool":    req.src_pool,
+        "input":       req.text,
+        "predictions": predictions,
+    })))
+}
+
+/// GET /multi_pool/stats — per-pool sizes + total cross-edges.
+async fn multi_pool_stats(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(state.neuro.multi_pool_stats()))
+}
+
 /// POST /neuro/ask  (also POST /chat)
 ///
 /// Character-chain decoder under the raw-data-bit architecture. See
@@ -5180,13 +5352,35 @@ async fn neuro_ask(
     let session_id         = req.session_id.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        // ── Raw-codepoint character-chain decoder ───────────────────────────
-        // Under the raw-data-bit architecture, every neuron label is
-        // `txt:<base64url(codepoint)>` — no predefined word/punct/role
-        // categories. The decoder walks the Hebbian chain one codepoint at
-        // a time: seed from the question's character atoms, propagate one
-        // hop, pick the highest-activation next codepoint atom, append,
-        // repeat.
+        // ── First layer: multi-pool associative recall ──────────────────────
+        // The N-pool fabric is the canonical paired-association substrate.
+        // /chat sends the question into the "in" pool and reads back every
+        // connected pool's prediction.  When "out" returns a non-empty
+        // answer, that's the bidirectional associative recall.  Other pools
+        // (emo, equation, motion, etc.) ride along automatically — every
+        // pool fires from a single input.
+        let atoms: Vec<String> = text.chars().map(char_label).collect();
+        let predictions = neuro.multi_pool_query(
+            "in", &atoms, hops.max(2), min_str.max(0.001),
+        );
+        if let Some(answer) = predictions.get("out").cloned() {
+            if !answer.is_empty() {
+                return serde_json::json!({
+                    "question":     text,
+                    "answer":       answer,
+                    "decoder":      "multi_pool",
+                    "predictions":  predictions,
+                    "hops":         hops,
+                    "min_strength": min_str,
+                    "session_id":   session_id,
+                });
+            }
+        }
+
+        // ── Fallback: raw-codepoint character-chain decoder ────────────────
+        // When multi-pool has nothing to say (cold pool, OOD input the
+        // associative substrate can't bridge), fall back to the slow
+        // pool's char-chain walk.
         let char_chain = decode_char_chain(
             &neuro,
             &text,
@@ -5196,23 +5390,21 @@ async fn neuro_ask(
         );
         if let Some(answer) = char_chain {
             return serde_json::json!({
-                "question":        text,
-                "answer":          answer,
-                "decoder":         "char_chain",
-                "hops":            hops,
-                "min_strength":    min_str,
-                "session_id":      session_id,
+                "question":     text,
+                "answer":       answer,
+                "decoder":      "char_chain",
+                "predictions":  predictions,
+                "hops":         hops,
+                "min_strength": min_str,
+                "session_id":   session_id,
             });
         }
-        // Empty chain — the fabric had no reachable next-character edges.
-        // Return an explicit null answer rather than falling through to the
-        // legacy word-level decoder (which expects predefined labels that
-        // no longer exist under the raw-codepoint scheme).
         return serde_json::json!({
             "question":     text,
             "answer":       serde_json::Value::Null,
             "decoder":      "char_chain",
             "reason":       "no-chain",
+            "predictions":  predictions,
             "hops":         hops,
             "min_strength": min_str,
             "session_id":   session_id,

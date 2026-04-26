@@ -74,38 +74,44 @@ def main():
     if not args.skip_train:
         t0 = time.time()
         for i, (q, a) in enumerate(CONVERSATIONS, 1):
-            payload = {"input": q, "output": a, "passes": args.passes, "lr": args.lr}
+            payload = {
+                "src_pool": "in",  "src": q,
+                "tgt_pool": "out", "tgt": a,
+                "passes": args.passes, "lr": args.lr,
+            }
             try:
-                resp = _post(f"{args.node}/two_pool/train_pair", payload, timeout=60)
-                stats = resp.get("stats", {})
+                resp = _post(f"{args.node}/multi_pool/train_pair", payload, timeout=60)
+                stats = resp.get("stats", {}).get("pools", {})
                 print(f"[{i:2d}/{len(CONVERSATIONS)}] {q!r} -> {a[:40]!r}  "
-                      f"in={stats.get('pool_in', {}).get('neurons', 0)} "
-                      f"out={stats.get('pool_out', {}).get('neurons', 0)} "
-                      f"x={stats.get('cross_pool', {}).get('weights', 0)}")
+                      f"in={stats.get('in', {}).get('neurons', 0)} "
+                      f"out={stats.get('out', {}).get('neurons', 0)} "
+                      f"x={resp.get('stats', {}).get('cross_edges', 0)}")
                 sys.stdout.flush()
             except Exception as exc:
                 print(f"  FAILED: {exc}", file=sys.stderr)
         dt = time.time() - t0
         print(f"\nTraining done in {dt:.1f}s")
 
-    # Forward test
-    print("\n=== Forward (in -> out) ===")
+    # Forward test (in -> all other pools)
+    print("\n=== Forward (in -> {out, ...}) ===")
     for q, expected in CONVERSATIONS:
         try:
-            resp = _post(f"{args.node}/two_pool/ask",
-                {"text": q, "direction": "in_to_out"}, timeout=15)
-            ans = resp.get("answer") or "(none)"
+            resp = _post(f"{args.node}/multi_pool/ask",
+                {"src_pool": "in", "text": q}, timeout=15)
+            preds = resp.get("predictions") or {}
+            ans = preds.get("out", "(none)")
             print(f"  {q!r:30s} -> {ans!r}")
         except Exception as exc:
             print(f"  {q!r:30s} -> ERROR: {exc}")
 
-    # Reverse test
-    print("\n=== Reverse (out -> in) ===")
+    # Reverse test (out -> all other pools)
+    print("\n=== Reverse (out -> {in, ...}) ===")
     for q, a in CONVERSATIONS:
         try:
-            resp = _post(f"{args.node}/two_pool/ask",
-                {"text": a, "direction": "out_to_in"}, timeout=15)
-            ans = resp.get("answer") or "(none)"
+            resp = _post(f"{args.node}/multi_pool/ask",
+                {"src_pool": "out", "text": a}, timeout=15)
+            preds = resp.get("predictions") or {}
+            ans = preds.get("in", "(none)")
             print(f"  {a[:30]!r:32s} -> {ans!r}")
         except Exception as exc:
             print(f"  {a[:30]!r:32s} -> ERROR: {exc}")

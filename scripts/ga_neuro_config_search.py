@@ -47,11 +47,75 @@ stagnant for 4 gens, random-restart slot when stuck.
 """
 from __future__ import annotations
 import math
+import os
 import random
 import string
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+
+
+# ─── Politeness: stay out of the way of other processes ────────────────────
+# After a system lockup we want to be a good neighbor.  Lower this process
+# priority on Windows (so other apps preempt easily) and keep a single thread.
+# An adaptive yield reads system CPU pressure each generation and inserts a
+# small sleep when load is high — backs off automatically, scales back up
+# when the box is idle.
+_HAS_PSUTIL = False
+try:
+    import psutil  # type: ignore
+    _HAS_PSUTIL = True
+except Exception:
+    psutil = None  # type: ignore
+
+
+def be_polite():
+    """Lower process priority on Windows; cap thread libs to 1 thread.
+    Also pin PYTHONHASHSEED=0 so set iteration order is reproducible across
+    runs (otherwise the cross.pair() iteration order in train_pair varies
+    and A/B baselines drift between invocations)."""
+    # Single-thread numeric libs (we don't import numpy here, but harmless).
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            BELOW_NORMAL = 0x00004000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetCurrentProcess()
+            kernel32.SetPriorityClass(handle, BELOW_NORMAL)
+            print("[polite] process priority lowered to BELOW_NORMAL",
+                  flush=True)
+        except Exception as e:
+            print(f"[polite] could not lower priority: {e}", flush=True)
+    else:
+        try:
+            os.nice(10)
+            print("[polite] os.nice(10) applied", flush=True)
+        except Exception as e:
+            print(f"[polite] could not nice: {e}", flush=True)
+
+
+def adaptive_yield():
+    """Sleep proportionally to system CPU load — 0 when idle, up to ~0.2s
+    when load is high.  Called between GA generations and between A/B
+    configs so other processes can grab the CPU."""
+    if not _HAS_PSUTIL:
+        time.sleep(0.05)  # tiny unconditional yield
+        return
+    try:
+        # Non-blocking sample (uses last delta).  Other processes' cpu pct
+        # = total - our pct.  We don't have a clean view, so use total load
+        # as proxy.  When >70% busy, sleep more.
+        load = psutil.cpu_percent(interval=None) / 100.0
+        # Map [0..1] to [0.02 .. 0.4]s.  At low load this is a courtesy
+        # blink; at high load we actively step back.
+        delay = 0.02 + 0.38 * max(0.0, min(1.0, load))
+        time.sleep(delay)
+    except Exception:
+        time.sleep(0.05)
 
 
 # ──────────────────────────────────────────────────────── Faithful Rust port
@@ -286,7 +350,8 @@ class NeuronPool:
                     self.neurons[mid].activation *= inhib_scale
 
     # ── Propagate ────────────────────────────────────────────────────────
-    def propagate_weighted(self, seed_activations, hops, min_activation):
+    def propagate_weighted(self, seed_activations, hops, min_activation,
+                           prop_no_clamp=False, prop_max_accum=False):
         n = len(self.neurons)
         if n == 0: return {}
         k_active = (max(int(self.cfg.sdr_sparsity * n), self.cfg.sdr_k_min)
@@ -295,7 +360,8 @@ class NeuronPool:
         for label, init in seed_activations.items():
             nid = self.label_to_id.get(label)
             if nid is not None:
-                activation[nid] = max(0.0, min(1.0, init))
+                activation[nid] = max(0.0, init if prop_no_clamp
+                                            else min(1.0, init))
         nxt = [0.0] * n
         for _ in range(hops):
             for i in range(n):
@@ -306,7 +372,13 @@ class NeuronPool:
                 if neuron.excit:
                     fan_out = max(1.0, math.sqrt(len(neuron.excit)))
                     for tgt, w in neuron.excit.items():
-                        nxt[tgt] = min(1.0, nxt[tgt] + src_act * w * 0.5 / fan_out)
+                        delta = src_act * w * 0.5 / fan_out
+                        if prop_max_accum:
+                            if delta > nxt[tgt]: nxt[tgt] = delta
+                        elif prop_no_clamp:
+                            nxt[tgt] = nxt[tgt] + delta
+                        else:
+                            nxt[tgt] = min(1.0, nxt[tgt] + delta)
                 if neuron.inhib:
                     for tgt, w in neuron.inhib.items():
                         nxt[tgt] = max(0.0, nxt[tgt] - src_act * abs(w) * 0.3)
@@ -399,8 +471,19 @@ class TwoPool:
         self.cross    = CrossPoolSynapses()
 
     def train_pair(self, in_atoms, out_atoms, lr,
-                   use_full_sequence=False, concept_only_cross=False):
+                   use_full_sequence=False, concept_only_cross=False,
+                   reset_activations_per_pair=False):
         if not in_atoms or not out_atoms: return
+        # Clear activations from any prior pair so cross.pair() doesn't
+        # see concepts left over from previous training rounds (which
+        # otherwise saturates every concept↔concept cross-edge to max_w).
+        if reset_activations_per_pair:
+            for n in self.pool_in.neurons:
+                n.activation = 0.0
+                n.trace = 0.0
+            for n in self.pool_out.neurons:
+                n.activation = 0.0
+                n.trace = 0.0
         self.pool_in.train_weighted(in_atoms, 1.0, False)
         self.pool_out.train_weighted(out_atoms, 1.0, False)
         if use_full_sequence:
@@ -425,25 +508,93 @@ class TwoPool:
 
     def query(self, atoms, direction, hops, min_activation,
               cross_seed_no_clamp=False, src_concept_argmax=False,
-              tgt_concept_argmax=False):
+              tgt_concept_argmax=False, prop_no_clamp=False,
+              prop_max_accum=False, src_concept_overlap=False,
+              tgt_concept_overlap=False, src_concept_lev=False,
+              src_concept_tfidf=False):
         if not atoms: return None
         src_pool = self.pool_in if direction == "fwd" else self.pool_out
         tgt_pool = self.pool_out if direction == "fwd" else self.pool_in
+        atom_set = set(atoms)
 
         # 1. Seed source, 2-hop within-source propagate.
         src_seeds = {a: 1.0 for a in atoms}
-        src_active = src_pool.propagate_weighted(src_seeds, 2,
-                                                 min(min_activation, 0.02))
+        src_active = src_pool.propagate_weighted(
+            src_seeds, 2, min(min_activation, 0.02),
+            prop_no_clamp=prop_no_clamp, prop_max_accum=prop_max_accum)
         if not src_active: return None
 
-        # 1b. Argmax over source concept neurons — forces a hard winner so
-        # cross-projection isn't blurred by every concept that shares chars.
-        if src_concept_argmax:
+        # 1b. Pick the source concept that best matches the input.
+        # Strategies (priority: lev > tfidf > overlap > argmax):
+        #   src_concept_lev:    lev_sim of atom sequence vs concept members
+        #                       — handles paraphrase inputs (single-char diffs)
+        #   src_concept_tfidf:  weight each member-overlap by 1/concept_freq
+        #                       — handles inputs with mostly-shared chars
+        #   src_concept_overlap: |members ∩ atom_set| / |members| — fast
+        #   src_concept_argmax: most-active concept after propagation
+        chose_concept = None
+        if src_concept_lev:
+            best, best_score = None, -1.0
+            for lbl in list(src_active.keys()):
+                if not lbl.startswith("concept::"): continue
+                cid = src_pool.label_to_id.get(lbl)
+                if cid is None: continue
+                members = src_pool.neurons[cid].members
+                if not members: continue
+                # Reconstruct ordered atom-label sequence of the concept.
+                mseq = [src_pool.neurons[m].label for m in members]
+                score = _seq_sim(atoms, mseq)
+                if score > best_score:
+                    best_score, best = score, lbl
+            chose_concept = best
+        elif src_concept_tfidf:
+            # Compute concept frequency per atom over the candidate set.
+            candidates = [(l, src_pool.label_to_id.get(l))
+                          for l in src_active.keys()
+                          if l.startswith("concept::")]
+            candidates = [(l, cid) for l, cid in candidates
+                          if cid is not None
+                          and src_pool.neurons[cid].members]
+            atom_concept_freq = {}
+            for _, cid in candidates:
+                ms = {src_pool.neurons[m].label
+                      for m in src_pool.neurons[cid].members}
+                for a in ms:
+                    atom_concept_freq[a] = atom_concept_freq.get(a, 0) + 1
+            best, best_score = None, -1.0
+            for lbl, cid in candidates:
+                members = src_pool.neurons[cid].members
+                score = 0.0
+                for m in members:
+                    ml = src_pool.neurons[m].label
+                    if ml in atom_set:
+                        f = atom_concept_freq.get(ml, 1)
+                        score += 1.0 / f
+                score /= max(1, len(members))
+                if score > best_score:
+                    best_score, best = score, lbl
+            chose_concept = best
+        elif src_concept_overlap:
+            best, best_score = None, -1.0
+            for lbl in list(src_active.keys()):
+                if not lbl.startswith("concept::"): continue
+                cid = src_pool.label_to_id.get(lbl)
+                if cid is None: continue
+                members = src_pool.neurons[cid].members
+                if not members: continue
+                hits = sum(1 for m in members
+                           if src_pool.neurons[m].label in atom_set)
+                score = hits / len(members)
+                if score > best_score:
+                    best_score, best = score, lbl
+            chose_concept = best
+        elif src_concept_argmax:
             concepts = {l: a for l, a in src_active.items()
                         if l.startswith("concept::")}
             if concepts:
-                top_lbl = max(concepts, key=concepts.get)
-                src_active = {top_lbl: concepts[top_lbl]}
+                chose_concept = max(concepts, key=concepts.get)
+        if chose_concept is not None and chose_concept in src_active:
+            src_active = {chose_concept: src_active[chose_concept]}
 
         # 2. Cross-project.
         tgt_seeds = {}
@@ -464,8 +615,10 @@ class TwoPool:
                 for k in tgt_seeds:
                     tgt_seeds[k] /= mx
 
-        # 2b. Argmax over target concept seeds — keep only the strongest
-        # concept seed; suppresses cross-talk from sibling concepts.
+        # 2b. Pick a single target concept seed.  tgt_concept_overlap is
+        # only meaningful for queries where the *answer* atoms are known,
+        # which they aren't at query time — so we just fall through to
+        # the activation-based argmax (or do nothing).
         if tgt_concept_argmax:
             concept_seeds = {l: v for l, v in tgt_seeds.items()
                              if l.startswith("concept::")}
@@ -474,8 +627,9 @@ class TwoPool:
                 tgt_seeds = {top_lbl: concept_seeds[top_lbl]}
 
         # 3. Propagate within target.
-        tgt_acts = tgt_pool.propagate_weighted(tgt_seeds, max(hops, 3),
-                                               min_activation)
+        tgt_acts = tgt_pool.propagate_weighted(
+            tgt_seeds, max(hops, 3), min_activation,
+            prop_no_clamp=prop_no_clamp, prop_max_accum=prop_max_accum)
         if not tgt_acts: return None
 
         # 4a. Concept walk if a composite fired.
@@ -543,6 +697,24 @@ def _label_to_char(label):
     if not label.startswith("a:"): return None
     rest = label[2:]
     return rest if len(rest) == 1 else None
+
+
+def _seq_sim(a_seq, b_seq):
+    """Levenshtein similarity over two label sequences.  Uses len-cap so
+    that very long sequences don't blow up cost (capped at 200 atoms)."""
+    if not a_seq and not b_seq: return 1.0
+    if not a_seq or not b_seq:  return 0.0
+    a = a_seq[:200]; b = b_seq[:200]
+    la, lb = len(a), len(b)
+    dp = list(range(lb + 1))
+    for i in range(1, la + 1):
+        prev = dp[0]; dp[0] = i
+        for j in range(1, lb + 1):
+            cur = dp[j]
+            cost = 0 if a[i-1] == b[j-1] else 1
+            dp[j] = min(dp[j]+1, dp[j-1]+1, prev+cost)
+            prev = cur
+    return 1.0 - dp[lb] / max(la, lb)
 
 
 def text_to_atoms(text):
@@ -621,16 +793,23 @@ def evaluate(genome, pairs):
     passes   = genome['passes']
     use_seq  = bool(genome.get('use_full_sequence', False))
     cpc_only = bool(genome.get('concept_only_cross', False))
+    reset_pp = bool(genome.get('reset_activations_per_pair', False))
     no_clamp = bool(genome.get('cross_seed_no_clamp', False))
     src_arg  = bool(genome.get('src_concept_argmax', False))
     tgt_arg  = bool(genome.get('tgt_concept_argmax', False))
+    p_noclmp = bool(genome.get('prop_no_clamp', False))
+    p_maxacc = bool(genome.get('prop_max_accum', False))
+    src_ovlp = bool(genome.get('src_concept_overlap', False))
+    src_lev  = bool(genome.get('src_concept_lev', False))
+    src_tfidf= bool(genome.get('src_concept_tfidf', False))
     for q, a in pairs:
         in_atoms  = text_to_atoms(q)
         out_atoms = text_to_atoms(a)
-        for _ in range(passes):
+        for pi in range(passes):
             tp.train_pair(in_atoms, out_atoms, train_lr,
                           use_full_sequence=use_seq,
-                          concept_only_cross=cpc_only)
+                          concept_only_cross=cpc_only,
+                          reset_activations_per_pair=(reset_pp and pi == 0))
 
     fwd_scores, rev_scores = [], []
     exact_fwd = 0; exact_rev = 0
@@ -640,11 +819,21 @@ def evaluate(genome, pairs):
         pf = tp.query(text_to_atoms(q), "fwd", qhops, qmin,
                       cross_seed_no_clamp=no_clamp,
                       src_concept_argmax=src_arg,
-                      tgt_concept_argmax=tgt_arg) or ""
+                      tgt_concept_argmax=tgt_arg,
+                      prop_no_clamp=p_noclmp,
+                      prop_max_accum=p_maxacc,
+                      src_concept_overlap=src_ovlp,
+                      src_concept_lev=src_lev,
+                      src_concept_tfidf=src_tfidf) or ""
         pr = tp.query(text_to_atoms(a), "rev", qhops, qmin,
                       cross_seed_no_clamp=no_clamp,
                       src_concept_argmax=src_arg,
-                      tgt_concept_argmax=tgt_arg) or ""
+                      tgt_concept_argmax=tgt_arg,
+                      prop_no_clamp=p_noclmp,
+                      prop_max_accum=p_maxacc,
+                      src_concept_overlap=src_ovlp,
+                      src_concept_lev=src_lev,
+                      src_concept_tfidf=src_tfidf) or ""
         fwd_scores.append(lev_sim(pf, a))
         rev_scores.append(lev_sim(pr, q))
         if pf == a: exact_fwd += 1
@@ -696,6 +885,12 @@ PARAM_SPACE = {
     'cross_seed_no_clamp':              ('bool',  0, 1),
     'src_concept_argmax':               ('bool',  0, 1),
     'tgt_concept_argmax':               ('bool',  0, 1),
+    'prop_no_clamp':                    ('bool',  0, 1),
+    'prop_max_accum':                   ('bool',  0, 1),
+    'reset_activations_per_pair':       ('bool',  0, 1),
+    'src_concept_overlap':              ('bool',  0, 1),
+    'src_concept_lev':                  ('bool',  0, 1),
+    'src_concept_tfidf':                ('bool',  0, 1),
 }
 
 # Seed: defaults from NeuroConfig + sensible runtime args.
@@ -712,6 +907,11 @@ DEFAULT_GENOME = {
     'train_lr': 0.5, 'passes': 30, 'query_hops': 4, 'query_min_activation': 0.05,
     'use_full_sequence': 1, 'concept_only_cross': 1, 'cross_seed_no_clamp': 0,
     'src_concept_argmax': 1, 'tgt_concept_argmax': 1,
+    'prop_no_clamp': 0, 'prop_max_accum': 1,
+    'reset_activations_per_pair': 1,
+    'src_concept_overlap': 0,
+    'src_concept_lev': 1,
+    'src_concept_tfidf': 0,
 }
 
 
@@ -805,10 +1005,14 @@ def adaptive_ga(pairs, pop_size=8, max_gens=20, target=0.999, seed=1):
             a, b = rng.sample(elites, 2)
             children.append(mutate(crossover(a, b, rng), ms, rng))
         pop = children
+        # Polite yield between generations — sleeps longer when system
+        # is busy so other apps stay responsive; near-zero when idle.
+        adaptive_yield()
     return best_ever
 
 
 def main():
+    be_polite()
     print("=" * 80)
     print("GA over actual NeuroConfig knobs (faithful Python port of Rust two_pool)")
     print("=" * 80)
@@ -819,30 +1023,36 @@ def main():
     pin = [len(q) for q,_ in probe]; pout = [len(a) for _,a in probe]
     print(f"Corpus: {len(probe)} pairs.  in {min(pin)}..{max(pin)}  "
           f"out {min(pout)}..{max(pout)}")
-    print(f"{'config':<40} {'combined':>9} {'fwd':>6} "
+    print(f"{'config':<48} {'combined':>9} {'fwd':>6} "
           f"{'rev':>6} {'exact':>10} {'t':>4}")
-    # (label, use_seq, cpc, no_clamp, src_arg, tgt_arg)
+    # (label, use_seq, cpc, no_clamp, src_arg, tgt_arg, p_noclmp, p_maxacc, reset_pp, src_ovlp)
     configs = [
-        ("CURRENT (chars only)",             0, 0, 0, 0, 0),
-        ("+ promote_full_sequence",          1, 0, 0, 0, 0),
-        ("+ concept_only_cross",             1, 1, 0, 0, 0),
-        ("+ src_concept_argmax",             1, 1, 0, 1, 0),
-        ("+ tgt_concept_argmax",             1, 1, 0, 0, 1),
-        ("+ src+tgt argmax",                 1, 1, 0, 1, 1),
-        ("+ src+tgt argmax + no_clamp",      1, 1, 1, 1, 1),
+        ("CURRENT (chars only)",                       0, 0, 0, 0, 0, 0, 0, 0, 0),
+        ("+ promote_full_sequence",                    1, 0, 0, 0, 0, 0, 0, 0, 0),
+        ("+ reset + argmax + max_accum",               1, 1, 0, 1, 1, 0, 1, 1, 0),
+        ("+ src_concept_overlap (replaces argmax)",    1, 1, 0, 0, 0, 0, 0, 1, 1),
+        ("+ overlap + max_accum + tgt_argmax",         1, 1, 0, 0, 1, 0, 1, 1, 1),
+        ("+ overlap + sum + tgt_argmax",               1, 1, 0, 0, 1, 1, 0, 1, 1),
+        ("+ overlap + sum + tgt_argmax + no_clamp",    1, 1, 1, 0, 1, 1, 0, 1, 1),
     ]
-    for label, use_seq, cpc, no_clamp, src_arg, tgt_arg in configs:
+    for (label, use_seq, cpc, no_clamp, src_arg, tgt_arg,
+         p_noclmp, p_maxacc, reset_pp, src_ovlp) in configs:
         g = dict(DEFAULT_GENOME)
-        g['use_full_sequence']    = use_seq
-        g['concept_only_cross']   = cpc
-        g['cross_seed_no_clamp']  = no_clamp
-        g['src_concept_argmax']   = src_arg
-        g['tgt_concept_argmax']   = tgt_arg
+        g['use_full_sequence']           = use_seq
+        g['concept_only_cross']          = cpc
+        g['cross_seed_no_clamp']         = no_clamp
+        g['src_concept_argmax']          = src_arg
+        g['tgt_concept_argmax']          = tgt_arg
+        g['prop_no_clamp']               = p_noclmp
+        g['prop_max_accum']              = p_maxacc
+        g['reset_activations_per_pair']  = reset_pp
+        g['src_concept_overlap']         = src_ovlp
         t0 = time.time()
         m = evaluate(g, probe)
-        print(f"{label:<40} {m['combined']:>9.4f} "
+        print(f"{label:<48} {m['combined']:>9.4f} "
               f"{m['fwd']:>6.3f} {m['rev']:>6.3f} "
               f"{m['exact_fwd']}/{m['exact_rev']:<7} {time.time()-t0:>3.0f}s")
+        adaptive_yield()
 
     print("\n--- DISCOVERY GA on small corpus ---")
     pairs = probe

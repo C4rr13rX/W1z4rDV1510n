@@ -516,24 +516,74 @@ Every `/media/train` call with text runs two passes automatically:
 - Hardware-adaptive window caps and length filters — no hard-coded limits
 - Edit-distance similarity with fast length pre-filter
 
-### Hebbian Q&A Fabric (`QaRuntime`)
-- Textbook and domain knowledge encoded as grown synaptic state
-- Querying fires input neurons and reads the output network — no matrix multiplication at inference
-- The answer is a reaction in the fabric's state
-- Persisted across restarts; hot-tier caching for high-confidence pairs
-- API: `POST /qa/ingest`, `POST /qa/query`
+### Multi-Pool Associative Fabric (N-pool — first layer of the stack)
+
+The Hebbian fast-recall layer.  Replaces the previous `QaRuntime`.  An
+arbitrary number of named `NeuronPool`s, with cross-synapses between every
+ordered pool pair.  Sending an input to any one pool causes every other
+connected pool to fire in parallel — a single input can drive a Q→A pool, an
+emotion pool, an equation pool, a motion pool, and so on, all at once.
+
+Pre-registered pools: `"in"` and `"out"` (the original two-pool path is now
+just two named pools in this fabric).  Any number of additional pools can be
+registered at runtime via `POST /multi_pool/register` or via
+`multi_pool_register(id)` in code.
+
+**How a query works:**
+
+1. Position-augment the input atoms (each atom at sequence index `i` becomes
+   a unique `{atom}@{i}`) so concepts that share content but differ in *where*
+   atoms appear can be discriminated by neural propagation alone — no
+   external decision rule needed.
+2. Propagate one hop in the source pool with a sum (no clamp) accumulator.
+   Concept neurons whose ALL members fire reach higher activation than peer
+   concepts whose only some members fire — the discrimination signal.
+3. Pick the highest-activation source concept (`top_active_concept`).
+4. Cross-project to each target pool through that pool-pair's
+   `CrossPoolSynapses`.
+5. Pick the strongest target concept seed.
+6. Propagate within the target pool.
+7. Decode by concept walk (composite member → chars) or chain walk
+   (greedy STDP traversal of active atoms).
+
+**API:**
+- `POST /multi_pool/register` — register a new pool by name.
+- `POST /multi_pool/train_pair` — train (src, tgt) across two named pools.
+- `POST /multi_pool/train_fanout` — train one source pool against many target
+  pools simultaneously (color + category + emotion etc. for one input).
+- `POST /multi_pool/ask` — send text into a source pool, get every connected
+  pool's prediction back.
+- `GET /multi_pool/stats` — per-pool sizes + total cross-edges.
+
+The legacy `POST /two_pool/*` endpoints still work — they're thin wrappers
+that route through `"in"` and `"out"` pool ids.
+
+**Why N-pool, not two-pool:** two_pool was a test.  The same machinery
+generalizes to any number of pools, so the fabric can grow specialized
+substrates (a JSON-shape pool, a tone pool, a motion-zone pool, a SQL pool,
+…) without the API or the discrimination logic changing.
 
 ### Hypothesis Queue and Research Feedback Loop
 
-When `neuro_ask` or `neuro_generate` fails the QA confidence gate (< 0.5), the question is added to the hypothesis queue and a norepinephrine spike is released (NE = 0.75). The `research_agent.py` script runs as a background service:
+When `/chat` returns no answer (multi-pool fabric has no associative bridge
+for the input), the question is added to the hypothesis queue and a
+norepinephrine spike is released (NE = 0.75).  The `research_agent.py`
+script runs as a background service:
 
 1. `GET /hypothesis/queue` — fetch open questions
 2. Fetch Wikipedia REST API + ArXiv Atom API for each question
-3. `POST /qa/ingest` — ingest the answer into the QA store
-4. `POST /media/train` — train the neuro pool on the answer text
-5. `POST /hypothesis/resolve` — mark the hypothesis resolved with a confidence score
+3. `POST /multi_pool/train_pair` — ingest the (question, answer) pair into
+   the multi-pool fabric (and any additional pool surfaces, e.g. equation
+   id, source URL).
+4. `POST /media/train` — train the slow pool on the answer text for
+   cross-domain generalization.
+5. `POST /hypothesis/resolve` — mark the hypothesis resolved with a
+   confidence score.
 
-On resolution, dopamine is released proportional to confidence and `flush_dopamine_potentiation()` runs — the connections that led to the correct prediction are retroactively strengthened. This is the computational equivalent of the hippocampal-cortical consolidation loop.
+On resolution, dopamine is released proportional to confidence and
+`flush_dopamine_potentiation()` runs — the connections that led to the
+correct prediction are retroactively strengthened.  This is the
+computational equivalent of the hippocampal-cortical consolidation loop.
 
 ### Knowledge Graph (`KnowledgeRuntime`)
 - JATS/NLM ingestion with text blocks, figure assets, and OCR hooks

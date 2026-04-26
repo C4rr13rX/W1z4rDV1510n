@@ -53,7 +53,6 @@ pub mod keyboard_bits;
 pub mod dynamic_pools;
 pub mod sensor_registry;
 pub mod motif_label_bridge;
-pub mod qa_runtime;
 pub mod fabric_trainer;
 pub mod equation_matrix;
 pub mod entity_health;
@@ -157,10 +156,6 @@ pub use dynamic_pools::{DynamicPoolConfig, DynamicPoolRegistry, DynamicPoolRepor
 
 pub use sensor_registry::{SensorCapability, SensorRegistry, SensorRegistryConfig, SensorRegistryReport};
 pub use motif_label_bridge::{MotifLabelBridge, MotifLabelBridgeConfig, MotifLabelReport, MotifLabelTask, MotifSnapshot};
-pub use qa_runtime::{
-    QaCandidateRecord, QaIngestReport, QaPair, QaQueryReport, QaQueryResult,
-    QaRuntime, QaRuntimeConfig, QaRuntimeReport,
-};
 pub use fabric_trainer::{
     FabricTrainer, FabricTrainerConfig, FabricTrainerReport, FabricTrainerStats, TrainingSignal,
 };
