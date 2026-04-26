@@ -233,6 +233,46 @@ pub struct SynapseDelta {
     pub inhibitory: bool,
 }
 
+/// Concept neuron snapshot for multi-pool cluster sync.  Captures the
+/// concept's label, its ordered member-atom labels, and its use_count so
+/// the receiving node can re-create the concept and reinstate
+/// member→concept hebbian edges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConceptDelta {
+    pub label:         String,
+    pub member_labels: Vec<String>,
+    pub use_count:     u64,
+}
+
+/// Cross-pool synapse delta keyed by both pool ids and both labels.
+/// Recipients apply `max(local, remote)` on weight.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossSynapseDelta {
+    pub src_pool:  String,
+    pub src_label: String,
+    pub tgt_pool:  String,
+    pub tgt_label: String,
+    pub weight:    f32,
+}
+
+/// Per-pool delta payload: pool id + intra-pool synapses + concept neurons.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultiPoolPoolDelta {
+    pub pool_id:  String,
+    pub synapses: Vec<SynapseDelta>,
+    pub concepts: Vec<ConceptDelta>,
+}
+
+/// Multi-pool fabric delta: per-pool intra-synapses + concepts + the
+/// cross-pool synapse table.  Used by `/multi_pool/delta/{export, apply}`
+/// to keep cluster nodes in sync on the N-pool fabric (the slow `pool`
+/// has its own `/neuro/delta/*` endpoints).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultiPoolDelta {
+    pub pools: Vec<MultiPoolPoolDelta>,
+    pub cross: Vec<CrossSynapseDelta>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Synapse {
     pub target: u32,
@@ -3218,6 +3258,26 @@ impl CrossPoolSynapses {
         Self { weights: HashMap::new(), cap: DEFAULT_CROSS_POOL_CAP }
     }
 
+    /// Read-only iterator over `(src_label, tgt_label, weight)` triples.
+    /// Used by cluster sync export.
+    pub fn iter_weights(&self) -> impl Iterator<Item = (&String, &String, f32)> {
+        self.weights.iter().map(|((a, b), w)| (a, b, *w))
+    }
+
+    /// Set weight to `max(current, weight)` capped at `CROSS_POOL_MAX_WEIGHT`.
+    /// Returns true if the stored weight changed.  Used by cluster sync apply.
+    pub fn merge_max(&mut self, in_label: &str, out_label: &str, weight: f32) -> bool {
+        let key = (in_label.to_string(), out_label.to_string());
+        let new_w = weight.min(CROSS_POOL_MAX_WEIGHT);
+        let cur = self.weights.get(&key).copied().unwrap_or(0.0);
+        if new_w > cur {
+            self.weights.insert(key, new_w);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Strengthen the bidirectional association `in_label ↔ out_label` by `lr`.
     /// Saturates at `CROSS_POOL_MAX_WEIGHT`.
     pub fn pair(&mut self, in_label: &str, out_label: &str, lr: f32) {
@@ -3320,6 +3380,14 @@ impl MultiPoolFabric {
 
     pub fn cross_total_edges(&self) -> usize {
         self.cross.values().map(|c| c.len()).sum()
+    }
+
+    /// Iterate every (src_pool_id, tgt_pool_id, CrossPoolSynapses).
+    /// Used by cluster sync to export the full cross-synapse table.
+    pub fn iter_cross(
+        &self,
+    ) -> impl Iterator<Item = (&String, &String, &CrossPoolSynapses)> {
+        self.cross.iter().map(|((s, t), c)| (s, t, c))
     }
 }
 
@@ -5414,6 +5482,194 @@ impl NeuroRuntime {
 
     pub fn multi_pool_stats(&self) -> serde_json::Value {
         self.two_pool_stats()
+    }
+
+    /// CLS-style replay: re-train the slow pool on concept neurons stored in
+    /// the multi-pool fabric.  This is the hippocampal→neocortical
+    /// consolidation step from CLS theory — the fast paired-association
+    /// substrate (multi-pool) feeds its memorized sequences into the slow
+    /// distributed pool at low learning rate so the slow pool's char-chain
+    /// decoder gradually inherits the same vocabulary.
+    ///
+    /// Each replay walks every pool's concept neurons, recovers their
+    /// original (un-augmented) atom-label sequence, and calls
+    /// `pool.train_weighted` at `lr_scale` (default 0.1).  Concepts are
+    /// replayed in `use_count` order so frequently-fired ones consolidate
+    /// first.  Returns the count of concepts replayed.
+    ///
+    /// `max_concepts_per_pool == 0` means replay all concepts.
+    pub fn multi_pool_replay_to_slow_pool(
+        &self,
+        max_concepts_per_pool: usize,
+        lr_scale: f32,
+    ) -> usize {
+        let mut replayed = 0;
+        // Snapshot concept atom-sequences first to release the lock before
+        // training the slow pool (avoid deadlock on `self.inner.lock()`).
+        let sequences: Vec<Vec<String>> = {
+            let guard = self.inner.lock();
+            let pool_ids = guard.multi_pool.pool_ids();
+            let mut all_seqs: Vec<(u64, Vec<String>)> = Vec::new();
+            for pid in &pool_ids {
+                let pool = match guard.multi_pool.pool(pid) {
+                    Some(p) => p, None => continue,
+                };
+                // Collect (use_count, atom-sequence) per concept in this pool.
+                let mut concepts: Vec<(u64, Vec<String>)> = Vec::new();
+                for slot in pool.neurons.iter() {
+                    if let NeuronSlot::Hot(n) = slot {
+                        if n.members.len() < 2 { continue; }
+                        let seq: Vec<String> = n.members.iter()
+                            .filter_map(|mid| pool.get_hot(*mid as usize)
+                                .and_then(|m| m.label.clone())
+                                .map(|lbl| {
+                                    // Strip position augmentation `@N`.
+                                    match lbl.rfind('@') {
+                                        Some(p) if lbl[p+1..].chars().all(|c| c.is_ascii_digit())
+                                                && p + 1 < lbl.len() =>
+                                            lbl[..p].to_string(),
+                                        _ => lbl,
+                                    }
+                                }))
+                            .collect();
+                        if seq.len() >= 2 {
+                            concepts.push((n.use_count, seq));
+                        }
+                    }
+                }
+                concepts.sort_by(|a, b| b.0.cmp(&a.0));
+                let take = if max_concepts_per_pool == 0 {
+                    concepts.len()
+                } else {
+                    max_concepts_per_pool.min(concepts.len())
+                };
+                for (uc, seq) in concepts.into_iter().take(take) {
+                    all_seqs.push((uc, seq));
+                }
+            }
+            all_seqs.into_iter().map(|(_, s)| s).collect()
+        };
+
+        // Train the slow pool outside the multi-pool guard.  This is the
+        // CLS replay step: each concept's atom sequence becomes one
+        // `train_weighted` call into the slow pool.
+        let mut guard = self.inner.lock();
+        for seq in &sequences {
+            guard.pool.train_weighted(seq, lr_scale, false);
+            replayed += 1;
+        }
+        replayed
+    }
+
+    /// Export the entire multi-pool fabric as a portable delta payload.
+    /// Each pool contributes its synapses + concept neurons; the cross-pool
+    /// synapse table is exported as a flat list keyed by both pool ids.
+    /// Recipients merge with `max(local, remote)` so knowledge accumulates.
+    /// First-pass implementation: full snapshot, no since_step filtering —
+    /// works for small clusters; revisit if payload size becomes a problem.
+    pub fn multi_pool_export_delta(&self) -> MultiPoolDelta {
+        let guard = self.inner.lock();
+        let mut delta = MultiPoolDelta::default();
+        for pid in guard.multi_pool.pool_ids() {
+            let pool = match guard.multi_pool.pool(&pid) {
+                Some(p) => p, None => continue,
+            };
+            let mut pdelta = MultiPoolPoolDelta { pool_id: pid.clone(), ..Default::default() };
+            for slot in pool.neurons.iter() {
+                let NeuronSlot::Hot(n) = slot else { continue };
+                let from_label = match &n.label {
+                    Some(l) => l.clone(),
+                    None => continue,
+                };
+                for (list, inhibitory) in [(&n.excitatory, false), (&n.inhibitory, true)] {
+                    for syn in list {
+                        if let Some(NeuronSlot::Hot(t)) = pool.neurons.get(syn.target as usize) {
+                            if let Some(to_label) = &t.label {
+                                pdelta.synapses.push(SynapseDelta {
+                                    from_label: from_label.clone(),
+                                    to_label:   to_label.clone(),
+                                    weight:     syn.weight,
+                                    inhibitory,
+                                });
+                            }
+                        }
+                    }
+                }
+                if !n.members.is_empty() {
+                    let member_labels: Vec<String> = n.members.iter()
+                        .filter_map(|mid| pool.get_hot(*mid as usize)
+                            .and_then(|m| m.label.clone()))
+                        .collect();
+                    if !member_labels.is_empty() {
+                        pdelta.concepts.push(ConceptDelta {
+                            label: from_label.clone(),
+                            member_labels,
+                            use_count: n.use_count,
+                        });
+                    }
+                }
+            }
+            delta.pools.push(pdelta);
+        }
+        // Cross-pool synapses, flattened.
+        for (src_pool, tgt_pool, cross) in guard.multi_pool.iter_cross() {
+            for (src_label, tgt_label, weight) in cross.iter_weights() {
+                delta.cross.push(CrossSynapseDelta {
+                    src_pool:  src_pool.clone(),
+                    src_label: src_label.clone(),
+                    tgt_pool:  tgt_pool.clone(),
+                    tgt_label: tgt_label.clone(),
+                    weight,
+                });
+            }
+        }
+        delta
+    }
+
+    /// Apply an incoming multi-pool delta from a peer node.  For each pool,
+    /// merge intra-pool synapses (max(local, remote)) and re-create concept
+    /// neurons (preserving member sequence).  Then merge cross-pool synapse
+    /// weights with the same max-merge rule.  Returns the count of items
+    /// applied (synapses + concepts + cross-edges).
+    pub fn multi_pool_apply_delta(&self, delta: &MultiPoolDelta) -> usize {
+        let mut applied = 0usize;
+        let mut guard = self.inner.lock();
+        // (1) Per-pool synapses + concepts.
+        let cfg_template = guard.multi_pool.pool("in")
+            .map(|p| p.config.clone())
+            .unwrap_or_else(NeuroConfig::default);
+        for pdelta in &delta.pools {
+            // Lazily create the pool if the receiving node doesn't have it.
+            guard.multi_pool.register_pool(&pdelta.pool_id, cfg_template.clone());
+            let pool = match guard.multi_pool.pool_mut(&pdelta.pool_id) {
+                Some(p) => p, None => continue,
+            };
+            applied += pool.apply_label_delta(&pdelta.synapses, &[]);
+            // Apply concept neurons after synapses so member ids exist.
+            for cd in &pdelta.concepts {
+                let cid = pool.get_or_create(&cd.label);
+                let member_ids: Vec<u32> = cd.member_labels.iter()
+                    .map(|m| pool.get_or_create(m))
+                    .collect();
+                if let Some(NeuronSlot::Hot(n)) = pool.neurons.get_mut(cid as usize) {
+                    if n.members.is_empty() {
+                        n.members = member_ids;
+                    }
+                    if cd.use_count > n.use_count {
+                        n.use_count = cd.use_count;
+                    }
+                }
+                applied += 1;
+            }
+        }
+        // (2) Cross-pool synapse weights with max-merge.
+        for cs in &delta.cross {
+            let cross = guard.multi_pool.cross_mut(&cs.src_pool, &cs.tgt_pool);
+            if cross.merge_max(&cs.src_label, &cs.tgt_label, cs.weight) {
+                applied += 1;
+            }
+        }
+        applied
     }
 
     // ── Resolution-aware activation + concept promotion ──────────────────────

@@ -66,6 +66,7 @@ pub use equation_matrix::{
     ContextApplicationResult, Discipline, EquationLink, EquationMatrixConfig,
     EquationMatrixReport, EquationMatrixRuntime, EquationSearchResult, EquationSummary,
     EquationVariable, EemPeerPayload, HypothesisSlot, LinkType, PhysicsEquation,
+    motif_eem_feedback_step,
 };
 
 pub use ingest::{StreamIngestBatch, StreamIngestor};

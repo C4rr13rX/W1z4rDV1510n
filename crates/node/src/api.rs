@@ -995,6 +995,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/multi_pool/train_fanout",  post(multi_pool_train_fanout))
         .route("/multi_pool/ask",           post(multi_pool_ask))
         .route("/multi_pool/stats",         get(multi_pool_stats))
+        .route("/multi_pool/replay",        post(multi_pool_replay))
+        .route("/multi_pool/delta/export",  get(multi_pool_delta_export))
+        .route("/multi_pool/delta/apply",   post(multi_pool_delta_apply))
         // ── Hypothesis queue ──────────────────────────────────────────────────
         // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
         .route("/hypothesis/queue",     get(hypothesis_queue_list))
@@ -5324,6 +5327,72 @@ async fn multi_pool_stats(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(state.neuro.multi_pool_stats()))
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiPoolReplayReq {
+    /// 0 = replay every concept; otherwise top-N by use_count per pool.
+    #[serde(default)]
+    max_per_pool: usize,
+    /// Slow-pool training lr_scale.  Default 0.1 — gentle CLS-style
+    /// consolidation so the slow pool doesn't overfit replayed sequences.
+    #[serde(default = "default_replay_lr")]
+    lr_scale: f32,
+}
+fn default_replay_lr() -> f32 { 0.1 }
+
+/// POST /multi_pool/replay — CLS-style replay: re-train the slow pool on
+/// every concept neuron stored in the multi-pool fabric.  This is the
+/// hippocampal→neocortical consolidation step from CLS theory; the fast
+/// paired-association substrate (multi-pool) feeds memorized sequences
+/// into the slow distributed pool at low lr_scale so the slow pool's
+/// char-chain decoder gradually inherits the same vocabulary.
+async fn multi_pool_replay(
+    State(state): State<ApiState>,
+    Json(req): Json<MultiPoolReplayReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let neuro = state.neuro.clone();
+    let max_per_pool = req.max_per_pool;
+    let lr_scale = req.lr_scale.max(0.0);
+    let replayed = tokio::task::spawn_blocking(move || {
+        neuro.multi_pool_replay_to_slow_pool(max_per_pool, lr_scale)
+    }).await.ok().unwrap_or(0);
+    (StatusCode::OK, Json(serde_json::json!({
+        "status":   "ok",
+        "replayed": replayed,
+        "lr_scale": lr_scale,
+    })))
+}
+
+/// GET /multi_pool/delta/export — export full multi-pool fabric state as a
+/// portable delta payload (per-pool synapses + concept neurons + cross-pool
+/// weight table).  Recipients merge with `max(local, remote)`.  Used by
+/// cluster gossip to keep N-pool fabrics in sync across nodes.
+async fn multi_pool_delta_export(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let neuro = state.neuro.clone();
+    let delta = tokio::task::spawn_blocking(move || {
+        neuro.multi_pool_export_delta()
+    }).await.ok().unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::to_value(delta)
+        .unwrap_or(serde_json::Value::Null)))
+}
+
+/// POST /multi_pool/delta/apply — receive a delta from a peer and merge.
+/// Returns the count of synapses + concepts + cross-edges applied.
+async fn multi_pool_delta_apply(
+    State(state): State<ApiState>,
+    Json(delta): Json<w1z4rdv1510n::neuro::MultiPoolDelta>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let neuro = state.neuro.clone();
+    let applied = tokio::task::spawn_blocking(move || {
+        neuro.multi_pool_apply_delta(&delta)
+    }).await.ok().unwrap_or(0);
+    (StatusCode::OK, Json(serde_json::json!({
+        "status":  "ok",
+        "applied": applied,
+    })))
 }
 
 /// POST /neuro/ask  (also POST /chat)

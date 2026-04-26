@@ -183,6 +183,94 @@ pub fn anneal(
     (population, energy_trace, acceptance_trace)
 }
 
+/// Anneal a *sequence* of environment snapshots with temporal continuity.
+///
+/// Plain `anneal()` takes one snapshot and runs N iterations to convergence;
+/// it has no concept of time.  For real sensor streams (video frames, mouse
+/// trajectories, telemetry windows) we need each frame to start from the
+/// prior frame's converged state, not from random — otherwise every frame
+/// pays the full convergence cost and the fabric never benefits from
+/// frame-to-frame continuity.
+///
+/// Behaviour per frame:
+///   1. Particles carry over from the prior frame (warm-start).
+///   2. If `mutation_between_frames > 0`, lightly perturb each carried
+///      particle so the kernel still has something to explore — necessary
+///      for frames where the snapshot has actually changed.
+///   3. Run the standard `anneal()` for `per_frame_iterations` (typically
+///      far fewer than the cold-start `schedule.n_iterations` because the
+///      population is already near-optimum after the first frame).
+///   4. Push the converged population into the result series and use it as
+///      the starting state for the next frame.
+///
+/// Returns one `(Population, energy_trace, acceptance_trace)` triple per
+/// frame, in input order.
+#[tracing::instrument(skip_all, fields(n_frames = snapshots.len()))]
+pub fn anneal_sequence(
+    initial_population: Population,
+    snapshots: &[EnvironmentSnapshot],
+    energy_model: &EnergyModel,
+    kernel: &dyn ProposalKernel,
+    search_module: Option<&SearchModule>,
+    schedule: &AnnealingScheduleConfig,
+    resample_config: &ResampleConfig,
+    hardware_backend: &HardwareBackendHandle,
+    neuro: Option<NeuroRuntimeHandle>,
+    homeostasis: &HomeostasisConfig,
+    live_frame: Option<&LiveFrameSink>,
+    live_neuro: Option<&LiveNeuroSink>,
+    mutation_between_frames: f64,
+    per_frame_iterations: usize,
+    rng: &mut StdRng,
+) -> Vec<(Population, Vec<f64>, Vec<f64>)> {
+    let mut series = Vec::with_capacity(snapshots.len());
+    let mut population = initial_population;
+
+    for (frame_idx, snap) in snapshots.iter().enumerate() {
+        // Warm-start: light mutation of carried particles between frames so
+        // the proposal kernel has somewhere to explore on the new frame.
+        // Skip on the first frame — caller-supplied initial population is
+        // assumed fresh.
+        if frame_idx > 0 && mutation_between_frames > 0.0 {
+            clone_and_mutate(&mut population, rng, mutation_between_frames);
+            normalize_weights(&mut population, hardware_backend.tensor_executor().as_deref());
+        }
+
+        // Per-frame schedule: same shape, fewer iterations.
+        let frame_schedule = AnnealingScheduleConfig {
+            n_iterations: per_frame_iterations.max(1),
+            ..schedule.clone()
+        };
+
+        let (converged, e_trace, a_trace) = anneal(
+            population,
+            snap,
+            energy_model,
+            kernel,
+            search_module,
+            &frame_schedule,
+            resample_config,
+            hardware_backend,
+            neuro.clone(),
+            homeostasis,
+            live_frame,
+            live_neuro,
+            rng,
+        );
+        population = converged.clone();
+        series.push((converged, e_trace, a_trace));
+
+        if let Some(neuro_runtime) = neuro.as_ref() {
+            // Hand the frame's converged particles to the neuro fabric so the
+            // motif runtime sees the state-sequence — this is what lets the
+            // proposal kernel use temporal motif priors on the *next* frame.
+            neuro_runtime.observe_states(population.particles.iter().map(|p| &p.current_state));
+        }
+    }
+
+    series
+}
+
 fn temperature(iteration: usize, schedule: &AnnealingScheduleConfig) -> f64 {
     match schedule.schedule_type {
         ScheduleType::Linear => {

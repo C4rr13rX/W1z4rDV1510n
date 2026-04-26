@@ -96,6 +96,17 @@ impl Discipline {
                 "GameTheory" => &["nash","equilibrium","strategy","payoff","game","minimax","player","dominant","cooperation","defection","prisoner","dilemma","auction","mechanism","coalition","shapley","replicator","evolutionary","stable","bayesian","hotelling","focal","schelling","zero-sum"],
                 "MarketingScience" => &["diffusion","adoption","viral","spread","bass","imitation","word","mouth","contagion","cascade","influence","persuasion","advertising","brand","market","share","elasticity","network","effect","preference","metcalfe","zipf","pareto","clv","retention","churn","adstock","lanchester","gompertz","threshold","logistic","sigmoid","growth"],
                 "CrossDisciplinary" => &["emergence","self-organization","complexity","power","law","scale","free","percolation","ising","mean","field","opinion","tipping","point","critical","phase","transition","fitness","landscape","coevolution","arms","race","cascade","failure","segregation","free","energy","maximum","entropy","jaynes","universal"],
+                // ── Engineering & applied science disciplines (added 2026-04-26) ──
+                "ControlTheory" => &["controller","feedback","feedforward","pid","proportional","integral","derivative","stability","lyapunov","routh","hurwitz","pole","zero","gain","phase","margin","transfer","function","plant","setpoint","steady","state","error","damping","overshoot","laplace","z-transform","state","space","kalman","filter","lqr","mpc","predictive"],
+                "SignalProcessing" => &["fourier","transform","frequency","spectrum","aliasing","nyquist","sampling","convolution","filter","fft","dft","stft","wavelet","window","hann","hamming","bandpass","lowpass","highpass","fir","iir","z-transform","modulation","demodulation","snr","decibel","quantization","interpolation","correlation","spectral"],
+                "Chemistry" => &["rate","arrhenius","equilibrium","reaction","reactant","product","catalyst","stoichiometry","activation","energy","enthalpy","entropy","gibbs","spontaneous","ph","poh","acid","base","buffer","henderson","hasselbalch","beer","lambert","absorbance","concentration","molarity","molality","oxidation","reduction","redox","nernst","electrochemistry","le","chatelier","kinetics"],
+                "ComputerScience" => &["algorithm","complexity","big","o","amortized","queue","stack","tree","graph","heap","hash","sort","search","traversal","recurrence","master","theorem","amdahl","gustafson","brewer","cap","fault","tolerance","caching","page","fault","memory","hierarchy","cache","line","throughput","latency","little","queueing","poisson","arrival","service","utilization"],
+                "Optimization" => &["gradient","descent","newton","method","conjugate","quasi","bfgs","lagrange","multiplier","karush","kuhn","tucker","kkt","duality","simplex","interior","point","convex","constraint","feasible","optimal","minimize","maximize","objective","loss","penalty","barrier","stochastic","sgd","momentum","adam","rmsprop","adagrad","line","search","trust","region"],
+                "MachineLearning" => &["perceptron","sigmoid","relu","tanh","softmax","cross","entropy","mean","squared","error","backpropagation","weight","update","layer","activation","embedding","attention","transformer","convolution","pooling","dropout","batch","norm","layer","norm","gradient","clipping","learning","rate","schedule","cosine","warmup","f1","precision","recall","auc","roc","bleu","perplexity","kl","divergence"],
+                "ElectricalEngineering" => &["voltage","current","resistance","ohm","kirchhoff","kvl","kcl","capacitor","inductor","resistor","impedance","admittance","reactance","time","constant","rc","rl","rlc","resonance","power","factor","real","reactive","apparent","watt","volt","ampere","amp","ohms","henry","farad","tesla","weber","decibel","db","gain","bode","nyquist"],
+                "StructuralEngineering" => &["stress","strain","modulus","young","elastic","plastic","yield","ultimate","tensile","compressive","shear","bending","moment","beam","deflection","euler","buckling","critical","load","mohr","circle","von","mises","fatigue","creep","fracture","toughness","poisson","ratio","hooke","truss","frame","column","slenderness"],
+                "Epidemiology" => &["susceptible","infected","recovered","exposed","sir","seir","reproduction","number","r0","attack","rate","incubation","latent","period","contagion","transmission","contact","tracing","vaccination","threshold","herd","immunity","epidemic","pandemic","outbreak","prevalence","incidence","mortality","case","fatality","compartmental"],
+                "Economics" => &["utility","supply","demand","equilibrium","price","quantity","elasticity","cobb","douglas","production","function","is-lm","aggregate","phillips","curve","unemployment","inflation","gdp","time","value","money","present","future","npv","irr","discount","rate","compound","interest","capm","beta","sharpe","arbitrage","black","scholes","option","strike","volatility","garch","heteroskedasticity"],
                 _ => &[],
             },
         }
@@ -532,6 +543,31 @@ impl EquationMatrixRuntime {
             eq.evidence_count += 1;
             eq.confidence = (eq.confidence + self.config.evidence_boost).min(1.0);
         }
+    }
+
+    /// Combined apply + reinforce step.  Calls `apply_to_context`, reinforces
+    /// every candidate whose relevance ≥ `relevance_threshold`, and returns
+    /// the matched equations together with their discipline keywords.  The
+    /// keyword list is what `motif_eem_feedback_step` feeds back into the
+    /// motif runtime so equation matches drive new motif activations — the
+    /// network develops "physics motifs" as the input stream re-fires the
+    /// same equation patterns over time.
+    pub fn apply_and_reinforce(
+        &self,
+        active_labels: &[String],
+        sensor_dims: u8,
+        relevance_threshold: f32,
+    ) -> Vec<(EquationSearchResult, Vec<String>)> {
+        let result = self.apply_to_context(active_labels, sensor_dims);
+        let mut out = Vec::new();
+        for cand in result.candidates {
+            if cand.relevance < relevance_threshold { continue; }
+            self.reinforce(&cand.equation.id);
+            let keywords: Vec<String> = cand.equation.discipline.keywords()
+                .iter().map(|k| (*k).to_string()).collect();
+            out.push((cand, keywords));
+        }
+        out
     }
 
     /// Decay all confidences slightly — equations not corroborated by sensor data
@@ -2413,7 +2449,335 @@ fn build_seed_equations() -> Vec<PhysicsEquation> {
             vec![], &["rugged landscape","complexity","interdependency","adaptation","local optima","search"], 0.88),
     ]);
 
+    // ══════════════════════════════════════════════════════════════════════
+    // ENGINEERING & APPLIED SCIENCE  (added 2026-04-26)
+    // 65 equations across Control / DSP / Chemistry / CS / Optimization /
+    // ML / Electrical / Structural / Epidemiology / Economics
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── Control Theory ────────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("u(t) = K_p e(t) + K_i ∫e dt + K_d de/dt", r"u(t)=K_pe(t)+K_i\int e\,dt+K_d\frac{de}{dt}",
+            Discipline::Custom("ControlTheory".into()),
+            vec![v("u","control signal","",""), v("e","setpoint error","",""), v("K_p","proportional gain","",""), v("K_i","integral gain","",""), v("K_d","derivative gain","","")],
+            vec![], &["pid controller","setpoint tracking","linear plant"], 0.92),
+        PhysicsEquation::new("G(s) = Y(s)/U(s)", r"G(s)=\frac{Y(s)}{U(s)}",
+            Discipline::Custom("ControlTheory".into()),
+            vec![v("G","transfer function","",""), v("s","Laplace variable","","")],
+            vec![], &["lti system","zero initial conditions"], 0.94),
+        PhysicsEquation::new("ẋ = Ax + Bu, y = Cx + Du", r"\dot{x}=Ax+Bu,\;y=Cx+Du",
+            Discipline::Custom("ControlTheory".into()),
+            vec![v("x","state vector","",""), v("u","input","",""), v("y","output","","")],
+            vec![], &["state-space form","linear time-invariant"], 0.95),
+        PhysicsEquation::new("V̇(x) < 0 (Lyapunov stability)", r"\dot V(x)<0",
+            Discipline::Custom("ControlTheory".into()),
+            vec![v("V","Lyapunov function","","")],
+            vec![], &["positive definite V","equilibrium at origin"], 0.93),
+        PhysicsEquation::new("PM = ∠G(jω_gc) + 180°", r"\text{PM}=\angle G(j\omega_{gc})+180^\circ",
+            Discipline::Custom("ControlTheory".into()),
+            vec![v("PM","phase margin","°","")],
+            vec![], &["bode analysis","gain-crossover frequency"], 0.91),
+        PhysicsEquation::new("x̂_{k|k} = x̂_{k|k-1} + K_k(z_k - H x̂_{k|k-1})", r"\hat x_{k|k}=\hat x_{k|k-1}+K_k(z_k-H\hat x_{k|k-1})",
+            Discipline::Custom("ControlTheory".into()),
+            vec![v("K_k","Kalman gain","",""), v("z_k","measurement","","")],
+            vec![], &["linear gaussian","optimal estimator"], 0.94),
+    ]);
+
+    // ── Signal Processing ─────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("X(f) = ∫ x(t) e^{-j 2π f t} dt", r"X(f)=\int x(t)e^{-j2\pi ft}dt",
+            Discipline::Custom("SignalProcessing".into()),
+            vec![v("X","spectrum","",""), v("x","time-domain signal","",""), v("f","frequency","Hz","")],
+            vec![], &["fourier transform","absolutely integrable"], 0.95),
+        PhysicsEquation::new("f_s ≥ 2 f_max  (Nyquist)", r"f_s\geq 2f_{\max}",
+            Discipline::Custom("SignalProcessing".into()),
+            vec![v("f_s","sampling rate","Hz",""), v("f_max","signal bandwidth","Hz","")],
+            vec![], &["bandlimited signal"], 0.96),
+        PhysicsEquation::new("(x * h)(t) = ∫ x(τ) h(t-τ) dτ", r"(x*h)(t)=\int x(\tau)h(t-\tau)d\tau",
+            Discipline::Custom("SignalProcessing".into()),
+            vec![v("h","filter impulse response","","")],
+            vec![], &["lti filter"], 0.95),
+        PhysicsEquation::new("X(z) = Σ x[n] z^{-n}", r"X(z)=\sum_{n=-\infty}^{\infty}x[n]z^{-n}",
+            Discipline::Custom("SignalProcessing".into()),
+            vec![v("z","z-transform variable","","")],
+            vec![], &["discrete-time","sampled signal"], 0.93),
+        PhysicsEquation::new("SNR_{dB} = 10 log_{10}(P_signal / P_noise)", r"\text{SNR}_{dB}=10\log_{10}\frac{P_{\text{signal}}}{P_{\text{noise}}}",
+            Discipline::Custom("SignalProcessing".into()),
+            vec![v("P_signal","signal power","W","")],
+            vec![], &[], 0.94),
+        PhysicsEquation::new("C = B log_2(1 + S/N)  (Shannon-Hartley)", r"C=B\log_2(1+S/N)",
+            Discipline::Custom("SignalProcessing".into()),
+            vec![v("C","channel capacity","bits/s",""), v("B","bandwidth","Hz","")],
+            vec![], &["awgn channel"], 0.95),
+    ]);
+
+    // ── Chemistry ─────────────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("k = A e^{-E_a / R T}  (Arrhenius)", r"k=Ae^{-E_a/RT}",
+            Discipline::Custom("Chemistry".into()),
+            vec![v("k","rate constant","",""), v("E_a","activation energy","J/mol",""), v("R","gas constant","J/(mol·K)","")],
+            vec![], &["elementary reaction","temperature dependence"], 0.95),
+        PhysicsEquation::new("rate = k [A]^m [B]^n", r"\text{rate}=k[A]^m[B]^n",
+            Discipline::Custom("Chemistry".into()),
+            vec![v("k","rate constant","",""), v("[A]","molar concentration","mol/L","")],
+            vec![], &["empirical rate law"], 0.93),
+        PhysicsEquation::new("ΔG = ΔH - TΔS", r"\Delta G=\Delta H-T\Delta S",
+            Discipline::Custom("Chemistry".into()),
+            vec![v("ΔG","Gibbs free energy","J/mol","")],
+            vec![], &["constant T, P"], 0.95),
+        PhysicsEquation::new("pH = -log_{10}[H+]", r"\text{pH}=-\log_{10}[\text{H}^+]",
+            Discipline::Custom("Chemistry".into()),
+            vec![v("[H+]","hydrogen ion molarity","mol/L","")],
+            vec![], &["aqueous solution"], 0.96),
+        PhysicsEquation::new("pH = pK_a + log_{10}([A-]/[HA])  (Henderson-Hasselbalch)", r"\text{pH}=\text{p}K_a+\log_{10}\frac{[A^-]}{[\text{HA}]}",
+            Discipline::Custom("Chemistry".into()),
+            vec![v("pK_a","acid dissociation","",""), v("[A-]","conjugate base","",""), v("[HA]","weak acid","","")],
+            vec![], &["buffer solution"], 0.94),
+        PhysicsEquation::new("A = ε l c  (Beer-Lambert)", r"A=\varepsilon l c",
+            Discipline::Custom("Chemistry".into()),
+            vec![v("A","absorbance","",""), v("ε","molar absorptivity","",""), v("l","path length","cm",""), v("c","concentration","mol/L","")],
+            vec![], &["dilute solution","monochromatic light"], 0.94),
+        PhysicsEquation::new("E = E° - (RT/nF) ln Q  (Nernst)", r"E=E^\circ-\frac{RT}{nF}\ln Q",
+            Discipline::Custom("Chemistry".into()),
+            vec![v("E","cell potential","V",""), v("F","Faraday constant","C/mol",""), v("Q","reaction quotient","","")],
+            vec![], &["redox half-cell","equilibrium displacement"], 0.94),
+    ]);
+
+    // ── Computer Science ──────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("T(n) = a T(n/b) + f(n)  (Master theorem)", r"T(n)=aT(n/b)+f(n)",
+            Discipline::Custom("ComputerScience".into()),
+            vec![v("a","subproblems","",""), v("b","subproblem size factor","","")],
+            vec![], &["divide-and-conquer recurrence"], 0.95),
+        PhysicsEquation::new("S(n) = 1 / ((1-p) + p/n)  (Amdahl)", r"S(n)=\frac{1}{(1-p)+p/n}",
+            Discipline::Custom("ComputerScience".into()),
+            vec![v("p","parallelizable fraction","",""), v("n","processors","","")],
+            vec![], &["fixed problem size"], 0.95),
+        PhysicsEquation::new("S(n) = (1-p) + n p  (Gustafson)", r"S(n)=(1-p)+np",
+            Discipline::Custom("ComputerScience".into()),
+            vec![v("p","parallel fraction at scale","",""), v("n","processors","","")],
+            vec![], &["fixed time","scaled problem"], 0.93),
+        PhysicsEquation::new("L = λ W  (Little's Law)", r"L=\lambda W",
+            Discipline::Custom("ComputerScience".into()),
+            vec![v("L","items in system","",""), v("λ","arrival rate","1/s",""), v("W","time in system","s","")],
+            vec![], &["steady-state queue"], 0.96),
+        PhysicsEquation::new("ρ = λ/μ  (M/M/1 utilization)", r"\rho=\lambda/\mu",
+            Discipline::Custom("ComputerScience".into()),
+            vec![v("μ","service rate","1/s","")],
+            vec![], &["poisson arrivals","exponential service"], 0.94),
+    ]);
+
+    // ── Optimization ──────────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("x_{k+1} = x_k - α ∇f(x_k)", r"x_{k+1}=x_k-\alpha\nabla f(x_k)",
+            Discipline::Custom("Optimization".into()),
+            vec![v("α","learning rate","",""), v("∇f","gradient","","")],
+            vec![], &["differentiable f","step size α"], 0.95),
+        PhysicsEquation::new("x_{k+1} = x_k - [H f(x_k)]^{-1} ∇f(x_k)", r"x_{k+1}=x_k-[Hf(x_k)]^{-1}\nabla f(x_k)",
+            Discipline::Custom("Optimization".into()),
+            vec![v("Hf","Hessian","","")],
+            vec![], &["twice differentiable","H invertible"], 0.93),
+        PhysicsEquation::new("∇f(x*) = Σ λ_i ∇g_i(x*)  (Lagrange)", r"\nabla f(x^*)=\sum_i\lambda_i\nabla g_i(x^*)",
+            Discipline::Custom("Optimization".into()),
+            vec![v("λ","multipliers","","")],
+            vec![], &["equality constraints","regular point"], 0.94),
+        PhysicsEquation::new("KKT: ∇f + Σλ∇g + Σμ∇h = 0, μ≥0, μ_i h_i = 0", r"\nabla\mathcal{L}=0,\;\mu\geq 0,\;\mu_i h_i=0",
+            Discipline::Custom("Optimization".into()),
+            vec![],
+            vec![], &["constraint qualification","convex problem"], 0.93),
+        PhysicsEquation::new("V(s) = max_a [r(s,a) + γ Σ p(s'|s,a) V(s')]  (Bellman)", r"V(s)=\max_a\left[r(s,a)+\gamma\sum_{s'}p(s'|s,a)V(s')\right]",
+            Discipline::Custom("Optimization".into()),
+            vec![v("V","value function","",""), v("γ","discount factor","","")],
+            vec![], &["markov decision process"], 0.94),
+    ]);
+
+    // ── Machine Learning ──────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("y = σ(Wx + b)  (perceptron)", r"y=\sigma(Wx+b)",
+            Discipline::Custom("MachineLearning".into()),
+            vec![v("W","weights","",""), v("b","bias","",""), v("σ","activation","","")],
+            vec![], &["differentiable activation"], 0.94),
+        PhysicsEquation::new("σ(z) = 1/(1+e^{-z})", r"\sigma(z)=\frac{1}{1+e^{-z}}",
+            Discipline::Custom("MachineLearning".into()),
+            vec![],
+            vec![], &["logistic activation"], 0.95),
+        PhysicsEquation::new("softmax(z)_i = e^{z_i} / Σ e^{z_j}", r"\text{softmax}(z)_i=\frac{e^{z_i}}{\sum_j e^{z_j}}",
+            Discipline::Custom("MachineLearning".into()),
+            vec![],
+            vec![], &["multi-class normalization"], 0.95),
+        PhysicsEquation::new("L = -Σ y_i log(ŷ_i)  (cross-entropy)", r"L=-\sum_i y_i\log\hat y_i",
+            Discipline::Custom("MachineLearning".into()),
+            vec![v("y","one-hot label","",""), v("ŷ","predicted probability","","")],
+            vec![], &["classification","calibrated softmax"], 0.95),
+        PhysicsEquation::new("∂L/∂W_l = δ_l a_{l-1}^T  (backprop)", r"\frac{\partial L}{\partial W_l}=\delta_l a_{l-1}^T",
+            Discipline::Custom("MachineLearning".into()),
+            vec![v("δ","layer gradient","","")],
+            vec![], &["chain rule","feedforward network"], 0.94),
+        PhysicsEquation::new("Attention(Q,K,V) = softmax(QK^T/√d) V", r"\text{Attention}(Q,K,V)=\text{softmax}\left(\frac{QK^T}{\sqrt{d}}\right)V",
+            Discipline::Custom("MachineLearning".into()),
+            vec![v("Q","queries","",""), v("K","keys","",""), v("V","values","","")],
+            vec![], &["scaled dot-product","transformer block"], 0.94),
+        PhysicsEquation::new("w ← w + η (a_pre + trace_pre)(a_post + trace_post)  (Hebb-STDP)", r"w\leftarrow w+\eta(a_{\text{pre}}+\tau_{\text{pre}})(a_{\text{post}}+\tau_{\text{post}})",
+            Discipline::Custom("MachineLearning".into()),
+            vec![v("η","learning rate","",""), v("a","activation","",""), v("τ","trace","","")],
+            vec![], &["local learning rule","neuromorphic"], 0.92),
+    ]);
+
+    // ── Electrical Engineering ────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("V = I R  (Ohm's law)", r"V=IR",
+            Discipline::Custom("ElectricalEngineering".into()),
+            vec![v("V","voltage","V",""), v("I","current","A",""), v("R","resistance","Ω","")],
+            vec![], &["linear resistor","steady current"], 0.97),
+        PhysicsEquation::new("Σ V = 0 around loop  (KVL)", r"\sum_k V_k=0",
+            Discipline::Custom("ElectricalEngineering".into()),
+            vec![],
+            vec![], &["lumped element circuit"], 0.96),
+        PhysicsEquation::new("Σ I = 0 at node  (KCL)", r"\sum_k I_k=0",
+            Discipline::Custom("ElectricalEngineering".into()),
+            vec![],
+            vec![], &["charge conservation"], 0.96),
+        PhysicsEquation::new("τ = R C  (RC time constant)", r"\tau=RC",
+            Discipline::Custom("ElectricalEngineering".into()),
+            vec![v("τ","time constant","s",""), v("C","capacitance","F","")],
+            vec![], &["first-order rc circuit"], 0.95),
+        PhysicsEquation::new("ω_0 = 1/√(LC)  (LC resonance)", r"\omega_0=1/\sqrt{LC}",
+            Discipline::Custom("ElectricalEngineering".into()),
+            vec![v("L","inductance","H",""), v("C","capacitance","F","")],
+            vec![], &["lossless lc tank"], 0.94),
+        PhysicsEquation::new("P = V I cos(φ)  (real power)", r"P=VI\cos\phi",
+            Discipline::Custom("ElectricalEngineering".into()),
+            vec![v("φ","phase angle","rad","")],
+            vec![], &["sinusoidal steady state"], 0.95),
+    ]);
+
+    // ── Structural / Mechanical Engineering ───────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("σ = E ε  (Hooke's law for stress)", r"\sigma=E\varepsilon",
+            Discipline::Custom("StructuralEngineering".into()),
+            vec![v("σ","stress","Pa",""), v("E","Young's modulus","Pa",""), v("ε","strain","","")],
+            vec![], &["linear elastic regime"], 0.96),
+        PhysicsEquation::new("P_cr = π² E I / (K L)²  (Euler buckling)", r"P_{cr}=\frac{\pi^2 EI}{(KL)^2}",
+            Discipline::Custom("StructuralEngineering".into()),
+            vec![v("I","moment of inertia","",""), v("L","length","m",""), v("K","effective length factor","","")],
+            vec![], &["slender column","ideal pinning"], 0.94),
+        PhysicsEquation::new("σ_v = √(½[(σ_1-σ_2)² + (σ_2-σ_3)² + (σ_1-σ_3)²])  (von Mises)", r"\sigma_v=\sqrt{\tfrac{1}{2}[(\sigma_1-\sigma_2)^2+(\sigma_2-\sigma_3)^2+(\sigma_1-\sigma_3)^2]}",
+            Discipline::Custom("StructuralEngineering".into()),
+            vec![],
+            vec![], &["ductile yielding criterion"], 0.93),
+        PhysicsEquation::new("y(x) = (P L³)/(48 E I)  (simply supported beam, center deflection)", r"y_{\max}=\frac{PL^3}{48EI}",
+            Discipline::Custom("StructuralEngineering".into()),
+            vec![v("P","point load at center","N","")],
+            vec![], &["simply supported beam","linear elastic"], 0.93),
+    ]);
+
+    // ── Epidemiology ──────────────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("dS/dt = -β S I / N", r"\frac{dS}{dt}=-\beta SI/N",
+            Discipline::Custom("Epidemiology".into()),
+            vec![v("S","susceptible","",""), v("I","infected","",""), v("β","transmission rate","",""), v("N","total population","","")],
+            vec![], &["sir model","well-mixed population"], 0.94),
+        PhysicsEquation::new("dI/dt = β S I / N - γ I", r"\frac{dI}{dt}=\beta SI/N-\gamma I",
+            Discipline::Custom("Epidemiology".into()),
+            vec![v("γ","recovery rate","","")],
+            vec![], &["sir model"], 0.94),
+        PhysicsEquation::new("dR/dt = γ I", r"\frac{dR}{dt}=\gamma I",
+            Discipline::Custom("Epidemiology".into()),
+            vec![v("R","recovered","","")],
+            vec![], &["sir model"], 0.95),
+        PhysicsEquation::new("R_0 = β / γ", r"R_0=\beta/\gamma",
+            Discipline::Custom("Epidemiology".into()),
+            vec![v("R_0","basic reproduction number","","")],
+            vec![], &["fully susceptible population"], 0.95),
+        PhysicsEquation::new("v_c = 1 - 1/R_0  (herd immunity threshold)", r"v_c=1-1/R_0",
+            Discipline::Custom("Epidemiology".into()),
+            vec![v("v_c","vaccination threshold","","")],
+            vec![], &["uniform mixing","perfect vaccine"], 0.93),
+    ]);
+
+    // ── Economics & Finance ───────────────────────────────────────────────
+    eqs.extend(vec![
+        PhysicsEquation::new("Y = A K^α L^{1-α}  (Cobb-Douglas)", r"Y=AK^\alpha L^{1-\alpha}",
+            Discipline::Custom("Economics".into()),
+            vec![v("Y","output","",""), v("K","capital","",""), v("L","labor","",""), v("A","total factor productivity","","")],
+            vec![], &["constant returns to scale"], 0.93),
+        PhysicsEquation::new("E_d = (%ΔQ_d) / (%ΔP)  (price elasticity of demand)", r"E_d=\frac{\%\Delta Q_d}{\%\Delta P}",
+            Discipline::Custom("Economics".into()),
+            vec![v("Q_d","quantity demanded","",""), v("P","price","","")],
+            vec![], &["small price change","ceteris paribus"], 0.92),
+        PhysicsEquation::new("PV = FV / (1 + r)^t", r"\text{PV}=\frac{\text{FV}}{(1+r)^t}",
+            Discipline::Custom("Economics".into()),
+            vec![v("PV","present value","",""), v("FV","future value","",""), v("r","discount rate","",""), v("t","time periods","","")],
+            vec![], &["constant rate","compounded periodically"], 0.96),
+        PhysicsEquation::new("E[R_i] = R_f + β_i (E[R_m] - R_f)  (CAPM)", r"E[R_i]=R_f+\beta_i(E[R_m]-R_f)",
+            Discipline::Custom("Economics".into()),
+            vec![v("R_f","risk-free rate","",""), v("β_i","asset beta","",""), v("R_m","market return","","")],
+            vec![], &["efficient market","mean-variance"], 0.92),
+        PhysicsEquation::new("C = S_0 N(d_1) - K e^{-rT} N(d_2)  (Black-Scholes call)", r"C=S_0 N(d_1)-Ke^{-rT}N(d_2)",
+            Discipline::Custom("Economics".into()),
+            vec![v("C","call price","",""), v("S_0","spot","",""), v("K","strike","",""), v("T","time to expiry","","")],
+            vec![], &["log-normal price","constant volatility","european option"], 0.91),
+        PhysicsEquation::new("S = (E[R_p] - R_f) / σ_p  (Sharpe ratio)", r"S=\frac{E[R_p]-R_f}{\sigma_p}",
+            Discipline::Custom("Economics".into()),
+            vec![v("σ_p","portfolio std dev","","")],
+            vec![], &["mean-variance frame"], 0.93),
+    ]);
+
     eqs
+}
+
+// ─── EEM ↔ Motif feedback loop ────────────────────────────────────────────────
+
+/// One feedback step between the equation matrix and the hierarchical motif
+/// runtime.  Two arrows:
+///
+///   1. Active labels → motif observation → EEM apply_and_reinforce.
+///      Recurring patterns in the input stream automatically drive equation
+///      reinforcement; equations not corroborated by repeated activations
+///      gradually decay (`decay_step`).
+///
+///   2. Matched equations → discipline keywords → motif observation.
+///      Any equation that matches strongly seeds its discipline keyword list
+///      back into the motif runtime, so the network develops "physics motifs"
+///      — recurring sequences of equation keywords that the motif graph
+///      tracks alongside raw sensor labels.  Over time, mass behavior in the
+///      input stream is detected as a motif over equation-keyword sequences,
+///      not just over raw labels.
+///
+/// `relevance_threshold` controls which equations get reinforced (default
+/// 0.3).  Returns the matched-equation count.
+pub fn motif_eem_feedback_step(
+    motifs: &mut crate::streaming::HierarchicalMotifRuntime,
+    eem: &EquationMatrixRuntime,
+    active_labels: &[String],
+    sensor_dims: u8,
+    timestamp: crate::schema::Timestamp,
+    relevance_threshold: f32,
+) -> usize {
+    if active_labels.is_empty() { return 0; }
+
+    // (1) Forward: observe raw labels in the motif runtime.
+    let _ = motifs.observe_label_sequence(active_labels, timestamp, 1.0);
+
+    // (2) EEM matches + reinforces from the same labels.
+    let matches = eem.apply_and_reinforce(
+        active_labels, sensor_dims, relevance_threshold,
+    );
+
+    // (3) Backward: every matched equation's keywords go back into the motif
+    //     runtime as a synthetic level-0 sequence prefixed with `eem:` so the
+    //     keywords are tracked separately from raw sensor labels and don't
+    //     collide with their original neuron ids.
+    let mut matched_count = 0;
+    for (_result, keywords) in &matches {
+        if keywords.is_empty() { continue; }
+        matched_count += 1;
+        let kw_labels: Vec<String> = keywords.iter()
+            .map(|k| format!("eem:{k}"))
+            .collect();
+        let _ = motifs.observe_label_sequence(&kw_labels, timestamp, 0.5);
+    }
+    matched_count
 }
 
 fn build_seed_links(eqs: &[PhysicsEquation]) -> Vec<EquationLink> {
