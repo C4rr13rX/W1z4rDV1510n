@@ -7873,7 +7873,7 @@ async fn mesh_synthesize(
                                     let h = (bin as f32 + 0.5) / 16.0 * 360.0;
                                     let c = 0.595f32;
                                     let x = c * (1.0 - ((h/60.0)%2.0 - 1.0).abs());
-                                    let m = 0.85 - c;
+                                    let _m = 0.85 - c;
                                     let (r,g,b) = if h<60.0{(c,x,0.0)}else if h<120.0{(x,c,0.0)}
                                         else if h<180.0{(0.0,c,x)}else if h<240.0{(0.0,x,c)}
                                         else if h<300.0{(x,0.0,c)}else{(c,0.0,x)};

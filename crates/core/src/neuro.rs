@@ -1886,6 +1886,38 @@ impl NeuronPool {
         out
     }
 
+    /// Force-promote a full ordered atom sequence to a concept neuron.
+    /// Used by the two-pool training endpoint where the (input, output) pair
+    /// is a known training unit by definition — no branching-entropy
+    /// inference needed.  Returns the concept label, or None if the
+    /// sequence is too short or members can't share a source prefix.
+    ///
+    /// On repeat calls the existing concept neuron is reused; member→concept
+    /// dendrites are reinforced each call (use_count increments).
+    pub fn promote_full_sequence(&mut self, atom_labels: &[String]) -> Option<String> {
+        if atom_labels.len() < 2 {
+            return None;
+        }
+        let ids: Vec<u32> = atom_labels.iter()
+            .map(|a| self.get_or_create(a))
+            .collect();
+        let label = self.composite_label_for_members(&ids)?;
+        let cid = self.get_or_create(&label);
+        // Snapshot scale before borrow.
+        let scale = self.config.excitatory_scale;
+        if let Some(n) = self.get_hot_mut(cid as usize) {
+            n.members = ids.clone();
+            n.activation = 1.0;
+            n.use_count += 1;
+        }
+        // Strengthen member → concept dendrites so partial member firing can
+        // partially activate the concept; full firing fully activates.
+        for &mid in &ids {
+            self.hebbian_pair(mid, cid, scale, false);
+        }
+        Some(label)
+    }
+
     // ── Streaming sequence consumption (replaces pair-only cooccur) ───────────
     //
     // On every training call, atoms (or already-promoted concepts) are
@@ -4748,42 +4780,25 @@ impl NeuroRuntime {
         if atoms.is_empty() {
             return None;
         }
-        let mut guard = self.inner.lock();
+        let guard = self.inner.lock();
 
-        // Activate atoms in source pool to fire concepts.  We use the
-        // existing record_symbols path for a non-learning activation pass;
-        // train_weighted with lr_scale=0 is a no-op so we just call
-        // record_symbols directly.
-        let src_active: HashMap<String, f32> = match dir {
-            AssocDirection::InToOut => {
-                guard.pool_in.record_symbols(atoms);
-                guard.pool_in.active_labels(min_activation)
-                    .into_iter()
-                    .filter_map(|lbl| {
-                        let id = guard.pool_in.label_to_id.get(&lbl).copied()?;
-                        let act = guard.pool_in.get_hot(id as usize)?.activation;
-                        Some((lbl, act))
-                    })
-                    .collect()
-            }
-            AssocDirection::OutToIn => {
-                guard.pool_out.record_symbols(atoms);
-                guard.pool_out.active_labels(min_activation)
-                    .into_iter()
-                    .filter_map(|lbl| {
-                        let id = guard.pool_out.label_to_id.get(&lbl).copied()?;
-                        let act = guard.pool_out.get_hot(id as usize)?.activation;
-                        Some((lbl, act))
-                    })
-                    .collect()
-            }
+        // 1. Seed source pool with the input atoms and propagate within-pool
+        //    so any concept neurons whose member-tail matches the input
+        //    actually fire.
+        let mut src_seeds: HashMap<String, f32> = HashMap::new();
+        for a in atoms {
+            src_seeds.insert(a.clone(), 1.0);
+        }
+        let src_active = match dir {
+            AssocDirection::InToOut => guard.pool_in.propagate_weighted(&src_seeds, 2, min_activation.min(0.02)),
+            AssocDirection::OutToIn => guard.pool_out.propagate_weighted(&src_seeds, 2, min_activation.min(0.02)),
         };
         if src_active.is_empty() {
             return None;
         }
 
-        // Cross-pool propagation.  For each active source label, route weight
-        // through cross_pool to the target pool.
+        // 2. Project active source labels through cross_pool to seed the
+        //    target pool.
         let mut tgt_seeds: HashMap<String, f32> = HashMap::new();
         for (src_label, src_act) in &src_active {
             let edges = match dir {
@@ -4799,44 +4814,136 @@ impl NeuroRuntime {
             return None;
         }
 
-        // Propagate within target pool to spread the cross-pool seeds.
+        // 3. Propagate within the target pool — this is what lets STDP edges
+        //    walk the chain of co-trained atoms.
         let tgt_acts = match dir {
-            AssocDirection::InToOut => guard.pool_out.propagate_weighted(&tgt_seeds, hops, min_activation),
-            AssocDirection::OutToIn => guard.pool_in.propagate_weighted(&tgt_seeds, hops, min_activation),
+            AssocDirection::InToOut => guard.pool_out.propagate_weighted(&tgt_seeds, hops.max(3), min_activation),
+            AssocDirection::OutToIn => guard.pool_in.propagate_weighted(&tgt_seeds, hops.max(3), min_activation),
         };
         if tgt_acts.is_empty() {
             return None;
         }
 
-        // Pick the highest-activation target label that decomposes to txt:
-        // atoms.  Concept neurons win over atoms when present.
-        let mut best: Option<(String, f32)> = None;
+        // 4. Decode by chain-walk. Concept neurons (composite labels) win
+        //    when they fire above any atom; otherwise pick the activated atom
+        //    with the weakest predecessor-pull (likely sequence start) and
+        //    greedily walk the strongest outgoing STDP edge weighted by
+        //    destination activation.
+        let target_pool = match dir {
+            AssocDirection::InToOut => &guard.pool_out,
+            AssocDirection::OutToIn => &guard.pool_in,
+        };
+
+        // 4a. If a composite/concept fired, walk its members directly.
+        let mut best_concept: Option<(String, f32)> = None;
         for (lbl, act) in &tgt_acts {
-            if !lbl.starts_with("txt:") {
+            if !lbl.starts_with("txt:") && !lbl.starts_with("a:") {
                 continue;
             }
-            if let Some((_, best_act)) = &best {
-                if act <= best_act {
-                    continue;
+            // composite labels in this codebase encode multiple atoms in their
+            // payload; treat any label whose composite_constituents returns
+            // more than 1 element as a fired concept.
+            let parts = target_pool.composite_constituents(lbl);
+            if parts.len() >= 2 {
+                let entry = best_concept.as_ref().map(|x| x.1).unwrap_or(0.0);
+                if *act > entry {
+                    best_concept = Some((lbl.clone(), *act));
                 }
             }
-            best = Some((lbl.clone(), *act));
         }
-        let (best_label, _) = best?;
+        if let Some((lbl, _)) = best_concept {
+            let parts = target_pool.composite_constituents(&lbl);
+            let chars: String = parts.iter()
+                .filter_map(|p| crate::streaming::label_to_char(p))
+                .collect();
+            if !chars.is_empty() {
+                return Some(chars);
+            }
+        }
 
-        // Walk best_label members to atoms.
-        let atom_labels = match dir {
-            AssocDirection::InToOut => guard.pool_out.composite_constituents(&best_label),
-            AssocDirection::OutToIn => guard.pool_in.composite_constituents(&best_label),
-        };
-        let chars: String = atom_labels.iter()
-            .filter_map(|al| crate::streaming::label_to_char(al))
+        // 4b. Chain-walk from the activated atom with the weakest incoming
+        //     pull (most likely sequence start).
+        let active_atom_ids: Vec<(u32, f32)> = tgt_acts.iter()
+            .filter(|(lbl, _)| crate::streaming::label_to_char(lbl).is_some())
+            .filter_map(|(lbl, act)| {
+                let id = target_pool.label_to_id.get(lbl).copied()?;
+                Some((id, *act))
+            })
             .collect();
-        if chars.is_empty() {
-            None
-        } else {
-            Some(chars)
+        if active_atom_ids.is_empty() {
+            return None;
         }
+        let active_set: HashSet<u32> = active_atom_ids.iter().map(|(i, _)| *i).collect();
+        let act_lookup: HashMap<u32, f32> = active_atom_ids.iter().copied().collect();
+
+        // Score each active atom by activation - alpha * predecessor_pull.
+        // predecessor_pull = sum over excit synapses INTO this atom whose
+        // source is also in the active set, weighted by source activation.
+        let mut start_scores: Vec<(u32, f32)> = Vec::new();
+        for (id, act) in &active_atom_ids {
+            let mut pred_pull = 0.0f32;
+            // Walk all active atoms and check their excit edges INTO id.
+            for (other_id, other_act) in &active_atom_ids {
+                if other_id == id { continue; }
+                if let Some(neuron) = target_pool.get_hot(*other_id as usize) {
+                    for syn in &neuron.excitatory {
+                        if syn.target == *id {
+                            pred_pull += other_act * syn.weight;
+                        }
+                    }
+                }
+            }
+            let score = act - 0.5 * pred_pull;
+            start_scores.push((*id, score));
+        }
+        start_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Greedy walk forward from the chosen start.
+        let max_len = 200usize;
+        let mut visited: HashSet<u32> = HashSet::new();
+        let mut chain: Vec<u32> = Vec::new();
+        let start = start_scores[0].0;
+        let mut cur = start;
+        for _ in 0..max_len {
+            if visited.contains(&cur) { break; }
+            visited.insert(cur);
+            chain.push(cur);
+            // pick strongest outgoing excit edge into another active atom.
+            let neuron = match target_pool.get_hot(cur as usize) {
+                Some(n) => n, None => break,
+            };
+            let mut best_next: Option<(u32, f32)> = None;
+            for syn in &neuron.excitatory {
+                let tgt = syn.target;
+                if visited.contains(&tgt) { continue; }
+                if !active_set.contains(&tgt) { continue; }
+                let tgt_act = *act_lookup.get(&tgt).unwrap_or(&0.0);
+                let score = syn.weight * (tgt_act + 0.05);
+                let cur_best = best_next.as_ref().map(|x| x.1).unwrap_or(0.0);
+                if score > cur_best {
+                    best_next = Some((tgt, score));
+                }
+            }
+            match best_next {
+                Some((nx, _)) => cur = nx,
+                None => break,
+            }
+        }
+        if chain.is_empty() {
+            return None;
+        }
+        // Walk chain ids back to chars.
+        let mut out = String::new();
+        for id in &chain {
+            if let Some(neuron) = target_pool.get_hot(*id as usize) {
+                if let Some(label) = neuron.label.as_ref() {
+                    if let Some(ch) = crate::streaming::label_to_char(label) {
+                        out.push(ch);
+                    }
+                }
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
     }
 
     /// Snapshot a summary of the two-pool state — sizes, top concepts, etc.
