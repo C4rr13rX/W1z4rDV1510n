@@ -559,6 +559,51 @@ fn position_augmented_atoms(atoms: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Bigram atoms — position-agnostic features over consecutive atom pairs.
+///
+/// Position augmentation gives perfect short-corpus exact recall (because
+/// concepts are uniquely keyed by `{atom}@{i}` per position) but kills
+/// heavy-paraphrase recall: paraphrases that share specific words share
+/// almost no positional atoms with their trained variants.  Bigram atoms
+/// fix this complementarity: they encode **local order** — the pair
+/// (atom_i, atom_{i+1}) — without binding to absolute position.  A word
+/// like "push" produces the same bigram chain regardless of where it
+/// appears in the sentence, so paraphrases that share words share bigrams.
+///
+/// **Source-prefix sharing trick**: `composite_label_for_members` requires
+/// every member to share the same source prefix (e.g. `txt:`) so concept
+/// labels can be generated.  We therefore put bigrams under the SAME
+/// `txt:` (or whatever) prefix as position atoms, with a payload that
+/// uses `.` and `~` as separators — both characters are outside the
+/// URL-safe base64 alphabet so `pos_label_to_char` cleanly rejects them
+/// (a bigram never accidentally decodes to a char in the output).
+///
+/// Format: `{src}:bg.{a_payload}~{b_payload}` where `{src}` is the source
+/// prefix shared with the position-augmented atoms (typically `txt`).
+fn bigram_atoms(atoms: &[String]) -> Vec<String> {
+    if atoms.len() < 2 { return Vec::new(); }
+    let mut out = Vec::with_capacity(atoms.len() - 1);
+    for w in atoms.windows(2) {
+        // Split each atom into (source, payload) and require the source to
+        // match — bigrams across different streams don't make sense.
+        let (sa, pa) = match w[0].split_once(':') { Some(x) => x, None => continue };
+        let (sb, pb) = match w[1].split_once(':') { Some(x) => x, None => continue };
+        if sa != sb { continue; }
+        out.push(format!("{sa}:bg.{pa}~{pb}"));
+    }
+    out
+}
+
+/// Combine position-augmented atoms with bigram atoms.  Order: positional
+/// atoms first (the concept walk decoder reads members in order, so this
+/// preserves the chain), bigrams appended at the end.  pos_label_to_char
+/// filters bigrams out during decode.
+fn position_and_bigram_atoms(atoms: &[String]) -> Vec<String> {
+    let mut out = position_augmented_atoms(atoms);
+    out.extend(bigram_atoms(atoms));
+    out
+}
+
 /// Strip a trailing `@{digits}` (positional augmentation) from a label,
 /// then run the standard `label_to_char` decoder.  Two-pool decoder paths
 /// (chain-walk and concept-walk) call this so positional atoms stored by
@@ -4321,6 +4366,13 @@ pub struct NeuroRuntime {
     config: NeuroRuntimeConfig,
     symbol_lookup: HashMap<String, Symbol>,
     inner: Arc<Mutex<NeuroState>>,
+    /// Atomic flag for bigram-atom dual encoding in the multi-pool path.
+    /// When true, train and query both use position-augmented + bigram atoms;
+    /// when false (default) only position-augmented atoms are used (the
+    /// existing behaviour preserved for backward compat with tests).
+    /// `Arc` so `NeuroRuntime: Clone` keeps holding (the flag is shared
+    /// state, not duplicated state).
+    use_bigrams: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub type NeuroRuntimeHandle = Arc<NeuroRuntime>;
@@ -4409,6 +4461,7 @@ impl NeuroRuntime {
             config,
             symbol_lookup,
             inner: Arc::new(Mutex::new(state)),
+            use_bigrams: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -5128,6 +5181,18 @@ impl NeuroRuntime {
         self.multi_pool_train_pair("in", input_atoms, "out", output_atoms, lr);
     }
 
+    /// Atomic flag controlling bigram-atom dual encoding for the multi-pool
+    /// fabric.  When set, both `multi_pool_train_pair` and
+    /// `multi_pool_decode_one_with_confidence` use position+bigram atoms
+    /// instead of position-only.  Off by default for backward compat with
+    /// the existing integration tests.
+    pub fn set_use_bigrams(&self, on: bool) {
+        self.use_bigrams.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn use_bigrams(&self) -> bool {
+        self.use_bigrams.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Register a new pool in the multi-pool fabric.  Idempotent.  Pools
     /// "in" and "out" are pre-registered for two_pool API compatibility;
     /// any number of additional pools may be added at runtime.
@@ -5169,8 +5234,20 @@ impl NeuroRuntime {
         // (0) Position-augment atoms so concepts whose content overlaps but
         //     diverges in *position* can be discriminated by neural
         //     propagation alone — no external decision rule needed.
-        let src_pos = position_augmented_atoms(src_atoms);
-        let tgt_pos = position_augmented_atoms(tgt_atoms);
+        //     When `use_bigrams` is on, ALSO add bigram atoms — position-
+        //     agnostic features over consecutive atom pairs that let
+        //     paraphrases sharing specific words (regardless of where they
+        //     appear in the sentence) share atom-level features.
+        let src_pos = if self.use_bigrams() {
+            position_and_bigram_atoms(src_atoms)
+        } else {
+            position_augmented_atoms(src_atoms)
+        };
+        let tgt_pos = if self.use_bigrams() {
+            position_and_bigram_atoms(tgt_atoms)
+        } else {
+            position_augmented_atoms(tgt_atoms)
+        };
 
         // (1) Reset transient activation/trace in the two relevant pools.
         if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { p.reset_transient_state(); }
@@ -5255,6 +5332,23 @@ impl NeuroRuntime {
         hops: usize,
         min_activation: f32,
     ) -> HashMap<String, String> {
+        self.multi_pool_query_with_confidence(src_pool_id, atoms, hops, min_activation)
+            .into_iter().map(|(k, (s, _))| (k, s)).collect()
+    }
+
+    /// Same as `multi_pool_query` but each target's value is `(decoded, confidence)`
+    /// where confidence in [0, 1] is the softmax-like product of three
+    /// posterior fractions (src concept dominance × cross-edge dominance ×
+    /// tgt concept dominance).  Used by `/query/integrated` to route by
+    /// precision-weighted Bayesian inference across multiple architectural
+    /// pieces.
+    pub fn multi_pool_query_with_confidence(
+        &self,
+        src_pool_id: &str,
+        atoms: &[String],
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, (String, f32)> {
         let mut out = HashMap::new();
         if atoms.is_empty() { return out; }
         let target_ids: Vec<String> = {
@@ -5264,10 +5358,10 @@ impl NeuroRuntime {
                 .collect()
         };
         for tgt_pool_id in target_ids {
-            if let Some(decoded) = self.multi_pool_decode_one(
+            if let Some((decoded, conf)) = self.multi_pool_decode_one_with_confidence(
                 src_pool_id, &tgt_pool_id, atoms, hops, min_activation
             ) {
-                out.insert(tgt_pool_id, decoded);
+                out.insert(tgt_pool_id, (decoded, conf));
             }
         }
         out
@@ -5282,6 +5376,31 @@ impl NeuroRuntime {
         hops: usize,
         min_activation: f32,
     ) -> Option<String> {
+        self.multi_pool_decode_one_with_confidence(
+            src_pool_id, tgt_pool_id, atoms, hops, min_activation
+        ).map(|(s, _)| s)
+    }
+
+    /// Decode plus a softmax-like confidence in [0, 1].  Confidence is the
+    /// product of three fractions:
+    ///   (a) source concept activation / sum of all src concept activations
+    ///       — how dominant the chosen src concept was over its peers
+    ///   (b) cross-edge weight to chosen target / sum of cross-edge weights
+    ///       from the chosen source — how confident the cross-pool
+    ///       projection is
+    ///   (c) target concept activation / sum of all tgt concept activations
+    ///       — how cleanly the target concept beat its siblings
+    /// This is the "best probabilities within an uncertain margin" reading
+    /// for a Bayesian-sensor multi-pool: each route returns its posterior
+    /// strength so consumers can route by precision-weighted inference.
+    fn multi_pool_decode_one_with_confidence(
+        &self,
+        src_pool_id: &str,
+        tgt_pool_id: &str,
+        atoms: &[String],
+        hops: usize,
+        min_activation: f32,
+    ) -> Option<(String, f32)> {
         if atoms.is_empty() { return None; }
         let guard = self.inner.lock();
         let src_pool = guard.multi_pool.pool(src_pool_id)?;
@@ -5292,7 +5411,11 @@ impl NeuroRuntime {
         //    activation than peer concepts whose SOME members fire — the
         //    discrimination signal that lets `top_active_concept` pick the
         //    right concept without any external rule.
-        let pos_atoms = position_augmented_atoms(atoms);
+        let pos_atoms = if self.use_bigrams() {
+            position_and_bigram_atoms(atoms)
+        } else {
+            position_augmented_atoms(atoms)
+        };
         let mut src_seeds: HashMap<String, f32> = HashMap::new();
         for a in &pos_atoms { src_seeds.insert(a.clone(), 1.0); }
         // Only one hop for source propagation: chars activate concepts they
@@ -5311,6 +5434,20 @@ impl NeuroRuntime {
 
         // 1b. Take the strongest active concept — pure neural argmax.
         let chosen_src_concept = top_active_concept(src_pool, &src_active);
+        let chosen_src_label = chosen_src_concept.clone();
+
+        // (a) Source-concept dominance fraction.
+        let src_concept_total: f32 = src_active.iter()
+            .filter(|(l, _)| src_pool.label_to_id.get(*l)
+                .and_then(|&id| src_pool.get_hot(id as usize))
+                .map(|n| !n.members.is_empty()).unwrap_or(false))
+            .map(|(_, a)| *a).sum();
+        let chosen_src_act = chosen_src_concept.as_ref()
+            .and_then(|l| src_active.get(l)).copied().unwrap_or(0.0);
+        let src_concept_frac = if src_concept_total > 1e-9 {
+            (chosen_src_act / src_concept_total).clamp(0.0, 1.0)
+        } else { 0.0 };
+
         let src_for_cross: HashMap<String, f32> = match chosen_src_concept {
             Some(lbl) => {
                 let act = *src_active.get(&lbl).unwrap_or(&0.0);
@@ -5324,13 +5461,24 @@ impl NeuroRuntime {
         // 2. Cross-project to the target pool via the (src, tgt) cross-synapses.
         let cross = guard.multi_pool.cross_for(src_pool_id, tgt_pool_id)?;
         let mut tgt_seeds: HashMap<String, f32> = HashMap::new();
+        // Track per-source cross-edge totals so we can compute the
+        // chosen-target fraction.
+        let mut chosen_src_edge_total = 0.0f32;
+        let mut chosen_src_edge_top = 0.0f32;
         for (src_label, src_act) in &src_for_cross {
             for (tgt_label, w) in cross.forward(src_label) {
                 let entry = tgt_seeds.entry(tgt_label).or_insert(0.0);
                 *entry += src_act * w;
+                if Some(src_label) == chosen_src_label.as_ref() {
+                    chosen_src_edge_total += w;
+                    if w > chosen_src_edge_top { chosen_src_edge_top = w; }
+                }
             }
         }
         if tgt_seeds.is_empty() { return None; }
+        let cross_edge_frac = if chosen_src_edge_total > 1e-9 {
+            (chosen_src_edge_top / chosen_src_edge_total).clamp(0.0, 1.0)
+        } else { 0.0 };
 
         // 2b. Keep only the strongest target *concept* seed.
         let mut top_concept_seed: Option<(String, f32)> = None;
@@ -5360,6 +5508,7 @@ impl NeuroRuntime {
         // 4. Decode.
         // 4a. Concept walk if a composite/concept fired.
         let mut best_concept: Option<(String, f32)> = None;
+        let mut tgt_concept_total = 0.0f32;
         for (lbl, act) in &tgt_acts {
             let id = match tgt_pool.label_to_id.get(lbl) {
                 Some(&i) => i,
@@ -5370,19 +5519,27 @@ impl NeuroRuntime {
                 None => continue,
             };
             if neuron.members.len() >= 2 {
+                tgt_concept_total += *act;
                 let entry = best_concept.as_ref().map(|x| x.1).unwrap_or(0.0);
                 if *act > entry {
                     best_concept = Some((lbl.clone(), *act));
                 }
             }
         }
+        let tgt_concept_frac = match (&best_concept, tgt_concept_total) {
+            (Some((_, a)), t) if t > 1e-9 => (*a / t).clamp(0.0, 1.0),
+            _ => 0.0,
+        };
+        // (c) Final confidence: product of the three softmax-like fractions.
+        let confidence = (src_concept_frac * cross_edge_frac * tgt_concept_frac)
+            .clamp(0.0, 1.0);
         if let Some((lbl, _)) = best_concept {
             let parts = tgt_pool.composite_constituents(&lbl);
             let chars: String = parts.iter()
                 .filter_map(|p| pos_label_to_char(p))
                 .collect();
             if !chars.is_empty() {
-                return Some(chars);
+                return Some((chars, confidence));
             }
         }
 
@@ -5457,7 +5614,16 @@ impl NeuroRuntime {
                 }
             }
         }
-        if out.is_empty() { None } else { Some(out) }
+        if out.is_empty() {
+            None
+        } else {
+            // Chain-walk fallback: take half the cross/src confidence as a
+            // proxy — the chain decoded from atom-level rather than concept.
+            // No tgt_concept_frac because no concept fired cleanly.
+            let fallback_conf = (src_concept_frac * cross_edge_frac * 0.5)
+                .clamp(0.0, 1.0);
+            Some((out, fallback_conf))
+        }
     }
 
     /// Snapshot a summary of the multi-pool state — per-pool sizes plus

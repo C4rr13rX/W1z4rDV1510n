@@ -998,6 +998,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/multi_pool/replay",        post(multi_pool_replay))
         .route("/multi_pool/delta/export",  get(multi_pool_delta_export))
         .route("/multi_pool/delta/apply",   post(multi_pool_delta_apply))
+        .route("/multi_pool/use_bigrams",   post(multi_pool_use_bigrams))
+        // POST /query/integrated — precision-weighted multi-route inference.
+        // Tries multi-pool first; if its confidence is below threshold,
+        // falls back to slow-pool char-chain; if both produce nothing,
+        // falls back to EEM equation match.  Returns the winning route's
+        // answer + which route + the confidence at which it won.
+        .route("/query/integrated",         post(query_integrated))
         // ── Hypothesis queue ──────────────────────────────────────────────────
         // Questions that scored below ANSWER_THRESHOLD sit here until resolved.
         .route("/hypothesis/queue",     get(hypothesis_queue_list))
@@ -5377,6 +5384,165 @@ async fn multi_pool_delta_export(
     }).await.ok().unwrap_or_default();
     (StatusCode::OK, Json(serde_json::to_value(delta)
         .unwrap_or(serde_json::Value::Null)))
+}
+
+// ── /query/integrated — precision-weighted multi-route inference ────────
+
+#[derive(Debug, Deserialize)]
+struct QueryIntegratedReq {
+    text: String,
+    #[serde(default = "default_integrated_src_pool")]
+    src_pool: String,
+    #[serde(default = "default_two_pool_hops")]
+    hops: usize,
+    #[serde(default = "default_two_pool_min_strength")]
+    min_strength: f32,
+    /// Below this multi-pool confidence, fall through to char-chain decoder.
+    #[serde(default = "default_mp_confidence_threshold")]
+    mp_confidence_threshold: f32,
+    #[serde(default = "default_eem_fallback")]
+    use_eem_fallback: bool,
+    /// Sensor dims for EEM fallback (3 = standard 3D world, 2 = page/UI).
+    #[serde(default = "default_integrated_dims")]
+    dims: u8,
+}
+fn default_integrated_dims()         -> u8 { 3 }
+fn default_integrated_src_pool()    -> String { "in".to_string() }
+fn default_mp_confidence_threshold() -> f32 { 0.30 }
+fn default_eem_fallback()            -> bool { true }
+
+/// POST /query/integrated — Bayesian-sensor cascaded routing.
+///
+/// The architecture's pieces are Bayesian sensors: each posts an answer
+/// alongside a posterior strength.  Multi-pool is the cheapest fastest
+/// route; when its confidence is high enough we accept and stop.  Below
+/// threshold we route to the slow-pool char-chain decoder; if that returns
+/// nothing we ask the EEM for a structurally-related answer (top
+/// equation's discipline keywords joined).  Returns which route won and at
+/// what confidence — the GA can tune the threshold per genome.
+async fn query_integrated(
+    State(state): State<ApiState>,
+    Json(req): Json<QueryIntegratedReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "text must not be empty" })));
+    }
+    let neuro    = state.neuro.clone();
+    let eem      = state.equation_matrix.clone();
+    let atoms: Vec<String> = req.text.chars().map(char_label).collect();
+    let hops     = req.hops;
+    let min_s    = req.min_strength;
+    let mp_thr   = req.mp_confidence_threshold;
+    let use_eem  = req.use_eem_fallback;
+    let dims     = req.dims;
+    let src_pool = req.src_pool.clone();
+    let text     = req.text.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        // (1) Multi-pool with confidence.
+        let mp = neuro.multi_pool_query_with_confidence(
+            &src_pool, &atoms, hops.max(2), min_s.max(0.001),
+        );
+        let mut all_routes: Vec<serde_json::Value> = Vec::new();
+        let mp_out = mp.get("out").cloned();
+        if let Some((ans, conf)) = mp_out.clone() {
+            all_routes.push(serde_json::json!({
+                "method":     "multi_pool",
+                "answer":     ans,
+                "confidence": conf,
+            }));
+            if conf >= mp_thr && !ans.is_empty() {
+                return serde_json::json!({
+                    "answer":     ans,
+                    "method":     "multi_pool",
+                    "confidence": conf,
+                    "all_routes": all_routes,
+                });
+            }
+        }
+
+        // (2) Slow-pool char-chain decoder.  Confidence approximation:
+        //     length / 100 capped at 0.6 — it has no clean posterior so
+        //     we cap it below the multi-pool top score to bias routing
+        //     back to multi-pool when both succeed at similar strength.
+        let cc = decode_char_chain(&neuro, &text, 120,
+            hops.max(1), min_s.max(0.001));
+        if let Some(answer) = cc.clone() {
+            let conf = (answer.len() as f32 / 100.0).min(0.6);
+            all_routes.push(serde_json::json!({
+                "method":     "char_chain",
+                "answer":     answer,
+                "confidence": conf,
+            }));
+            if !answer.is_empty() {
+                return serde_json::json!({
+                    "answer":     answer,
+                    "method":     "char_chain",
+                    "confidence": conf,
+                    "all_routes": all_routes,
+                });
+            }
+        }
+
+        // (3) EEM fallback.
+        if use_eem {
+            // Tokenize the input into word labels for the EEM context.
+            let words: Vec<String> = text.split_whitespace()
+                .filter(|w| w.len() >= 3)
+                .take(12)
+                .map(|w| w.to_lowercase())
+                .collect();
+            if !words.is_empty() {
+                let result = eem.apply_to_context(&words, dims);
+                if let Some(top) = result.candidates.first() {
+                    let kw: Vec<&str> = top.equation.discipline.keywords()
+                        .iter().take(8).copied().collect();
+                    let answer = kw.join(" ");
+                    let conf = top.relevance.min(1.0);
+                    all_routes.push(serde_json::json!({
+                        "method":     "eem",
+                        "answer":     answer,
+                        "confidence": conf,
+                    }));
+                    return serde_json::json!({
+                        "answer":     answer,
+                        "method":     "eem",
+                        "confidence": conf,
+                        "all_routes": all_routes,
+                    });
+                }
+            }
+        }
+
+        // (4) Nothing fired.
+        serde_json::json!({
+            "answer":     serde_json::Value::Null,
+            "method":     "none",
+            "confidence": 0.0,
+            "all_routes": all_routes,
+        })
+    }).await.ok().unwrap_or_else(|| serde_json::json!({"error":"task failed"}));
+    (StatusCode::OK, Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+struct UseBigramsReq { enable: bool }
+
+/// POST /multi_pool/use_bigrams — toggle bigram-atom dual encoding for the
+/// multi-pool fabric.  When enabled, train and query both augment atoms
+/// with position-agnostic bigram features — addresses the heavy-paraphrase
+/// recall ceiling that position-only encoding can't bridge.  Setting must
+/// be applied BEFORE training so concepts span both atom representations.
+async fn multi_pool_use_bigrams(
+    State(state): State<ApiState>,
+    Json(req): Json<UseBigramsReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    state.neuro.set_use_bigrams(req.enable);
+    (StatusCode::OK, Json(serde_json::json!({
+        "status":      "ok",
+        "use_bigrams": state.neuro.use_bigrams(),
+    })))
 }
 
 /// POST /multi_pool/delta/apply — receive a delta from a peer and merge.
