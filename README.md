@@ -169,11 +169,13 @@ Silence and uncertainty are first-class outputs here. A tokenized model cannot p
 
 | Task | Score | Notes |
 |------|-------|-------|
-| Multi-pool fwd/rev recall (8-pair small + 30-45k char large corpus) | **1.000 / 8-of-8** | `POST /multi_pool/ask` after architectural fix; 7/7 Rust + 30/30 Python integration tests pass |
+| Multi-pool fwd/rev recall (8-pair small + 30-45k char large corpus) | **1.000 / 8-of-8** | `POST /multi_pool/ask`; 7/7 Rust + 30/30 Python integration tests pass |
 | Multi-pool 32-pair encyclopedia (cross-domain) | **0.987 / 32-of-32 fwd** | Same path, harder corpus |
+| GA combined score (NCBI memorization + paraphrase generalization) | **0.837** | Recipe B: bigrams+trigrams+IDF, passes=7, lr=0.167; measured on 25 NCBI pairs + 15 class descriptions |
+| Class paraphrase exact recall | **60% (9/15)** | Recipe B with trigrams; was 0% before n-gram encoding |
 | Chat / generate quality | **0.630** | `POST /chat`, `POST /neuro/generate` |
 
-These scores are corpus-dependent — they shift as more training data is ingested. `/chat` uses the dual-memory (CLS) architecture: N-pool fabric as the high-confidence fast path, slow NeuronPool char-chain decoder as the fallback. Expect both numbers to improve with broader training corpora; the multi-pool path is exact-recall by construction once a pair is trained.
+These scores are corpus-dependent — they shift as more training data is ingested. `/query/integrated` uses the precision-weighted cascade: N-pool fabric as the high-confidence primary sensor, slow NeuronPool char-chain decoder and EEM as fallbacks. The GA-discovered Recipe B (combined=0.837) provides the current best configuration for paraphrase-heavy corpora.
 
 ---
 
@@ -243,7 +245,7 @@ The node is an **instrument, not an agent**. It observes every incoming sensor s
 
 Every sensor stream — a chess board, a video camera, a news feed, a social graph, a chemical state — arrives in the same generic format. The node has no knowledge of any specific domain. It sees positions, labels, and co-occurrences. What it learns from a chess game transfers to what it knows about crowd dynamics, and vice versa. The neural fabric that grows from one domain is the same fabric another domain trains.
 
-The Environmental Equation Matrix sits at the center of this. As the neural fabric fires labels from sensor data, the EEM continuously asks: *which physical laws govern what I'm currently observing?* It works across 282 equations and 24 disciplines simultaneously — because the environment doesn't respect disciplinary boundaries. A crowd tipping toward panic obeys the same Kuramoto coupling equations as synchronized chemical oscillators. A viral narrative spreading through a social network follows the same Bass diffusion curve as a product launch. A coordinated information campaign has a measurable Lyapunov exponent. The EEM names these processes from raw observation, without being told what to look for.
+The Environmental Equation Matrix sits at the center of this. As the neural fabric fires labels from sensor data, the EEM continuously asks: *which physical laws govern what I'm currently observing?* It works across 339 equations and 27 disciplines simultaneously — because the environment doesn't respect disciplinary boundaries. A crowd tipping toward panic obeys the same Kuramoto coupling equations as synchronized chemical oscillators. A viral narrative spreading through a social network follows the same Bass diffusion curve as a product launch. A coordinated information campaign has a measurable Lyapunov exponent. The EEM names these processes from raw observation, without being told what to look for.
 
 When the EEM can't explain a label cluster — when something is happening that doesn't match any known equation — it opens a hypothesis gap and records which nodes are seeing it. A gap observed independently across many nodes in a distributed deployment is the system's way of saying: *something real is happening here that we don't have a name for yet.* That is a more useful signal than a classification.
 
@@ -282,9 +284,17 @@ When the EEM can't explain a label cluster — when something is happening that 
 │         Hyp  API  ── /hypothesis/queue  /hypothesis/resolve         │
 │         EEM  API  ── /equations/*  /causal/graph                    │
 │         MP   API  ── /multi_pool/{register,train_pair,             │
-│                       train_fanout,ask,stats}                        │
+│                       train_fanout,ask,replay,delta/*,use_ngrams}    │
+│         Cascade   ── /query/integrated  (MP → char-chain → EEM)     │
 │         Cluster   ── ClusterNode  ── HashRing ── OtpRegistry        │
 │         Dist      ── DistributedCoordinator (round-robin, delta sync)│
+│                                                                      │
+│  ┌───────── Cross-wiring feedback loops ────────────────────────┐   │
+│  │  EEM ──fb_eem_into_mp──► MP weights (at training time)      │   │
+│  │  MP  ──fb_mp_into_slowpool──► slow pool /media/train        │   │
+│  │  low confidence ──fb_replay_low_conf──► /multi_pool/replay   │   │
+│  │  route disagreement ──fb_disagreement_ne──► NE spike → ↑LR  │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 │                                                                      │
 │  KnowledgeRuntime ── HierarchicalMotifs ── FabricTrainer            │
 │  P2P Gossip / Data Mesh / Blockchain Layer                           │
@@ -403,7 +413,7 @@ Every prediction is the result of multiple components voting simultaneously. Und
 | **Working memory carry** | Cosine similarity between consecutive frames sets a dynamic carry factor; similar frames reinforce prior context, dissimilar frames reset it |
 | **Temporal motif priors** | `HierarchicalMotifRuntime` mines recurring sequences at unbounded depth; the proposal kernel pulls candidates toward centroids of motif classes the fabric expects next |
 | **Classical annealer** | Searches minimum-energy state configurations; temperature is coherence-modulated — confident fabric → fast convergence; uncertain fabric → high-temperature exploration |
-| **Environmental Equation Matrix** | 282 equations across 24 disciplines vote on active sensor labels; matching equations reinforce associated labels; hypothesis gaps suppress confidence when nothing matches |
+| **Environmental Equation Matrix** | 339 equations across 27 disciplines vote on active sensor labels; matching equations reinforce associated labels; hypothesis gaps suppress confidence when nothing matches |
 | **Surprise-weighted replay** | Persistent mispredictions are replayed at higher frequency — the system applies stronger correction to its worst errors |
 | **Peer node learning** | In cluster mode, incremental weight deltas (label-keyed synapse weights + co-occurrence counts since last sync) are pushed to all peers every 20 training calls and merged with `max(local, remote)` — knowledge only accumulates, never overwrites |
 | **ResourceMonitor** | Under CPU/RAM pressure, batch sizes and update frequency drop — slower adaptation, more conservative predictions |
@@ -476,7 +486,7 @@ Every `/media/train` call with text runs two passes automatically:
 
 ### Environmental Equation Matrix (`EquationMatrixRuntime`)
 - A self-growing directed graph of physics equations spanning all domains from Newtonian mechanics to topological quantum phenomena
-- **282 seed equations across 24 disciplines**:
+- **339 seed equations across 27 disciplines**:
   - Classical Mechanics (F=ma through SHO, impulse, center of mass, torque, rotational dynamics)
   - Waves & Oscillations (wave equation, Doppler, decibel scale, intensity)
   - Lagrangian / Hamiltonian mechanics (action principle, Poisson brackets, adiabatic invariants)
@@ -503,6 +513,16 @@ Every `/media/train` call with text runs two passes automatically:
   - **Chaos Theory extended** (Lorenz attractor, logistic map, Feigenbaum constant, Rössler attractor, Liouville theorem, correlation dimension, Poincaré recurrence, tent map, KAM theorem, entropy production rate, sensitive dependence)
   - **Quantum extended** (Lindblad master equation, quantum Zeno effect, Wigner function, Rabi oscillations, Bloch sphere, quantum mutual information, quantum discord, Grover search, Shor's algorithm, quantum error correction, quantum Fisher information, decoherence time, teleportation fidelity)
   - **Cross-Disciplinary Bridges** (Friston free energy principle, Jaynes maximum entropy, power laws, percolation threshold, small-world networks, Ising opinion dynamics, mean field theory, RG fixed points, Kolmogorov complexity, integrated information Φ, fitness landscapes, cascade failure, Red Queen coevolution, Schelling segregation, NK complexity model)
+  - **Control Theory** (PID controller, transfer function, Laplace stability, state-space representation, Nyquist criterion, Bode plot, root locus, LQR optimal control, Kalman filter, H-infinity norm)
+  - **Signal Processing** (DFT, convolution theorem, Nyquist-Shannon sampling, Wiener filter, matched filter, FFT complexity, windowing, spectrogram, autocorrelation, power spectral density)
+  - **Chemistry** (ideal gas law, Arrhenius equation, equilibrium constant, Gibbs free energy, Nernst equation, reaction rate, activation energy, Henderson-Hasselbalch, osmotic pressure, Beer-Lambert law)
+  - **Computer Science** (P vs NP, Turing completeness, halting problem, Shannon capacity, Big-O notation, Amdahl's law, master theorem, NP-hardness reduction, Cook-Levin theorem, Rice's theorem)
+  - **Optimization** (gradient descent, Lagrangian multipliers, KKT conditions, simplex algorithm, Newton's method, convex duality, stochastic gradient, momentum update, Adam optimizer, simulated annealing)
+  - **Machine Learning** (backpropagation, VC dimension, bias-variance tradeoff, universal approximation, PAC learning, kernel trick, SVM margin, Bayesian inference, EM algorithm, Rademacher complexity)
+  - **Electrical Engineering** (Ohm's law, Kirchhoff's laws, RC time constant, LC resonance, Thevenin equivalent, Norton equivalent, Bode gain, power factor, transmission line, skin depth)
+  - **Structural Engineering** (Euler buckling, beam bending moment, stress-strain (Hooke), fatigue life (S-N), yield criterion (von Mises), deflection formula, moment of inertia, safety factor, creep, fracture toughness)
+  - **Epidemiology** (SIR model, basic reproduction number R0, herd immunity threshold, force of infection, SEIR model, doubling time, attack rate, endemic equilibrium, vaccine efficacy, case fatality rate)
+  - **Economics** (supply-demand equilibrium, price elasticity, utility maximization, Cobb-Douglas production, IS-LM model, Fisher equation, Gini coefficient, Lorenz curve, Phillips curve, Solow growth model)
 - **23 semantic links** between equations: `derives_from`, `bridges`, `special_case`, `unifies`, `approximates`, `generalizes`, `contradicts`
 - **Dimension-aware**: equations tagged with spatial applicability. Anyons (`ψ → e^{iθ}ψ`) are strictly 2D — they will not surface in a 3D sensor context. Maxwell's equations are 3D. Thermodynamic identities are dimension-agnostic
 - **Sensor-driven**: `apply_to_context(labels, dims)` takes active neuro-fabric labels + sensor dimensionality and returns candidate equations explaining the current observation
@@ -520,50 +540,189 @@ Every `/media/train` call with text runs two passes automatically:
 
 ### Multi-Pool Associative Fabric (N-pool — first layer of the stack)
 
-The Hebbian fast-recall layer.  Replaces the previous `QaRuntime`.  An
-arbitrary number of named `NeuronPool`s, with cross-synapses between every
-ordered pool pair.  Sending an input to any one pool causes every other
-connected pool to fire in parallel — a single input can drive a Q→A pool, an
-emotion pool, an equation pool, a motion pool, and so on, all at once.
+The Hebbian fast-recall layer. An arbitrary number of named `NeuronPool`s, with
+cross-synapses between every ordered pool pair. Sending an input to any one pool
+causes every other connected pool to fire in parallel — a single input drives a
+Q→A pool, an emotion pool, an equation pool, a motion pool, and so on, all at once.
 
-Pre-registered pools: `"in"` and `"out"` (the original two-pool path is now
-just two named pools in this fabric).  Any number of additional pools can be
-registered at runtime via `POST /multi_pool/register` or via
-`multi_pool_register(id)` in code.
+Pre-registered pools: `"in"` and `"out"`. Additional pools are registered at
+runtime via `POST /multi_pool/register`.
 
 **How a query works:**
 
-1. Position-augment the input atoms (each atom at sequence index `i` becomes
-   a unique `{atom}@{i}`) so concepts that share content but differ in *where*
-   atoms appear can be discriminated by neural propagation alone — no
-   external decision rule needed.
-2. Propagate one hop in the source pool with a sum (no clamp) accumulator.
-   Concept neurons whose ALL members fire reach higher activation than peer
-   concepts whose only some members fire — the discrimination signal.
-3. Pick the highest-activation source concept (`top_active_concept`).
-4. Cross-project to each target pool through that pool-pair's
-   `CrossPoolSynapses`.
-5. Pick the strongest target concept seed.
-6. Propagate within the target pool.
-7. Decode by concept walk (composite member → chars) or chain walk
-   (greedy STDP traversal of active atoms).
+1. **N-gram atom encoding** — the input is encoded as position-augmented atoms plus
+   optional bigrams (`{src}:bg.{a}~{b}`) and trigrams (`{src}:tg.{a}~{b}~{c}`).
+   Bigrams and trigrams provide paraphrase generalization — queries that share
+   character sub-sequences activate overlapping concept sets even if word boundaries
+   differ.  IDF weighting (when enabled) scales each atom's Hebbian contribution by
+   `ln((C+1)/(count+1))+1`, clamped `[0.5, 4.0]`, so rare atoms count for more.
+2. **Propagate** one hop in the source pool with a sum-no-clamp accumulator.
+   Concept neurons whose ALL members fire reach higher activation than those whose
+   only some members fire — pure neural discrimination, no external rule.
+3. **Pick** the highest-activation source concept (`top_active_concept`).
+4. **Cross-project** to each target pool through that pool-pair's `CrossPoolSynapses`.
+5. **Decode** the target concept by composite member walk (char-chain) or STDP atom
+   traversal.
+
+**Precision-weighted cascade routing (`/query/integrated`)**
+
+Multi-pool recall is the primary sensor; the slow-pool char-chain decoder and the
+EEM are fallback sensors. The cascade fires all three and picks the best by
+confidence:
+
+```
+Input
+  │
+  ├─► multi_pool (fast associative)  ── confidence = product of 3 Bayesian fractions
+  │                                        ↓ if confidence ≥ threshold
+  │                                       return multi-pool answer
+  │
+  ├─► char_chain (slow NeuronPool)   ── Bayesian decode confidence
+  │                                        ↓ if better than multi-pool
+  │                                       return char-chain answer
+  │
+  └─► EEM fallback                   ── equation match score
+                                          ↓ always last resort
+                                         return EEM match
+```
+
+`POST /query/integrated` returns `{answer, method, confidence, all_routes}` so
+every inference call is fully auditable — you can see which sensor handled each
+query and at what confidence.
+
+**N-gram encoding toggles (`POST /multi_pool/use_ngrams`)**
+
+```json
+{ "bigrams": true, "trigrams": true, "idf": false }
+```
+
+- `bigrams` — enable character-pair atoms; helps paraphrase recall
+- `trigrams` — enable character-triple atoms; strongest discrimination signal on
+  class-description paraphrases (60% exact recall vs. 0% without)
+- `idf` — IDF weighting; use at low training intensity (passes ≤ 10, lr ≤ 0.2);
+  gets washed out by edge saturation at high passes/LR
+
+**Current best recipe (GA result, Recipe B, combined=0.837):**
+```
+bigrams=1, trigrams=1, idf=1, passes=7, lr=0.167, hops=1, min_strength=0.155
+```
+
+**Cross-wiring feedback loops (genome-toggleable)**
+
+Four feedback paths close additional signal loops between components at training
+and eval time — each enabled or disabled independently by the GA genome:
+
+| Toggle | What it closes |
+|--------|----------------|
+| `fb_eem_into_mp` | EEM equation matches on queries → train `(query, equation_text)` into cross-pool weights at ½ LR.  EEM-detected physics enters the multi-pool fabric. |
+| `fb_mp_into_slowpool` | Every `(description, code)` pair trained into multi-pool → also pumped through `/media/train` so the slow-pool char-chain decoder sees the same vocabulary. |
+| `fb_replay_low_conf` | After eval, if avg confidence < 0.20 → fire `/multi_pool/replay` (CLS replay).  Low confidence triggers consolidation. |
+| `fb_disagreement_ne` | After eval, if ≥ 25% of queries fell to char-chain or EEM → release 0.5 NE spike.  Route disagreement → elevated LR on next training run. |
+
+**CLS replay (`POST /multi_pool/replay`)**
+
+Replays concept neurons from the N-pool fabric back into the slow NeuronPool at a
+configurable LR scale (`cls_lr_scale`).  Equivalent to hippocampal→cortical
+consolidation: episodic N-pool knowledge reinforces the distributed slow-pool
+representation.
+
+**Cluster delta sync**
+
+`POST /multi_pool/delta/export` / `POST /multi_pool/delta/apply` — per-pool weight
+deltas compatible with the existing `max(local, remote)` merge strategy so N-pool
+fabric knowledge propagates across cluster nodes alongside the slow-pool delta.
 
 **API:**
-- `POST /multi_pool/register` — register a new pool by name.
-- `POST /multi_pool/train_pair` — train (src, tgt) across two named pools.
-- `POST /multi_pool/train_fanout` — train one source pool against many target
-  pools simultaneously (color + category + emotion etc. for one input).
-- `POST /multi_pool/ask` — send text into a source pool, get every connected
-  pool's prediction back.
-- `GET /multi_pool/stats` — per-pool sizes + total cross-edges.
+- `POST /multi_pool/register` — register a new pool by name
+- `POST /multi_pool/train_pair` — train (src, tgt) across two named pools
+- `POST /multi_pool/train_fanout` — train one source pool against many targets simultaneously
+- `POST /multi_pool/ask` — send text to a source pool; every connected pool fires its prediction
+- `POST /multi_pool/replay` — CLS replay: consolidate N-pool concept neurons into slow pool
+- `POST /multi_pool/delta/export` — export per-pool synapse deltas for cluster sync
+- `POST /multi_pool/delta/apply` — apply incoming per-pool deltas from a peer node
+- `POST /multi_pool/use_ngrams` — set bigrams/trigrams/idf flags live (`{bigrams, trigrams, idf}`)
+- `POST /query/integrated` — precision-weighted cascade: multi-pool → char-chain → EEM
+- `GET /multi_pool/stats` — per-pool sizes + total cross-edge count
 
-The legacy `POST /two_pool/*` endpoints still work — they're thin wrappers
-that route through `"in"` and `"out"` pool ids.
+### GA Architecture Search
 
-**Why N-pool, not two-pool:** two_pool was a test.  The same machinery
-generalizes to any number of pools, so the fabric can grow specialized
-substrates (a JSON-shape pool, a tone pool, a motion-zone pool, a SQL pool,
-…) without the API or the discrimination logic changing.
+The system ships with a complete genetic algorithm harness for discovering optimal
+multi-pool configurations and enabling/disabling cross-wiring feedback loops.
+
+**Training corpus** (build once, ~minutes):
+```bash
+# Fetch NCBI/PMC articles (neuroscience, biofields, genetics, rhythms)
+python scripts/fetch_ncbi_corpus.py
+# Writes data/foundation/ncbi_pairs.jsonl  (~1185 Q-A pairs)
+
+# Generate science/engineering class corpus
+python scripts/build_class_corpus.py
+# Writes data/foundation/class_corpus.jsonl  (155 pairs — 31 classes × 5 paraphrases)
+```
+
+**Fitness harness (`scripts/ga_node_fitness.py`)**
+
+Spawns a fresh node, trains the NCBI corpus and class corpus at the genome's
+hyperparameters, then evaluates:
+- NCBI memorization (exact + Levenshtein similarity)
+- NCBI generalization (held-out paraphrase queries)
+- Class description memorization
+- Class paraphrase exact recall (the hardest metric)
+- Equation pool hit rate
+
+Returns a combined scalar in [0, 1].
+
+**Wide GA (`scripts/ga_node_search.py`)**
+
+Explores the full 17-dimensional genome:
+
+| Group | Parameters |
+|-------|-----------|
+| Multi-pool | `lr`, `passes`, `hops`, `min_strength` |
+| Connection toggles | `cls_replay_after_epoch`, `cls_lr_scale`, `eem_in_train_loop`, `train_equation_pool` |
+| Routing | `mp_confidence_threshold`, `use_eem_fallback` |
+| N-gram encoding | `use_bigrams`, `use_trigrams`, `use_idf` |
+| Cross-wiring | `fb_eem_into_mp`, `fb_mp_into_slowpool`, `fb_replay_low_conf`, `fb_disagreement_ne` |
+
+```bash
+python scripts/ga_node_search.py \
+  --pop 4 --max-gens 5 \
+  --ncbi-max 40 --class-max 15
+```
+
+**Scoping GA (`scripts/ga_scoping_search.py`)**
+
+Long-running phased search that drills around the current best recipe. Each phase:
+- Evaluates the running best as elite
+- Generates exploit descendants (mutated at current radius around best)
+- Reserves `explore_frac=0.30` for broad-radius exploration
+- 10% chance per phase to inject a fully random genome
+- On improvement → shrink radius × 0.85 (drill down)
+- On no improvement → expand radius × 1.10 (escape local basin)
+
+```bash
+# Launch with 4-hour budget (appends to existing log — fully resumable)
+python scripts/ga_scoping_search.py \
+  --pop 6 --max-phases 200 --max-runtime-secs 14400 \
+  --ncbi-max 25 --class-max 15 \
+  --log data/foundation/ga_scoping.jsonl
+
+# Post-run analysis: which feedback loops survived GA pressure?
+python -c "
+import json
+lines = [json.loads(l) for l in open('data/foundation/ga_scoping.jsonl')]
+summaries = [l for l in lines if l.get('phase_summary')]
+for s in summaries[-5:]:
+    g = s['best_genome']
+    print(f\"ph{s.get('phase','?')} score={s['best_score']:.4f} \",
+          f\"fb_eem={g.get('fb_eem_into_mp',0)} \",
+          f\"fb_slow={g.get('fb_mp_into_slowpool',0)} \",
+          f\"fb_rep={g.get('fb_replay_low_conf',0)} \",
+          f\"fb_ne={g.get('fb_disagreement_ne',0)}\")
+"
+```
+
+Current best (Recipe B): `combined=0.837`, bigrams+trigrams+IDF, passes=7, lr=0.167.
 
 ### Hypothesis Queue and Research Feedback Loop
 
@@ -639,8 +798,12 @@ W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 | `/multi_pool/train_pair` | POST | Train (src, tgt) across two named pools — symmetric |
 | `/multi_pool/train_fanout` | POST | Train one source pool against many targets at once |
 | `/multi_pool/ask` | POST | Send text to a source pool — every other pool fires its prediction |
+| `/multi_pool/replay` | POST | CLS replay: consolidate N-pool concept neurons into slow pool |
+| `/multi_pool/delta/export` | POST | Export per-pool synapse deltas for cluster sync |
+| `/multi_pool/delta/apply` | POST | Apply incoming per-pool deltas from a peer node |
+| `/multi_pool/use_ngrams` | POST | Set bigram/trigram/IDF encoding flags live |
 | `/multi_pool/stats` | GET | Per-pool sizes + total cross-edge count |
-| `/two_pool/*` | POST/GET | Legacy thin wrappers around `/multi_pool/*` using pool ids `"in"`/`"out"` |
+| `/query/integrated` | POST | Precision-weighted cascade: multi-pool → char-chain → EEM |
 | `/knowledge/ingest` | POST | Ingest documents into the knowledge graph |
 | `/knowledge/vote` | POST | Vote on knowledge associations |
 | `/streaming/labels` | GET | Label queue for human annotation |
@@ -738,7 +901,7 @@ The annealer predicts environment states by searching over candidate configurati
 
 ### 3) Environmental Equation Matrix
 
-The EEM bridges the gap between raw sensor patterns and physical interpretation. As the neuro fabric fires labels, the EEM surfaces candidate equations governing the observed phenomenon. It is a complete map of modern physics — 282 equations across 24 disciplines — compiled into the node so that any sensor stream can be interpreted through the lens of physical law.
+The EEM bridges the gap between raw sensor patterns and physical interpretation. As the neuro fabric fires labels, the EEM surfaces candidate equations governing the observed phenomenon. It is a complete map of modern physics and engineering — 339 equations across 27 disciplines — compiled into the node so that any sensor stream can be interpreted through the lens of physical law.
 
 - Equations accumulate sensor-driven evidence; those that consistently explain observations gain confidence; those that don't, decay
 - When the fabric fires labels that match no equation, a `HypothesisSlot` is opened — the node records it as an unexplained phenomenon awaiting discovery
@@ -880,7 +1043,7 @@ This is associative retrieval + predictive coding, not autoregressive generation
 
 ### Code assistance
 
-Code has strong motif structure — function signatures, boilerplate, API call sequences promote quickly through `HierarchicalMotifRuntime`. A bridge script tokenizes source files into labeled symbols (function names, keywords, identifiers at line/column positions) and feeds them as `EnvironmentSnapshot` sequences. Known problem→solution pairs go through `/qa/ingest`.
+Code has strong motif structure — function signatures, boilerplate, API call sequences promote quickly through `HierarchicalMotifRuntime`. A bridge script tokenizes source files into labeled symbols (function names, keywords, identifiers at line/column positions) and feeds them as `EnvironmentSnapshot` sequences. Known problem→solution pairs go through `/multi_pool/train_pair` (src_pool `"in"`, tgt_pool `"out"`).
 
 **This is compositional generation, not retrieval.** Given a plain English instruction the fabric has never seen — "create a vehicle tracker class" — the process is:
 
@@ -961,17 +1124,24 @@ These scripts use the node architecture — the node has no knowledge of their d
 
 | Script | Domain | What it sends |
 |--------|--------|---------------|
-| `chess_training_loop.py` | Chess | Board positions as 2D `EnvironmentSnapshot`; moves as Q&A pairs |
+| `chess_training_loop.py` | Chess | Board positions as 2D `EnvironmentSnapshot`; moves as Q&A pairs via `/multi_pool/train_pair` |
 | `rtsp_pose_bridge.py` | Video / pose | Pose keypoints as 3D symbol positions |
 | `rss_topic_bridge.py` | Topics | Topic signals as streaming events |
 | `traffic_sensor_bridge.py` | Traffic | Flow data as crowd sensor stream |
-| `textbook_scripts/` | Knowledge | Q&A pairs from OpenStax textbooks |
+| `textbook_scripts/` | Knowledge | Q&A pairs from OpenStax textbooks ingested via `/multi_pool/train_pair` |
 | `scripts/train_obstacle.py` | Screen navigation | Screenshot + goal text + mouse trajectory via `/media/train`; anchor pairs for discrimination |
 | `scripts/playback_obstacle.py` | Screen navigation | Goal text → `/media/playback` → predicted zone → Playwright cursor action |
-| `scripts/research_agent.py` | Hypothesis resolution | Polls `/hypothesis/queue`, fetches Wikipedia + ArXiv, ingests via `/qa/ingest` + `/media/train`, resolves via `/hypothesis/resolve` |
-| `scripts/train_full_pipeline.py` | Full training benchmark | End-to-end QA + chat quality scoring |
+| `scripts/research_agent.py` | Hypothesis resolution | Polls `/hypothesis/queue`, fetches Wikipedia + ArXiv, ingests via `/multi_pool/train_pair` + `/media/train`, resolves via `/hypothesis/resolve` |
+| `scripts/chat.py` | Interactive REPL | `/train`, `/pair`, `/reg`, `/raw`, `/pools` commands; uses `/query/integrated` |
+| `scripts/fetch_ncbi_corpus.py` | Training corpus | Fetches NCBI/PMC articles (neuroscience, biofields, genetics, rhythms) → `data/foundation/ncbi_pairs.jsonl` |
+| `scripts/build_class_corpus.py` | Training corpus | Generates 31 science/engineering classes × 5 paraphrase variants → `data/foundation/class_corpus.jsonl` |
+| `scripts/ga_node_fitness.py` | GA harness | Fitness evaluator: spawn node, train NCBI + class corpus, score memorization + paraphrase + generalization |
+| `scripts/ga_node_search.py` | GA search | 17-dim genome (multi-pool params + connection toggles + routing + n-gram + cross-wiring); adaptive GA |
+| `scripts/ga_scoping_search.py` | GA drill | Phased scoping GA starting at Recipe B (combined=0.837); shrinks radius on improvement, reserves explore fraction |
+| `scripts/integration_test.py` | E2E tests | End-to-end integration tests against a live node |
+| `scripts/stress_test.py` | Load tests | Concurrent training + query load tests |
 
-**Adding a new domain**: translate your data to `EnvironmentSnapshot`, `POST` to `/neuro/train`, optionally send to `/qa/ingest` and `/equations/apply`. The node learns from it alongside everything else.
+**Adding a new domain**: translate your data to `EnvironmentSnapshot`, `POST` to `/neuro/train`, and send labelled pairs to `/multi_pool/train_pair`. Optionally call `/equations/apply` for physics context. The node learns from everything alongside everything else.
 
 For multimodal domains (image + text + motion): use `ImageBitsEncoder`, `TextBitsEncoder`, `MotionBitsEncoder` from the encoder library to convert raw data to labels, then `POST /media/train`. The node's neural fabric is the same one everything else trains.
 
@@ -1000,12 +1170,12 @@ cp target/release/w1z4rdv1510n-node.exe bin/w1z4rd_node.exe   # Windows
 ### 1. Start the node
 
 The node exposes two APIs on startup:
-- **`:8090` — Node API**: all training routes (`/media/train`, `/qa/ingest`, `/qa/query`, `/chat`,
-  `/neuro/*`, `/hypothesis/*`, `/equations/*`, `/health`, etc.)  
+- **`:8090` — Node API**: all training routes (`/media/train`, `/multi_pool/*`, `/query/integrated`, `/chat`,
+  `/neuro/*`, `/hypothesis/*`, `/equations/*`, `/health`, etc.)
 - **`:8080` — Neuro API**: an internal lighter API for snapshot reads and propagation
 
 **Use port 8090 for all training scripts.** Always launch from the project root with
-`W1Z4RDV1510N_DATA_DIR` set so the neural pool and QA store persist to the right location.
+`W1Z4RDV1510N_DATA_DIR` set so the neural pool data persists to the right location.
 
 ```bash
 # Windows (Git Bash / PowerShell)
@@ -1020,8 +1190,8 @@ curl http://127.0.0.1:8090/health   # node API
 Expected output for node API: `{"status":"OK","node_id":"node-...","uptime_secs":0,...}`
 
 > **Port note:** Use `:8090` for all training scripts and API calls. The `:8090` node API
-> exposes all routes: `/chat`, `/qa/*`, `/neuro/*`, `/media/*`, `/hypothesis/*`,
-> `/equations/*`, `/cluster/*`, and admin routes.
+> exposes all routes: `/chat`, `/multi_pool/*`, `/query/integrated`, `/neuro/*`,
+> `/media/*`, `/hypothesis/*`, `/equations/*`, `/cluster/*`, and admin routes.
 > The `:8080` neuro API is a lighter internal surface (snapshot reads, propagation) —
 > it does **not** expose cluster or media routes.
 
@@ -1203,12 +1373,36 @@ curl -s -X POST http://127.0.0.1:8090/multi_pool/ask \
   -d '{"src_pool": "in", "text": "hello"}'
 # -> {"predictions": {"out": "Hello there friend.", "emo": "warm"}, ...}
 
+# Precision-weighted cascade: multi-pool -> char-chain -> EEM fallback
+curl -s -X POST http://127.0.0.1:8090/query/integrated \
+  -H "Content-Type: application/json" \
+  -d '{"text": "what is the function of mitochondria", "hops": 2}'
+# -> {"answer": "...", "method": "multi_pool", "confidence": 0.84,
+#     "all_routes": [{"method":"multi_pool","answer":"...","confidence":0.84},
+#                    {"method":"char_chain","answer":"...","confidence":0.31}]}
+
+# Enable bigrams + trigrams + IDF (best for paraphrase-heavy corpora)
+curl -s -X POST http://127.0.0.1:8090/multi_pool/use_ngrams \
+  -H "Content-Type: application/json" \
+  -d '{"bigrams": true, "trigrams": true, "idf": true}'
+
+# Train at low intensity when IDF is on (Recipe B, combined=0.837)
+curl -s -X POST http://127.0.0.1:8090/multi_pool/train_pair \
+  -H "Content-Type: application/json" \
+  -d '{
+    "src_pool": "in",  "src": "what is photosynthesis",
+    "tgt_pool": "out", "tgt": "the process plants use to convert sunlight into glucose",
+    "passes": 7, "lr": 0.167
+  }'
+
+# CLS replay — consolidate N-pool concept neurons back into slow pool
+curl -s -X POST http://127.0.0.1:8090/multi_pool/replay \
+  -H "Content-Type: application/json" \
+  -d '{"cls_lr_scale": 0.10}'
+
 # Per-pool sizes + total cross-edges
 curl http://127.0.0.1:8090/multi_pool/stats
 ```
-
-The legacy `/two_pool/train_pair` and `/two_pool/ask` endpoints are thin
-wrappers around the same fabric using pool ids `"in"` and `"out"`.
 
 ---
 
@@ -1375,7 +1569,7 @@ curl -s -X POST http://127.0.0.1:8090/media/train \
 - Every 20 training calls, the node exports synapses updated since the last sync (weight ≥ 0.005) and co-occurrence pairs involving recently active neurons, then fans out a `POST /neuro/delta/apply` to all peers concurrently
 - Peers merge with `max(local, remote)` — knowledge only accumulates, never overwrites
 - When a new node joins, it triggers peers to push their current delta, seeding it with the cluster's accumulated knowledge
-- Every `POST /qa/ingest` is immediately broadcast to all peers so the QA store stays fully replicated
+- N-pool fabric deltas are exported and applied via `/multi_pool/delta/export` and `/multi_pool/delta/apply` — same `max(local, remote)` merge strategy as the slow-pool delta
 - Peers that fail 5 consecutive calls are evicted from the routing list and restored on the next cluster status refresh
 
 ---
@@ -1386,7 +1580,8 @@ curl -s -X POST http://127.0.0.1:8090/media/train \
 |---------|-------|-----|
 | Port already in use | Old node process still running | `powershell -Command "Stop-Process -Name w1z4rd_node -Force"` |
 | `dlltool.exe not found` | WinLibs not in PATH | `export PATH="$PATH:/path/to/mingw64/bin"` |
-| QA returns 0 active neurons | Corrupted `answer_index` | `python scripts/recover_qa_store.py` |
+| `/multi_pool/ask` returns empty predictions | No pairs trained into that pool pair | Train with `/multi_pool/train_pair` first; check `/multi_pool/stats` for pool sizes |
+| `/query/integrated` always returns `char_chain` | N-gram encoding disabled or too few training passes | Enable bigrams/trigrams via `/multi_pool/use_ngrams`; use passes ≥ 5 |
 | Checkpoint saves to AppData | `W1Z4RDV1510N_DATA_DIR` not set | Set env var before launching node |
 | Avira quarantines build artifact | AV false positive | Add `target/` to Windows Defender exclusions |
 | Cluster join returns 409 Conflict | Stale `cluster_state.json` on disk | Delete `~/.w1z4rd/cluster_state.json` (Linux/WSL) or `%APPDATA%\w1z4rd\cluster_state.json` (Windows) |
