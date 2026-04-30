@@ -50,8 +50,10 @@ PARAM_SPACE = {
     # ── Bayesian-sensor routing knobs ────────────────────────────
     "mp_confidence_threshold":  ("float", 0.05, 0.80),
     "use_eem_fallback":         ("bool",  0,    1),
-    # ── Atom-encoding architecture toggle ───────────────────────
+    # ── Atom-encoding architecture toggles ──────────────────────
     "use_bigrams":              ("bool",  0,    1),
+    "use_trigrams":             ("bool",  0,    1),
+    "use_idf":                  ("bool",  0,    1),
 }
 
 DEFAULT_GENOME = {
@@ -59,7 +61,7 @@ DEFAULT_GENOME = {
     "cls_replay_after_epoch": 1, "cls_lr_scale": 0.1,
     "eem_in_train_loop": 0, "train_equation_pool": 1,
     "mp_confidence_threshold": 0.30, "use_eem_fallback": 1,
-    "use_bigrams": 0,
+    "use_bigrams": 1, "use_trigrams": 0, "use_idf": 0,
 }
 
 

@@ -604,6 +604,48 @@ fn position_and_bigram_atoms(atoms: &[String]) -> Vec<String> {
     out
 }
 
+/// Trigram atoms — position-agnostic features over consecutive atom triples.
+///
+/// Bigrams capture two-atom local order; trigrams capture three-atom
+/// local order, which discriminates words/morphemes more strongly than
+/// bigrams alone.  E.g., the trigram chain over the chars of "stack"
+/// (`bg.s~t`, `bg.t~a`, `bg.a~c`, `bg.c~k`) overlaps the chain over
+/// "static" (`bg.s~t`, `bg.t~a`, `bg.a~t`, `bg.t~i`, `bg.i~c`) at the
+/// first two bigrams.  The trigram chain over "stack" (`tg.s~t~a`,
+/// `tg.t~a~c`, `tg.a~c~k`) overlaps "static" (`tg.s~t~a`, `tg.t~a~t`,
+/// `tg.a~t~i`, `tg.t~i~c`) at only the first.  Sharper signal.
+///
+/// Same source-prefix-sharing trick: `{src}:tg.{a}~{b}~{c}` keeps the
+/// label under the position-atom source so concept formation works.
+fn trigram_atoms(atoms: &[String]) -> Vec<String> {
+    if atoms.len() < 3 { return Vec::new(); }
+    let mut out = Vec::with_capacity(atoms.len() - 2);
+    for w in atoms.windows(3) {
+        let (sa, pa) = match w[0].split_once(':') { Some(x) => x, None => continue };
+        let (sb, pb) = match w[1].split_once(':') { Some(x) => x, None => continue };
+        let (sc, pc) = match w[2].split_once(':') { Some(x) => x, None => continue };
+        if sa != sb || sb != sc { continue; }
+        out.push(format!("{sa}:tg.{pa}~{pb}~{pc}"));
+    }
+    out
+}
+
+/// Build atoms with the requested n-gram augmentations.  When both bigrams
+/// and trigrams are requested, the order is: position atoms, bigrams,
+/// trigrams.  The decoder ignores everything but position atoms, so the
+/// ordering only matters for `composite_label_for_members` which keeps
+/// the concept's payload deterministic regardless.
+fn position_and_ngram_atoms(
+    atoms: &[String],
+    use_bigrams: bool,
+    use_trigrams: bool,
+) -> Vec<String> {
+    let mut out = position_augmented_atoms(atoms);
+    if use_bigrams  { out.extend(bigram_atoms(atoms)); }
+    if use_trigrams { out.extend(trigram_atoms(atoms)); }
+    out
+}
+
 /// Strip a trailing `@{digits}` (positional augmentation) from a label,
 /// then run the standard `label_to_char` decoder.  Two-pool decoder paths
 /// (chain-walk and concept-walk) call this so positional atoms stored by
@@ -792,6 +834,17 @@ pub struct NeuronPool {
     /// threshold, and plasticity on every training and inference call.
     #[serde(default)]
     pub neuromodulators: NeuromodulatorState,
+    /// Per-atom membership count: how many concepts list this atom as a
+    /// member.  Used by `promote_full_sequence` to compute IDF scaling for
+    /// each member→concept hebbian edge — rare atoms (low membership count)
+    /// produce stronger discrimination signal.  Skipped from serde since
+    /// it can be rebuilt from concept member lists at load time.
+    #[serde(skip)]
+    concept_membership_count: HashMap<u32, u32>,
+    /// Total concepts in the pool — denominator for IDF.  Maintained alongside
+    /// `concept_membership_count`.
+    #[serde(skip)]
+    concept_count: u32,
 }
 
 const COOCCUR_EMA_ALPHA: f32 = 0.97;
@@ -822,6 +875,8 @@ impl NeuronPool {
             hot_tier_max: DEFAULT_HOT_TIER_MAX,
             hot_count: 0,
             neuromodulators: NeuromodulatorState::default(),
+            concept_membership_count: HashMap::new(),
+            concept_count: 0,
         }
     }
 
@@ -2198,6 +2253,21 @@ impl NeuronPool {
     /// On repeat calls the existing concept neuron is reused; member→concept
     /// dendrites are reinforced each call (use_count increments).
     pub fn promote_full_sequence(&mut self, atom_labels: &[String]) -> Option<String> {
+        self.promote_full_sequence_with(atom_labels, false)
+    }
+
+    /// Variant with explicit IDF toggle.  When `apply_idf` is false, every
+    /// member→concept hebbian edge gets the same `excitatory_scale`.  When
+    /// true, each edge's scale is multiplied by an IDF factor (rare atoms
+    /// stronger).  IDF is gated because empirically, with `max_weight=4`
+    /// and 30+ training passes, edge saturation washes the IDF amplification
+    /// out — the GA prefers IDF off.  Kept available for reduced-max_weight
+    /// configs and wider corpus sweeps.
+    pub fn promote_full_sequence_with(
+        &mut self,
+        atom_labels: &[String],
+        apply_idf: bool,
+    ) -> Option<String> {
         if atom_labels.len() < 2 {
             return None;
         }
@@ -2206,6 +2276,11 @@ impl NeuronPool {
             .collect();
         let label = self.composite_label_for_members(&ids)?;
         let cid = self.get_or_create(&label);
+        // Detect first-promotion vs re-promotion of the same concept.  IDF
+        // membership counters only update on first promotion so re-running
+        // a training pair doesn't keep inflating the count for its members.
+        let was_new_concept = self.get_hot(cid as usize)
+            .map(|n| n.members.is_empty()).unwrap_or(true);
         // Snapshot scale before borrow.
         let scale = self.config.excitatory_scale;
         if let Some(n) = self.get_hot_mut(cid as usize) {
@@ -2213,10 +2288,23 @@ impl NeuronPool {
             n.activation = 1.0;
             n.use_count += 1;
         }
-        // Strengthen member → concept dendrites so partial member firing can
-        // partially activate the concept; full firing fully activates.
+        if was_new_concept {
+            self.concept_count += 1;
+            for &mid in &ids {
+                *self.concept_membership_count.entry(mid).or_insert(0) += 1;
+            }
+        }
+        // Strengthen member → concept dendrites.
+        let total = self.concept_count.max(1) as f32;
         for &mid in &ids {
-            self.hebbian_pair(mid, cid, scale, false);
+            let final_scale = if apply_idf {
+                let count = *self.concept_membership_count.get(&mid).unwrap_or(&1) as f32;
+                let idf = (((total + 1.0) / (count + 1.0)).ln() + 1.0).clamp(0.5, 4.0);
+                scale * idf
+            } else {
+                scale
+            };
+            self.hebbian_pair(mid, cid, final_scale, false);
         }
 
         Some(label)
@@ -4373,6 +4461,12 @@ pub struct NeuroRuntime {
     /// `Arc` so `NeuroRuntime: Clone` keeps holding (the flag is shared
     /// state, not duplicated state).
     use_bigrams: Arc<std::sync::atomic::AtomicBool>,
+    /// Atomic flag for trigram-atom encoding (position-agnostic length-3
+    /// n-grams).  Independent of `use_bigrams` so the GA can A/B test
+    /// bigrams alone, trigrams alone, or both together.
+    use_trigrams: Arc<std::sync::atomic::AtomicBool>,
+    /// Atomic flag for IDF-weighted hebbian update at concept-promote time.
+    use_idf: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub type NeuroRuntimeHandle = Arc<NeuroRuntime>;
@@ -4461,7 +4555,9 @@ impl NeuroRuntime {
             config,
             symbol_lookup,
             inner: Arc::new(Mutex::new(state)),
-            use_bigrams: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            use_bigrams:  Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            use_trigrams: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            use_idf:      Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -5193,6 +5289,30 @@ impl NeuroRuntime {
         self.use_bigrams.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Atomic flag for trigram (length-3 n-gram) atom encoding.  Independent
+    /// of `use_bigrams` — both can be on, off, or either alone.
+    pub fn set_use_trigrams(&self, on: bool) {
+        self.use_trigrams.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn use_trigrams(&self) -> bool {
+        self.use_trigrams.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Atomic flag for IDF-weighted hebbian update at promote time.  When
+    /// off (default), each member→concept edge gets the unweighted scale.
+    /// When on, the scale is multiplied by an IDF factor: rare atoms (in
+    /// few concepts) get a stronger initial bump.  Empirical caveat: with
+    /// `max_weight=4` and 30+ passes, IDF amplification gets washed out by
+    /// edge saturation, so this toggle is neutral or slightly negative on
+    /// the standard NCBI/class corpora.  Kept on the runtime so wider
+    /// GA sweeps and reduced-`max_weight` configs can re-evaluate.
+    pub fn set_use_idf(&self, on: bool) {
+        self.use_idf.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn use_idf(&self) -> bool {
+        self.use_idf.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Register a new pool in the multi-pool fabric.  Idempotent.  Pools
     /// "in" and "out" are pre-registered for two_pool API compatibility;
     /// any number of additional pools may be added at runtime.
@@ -5238,16 +5358,10 @@ impl NeuroRuntime {
         //     agnostic features over consecutive atom pairs that let
         //     paraphrases sharing specific words (regardless of where they
         //     appear in the sentence) share atom-level features.
-        let src_pos = if self.use_bigrams() {
-            position_and_bigram_atoms(src_atoms)
-        } else {
-            position_augmented_atoms(src_atoms)
-        };
-        let tgt_pos = if self.use_bigrams() {
-            position_and_bigram_atoms(tgt_atoms)
-        } else {
-            position_augmented_atoms(tgt_atoms)
-        };
+        let src_pos = position_and_ngram_atoms(
+            src_atoms, self.use_bigrams(), self.use_trigrams());
+        let tgt_pos = position_and_ngram_atoms(
+            tgt_atoms, self.use_bigrams(), self.use_trigrams());
 
         // (1) Reset transient activation/trace in the two relevant pools.
         if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { p.reset_transient_state(); }
@@ -5258,8 +5372,13 @@ impl NeuroRuntime {
         if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) { p.train_weighted(&tgt_pos, 1.0, false); }
 
         // (2) Force-promote the full ordered atom sequence to a concept.
-        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { let _ = p.promote_full_sequence(&src_pos); }
-        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) { let _ = p.promote_full_sequence(&tgt_pos); }
+        let apply_idf = self.use_idf();
+        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
+            let _ = p.promote_full_sequence_with(&src_pos, apply_idf);
+        }
+        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) {
+            let _ = p.promote_full_sequence_with(&tgt_pos, apply_idf);
+        }
 
         // (3) Snapshot active concept labels in each pool.
         let src_concepts: Vec<String> = guard.multi_pool.pool(src_pool_id)
@@ -5411,11 +5530,8 @@ impl NeuroRuntime {
         //    activation than peer concepts whose SOME members fire — the
         //    discrimination signal that lets `top_active_concept` pick the
         //    right concept without any external rule.
-        let pos_atoms = if self.use_bigrams() {
-            position_and_bigram_atoms(atoms)
-        } else {
-            position_augmented_atoms(atoms)
-        };
+        let pos_atoms = position_and_ngram_atoms(
+            atoms, self.use_bigrams(), self.use_trigrams());
         let mut src_seeds: HashMap<String, f32> = HashMap::new();
         for a in &pos_atoms { src_seeds.insert(a.clone(), 1.0); }
         // Only one hop for source propagation: chars activate concepts they

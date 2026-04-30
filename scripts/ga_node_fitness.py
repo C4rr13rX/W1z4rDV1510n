@@ -187,16 +187,31 @@ def run_one_genome(
         cls_after_ep  = bool(genome.get("cls_replay_after_epoch", 0))
         eem_in_loop   = bool(genome.get("eem_in_train_loop", 0))
         use_bigrams   = bool(genome.get("use_bigrams", 0))
+        use_trigrams  = bool(genome.get("use_trigrams", 0))
+        use_idf       = bool(genome.get("use_idf", 0))
 
-        # Bigram toggle MUST be set before any training so concept neurons
-        # are built with both atom representations from the start.
+        # n-gram + IDF toggles MUST be set before any training so concept
+        # neurons are built with the right atom encoding and edge weights.
         try:
-            post(f"{node}/multi_pool/use_bigrams", {"enable": use_bigrams})
+            post(f"{node}/multi_pool/use_bigrams", {
+                "bigrams":  use_bigrams,
+                "trigrams": use_trigrams,
+                "idf":      use_idf,
+            })
         except Exception:
             pass
 
+        # ── New cross-wiring feedback toggles (Phase 5) ───────────────
+        # Each loops a signal between architectural pieces.  All four are
+        # implemented in the harness — no Rust rebuild — so the scoping
+        # GA can mix and match them.
+        fb_eem_into_mp        = bool(genome.get("fb_eem_into_mp", 0))
+        fb_mp_into_slowpool   = bool(genome.get("fb_mp_into_slowpool", 0))
+        fb_replay_low_conf    = bool(genome.get("fb_replay_low_conf", 0))
+        fb_disagreement_ne    = bool(genome.get("fb_disagreement_ne", 0))
+
         # Register equation pool if requested.
-        if train_eq:
+        if train_eq or fb_eem_into_mp:
             post(f"{node}/multi_pool/register", {"pool_id": "equation"})
 
         # ── Subsample corpora to keep the eval cheap ──────────────────
@@ -216,6 +231,26 @@ def run_one_genome(
                     "tgt_pool": "out", "tgt": r["answer"],
                     "passes": passes, "lr": lr,
                 }, timeout=60)
+                if fb_eem_into_mp:
+                    # Loop: EEM matches over the question's word labels →
+                    # if a strong equation matches, write its keywords into
+                    # the multi-pool as an additional (in -> equation)
+                    # training pair.  Closes the EEM ↔ multi-pool loop.
+                    try:
+                        kw_resp = post(f"{node}/equations/apply",
+                                       {"labels": r["question"].split()[:8],
+                                        "dims": 3}, timeout=10)
+                        cands = (kw_resp or {}).get("candidates") or []
+                        if cands and float(cands[0].get("relevance", 0)) > 0.20:
+                            kws = (cands[0].get("equation") or {}).get("text", "")
+                            if kws:
+                                post(f"{node}/multi_pool/train_pair", {
+                                    "src_pool": "in",     "src": r["question"],
+                                    "tgt_pool": "equation","tgt": kws[:120],
+                                    "passes": max(3, passes // 4), "lr": lr * 0.5,
+                                }, timeout=30)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -238,6 +273,20 @@ def run_one_genome(
                     post(f"{node}/equations/apply",
                          {"labels": r["description"].split()[:8], "dims": 3},
                          timeout=10)
+                if fb_mp_into_slowpool:
+                    # Loop: multi-pool answer → slow-pool training.  Pump
+                    # the *correct* (description, code) pair through
+                    # /media/train so the slow pool's char-chain decoder
+                    # gets the same vocabulary multi-pool memorized.
+                    # Guarded — failures don't abort training.
+                    try:
+                        post(f"{node}/media/train", {
+                            "modality": "text",
+                            "text": r["description"] + " " + r["code"],
+                            "lr_scale": 0.3,
+                        }, timeout=30)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -294,12 +343,16 @@ def run_one_genome(
                 return {"answer": "", "method": "none", "confidence": 0.0,
                         "predictions": {}}
 
+        # Track avg confidence and per-route disagreement to power the
+        # post-eval feedback loops.
+        confs: list[float] = []
         # Generalization (held-out) NCBI.
         ncbi_gen_scores = []
         ncbi_gen_exact  = 0
         for r in ncbi_eval:
-            preds = query_pred(r["question"]).get("predictions") or {}
-            pred = preds.get("out", "") or ""
+            qp = query_pred(r["question"])
+            pred = qp.get("answer") or ""
+            confs.append(float(qp.get("confidence") or 0.0))
             ncbi_gen_scores.append(lev_sim(pred, r["answer"]))
             if pred == r["answer"]: ncbi_gen_exact += 1
 
@@ -343,10 +396,44 @@ def run_one_genome(
         class_mem_scores = []
         class_mem_exact  = 0
         for r in class_mem_sample:
-            preds = query_pred(r["description"]).get("predictions") or {}
-            pred = preds.get("out", "") or ""
+            qp = query_pred(r["description"])
+            pred = qp.get("answer") or ""
+            confs.append(float(qp.get("confidence") or 0.0))
             class_mem_scores.append(lev_sim(pred, r["code"]))
             if pred == r["code"]: class_mem_exact += 1
+
+        # ── Post-eval feedback loops ──────────────────────────────────
+        avg_conf = sum(confs) / max(1, len(confs))
+        # fb_replay_low_conf: if average eval confidence is below 0.20,
+        # trigger a CLS replay so the slow pool learns from multi-pool's
+        # concept set on its way back through eval.  This closes a loop
+        # we previously only fired during training.
+        if fb_replay_low_conf and avg_conf < 0.20:
+            try:
+                post(f"{node}/multi_pool/replay", {
+                    "max_per_pool": 0,
+                    "lr_scale": float(genome.get("cls_lr_scale", 0.1)),
+                }, timeout=60)
+            except Exception:
+                pass
+        # fb_disagreement_ne: count routes that fell to char_chain or eem.
+        # Each non-multi_pool route is a "disagreement event" between the
+        # two strongest sensors.  Convert disagreement into a NE spike via
+        # /neuro/release_neuromodulator so the next training run uses
+        # elevated LR — the canonical attention/surprise signal.  Fires
+        # only if ≥ 25% of queries disagreed.
+        if fb_disagreement_ne:
+            disagree = (route_counts.get("char_chain", 0)
+                       + route_counts.get("eem", 0))
+            total = sum(route_counts.values())
+            if total > 0 and disagree / total >= 0.25:
+                try:
+                    post(f"{node}/neuro/neuromodulator/release", {
+                        "kind": "norepinephrine",
+                        "amount": 0.5,
+                    }, timeout=10)
+                except Exception:
+                    pass
 
         ncbi_gen_mean   = sum(ncbi_gen_scores)   / max(1, len(ncbi_gen_scores))
         ncbi_mem_mean   = sum(ncbi_mem_scores)   / max(1, len(ncbi_mem_scores))

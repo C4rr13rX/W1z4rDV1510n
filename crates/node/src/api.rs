@@ -5527,21 +5527,52 @@ async fn query_integrated(
 }
 
 #[derive(Debug, Deserialize)]
-struct UseBigramsReq { enable: bool }
+struct UseBigramsReq {
+    /// Backward-compat single-bool form: legacy callers pass {"enable": true}.
+    #[serde(default)]
+    enable: Option<bool>,
+    /// Explicit n-gram toggles.  Either or both can be set independently.
+    #[serde(default)]
+    bigrams: Option<bool>,
+    #[serde(default)]
+    trigrams: Option<bool>,
+    /// IDF-weighted hebbian update at promote time (rare atoms stronger).
+    #[serde(default)]
+    idf: Option<bool>,
+}
 
-/// POST /multi_pool/use_bigrams — toggle bigram-atom dual encoding for the
-/// multi-pool fabric.  When enabled, train and query both augment atoms
-/// with position-agnostic bigram features — addresses the heavy-paraphrase
-/// recall ceiling that position-only encoding can't bridge.  Setting must
-/// be applied BEFORE training so concepts span both atom representations.
+/// POST /multi_pool/use_bigrams — toggle n-gram atom encoding for the
+/// multi-pool fabric.  When enabled, train and query augment atoms with
+/// position-agnostic n-gram features — addresses heavy-paraphrase recall.
+///
+/// Three forms accepted:
+///   {"enable": true}                       — sets use_bigrams (legacy)
+///   {"bigrams": true}                      — explicit bigram only
+///   {"bigrams": true, "trigrams": true}    — bigrams AND trigrams together
+///
+/// Setting must be applied BEFORE training so concept neurons span the
+/// chosen atom representations.
 async fn multi_pool_use_bigrams(
     State(state): State<ApiState>,
     Json(req): Json<UseBigramsReq>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    state.neuro.set_use_bigrams(req.enable);
+    if let Some(b) = req.enable {
+        state.neuro.set_use_bigrams(b);
+    }
+    if let Some(b) = req.bigrams {
+        state.neuro.set_use_bigrams(b);
+    }
+    if let Some(t) = req.trigrams {
+        state.neuro.set_use_trigrams(t);
+    }
+    if let Some(idf) = req.idf {
+        state.neuro.set_use_idf(idf);
+    }
     (StatusCode::OK, Json(serde_json::json!({
-        "status":      "ok",
-        "use_bigrams": state.neuro.use_bigrams(),
+        "status":       "ok",
+        "use_bigrams":  state.neuro.use_bigrams(),
+        "use_trigrams": state.neuro.use_trigrams(),
+        "use_idf":      state.neuro.use_idf(),
     })))
 }
 
