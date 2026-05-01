@@ -342,7 +342,7 @@ def run_experimental(
             all_inds.sort(key=lambda x: -x[0])
             quartile = all_inds[:max(4, len(all_inds) // 4)]
             new_score, new_g, new_m = rng.choice(quartile)
-            print(f"[xp] === ph{phase} PLATEAU RESTART → top-quartile "
+            print(f"[xp] === ph{phase} PLATEAU RESTART -> top-quartile "
                   f"genome (xp={new_score:.4f})", flush=True)
             best_genome = dict(new_g)
             # Don't reset best_score — we still track it overall.
@@ -393,11 +393,39 @@ def main():
     print(f"[xp] corpora: ncbi={len(ncbi)} classes={len(cls_)}", flush=True)
     print(f"[xp] eval subsets: ncbi_max={args.ncbi_max} class_max={args.class_max}",
           flush=True)
-    print(f"[xp] seed=Recipe B+ (prior best, orig combined~0.840)", flush=True)
+
+    # Resume: if a prior log exists, load the best xp_score genome from it
+    # and use that as the seed instead of RECIPE_BPLUS_SEED.
+    seed_genome = dict(RECIPE_BPLUS_SEED)
+    log_p = pathlib.Path(args.log)
+    if log_p.exists() and log_p.stat().st_size > 0:
+        try:
+            best_xp = -1.0
+            best_g_resume = None
+            with open(log_p, encoding="utf-8") as f:
+                for line in f:
+                    rec = json.loads(line)
+                    if rec.get("phase_summary"): continue
+                    xp = rec.get("experimental", -1.0)
+                    if xp > best_xp and rec.get("genome"):
+                        best_xp = xp
+                        best_g_resume = rec["genome"]
+            if best_g_resume is not None and best_xp > 0:
+                seed_genome = best_g_resume
+                print(f"[xp] resuming from prior log best xp={best_xp:.4f}",
+                      flush=True)
+            else:
+                print(f"[xp] prior log empty/no scores; starting from Recipe B+",
+                      flush=True)
+        except Exception as e:
+            print(f"[xp] could not resume from log: {e}; starting from Recipe B+",
+                  flush=True)
+    else:
+        print(f"[xp] seed=Recipe B+ (prior best, orig combined~0.840)", flush=True)
     print(f"[xp] target experimental_combined={args.target}", flush=True)
 
     best_g, best_m, champs = run_experimental(
-        RECIPE_BPLUS_SEED, ncbi, cls_,
+        seed_genome, ncbi, cls_,
         pop_size=args.pop,
         phase_budget_secs=args.phase_budget_secs,
         max_phases=args.max_phases,
