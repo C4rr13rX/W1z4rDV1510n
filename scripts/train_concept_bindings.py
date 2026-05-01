@@ -50,6 +50,46 @@ IDENTITY_BINDINGS: list[tuple[str, str]] = [
 ]
 
 
+def _load_code_corpus() -> list[tuple[str, str]]:
+    """Pull every (Q, A) from build_code_corpus.CORPUS.
+
+    build_code_corpus imports httpx + neuro_client at module level for its
+    own training loop; we don't need those — only the CORPUS data — so we
+    stub the deps if they aren't installed.  Returns a flat list of
+    (question, answer) tuples covering JS/TS/CSS/HTML/Angular/Ionic/Python/
+    PHP/C/C++/C#/Rust/Perl/JSON/XML/applied math/Blender/KiCad/ngspice/
+    OpenSCAD/Verilator/Linux+Windows terminal/Git/Docker/agent decisions.
+    """
+    import importlib.util
+    import types
+    for stub in ("httpx", "neuro_client"):
+        if stub not in sys.modules:
+            mod = types.ModuleType(stub)
+            if stub == "neuro_client":
+                mod.NeuroClient = object  # type: ignore[attr-defined]
+            sys.modules[stub] = mod
+    spec = importlib.util.spec_from_file_location(
+        "build_code_corpus",
+        str(__import__("pathlib").Path(__file__).resolve().parent / "build_code_corpus.py"),
+    )
+    if spec is None or spec.loader is None:
+        return []
+    m = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(m)
+    except Exception as exc:
+        print(f"WARN: could not import build_code_corpus.CORPUS: {exc}", file=sys.stderr)
+        return []
+    pairs: list[tuple[str, str]] = []
+    for _title, _disc, qas in getattr(m, "CORPUS", []):
+        for q, a in qas:
+            pairs.append((q, a))
+    return pairs
+
+
+CODE_BINDINGS: list[tuple[str, str]] = _load_code_corpus()
+
+
 def _post(url: str, payload: dict, timeout: float = 60) -> dict:
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data,
@@ -76,8 +116,10 @@ def main() -> int:
         print(f"ERROR: node offline: {exc}", file=sys.stderr)
         return 1
 
-    pairs = list(CONVERSATIONS) + IDENTITY_BINDINGS
+    pairs = list(CONVERSATIONS) + IDENTITY_BINDINGS + CODE_BINDINGS
     total = len(pairs)
+    print(f"Pair budget: {len(CONVERSATIONS)} greetings + {len(IDENTITY_BINDINGS)} identity + "
+          f"{len(CODE_BINDINGS)} code = {total} total")
     ok = 0
     t0 = time.time()
     for i, (q, a) in enumerate(pairs, 1):

@@ -2,27 +2,39 @@
 # run_all_training.sh — Full curriculum training runner
 #
 # CURRICULUM ORDER (designed to prevent "untraining"):
-#   1. Foundational seeds x3 (anchors core facts before anything else)
-#   2. Stage 0: Toddler concepts
-#   3. Foundational seeds x2 (reinforce before K-12)
-#   4. Stages 1-2: K-12 textbooks
-#   5. Foundational seeds x2 (reinforce after textbook load)
-#   6. Code/terminal/agent corpus
-#   7. Foundational seeds x2
-#   8. Stages 10-17: STEM
-#   9. Foundational seeds x1
-#  10. Stages 18-22: Language/documentation
-#  11. Foundational seeds x1
-#  12. Stages 23-24: Library docs + Stack Overflow
-#  13. Foundational seeds x1
-#  14. Stage 25: LibreTexts comprehensive
-#  15. Stage 26: Biodiversity
-#  16. Stages 27-28: Cognitive/sorting
-#  17. Stage 29: Bible
-#  18. Stages 30-33: Medical/psychology
-#  19. Stage 34: Mathematics
-#  20. Stage 35: Pedagogy
-#  21. Foundational seeds x3 (final anchor)
+#   Phase  1  Saturate conversational identity (5 rounds × 5 passes @ LR=7.5)
+#   Phase  2  Foundational seeds ×3 (anchors core facts before anything else)
+#   Phase  3  Stage  0: toddler concepts
+#   Phase  4  Stages 1-2: K-12 textbooks
+#   Phase  5  Stage 5: code / terminal / agent corpus (113 Q&A across 29 langs/tools)
+#   Phase  6  Stages 10-17: STEM
+#   Phase  7  Stages 18-22: language / documentation
+#   Phase  8  Stages 23-24: library docs + Stack Overflow
+#   Phase  9  Stage 25:    LibreTexts comprehensive
+#   Phase 10  Stage 26:    biodiversity
+#   Phase 11  Stages 27-28: cognitive + sorting
+#   Phase 12  Stage 29:    Bible
+#   Phase 13  Stages 30-33: medical / psychology
+#   Phase 14  Stage 34:    mathematics
+#   Phase 15  Stage 35:    pedagogy
+#   Phase 16  Stage  9:    cow mesh
+#   Phase 17  English foundation full-architecture pipeline (--pass all)
+#   Phase 18  Multi-modal concept streams (image+text+keyboard+temporal)
+#   Phase 19  Plant cell physiology (multi-scale)
+#   Phase 20  JSON responses (scope-marked, NL-balanced)
+#   Phase 21  Natural-language rebalance (counterweight to JSON)
+#   Phase 22  Cow anatomy + behaviour + lifecycle
+#   Phase 23  Cow 3D anatomical positions
+#   Phase 24  Cow multi-view dense surface
+#   Phase 25  Cow barrel-surface refinement
+#   Phase 26  Foreign language corpus (stages 36-40, 20 languages)
+#   Phase 27  Chess outcome + move prediction (5 bounded iterations)
+#   Phase 28  Obstacle course (Playwright; best effort)
+#   Phase 29  Multi-pool concept binding (GA-tuned /multi_pool/train_pair path)
+#   FINAL    Foundational seeds ×3 + conversations ×10 (final anchor)
+#
+# Foundational seeds + conversational reanchor run between major phases
+# throughout to prevent corpus drift from overwriting greetings/identity.
 #
 # Run from project root. Logs to D:/w1z4rdv1510n-data/training/
 
@@ -258,16 +270,139 @@ python "$SCRIPTS/build_cow_dataset.py" \
     2>&1 | tee -a "$LOG_DIR/stage9.log" | tail -1
 echo "[$(date)] Stage 9 done" | tee -a "$LOG_DIR/run_all.log"
 
-# ─── PHASE 17: MULTI-POOL CONCEPT BINDING (GA-tuned path) ────────────────────
+# ─── PHASE 17: ENGLISH FOUNDATION CORPUS (full architecture) ─────────────────
+# train_foundation.py exercises EVERY core endpoint per fact:
+#   /media/train_sequence + /equations/ingest + /knowledge/ingest +
+#   /qa/ingest + /neuro/record_episode + /neuro/checkpoint
+# --pass all runs concepts -> text -> images sub-passes back to back.
+echo "[$(date)] Starting Phase 17 (English foundation, full architecture)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_foundation.py" \
+    --node "$NODE" \
+    --pass all \
+    2>&1 | tee -a "$LOG_DIR/foundation_pipeline.log" | tail -5
+echo "[$(date)] Phase 17 done" | tee -a "$LOG_DIR/run_all.log"
+
+reinforce_conversations 3
+
+# ─── PHASE 18: MULTI-MODAL CONCEPT STREAMS ──────────────────────────────────
+# Cross-stream concept neurons that fire across image / text / keyboard /
+# audio / temporal modalities.  Skips audio when no AWS Polly credentials
+# (Stack Overflow / cached probes still useful).  Best-effort.
+echo "[$(date)] Starting Phase 18 (multi-modal concept streams)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_concept_streams.py" \
+    --node "$NODE" \
+    --no-audio \
+    2>&1 | tee -a "$LOG_DIR/concept_streams.log" | tail -5 \
+    || echo "[$(date)] Phase 18 skipped (missing optional deps)" | tee -a "$LOG_DIR/run_all.log"
+echo "[$(date)] Phase 18 done" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 19: PLANT CELL PHYSIOLOGY (multi-scale) ──────────────────────────
+# Dense scientific corpus: plant_cell -> cell_wall -> chloroplast ->
+# thylakoid -> chlorophyll -> carbon_atom across 6 length scales.
+echo "[$(date)] Starting Phase 19 (plant cell physiology)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_cell_layers.py" \
+    --host localhost --port 8090 \
+    --passes 6 \
+    2>&1 | tee -a "$LOG_DIR/cell_layers.log" | tail -5
+echo "[$(date)] Phase 19 done" | tee -a "$LOG_DIR/run_all.log"
+
+reinforce_conversations 3
+
+# ─── PHASE 20: JSON RESPONSES (scope-marked, NL-balanced) ────────────────────
+# Every batch interleaves JSON-asked + NL-asked pairs so JSON cannot dominate.
+echo "[$(date)] Starting Phase 20 (JSON response training)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_json_responses.py" \
+    --node localhost:8090 \
+    2>&1 | tee -a "$LOG_DIR/json_responses.log" | tail -5
+echo "[$(date)] Phase 20 done" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 21: NATURAL-LANGUAGE REBALANCE ───────────────────────────────────
+# Counterweight to JSON-heavy training: 200 repeats of plain-English Q&A
+# across science / history / geography / math / everyday.
+echo "[$(date)] Starting Phase 21 (NL rebalance)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/retrain_natural_language.py" \
+    --node localhost:8090 \
+    2>&1 | tee -a "$LOG_DIR/nl_rebalance.log" | tail -5
+echo "[$(date)] Phase 21 done" | tee -a "$LOG_DIR/run_all.log"
+
+reinforce_conversations 3
+
+# ─── PHASE 22: COW ANATOMY + BEHAVIOUR + LIFECYCLE ──────────────────────────
+echo "[$(date)] Starting Phase 22 (cow anatomy + behaviour)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_cow_anatomy.py" \
+    --node "$NODE" \
+    2>&1 | tee -a "$LOG_DIR/cow_anatomy.log" | tail -5
+echo "[$(date)] Phase 22 done" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 23: COW 3D ANATOMICAL POSITIONS ──────────────────────────────────
+echo "[$(date)] Starting Phase 23 (cow 3D anatomy)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_cow_3d_anatomy.py" \
+    2>&1 | tee -a "$LOG_DIR/cow_3d_anatomy.log" | tail -5
+echo "[$(date)] Phase 23 done" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 24: COW MULTI-VIEW DENSE SURFACE ─────────────────────────────────
+echo "[$(date)] Starting Phase 24 (cow multi-view surface)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_cow_multiview_surface.py" \
+    2>&1 | tee -a "$LOG_DIR/cow_multiview.log" | tail -5
+echo "[$(date)] Phase 24 done" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 25: COW BARREL-SURFACE REFINEMENT ────────────────────────────────
+# Shifts existing cow_surf_XX_XX centroids toward the correct barrel cross-section.
+echo "[$(date)] Starting Phase 25 (cow barrel-surface retrain)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/retrain_barrel_surface.py" \
+    2>&1 | tee -a "$LOG_DIR/cow_barrel.log" | tail -5
+echo "[$(date)] Phase 25 done" | tee -a "$LOG_DIR/run_all.log"
+
+reinforce_conversations 3
+
+# ─── PHASE 26: FOREIGN LANGUAGE CORPUS (stages 36-40) ───────────────────────
+# 20 languages: Project Gutenberg native + English language-learning books +
+# Wikibooks language courses + built-in alphabets/grammar/phrases + Wiktionary.
+echo "[$(date)] Starting Phase 26 (foreign languages, stages 36-40)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/build_foreign_language_corpus.py" \
+    --stages 36,37,38,39,40 \
+    --node localhost:8090 \
+    2>&1 | tee -a "$LOG_DIR/foreign_lang.log" | tail -5
+echo "[$(date)] Phase 26 done" | tee -a "$LOG_DIR/run_all.log"
+
+reinforce_conversations 3
+
+# ─── PHASE 27: CHESS OUTCOME + MOVE PREDICTION ──────────────────────────────
+# Bounded: 5 iterations on up to 1000 games to avoid the infinite loop default.
+# Skips cleanly if the PGN dataset is missing.
+echo "[$(date)] Starting Phase 27 (chess training, 5 bounded iterations)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/chess_training_loop.py" \
+    --max-games 1000 \
+    --max-iterations 5 \
+    2>&1 | tee -a "$LOG_DIR/chess.log" | tail -5 \
+    || echo "[$(date)] Phase 27 skipped (chess dataset not preprocessed?)" | tee -a "$LOG_DIR/run_all.log"
+echo "[$(date)] Phase 27 done" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 28: OBSTACLE COURSE (Playwright; best effort) ────────────────────
+# Requires Playwright + a viewer of the obstacle UI.  Skipped on environments
+# without the browser drivers; the rest of the curriculum still runs.
+echo "[$(date)] Starting Phase 28 (obstacle course, best effort)..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_obstacle.py" \
+    --node "$NODE" \
+    --reps 8 \
+    2>&1 | tee -a "$LOG_DIR/obstacle.log" | tail -5 \
+    || echo "[$(date)] Phase 28 skipped (Playwright not available?)" | tee -a "$LOG_DIR/run_all.log"
+echo "[$(date)] Phase 28 done" | tee -a "$LOG_DIR/run_all.log"
+
+reinforce_conversations 3
+
+# ─── PHASE 29: MULTI-POOL CONCEPT BINDING (GA-tuned path) ────────────────────
 # After the slow-pool char-chain decoder is trained, bind the high-priority
-# Q->A pairs (greetings + identity facts) through /multi_pool/train_pair so
-# the GA-experimental winning genome (use_trigrams=true, lr=0.825, passes=35,
-# mp_confidence_threshold=0.345) actually fires at chat time.  Without this
-# step the GA gain is dormant — the curriculum trains the slow pool only.
+# Q->A pairs (greetings + identity facts + 113 code Q&A) through
+# /multi_pool/train_pair so the GA-experimental winning genome
+# (use_trigrams=true, lr=0.825, passes=35, mp_confidence_threshold=0.345)
+# actually fires at chat time.  Without this step the GA gain is dormant —
+# the curriculum trains the slow pool only.
 #
-# /query/integrated routes to multi-pool first; high-confidence greeting
-# bindings here mean instant high-confidence chat replies for these phrases
-# without disturbing the broader corpus knowledge in the slow pool.
+# /query/integrated routes to multi-pool first; high-confidence bindings
+# here mean instant high-confidence chat replies for greetings, identity,
+# and code questions without disturbing the broader corpus knowledge in
+# the slow pool.
 echo "[$(date)] Binding key Q->A concepts in multi-pool fabric..." | tee -a "$LOG_DIR/run_all.log"
 PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_concept_bindings.py" \
     --node "$NODE" \
