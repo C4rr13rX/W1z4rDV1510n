@@ -54,15 +54,20 @@ reinforce_foundations() {
 # Uses LR=7.5 (near max clamp) to saturate greeting connections so they
 # compete with corpus-trained words in kWTA. Without this, the code/docs
 # corpus progressively overwrites the "hello" -> greeting associations.
-# Initial call: --rounds 20 (saturates all 35 pairs to max_weight=4.0)
-# Subsequent reinforcement calls: --rounds 5 (re-anchors drift without over-training)
+#
+# 2026-05-01: dropped --passes 15 -> 5.  Math: passes * lr = 5 * 7.5 = 37.5
+# is already 9x the max_weight=4.0 clamp; greetings saturate after pass 1.
+# Old (15 passes) was wall-clock waste.  Initial saturation also dropped
+# from rounds=20 -> 5 because every later phase already re-anchors 5
+# rounds; total greeting reinforcement across the curriculum stays > 50
+# rounds, far above what kWTA needs to dominate corpus noise.
 reinforce_conversations() {
     local rounds="${1:-5}"
     echo "[$(date)] Reinforcing conversational identity (${rounds} rounds)..." | tee -a "$LOG_DIR/run_all.log"
     PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_conversations.py" \
         --node "$NODE" \
         --rounds "$rounds" \
-        --passes 15 \
+        --passes 5 \
         --lr 7.5 \
         2>&1 | tee -a "$LOG_DIR/conversations.log" | tail -2
     echo "[$(date)] Conversational reinforcement done" | tee -a "$LOG_DIR/run_all.log"
@@ -76,9 +81,11 @@ sleep 1
 echo "[$(date)] Pool cleared — starting fresh curriculum" | tee -a "$LOG_DIR/run_all.log"
 
 # ─── PHASE 1: SATURATE CONVERSATIONAL IDENTITY ───────────────────────────────
-# All 35 pairs trained at LR=7.5 x 15 passes x 20 rounds = max_weight=4.0
-# This establishes greeting/identity responses before any corpus can compete.
-reinforce_conversations 20
+# 35 pairs trained at LR=7.5 x 5 passes x 5 rounds. Saturation math: each
+# pass multiplies edge weight by ~LR until max_weight=4.0 clamps; lr=7.5
+# clamps in pass 1.  The 5-round contrastive cycle handles noise suppression.
+# Cuts ~10 hours of redundant Hebbian work vs the prior 15x20 schedule.
+reinforce_conversations 5
 
 # ─── PHASE 2: ANCHOR FOUNDATIONS ─────────────────────────────────────────────
 reinforce_foundations 3
@@ -250,6 +257,22 @@ python "$SCRIPTS/build_cow_dataset.py" \
     --data-dir "$DATA" \
     2>&1 | tee -a "$LOG_DIR/stage9.log" | tail -1
 echo "[$(date)] Stage 9 done" | tee -a "$LOG_DIR/run_all.log"
+
+# ─── PHASE 17: MULTI-POOL CONCEPT BINDING (GA-tuned path) ────────────────────
+# After the slow-pool char-chain decoder is trained, bind the high-priority
+# Q->A pairs (greetings + identity facts) through /multi_pool/train_pair so
+# the GA-experimental winning genome (use_trigrams=true, lr=0.825, passes=35,
+# mp_confidence_threshold=0.345) actually fires at chat time.  Without this
+# step the GA gain is dormant — the curriculum trains the slow pool only.
+#
+# /query/integrated routes to multi-pool first; high-confidence greeting
+# bindings here mean instant high-confidence chat replies for these phrases
+# without disturbing the broader corpus knowledge in the slow pool.
+echo "[$(date)] Binding key Q->A concepts in multi-pool fabric..." | tee -a "$LOG_DIR/run_all.log"
+PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_concept_bindings.py" \
+    --node "$NODE" \
+    2>&1 | tee -a "$LOG_DIR/concept_bindings.log" | tail -5
+echo "[$(date)] Multi-pool concept bindings done" | tee -a "$LOG_DIR/run_all.log"
 
 # ─── FINAL: RE-ANCHOR FOUNDATIONS + CONVERSATIONS ────────────────────────────
 reinforce_foundations 3
