@@ -231,6 +231,33 @@ def run_experimental(
     # All-time top-quartile pool for plateau restarts.
     all_inds: list[tuple[float, dict, dict]] = [(seed_score, seed, seed_m)]
 
+    # Pre-warm champions and all_inds from any prior log records, so plateau
+    # pivots have access to specialists discovered in earlier sessions.
+    if log_path.exists():
+        try:
+            with open(log_path, encoding="utf-8") as f:
+                for line in f:
+                    rec = json.loads(line)
+                    if rec.get("phase_summary"): continue
+                    g = rec.get("genome")
+                    m = rec.get("metrics")
+                    if not g or not m: continue
+                    xp = rec.get("experimental", experimental_combined(m))
+                    all_inds.append((xp, g, m))
+                    ngm = m.get("ncbi_gen_mean", 0.0)
+                    cpm = m.get("class_par_mean", 0.0)
+                    if ngm > champions["ncbi_gen"][0]:
+                        champions["ncbi_gen"] = (ngm, g, m)
+                    if cpm > champions["class_par"][0]:
+                        champions["class_par"] = (cpm, g, m)
+                    if xp > champions["combined"][0]:
+                        champions["combined"] = (xp, g, m)
+            print(f"[xp] pre-warmed from log: ncbi_gen_champ={champions['ncbi_gen'][0]:.3f}  "
+                  f"class_par_champ={champions['class_par'][0]:.3f}  "
+                  f"all_inds={len(all_inds)}", flush=True)
+        except Exception as e:
+            print(f"[xp] could not pre-warm champions: {e}", flush=True)
+
     radius = radius_start
     phases_since_improvement = 0
     rotate_counter = 0
@@ -337,15 +364,34 @@ def run_experimental(
                   f"phases stuck); xp_best={best_score:.4f}; radius -> {radius:.3f}",
                   flush=True)
 
-        # Plateau break: pick a random top-quartile genome as new elite.
+        # Plateau break: pivot the elite-search to the metric specialist
+        # for whichever weak metric (gen / par) is currently lowest in the
+        # running best.  The specialist may have a *lower* xp_score (their
+        # mem dropped) but their basin in genome space is unexplored under
+        # the current elite — so search around them now.
+        #
+        # 30% of the time we still fall back to a random top-quartile pick
+        # to keep nearby variants in the loop.
         if phases_since_improvement >= restart_after:
-            all_inds.sort(key=lambda x: -x[0])
-            quartile = all_inds[:max(4, len(all_inds) // 4)]
-            new_score, new_g, new_m = rng.choice(quartile)
-            print(f"[xp] === ph{phase} PLATEAU RESTART -> top-quartile "
-                  f"genome (xp={new_score:.4f})", flush=True)
-            best_genome = dict(new_g)
-            # Don't reset best_score — we still track it overall.
+            bm = best_metrics
+            ngm = bm.get("ncbi_gen_mean", 0.0)
+            cpm = bm.get("class_par_mean", 0.0)
+            weak = "ncbi_gen" if ngm < cpm else "class_par"
+            ch_score, ch_g, _ = champions[weak]
+            use_specialist = rng.random() < 0.70 and ch_g is not None
+            if use_specialist:
+                print(f"[xp] === ph{phase} PLATEAU PIVOT to {weak} "
+                      f"specialist ({weak}={ch_score:.3f}, was {ngm if weak=='ncbi_gen' else cpm:.3f})",
+                      flush=True)
+                best_genome = dict(ch_g)
+            else:
+                all_inds.sort(key=lambda x: -x[0])
+                quartile = all_inds[:max(4, len(all_inds) // 4)]
+                new_score, new_g, new_m = rng.choice(quartile)
+                print(f"[xp] === ph{phase} PLATEAU RESTART -> top-quartile "
+                      f"genome (xp={new_score:.4f})", flush=True)
+                best_genome = dict(new_g)
+            # Don't reset best_score — we still track the global best xp.
             radius = radius_start
             phases_since_improvement = 0
 
