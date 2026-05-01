@@ -4455,15 +4455,18 @@ pub struct NeuroRuntime {
     symbol_lookup: HashMap<String, Symbol>,
     inner: Arc<Mutex<NeuroState>>,
     /// Atomic flag for bigram-atom dual encoding in the multi-pool path.
-    /// When true, train and query both use position-augmented + bigram atoms;
-    /// when false (default) only position-augmented atoms are used (the
-    /// existing behaviour preserved for backward compat with tests).
+    /// When true, train and query both use position-augmented + bigram atoms.
+    /// Default false: GA-experimental search (May 2026) found bigrams without
+    /// trigrams underperformed trigrams-alone (combined 0.808 vs 0.823) and
+    /// bigrams+trigrams together added noise without improving recall.
     /// `Arc` so `NeuroRuntime: Clone` keeps holding (the flag is shared
     /// state, not duplicated state).
     use_bigrams: Arc<std::sync::atomic::AtomicBool>,
     /// Atomic flag for trigram-atom encoding (position-agnostic length-3
     /// n-grams).  Independent of `use_bigrams` so the GA can A/B test
-    /// bigrams alone, trigrams alone, or both together.
+    /// bigrams alone, trigrams alone, or both together.  Default true:
+    /// GA-experimental search settled on trigrams-alone (orig combined 0.864
+    /// vs 0.840 plateau under position-only encoding).
     use_trigrams: Arc<std::sync::atomic::AtomicBool>,
     /// Atomic flag for IDF-weighted hebbian update at concept-promote time.
     use_idf: Arc<std::sync::atomic::AtomicBool>,
@@ -4556,7 +4559,7 @@ impl NeuroRuntime {
             symbol_lookup,
             inner: Arc::new(Mutex::new(state)),
             use_bigrams:  Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            use_trigrams: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            use_trigrams: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             use_idf:      Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }

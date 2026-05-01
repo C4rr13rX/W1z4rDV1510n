@@ -5100,8 +5100,13 @@ struct TwoPoolTrainReq {
     #[serde(default = "default_two_pool_lr")]
     lr:      f32,
 }
-fn default_two_pool_passes() -> usize { 30 }
-fn default_two_pool_lr() -> f32 { 0.3 }
+// GA-experimental search winning genome (May 2026, orig combined 0.864):
+// passes=35, lr=0.825 — much higher LR than the prior 0.3 default produced
+// faster Q→A lock-in without overfitting (mem stayed at 1.0/1.0 across
+// NCBI + class corpora).  Used by both /two_pool/train_pair and /multi_pool/*
+// train endpoints.
+fn default_two_pool_passes() -> usize { 35 }
+fn default_two_pool_lr() -> f32 { 0.825 }
 
 #[derive(Debug, Deserialize)]
 struct TwoPoolAskReq {
@@ -5116,8 +5121,12 @@ struct TwoPoolAskReq {
     min_strength: f32,
 }
 fn default_two_pool_direction() -> String { "in_to_out".to_string() }
-fn default_two_pool_hops() -> usize { 3 }
-fn default_two_pool_min_strength() -> f32 { 0.05 }
+// GA-experimental winning genome: hops=1, min_strength=0.292 — sharper
+// recall threshold paired with single-hop traversal under the trigram-on
+// encoding regime.  Higher hops brought in noise from related trigrams
+// without lifting exact-match recall.
+fn default_two_pool_hops() -> usize { 1 }
+fn default_two_pool_min_strength() -> f32 { 0.292 }
 
 /// POST /two_pool/train_pair
 async fn two_pool_train_pair(
@@ -5408,7 +5417,10 @@ struct QueryIntegratedReq {
 }
 fn default_integrated_dims()         -> u8 { 3 }
 fn default_integrated_src_pool()    -> String { "in".to_string() }
-fn default_mp_confidence_threshold() -> f32 { 0.30 }
+// GA-experimental winning genome: 0.345 — slightly higher MP-vs-fallback
+// cutover than the pre-GA 0.30 default; routes fewer noisy multi-pool hits
+// to char-chain/EEM and improved class-paraphrase exact match (18/25 vs prior).
+fn default_mp_confidence_threshold() -> f32 { 0.345 }
 fn default_eem_fallback()            -> bool { true }
 
 /// POST /query/integrated — Bayesian-sensor cascaded routing.
