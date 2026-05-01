@@ -22,8 +22,9 @@ import urllib.request
 import uuid
 
 DEFAULT_NODE   = "http://localhost:8090"
-DEFAULT_PASSES = 30
-DEFAULT_LR     = 0.3
+# Match the GA-experimental winning genome banked into runtime defaults.
+DEFAULT_PASSES = 35
+DEFAULT_LR     = 0.825
 
 CONVERSATIONS: list[tuple[str, str]] = [
     ("hello",                   "Hello, I am W1z4rD. Ask me anything."),

@@ -22,8 +22,10 @@ import urllib.error
 import urllib.request
 
 DEFAULT_NODE   = "http://localhost:8090"
-DEFAULT_PASSES = 30
-DEFAULT_LR     = 0.3
+# GA-experimental winning genome (May 2026): passes=35, lr=0.825 produced
+# orig combined 0.864 vs the old (30, 0.3) baseline at 0.840 plateau.
+DEFAULT_PASSES = 35
+DEFAULT_LR     = 0.825
 
 CONVERSATIONS: list[tuple[str, str]] = [
     ("hello",                   "Hello, I am W1z4rD. Ask me anything."),
