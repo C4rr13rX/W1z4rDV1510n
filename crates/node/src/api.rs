@@ -5098,15 +5098,19 @@ fn decode_char_chain(
         }
 
         // Append the whole concept's atom labels and chars.
+        // Terminators ('\n', '.', '?', '!') only end the response after the
+        // decoder has emitted real content — without this guard, the very
+        // first emission can be a newline (which co-occurs with everything
+        // in the training corpus) and the answer collapses to empty after
+        // .trim().  Same semantic as the existing punctuation guard, just
+        // applied uniformly so structural training tokens can't shortcut
+        // a real answer.
         let mut hit_terminator = false;
         for (al, ch) in atom_labels.iter().zip(chars.iter()) {
             out_atoms.push(al.clone());
             out_chars.push(*ch);
-            if *ch == '\n' {
-                hit_terminator = true;
-                break;
-            }
-            if matches!(*ch, '.' | '?' | '!') && out_chars.len() > 2 {
+            let is_terminator = matches!(*ch, '\n' | '.' | '?' | '!');
+            if is_terminator && out_chars.len() > 2 {
                 hit_terminator = true;
                 break;
             }
