@@ -413,4 +413,9 @@ echo "[$(date)] Multi-pool concept bindings done" | tee -a "$LOG_DIR/run_all.log
 reinforce_foundations 3
 reinforce_conversations 10
 
+# ─── CHECKPOINT: PERSIST SLOW-POOL + MULTI-POOL TO DISK ──────────────────────
+echo "[$(date)] Saving pools to disk..." | tee -a "$LOG_DIR/run_all.log"
+curl -s -X POST "$NODE/neuro/checkpoint" | tee -a "$LOG_DIR/run_all.log"
+echo "" | tee -a "$LOG_DIR/run_all.log"
+
 echo "===== Full curriculum training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"

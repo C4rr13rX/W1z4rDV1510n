@@ -757,6 +757,12 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             ..Default::default()
         },
     ));
+    // Load persisted multi_pool cross-pool synapses.  Pool neurons and their
+    // cold files are already wired inside NeuroRuntime::new() using the same
+    // pool_state_path-derived hot/cold directories as the main slow pool.
+    // Only the concept↔concept bridge weights live in this separate file.
+    let mp_cross_path = node_data_dir().join("multi_pool_cross.json");
+    neuro_handle.multi_pool_load_cross_synapses(&mp_cross_path);
     let ledger_backend = if config.ledger.enabled {
         config.ledger.backend.clone()
     } else {
@@ -5244,6 +5250,9 @@ async fn multi_pool_train_pair(
         for _ in 0..passes {
             neuro.multi_pool_train_pair(&src_pool, &src_atoms, &tgt_pool, &tgt_atoms, lr);
         }
+        // Advance step counter once per pair (not per pass) so eviction
+        // sees idle accumulate at a rate proportional to data volume.
+        neuro.multi_pool_tick_all();
     }).await.ok();
     (StatusCode::OK, Json(serde_json::json!({
         "status": "ok",
@@ -7449,23 +7458,36 @@ async fn hypothesis_research_loop(
 }
 
 /// POST /neuro/checkpoint
-/// Force-save the NeuronPool to disk.
+/// Persist the slow-pool NeuronPool, multi-pool hot tiers, and cross-pool
+/// synapse table to disk.  Cold files are already written continuously by
+/// the eviction system; this captures the currently-hot neurons.
 async fn neuro_checkpoint(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let pool_path = state.neuro.pool_state_path().unwrap_or("").to_string();
-    let pool_path_clone = pool_path.clone();
-    let pool_result = tokio::task::spawn_blocking(move || {
-        state.neuro.save_pool()
-    }).await.unwrap_or_else(|e| Err(e.to_string()));
-    let _ = pool_path_clone;
-    match pool_result {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({
+    let pool_path  = state.neuro.pool_state_path().unwrap_or("").to_string();
+    let mp_hot_dir  = node_data_dir().join("multi_pool_hot");
+    let mp_cross    = node_data_dir().join("multi_pool_cross.json");
+    let neuro = state.neuro.clone();
+    let (pool_res, mp_hot_res, mp_cross_res) = tokio::task::spawn_blocking(move || {
+        let pool_res     = neuro.save_pool();
+        let mp_hot_res   = neuro.multi_pool_save_hot_tiers(&mp_hot_dir);
+        let mp_cross_res = neuro.multi_pool_save_cross_synapses(&mp_cross);
+        (pool_res, mp_hot_res, mp_cross_res)
+    }).await.unwrap_or_else(|e| {
+        let s = e.to_string();
+        (Err(s.clone()), Err(s.clone()), Err(s))
+    });
+    match (pool_res, mp_hot_res, mp_cross_res) {
+        (Ok(()), Ok(()), Ok(())) => (StatusCode::OK, Json(serde_json::json!({
             "saved": true,
             "pool_path": pool_path,
         }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("pool: {}", e) }))),
+        (Err(e), _, _) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("pool: {e}") }))),
+        (_, Err(e), _) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("multi_pool hot: {e}") }))),
+        (_, _, Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("multi_pool cross: {e}") }))),
     }
 }
 
@@ -7478,6 +7500,16 @@ async fn neuro_clear(
     let result = tokio::task::spawn_blocking(move || {
         state.neuro.clear_pool()
     }).await.unwrap_or_else(|e| Err(e.to_string()));
+    // Delete persisted multi_pool state so training starts fresh.
+    let _ = std::fs::remove_file(node_data_dir().join("multi_pool_cross.json"));
+    if let Ok(entries) = std::fs::read_dir(node_data_dir().join("multi_pool_hot")) {
+        for e in entries.flatten() { let _ = std::fs::remove_file(e.path()); }
+    }
+    if let Ok(entries) = std::fs::read_dir(node_data_dir().join("multi_pool_cold")) {
+        for e in entries.flatten() {
+            if e.path().is_dir() { let _ = std::fs::remove_dir_all(e.path()); }
+        }
+    }
     match result {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "cleared": true }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,

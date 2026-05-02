@@ -3522,6 +3522,92 @@ impl MultiPoolFabric {
     ) -> impl Iterator<Item = (&String, &String, &CrossPoolSynapses)> {
         self.cross.iter().map(|((s, t), c)| (s, t, c))
     }
+
+    /// Wire hot/cold paging for a single pool.  Called at startup and when
+    /// a pool is dynamically registered so every pool participates in
+    /// the same eviction system as the main slow pool.
+    pub fn set_pool_cold_dir(&mut self, pool_id: &str, cold_base: &std::path::Path,
+                              idle_steps: u64, hot_max: usize) {
+        if let Some(pool) = self.pools.get_mut(pool_id) {
+            let dir = cold_base.join(pool_id);
+            let _ = std::fs::create_dir_all(&dir);
+            pool.set_cold_dir(dir, idle_steps, hot_max);
+        }
+    }
+
+    /// Wire cold paging for all currently registered pools.
+    pub fn set_all_cold_dirs(&mut self, cold_base: &std::path::Path,
+                              idle_steps: u64, hot_max: usize) {
+        for (pid, pool) in self.pools.iter_mut() {
+            let dir = cold_base.join(pid.as_str());
+            let _ = std::fs::create_dir_all(&dir);
+            pool.set_cold_dir(dir, idle_steps, hot_max);
+        }
+    }
+
+    /// Restore the cold index from disk for every pool that has a cold_dir set.
+    /// Called at startup after set_all_cold_dirs so previously evicted neurons
+    /// are re-registered as Cold slots before any queries arrive.
+    pub fn restore_all_cold_indices(&mut self) {
+        for pool in self.pools.values_mut() {
+            if let Some(cd) = pool.cold_dir.clone() {
+                pool.restore_cold_index(&cd);
+            }
+        }
+    }
+
+    /// Advance the step counter and run eviction on every registered pool.
+    /// Call once per training pair (not per pass) so the idle-time eviction
+    /// threshold accumulates at a rate proportional to data volume.
+    pub fn tick_all(&mut self) {
+        for pool in self.pools.values_mut() {
+            pool.step();
+        }
+    }
+
+    /// Serialize every pool's hot tier to `<hot_base>/<pool_id>.json`.
+    /// Creates `hot_base` if it doesn't exist.  Returns pool ids that failed.
+    pub fn save_hot_tiers(&self, hot_base: &std::path::Path) -> Vec<(String, String)> {
+        let _ = std::fs::create_dir_all(hot_base);
+        let mut errors = Vec::new();
+        for (pid, pool) in &self.pools {
+            let path = hot_base.join(format!("{pid}.json"));
+            let result = std::fs::File::create(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|f| serde_json::to_writer(std::io::BufWriter::new(f), pool)
+                    .map_err(|e| e.to_string()));
+            if let Err(e) = result {
+                errors.push((pid.clone(), e));
+            }
+        }
+        errors
+    }
+
+    /// Load per-pool hot tiers from `<hot_base>/<pool_id>.json` and rewire
+    /// cold paging.  Skips pools whose files don't exist (fresh pool stays
+    /// empty).  Must be called after `set_all_cold_dirs` so cold_dir is known.
+    pub fn load_hot_tiers(&mut self, hot_base: &std::path::Path,
+                           cold_base: &std::path::Path, idle_steps: u64, hot_max: usize) {
+        for pid in self.pool_ids() {
+            let path = hot_base.join(format!("{pid}.json"));
+            if !path.exists() { continue; }
+            match std::fs::File::open(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|f| serde_json::from_reader::<_, NeuronPool>(
+                    std::io::BufReader::new(f)).map_err(|e| e.to_string()))
+            {
+                Ok(mut loaded) => {
+                    let cold_dir = cold_base.join(&pid);
+                    let _ = std::fs::create_dir_all(&cold_dir);
+                    loaded.set_cold_dir(cold_dir.clone(), idle_steps, hot_max);
+                    loaded.restore_cold_index(&cold_dir);
+                    *self.pools.get_mut(&pid).unwrap() = loaded;
+                    tracing::info!("multi_pool[{pid}]: loaded hot tier from {}", path.display());
+                }
+                Err(e) => tracing::warn!("multi_pool[{pid}]: failed to load hot tier: {e}"),
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3559,6 +3645,9 @@ struct NeuroState {
     /// Hierarchical motif discovery — observes every train_weighted call so
     /// recurring label-sequence patterns get promoted to meta-motifs.
     motifs: HierarchicalMotifRuntime,
+    /// Cold-storage base directory for multi-pool pools.  Stored so newly
+    /// registered pools inherit the same paging config as the initial pools.
+    multi_pool_cold_base: Option<std::path::PathBuf>,
 }
 
 impl NeuroState {
@@ -3586,6 +3675,7 @@ impl NeuroState {
             sufficiency: ConditionalSufficiencyTracker::new(),
             registry: PredictionRegistry::new(),
             motifs: HierarchicalMotifRuntime::new(motif_config),
+            multi_pool_cold_base: None,
         }
     }
 
@@ -4554,6 +4644,34 @@ impl NeuroRuntime {
             }
         }
 
+        // ── Multi-pool hot/cold paging ─────────────────────────────────────────
+        // Mirror the main pool's hot/cold system for all multi-pool pools.
+        // cold_dir is derived from the same pool_state_path as the main pool:
+        //   neuro_pool.json → multi_pool_cold/<pool_id>/  (cold files)
+        //                   → multi_pool_hot/<pool_id>.json (hot-tier snapshot)
+        //
+        // On startup: load per-pool hot tier, wire cold_dir, restore cold index.
+        // During session: tick_all() (called from train_pair handler) advances
+        // the step counter so idle eviction fires for unused concept neurons.
+        if let Some(ref path) = config.pool_state_path {
+            let mp_base = std::path::Path::new(path)
+                .parent().unwrap_or(std::path::Path::new("."));
+            let mp_cold_base = mp_base.join("multi_pool_cold");
+            let mp_hot_base  = mp_base.join("multi_pool_hot");
+            let idle    = config.neuro.eviction_idle_steps.unwrap_or(DEFAULT_EVICTION_IDLE_STEPS);
+            let hot_max = config.neuro.hot_tier_max.unwrap_or(DEFAULT_HOT_TIER_MAX);
+            // Try to load per-pool hot-tier snapshots first.  If they exist,
+            // each pool is restored complete with its hot neurons + cold index.
+            // If not, the pool stays empty — fresh start or first ever run.
+            state.multi_pool.load_hot_tiers(&mp_hot_base, &mp_cold_base, idle, hot_max);
+            // Wire cold dirs for any pools that didn't load a hot tier (already
+            // set by load_hot_tiers for pools that loaded; this is a no-op
+            // for those but ensures empty pools also have eviction enabled).
+            state.multi_pool.set_all_cold_dirs(&mp_cold_base, idle, hot_max);
+            state.multi_pool.restore_all_cold_indices();
+            state.multi_pool_cold_base = Some(mp_cold_base);
+        }
+
         Self {
             config,
             symbol_lookup,
@@ -5319,19 +5437,76 @@ impl NeuroRuntime {
     /// Register a new pool in the multi-pool fabric.  Idempotent.  Pools
     /// "in" and "out" are pre-registered for two_pool API compatibility;
     /// any number of additional pools may be added at runtime.
+    /// New pools automatically inherit the cold-paging config so they
+    /// participate in eviction without any additional wiring.
     pub fn multi_pool_register(&self, pool_id: &str) {
-        let cfg = {
+        let (cfg, cold_base) = {
             let guard = self.inner.lock();
-            // Borrow an existing pool's config so all pools share knobs.
-            guard.multi_pool.pool("in").map(|p| p.config.clone())
+            let cfg = guard.multi_pool.pool("in").map(|p| p.config.clone());
+            let cold_base = guard.multi_pool_cold_base.clone();
+            (cfg, cold_base)
         };
         if let Some(cfg) = cfg {
+            let idle    = self.config.neuro.eviction_idle_steps.unwrap_or(DEFAULT_EVICTION_IDLE_STEPS);
+            let hot_max = self.config.neuro.hot_tier_max.unwrap_or(DEFAULT_HOT_TIER_MAX);
             let mut guard = self.inner.lock();
             guard.multi_pool.register_pool(pool_id, cfg);
+            if let Some(ref base) = cold_base {
+                guard.multi_pool.set_pool_cold_dir(pool_id, base, idle, hot_max);
+            }
         }
     }
 
     /// Train a single (src_atoms, tgt_atoms) pair across two named pools.
+    /// Advance the step counter for all multi-pool pools and run eviction
+    /// on any pool that has hit its 200-step eviction cadence.
+    /// Call once per training pair from the API handler so idle neurons
+    /// accumulate steps and get evicted to their cold directories.
+    pub fn multi_pool_tick_all(&self) {
+        let mut guard = self.inner.lock();
+        guard.multi_pool.tick_all();
+    }
+
+    /// Serialize the hot tier of every multi-pool pool to
+    /// `<hot_base>/<pool_id>.json`.  Call from /neuro/checkpoint to
+    /// persist the multi-pool state across restarts.  The cold files
+    /// written by eviction are already persistent by construction.
+    pub fn multi_pool_save_hot_tiers(&self, hot_base: &std::path::Path) -> Result<(), String> {
+        let guard = self.inner.lock();
+        let errors = guard.multi_pool.save_hot_tiers(hot_base);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.into_iter().map(|(p, e)| format!("{p}: {e}")).collect::<Vec<_>>().join("; "))
+        }
+    }
+
+    /// Save only the cross-pool synapse table to `path` (JSON array of
+    /// CrossSynapseDelta).  Pool neurons are covered by hot-tier snapshots
+    /// and cold files; only concept↔concept bridge weights need this
+    /// separate file since they're not neurons and eviction doesn't touch them.
+    pub fn multi_pool_save_cross_synapses(&self, path: &std::path::Path) -> Result<(), String> {
+        let delta = self.multi_pool_export_delta();
+        let bytes = serde_json::to_vec(&delta.cross).map_err(|e| e.to_string())?;
+        std::fs::write(path, bytes).map_err(|e| e.to_string())
+    }
+
+    /// Load cross-pool synapses saved by `multi_pool_save_cross_synapses`.
+    pub fn multi_pool_load_cross_synapses(&self, path: &std::path::Path) {
+        if !path.exists() { return; }
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let cross: Vec<CrossSynapseDelta> = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("multi_pool: failed to load cross synapses: {e}");
+                return;
+            }
+        };
+        let delta = MultiPoolDelta { pools: Vec::new(), cross };
+        let n = self.multi_pool_apply_delta(&delta);
+        tracing::info!("multi_pool: loaded {n} cross-pool synapse edges");
+    }
+
     /// Symmetric by construction — the cross-synapse weight is the same in
     /// both directions, so a query into either pool can recall the other.
     /// Generalizes `two_pool_train_pair` to arbitrary pool ids.
