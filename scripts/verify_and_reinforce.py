@@ -185,17 +185,25 @@ def _spans(text: str, role: str, y: float, idx: int, total: int) -> list:
 
 
 def reinforce_pair(node: str, q: str, a: str) -> dict:
-    """Reinforce a verified-correct pair on BOTH pool paths:
-      • slow pool — train_sequence + record_episode(surprise=0.5) to
-        fire the dopamine-gated late-LTP capture on the path that
-        produced the correct answer.
-      • multi_pool — extra train_pair passes so the concept-bound
-        bridge edges get pushed to (or held at) max_weight, hardening
-        the routing decision.
-    """
-    out = {"slow_pool": [], "multi_pool": None}
+    """Reinforce a verified-correct pair on both pool paths via the
+    train→reinforce cycle.
 
-    # 1) Slow-pool sequence training with neuromodulator-gated LTP.
+    Each cycle: train_sequence × 1 (lays down trace tags on the
+    participating synapses) → /neuro/reinforce (dopamine pulse +
+    flush, capturing tags into late-LTP).  Repeated 5 times because
+    validation showed weights saturate by ~5 cycles.
+
+    /neuro/record_episode does NOT fire dopamine — it only writes to
+    the episodic store — so this path uses the explicit /neuro/reinforce
+    endpoint introduced for verifier-driven consolidation.
+
+    Multi-pool extra passes follow so the concept-bound bridge edges
+    get pushed to (or held at) max_weight, hardening the /chat routing
+    decision toward decoder=multi_pool for this pair.
+    """
+    out = {"slow_pool_cycles": [], "multi_pool": None}
+
+    # Build the frame sequence once — re-used across all reinforce cycles.
     q_words = q.split()
     a_words = a.split()
     total = len(q_words) + len(a_words)
@@ -213,20 +221,23 @@ def reinforce_pair(node: str, q: str, a: str) -> dict:
             "data_b64": _b64(w), "text": w,
             "spans": _spans(w, "body", 0.5, len(q_words) + j, total),
         })
+
+    # train+reinforce cycles — train re-tags traces, reinforce captures them.
     for _ in range(REINFORCE_PASSES):
         sid = str(uuid.uuid4())
         r = _post(node, "/media/train_sequence", {
             "session_id": sid, "base_lr": REINFORCE_LR_SLOW,
             "tau_secs": 2.0, "frames": frames,
         }, timeout=20)
-        out["slow_pool"].append("err" if r.get("error") else "ok")
+        train_ok = not r.get("error")
+        r2 = _post(node, "/neuro/reinforce", {
+            "confidence": REINFORCE_SURPRISE,
+        }, timeout=10)
+        reinforce_ok = not r2.get("error")
+        out["slow_pool_cycles"].append(
+            "ok" if train_ok and reinforce_ok else "err")
 
-    # 2) Dopamine pulse — captures the tagged synapses into late-LTP.
-    _post(node, "/neuro/record_episode", {
-        "context": q, "outcome": a, "surprise": REINFORCE_SURPRISE,
-    }, timeout=10)
-
-    # 3) Multi-pool extra passes so the concept binding holds at saturation.
+    # Multi-pool extra passes hold the concept binding at saturation.
     r = _post(node, "/multi_pool/train_pair", {
         "src_pool": "in",  "src": q,
         "tgt_pool": "out", "tgt": a,

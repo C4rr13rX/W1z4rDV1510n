@@ -951,6 +951,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/media/playback",       post(media_playback))
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
+        // POST /neuro/reinforce — externally-callable dopamine pulse +
+        //   flush.  Captures recently-trained synapses (those with warm
+        //   trace tags) into permanent weight boosts.  The verifier
+        //   driver calls this after a (Q, expected_A) pair passes its
+        //   match check, so the path that produced the right answer
+        //   gets late-LTP'd against future interference.
+        .route("/neuro/reinforce",      post(neuro_reinforce))
         .route("/neuro/clear",          post(neuro_clear))
         // ── Distributed training ─────────────────────────────────────────────
         // POST /neuro/delta/apply — receive a weight delta from a peer and merge
@@ -7490,6 +7497,45 @@ async fn hypothesis_research_loop(
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct NeuroReinforceReq {
+    /// Dopamine pulse magnitude (0.0 .. 1.0).  Maps directly to the
+    /// retrograde-potentiation strength applied to recently-active
+    /// synapses — same scale `/hypothesis/resolve` uses for its
+    /// `confidence` parameter.
+    #[serde(default = "default_reinforce_confidence")]
+    confidence: f32,
+}
+fn default_reinforce_confidence() -> f32 { 0.85 }
+
+/// POST /neuro/reinforce
+/// Fire a dopamine pulse on the slow pool, then immediately flush it
+/// into permanent weight boosts on every recently-active synapse.
+///
+/// This is the externally-callable equivalent of what `/hypothesis/resolve`
+/// runs internally on a successful resolution.  Use it to bake in a
+/// verified-correct training pair: call /media/train_sequence (or
+/// /multi_pool/train_pair) first to lay down the Hebbian trace tags on
+/// the participating synapses, then call this endpoint to capture those
+/// tagged synapses into late-LTP.  Synapses without a recent trace are
+/// untouched — only the path that just fired benefits.
+///
+/// Three-factor Hebbian: Δw = lr_da × dopamine_tag × existing_weight.
+/// Dopamine is reset to 0 after the flush so a subsequent training
+/// pass starts from a clean baseline.
+async fn neuro_reinforce(
+    State(state): State<ApiState>,
+    Json(req): Json<NeuroReinforceReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let amount = req.confidence.clamp(0.0, 1.0);
+    state.neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, amount);
+    state.neuro.flush_dopamine();
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "ok",
+        "confidence": amount,
+    })))
 }
 
 /// POST /neuro/checkpoint
