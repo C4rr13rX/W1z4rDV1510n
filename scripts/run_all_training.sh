@@ -85,6 +85,26 @@ reinforce_conversations() {
     echo "[$(date)] Conversational reinforcement done" | tee -a "$LOG_DIR/run_all.log"
 }
 
+# Helper: verifier-driven consolidation.  Runs the (Q, expected_A) battery
+# against /chat; for every pair that passes, fires the dopamine-gated LTP
+# capture path on the synapses that produced the correct answer.  Failed
+# pairs are logged to regression_queue.jsonl and NOT reinforced (would
+# burn in a wrong answer).  Exit code 0 = clean, 3 = some regressions —
+# we tolerate regressions during the curriculum and only fail-hard on the
+# final verifier call (with --check-only) so a single phase drift doesn't
+# abort hours of training.
+verify_and_reinforce() {
+    local label="${1:-mid-curriculum}"
+    local extra_args="${2:-}"
+    echo "[$(date)] Verifier (${label})..." | tee -a "$LOG_DIR/run_all.log"
+    PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/verify_and_reinforce.py" \
+        --node "$NODE" $extra_args \
+        2>&1 | tee -a "$LOG_DIR/verifier.log" | tail -10 \
+        || echo "[$(date)] Verifier (${label}) reported regressions — see regression_queue.jsonl" \
+            | tee -a "$LOG_DIR/run_all.log"
+    echo "[$(date)] Verifier (${label}) done" | tee -a "$LOG_DIR/run_all.log"
+}
+
 # ─── PHASE 0: CLEAR POOL ─────────────────────────────────────────────────────
 echo "[$(date)] Clearing pool for fresh start..." | tee -a "$LOG_DIR/run_all.log"
 curl -s -X POST "$NODE/neuro/clear" | tee -a "$LOG_DIR/run_all.log"
@@ -409,13 +429,33 @@ PYTHONIOENCODING=utf-8 python3 "$SCRIPTS/train_concept_bindings.py" \
     2>&1 | tee -a "$LOG_DIR/concept_bindings.log" | tail -5
 echo "[$(date)] Multi-pool concept bindings done" | tee -a "$LOG_DIR/run_all.log"
 
+# Verifier round 1 (post-Phase 29): runs the Q->A battery and reinforces
+# every pair that passes — locks in the dopamine-gated capture on the
+# synapses that just produced the correct answer.  Failures here are
+# expected for any pair that the curriculum hasn't covered yet; they
+# flow into the regression queue and get retried after the final
+# re-anchor below.
+verify_and_reinforce "post-phase29"
+
 # ─── FINAL: RE-ANCHOR FOUNDATIONS + CONVERSATIONS ────────────────────────────
 reinforce_foundations 3
 reinforce_conversations 10
+
+# Verifier round 2 (post-final-anchor): the final re-anchor should have
+# pushed any straggler pairs into a recallable state.  This pass picks
+# up the second-tier reinforcement and produces the canonical pass-rate
+# metric for the whole curriculum run.
+verify_and_reinforce "post-final-anchor"
 
 # ─── CHECKPOINT: PERSIST SLOW-POOL + MULTI-POOL TO DISK ──────────────────────
 echo "[$(date)] Saving pools to disk..." | tee -a "$LOG_DIR/run_all.log"
 curl -s -X POST "$NODE/neuro/checkpoint" | tee -a "$LOG_DIR/run_all.log"
 echo "" | tee -a "$LOG_DIR/run_all.log"
+
+# Verifier round 3 (post-checkpoint, --check-only): final pass-rate metric
+# with no further training side-effects — what you see here is what gets
+# served to /chat from now on.  Exit code propagates: 0 = clean, 3 = some
+# regressions remain in the regression queue.
+verify_and_reinforce "final-readout" "--check-only"
 
 echo "===== Full curriculum training complete $(date) =====" | tee -a "$LOG_DIR/run_all.log"
