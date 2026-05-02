@@ -4986,29 +4986,60 @@ fn decode_char_chain(
     let mut out_chars: Vec<char> = Vec::new();
     let mut stopped_empty = true;
 
+    // Match the training-time temporal model.  train_convos_atoms.py and
+    // train_sequence lay down Hebbian edges with exponential decay over
+    // dt: weights drop with `exp(-dt/tau)` where tau ≈ 2.0s.  Question
+    // tokens were trained at 0.05s spacing, answer tokens at 0.10s
+    // spacing, with a 0.4s gap between.  At decode time we should mirror
+    // that schedule: each emitted character advances "now" by dt, and
+    // the question seed should fade per the same tau the network was
+    // trained against.  Without this fade, q_atoms keep re-injecting
+    // forever and the decoder converges to a fixed-point cycle of
+    // whatever atoms have the highest mutual weights with the question
+    // characters — even when the trained bridge edges to the answer
+    // side are stronger.
+    const ANSWER_DT_PER_CHAR: f32 = 0.10;
+    const SEQUENCE_TAU: f32       = 2.0;
+    const Q_INITIAL_WEIGHT: f32   = 0.6;
+    const TAIL_INITIAL_WEIGHT: f32 = 0.3;
+    const RECENT_WEIGHT: f32      = 1.0;
+
     for _ in 0..max_chars {
-        // Rolling seed: question + tail + the last few output atoms (if any).
+        // Rolling seed: question (decayed) + tail (decayed) + the last
+        // few output atoms (full strength — this is the autoregressive
+        // signal that should dominate as generation proceeds).
         let recent_tail_start = out_atoms.len().saturating_sub(3);
         let recent_seed: Vec<String> = out_atoms[recent_tail_start..].to_vec();
 
-        let acts = match recent_seed.is_empty() {
-            true => neuro.propagate_combined(
+        // Temporal decay of the question signal mirrors the training-time
+        // bridge weight `exp(-dt/tau)`.  step=0 leaves the question at
+        // its initial weight; later steps fade it.  The recent-output
+        // seed stays at full strength so autoregression takes over.
+        let step_dt   = (out_atoms.len() as f32) * ANSWER_DT_PER_CHAR;
+        let q_fade    = (-step_dt / SEQUENCE_TAU).exp();
+        let q_weight  = Q_INITIAL_WEIGHT  * q_fade;
+        let tail_weight = TAIL_INITIAL_WEIGHT * q_fade;
+
+        let acts = if recent_seed.is_empty() {
+            // First emission: full question signal — no autoregression yet.
+            neuro.propagate_combined(
                 &[
                     (q_atoms.as_slice(),   1.0_f32),
                     (tail_seed.as_slice(), 0.5_f32),
                 ],
                 hops,
                 min_strength,
-            ),
-            false => neuro.propagate_combined(
+            )
+        } else {
+            neuro.propagate_combined(
                 &[
-                    (q_atoms.as_slice(),     0.6_f32),
-                    (tail_seed.as_slice(),   0.3_f32),
-                    (recent_seed.as_slice(), 1.0_f32),
+                    (q_atoms.as_slice(),     q_weight),
+                    (tail_seed.as_slice(),   tail_weight),
+                    (recent_seed.as_slice(), RECENT_WEIGHT),
                 ],
                 hops,
                 min_strength,
-            ),
+            )
         };
 
         // Pick the highest-activation txt: atom (single codepoint) that isn't
