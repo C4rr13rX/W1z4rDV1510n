@@ -55,9 +55,16 @@ RESULT_LOG     = Path("D:/w1z4rdv1510n-data/training/verifier.log")
 # Reinforcement tuning — same shape as wizard_chat/_wizard_train but
 # slightly more passes since we know the answer is correct (no risk of
 # burning in a wrong correction).
-REINFORCE_PASSES   = 5
+REINFORCE_PASSES   = 20      # train+reinforce cycles per pair (raised from
+                              # 5 after the dose-response stress test showed
+                              # 5 cycles is in a noisy regime; 20 + conf=1.0
+                              # is the operating point that reliably
+                              # protects A1 against subsequent A2 training)
 REINFORCE_LR_SLOW  = 0.40   # /media/train_sequence base_lr
-REINFORCE_SURPRISE = 0.5    # record_episode surprise → dopamine pulse
+REINFORCE_SURPRISE = 1.0    # /neuro/reinforce confidence — full dopamine
+                              # pulse, capped at the runtime's clamp.  Lower
+                              # values were too quiet to survive the
+                              # post-trace-gated three-factor flush.
 MULTI_POOL_PASSES  = 10     # extra /multi_pool/train_pair passes
 
 

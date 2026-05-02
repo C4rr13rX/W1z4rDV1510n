@@ -1478,17 +1478,43 @@ impl NeuronPool {
     }
 
     /// Flush accumulated dopamine tags into permanent weight boosts.
-    /// Implements three-factor Hebbian: Δw = lr_da × dopamine_tag × existing_weight.
-    /// Call after `apply_dopamine` once per reward episode.
+    ///
+    /// True three-factor Hebbian: a synapse is potentiated only if BOTH
+    /// endpoints had recent activity AND dopamine arrived.  Without the
+    /// post-side gate this collapses to "boost every outgoing synapse
+    /// of any neuron that recently fired" — a path-blind broadcast that
+    /// strengthens edges between recent neurons and atoms they never
+    /// actually fired with, which is the failure mode the dose-response
+    /// stress test caught: shared atoms (e.g. 'I', 'am') accumulate
+    /// boosts that later transfer to competing answers riding on the
+    /// same shared infrastructure.
+    ///
+    /// Δw = lr_da × pre_tag × post_trace_gate × existing_weight
+    ///
+    /// where post_trace_gate = 1.0 if target.trace > 0.005, else 0.
+    /// This restricts the boost to genuinely co-active synapses — the
+    /// pre × post × reward biology described in the README and the
+    /// classic three-factor STDP literature.
     pub fn flush_dopamine_potentiation(&mut self) {
         let lr      = self.config.dopamine_retrograde_lr;
         let max_w   = self.config.max_weight;
+        let post_threshold = 0.005;
+        // Snapshot target traces in a read-only pass so we can satisfy
+        // the borrow checker while applying the per-synapse mutation.
+        let target_traces: Vec<f32> = self.neurons.iter()
+            .map(|slot| match slot {
+                NeuronSlot::Hot(n) => n.trace,
+                _ => 0.0,
+            })
+            .collect();
         for slot in self.neurons.iter_mut() {
             if let NeuronSlot::Hot(neuron) = slot {
                 let tag = neuron.dopamine_tag;
                 if tag < 0.01 { continue; }
                 for syn in neuron.excitatory.iter_mut() {
-                    // Potentiate in proportion to both tag and existing weight strength.
+                    let post_trace = target_traces
+                        .get(syn.target as usize).copied().unwrap_or(0.0);
+                    if post_trace < post_threshold { continue; }
                     syn.weight = (syn.weight + lr * tag * syn.weight).min(max_w);
                 }
                 neuron.dopamine_tag = 0.0;
