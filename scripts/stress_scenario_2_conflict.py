@@ -93,14 +93,20 @@ def train_multi(q: str, a: str, *, passes: int = 10) -> None:
     }, timeout=60)
 
 
-def reinforce_pair(q: str, a: str, *, cycles: int = 5) -> None:
+def reinforce_pair(q: str, a: str, *, cycles: int = 20,
+                    confidence: float = 1.0) -> None:
+    """Default 20 cycles at conf=1.0 — the operating point the
+    dose-response stress test confirmed reliably protects the
+    reinforced answer against subsequent plain training of a
+    competing answer (under the post-trace-gated three-factor flush
+    introduced alongside this default)."""
     frames = _frames(q, a)
     for _ in range(cycles):
         post("/media/train_sequence", {
             "session_id": str(uuid.uuid4()),
             "base_lr": 0.40, "tau_secs": 2.0, "frames": frames,
         }, timeout=20)
-        post("/neuro/reinforce", {"confidence": 0.85}, timeout=10)
+        post("/neuro/reinforce", {"confidence": confidence}, timeout=10)
 
 
 def query(q: str) -> tuple[str, str]:
