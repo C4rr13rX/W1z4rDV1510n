@@ -257,6 +257,13 @@ pub struct CrossSynapseDelta {
     pub tgt_pool:  String,
     pub tgt_label: String,
     pub weight:    f32,
+    /// Consolidation count for this cross-pool edge.  Recipients merge
+    /// with max(local, remote) so reinforced concept routes propagate
+    /// through the cluster as the late-LTP-equivalent receptor count.
+    /// Serde default keeps wire-format backward-compatible with peers
+    /// running older builds.
+    #[serde(default)]
+    pub consolidation: u8,
 }
 
 /// Per-pool delta payload: pool id + intra-pool synapses + concept neurons.
@@ -3483,10 +3490,37 @@ impl PositionAccumulator {
 /// out-pool labels reachable from `in_label`; `reverse(out_label)` lists
 /// in-pool labels reachable from `out_label`.  Either direction reads the
 /// same underlying weight.
+/// One cross-pool concept-to-concept edge.  Mirrors the within-pool
+/// `Synapse` axes so consolidation history can accumulate independently
+/// of raw weight: pair() bumps weight + trace, flush_consolidation()
+/// captures trace into permanent consolidation count, propagation reads
+/// `effective_weight()` so consolidated cross-pool edges propagate
+/// stronger signal even at saturation.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CrossEdge {
+    pub weight: f32,
+    /// Transient activity tag — set on each pair() call, decays each
+    /// flush.  Captured into consolidation by flush_consolidation().
+    #[serde(default)]
+    pub trace: f32,
+    /// Saturating count of dopamine-flush captures.  Each tick adds
+    /// CONSOLIDATION_K to the propagation multiplier so reinforced
+    /// cross-pool routes keep an edge even after raw weight saturates.
+    #[serde(default)]
+    pub consolidation: u8,
+}
+
+impl CrossEdge {
+    #[inline]
+    pub fn effective_weight(&self) -> f32 {
+        self.weight * (1.0 + self.consolidation as f32 * CONSOLIDATION_K)
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CrossPoolSynapses {
-    /// (in_label, out_label) → weight.  Bidirectional read.
-    weights: HashMap<(String, String), f32>,
+    /// (in_label, out_label) → CrossEdge.  Bidirectional read.
+    weights: HashMap<(String, String), CrossEdge>,
     #[serde(skip)]
     cap: usize,
 }
@@ -3499,37 +3533,44 @@ impl CrossPoolSynapses {
         Self { weights: HashMap::new(), cap: DEFAULT_CROSS_POOL_CAP }
     }
 
-    /// Read-only iterator over `(src_label, tgt_label, weight)` triples.
-    /// Used by cluster sync export.
-    pub fn iter_weights(&self) -> impl Iterator<Item = (&String, &String, f32)> {
-        self.weights.iter().map(|((a, b), w)| (a, b, *w))
+    /// Read-only iterator over `(src_label, tgt_label, weight, consolidation)`.
+    /// Used by cluster sync export so consolidation history is portable.
+    pub fn iter_weights(&self) -> impl Iterator<Item = (&String, &String, f32, u8)> {
+        self.weights.iter().map(|((a, b), e)| (a, b, e.weight, e.consolidation))
     }
 
-    /// Set weight to `max(current, weight)` capped at `CROSS_POOL_MAX_WEIGHT`.
-    /// Returns true if the stored weight changed.  Used by cluster sync apply.
-    pub fn merge_max(&mut self, in_label: &str, out_label: &str, weight: f32) -> bool {
+    /// Set weight + consolidation to `max(current, remote)` independently.
+    /// Returns true if either field grew.  Used by cluster sync apply so
+    /// consolidation accumulates across the cluster like raw weight does.
+    pub fn merge_max(&mut self, in_label: &str, out_label: &str,
+                       weight: f32, consolidation: u8) -> bool {
         let key = (in_label.to_string(), out_label.to_string());
         let new_w = weight.min(CROSS_POOL_MAX_WEIGHT);
-        let cur = self.weights.get(&key).copied().unwrap_or(0.0);
-        if new_w > cur {
-            self.weights.insert(key, new_w);
-            true
-        } else {
-            false
+        let edge = self.weights.entry(key).or_default();
+        let mut changed = false;
+        if new_w > edge.weight { edge.weight = new_w; changed = true; }
+        if consolidation > edge.consolidation {
+            edge.consolidation = consolidation;
+            changed = true;
         }
+        changed
     }
 
-    /// Strengthen the bidirectional association `in_label ↔ out_label` by `lr`.
-    /// Saturates at `CROSS_POOL_MAX_WEIGHT`.
+    /// Strengthen the bidirectional association `in_label ↔ out_label` by
+    /// `lr`.  Bumps weight (saturates at CROSS_POOL_MAX_WEIGHT) and
+    /// stamps a transient trace tag — exactly mirroring how `Synapse`
+    /// is written by within-pool training.
     pub fn pair(&mut self, in_label: &str, out_label: &str, lr: f32) {
         let key = (in_label.to_string(), out_label.to_string());
-        let w = self.weights.entry(key).or_insert(0.0);
-        *w = (*w + lr).min(CROSS_POOL_MAX_WEIGHT);
+        let edge = self.weights.entry(key).or_default();
+        edge.weight = (edge.weight + lr).min(CROSS_POOL_MAX_WEIGHT);
+        edge.trace = (edge.trace + lr).min(1.0);
         if self.cap > 0 && self.weights.len() > self.cap {
-            // Evict weakest 5%
+            // Evict weakest 5% by raw weight (consolidation is downstream
+            // of weight, so keeping max-weight edges keeps max-consolidation).
             let target = (self.cap as f32 * 0.95) as usize;
             let mut sorted: Vec<(_, f32)> = self.weights.iter()
-                .map(|(k, v)| (k.clone(), *v))
+                .map(|(k, e)| (k.clone(), e.weight))
                 .collect();
             sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             for (k, _) in sorted.into_iter().take(self.weights.len() - target) {
@@ -3538,17 +3579,42 @@ impl CrossPoolSynapses {
         }
     }
 
-    /// Forward read: `in_label` → all reachable `(out_label, weight)`.
+    /// Capture trace tags into permanent consolidation count.  Mirrors
+    /// `flush_dopamine_potentiation` on within-pool synapses: edges
+    /// with a warm trace get a consolidation tick (saturating at u8::MAX),
+    /// then traces decay so the next reinforce cycle requires fresh
+    /// activity.  `dopamine` scales whether we capture at all (mirroring
+    /// the apply_dopamine threshold check).
+    pub fn flush_consolidation(&mut self, dopamine: f32) {
+        let trace_threshold = 0.005;
+        let dop_threshold = 0.01;
+        if dopamine < dop_threshold { return; }
+        for edge in self.weights.values_mut() {
+            if edge.trace > trace_threshold {
+                edge.consolidation = edge.consolidation.saturating_add(1);
+            }
+            edge.trace *= 0.85;  // same decay as the within-pool `trace`
+        }
+    }
+
+    /// Forward read: `in_label` → all reachable `(out_label, effective_weight)`.
+    /// Returns consolidation-multiplied weight so propagation through this
+    /// cross-pool edge favours consolidated routes at saturation — the
+    /// late-LTP analogue applied at the multi-pool concept layer.
     pub fn forward(&self, in_label: &str) -> Vec<(String, f32)> {
         self.weights.iter()
-            .filter_map(|((a, b), w)| if a == in_label { Some((b.clone(), *w)) } else { None })
+            .filter_map(|((a, b), e)| if a == in_label
+                { Some((b.clone(), e.effective_weight())) }
+                else { None })
             .collect()
     }
 
-    /// Reverse read: `out_label` → all reachable `(in_label, weight)`.
+    /// Reverse read: `out_label` → all reachable `(in_label, effective_weight)`.
     pub fn reverse(&self, out_label: &str) -> Vec<(String, f32)> {
         self.weights.iter()
-            .filter_map(|((a, b), w)| if b == out_label { Some((a.clone(), *w)) } else { None })
+            .filter_map(|((a, b), e)| if b == out_label
+                { Some((a.clone(), e.effective_weight())) }
+                else { None })
             .collect()
     }
 
@@ -3670,6 +3736,22 @@ impl MultiPoolFabric {
     pub fn tick_all(&mut self) {
         for pool in self.pools.values_mut() {
             pool.step();
+        }
+    }
+
+    /// Capture trace tags into permanent consolidation count on every
+    /// cross-pool edge in every (src, tgt) pool pair, AND flush
+    /// dopamine potentiation on every within-pool synapse in every
+    /// pool.  Mirrors the slow-pool flush_dopamine_potentiation but at
+    /// the multi-pool layer where concept-to-concept arbitration
+    /// actually happens.  Called from NeuroRuntime::flush_dopamine so
+    /// /neuro/reinforce consolidates both axes in one call.
+    pub fn flush_consolidation_all(&mut self, dopamine: f32) {
+        for pool in self.pools.values_mut() {
+            pool.flush_dopamine_potentiation();
+        }
+        for cross in self.cross.values_mut() {
+            cross.flush_consolidation(dopamine);
         }
     }
 
@@ -5005,10 +5087,21 @@ impl NeuroRuntime {
     /// Convert dopamine tags accumulated via [`release_neuromodulator`] into
     /// permanent weight boosts (retrograde three-factor Hebbian potentiation).
     /// Call this once per reward episode, after the dopamine-tagged training.
+    ///
+    /// Now flushes BOTH layers: the within-pool slow synapses (atom→atom,
+    /// atom→concept) get late-LTP via flush_dopamine_potentiation, and
+    /// every cross-pool concept↔concept edge gets a consolidation tick
+    /// proportional to the trace it accumulated during recent training.
+    /// Without the cross-pool flush, multi-pool conflict arbitration
+    /// stayed pinned at the saturation ceiling because the concept-to-
+    /// concept routing layer had no architectural axis other than raw
+    /// weight.
     pub fn flush_dopamine(&self) {
         if !self.config.enabled { return; }
         let mut guard = self.inner.lock();
+        let dop = guard.pool.neuromodulators.dopamine;
         guard.pool.flush_dopamine_potentiation();
+        guard.multi_pool.flush_consolidation_all(dop);
         guard.pool.neuromodulators.dopamine = 0.0;
     }
 
@@ -6182,13 +6275,14 @@ impl NeuroRuntime {
         }
         // Cross-pool synapses, flattened.
         for (src_pool, tgt_pool, cross) in guard.multi_pool.iter_cross() {
-            for (src_label, tgt_label, weight) in cross.iter_weights() {
+            for (src_label, tgt_label, weight, consolidation) in cross.iter_weights() {
                 delta.cross.push(CrossSynapseDelta {
                     src_pool:  src_pool.clone(),
                     src_label: src_label.clone(),
                     tgt_pool:  tgt_pool.clone(),
                     tgt_label: tgt_label.clone(),
                     weight,
+                    consolidation,
                 });
             }
         }
@@ -6231,10 +6325,11 @@ impl NeuroRuntime {
                 applied += 1;
             }
         }
-        // (2) Cross-pool synapse weights with max-merge.
+        // (2) Cross-pool synapse weights + consolidation with max-merge.
         for cs in &delta.cross {
             let cross = guard.multi_pool.cross_mut(&cs.src_pool, &cs.tgt_pool);
-            if cross.merge_max(&cs.src_label, &cs.tgt_label, cs.weight) {
+            if cross.merge_max(&cs.src_label, &cs.tgt_label,
+                                 cs.weight, cs.consolidation) {
                 applied += 1;
             }
         }
