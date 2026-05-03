@@ -526,6 +526,12 @@ fn top_active_concept(
     pool: &NeuronPool,
     src_active: &HashMap<String, f32>,
 ) -> Option<String> {
+    // Deterministic argmax: when two concepts have equal activation,
+    // pick the lexicographically smaller label.  Without this tiebreak
+    // the winner depends on Rust's randomized HashMap iteration order
+    // and concept arbitration becomes nondeterministic across runs —
+    // the failure mode the dose-response stress test caught at the
+    // boundary regimes where activation values cluster tightly.
     let mut best: Option<(String, f32)> = None;
     for (lbl, act) in src_active.iter() {
         let id = match pool.label_to_id.get(lbl) {
@@ -537,8 +543,13 @@ fn top_active_concept(
             None => continue,
         };
         if neuron.members.is_empty() { continue; }
-        let cur = best.as_ref().map(|x| x.1).unwrap_or(f32::MIN);
-        if *act > cur {
+        let take = match &best {
+            None                  => true,
+            Some((bl, ba)) if *act >  *ba => true,
+            Some((bl, ba)) if *act == *ba => lbl < bl,
+            _ => false,
+        };
+        if take {
             best = Some((lbl.clone(), *act));
         }
     }

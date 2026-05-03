@@ -5059,6 +5059,11 @@ fn decode_char_chain(
         // emitting.  Atoms are emitted directly.  Concepts emit the whole
         // member sequence in one decoder step — that's the consumption
         // behavior: a concept fires as one unit.
+        // Deterministic argmax: alphabetical tiebreak when activations
+        // are equal so iteration over the HashMap produces the same
+        // winner across runs.  Without this the char_chain decoder
+        // can pick different atoms on identical inputs depending on
+        // randomized hash order.
         let mut best: Option<(String, f32)> = None;
         for (label, act) in acts.iter() {
             if *act < min_strength {
@@ -5070,12 +5075,15 @@ fn decode_char_chain(
             if recent_set.contains(label.as_str()) {
                 continue;
             }
-            if let Some((_, best_act)) = &best {
-                if *act <= *best_act {
-                    continue;
-                }
+            let take = match &best {
+                None                       => true,
+                Some((_, ba)) if *act >  *ba => true,
+                Some((bl, ba)) if *act == *ba => label < bl,
+                _ => false,
+            };
+            if take {
+                best = Some((label.clone(), *act));
             }
-            best = Some((label.clone(), *act));
         }
 
         let Some((label, _)) = best else {

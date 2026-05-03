@@ -150,7 +150,9 @@ def train_slow(q: str, a: str, *, lr: float = 7.5, passes: int = 5) -> None:
         }, timeout=20)
 
 
-def train_multi(q: str, a: str, *, passes: int = 35) -> None:
+def train_multi(q: str, a: str, *, passes: int = 10) -> None:
+    # 10 passes is enough to seat the concept binding for a stress
+    # test; the GA-tuned default of 35 is for production saturation.
     post("/multi_pool/train_pair", {
         "src_pool": "in", "src": q, "tgt_pool": "out", "tgt": a,
         "passes": passes,
