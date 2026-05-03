@@ -231,6 +231,10 @@ pub struct SynapseDelta {
     /// Absolute weight (not a diff). Recipients apply max(local, remote).
     pub weight:     f32,
     pub inhibitory: bool,
+    /// Consolidation count.  Recipients apply max(local, remote) so
+    /// consolidation history accumulates across the cluster.
+    #[serde(default)]
+    pub consolidation: u8,
 }
 
 /// Concept neuron snapshot for multi-pool cluster sync.  Captures the
@@ -273,17 +277,46 @@ pub struct MultiPoolDelta {
     pub cross: Vec<CrossSynapseDelta>,
 }
 
+/// Multiplicative bonus per consolidation count applied at propagation
+/// time.  Each time a synapse is captured by a dopamine flush its
+/// `consolidation` counter ticks up.  At propagation:
+///   effective_weight = weight × (1 + consolidation × CONSOLIDATION_K)
+/// so a fully-consolidated synapse propagates ~6× the signal of an
+/// unconsolidated one even when both are at max_weight.  This is the
+/// architectural lever that lets reinforced paths beat freshly-trained
+/// competitors at the kWTA ceiling — the late-LTP analogue from
+/// neuroscience, where consolidated synapses physically anchor more
+/// AMPA receptors and conduct larger post-synaptic currents per spike.
+pub const CONSOLIDATION_K: f32 = 0.02;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Synapse {
     pub target: u32,
     pub weight: f32,
     pub inhibitory: bool,
+    /// Number of dopamine-flush captures this synapse has accumulated.
+    /// Saturates at u8::MAX = 255.  Default 0 for backward-compat with
+    /// pre-consolidation pool snapshots.
+    #[serde(default)]
+    pub consolidation: u8,
+}
+
+impl Synapse {
+    /// Weight times the consolidation multiplier.  Use this everywhere
+    /// activation propagation reads `syn.weight` so consolidated paths
+    /// propagate stronger signal at the same raw weight.
+    #[inline]
+    pub fn effective_weight(&self) -> f32 {
+        self.weight * (1.0 + self.consolidation as f32 * CONSOLIDATION_K)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dendrite {
     pub source: u32,
     pub weight: f32,
+    #[serde(default)]
+    pub consolidation: u8,
 }
 
 // ── Cluster-portable cold-storage types ───────────────────────────────────────
@@ -298,6 +331,8 @@ pub struct Dendrite {
 pub struct ColdSynapse {
     pub target_label: String,
     pub weight:       f32,
+    #[serde(default)]
+    pub consolidation: u8,
 }
 
 /// One dendrite as it appears in a cold (disk) neuron file.
@@ -305,6 +340,8 @@ pub struct ColdSynapse {
 pub struct ColdDendrite {
     pub source_label: String,
     pub weight:       f32,
+    #[serde(default)]
+    pub consolidation: u8,
 }
 
 /// Complete cluster-portable neuron representation written to / read from disk.
@@ -988,15 +1025,18 @@ impl NeuronPool {
                 // that has not yet been seen locally — they will be trained on demand.
                 let excitatory: Vec<Synapse> = cold.excitatory.iter().map(|cs| {
                     let target = self.get_or_create_no_ensure(&cs.target_label);
-                    Synapse { target, weight: cs.weight, inhibitory: false }
+                    Synapse { target, weight: cs.weight, inhibitory: false,
+                              consolidation: cs.consolidation }
                 }).collect();
                 let inhibitory: Vec<Synapse> = cold.inhibitory.iter().map(|cs| {
                     let target = self.get_or_create_no_ensure(&cs.target_label);
-                    Synapse { target, weight: cs.weight, inhibitory: true }
+                    Synapse { target, weight: cs.weight, inhibitory: true,
+                              consolidation: cs.consolidation }
                 }).collect();
                 let dendrites: Vec<Dendrite> = cold.dendrites.iter().map(|cd| {
                     let source = self.get_or_create_no_ensure(&cd.source_label);
-                    Dendrite { source, weight: cd.weight }
+                    Dendrite { source, weight: cd.weight,
+                               consolidation: cd.consolidation }
                 }).collect();
 
                 let mut n = Neuron::new(id, Some(cold.label), frozen_step);
@@ -1067,15 +1107,18 @@ impl NeuronPool {
         // Resolve synapse targets to labels for portable storage.
         let excitatory: Vec<ColdSynapse> = neuron.excitatory.iter().filter_map(|s| {
             let target_label = self.label_for(s.target)?;
-            Some(ColdSynapse { target_label, weight: s.weight })
+            Some(ColdSynapse { target_label, weight: s.weight,
+                                consolidation: s.consolidation })
         }).collect();
         let inhibitory: Vec<ColdSynapse> = neuron.inhibitory.iter().filter_map(|s| {
             let target_label = self.label_for(s.target)?;
-            Some(ColdSynapse { target_label, weight: s.weight })
+            Some(ColdSynapse { target_label, weight: s.weight,
+                                consolidation: s.consolidation })
         }).collect();
         let dendrites: Vec<ColdDendrite> = neuron.dendrites.iter().filter_map(|d| {
             let source_label = self.label_for(d.source)?;
-            Some(ColdDendrite { source_label, weight: d.weight })
+            Some(ColdDendrite { source_label, weight: d.weight,
+                                 consolidation: d.consolidation })
         }).collect();
 
         let cold = ColdNeuron {
@@ -1527,6 +1570,16 @@ impl NeuronPool {
                         .get(syn.target as usize).copied().unwrap_or(0.0);
                     if post_trace < post_threshold { continue; }
                     syn.weight = (syn.weight + lr * tag * syn.weight).min(max_w);
+                    // Consolidation tick — separate architectural axis
+                    // from raw weight.  Even when weight is clamped at
+                    // max_w, the consolidation counter keeps
+                    // accumulating, and effective_weight() multiplies
+                    // through it at propagation time.  This is what
+                    // protects reinforced paths from being matched by
+                    // freshly-trained competitors that also reach
+                    // max_w — biology's late-LTP, persisting beyond
+                    // the synapse's saturation ceiling.
+                    syn.consolidation = syn.consolidation.saturating_add(1);
                 }
                 neuron.dopamine_tag = 0.0;
             }
@@ -1854,14 +1907,14 @@ impl NeuronPool {
                 for syn in &neuron.excitatory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] + src_act * syn.weight * 0.5 / fan_out).min(1.0);
+                        next[tgt] = (next[tgt] + src_act * syn.effective_weight() * 0.5 / fan_out).min(1.0);
                     }
                 }
                 // Inhibitory: suppress target
                 for syn in &neuron.inhibitory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                        next[tgt] = (next[tgt] - src_act * syn.effective_weight().abs() * 0.3).max(0.0);
                     }
                 }
             }
@@ -1923,13 +1976,13 @@ impl NeuronPool {
                 for syn in &neuron.excitatory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] + src_act * syn.weight * 0.5 / fan_out).min(1.0);
+                        next[tgt] = (next[tgt] + src_act * syn.effective_weight() * 0.5 / fan_out).min(1.0);
                     }
                 }
                 for syn in &neuron.inhibitory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                        next[tgt] = (next[tgt] - src_act * syn.effective_weight().abs() * 0.3).max(0.0);
                     }
                 }
             }
@@ -1990,13 +2043,13 @@ impl NeuronPool {
                 for syn in &neuron.excitatory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] += src_act * syn.weight * 0.5 / fan_out;
+                        next[tgt] += src_act * syn.effective_weight() * 0.5 / fan_out;
                     }
                 }
                 for syn in &neuron.inhibitory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                        next[tgt] = (next[tgt] - src_act * syn.effective_weight().abs() * 0.3).max(0.0);
                     }
                 }
             }
@@ -2053,14 +2106,14 @@ impl NeuronPool {
                 for syn in &neuron.excitatory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        let delta = src_act * syn.weight * 0.5 / fan_out;
+                        let delta = src_act * syn.effective_weight() * 0.5 / fan_out;
                         if delta > next[tgt] { next[tgt] = delta; }
                     }
                 }
                 for syn in &neuron.inhibitory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] - src_act * syn.weight.abs() * 0.3).max(0.0);
+                        next[tgt] = (next[tgt] - src_act * syn.effective_weight().abs() * 0.3).max(0.0);
                     }
                 }
             }
@@ -2167,13 +2220,13 @@ impl NeuronPool {
                 for syn in &neuron.excitatory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] + signal * syn.weight * 0.5 / fan_out).min(1.0);
+                        next[tgt] = (next[tgt] + signal * syn.effective_weight() * 0.5 / fan_out).min(1.0);
                     }
                 }
                 for syn in &neuron.inhibitory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] - signal * syn.weight.abs() * 0.3).max(0.0);
+                        next[tgt] = (next[tgt] - signal * syn.effective_weight().abs() * 0.3).max(0.0);
                     }
                 }
             }
@@ -2565,14 +2618,17 @@ impl NeuronPool {
             // Lists are kept sorted by target for O(log n) lookup.
             match list.binary_search_by_key(&to, |s| s.target) {
                 Ok(idx)  => list[idx].weight = (list[idx].weight + delta).min(max_w),
-                Err(idx) => list.insert(idx, Synapse { target: to, weight: delta.min(max_w), inhibitory }),
+                Err(idx) => list.insert(idx, Synapse { target: to,
+                                weight: delta.min(max_w), inhibitory,
+                                consolidation: 0 }),
             }
         }
         // Mirror on dendrite bookkeeping (kept in sync with excitatory/inhibitory lists).
         if let Some(target) = self.get_hot_mut(to as usize) {
             match target.dendrites.binary_search_by_key(&from, |d| d.source) {
                 Ok(idx)  => target.dendrites[idx].weight = (target.dendrites[idx].weight + delta).min(max_w),
-                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: delta.min(max_w) }),
+                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from,
+                                weight: delta.min(max_w), consolidation: 0 }),
             }
         }
     }
@@ -2593,13 +2649,15 @@ impl NeuronPool {
             };
             match list.binary_search_by_key(&to, |s| s.target) {
                 Ok(idx)  => list[idx].weight = w,
-                Err(idx) => list.insert(idx, Synapse { target: to, weight: w, inhibitory }),
+                Err(idx) => list.insert(idx, Synapse { target: to, weight: w,
+                                inhibitory, consolidation: 0 }),
             }
         }
         if let Some(target) = self.get_hot_mut(to as usize) {
             match target.dendrites.binary_search_by_key(&from, |d| d.source) {
                 Ok(idx)  => target.dendrites[idx].weight = w,
-                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from, weight: w }),
+                Err(idx) => target.dendrites.insert(idx, Dendrite { source: from,
+                                weight: w, consolidation: 0 }),
             }
         }
     }
@@ -2679,6 +2737,7 @@ impl NeuronPool {
                         to_label,
                         weight: syn.weight,
                         inhibitory,
+                        consolidation: syn.consolidation,
                     });
                 }
             }
@@ -2732,7 +2791,11 @@ impl NeuronPool {
                     }
                 }
             }
-            // Forward synapse
+            // Forward synapse — merge weight and consolidation independently
+            // with max(local, remote).  Consolidation is its own architectural
+            // axis (late-LTP receptor count) so a node that has consolidated
+            // a path more strongly preserves that history when its delta is
+            // applied to a peer.
             if let Some(n) = self.get_hot_mut(from_id as usize) {
                 let list = if sd.inhibitory { &mut n.inhibitory } else { &mut n.excitatory };
                 match list.binary_search_by_key(&to_id, |s| s.target) {
@@ -2740,12 +2803,16 @@ impl NeuronPool {
                         if sd.weight > list[idx].weight {
                             list[idx].weight = sd.weight.min(max_w);
                         }
+                        if sd.consolidation > list[idx].consolidation {
+                            list[idx].consolidation = sd.consolidation;
+                        }
                     }
                     Err(idx) => {
                         list.insert(idx, Synapse {
                             target: to_id,
                             weight: sd.weight.min(max_w),
                             inhibitory: sd.inhibitory,
+                            consolidation: sd.consolidation,
                         });
                     }
                 }
@@ -2757,11 +2824,15 @@ impl NeuronPool {
                         if sd.weight > t.dendrites[idx].weight {
                             t.dendrites[idx].weight = sd.weight.min(max_w);
                         }
+                        if sd.consolidation > t.dendrites[idx].consolidation {
+                            t.dendrites[idx].consolidation = sd.consolidation;
+                        }
                     }
                     Err(idx) => {
                         t.dendrites.insert(idx, Dendrite {
                             source: from_id,
                             weight: sd.weight.min(max_w),
+                            consolidation: sd.consolidation,
                         });
                     }
                 }
@@ -5894,7 +5965,7 @@ impl NeuroRuntime {
                 if let Some(neuron) = tgt_pool.get_hot(*other_id as usize) {
                     for syn in &neuron.excitatory {
                         if syn.target == *id {
-                            pred_pull += other_act * syn.weight;
+                            pred_pull += other_act * syn.effective_weight();
                         }
                     }
                 }
@@ -5922,7 +5993,7 @@ impl NeuroRuntime {
                 if visited.contains(&tgt) { continue; }
                 if !active_set.contains(&tgt) { continue; }
                 let tgt_act = *act_lookup.get(&tgt).unwrap_or(&0.0);
-                let score = syn.weight * (tgt_act + 0.05);
+                let score = syn.effective_weight() * (tgt_act + 0.05);
                 let cur_best = best_next.as_ref().map(|x| x.1).unwrap_or(0.0);
                 if score > cur_best {
                     best_next = Some((tgt, score));
@@ -6087,6 +6158,7 @@ impl NeuroRuntime {
                                     to_label:   to_label.clone(),
                                     weight:     syn.weight,
                                     inhibitory,
+                                    consolidation: syn.consolidation,
                                 });
                             }
                         }

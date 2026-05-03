@@ -84,6 +84,12 @@ pub struct SynapseDelta {
     /// Absolute weight value (not a diff) — recipient takes max(local, remote).
     pub weight: f32,
     pub inhibitory: bool,
+    /// Number of dopamine-flush captures this synapse has accumulated.
+    /// Recipients take max(local, remote) so consolidation history
+    /// accumulates across the cluster.  Serde default 0 keeps the wire
+    /// format backward-compatible with peers running older builds.
+    #[serde(default)]
+    pub consolidation: u8,
 }
 
 /// Compact snapshot of weight changes produced by one node since its last sync.
