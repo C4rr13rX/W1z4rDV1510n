@@ -1523,6 +1523,48 @@ impl NeuronPool {
         }
     }
 
+    // ── Fan-in normalization for activation read-out ──────────────────────────
+
+    /// Build the {label → activation} result map from a propagated
+    /// activation array, applying fan-in normalization at read time.
+    ///
+    /// A neuron with `d` incoming dendrites has its reported activation
+    /// divided by `1 + ln(d + 1)`.  Hub neurons that accumulated huge
+    /// in-degrees from broad training (`\n`, `"`, `!`, common letters)
+    /// get penalized at decode without changing how propagation flowed
+    /// or how training writes weights.  Without this, structural-marker
+    /// hubs deterministically dominate any propagation result whose
+    /// path runs through common atoms — exactly the failure mode the
+    /// stress tests caught when the curriculum's K-12+code corpus
+    /// inflated punctuation fan-in past every greeting bridge edge.
+    ///
+    /// The 1 + ln(d+1) form: 0 dendrites → no penalty; 100 → 0.18×;
+    /// 1000 → 0.13×; 10000 → 0.10×.  Sub-linear so meaningful
+    /// well-connected concept neurons aren't crushed, but pure-hub
+    /// punctuation atoms lose decisively to content-bearing neighbours.
+    /// This is the homeostatic firing-rate normalization analogue from
+    /// cortical biology — sliding-threshold models adjust intrinsic
+    /// excitability inversely with cumulative input drive.
+    fn build_result_with_fan_in(&self, activation: &[f32], min_activation: f32)
+        -> HashMap<String, f32>
+    {
+        let mut result = HashMap::new();
+        for (idx, act) in activation.iter().enumerate() {
+            if *act < min_activation { continue; }
+            let neuron = match self.get_hot(idx) {
+                Some(n) => n,
+                None    => continue,
+            };
+            let label = match &neuron.label {
+                Some(l) => l,
+                None    => continue,
+            };
+            let inv_fi = 1.0 / (1.0 + (neuron.dendrites.len() as f32 + 1.0).ln());
+            result.insert(label.clone(), *act * inv_fi);
+        }
+        result
+    }
+
     // ── Dopamine retrograde potentiation ─────────────────────────────────────
 
     /// Tag all recently-active neurons (non-zero trace) with a dopamine signal.
@@ -1935,15 +1977,7 @@ impl NeuronPool {
         }
 
         // Collect results above threshold (hot neurons only — cold neurons cannot have activation)
-        let mut result = HashMap::new();
-        for (idx, act) in activation.iter().enumerate() {
-            if *act >= min_activation {
-                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
-                    result.insert(label.clone(), *act);
-                }
-            }
-        }
-        result
+        self.build_result_with_fan_in(&activation, min_activation)
     }
 
     /// Like `propagate` but each seed label can have a custom initial activation
@@ -1997,15 +2031,7 @@ impl NeuronPool {
             if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
             std::mem::swap(&mut activation, &mut next);
         }
-        let mut result = HashMap::new();
-        for (idx, act) in activation.iter().enumerate() {
-            if *act >= min_activation {
-                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
-                    result.insert(label.clone(), *act);
-                }
-            }
-        }
-        result
+        self.build_result_with_fan_in(&activation, min_activation)
     }
 
     /// Variant of `propagate_weighted` that uses a *sum* accumulator with
@@ -2064,15 +2090,7 @@ impl NeuronPool {
             if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
             std::mem::swap(&mut activation, &mut next);
         }
-        let mut result = HashMap::new();
-        for (idx, act) in activation.iter().enumerate() {
-            if *act >= min_activation {
-                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
-                    result.insert(label.clone(), *act);
-                }
-            }
-        }
-        result
+        self.build_result_with_fan_in(&activation, min_activation)
     }
 
     /// Variant of `propagate_weighted` that uses a max-accumulator on the
@@ -2128,15 +2146,7 @@ impl NeuronPool {
             if k_active > 0 { Self::apply_kwta(&mut next, k_active); }
             std::mem::swap(&mut activation, &mut next);
         }
-        let mut result = HashMap::new();
-        for (idx, act) in activation.iter().enumerate() {
-            if *act >= min_activation {
-                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
-                    result.insert(label.clone(), *act);
-                }
-            }
-        }
-        result
+        self.build_result_with_fan_in(&activation, min_activation)
     }
 
     /// Reset per-neuron transient state (activation + trace) without
@@ -2248,15 +2258,7 @@ impl NeuronPool {
             std::mem::swap(&mut activation, &mut next);
         }
 
-        let mut result = HashMap::new();
-        for (idx, act) in activation.iter().enumerate() {
-            if *act >= min_activation {
-                if let Some(label) = self.get_hot(idx).and_then(|n| n.label.as_ref()) {
-                    result.insert(label.clone(), *act);
-                }
-            }
-        }
-        result
+        self.build_result_with_fan_in(&activation, min_activation)
     }
 
     pub fn cooccurrences_above(&self, threshold: u64) -> Vec<((String, String), f32)> {
