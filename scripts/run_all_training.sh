@@ -106,10 +106,17 @@ verify_and_reinforce() {
 }
 
 # ─── PHASE 0: CLEAR POOL ─────────────────────────────────────────────────────
-echo "[$(date)] Clearing pool for fresh start..." | tee -a "$LOG_DIR/run_all.log"
-curl -s -X POST "$NODE/neuro/clear" | tee -a "$LOG_DIR/run_all.log"
-echo "" | tee -a "$LOG_DIR/run_all.log"
-sleep 1
+# SKIP_CLEAR=1 keeps the pool intact so a hot-swapped binary can resume
+# training on top of the current snapshot.  Default behaviour (unset or
+# any other value) clears the pool — every fresh curriculum starts blank.
+if [ "${SKIP_CLEAR:-}" = "1" ]; then
+    echo "[$(date)] SKIP_CLEAR=1 — preserving existing pool snapshot" | tee -a "$LOG_DIR/run_all.log"
+else
+    echo "[$(date)] Clearing pool for fresh start..." | tee -a "$LOG_DIR/run_all.log"
+    curl -s -X POST "$NODE/neuro/clear" | tee -a "$LOG_DIR/run_all.log"
+    echo "" | tee -a "$LOG_DIR/run_all.log"
+    sleep 1
+fi
 echo "[$(date)] Pool cleared — starting fresh curriculum" | tee -a "$LOG_DIR/run_all.log"
 
 # ─── PHASE 1: SATURATE CONVERSATIONAL IDENTITY ───────────────────────────────
