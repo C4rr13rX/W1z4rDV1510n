@@ -185,7 +185,6 @@ pub fn call_fingerprint(labels: &[String]) -> String {
 // Runtime
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
 pub struct HierarchicalMotifRuntime {
     config: HierarchicalMotifConfig,
     levels: Vec<MotifLevel>,
@@ -193,10 +192,39 @@ pub struct HierarchicalMotifRuntime {
     /// Window size cap per level.  `None` = unlimited (high-spec machines).
     /// On constrained hardware this is set to `config.max_sequence_len * 4`.
     window_cap: Option<usize>,
+    /// Polite back-off contract for the promotion cascade.  No fixed
+    /// depth_limit — the cascade stops when (a) a level produces no
+    /// new promotions ("nothing more to find at this scale right now,
+    /// try again next call") or (b) the gate signals system pressure.
+    /// Operators inject a configured gate via `with_gate`; the default
+    /// `default_gate()` enforces consumer-progress only until memory
+    /// targets are explicitly set in `GateConfig`.
+    gate: std::sync::Arc<dyn crate::resource::ResourceGate>,
+}
+
+impl std::fmt::Debug for HierarchicalMotifRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HierarchicalMotifRuntime")
+            .field("config", &self.config)
+            .field("levels", &self.levels.len())
+            .field("tick", &self.tick)
+            .field("window_cap", &self.window_cap)
+            .finish()
+    }
 }
 
 impl HierarchicalMotifRuntime {
     pub fn new(config: HierarchicalMotifConfig) -> Self {
+        Self::with_gate(config, crate::resource::default_gate())
+    }
+
+    /// Same as `new`, but lets callers wire in a configured
+    /// [`ResourceGate`] (e.g. one with finite memory targets, or an
+    /// `AlwaysOnGate` for tests).
+    pub fn with_gate(
+        config: HierarchicalMotifConfig,
+        gate: std::sync::Arc<dyn crate::resource::ResourceGate>,
+    ) -> Self {
         let hw = HardwareProfile::detect();
         // Cap the window on ALL hardware to prevent unbounded growth.
         // On constrained hardware use 4×max_seq_len; on high-spec use 64×max_seq_len.
@@ -212,6 +240,7 @@ impl HierarchicalMotifRuntime {
             levels: Vec::new(),
             tick: 0,
             window_cap,
+            gate,
         }
     }
 
@@ -238,16 +267,18 @@ impl HierarchicalMotifRuntime {
         let mut newly_promoted: Vec<MetaMotif> = Vec::new();
 
         let mut lvl = 0;
+        let mut work_ctx = crate::resource::WorkContext::new("motif_observe");
         loop {
-            if level_ids.is_empty() {
-                break;
-            }
+            if level_ids.is_empty() { break; }
+            if !self.gate.should_continue(&work_ctx) { break; }
             // Grow the levels vec on demand — no ceiling.
             if lvl >= self.levels.len() {
                 self.levels.push(MotifLevel::new());
             }
             let promoted = self.ingest_level(lvl, &level_ids, &level_durations, timestamp.unix);
-
+            let progressed = !promoted.is_empty();
+            work_ctx.note_iteration(progressed);
+            if !progressed { break; }
             level_ids = promoted.iter().map(|m| m.id.clone()).collect();
             level_durations = promoted.iter().map(|m| m.duration_secs).collect();
             newly_promoted.extend(promoted);
@@ -310,23 +341,30 @@ impl HierarchicalMotifRuntime {
         let mut level_durations = durations;
         let mut lvl = 0;
 
-        // Cascade depth and per-level promotion budget are both derived from
-        // max_sequence_len so they scale with the operator's intended complexity.
-        // depth_limit: each level compounds the sequence length by at least 2,
-        //   so log2(max_sequence_len) levels is the natural ceiling before motifs
-        //   would exceed max_sequence_len themselves.
-        // carry_limit: the next level sees at most max_sequence_len promotions —
-        //   more than that is noise given the motif length contract.
-        let depth_limit = (self.config.max_sequence_len as f64).log2().ceil() as usize + 1;
+        // No fixed depth cap.  The cascade runs until one of three
+        // conditions terminates it:
+        //   • level_ids empties (nothing to promote)
+        //   • the current level promoted nothing this round ("nothing
+        //     more to find at this scale right now — try again with
+        //     fresh data on the next observation")
+        //   • the resource gate signals system pressure or no-progress
+        //
+        // Per-level width is still capped by carry_limit so memory
+        // doesn't balloon — that's a width budget, not a height one.
+        // The hierarchy can grow arbitrarily tall when the data
+        // actually contains arbitrarily-deep recurring structure.
         let carry_limit = self.config.max_sequence_len;
+        let mut work_ctx = crate::resource::WorkContext::new("motif_promotion");
         loop {
-            if level_ids.is_empty() || lvl >= depth_limit {
-                break;
-            }
+            if level_ids.is_empty() { break; }
+            if !self.gate.should_continue(&work_ctx) { break; }
             if lvl >= self.levels.len() {
                 self.levels.push(MotifLevel::new());
             }
             let mut promoted = self.ingest_level(lvl, &level_ids, &level_durations, timestamp.unix);
+            let progressed = !promoted.is_empty();
+            work_ctx.note_iteration(progressed);
+            if !progressed { break; }
             // Carry only the highest-support promotions to the next level.
             if promoted.len() > carry_limit {
                 promoted.sort_unstable_by(|a, b| {

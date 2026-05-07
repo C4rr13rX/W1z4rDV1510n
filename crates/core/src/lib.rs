@@ -12,6 +12,7 @@ pub mod hardware;
 pub mod logging;
 pub mod ml;
 pub mod neuro;
+pub mod resource;
 pub mod network;
 pub mod math_toolbox;
 pub mod objective;
