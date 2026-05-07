@@ -5689,23 +5689,31 @@ async fn neuro_ask(
     let session_id         = req.session_id.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        // ── First layer: multi-pool associative recall ──────────────────────
+        // ── First layer: multi-pool associative recall WITH CONFIDENCE GATE ─
         // The N-pool fabric is the canonical paired-association substrate.
-        // /chat sends the question into the "in" pool and reads back every
-        // connected pool's prediction.  When "out" returns a non-empty
-        // answer, that's the bidirectional associative recall.  Other pools
-        // (emo, equation, motion, etc.) ride along automatically — every
-        // pool fires from a single input.
+        // We only accept its answer when the chosen concept's posterior
+        // confidence clears the GA-tuned threshold (default 0.345); below
+        // that the input atoms only partially overlap a trained concept
+        // (e.g. "what is linux?" weakly matching "what is hebbian
+        // learning") and routing to multi_pool produces a confident-
+        // looking but wrong answer.  Below the threshold we fall through
+        // to the slow-pool char_chain like /query/integrated does.
         let atoms: Vec<String> = text.chars().map(char_label).collect();
-        let predictions = neuro.multi_pool_query(
+        let mp_thr: f32 = default_mp_confidence_threshold();
+        let mp = neuro.multi_pool_query_with_confidence(
             "in", &atoms, hops.max(2), min_str.max(0.001),
         );
-        if let Some(answer) = predictions.get("out").cloned() {
-            if !answer.is_empty() {
+        // Compose the legacy `predictions` map from the (answer, conf) pairs
+        // for downstream UI display (decoders panel, cross-pool overlay).
+        let predictions: std::collections::HashMap<String, String> =
+            mp.iter().map(|(p, (a, _))| (p.clone(), a.clone())).collect();
+        if let Some((answer, conf)) = mp.get("out").cloned() {
+            if !answer.is_empty() && conf >= mp_thr {
                 return serde_json::json!({
                     "question":     text,
                     "answer":       answer,
                     "decoder":      "multi_pool",
+                    "confidence":   conf,
                     "predictions":  predictions,
                     "hops":         hops,
                     "min_strength": min_str,
@@ -5715,9 +5723,10 @@ async fn neuro_ask(
         }
 
         // ── Fallback: raw-codepoint character-chain decoder ────────────────
-        // When multi-pool has nothing to say (cold pool, OOD input the
-        // associative substrate can't bridge), fall back to the slow
-        // pool's char-chain walk.
+        // multi_pool either had nothing or its top concept's confidence was
+        // below the threshold (low-overlap query against trained concepts).
+        // The slow-pool char-chain walks Hebbian edges directly without
+        // committing to a specific concept basin.
         let char_chain = decode_char_chain(
             &neuro,
             &text,
