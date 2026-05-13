@@ -2226,6 +2226,49 @@ impl NeuronPool {
         out
     }
 
+    /// Wire bidirectional **within-pool inhibitory synapses** from
+    /// `new_concept_label` to every other concept neuron in this pool
+    /// (and back).  This is the lateral-inhibition wiring that turns
+    /// the target-pool decode into a soft winner-take-all: when one
+    /// concept fires, its peers receive inhibitory drive proportional
+    /// to its activation × weight × inhibitory_scale, suppressing
+    /// spurious co-fires of overlapping competitors.
+    ///
+    /// Uses `set_synapse` (idempotent) so calling this on the same pair
+    /// across the training pass loop doesn't accumulate weight past the
+    /// intended structural strength.
+    pub fn wire_lateral_inhibition_to_peers(
+        &mut self,
+        new_concept_label: &str,
+        weight: f32,
+    ) -> usize {
+        let new_id = match self.label_to_id.get(new_concept_label) {
+            Some(&id) => id, None => return 0,
+        };
+        // Confirm it's a concept neuron (has members).
+        let is_concept = self.get_hot(new_id as usize)
+            .map(|n| !n.members.is_empty()).unwrap_or(false);
+        if !is_concept { return 0; }
+        // Enumerate every OTHER concept's id.
+        let peers: Vec<u32> = (0..self.neurons.len()).filter_map(|i| {
+            if i as u32 == new_id { return None; }
+            match self.neurons.get(i) {
+                Some(NeuronSlot::Hot(n)) if !n.members.is_empty() => Some(i as u32),
+                _ => None,
+            }
+        }).collect();
+        let mut wired = 0usize;
+        for pid in peers {
+            // Symmetric: new→peer AND peer→new.  Without symmetry the
+            // pool would have one-way lateral suppression which violates
+            // the "any concept can win" invariant of winner-take-all.
+            self.set_synapse(new_id, pid, weight, true);
+            self.set_synapse(pid, new_id, weight, true);
+            wired += 2;
+        }
+        wired
+    }
+
     /// Propagate using **prediction errors** rather than raw activations
     /// (hierarchical predictive coding).
     ///
@@ -3604,6 +3647,15 @@ const CROSS_INH_RATE: f32 = 0.3;
 /// once later evidence re-validates the association.
 const CROSS_EXC_TRACE_DECAY: f32 = 0.85;
 const CROSS_INH_TRACE_DECAY: f32 = 0.70;
+/// Structural lateral-inhibition weight wired between concept neurons
+/// in the same pool during `multi_pool_train_pair`.  Used with
+/// `set_synapse` (idempotent) so repeated training of the same pair
+/// doesn't accumulate beyond this fixed strength.  The global
+/// `NeuroConfig::inhibitory_scale` (default 0.5) multiplies this at
+/// propagation, so effective per-peer inhibition is
+/// 0.4 × 0.5 = 0.2 — strong enough to bias winner-take-all, weak
+/// enough that a co-active genuine peer still survives.
+const WITHIN_POOL_LATERAL_INH_WEIGHT: f32 = 0.4;
 
 impl CrossPoolSynapses {
     pub fn new() -> Self {
@@ -5991,6 +6043,32 @@ impl NeuroRuntime {
                     .pair_signed(b_prime, a, inh_lr, true);
             }
         }
+
+        // (4d) Within-pool lateral inhibition between concept neurons.
+        //      Each newly-trained concept gets symmetric inhibitory
+        //      synapses to every other concept in its pool, so during
+        //      the target-pool propagate step a winning concept actively
+        //      suppresses its peers.  This is the lateral inhibition
+        //      that cortical inhibitory interneurons provide — without
+        //      it the target pool can co-activate two competing concepts
+        //      when their member atoms overlap (apple/ball both circles).
+        //
+        //      Uses set_synapse semantics: idempotent across the multi-
+        //      pass training loop, fixed structural weight.  The global
+        //      `inhibitory_scale` config (default 0.5) further scales
+        //      this at propagation time so the effective lateral
+        //      inhibition per peer is weight × inhibitory_scale.
+        let lateral_w = WITHIN_POOL_LATERAL_INH_WEIGHT;
+        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
+            for a in &src_concepts {
+                p.wire_lateral_inhibition_to_peers(a, lateral_w);
+            }
+        }
+        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) {
+            for b in &tgt_concepts {
+                p.wire_lateral_inhibition_to_peers(b, lateral_w);
+            }
+        }
     }
 
     /// Train one source pool simultaneously against many target pools.
@@ -6374,24 +6452,17 @@ impl NeuroRuntime {
             (chosen_src_edge_top / chosen_src_edge_total).clamp(0.0, 1.0)
         } else { 0.0 };
 
-        // 2b. Keep only the strongest target *concept* seed.
-        let mut top_concept_seed: Option<(String, f32)> = None;
-        for (lbl, v) in &tgt_seeds {
-            if let Some(&id) = tgt_pool.label_to_id.get(lbl) {
-                if let Some(neuron) = tgt_pool.get_hot(id as usize) {
-                    if !neuron.members.is_empty() {
-                        let cur = top_concept_seed.as_ref().map(|x| x.1).unwrap_or(f32::MIN);
-                        if *v > cur {
-                            top_concept_seed = Some((lbl.clone(), *v));
-                        }
-                    }
-                }
-            }
-        }
-        if let Some((lbl, v)) = top_concept_seed {
-            tgt_seeds.clear();
-            tgt_seeds.insert(lbl, v);
-        }
+        // 2b. (Removed) — the old code pruned tgt_seeds to a single
+        //     top concept seed before propagation, which prevented the
+        //     within-pool lateral inhibition between concept neurons
+        //     from firing.  With sign-aware cross-pool propagation, the
+        //     seed pruning is already done upstream: inhibitory cross-
+        //     edges suppress competitor seeds below 0 and they get
+        //     clamped out.  The seeds that DO reach propagation are
+        //     legitimate competitors; lateral inhibition between
+        //     concept neurons (wired by `wire_lateral_inhibition_to_peers`
+        //     during training) decides the winner naturally during the
+        //     within-pool propagate step.
 
         // 3. Propagate within the target pool.
         let tgt_acts = tgt_pool.propagate_weighted_sum_no_clamp(
@@ -6438,13 +6509,25 @@ impl NeuroRuntime {
             // 4a-bis: target pool isn't a character pool (image_pixels,
             // audio_features, etc.).  pos_label_to_char returned nothing,
             // but the concept legitimately fired.  Return the concept's
-            // identifying members as a space-joined token list — the
-            // "decoded" form for non-character modalities.  Strip the
-            // position-augmentation tags so the consumer sees the raw
-            // domain atoms (e.g. "img:h0 img:h0_z3_4 img:h0_z4_4 …").
+            // members RANKED BY ACTIVATION so lateral inhibition's effect
+            // shows up: atoms strongly fired by the winning concept come
+            // first, atoms shared with suppressed competitor concepts
+            // (lower activation post-inhibition) sink to the bottom.
+            // Without the activation sort, the first 40 stored members
+            // dominate the response and overlapping early-stored atoms
+            // between visually-similar concepts (apple/ball both circles)
+            // make discrimination look worse than it actually is.
             if !parts.is_empty() {
-                let decoded: String = parts.iter()
-                    .map(|p| strip_position_suffix(p))
+                let mut ranked: Vec<(&String, f32)> = parts.iter()
+                    .map(|p| (p, *tgt_acts.get(p).unwrap_or(&0.0)))
+                    .collect();
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal));
+                let decoded: String = ranked.iter()
+                    .filter_map(|(p, _)| {
+                        let s = strip_position_suffix(p);
+                        if s.is_empty() { None } else { Some(s) }
+                    })
                     .take(40)            // cap so the response stays small
                     .collect::<Vec<_>>()
                     .join(" ");
