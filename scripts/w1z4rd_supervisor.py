@@ -239,10 +239,75 @@ def node_healthy(url: str, timeout: float) -> bool:
         return False
 
 
+def kill_processes_by_image(image_name: str, log: Logger,
+                              exclude_pid: int | None = None) -> int:
+    """Force-kill every process whose image name matches *image_name*
+    (case-insensitive on Windows).  Returns the number of processes
+    killed.  Used to clear stuck/orphan instances before relaunching —
+    without this, every restart cycle leaves the previous instance
+    holding the data dir and the port, and the cycle never recovers.
+    """
+    killed = 0
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=10,
+            )
+            pids: list[int] = []
+            for line in out.stdout.splitlines():
+                parts = [p.strip().strip('"') for p in line.split(",")]
+                if len(parts) >= 2 and parts[0].lower() == image_name.lower():
+                    try:
+                        pid = int(parts[1])
+                    except ValueError:
+                        continue
+                    if exclude_pid is not None and pid == exclude_pid:
+                        continue
+                    pids.append(pid)
+            for pid in pids:
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                    capture_output=True, timeout=5)
+                    killed += 1
+                except Exception as exc:
+                    log.warn(f"taskkill PID={pid} failed: {exc}")
+        else:
+            out = subprocess.run(["pgrep", "-f", image_name],
+                                  capture_output=True, text=True, timeout=10)
+            for raw in out.stdout.splitlines():
+                try:
+                    pid = int(raw.strip())
+                except ValueError:
+                    continue
+                if exclude_pid is not None and pid == exclude_pid:
+                    continue
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    killed += 1
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.warn(f"kill_processes_by_image({image_name}) failed: {exc}")
+    if killed:
+        log.info(f"killed {killed} orphan {image_name} process(es) before relaunch")
+    return killed
+
+
 def start_node(cfg: dict, log: Logger) -> int | None:
-    """Launch the node binary detached.  Returns PID on success."""
+    """Launch the node binary detached.  Returns PID on success.
+
+    Kills any existing w1z4rd_node.exe instances first so port 8090 and
+    the data dir lock are free.  Without this, repeated supervisor
+    restart cycles pile up zombie nodes that all fail to bind.
+    """
     node_cfg = cfg["node"]
     binary = node_cfg["binary"]
+    image = pathlib.Path(binary).name
+    kill_processes_by_image(image, log)
+    # Brief settle so the kernel releases the port + file handles.
+    time.sleep(1.0)
+
     if not pathlib.Path(binary).exists():
         log.error(f"node binary not found: {binary}")
         return None
@@ -290,8 +355,55 @@ def django_healthy(url: str, timeout: float) -> bool:
         return False
 
 
+def _kill_listeners_on_port(port: int, log: Logger) -> int:
+    """Kill any process currently listening on *port*.  Used before
+    launching waitress so a stuck old runserver/waitress instance
+    doesn't block the new one from binding.  Returns number killed."""
+    killed = 0
+    if os.name != "nt":
+        return 0
+    try:
+        # netstat -ano | findstr LISTENING + port
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, text=True, timeout=10,
+        )
+        pids: set[int] = set()
+        for raw in out.stdout.splitlines():
+            line = raw.strip()
+            if "LISTENING" not in line:
+                continue
+            # columns: Proto  LocalAddr  ForeignAddr  State  PID
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            local_addr = parts[1]
+            if not local_addr.endswith(f":{port}"):
+                continue
+            try:
+                pids.add(int(parts[-1]))
+            except ValueError:
+                continue
+        for pid in pids:
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                capture_output=True, timeout=5)
+                killed += 1
+            except Exception as exc:
+                log.warn(f"taskkill PID={pid} on port {port} failed: {exc}")
+    except Exception as exc:
+        log.warn(f"_kill_listeners_on_port({port}) failed: {exc}")
+    if killed:
+        log.info(f"killed {killed} stale listener(s) on port {port}")
+    return killed
+
+
 def start_django(cfg: dict, log: Logger) -> int | None:
-    """Launch waitress (run_waitress.py) detached.  Returns PID on success."""
+    """Launch waitress (run_waitress.py) detached.  Returns PID on success.
+
+    Kills any process currently listening on the configured port so a
+    stuck old instance doesn't prevent the new waitress from binding.
+    """
     dcfg = cfg["django"]
     if not dcfg.get("enabled"):
         return None
@@ -304,6 +416,9 @@ def start_django(cfg: dict, log: Logger) -> int | None:
     if not (pathlib.Path(working_dir) / launcher).exists():
         log.error(f"django launcher not found: {working_dir}\\{launcher}")
         return None
+
+    _kill_listeners_on_port(int(dcfg["port"]), log)
+    time.sleep(1.0)
 
     env = os.environ.copy()
     env["WAITRESS_HOST"]    = str(dcfg["host"])
