@@ -5941,6 +5941,43 @@ impl NeuroRuntime {
         let chosen_src_concept = top_active_concept(src_pool, &src_active);
         let chosen_src_label = chosen_src_concept.clone();
 
+        // 1c. Input-coverage gate.  With a small pool the chosen concept's
+        // src_concept_frac is trivially 1.0 (no peer to compete with), and
+        // any input that shares a short prefix with the trained Q —
+        // e.g. "what is the X" — activates the concept above min_strength.
+        // That produced confident-wrong answers like "What is the sun?"
+        // → the Lagrangian definition.
+        //
+        // Architectural fix: measure how much of the concept's atoms the
+        // input actually covered.  A genuine match has the input touching
+        // most of the concept's position-augmented atoms.  A spurious
+        // prefix-only match touches only a small fraction.  Jaccard
+        // between input pos-atoms and the chosen concept's members is
+        // the geometry of that overlap; below 0.55 we reject and let
+        // /chat fall through to char_chain rather than emit a confident
+        // wrong answer.
+        if let Some(ref chosen) = chosen_src_concept {
+            if let Some(&cid) = src_pool.label_to_id.get(chosen) {
+                if let Some(neuron) = src_pool.get_hot(cid as usize) {
+                    if !neuron.members.is_empty() {
+                        let concept_atoms: std::collections::HashSet<String> =
+                            neuron.members.iter()
+                                .filter_map(|mid| src_pool.get_hot(*mid as usize))
+                                .filter_map(|n| n.label.clone())
+                                .collect();
+                        let input_atoms: std::collections::HashSet<String> =
+                            pos_atoms.iter().cloned().collect();
+                        let inter = concept_atoms.intersection(&input_atoms).count();
+                        let union = concept_atoms.union(&input_atoms).count().max(1);
+                        let jaccard = inter as f32 / union as f32;
+                        if jaccard < 0.55 {
+                            return None;  // fall through to char_chain
+                        }
+                    }
+                }
+            }
+        }
+
         // (a) Source-concept dominance fraction.
         let src_concept_total: f32 = src_active.iter()
             .filter(|(l, _)| src_pool.label_to_id.get(*l)
