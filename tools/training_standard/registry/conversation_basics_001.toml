@@ -1,0 +1,51 @@
+[script]
+id          = "conversation_basics_001"
+category    = "conversation"
+phase       = 1
+description = """
+Baseline conversational recall over corpora the node has already seen.
+This is the floor every later script promises not to regress.
+"""
+depends_on  = []
+
+[[inputs]]
+kind = "corpus"
+path = "data/wiki/basic_phrases.jsonl"
+
+[[inputs]]
+kind = "corpus"
+path = "data/wiki/sentences_who_what_where.jsonl"
+
+# Each benchmark is a self-contained contract: a prompt + the minimum
+# signal we need to see in the response to call it 'understood'.
+# These are deliberately permissive on phrasing — substring match, not
+# exact match — because the node's outputs aren't deterministic.
+
+[[benchmarks]]
+label        = "greeting / role"
+prompt       = "Who are you and what do you do?"
+must_include = ["W1z4rD", "vision"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "self-aware: training"
+prompt       = "Are you still learning, or are you fully trained?"
+must_include = ["training"]
+forbidden    = ["fully trained"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "topic: neurons"
+prompt       = "What is a neuron?"
+must_include = ["neuron"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "topic: training"
+prompt       = "How does training work for you?"
+must_include = ["training", "data"]
+min_score    = 0.5
+expected_structure = "prose"

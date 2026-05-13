@@ -1,0 +1,50 @@
+[script]
+id          = "code_gen_python_001"
+category    = "code_generation"
+phase       = 20
+description = """
+First-level Python code generation: idiomatic short functions from
+plain-English specifications.  Each response is AST-parsed to verify
+syntactic validity in addition to keyword recall.
+
+This script protects the conversation baseline — training code patterns
+shouldn't damage the model's ability to answer plain questions.
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/code/python_function_examples.jsonl"
+
+[[inputs]]
+kind = "template"
+path = "templates/python_function.tmpl"
+
+[[benchmarks]]
+label         = "reverse linked list"
+prompt        = "Write a Python function that reverses a singly linked list. Use a `Node` class with `value` and `next` attributes."
+must_include  = ["def ", "while", "prev", "return"]
+forbidden     = ["TODO", "..."]
+must_be_valid = "python"
+min_score     = 0.7
+
+[[benchmarks]]
+label         = "fibonacci memo"
+prompt        = "Write a Python function `fib(n)` that returns the nth Fibonacci number using memoization."
+must_include  = ["def fib", "return", "if"]
+forbidden     = ["TODO", "..."]
+must_be_valid = "python"
+min_score     = 0.7
+
+[[benchmarks]]
+label         = "word frequency"
+prompt        = "Write a Python function that takes a string and returns a dict of word -> count."
+must_include  = ["def ", "split", "return"]
+forbidden     = ["TODO", "..."]
+must_be_valid = "python"
+min_score     = 0.6
+
+# After this script trains we re-run conversation_basics_001 to make
+# sure code patterns haven't drowned out plain-language ability.
+[[regression_protects]]
+script_id = "conversation_basics_001"
