@@ -264,6 +264,13 @@ pub struct CrossSynapseDelta {
     /// running older builds.
     #[serde(default)]
     pub consolidation: u8,
+    /// Sign of this cross-edge.  Excitatory by default (matches pre-
+    /// sign-aware wire format).  Inhibitory edges are kept distinct
+    /// across the cluster: peers don't merge a remote inhibitory edge
+    /// into a local excitatory one or vice versa — they coexist as
+    /// the freshest-wins polarity, same as `pair_signed`.
+    #[serde(default)]
+    pub inhibitory: bool,
 }
 
 /// Per-pool delta payload: pool id + intra-pool synapses + concept neurons.
@@ -2199,6 +2206,26 @@ impl NeuronPool {
         out
     }
 
+    /// Every concept-neuron label in the hot tier, regardless of current
+    /// activation.  Used by the contrastive Hebbian rule in
+    /// `multi_pool_train_pair` to enumerate target-pool competitors that
+    /// the just-trained source concept should inhibit.  Without this, a
+    /// freshly-created source concept has no edges to look at and the
+    /// inhibition pass fires zero times.
+    pub fn all_concept_labels(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for slot in self.neurons.iter() {
+            if let NeuronSlot::Hot(n) = slot {
+                if !n.members.is_empty() {
+                    if let Some(label) = &n.label {
+                        out.push(label.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Propagate using **prediction errors** rather than raw activations
     /// (hierarchical predictive coding).
     ///
@@ -3530,12 +3557,31 @@ pub struct CrossEdge {
     /// cross-pool routes keep an edge even after raw weight saturates.
     #[serde(default)]
     pub consolidation: u8,
+    /// Excitatory by default (the legacy behaviour).  When true, this
+    /// edge contributes NEGATIVELY to the target seed during cross-pool
+    /// propagation — implements categorical exclusion and predictive-
+    /// coding contradiction signals.  Built by the contrastive Hebbian
+    /// rule in `multi_pool_train_pair` when training (A, B) finds A
+    /// already had a strong excitatory edge to some peer B′ ≠ B.
+    #[serde(default)]
+    pub inhibitory: bool,
 }
 
 impl CrossEdge {
+    /// Raw magnitude × consolidation multiplier.  Sign-agnostic; use
+    /// `signed_effective_weight()` when propagating.
     #[inline]
     pub fn effective_weight(&self) -> f32 {
         self.weight * (1.0 + self.consolidation as f32 * CONSOLIDATION_K)
+    }
+
+    /// Effective weight with sign applied.  Inhibitory edges return a
+    /// negative value so cross-pool propagation can sum excitatory and
+    /// inhibitory contributions in one pass.
+    #[inline]
+    pub fn signed_effective_weight(&self) -> f32 {
+        let mag = self.effective_weight();
+        if self.inhibitory { -mag } else { mag }
     }
 }
 
@@ -3549,28 +3595,56 @@ pub struct CrossPoolSynapses {
 
 const DEFAULT_CROSS_POOL_CAP: usize = 200_000;
 const CROSS_POOL_MAX_WEIGHT: f32 = 4.0;
+/// Inhibitory cross-edge build rate, relative to excitatory.  Softer
+/// so genuine pairings dominate; biology agrees that GABAergic LTP is
+/// less aggressive than glutamatergic LTP at first exposure.
+const CROSS_INH_RATE: f32 = 0.3;
+/// Trace decay applied each `flush_consolidation`.  Inhibitory edges
+/// decay faster (1.5×) so spurious early counter-edges can be unlearned
+/// once later evidence re-validates the association.
+const CROSS_EXC_TRACE_DECAY: f32 = 0.85;
+const CROSS_INH_TRACE_DECAY: f32 = 0.70;
 
 impl CrossPoolSynapses {
     pub fn new() -> Self {
         Self { weights: HashMap::new(), cap: DEFAULT_CROSS_POOL_CAP }
     }
 
-    /// Read-only iterator over `(src_label, tgt_label, weight, consolidation)`.
-    /// Used by cluster sync export so consolidation history is portable.
-    pub fn iter_weights(&self) -> impl Iterator<Item = (&String, &String, f32, u8)> {
-        self.weights.iter().map(|((a, b), e)| (a, b, e.weight, e.consolidation))
+    /// Read-only iterator over `(src_label, tgt_label, weight, consolidation, inhibitory)`.
+    /// Used by cluster sync export so consolidation history and edge sign
+    /// are both portable across the cluster.
+    pub fn iter_weights(&self) -> impl Iterator<Item = (&String, &String, f32, u8, bool)> {
+        self.weights.iter().map(|((a, b), e)|
+            (a, b, e.weight, e.consolidation, e.inhibitory))
     }
 
-    /// Set weight + consolidation to `max(current, remote)` independently.
-    /// Returns true if either field grew.  Used by cluster sync apply so
-    /// consolidation accumulates across the cluster like raw weight does.
+    /// Cluster sync merge — preserves the freshest sign (remote wins on
+    /// polarity if it disagrees with local AND its weight is at least
+    /// as large), otherwise the larger weight + larger consolidation
+    /// independently win.  Mirrors pair_signed's flip semantics:
+    /// later evidence with sufficient magnitude flips an old polarity.
     pub fn merge_max(&mut self, in_label: &str, out_label: &str,
-                       weight: f32, consolidation: u8) -> bool {
+                       weight: f32, consolidation: u8,
+                       inhibitory: bool) -> bool {
         let key = (in_label.to_string(), out_label.to_string());
         let new_w = weight.min(CROSS_POOL_MAX_WEIGHT);
         let edge = self.weights.entry(key).or_default();
         let mut changed = false;
-        if new_w > edge.weight { edge.weight = new_w; changed = true; }
+        // Sign-aware merge: when remote disagrees with local AND remote
+        // weight is at least as strong, flip polarity.  Otherwise keep
+        // local sign and merge magnitudes by max.  Without this rule a
+        // freshly-learned local inhibitory edge could get overwritten by
+        // a stale remote excitatory one purely on weight comparison.
+        if edge.weight > 0.0 && edge.inhibitory != inhibitory {
+            if new_w >= edge.weight {
+                edge.inhibitory = inhibitory;
+                edge.weight = new_w;
+                changed = true;
+            }
+        } else {
+            edge.inhibitory = inhibitory;
+            if new_w > edge.weight { edge.weight = new_w; changed = true; }
+        }
         if consolidation > edge.consolidation {
             edge.consolidation = consolidation;
             changed = true;
@@ -3582,14 +3656,39 @@ impl CrossPoolSynapses {
     /// `lr`.  Bumps weight (saturates at CROSS_POOL_MAX_WEIGHT) and
     /// stamps a transient trace tag — exactly mirroring how `Synapse`
     /// is written by within-pool training.
+    /// Excitatory pairing — the legacy `pair()` behaviour preserved
+    /// for existing callers.  Equivalent to `pair_signed(... , false)`.
     pub fn pair(&mut self, in_label: &str, out_label: &str, lr: f32) {
+        self.pair_signed(in_label, out_label, lr, false);
+    }
+
+    /// Sign-aware pairing.  `inhibitory=true` builds (or strengthens)
+    /// a counter-edge that subtracts from the target seed during
+    /// propagation.  Mixing signs on the same (in_label, out_label):
+    /// the most recently bumped sign wins — late counter-evidence
+    /// flips a once-excitatory edge to inhibitory rather than splitting
+    /// it across two map entries.  This keeps the storage flat and
+    /// avoids both signs fighting over the same effective edge.
+    pub fn pair_signed(&mut self, in_label: &str, out_label: &str,
+                          lr: f32, inhibitory: bool) {
         let key = (in_label.to_string(), out_label.to_string());
         let edge = self.weights.entry(key).or_default();
-        edge.weight = (edge.weight + lr).min(CROSS_POOL_MAX_WEIGHT);
+        // Sign flip: if the new evidence disagrees with the existing
+        // sign, soften the existing magnitude before applying the new
+        // increment.  This is "unlearn the old polarity" — without it
+        // an edge could oscillate forever between exc and inh on
+        // contradictory training.
+        if edge.weight > 0.0 && edge.inhibitory != inhibitory {
+            edge.weight = (edge.weight - lr).max(0.0);
+            if edge.weight <= 1e-6 {
+                edge.inhibitory = inhibitory;
+            }
+        } else {
+            edge.inhibitory = inhibitory;
+            edge.weight = (edge.weight + lr).min(CROSS_POOL_MAX_WEIGHT);
+        }
         edge.trace = (edge.trace + lr).min(1.0);
         if self.cap > 0 && self.weights.len() > self.cap {
-            // Evict weakest 5% by raw weight (consolidation is downstream
-            // of weight, so keeping max-weight edges keeps max-consolidation).
             let target = (self.cap as f32 * 0.95) as usize;
             let mut sorted: Vec<(_, f32)> = self.weights.iter()
                 .map(|(k, e)| (k.clone(), e.weight))
@@ -3615,7 +3714,12 @@ impl CrossPoolSynapses {
             if edge.trace > trace_threshold {
                 edge.consolidation = edge.consolidation.saturating_add(1);
             }
-            edge.trace *= 0.85;  // same decay as the within-pool `trace`
+            // Sign-specific decay: inhibitory traces fade faster so a
+            // counter-edge built from one ambiguous training can be
+            // unlearned by subsequent confirming evidence.
+            let decay = if edge.inhibitory { CROSS_INH_TRACE_DECAY }
+                        else                { CROSS_EXC_TRACE_DECAY };
+            edge.trace *= decay;
         }
     }
 
@@ -3624,14 +3728,25 @@ impl CrossPoolSynapses {
         self.weights.keys().map(|(a, b)| (a, b))
     }
 
-    /// Forward read: `in_label` → all reachable `(out_label, effective_weight)`.
-    /// Returns consolidation-multiplied weight so propagation through this
-    /// cross-pool edge favours consolidated routes at saturation — the
-    /// late-LTP analogue applied at the multi-pool concept layer.
+    /// Forward read: `in_label` → all reachable `(out_label, signed_weight)`.
+    /// Returns the consolidation-multiplied weight with sign applied so
+    /// callers can sum excitatory and inhibitory contributions in one pass.
+    /// Inhibitory edges return negative values.
     pub fn forward(&self, in_label: &str) -> Vec<(String, f32)> {
         self.weights.iter()
             .filter_map(|((a, b), e)| if a == in_label
-                { Some((b.clone(), e.effective_weight())) }
+                { Some((b.clone(), e.signed_effective_weight())) }
+                else { None })
+            .collect()
+    }
+
+    /// Forward read split by sign — for diagnostics where you want to
+    /// see excitatory and inhibitory contributions separately.  Each
+    /// tuple is `(out_label, magnitude, is_inhibitory)`.
+    pub fn forward_signed(&self, in_label: &str) -> Vec<(String, f32, bool)> {
+        self.weights.iter()
+            .filter_map(|((a, b), e)| if a == in_label
+                { Some((b.clone(), e.effective_weight(), e.inhibitory)) }
                 else { None })
             .collect()
     }
@@ -5833,13 +5948,47 @@ impl NeuroRuntime {
         let tgt_concepts: Vec<String> = guard.multi_pool.pool(tgt_pool_id)
             .map(|p| p.active_concept_labels(0.05)).unwrap_or_default();
 
-        // (4) Cross-pool symmetric Hebbian.  Store under both (src,tgt) and
-        //     (tgt,src) so query.forward() works natively in either
-        //     direction without needing reverse() lookups.
+        // (4a) Enumerate EXISTING concept labels in the target pool.
+        //      The contrastive Hebbian rule below treats every existing
+        //      target concept that is NOT in the current pairing as a
+        //      "competitor" — the current observation said "A goes with
+        //      B, not with B′" for every B′ that already lives in the
+        //      target pool.  This builds the categorical-exclusion
+        //      structure: after training apple ↔ apple_img, training
+        //      banana ↔ banana_img will inhibit (banana_text → apple_img)
+        //      and (banana_text → audio_features_of_apple) etc.
+        let competitors: Vec<String> = guard.multi_pool.pool(tgt_pool_id)
+            .map(|p| p.all_concept_labels()).unwrap_or_default();
+        let tgt_concept_set: std::collections::HashSet<&String> =
+            tgt_concepts.iter().collect();
+
+        // (4b) Excitatory pairing — the actual paired association.
+        //      Store both directions so query.forward() works either way.
         for a in &src_concepts {
             for b in &tgt_concepts {
-                guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id).pair(a, b, lr);
-                guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id).pair(b, a, lr);
+                guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
+                    .pair_signed(a, b, lr, false);
+                guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
+                    .pair_signed(b, a, lr, false);
+            }
+        }
+
+        // (4c) Contrastive Hebbian — build INHIBITORY edges from each
+        //      newly-trained src concept to every PRE-EXISTING competitor
+        //      target concept.  Soft rate (CROSS_INH_RATE × lr) so a
+        //      single observation doesn't immediately wall off the entire
+        //      pool; repeated training of distinct pairs accumulates the
+        //      inhibition until each text concept actively suppresses
+        //      every non-paired image/audio concept.  Symmetric
+        //      bidirectional storage matches the excitatory pass above.
+        let inh_lr = lr * CROSS_INH_RATE;
+        for a in &src_concepts {
+            for b_prime in &competitors {
+                if tgt_concept_set.contains(b_prime) { continue; }
+                guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
+                    .pair_signed(a, b_prime, inh_lr, true);
+                guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
+                    .pair_signed(b_prime, a, inh_lr, true);
             }
         }
     }
@@ -5979,15 +6128,44 @@ impl NeuroRuntime {
                     for (a, _) in c.iter_edges() { s.insert(a.clone()); }
                     s.into_iter().take(5).collect()
                 }).unwrap_or_default();
-            let chosen_forward_count = if let Some(ref ch) = chosen {
-                guard.multi_pool.cross_for(src_pool_id, tgt)
-                    .map(|c| c.forward(ch).len()).unwrap_or(0)
-            } else { 0 };
+            // Split forward edges by sign so callers can see how much
+            // excitation vs inhibition flows from the chosen source
+            // concept into this target pool.
+            let (chosen_exc_count, chosen_inh_count, chosen_exc_top, chosen_inh_top) =
+                if let Some(ref ch) = chosen {
+                    let mut ec = 0usize; let mut ic = 0usize;
+                    let mut etop = 0.0f32; let mut itop = 0.0f32;
+                    if let Some(c) = guard.multi_pool.cross_for(src_pool_id, tgt) {
+                        for (_, mag, inh) in c.forward_signed(ch) {
+                            if inh {
+                                ic += 1;
+                                if mag > itop { itop = mag; }
+                            } else {
+                                ec += 1;
+                                if mag > etop { etop = mag; }
+                            }
+                        }
+                    }
+                    (ec, ic, etop, itop)
+                } else { (0, 0, 0.0, 0.0) };
+            // Also tally global exc/inh edge counts in this (src,tgt)
+            // cross-pool table for high-level visibility.
+            let (mut global_exc, mut global_inh) = (0usize, 0usize);
+            if let Some(c) = guard.multi_pool.cross_for(src_pool_id, tgt) {
+                for (_, _, _, _, inh) in c.iter_weights() {
+                    if inh { global_inh += 1; } else { global_exc += 1; }
+                }
+            }
             cross_info.push(serde_json::json!({
                 "tgt": tgt,
                 "edges": edges_count,
+                "edges_excitatory": global_exc,
+                "edges_inhibitory": global_inh,
                 "stored_src_labels_sample": stored_src_labels,
-                "forward_from_chosen": chosen_forward_count,
+                "forward_from_chosen_exc": chosen_exc_count,
+                "forward_from_chosen_inh": chosen_inh_count,
+                "forward_top_exc_mag":     chosen_exc_top,
+                "forward_top_inh_mag":     chosen_inh_top,
             }));
         }
         serde_json::json!({
@@ -6163,22 +6341,34 @@ impl NeuroRuntime {
         };
 
         // 2. Cross-project to the target pool via the (src, tgt) cross-synapses.
+        //    Excitatory edges return positive weights; inhibitory edges
+        //    return negative weights.  Both feed the same accumulator;
+        //    over-inhibited seeds are clamped at 0 (an over-suppressed
+        //    neuron just doesn't fire — same nonlinearity biology uses).
         let cross = guard.multi_pool.cross_for(src_pool_id, tgt_pool_id)?;
         let mut tgt_seeds: HashMap<String, f32> = HashMap::new();
-        // Track per-source cross-edge totals so we can compute the
-        // chosen-target fraction.
         let mut chosen_src_edge_total = 0.0f32;
         let mut chosen_src_edge_top = 0.0f32;
         for (src_label, src_act) in &src_for_cross {
             for (tgt_label, w) in cross.forward(src_label) {
                 let entry = tgt_seeds.entry(tgt_label).or_insert(0.0);
-                *entry += src_act * w;
+                *entry += src_act * w;   // w may be negative (inhibitory)
                 if Some(src_label) == chosen_src_label.as_ref() {
-                    chosen_src_edge_total += w;
-                    if w > chosen_src_edge_top { chosen_src_edge_top = w; }
+                    // For the chosen-target fraction we only count
+                    // excitatory edges — inhibition reduces seeds but
+                    // doesn't compete to "be the prediction".  Without
+                    // this, a strongly inhibited target would inflate
+                    // the cross_edge_frac denominator with negative
+                    // weight magnitude and confuse the confidence calc.
+                    if w > 0.0 {
+                        chosen_src_edge_total += w;
+                        if w > chosen_src_edge_top { chosen_src_edge_top = w; }
+                    }
                 }
             }
         }
+        // Clamp over-inhibited seeds and drop seeds that fell to/below 0.
+        tgt_seeds.retain(|_, v| { *v = v.max(0.0); *v > 0.0 });
         if tgt_seeds.is_empty() { return None; }
         let cross_edge_frac = if chosen_src_edge_total > 1e-9 {
             (chosen_src_edge_top / chosen_src_edge_total).clamp(0.0, 1.0)
@@ -6527,9 +6717,12 @@ impl NeuroRuntime {
             }
             delta.pools.push(pdelta);
         }
-        // Cross-pool synapses, flattened.
+        // Cross-pool synapses, flattened.  Edge sign travels with the
+        // delta so peers see the same polarity as the originator.
         for (src_pool, tgt_pool, cross) in guard.multi_pool.iter_cross() {
-            for (src_label, tgt_label, weight, consolidation) in cross.iter_weights() {
+            for (src_label, tgt_label, weight, consolidation, inhibitory)
+                in cross.iter_weights()
+            {
                 delta.cross.push(CrossSynapseDelta {
                     src_pool:  src_pool.clone(),
                     src_label: src_label.clone(),
@@ -6537,6 +6730,7 @@ impl NeuroRuntime {
                     tgt_label: tgt_label.clone(),
                     weight,
                     consolidation,
+                    inhibitory,
                 });
             }
         }
@@ -6579,11 +6773,13 @@ impl NeuroRuntime {
                 applied += 1;
             }
         }
-        // (2) Cross-pool synapse weights + consolidation with max-merge.
+        // (2) Cross-pool synapse weights + consolidation + sign with
+        // max-merge.  See merge_max's sign-aware flip semantics.
         for cs in &delta.cross {
             let cross = guard.multi_pool.cross_mut(&cs.src_pool, &cs.tgt_pool);
             if cross.merge_max(&cs.src_label, &cs.tgt_label,
-                                 cs.weight, cs.consolidation) {
+                                 cs.weight, cs.consolidation,
+                                 cs.inhibitory) {
                 applied += 1;
             }
         }
