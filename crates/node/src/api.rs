@@ -8302,6 +8302,15 @@ struct SensorObserveRequest {
     /// Learning rate for the cross-pool pair, default 1.0.
     #[serde(default = "default_sensor_lr")]
     lr:          f32,
+    /// Polarity of the paired observation.  "positive" (default) builds
+    /// excitatory cross-edges + contrastive competitor inhibition; the
+    /// system learns "this modality content goes with this text".
+    /// "negative" builds inhibitory cross-edges only — explicit
+    /// anti-example training, e.g. show an apple image with paired_text
+    /// "vegetable" + polarity "negative" to teach that apple is NOT a
+    /// vegetable.  Has no effect when paired_text is absent.
+    #[serde(default)]
+    polarity:    Option<String>,
 }
 
 fn default_sensor_lr() -> f32 { 1.0 }
@@ -8337,6 +8346,9 @@ async fn sensor_observe(
     let text_field  = req.text.clone();
     let paired_text = req.paired_text.clone();
     let lr          = req.lr.max(0.0);
+    let negative    = req.polarity.as_deref()
+        .map(|s| s.eq_ignore_ascii_case("negative") || s == "-" || s == "anti")
+        .unwrap_or(false);
 
     let result = tokio::task::spawn_blocking(move || {
         // Step 1: encode → labels.
@@ -8373,10 +8385,11 @@ async fn sensor_observe(
         let trained_pair_flag = if let Some(pt) = paired_text.as_deref() {
             if !pt.is_empty() {
                 let text_atoms: Vec<String> = pt.chars().map(char_label).collect();
-                neuro.multi_pool_train_pair(
+                neuro.multi_pool_train_pair_polarity(
                     "keyboard_text", &text_atoms,
                     pool_id,         &labels,
                     lr,
+                    negative,
                 );
                 true
             } else { false }
@@ -8385,7 +8398,8 @@ async fn sensor_observe(
             // pool by self-pairing.  Without a paired text the concept
             // still needs to be ingested somewhere; same-pool pairing
             // is the cheapest way to do that without spurious cross-
-            // edges to other pools.
+            // edges to other pools.  Polarity doesn't apply to self-
+            // pairing (an anti-example needs a stated counterpart).
             neuro.multi_pool_train_pair(pool_id, &labels, pool_id, &labels, lr);
             false
         };

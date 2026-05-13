@@ -5954,6 +5954,46 @@ impl NeuroRuntime {
         tgt_atoms: &[String],
         lr: f32,
     ) {
+        self.multi_pool_train_pair_polarity(
+            src_pool_id, src_atoms, tgt_pool_id, tgt_atoms, lr, false,
+        );
+    }
+
+    /// Negative-pair variant: store inhibitory cross-edges between the
+    /// two concept sets instead of excitatory ones.  Used for explicit
+    /// anti-examples ("apple is NOT a vegetable").  The contrastive
+    /// pass is skipped because there is no positive pairing to use as
+    /// a baseline for competitor inhibition — the entire observation
+    /// IS the negative signal.  Lateral within-pool wiring is also
+    /// skipped: a negative example doesn't define new categorical
+    /// neighbours, just suppresses one specific association.
+    pub fn multi_pool_train_pair_negative(
+        &self,
+        src_pool_id: &str,
+        src_atoms: &[String],
+        tgt_pool_id: &str,
+        tgt_atoms: &[String],
+        lr: f32,
+    ) {
+        self.multi_pool_train_pair_polarity(
+            src_pool_id, src_atoms, tgt_pool_id, tgt_atoms, lr, true,
+        );
+    }
+
+    /// Underlying implementation.  When `negative=false` (positive
+    /// observation), runs the full Hebbian + contrastive + lateral
+    /// wiring pipeline.  When `negative=true`, only the inhibitory
+    /// concept↔concept pairing is recorded — the observation is an
+    /// anti-example and does not imply new category structure.
+    pub fn multi_pool_train_pair_polarity(
+        &self,
+        src_pool_id: &str,
+        src_atoms: &[String],
+        tgt_pool_id: &str,
+        tgt_atoms: &[String],
+        lr: f32,
+        negative: bool,
+    ) {
         if src_atoms.is_empty() || tgt_atoms.is_empty() { return; }
         if src_pool_id == tgt_pool_id { return; }
         let mut guard = self.inner.lock();
@@ -6009,20 +6049,33 @@ impl NeuroRuntime {
         //      structure: after training apple ↔ apple_img, training
         //      banana ↔ banana_img will inhibit (banana_text → apple_img)
         //      and (banana_text → audio_features_of_apple) etc.
-        let competitors: Vec<String> = guard.multi_pool.pool(tgt_pool_id)
-            .map(|p| p.all_concept_labels()).unwrap_or_default();
+        //
+        //      Skipped when `negative` — anti-examples don't define new
+        //      category structure, they only suppress one specific pair.
+        let competitors: Vec<String> = if !negative {
+            guard.multi_pool.pool(tgt_pool_id)
+                .map(|p| p.all_concept_labels()).unwrap_or_default()
+        } else { Vec::new() };
         let tgt_concept_set: std::collections::HashSet<&String> =
             tgt_concepts.iter().collect();
 
-        // (4b) Excitatory pairing — the actual paired association.
-        //      Store both directions so query.forward() works either way.
+        // (4b) Polarity-aware concept pairing.
+        //      Positive observation: excitatory edges (a goes with b).
+        //      Negative observation: inhibitory edges (a is NOT b).
+        //      Both directions stored so the query path fires either way.
         for a in &src_concepts {
             for b in &tgt_concepts {
                 guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
-                    .pair_signed(a, b, lr, false);
+                    .pair_signed(a, b, lr, negative);
                 guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
-                    .pair_signed(b, a, lr, false);
+                    .pair_signed(b, a, lr, negative);
             }
+        }
+        if negative {
+            // Anti-example complete: skip competitor inhibition and
+            // lateral wiring.  Return early — the inhibitory pair above
+            // is the entire training signal.
+            return;
         }
 
         // (4c) Contrastive Hebbian — build INHIBITORY edges from each
