@@ -40,6 +40,50 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use crate::hardware::HardwareProfile;
 
 
+// ── User-input idle detection ───────────────────────────────────────────────
+//
+// On Windows we use GetLastInputInfo (Win32 API) to measure how long ago
+// the system saw any keyboard / mouse input.  This is cheap (a single
+// syscall, ~µs) and is sampled on EVERY should_continue call so the
+// gate reacts to the operator coming back to the machine within a
+// single poll cycle of whatever iterative consumer is running.
+//
+// The promise to the operator: "I move my mouse, maybe a second freeze
+// is allowed, then resources release."  With poll cadences in the
+// 100ms-1s range and the gate flipping to "back off" on any input
+// activity, that's exactly the behaviour we get.
+
+#[cfg(target_os = "windows")]
+fn system_idle_seconds() -> f32 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetLastInputInfo, LASTINPUTINFO,
+    };
+    use windows_sys::Win32::System::SystemInformation::GetTickCount;
+    unsafe {
+        let mut info: LASTINPUTINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<LASTINPUTINFO>() as u32;
+        if GetLastInputInfo(&mut info) == 0 {
+            return f32::MAX;  // syscall failed — treat as idle
+        }
+        let now_ticks  = GetTickCount();
+        // GetTickCount wraps every ~49 days; tolerate that by treating
+        // wrap-around as fresh activity.
+        let elapsed_ms = now_ticks.wrapping_sub(info.dwTime);
+        (elapsed_ms as f32) / 1000.0
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_idle_seconds() -> f32 {
+    // Non-Windows: we don't have a portable cheap API for system-wide
+    // input idle.  Returning a large value disables the user-input
+    // back-off entirely (consumers run as before).  Add an
+    // X11/Wayland/AppKit implementation here if you need it on those
+    // platforms.
+    f32::MAX
+}
+
+
 /// Per-consumer iteration context.  The consumer mutates this each
 /// pass to report whether it made progress; the gate reads it to
 /// decide whether more iterations are warranted.
@@ -92,6 +136,20 @@ pub struct GateConfig {
     /// system memory and CPU.  Lower is more responsive; higher is
     /// cheaper.  500 ms is the default.
     pub sample_interval_ms: u64,
+    /// **User-activity back-off threshold.**  When the OS reports
+    /// that keyboard/mouse activity happened more recently than this
+    /// many seconds ago, the gate returns false from every
+    /// should_continue call.  This is the lever that frees the
+    /// machine the instant the operator comes back to it: with
+    /// `user_activity_idle_threshold_secs = 1.5`, any input within
+    /// the last 1.5 seconds halts every iterative consumer
+    /// immediately, and they resume the moment the operator stops
+    /// touching the keyboard / mouse for that long.
+    ///
+    /// Set to `f32::MAX` to disable user-activity back-off entirely
+    /// (training-server-only deployments where there is no
+    /// interactive user to share with).
+    pub user_activity_idle_threshold_secs: f32,
 }
 
 impl Default for GateConfig {
@@ -113,6 +171,10 @@ impl GateConfig {
                 max_system_cpu_fraction:  0.75,
                 mem_hard_mb:              u64::MAX,
                 sample_interval_ms:       500,
+                // Constrained machine = laptop, almost certainly
+                // interactive.  React within 1.5s of user touching
+                // anything.
+                user_activity_idle_threshold_secs: 1.5,
             }
         } else {
             Self {
@@ -120,6 +182,10 @@ impl GateConfig {
                 max_system_cpu_fraction:  0.90,
                 mem_hard_mb:              u64::MAX,
                 sample_interval_ms:       500,
+                // Workstation: same default user-activity threshold —
+                // the user has explicitly asked for the brain to back
+                // off "instantly" when they come back to the machine.
+                user_activity_idle_threshold_secs: 1.5,
             }
         }
     }
@@ -219,6 +285,19 @@ impl ResourceGate for SystemGate {
         // budget; the next call (with fresh data) gets a clean restart.
         if ctx.iterations > 0 && !ctx.progressed_last_iter {
             return false;
+        }
+        // User-activity back-off — checked first, before any
+        // expensive system-pressure sampling, because this is the
+        // path that has to fire fastest.  Cost: one syscall (~µs).
+        // The operator's contract: any mouse / keyboard activity in
+        // the last `user_activity_idle_threshold_secs` halts every
+        // iterative consumer immediately so the machine snaps back
+        // to interactive responsiveness.
+        if self.config.user_activity_idle_threshold_secs != f32::MAX {
+            let idle = system_idle_seconds();
+            if idle < self.config.user_activity_idle_threshold_secs {
+                return false;
+            }
         }
         self.maybe_sample();
         let s = self.state.read();
