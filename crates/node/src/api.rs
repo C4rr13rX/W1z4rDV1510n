@@ -968,6 +968,17 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/cluster/sync/status",  get(cluster_sync_status))
         .route("/neuro/motifs",         get(neuro_motifs))
         .route("/neuro/motifs/predict", post(neuro_motifs_predict))
+        // ── Brain configuration API ──────────────────────────────────────────
+        // GET  /brain          — full architectural snapshot (pools, motifs,
+        //                        neuromodulators, slow-pool config, runtime
+        //                        flags) in one read.
+        // GET  /brain/recipes  — list registered feedback recipes by name +
+        //                        their arg schema.
+        // POST /brain/recipes/run — execute a named recipe with arguments and
+        //                        return per-step results.
+        .route("/brain",                get(brain_overview))
+        .route("/brain/recipes",        get(brain_recipes))
+        .route("/brain/recipes/run",    post(brain_recipes_run))
         .route("/neuro/ask",            post(neuro_ask))
         .route("/neuro/pipeline",       post(neuro_pipeline))
         .route("/neuro/generate",       post(neuro_generate))
@@ -7541,6 +7552,317 @@ fn default_reinforce_confidence() -> f32 { 0.85 }
 ///
 /// Three-factor Hebbian: Δw = lr_da × dopamine_tag × existing_weight.
 /// Dopamine is reset to 0 after the flush so a subsequent training
+// ── Brain configuration API ─────────────────────────────────────────────────
+//
+// The user wants ONE PLACE that surfaces every architectural part of the
+// brain at once + composable feedback loops they can invoke by name.
+// Rather than make them stitch together /multi_pool/stats + /neuro/stats
+// + /neuro/motifs + /equations/* themselves, `/brain` reads everything
+// in a single response.  `/brain/recipes` exposes pre-registered
+// feedback orchestrations (verifier pass, dopamine pulse, train-and-
+// verify, motif consolidation) by name so they can be triggered from
+// curl/Python/the UI without composing the underlying calls each time.
+
+/// GET /brain
+/// Aggregated snapshot of every architectural layer the node operates.
+async fn brain_overview(
+    State(state): State<ApiState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let neuro     = state.neuro.clone();
+    let snapshot  = neuro.snapshot();
+    let nm_state  = neuro.neuromodulator_state();
+    let motifs    = neuro.meta_motifs();
+    let motif_count = motifs.len();
+    let motif_levels: std::collections::HashMap<usize, usize> = motifs.iter()
+        .fold(std::collections::HashMap::new(), |mut acc, m| {
+            *acc.entry(m.level).or_insert(0) += 1; acc
+        });
+    let attractor_count = motifs.iter().filter(|m| m.is_attractor).count();
+
+    // Pool stats — names + neuron counts for each pool in the multi-pool
+    // fabric, plus slow-pool size.  Multi-pool is iterated via the cross
+    // table since we don't have direct pool enumeration here.
+    let mp_delta = neuro.multi_pool_export_delta();
+    let mut pool_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for p in &mp_delta.pools {
+        *pool_counts.entry(p.pool_id.clone()).or_insert(0) += p.concepts.len();
+    }
+    let cross_edges: usize = mp_delta.cross.len();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "node_id": state.node_id,
+        "slow_pool": {
+            "active_label_count": snapshot.active_labels.len(),
+        },
+        "multi_pool": {
+            "pools":       pool_counts,
+            "cross_edges": cross_edges,
+        },
+        "motifs": {
+            "total":              motif_count,
+            "by_level":           motif_levels,
+            "attractor_count":    attractor_count,
+        },
+        "neuromodulators": nm_state,
+        "feedback_recipes": serde_json::json!([
+            "dopamine_pulse", "consolidate_pair", "train_and_verify",
+            "verifier_pass", "motif_query_continuation"
+        ]),
+    })))
+}
+
+#[derive(serde::Serialize)]
+struct RecipeSpec {
+    name: &'static str,
+    description: &'static str,
+    args: serde_json::Value,
+}
+
+/// GET /brain/recipes
+/// Schema-discoverable list of all pre-registered feedback recipes.
+/// Each recipe is a named orchestration of underlying API calls that
+/// closes one feedback loop in the architecture.  Users can call any
+/// recipe via POST /brain/recipes/run without composing the underlying
+/// endpoints manually.
+async fn brain_recipes(
+) -> (StatusCode, Json<serde_json::Value>) {
+    let recipes = vec![
+        RecipeSpec {
+            name: "dopamine_pulse",
+            description: "Release a dopamine pulse and flush three-factor LTP. \
+                          Captures recently-trained synapses into permanent boost.",
+            args: serde_json::json!({"confidence": "f32 in 0..1, default 0.85"}),
+        },
+        RecipeSpec {
+            name: "consolidate_pair",
+            description: "Train (q, a) via /multi_pool/train_pair then fire a \
+                          dopamine pulse so the binding is held at saturation.",
+            args: serde_json::json!({
+                "q": "string", "a": "string",
+                "passes": "int, default 35",
+                "confidence": "f32, default 0.85",
+            }),
+        },
+        RecipeSpec {
+            name: "train_and_verify",
+            description: "Train a (q, a) pair then immediately query /chat to \
+                          verify the trained answer is returned.  This is what \
+                          the wizard-chat train button uses end-to-end.",
+            args: serde_json::json!({
+                "q": "string", "a": "string",
+                "passes": "int, default 35",
+            }),
+        },
+        RecipeSpec {
+            name: "verifier_pass",
+            description: "Run a (q, a) battery through /chat, return per-pair \
+                          pass/fail.  Reinforce on every pass.  Skip reinforce \
+                          on failures so we don't burn in wrong answers.",
+            args: serde_json::json!({
+                "battery": "[ { q, a }, ... ]",
+                "reinforce_on_pass": "bool, default true",
+            }),
+        },
+        RecipeSpec {
+            name: "motif_query_continuation",
+            description: "Walk the motif transition graph starting from the \
+                          last char of `prefix`, emit successor chars greedily \
+                          until we hit max_steps or a terminator.  Diagnostic \
+                          for the motif-as-primary path.",
+            args: serde_json::json!({
+                "prefix": "string", "max_steps": "int, default 30",
+            }),
+        },
+    ];
+    (StatusCode::OK, Json(serde_json::json!({"recipes": recipes})))
+}
+
+#[derive(Deserialize)]
+struct RecipeRunReq {
+    name: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
+/// POST /brain/recipes/run
+/// Execute a named feedback recipe with the supplied args.  Each
+/// recipe handler is small and explicit — no DSL, no template engine,
+/// just a match on name → run the underlying API operations.
+async fn brain_recipes_run(
+    State(state): State<ApiState>,
+    Json(req): Json<RecipeRunReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let neuro = state.neuro.clone();
+    let name = req.name.as_str();
+    let args = req.args;
+
+    match name {
+        "dopamine_pulse" => {
+            let conf = args.get("confidence").and_then(|v| v.as_f64())
+                .unwrap_or(0.85) as f32;
+            let conf = conf.clamp(0.0, 1.0);
+            neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, conf);
+            neuro.flush_dopamine();
+            (StatusCode::OK, Json(serde_json::json!({
+                "recipe": name, "ok": true, "confidence": conf,
+            })))
+        }
+        "consolidate_pair" => {
+            let q = match args.get("q").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "q required"}))),
+            };
+            let a = match args.get("a").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "a required"}))),
+            };
+            let passes = args.get("passes").and_then(|v| v.as_u64())
+                .unwrap_or(35) as usize;
+            let conf = args.get("confidence").and_then(|v| v.as_f64())
+                .unwrap_or(0.85) as f32;
+            let q_atoms: Vec<String> = q.chars().map(char_label).collect();
+            let a_atoms: Vec<String> = a.chars().map(char_label).collect();
+            let n2 = neuro.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                for _ in 0..passes {
+                    n2.multi_pool_train_pair("in", &q_atoms, "out", &a_atoms, 0.825);
+                }
+                n2.release_neuromodulator(NeuromodulatorKind::Dopamine, conf);
+                n2.flush_dopamine();
+            }).await;
+            (StatusCode::OK, Json(serde_json::json!({
+                "recipe": name, "ok": true, "q": q, "a": a,
+                "passes": passes, "confidence": conf,
+            })))
+        }
+        "train_and_verify" => {
+            let q = match args.get("q").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "q required"}))),
+            };
+            let a = match args.get("a").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "a required"}))),
+            };
+            let passes = args.get("passes").and_then(|v| v.as_u64())
+                .unwrap_or(35) as usize;
+            let q_atoms: Vec<String> = q.chars().map(char_label).collect();
+            let a_atoms: Vec<String> = a.chars().map(char_label).collect();
+            let n2 = neuro.clone();
+            let q_for_query = q.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                for _ in 0..passes {
+                    n2.multi_pool_train_pair("in", &q_atoms, "out", &a_atoms, 0.825);
+                }
+                n2.release_neuromodulator(NeuromodulatorKind::Dopamine, 0.85);
+                n2.flush_dopamine();
+                // Verify via the same path /chat uses.
+                let q_chars: Vec<String> = q_for_query.chars()
+                    .map(char_label).collect();
+                n2.multi_pool_query_with_confidence("in", &q_chars, 2, 0.001)
+            }).await.ok();
+            let mp = result.unwrap_or_default();
+            let (actual, conf) = mp.get("out").cloned().unwrap_or_default();
+            let verify_match = !actual.is_empty()
+                && actual.trim().to_lowercase()
+                          == a.trim().to_lowercase();
+            (StatusCode::OK, Json(serde_json::json!({
+                "recipe": name, "ok": verify_match,
+                "q": q, "a_trained": a, "a_returned": actual,
+                "confidence": conf, "verify_match": verify_match,
+                "passes": passes,
+            })))
+        }
+        "verifier_pass" => {
+            let reinforce_on_pass = args.get("reinforce_on_pass")
+                .and_then(|v| v.as_bool()).unwrap_or(true);
+            let battery = match args.get("battery").and_then(|v| v.as_array()) {
+                Some(arr) => arr.clone(),
+                None => return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "battery (array of {q,a}) required"}))),
+            };
+            let mut results = Vec::new();
+            let mut passed = 0usize;
+            for entry in &battery {
+                let q = entry.get("q").and_then(|v| v.as_str()).unwrap_or("");
+                let a = entry.get("a").and_then(|v| v.as_str()).unwrap_or("");
+                if q.is_empty() || a.is_empty() { continue; }
+                let n2 = neuro.clone();
+                let q_for = q.to_string();
+                let a_for = a.to_string();
+                let (actual, conf, did_reinforce) = tokio::task::spawn_blocking(move || {
+                    let q_chars: Vec<String> = q_for.chars().map(char_label).collect();
+                    let mp = n2.multi_pool_query_with_confidence(
+                        "in", &q_chars, 2, 0.001);
+                    let (act, c) = mp.get("out").cloned().unwrap_or_default();
+                    let matched = !act.is_empty()
+                        && act.trim().to_lowercase()
+                                == a_for.trim().to_lowercase();
+                    let did = matched && reinforce_on_pass;
+                    if did {
+                        let a_chars: Vec<String> = a_for.chars()
+                            .map(char_label).collect();
+                        // 5 train+reinforce cycles per validated dose-response.
+                        for _ in 0..5 {
+                            n2.multi_pool_train_pair("in", &q_chars,
+                                "out", &a_chars, 0.40);
+                            n2.release_neuromodulator(
+                                NeuromodulatorKind::Dopamine, 1.0);
+                            n2.flush_dopamine();
+                        }
+                    }
+                    (act, c, did)
+                }).await.unwrap_or((String::new(), 0.0, false));
+                let pass = !actual.is_empty()
+                    && actual.trim().to_lowercase() == a.trim().to_lowercase();
+                if pass { passed += 1; }
+                results.push(serde_json::json!({
+                    "q": q, "expected": a, "actual": actual,
+                    "confidence": conf, "pass": pass, "reinforced": did_reinforce,
+                }));
+            }
+            (StatusCode::OK, Json(serde_json::json!({
+                "recipe": name, "total": results.len(), "passed": passed,
+                "pass_rate": if results.is_empty() { 0.0 }
+                              else { passed as f64 / results.len() as f64 },
+                "results": results,
+            })))
+        }
+        "motif_query_continuation" => {
+            let prefix = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+            let max_steps = args.get("max_steps").and_then(|v| v.as_u64())
+                .unwrap_or(30) as usize;
+            if prefix.is_empty() {
+                return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "prefix required"})));
+            }
+            let last_char = prefix.chars().last().unwrap();
+            let mut cur = char_label(last_char);
+            let mut emitted = Vec::new();
+            for _ in 0..max_steps {
+                let preds = neuro.motif_predictions(&cur);
+                if preds.is_empty() { break; }
+                let (next, _p) = preds[0].clone();
+                emitted.push(next.clone());
+                cur = next;
+            }
+            (StatusCode::OK, Json(serde_json::json!({
+                "recipe": name, "prefix": prefix, "max_steps": max_steps,
+                "emitted_labels": emitted,
+            })))
+        }
+        _ => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("unknown recipe: {name}"),
+            "hint": "GET /brain/recipes for the registered list",
+        }))),
+    }
+}
+
 /// pass starts from a clean baseline.
 async fn neuro_reinforce(
     State(state): State<ApiState>,

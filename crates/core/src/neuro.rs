@@ -5016,16 +5016,24 @@ impl NeuroRuntime {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
         };
-        // Intra-call: observe all labels as a sorted sequence — discovers
-        // repeated sub-sequences within each training call.
+        // Observe the labels in temporal order — gives the motif runtime
+        // direct cross-call bigrams (e.g. last char of a question →
+        // first char of the answer, when frames arrive back to back).
+        // The call_fingerprint observation that used to follow this was
+        // pushing a synthetic motif id into the SAME level-0 window,
+        // which interrupted every cross-call bigram with a fingerprint
+        // edge.  Result: predict_next("g") returned only (g, fp_*)
+        // transitions, never (g, p) for cases like "ping" → "pong".
+        //
+        // Removed.  Inter-call fingerprint pattern detection ("which
+        // sequences of calls repeat") is a legitimate capability but
+        // belongs in a dedicated motif runtime instance with its own
+        // level-0 window so it doesn't pollute label-level transitions.
+        // When we need it back, instantiate a second
+        // HierarchicalMotifRuntime in NeuroState and feed it the
+        // fingerprint observations there.
         let duration_per = if symbols.is_empty() { 1.0 } else { 1.0 / symbols.len() as f64 };
         guard.motifs.observe_label_sequence(symbols, ts, duration_per);
-
-        // Inter-call: observe the call's fingerprint as a single level-0 motif
-        // so the motif runtime also learns which sequences of CALLS repeat.
-        // e.g. "cell-membrane call" → "osmosis call" → "ATP call" across K-12 pages.
-        let fp = call_fingerprint(symbols);
-        guard.motifs.observe_label_sequence(&[fp], ts, 1.0);
     }
 
     // ── Distributed training helpers ──────────────────────────────────────────
