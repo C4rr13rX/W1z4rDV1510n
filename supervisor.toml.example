@@ -1,0 +1,40 @@
+# W1z4rD V1510n supervisor configuration.
+#
+# Copy this file to supervisor.toml in the project root and edit any
+# fields you want to override.  Anything you don't list keeps its
+# default — you only need to write the keys that differ.
+#
+# After editing, the supervisor picks up changes on the next restart
+# (or you can use the Task Scheduler "End task" / "Run" actions).
+
+[node]
+# Path to the node binary the supervisor will manage.
+binary       = "D:\\Projects\\W1z4rDV1510n\\bin\\w1z4rd_node.exe"
+working_dir  = "D:\\Projects\\W1z4rDV1510n"
+data_dir     = "D:\\w1z4rdv1510n-data"
+health_url   = "http://localhost:8090/health"
+# Probe parameters.
+health_timeout = 3.0
+health_misses_before_restart = 3
+poll_interval = 5.0
+warmup_secs   = 30.0
+
+[training]
+# Flip to false to disable auto-relaunch of training entirely (e.g.
+# while you're debugging by hand).
+enabled            = true
+# Relative-to-project path to the script the supervisor runs.  Replace
+# with your own training script if you want — it just has to respect
+# SKIP_CLEAR=1 if you want resumability across supervisor restarts.
+command            = "scripts/run_all_training.sh"
+resume_on_restart  = true
+first_run_marker   = ".supervisor_training_started"
+warmup_before_training = 10.0
+restart_backoff_secs   = 30.0
+
+[supervisor]
+log_dir        = "D:\\w1z4rdv1510n-data\\training"
+log_file_name  = "supervisor.log"
+# Run the supervisor at HIGH priority on Windows so it stays
+# responsive to node crashes even when the system is loaded.
+boost_priority = true
