@@ -32,6 +32,9 @@ CATEGORIES = {
     "terminal_proficiency_win",
     "terminal_proficiency_mac",
     "terminal_proficiency_linux",
+    # Cross-modal: text ↔ image/audio/pdf paired training so the multi-pool
+    # fabric forms cross-pool synapses between modality pools.
+    "multimodal_pairs",
 }
 
 # Code languages the AST validator understands.  Anything else means

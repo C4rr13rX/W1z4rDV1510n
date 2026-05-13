@@ -3845,8 +3845,41 @@ struct NeuroState {
 impl NeuroState {
     fn new(config: NeuroConfig, motif_config: HierarchicalMotifConfig) -> Self {
         let mut multi_pool = MultiPoolFabric::new();
+        // Core conversational pair — "in" receives the user's text atoms,
+        // "out" is decoded as the answer.  Retained for backward compat
+        // with the two_pool API and every training script that already
+        // targets them.
         multi_pool.register_pool("in",  config.clone());
         multi_pool.register_pool("out", config.clone());
+        // Modality pools — registered up front so cross-pool synapses can
+        // form between them as soon as paired training begins.  Every
+        // multi_pool_query against any source pool will produce a
+        // prediction in each of these by walking learned cross-edges.
+        //
+        // keyboard_text   — typed input as character atoms (parallel "in"
+        //                    for cases where a request mixes typed text
+        //                    with attachments and we want to keep typed
+        //                    bytes distinct from generic "in")
+        // image_pixels    — labels emitted by ImageBitsEncoder over a frame
+        // audio_features  — labels emitted by AudioBitsEncoder over a chunk
+        // screen_frames   — same shape as image_pixels but a separate pool
+        //                    so screen-capture and webcam don't compete
+        // pdf_text        — extracted text from PDFs as character atoms,
+        //                    separated from keyboard_text so the fabric
+        //                    can route differently per source
+        // video_frames    — placeholder; populated by the same image-bits
+        //                    pipeline but tagged so motion-pair training
+        //                    knows it's a temporal stream
+        for pool_id in [
+            "keyboard_text",
+            "image_pixels",
+            "audio_features",
+            "screen_frames",
+            "pdf_text",
+            "video_frames",
+        ] {
+            multi_pool.register_pool(pool_id, config.clone());
+        }
         Self {
             pool: NeuronPool::new(config.clone()),
             multi_pool,

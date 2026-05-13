@@ -1,0 +1,55 @@
+[script]
+id          = "multimodal_pairs_001"
+category    = "multimodal_pairs"
+phase       = 30
+description = """
+First-level cross-modal training: paired (image, caption) and
+(audio, transcript) observations.  The training loop posts each pair to
+/sensor/observe with `paired_text` set, which trains cross-pool synapses
+between keyboard_text and image_pixels / audio_features.
+
+After training, querying any text the captions contained should fire
+predictions in the modality pools, and vice versa.  Verifies that the
+fabric is actually wiring up cross-modal recall, not just storing
+per-pool atoms in isolation.
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/multimodal/image_caption_pairs.jsonl"
+
+[[inputs]]
+kind = "corpus"
+path = "data/multimodal/audio_transcript_pairs.jsonl"
+
+# Each benchmark checks one direction of cross-modal recall.  The runner
+# probes /chat with the prompt; the multi-pool fabric is expected to
+# fire image_pixels or audio_features predictions in the response.  The
+# `must_include` strings are tokens that should appear in those pools'
+# decoded output — they verify cross-pool synapses formed, not just
+# in-pool concept presence.
+
+[[benchmarks]]
+label        = "text → image: known caption"
+prompt       = "What does a red apple look like?"
+must_include = ["img:"]
+min_score    = 0.3
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "text → audio: known transcript"
+prompt       = "What does the word hello sound like?"
+must_include = ["aud:"]
+min_score    = 0.3
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "conversational fallback still works"
+prompt       = "Are you still able to answer questions?"
+must_include = ["yes", "answer"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

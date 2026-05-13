@@ -1023,6 +1023,19 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/multi_pool/delta/export",  get(multi_pool_delta_export))
         .route("/multi_pool/delta/apply",   post(multi_pool_delta_apply))
         .route("/multi_pool/use_bigrams",   post(multi_pool_use_bigrams))
+        // ── Multimodal sensor ingestion ────────────────────────────────────────
+        // POST /sensor/observe — multimodal online-learning endpoint.
+        //   Body: { kind: "image"|"audio"|"pdf_text"|"screen"|"video_frame"|"text",
+        //           bytes_b64?: str, text?: str, paired_text?: str, lr?: f32 }
+        //   Decodes the bytes with the matching encoder (ImageBitsEncoder /
+        //   AudioBitsEncoder), trains the resulting labels into the matching
+        //   modality pool, and — if `paired_text` is supplied — also trains
+        //   a cross-pool pair (paired_text in keyboard_text ↔ labels in the
+        //   modality pool) so subsequent text queries activate the modality
+        //   pool via the learned cross-edges.
+        //   Returns { pool, labels_count, predictions } where predictions is
+        //   the cross-pool decode from the sensor pool into every other pool.
+        .route("/sensor/observe",           post(sensor_observe))
         // POST /query/integrated — precision-weighted multi-route inference.
         // Tries multi-pool first; if its confidence is below threshold,
         // falls back to slow-pool char-chain; if both produce nothing,
@@ -5711,11 +5724,29 @@ async fn neuro_ask(
         // to the slow-pool char_chain like /query/integrated does.
         let atoms: Vec<String> = text.chars().map(char_label).collect();
         let mp_thr: f32 = default_mp_confidence_threshold();
-        let mp = neuro.multi_pool_query_with_confidence(
+        // Query from BOTH "in" (legacy two_pool semantics) and
+        // "keyboard_text" (modality-aware pool registered for
+        // multimodal training).  Predictions from either source pool
+        // flow into every other registered pool — so a text question
+        // can activate image_pixels / audio_features when those
+        // cross-pool synapses have been formed by /sensor/observe.
+        let mp_in   = neuro.multi_pool_query_with_confidence(
             "in", &atoms, hops.max(2), min_str.max(0.001),
         );
-        // Compose the legacy `predictions` map from the (answer, conf) pairs
-        // for downstream UI display (decoders panel, cross-pool overlay).
+        let mp_kbd  = neuro.multi_pool_query_with_confidence(
+            "keyboard_text", &atoms, hops.max(2), min_str.max(0.001),
+        );
+        // Merge: prefer whichever source produced higher confidence
+        // for each target pool.  Backward compatible — "out" coming
+        // from "in" wins as long as no keyboard_text→out edge has
+        // stronger confidence.
+        let mut mp: std::collections::HashMap<String, (String, f32)> = mp_in;
+        for (pool, (decoded, conf)) in mp_kbd {
+            match mp.get(&pool) {
+                Some((_, existing_conf)) if *existing_conf >= conf => {}
+                _ => { mp.insert(pool, (decoded, conf)); }
+            }
+        }
         let predictions: std::collections::HashMap<String, String> =
             mp.iter().map(|(p, (a, _))| (p.clone(), a.clone())).collect();
         if let Some((answer, conf)) = mp.get("out").cloned() {
@@ -8203,6 +8234,154 @@ async fn entity_observe(
         }
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// POST /sensor/observe
+// Multimodal online-learning endpoint.  Decodes the supplied bytes with the
+// matching encoder (image/audio/text), trains the resulting labels into the
+// matching modality pool, and — if `paired_text` is supplied — also trains a
+// cross-pool pair so subsequent text queries can recall the modality content
+// via learned cross-edges.  Returns the labels emitted and the cross-pool
+// decode (this sensor pool → every other registered pool).
+//
+// This is the path that turns the node into a true online-learning system
+// when paired with a webcam/mic capture client posting frames continuously.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SensorObserveRequest {
+    /// "image" | "audio" | "screen" | "video_frame" | "pdf_text" | "text"
+    kind:        String,
+    /// Base64-encoded raw bytes (image: JPG/PNG/etc; audio: WAV; absent for
+    /// pdf_text / text — those use `text` instead).
+    #[serde(default)]
+    bytes_b64:   Option<String>,
+    /// Plain text content (for pdf_text and text kinds).
+    #[serde(default)]
+    text:        Option<String>,
+    /// If supplied, also train a cross-pool pair (paired_text in
+    /// keyboard_text ↔ encoded labels in the modality pool).  This is how
+    /// the fabric learns "this image goes with this caption".
+    #[serde(default)]
+    paired_text: Option<String>,
+    /// Learning rate for the cross-pool pair, default 1.0.
+    #[serde(default = "default_sensor_lr")]
+    lr:          f32,
+}
+
+fn default_sensor_lr() -> f32 { 1.0 }
+
+fn kind_to_pool(kind: &str) -> Option<(&'static str, &'static str)> {
+    // (pool_id, encoder_modality_for_encode_media_labels)
+    match kind {
+        "image"        => Some(("image_pixels",   "image")),
+        "audio"        => Some(("audio_features", "audio")),
+        "screen"       => Some(("screen_frames",  "image")),
+        "video_frame"  => Some(("video_frames",   "image")),
+        "pdf_text"     => Some(("pdf_text",       "text")),
+        "text"         => Some(("keyboard_text",  "text")),
+        _              => None,
+    }
+}
+
+async fn sensor_observe(
+    State(state): State<ApiState>,
+    Json(req): Json<SensorObserveRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some((pool_id, modality)) = kind_to_pool(&req.kind) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!(
+                "unknown kind {:?}; expected one of image|audio|screen|video_frame|pdf_text|text",
+                req.kind
+            ),
+        })));
+    };
+
+    let neuro       = state.neuro.clone();
+    let bytes_b64   = req.bytes_b64.clone();
+    let text_field  = req.text.clone();
+    let paired_text = req.paired_text.clone();
+    let lr          = req.lr.max(0.0);
+
+    let result = tokio::task::spawn_blocking(move || {
+        // Step 1: encode → labels.
+        let labels: Vec<String> = match modality {
+            "text" => {
+                // For text-kind, use raw character atoms — that's what
+                // the existing chat path uses too, so cross-pool synapses
+                // between keyboard_text and image_pixels share the same
+                // alphabet on the text side.
+                let txt = text_field.as_deref().unwrap_or("");
+                if txt.is_empty() {
+                    return Err::<_, String>("text kind requires non-empty `text`".to_string());
+                }
+                txt.chars().map(char_label).collect()
+            }
+            other => {
+                let b64_ref = bytes_b64.as_deref();
+                if b64_ref.is_none() {
+                    return Err(format!("{other} kind requires `bytes_b64`"));
+                }
+                encode_media_labels(other, b64_ref, None, None, None, None)?
+            }
+        };
+
+        if labels.is_empty() {
+            return Err("encoder produced no labels".to_string());
+        }
+
+        // Step 2: if paired_text is supplied, train the cross-pool pair
+        // — this creates concepts in BOTH pools (keyboard_text + the
+        // modality pool) and forms the cross-edge in one call.  The
+        // multi_pool_train_pair helper handles concept formation on
+        // either side; no separate self-pair is needed.
+        let trained_pair_flag = if let Some(pt) = paired_text.as_deref() {
+            if !pt.is_empty() {
+                let text_atoms: Vec<String> = pt.chars().map(char_label).collect();
+                neuro.multi_pool_train_pair(
+                    "keyboard_text", &text_atoms,
+                    pool_id,         &labels,
+                    lr,
+                );
+                true
+            } else { false }
+        } else {
+            // No caption — just observe the labels into the modality
+            // pool by self-pairing.  Without a paired text the concept
+            // still needs to be ingested somewhere; same-pool pairing
+            // is the cheapest way to do that without spurious cross-
+            // edges to other pools.
+            neuro.multi_pool_train_pair(pool_id, &labels, pool_id, &labels, lr);
+            false
+        };
+
+        // Step 4: query — what does this observation activate elsewhere?
+        let predictions = neuro.multi_pool_query_with_confidence(
+            pool_id, &labels, 2, 0.001,
+        );
+        let preds_json: std::collections::HashMap<String, serde_json::Value> =
+            predictions.into_iter().map(|(p, (a, c))| {
+                (p, serde_json::json!({"decoded": a, "confidence": c}))
+            }).collect();
+
+        Ok::<_, String>(serde_json::json!({
+            "pool":         pool_id,
+            "labels_count": labels.len(),
+            "labels_sample": labels.iter().take(20).cloned().collect::<Vec<_>>(),
+            "predictions":  preds_json,
+            "trained_pair": trained_pair_flag,
+        }))
+    }).await;
+
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)),
+        Ok(Err(msg)) => (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg }))),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "sensor_observe panic" }))),
+    }
+}
+
 
 // ────────────────────────────────────────────────────────────────────────────
 // GET /entity/report
