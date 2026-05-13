@@ -715,6 +715,26 @@ fn pos_label_to_char(label: &str) -> Option<char> {
     crate::streaming::label_to_char(stripped)
 }
 
+/// Strip the `@<position>` and any `tg.<trigram>` decoration off an atom
+/// label so a non-character modality pool's atoms can be reported in
+/// their original encoded form (e.g. `img:h0_z3_4@2` → `img:h0_z3_4`).
+/// Used by the cross-pool decoder when the target pool's atoms aren't
+/// character atoms — the fallback that lets text → image queries return
+/// the image-bit tokens the modality pool actually stores.
+fn strip_position_suffix(label: &str) -> String {
+    // Drop trigram-tagged labels — they're not raw atoms, they're
+    // n-gram features that don't decode to a single domain token.
+    if label.contains("tg.") { return String::new(); }
+    if let Some(pos) = label.rfind('@') {
+        if label[pos + 1..].chars().all(|c| c.is_ascii_digit())
+            && pos + 1 < label.len()
+        {
+            return label[..pos].to_string();
+        }
+    }
+    label.to_string()
+}
+
 // ── Neuromodulator system ─────────────────────────────────────────────────────
 
 /// Which neuromodulator to release via [`NeuroRuntime::release_neuromodulator`].
@@ -3599,6 +3619,11 @@ impl CrossPoolSynapses {
         }
     }
 
+    /// Diagnostic: every stored ((src, tgt), edge) entry.  Read-only.
+    pub fn iter_edges(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.weights.keys().map(|(a, b)| (a, b))
+    }
+
     /// Forward read: `in_label` → all reachable `(out_label, effective_weight)`.
     /// Returns consolidation-multiplied weight so propagation through this
     /// cross-pool edge favours consolidated routes at saturation — the
@@ -5877,6 +5902,110 @@ impl NeuroRuntime {
             .into_iter().map(|(k, (s, _))| (k, s)).collect()
     }
 
+    /// Diagnostic: run the same path as `multi_pool_query_with_confidence`
+    /// but instead of just returning the decode, return every intermediate
+    /// state — source activations, chosen concept, Jaccard input-coverage,
+    /// per-target cross-edge totals, and target seeds.  Used to triage
+    /// why a query that "should" succeed returns empty.
+    ///
+    /// Does NOT alter any state; safe to call concurrently with training.
+    pub fn multi_pool_debug_query(
+        &self,
+        src_pool_id: &str,
+        atoms: &[String],
+    ) -> serde_json::Value {
+        if atoms.is_empty() {
+            return serde_json::json!({"error": "empty atoms"});
+        }
+        let guard = self.inner.lock();
+        let Some(src_pool) = guard.multi_pool.pool(src_pool_id) else {
+            return serde_json::json!({"error": format!("no src pool {src_pool_id:?}")});
+        };
+        let pos_atoms = position_and_ngram_atoms(
+            atoms, self.use_bigrams(), self.use_trigrams());
+        let mut src_seeds: HashMap<String, f32> = HashMap::new();
+        for a in &pos_atoms { src_seeds.insert(a.clone(), 1.0); }
+        let src_active = src_pool.propagate_weighted_sum_no_clamp(
+            &src_seeds, 1, 0.001,
+        );
+        // Separate concept-active from atom-active (concepts have members).
+        let (mut active_concepts, mut active_atoms): (Vec<(String, f32)>, Vec<(String, f32)>)
+            = (Vec::new(), Vec::new());
+        for (lbl, act) in src_active.iter() {
+            let is_concept = src_pool.label_to_id.get(lbl)
+                .and_then(|&id| src_pool.get_hot(id as usize))
+                .map(|n| !n.members.is_empty()).unwrap_or(false);
+            if is_concept { active_concepts.push((lbl.clone(), *act)); }
+            else          { active_atoms.push((lbl.clone(), *act)); }
+        }
+        active_concepts.sort_by(|a, b| b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
+        active_atoms.sort_by(|a, b| b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
+        let chosen = top_active_concept(src_pool, &src_active);
+        let mut jaccard = None;
+        let mut concept_atoms_count = 0;
+        if let Some(ref c) = chosen {
+            if let Some(&cid) = src_pool.label_to_id.get(c) {
+                if let Some(neuron) = src_pool.get_hot(cid as usize) {
+                    let concept_atoms: std::collections::HashSet<String> =
+                        neuron.members.iter()
+                            .filter_map(|mid| src_pool.get_hot(*mid as usize))
+                            .filter_map(|n| n.label.clone())
+                            .collect();
+                    let input_atoms: std::collections::HashSet<String> =
+                        pos_atoms.iter().cloned().collect();
+                    let inter = concept_atoms.intersection(&input_atoms).count();
+                    let union = concept_atoms.union(&input_atoms).count().max(1);
+                    jaccard = Some(inter as f32 / union as f32);
+                    concept_atoms_count = concept_atoms.len();
+                }
+            }
+        }
+        // Cross-edge availability per target pool, plus a sample of
+        // stored src-side labels so we can spot training/query label
+        // mismatches.
+        let target_ids: Vec<String> = guard.multi_pool.pool_ids().into_iter()
+            .filter(|id| id != src_pool_id).collect();
+        let mut cross_info: Vec<serde_json::Value> = Vec::new();
+        for tgt in &target_ids {
+            let edges_count = guard.multi_pool.cross_for(src_pool_id, tgt)
+                .map(|c| c.len()).unwrap_or(0);
+            let stored_src_labels: Vec<String> = guard.multi_pool
+                .cross_for(src_pool_id, tgt)
+                .map(|c| {
+                    let mut s: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for (a, _) in c.iter_edges() { s.insert(a.clone()); }
+                    s.into_iter().take(5).collect()
+                }).unwrap_or_default();
+            let chosen_forward_count = if let Some(ref ch) = chosen {
+                guard.multi_pool.cross_for(src_pool_id, tgt)
+                    .map(|c| c.forward(ch).len()).unwrap_or(0)
+            } else { 0 };
+            cross_info.push(serde_json::json!({
+                "tgt": tgt,
+                "edges": edges_count,
+                "stored_src_labels_sample": stored_src_labels,
+                "forward_from_chosen": chosen_forward_count,
+            }));
+        }
+        serde_json::json!({
+            "src_pool":               src_pool_id,
+            "input_atoms":            atoms.len(),
+            "pos_atoms":              pos_atoms.len(),
+            "pos_atoms_sample":       pos_atoms.iter().take(10).collect::<Vec<_>>(),
+            "src_active_total":       src_active.len(),
+            "active_concepts":        active_concepts.iter().take(5).collect::<Vec<_>>(),
+            "active_atoms_top":       active_atoms.iter().take(5).collect::<Vec<_>>(),
+            "chosen_concept":         chosen,
+            "concept_member_count":   concept_atoms_count,
+            "jaccard_input_coverage": jaccard,
+            "jaccard_gate_threshold": 0.55,
+            "cross_edges_per_tgt":    cross_info,
+        })
+    }
+
     /// Same as `multi_pool_query` but each target's value is `(decoded, confidence)`
     /// where confidence in [0, 1] is the softmax-like product of three
     /// posterior fractions (src concept dominance × cross-edge dominance ×
@@ -6116,6 +6245,23 @@ impl NeuroRuntime {
             if !chars.is_empty() {
                 return Some((chars, confidence));
             }
+            // 4a-bis: target pool isn't a character pool (image_pixels,
+            // audio_features, etc.).  pos_label_to_char returned nothing,
+            // but the concept legitimately fired.  Return the concept's
+            // identifying members as a space-joined token list — the
+            // "decoded" form for non-character modalities.  Strip the
+            // position-augmentation tags so the consumer sees the raw
+            // domain atoms (e.g. "img:h0 img:h0_z3_4 img:h0_z4_4 …").
+            if !parts.is_empty() {
+                let decoded: String = parts.iter()
+                    .map(|p| strip_position_suffix(p))
+                    .take(40)            // cap so the response stays small
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !decoded.is_empty() {
+                    return Some((decoded, confidence));
+                }
+            }
         }
 
         // 4b. Chain-walk over active atom neurons.
@@ -6126,7 +6272,35 @@ impl NeuroRuntime {
                 Some((id, *act))
             })
             .collect();
-        if active_atom_ids.is_empty() { return None; }
+        if active_atom_ids.is_empty() {
+            // 4b-bis: target is a non-character pool.  Fall back to
+            // listing the top-N most-active non-character atoms — the
+            // cross-pool prediction in the target pool's native
+            // vocabulary.  This is the path that lets a text query
+            // produce a meaningful `image_pixels` response: the highest
+            // image-bit labels that fired from the cross-edges.
+            let mut all_atoms: Vec<(String, f32)> = tgt_acts.iter()
+                .filter(|(lbl, _)| pos_label_to_char(lbl).is_none())
+                .filter(|(lbl, _)| {
+                    // Only return ATOM neurons (no members) — concepts
+                    // are reported separately above.
+                    tgt_pool.label_to_id.get(*lbl)
+                        .and_then(|&id| tgt_pool.get_hot(id as usize))
+                        .map(|n| n.members.is_empty())
+                        .unwrap_or(false)
+                })
+                .map(|(lbl, act)| (lbl.clone(), *act))
+                .collect();
+            if all_atoms.is_empty() { return None; }
+            all_atoms.sort_by(|a, b| b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal));
+            let decoded: String = all_atoms.iter()
+                .take(40)
+                .map(|(l, _)| strip_position_suffix(l))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some((decoded, confidence));
+        }
         let active_set: HashSet<u32> = active_atom_ids.iter().map(|(i, _)| *i).collect();
         let act_lookup: HashMap<u32, f32> = active_atom_ids.iter().copied().collect();
 

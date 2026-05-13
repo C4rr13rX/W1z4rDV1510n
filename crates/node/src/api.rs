@@ -1023,6 +1023,11 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/multi_pool/delta/export",  get(multi_pool_delta_export))
         .route("/multi_pool/delta/apply",   post(multi_pool_delta_apply))
         .route("/multi_pool/use_bigrams",   post(multi_pool_use_bigrams))
+        // POST /multi_pool/debug_query — diagnostic for why a cross-pool
+        // recall returns empty.  Returns every intermediate state:
+        // src_active size, chosen concept, Jaccard coverage, cross-edge
+        // counts per target.  Read-only; safe alongside training.
+        .route("/multi_pool/debug_query",   post(multi_pool_debug_query))
         // ── Multimodal sensor ingestion ────────────────────────────────────────
         // POST /sensor/observe — multimodal online-learning endpoint.
         //   Body: { kind: "image"|"audio"|"pdf_text"|"screen"|"video_frame"|"text",
@@ -1036,6 +1041,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         //   Returns { pool, labels_count, predictions } where predictions is
         //   the cross-pool decode from the sensor pool into every other pool.
         .route("/sensor/observe",           post(sensor_observe))
+        // POST /sensor/observe_triple — train all pairwise cross-edges
+        // in a single observation, so a single presentation of (image,
+        // audio, text) wires keyboard_text↔image_pixels AND
+        // keyboard_text↔audio_features AND image_pixels↔audio_features.
+        // After enough triples, querying ANY one modality recalls the
+        // OTHER TWO directly — the toddler-level cross-modal floor.
+        .route("/sensor/observe_triple",    post(sensor_observe_triple))
         // POST /query/integrated — precision-weighted multi-route inference.
         // Tries multi-pool first; if its confidence is below threshold,
         // falls back to slow-pool char-chain; if both produce nothing,
@@ -5421,6 +5433,29 @@ async fn multi_pool_ask(
     })))
 }
 
+#[derive(Deserialize)]
+struct MultiPoolDebugQueryReq {
+    src_pool: String,
+    text:     String,
+}
+
+async fn multi_pool_debug_query(
+    State(state): State<ApiState>,
+    Json(req): Json<MultiPoolDebugQueryReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "text must not be empty"})));
+    }
+    let neuro = state.neuro.clone();
+    let atoms: Vec<String> = req.text.chars().map(char_label).collect();
+    let src_pool = req.src_pool.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        neuro.multi_pool_debug_query(&src_pool, &atoms)
+    }).await.unwrap_or_else(|_| serde_json::json!({"error": "spawn_blocking panic"}));
+    (StatusCode::OK, Json(result))
+}
+
 /// GET /multi_pool/stats — per-pool sizes + total cross-edges.
 async fn multi_pool_stats(
     State(state): State<ApiState>,
@@ -8379,6 +8414,77 @@ async fn sensor_observe(
             Json(serde_json::json!({ "error": msg }))),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "sensor_observe panic" }))),
+    }
+}
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// POST /sensor/observe_triple — paired (image, audio, text) observation.
+// Trains all three pairwise cross-edges in one shot:
+//   keyboard_text  ↔ image_pixels
+//   keyboard_text  ↔ audio_features
+//   image_pixels   ↔ audio_features
+// so a single presentation wires the modality fabric end-to-end.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SensorObserveTripleRequest {
+    /// Text label that accompanies the image and audio (e.g. "apple").
+    text:        String,
+    /// Base64-encoded image bytes (JPEG/PNG/etc).
+    image_b64:   String,
+    /// Base64-encoded WAV bytes.
+    audio_b64:   String,
+    #[serde(default = "default_sensor_lr")]
+    lr:          f32,
+}
+
+async fn sensor_observe_triple(
+    State(state): State<ApiState>,
+    Json(req): Json<SensorObserveTripleRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"text must not be empty"})));
+    }
+    let neuro = state.neuro.clone();
+    let text  = req.text.clone();
+    let img_b = req.image_b64.clone();
+    let aud_b = req.audio_b64.clone();
+    let lr    = req.lr.max(0.0);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let img_labels = encode_media_labels("image", Some(&img_b), None, None, None, None)?;
+        let aud_labels = encode_media_labels("audio", Some(&aud_b), None, None, None, None)?;
+        if img_labels.is_empty() || aud_labels.is_empty() {
+            return Err::<_, String>("encoder produced no labels".to_string());
+        }
+        let text_atoms: Vec<String> = text.chars().map(char_label).collect();
+
+        // Train all three pairwise cross-edges.  Each call promotes the
+        // full atom sequence on both sides and connects the matching
+        // concepts symmetrically.
+        neuro.multi_pool_train_pair("keyboard_text", &text_atoms,
+                                      "image_pixels",  &img_labels, lr);
+        neuro.multi_pool_train_pair("keyboard_text", &text_atoms,
+                                      "audio_features",&aud_labels, lr);
+        neuro.multi_pool_train_pair("image_pixels",  &img_labels,
+                                      "audio_features",&aud_labels, lr);
+
+        Ok::<_, String>(serde_json::json!({
+            "text":           text,
+            "img_labels":     img_labels.len(),
+            "aud_labels":     aud_labels.len(),
+            "pairs_trained":  3,
+        }))
+    }).await;
+
+    match result {
+        Ok(Ok(v))    => (StatusCode::OK, Json(v)),
+        Ok(Err(msg)) => (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg}))),
+        Err(_)       => (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"triple panic"}))),
     }
 }
 
