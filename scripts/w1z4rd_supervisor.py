@@ -95,6 +95,24 @@ DEFAULT_CONFIG = {
         # the rest of the system is loaded.
         "boost_priority": True,
     },
+    "django": {
+        # The R3V3N!R / wizard-chat control tower.  Operationally
+        # critical for the wizard chat UI; the node alone is not enough
+        # because the rolling-context store and agent endpoints live in
+        # Django.  Watchdog policy mirrors the node policy.
+        "enabled":        True,
+        "project_root":   "D:\\Projects\\CoolCryptoUtilities",
+        "python":         "D:\\Projects\\CoolCryptoUtilities\\.venv\\Scripts\\python.exe",
+        "working_dir":    "D:\\Projects\\CoolCryptoUtilities\\web",
+        "launcher":       "run_waitress.py",
+        "host":           "127.0.0.1",
+        "port":           8000,
+        "threads":        8,
+        "health_url":     "http://127.0.0.1:8000/api/wizard-chat/status/",
+        "health_timeout": 5.0,
+        "health_misses_before_restart": 3,
+        "warmup_secs":    15.0,
+    },
 }
 
 
@@ -258,6 +276,65 @@ def start_node(cfg: dict, log: Logger) -> int | None:
         return None
 
 
+# ── Django (R3V3N!R control tower) management ──────────────────────────────
+
+
+def django_healthy(url: str, timeout: float) -> bool:
+    """True iff Django answers a basic GET on its status endpoint
+    within `timeout`.  We accept any 2xx — the endpoint format may
+    evolve, but if the server is responding at all the panel is alive."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return False
+
+
+def start_django(cfg: dict, log: Logger) -> int | None:
+    """Launch waitress (run_waitress.py) detached.  Returns PID on success."""
+    dcfg = cfg["django"]
+    if not dcfg.get("enabled"):
+        return None
+    python = dcfg["python"]
+    launcher = dcfg["launcher"]
+    working_dir = dcfg["working_dir"]
+    if not pathlib.Path(python).exists():
+        log.error(f"django python not found: {python}")
+        return None
+    if not (pathlib.Path(working_dir) / launcher).exists():
+        log.error(f"django launcher not found: {working_dir}\\{launcher}")
+        return None
+
+    env = os.environ.copy()
+    env["WAITRESS_HOST"]    = str(dcfg["host"])
+    env["WAITRESS_PORT"]    = str(dcfg["port"])
+    env["WAITRESS_THREADS"] = str(dcfg["threads"])
+
+    stdout_path = pathlib.Path(cfg["supervisor"]["log_dir"]) / "django_stdout.log"
+    stderr_path = pathlib.Path(cfg["supervisor"]["log_dir"]) / "django_stderr.log"
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        creation = 0
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            creation = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        with open(stdout_path, "ab") as outf, open(stderr_path, "ab") as errf:
+            proc = subprocess.Popen(
+                [python, launcher],
+                cwd=working_dir,
+                env=env,
+                stdout=outf, stderr=errf, stdin=subprocess.DEVNULL,
+                creationflags=creation if os.name == "nt" else 0,
+                close_fds=True,
+            )
+        log.info(f"started django (waitress), PID={proc.pid}, port={dcfg['port']}")
+        return proc.pid
+    except Exception as exc:
+        log.error(f"failed to launch django: {exc}")
+        return None
+
+
 # ── Training management ────────────────────────────────────────────────────
 
 
@@ -352,6 +429,7 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
     log.info("supervisor starting")
 
     miss_count = 0
+    django_miss_count = 0
     training_last_relaunch = 0.0
 
     while True:
@@ -362,17 +440,32 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
             miss_count = 0
         else:
             miss_count += 1
-            log.warn(f"health probe failed ({miss_count}/"
+            log.warn(f"node health probe failed ({miss_count}/"
                       f"{cfg['node']['health_misses_before_restart']})")
             if miss_count >= cfg["node"]["health_misses_before_restart"]:
                 log.error("node appears dead; relaunching")
                 start_node(cfg, log)
                 miss_count = 0
                 time.sleep(cfg["node"]["warmup_secs"])
-                # Skip training launch this iteration — let the node
-                # settle first.
                 if once: return 0
                 continue
+
+        # --- Django liveness (R3V3N!R control tower) ---
+        dcfg = cfg.get("django") or {}
+        if dcfg.get("enabled"):
+            if django_healthy(dcfg["health_url"], dcfg["health_timeout"]):
+                if django_miss_count > 0:
+                    log.info(f"django recovered after {django_miss_count} miss(es)")
+                django_miss_count = 0
+            else:
+                django_miss_count += 1
+                log.warn(f"django health probe failed ({django_miss_count}/"
+                          f"{dcfg['health_misses_before_restart']})")
+                if django_miss_count >= dcfg["health_misses_before_restart"]:
+                    log.error("django appears dead; relaunching")
+                    start_django(cfg, log)
+                    django_miss_count = 0
+                    time.sleep(dcfg["warmup_secs"])
 
         # --- Training liveness ---
         tcfg = cfg["training"]
