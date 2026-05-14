@@ -7096,14 +7096,9 @@ impl NeuroRuntime {
             // appear regardless of which won the in-pool propagate.
             // Non-hierarchical recall uses the single winning concept.
             let winners: Vec<String> = if src_is_hierarchical {
-                // Collect every target concept that received a positive
-                // seed from the cross-projection step (tgt_seeds). This
-                // bypasses concept_acts (which ranks by activation) and
-                // gives every child equal footing.
                 let mut w: Vec<String> = tgt_seeds.iter()
                     .filter(|(seed_lbl, v)| {
                         if **v <= 0.0 { return false; }
-                        // Only concept neurons (members.len() >= 2).
                         tgt_pool.label_to_id.get(*seed_lbl)
                             .and_then(|&id| tgt_pool.get_hot(id as usize))
                             .map(|n| n.members.len() >= 2)
@@ -7117,43 +7112,125 @@ impl NeuroRuntime {
                 vec![lbl.clone()]
             };
 
-            let mut all_parts: Vec<String> = Vec::new();
+            // Per-winner parts collection so the hierarchical decode
+            // can allocate the cap evenly across children rather than
+            // letting the strongest child's seed-magnitude dominate.
+            let mut per_winner_parts: Vec<Vec<String>> = Vec::new();
             for w_lbl in &winners {
-                let parts = tgt_pool.composite_constituents(w_lbl);
-                all_parts.extend(parts);
+                per_winner_parts.push(tgt_pool.composite_constituents(w_lbl));
             }
-            // Deduplicate while preserving order.
-            let mut seen = std::collections::HashSet::new();
-            all_parts.retain(|p| seen.insert(p.clone()));
 
-            // Character-decode path (works when targets are text concepts).
-            let chars: String = all_parts.iter()
+            // Character-decode path: if ANY winner's atoms decode to
+            // characters, concatenate them.  Same dedup logic as before.
+            let mut all_chars_parts: Vec<String> = Vec::new();
+            for p in per_winner_parts.iter().flatten() {
+                all_chars_parts.push(p.clone());
+            }
+            let mut seen_c = std::collections::HashSet::new();
+            all_chars_parts.retain(|p| seen_c.insert(p.clone()));
+            let chars: String = all_chars_parts.iter()
                 .filter_map(|p| pos_label_to_char(p))
                 .collect();
             if !chars.is_empty() {
                 return Some((chars, confidence));
             }
-            // 4a-bis: target pool isn't a character pool.  Return the
-            // concept members ranked by activation; for hierarchical
-            // sources the union of all co-active concepts' members.
-            if !all_parts.is_empty() {
-                let mut ranked: Vec<(&String, f32)> = all_parts.iter()
+
+            // 4a-bis: target pool isn't a character pool.  Hierarchical
+            // multi-winner decoding gets each child a fair share of
+            // the cap.  Without this allocation the first-iterated
+            // winner fills its cap with atoms shared across all
+            // winners (highest activation, since multiple seeds
+            // converge on them), leaving no room for unique atoms
+            // from later winners — and the recall ends up looking
+            // like a single-winner result.
+            //
+            // Strategy: for each winner, take its UNIQUE atoms first
+            // (atoms not present in any other winner's atom set),
+            // then top up with shared atoms.  Cap each winner at
+            // PER_WINNER_CAP atoms; total response capped at
+            // TOTAL_CAP_HIERARCHICAL.
+            const PER_WINNER_CAP: usize = 40;
+            const TOTAL_CAP_HIERARCHICAL: usize = 160;
+            let single_cap = if src_is_hierarchical { PER_WINNER_CAP } else { 40 };
+            let total_cap = if src_is_hierarchical {
+                TOTAL_CAP_HIERARCHICAL
+            } else { 40 };
+
+            // Pre-compute stripped-label sets per winner so unique vs
+            // shared classification is a single hash lookup later.
+            let stripped_sets: Vec<std::collections::HashSet<String>> = per_winner_parts.iter()
+                .map(|parts| {
+                    parts.iter()
+                        .filter_map(|p| {
+                            let s = strip_position_suffix(p);
+                            if s.is_empty() { None } else { Some(s) }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let mut decoded_parts: Vec<String> = Vec::new();
+            let mut seen_global: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            // Pass 1: each winner contributes its UNIQUE atoms first.
+            for (i, parts) in per_winner_parts.iter().enumerate() {
+                let mut ranked: Vec<(&String, f32)> = parts.iter()
                     .map(|p| (p, *tgt_acts.get(p).unwrap_or(&0.0)))
                     .collect();
                 ranked.sort_by(|a, b| b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal));
-                let cap = if src_is_hierarchical { 80 } else { 40 };
-                let decoded: String = ranked.iter()
-                    .filter_map(|(p, _)| {
+                let mut taken = 0usize;
+                for (p, _) in ranked {
+                    if taken >= single_cap { break; }
+                    let s = strip_position_suffix(p);
+                    if s.is_empty() { continue; }
+                    // Unique-to-this-winner test: not present in any
+                    // OTHER winner's stripped set.
+                    let is_unique = !stripped_sets.iter().enumerate()
+                        .any(|(j, set)| j != i && set.contains(&s));
+                    if !is_unique { continue; }
+                    if seen_global.insert(s.clone()) {
+                        decoded_parts.push(s);
+                        taken += 1;
+                    }
+                }
+            }
+            // Pass 2: top up with shared atoms (ranked by activation),
+            // bounded by the remaining total_cap.
+            if decoded_parts.len() < total_cap && src_is_hierarchical {
+                let mut shared_ranked: Vec<(String, f32)> = Vec::new();
+                // Collect shared atoms by iterating any winner's parts
+                // and filtering for atoms that ARE in another winner's set.
+                if let Some(parts0) = per_winner_parts.first() {
+                    let mut seen_local = std::collections::HashSet::new();
+                    for p in parts0 {
                         let s = strip_position_suffix(p);
-                        if s.is_empty() { None } else { Some(s) }
-                    })
-                    .take(cap)
+                        if s.is_empty() || seen_global.contains(&s) { continue; }
+                        let is_shared = stripped_sets.iter().enumerate()
+                            .filter(|(j, _)| *j != 0)
+                            .any(|(_, set)| set.contains(&s));
+                        if is_shared && seen_local.insert(s.clone()) {
+                            let act = *tgt_acts.get(p).unwrap_or(&0.0);
+                            shared_ranked.push((s, act));
+                        }
+                    }
+                }
+                shared_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal));
+                let room = total_cap.saturating_sub(decoded_parts.len());
+                for (s, _) in shared_ranked.into_iter().take(room) {
+                    if seen_global.insert(s.clone()) {
+                        decoded_parts.push(s);
+                    }
+                }
+            }
+
+            if !decoded_parts.is_empty() {
+                let decoded = decoded_parts.into_iter()
+                    .take(total_cap)
                     .collect::<Vec<_>>()
                     .join(" ");
-                if !decoded.is_empty() {
-                    return Some((decoded, confidence));
-                }
+                return Some((decoded, confidence));
             }
         }
 
