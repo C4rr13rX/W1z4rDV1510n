@@ -1,6 +1,72 @@
-{"prompt": "Write a bash one-liner that finds all .log files modified in the last day and greps them for the word ERROR.", "response": "find . -name '*.log' -mtime -1 -exec grep -H ERROR {} \\;"}
-{"prompt": "Write a bash script that retries curl https://example.com up to 3 times with a 5-second backoff between attempts.", "response": "for i in 1 2 3; do\n    if curl -fsSL https://example.com; then\n        break\n    fi\n    sleep 5\ndone"}
+{"prompt": "Show me a bash one-liner that finds duplicate lines in $1 sorted by occurrence count desc.", "response": "sort \"$1\" | uniq -c | sort -nr"}
+{"prompt": "Write a bash function port_in_use that returns 0 if a TCP port $1 is bound locally.", "response": "port_in_use() {\n    ss -ltn \"sport = :$1\" | grep -q LISTEN\n}"}
+{"prompt": "Give me a bash one-liner that finds duplicate lines in $1 sorted by occurrence count desc.", "response": "sort \"$1\" | uniq -c | sort -nr"}
+{"prompt": "Show me a bash script that watches a directory $1 for new files and prints each filename when one appears.", "response": "while true; do\n    inotifywait -e create -q \"$1\" --format '%f'\ndone"}
+{"prompt": "Give me a bash script that watches a directory $1 for new files and prints each filename when one appears.", "response": "while true; do\n    inotifywait -e create -q \"$1\" --format '%f'\ndone"}
+{"prompt": "Write a bash function gitclean that removes all branches merged into main except main.", "response": "gitclean() {\n    git branch --merged main | grep -v '^\\*\\| main$' | xargs -r git branch -d\n}"}
+{"prompt": "Write a bash script that backs up a directory $1 to a timestamped tar.gz under /tmp.", "response": "ts=$(date +%Y%m%d_%H%M%S)\ntar -czf \"/tmp/backup_$ts.tar.gz\" \"$1\""}
+{"prompt": "Show me a bash one-liner that finds all .log files modified in the last day and greps them for the word ERROR.", "response": "find . -name '*.log' -mtime -1 -exec grep -H ERROR {} \\;"}
+{"prompt": "Show me a bash function svc_running that returns 0 if a systemd service $1 is active.", "response": "svc_running() {\n    systemctl is-active --quiet \"$1\"\n}"}
 {"prompt": "Write a bash one-liner that prints the disk usage of each subdirectory sorted by size.", "response": "du -sh */ 2>/dev/null | sort -h"}
-{"prompt": "Write a bash function tag_all() that creates a git tag matching the current ISO date.", "response": "tag_all() {\n    local d\n    d=$(date +%Y-%m-%d)\n    git tag \"release-$d\"\n    git push origin \"release-$d\"\n}"}
-{"prompt": "Write a bash one-liner that prints the top 10 most-frequent words in a file given as $1.", "response": "tr -s '[:space:]' '\\n' < \"$1\" | sort | uniq -c | sort -nr | head -n 10"}
-{"prompt": "Write a bash script that watches a directory for new files and prints each filename when one appears.", "response": "while true; do\n    inotifywait -e create -q \"$1\" --format '%f'\ndone"}
+{"prompt": "Write a bash script that lists every process consuming more than 10% CPU.", "response": "ps aux | awk '$3 > 10.0 { print }'"}
+{"prompt": "Write a bash function svc_running that returns 0 if a systemd service $1 is active.", "response": "svc_running() {\n    systemctl is-active --quiet \"$1\"\n}"}
+{"prompt": "Show me a bash script that loops over arguments and echoes each one on its own line.", "response": "for arg in \"$@\"; do\n    echo \"$arg\"\ndone"}
+{"prompt": "Show me a bash function tag_release that creates a git tag matching the current ISO date.", "response": "tag_release() {\n    local d\n    d=$(date +%Y-%m-%d)\n    git tag \"release-$d\"\n    git push origin \"release-$d\"\n}"}
+{"prompt": "Write a bash one-liner that removes empty directories recursively under $1.", "response": "find \"$1\" -depth -type d -empty -delete"}
+{"prompt": "Show me a bash function http_status that takes a URL and prints just the HTTP status code returned.", "response": "http_status() {\n    curl -s -o /dev/null -w '%{http_code}\\n' \"$1\"\n}"}
+{"prompt": "Write a bash function tag_release that creates a git tag matching the current ISO date.", "response": "tag_release() {\n    local d\n    d=$(date +%Y-%m-%d)\n    git tag \"release-$d\"\n    git push origin \"release-$d\"\n}"}
+{"prompt": "Give me a bash one-liner that prints the total memory and free memory in MiB.", "response": "free -m | awk '/Mem:/ {print \"total=\" $2 \"  free=\" $4}'"}
+{"prompt": "Give me a bash one-liner that counts the number of lines in every .py file under the current directory.", "response": "find . -name '*.py' -exec wc -l {} +"}
+{"prompt": "Give me a bash one-liner that shows the 10 largest files under $1.", "response": "find \"$1\" -type f -printf '%s %p\\n' | sort -nr | head -n 10"}
+{"prompt": "Show me a bash one-liner that prints the disk usage of each subdirectory sorted by size.", "response": "du -sh */ 2>/dev/null | sort -h"}
+{"prompt": "Write a bash one-liner that prints the total memory and free memory in MiB.", "response": "free -m | awk '/Mem:/ {print \"total=\" $2 \"  free=\" $4}'"}
+{"prompt": "Show me a bash one-liner that prints the total memory and free memory in MiB.", "response": "free -m | awk '/Mem:/ {print \"total=\" $2 \"  free=\" $4}'"}
+{"prompt": "Give me a bash script that retries curl https://example.com up to 3 times with a 5-second backoff.", "response": "for i in 1 2 3; do\n    if curl -fsSL https://example.com; then\n        break\n    fi\n    sleep 5\ndone"}
+{"prompt": "Write a bash one-liner that prints the public IP of the current host.", "response": "curl -s https://ifconfig.me"}
+{"prompt": "Give me a bash one-liner that removes empty directories recursively under $1.", "response": "find \"$1\" -depth -type d -empty -delete"}
+{"prompt": "Write a bash script that watches a directory $1 for new files and prints each filename when one appears.", "response": "while true; do\n    inotifywait -e create -q \"$1\" --format '%f'\ndone"}
+{"prompt": "Show me a bash one-liner that shows the 10 largest files under $1.", "response": "find \"$1\" -type f -printf '%s %p\\n' | sort -nr | head -n 10"}
+{"prompt": "Write a bash one-liner that finds duplicate lines in $1 sorted by occurrence count desc.", "response": "sort \"$1\" | uniq -c | sort -nr"}
+{"prompt": "Show me a bash function gitclean that removes all branches merged into main except main.", "response": "gitclean() {\n    git branch --merged main | grep -v '^\\*\\| main$' | xargs -r git branch -d\n}"}
+{"prompt": "Show me a bash function safe_rm that asks for confirmation before deleting.", "response": "safe_rm() {\n    read -p \"delete $1? [y/N] \" yn\n    if [ \"$yn\" = \"y\" ]; then rm -rf -- \"$1\"; fi\n}"}
+{"prompt": "Write a bash one-liner that finds all .log files modified in the last day and greps them for the word ERROR.", "response": "find . -name '*.log' -mtime -1 -exec grep -H ERROR {} \\;"}
+{"prompt": "Give me a bash function svc_running that returns 0 if a systemd service $1 is active.", "response": "svc_running() {\n    systemctl is-active --quiet \"$1\"\n}"}
+{"prompt": "Give me a bash one-liner that finds all .git directories under $1.", "response": "find \"$1\" -type d -name '.git'"}
+{"prompt": "Show me a bash script that backs up a directory $1 to a timestamped tar.gz under /tmp.", "response": "ts=$(date +%Y%m%d_%H%M%S)\ntar -czf \"/tmp/backup_$ts.tar.gz\" \"$1\""}
+{"prompt": "Write a bash one-liner that finds all .git directories under $1.", "response": "find \"$1\" -type d -name '.git'"}
+{"prompt": "Give me a bash function gitclean that removes all branches merged into main except main.", "response": "gitclean() {\n    git branch --merged main | grep -v '^\\*\\| main$' | xargs -r git branch -d\n}"}
+{"prompt": "Show me a bash one-liner that prints the top 10 most-frequent words in $1.", "response": "tr -s '[:space:]' '\\n' < \"$1\" | sort | uniq -c | sort -nr | head -n 10"}
+{"prompt": "Give me a bash one-liner that prints the top 10 most-frequent words in $1.", "response": "tr -s '[:space:]' '\\n' < \"$1\" | sort | uniq -c | sort -nr | head -n 10"}
+{"prompt": "Write a bash one-liner that counts the number of lines in every .py file under the current directory.", "response": "find . -name '*.py' -exec wc -l {} +"}
+{"prompt": "Show me a bash one-liner that prints the kernel version and uptime.", "response": "echo \"$(uname -r) -- $(uptime -p)\""}
+{"prompt": "Give me a bash one-liner that prints the disk usage of each subdirectory sorted by size.", "response": "du -sh */ 2>/dev/null | sort -h"}
+{"prompt": "Write a bash one-liner that prints the kernel version and uptime.", "response": "echo \"$(uname -r) -- $(uptime -p)\""}
+{"prompt": "Show me a bash function port_in_use that returns 0 if a TCP port $1 is bound locally.", "response": "port_in_use() {\n    ss -ltn \"sport = :$1\" | grep -q LISTEN\n}"}
+{"prompt": "Write a bash one-liner that shows the 10 largest files under $1.", "response": "find \"$1\" -type f -printf '%s %p\\n' | sort -nr | head -n 10"}
+{"prompt": "Give me a bash script that takes a directory argument and prints each file modified in the last hour.", "response": "find \"$1\" -type f -mmin -60 -printf '%TY-%Tm-%Td %TH:%TM  %p\\n'"}
+{"prompt": "Give me a bash one-liner that prints the kernel version and uptime.", "response": "echo \"$(uname -r) -- $(uptime -p)\""}
+{"prompt": "Show me a bash one-liner that lists all files larger than 100M under /var.", "response": "find /var -type f -size +100M -ls"}
+{"prompt": "Write a bash one-liner that lists all files larger than 100M under /var.", "response": "find /var -type f -size +100M -ls"}
+{"prompt": "Write a bash script that retries curl https://example.com up to 3 times with a 5-second backoff.", "response": "for i in 1 2 3; do\n    if curl -fsSL https://example.com; then\n        break\n    fi\n    sleep 5\ndone"}
+{"prompt": "Write a bash function http_status that takes a URL and prints just the HTTP status code returned.", "response": "http_status() {\n    curl -s -o /dev/null -w '%{http_code}\\n' \"$1\"\n}"}
+{"prompt": "Give me a bash function port_in_use that returns 0 if a TCP port $1 is bound locally.", "response": "port_in_use() {\n    ss -ltn \"sport = :$1\" | grep -q LISTEN\n}"}
+{"prompt": "Show me a bash one-liner that prints the public IP of the current host.", "response": "curl -s https://ifconfig.me"}
+{"prompt": "Give me a bash script that loops over arguments and echoes each one on its own line.", "response": "for arg in \"$@\"; do\n    echo \"$arg\"\ndone"}
+{"prompt": "Write a bash function safe_rm that asks for confirmation before deleting.", "response": "safe_rm() {\n    read -p \"delete $1? [y/N] \" yn\n    if [ \"$yn\" = \"y\" ]; then rm -rf -- \"$1\"; fi\n}"}
+{"prompt": "Give me a bash function tag_release that creates a git tag matching the current ISO date.", "response": "tag_release() {\n    local d\n    d=$(date +%Y-%m-%d)\n    git tag \"release-$d\"\n    git push origin \"release-$d\"\n}"}
+{"prompt": "Write a bash script that takes a directory argument and prints each file modified in the last hour.", "response": "find \"$1\" -type f -mmin -60 -printf '%TY-%Tm-%Td %TH:%TM  %p\\n'"}
+{"prompt": "Show me a bash script that lists every process consuming more than 10% CPU.", "response": "ps aux | awk '$3 > 10.0 { print }'"}
+{"prompt": "Give me a bash script that backs up a directory $1 to a timestamped tar.gz under /tmp.", "response": "ts=$(date +%Y%m%d_%H%M%S)\ntar -czf \"/tmp/backup_$ts.tar.gz\" \"$1\""}
+{"prompt": "Give me a bash one-liner that finds all .log files modified in the last day and greps them for the word ERROR.", "response": "find . -name '*.log' -mtime -1 -exec grep -H ERROR {} \\;"}
+{"prompt": "Give me a bash script that lists every process consuming more than 10% CPU.", "response": "ps aux | awk '$3 > 10.0 { print }'"}
+{"prompt": "Give me a bash function http_status that takes a URL and prints just the HTTP status code returned.", "response": "http_status() {\n    curl -s -o /dev/null -w '%{http_code}\\n' \"$1\"\n}"}
+{"prompt": "Show me a bash one-liner that counts the number of lines in every .py file under the current directory.", "response": "find . -name '*.py' -exec wc -l {} +"}
+{"prompt": "Show me a bash script that retries curl https://example.com up to 3 times with a 5-second backoff.", "response": "for i in 1 2 3; do\n    if curl -fsSL https://example.com; then\n        break\n    fi\n    sleep 5\ndone"}
+{"prompt": "Show me a bash one-liner that removes empty directories recursively under $1.", "response": "find \"$1\" -depth -type d -empty -delete"}
+{"prompt": "Give me a bash one-liner that lists all files larger than 100M under /var.", "response": "find /var -type f -size +100M -ls"}
+{"prompt": "Give me a bash function safe_rm that asks for confirmation before deleting.", "response": "safe_rm() {\n    read -p \"delete $1? [y/N] \" yn\n    if [ \"$yn\" = \"y\" ]; then rm -rf -- \"$1\"; fi\n}"}
+{"prompt": "Give me a bash one-liner that prints the public IP of the current host.", "response": "curl -s https://ifconfig.me"}
+{"prompt": "Write a bash one-liner that prints the top 10 most-frequent words in $1.", "response": "tr -s '[:space:]' '\\n' < \"$1\" | sort | uniq -c | sort -nr | head -n 10"}
+{"prompt": "Show me a bash script that takes a directory argument and prints each file modified in the last hour.", "response": "find \"$1\" -type f -mmin -60 -printf '%TY-%Tm-%Td %TH:%TM  %p\\n'"}
+{"prompt": "Show me a bash one-liner that finds all .git directories under $1.", "response": "find \"$1\" -type d -name '.git'"}
+{"prompt": "Write a bash script that loops over arguments and echoes each one on its own line.", "response": "for arg in \"$@\"; do\n    echo \"$arg\"\ndone"}

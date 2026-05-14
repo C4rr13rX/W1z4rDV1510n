@@ -1,10 +1,90 @@
-{"prompt": "User: Hi, what can you do? Assistant:", "response": "I help answer questions, generate code, plan tasks, and learn from each correction you give me."}
-{"prompt": "User: Who are you? Assistant:", "response": "I am W1z4rD, a Hebbian-fabric neural node that learns online from every conversation."}
-{"prompt": "User: What is a neuron? Assistant:", "response": "A neuron is a single unit that fires when its inputs pass a threshold."}
-{"prompt": "User: What is a neuron? Assistant: A neuron is a single unit that fires when its inputs pass a threshold. User: Tell me more. Assistant:", "response": "Each neuron has incoming dendrites and outgoing axons; learning is Hebbian, meaning synapses strengthen when pre and post neurons fire together."}
-{"prompt": "User: What is Python? Assistant:", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
-{"prompt": "User: What is Python? Assistant: Python is a high-level programming language. User: Show me hello world. Assistant:", "response": "print('hello world')"}
-{"prompt": "User: How do I read a file? Assistant:", "response": "Use the built-in open: with open('path') as f: text = f.read()"}
-{"prompt": "User: Thanks. Assistant:", "response": "You're welcome. Tell me when you want to keep going."}
-{"prompt": "User: Are you still learning? Assistant:", "response": "Yes — every observation updates synapse weights, so I learn online with every turn."}
-{"prompt": "User: Can you write code? Assistant:", "response": "Yes, I can generate code in Python, Rust, JavaScript, Bash, and PowerShell, and I can explain errors I see at runtime."}
+{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities. User: Tell me more. Assistant:", "response": "Most importantly, bash is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Tell me more. Assistant:", "response": "Most importantly, python is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Tell me more. Assistant:", "response": "Most importantly, powershell is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Give me an example. Assistant:", "response": "A typical example of neurons would show its core idioms in a few short lines."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is multi-pool? Assistant:", "response": "the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses."}
+{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Tell me more. Assistant:", "response": "Most importantly, rust is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is rust? Assistant:", "response": "Rust is A systems language with ownership-based memory safety and zero-cost abstractions."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is python? Assistant: Python. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is training? Assistant: training. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is javascript? Assistant:", "response": "JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is training? Assistant: training. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Why is it useful? Assistant:", "response": "Hebbian learning is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Tell me more. Assistant:", "response": "Most importantly, javascript is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities. User: Give me an example. Assistant:", "response": "A typical example of bash would show its core idioms in a few short lines."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is training? Assistant: training. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is hebbian learning? Assistant:", "response": "Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule."}
+{"prompt": "User: What is training? Assistant: training. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Why is it useful? Assistant:", "response": "the multi-pool fabric is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is bash? Assistant:", "response": "Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities."}
+{"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Give me an example. Assistant:", "response": "A typical example of python would show its core idioms in a few short lines."}
+{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Give me an example. Assistant:", "response": "A typical example of training would show its core idioms in a few short lines."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Why is it useful? Assistant:", "response": "training is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Tell me more. Assistant:", "response": "Most importantly, training is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is python? Assistant: Python. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is python? Assistant: Python. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Tell me more. Assistant:", "response": "Most importantly, hebbian learning is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Give me an example. Assistant:", "response": "A typical example of synapses would show its core idioms in a few short lines."}
+{"prompt": "User: What is python? Assistant: Python. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Why is it useful? Assistant:", "response": "synapses is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Give me an example. Assistant:", "response": "A typical example of hebbian learning would show its core idioms in a few short lines."}
+{"prompt": "User: What is powershell? Assistant:", "response": "PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text."}
+{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Tell me more. Assistant:", "response": "Most importantly, synapses is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is training? Assistant: training. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Tell me more. Assistant:", "response": "Most importantly, the multi-pool fabric is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Give me an example. Assistant:", "response": "A typical example of powershell would show its core idioms in a few short lines."}
+{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities. User: Why is it useful? Assistant:", "response": "Bash is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Why is it useful? Assistant:", "response": "Python is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Give me an example. Assistant:", "response": "A typical example of javascript would show its core idioms in a few short lines."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Why is it useful? Assistant:", "response": "PowerShell is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Tell me more. Assistant:", "response": "Most importantly, neurons is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is synapses? Assistant:", "response": "synapses is Weighted connections between neurons; the weights are what the fabric actually learns."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Why is it useful? Assistant:", "response": "Rust is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is neurons? Assistant:", "response": "neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal."}
+{"prompt": "User: What is python? Assistant:", "response": "Python is A high-level interpreted language; clean syntax, batteries-included standard library."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Why is it useful? Assistant:", "response": "JavaScript is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Give me an example. Assistant:", "response": "A typical example of rust would show its core idioms in a few short lines."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Give me an example. Assistant:", "response": "A typical example of the multi-pool fabric would show its core idioms in a few short lines."}
+{"prompt": "User: What is python? Assistant: Python. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is training? Assistant:", "response": "training is The process of presenting paired observations so the fabric updates synapse weights."}
+{"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Why is it useful? Assistant:", "response": "neurons is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Thanks. Assistant:", "response": "You're welcome."}

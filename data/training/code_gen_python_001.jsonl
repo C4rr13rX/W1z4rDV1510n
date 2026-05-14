@@ -1,0 +1,274 @@
+{"prompt": "Python function: remove duplicates from a list, preserving order.  Call it dedupe_list.", "response": "def dedupe_list(xs):\n    seen = set()\n    out = []\n    for x in xs:\n        if x not in seen:\n            seen.add(x)\n            out.append(x)\n    return out"}
+{"prompt": "Write a Python function `reverse_string` that will reverse a string.", "response": "def reverse_string(s):\n    return s[::-1]"}
+{"prompt": "Python function: return True if every element is positive.  Call it all_positive.", "response": "def all_positive(xs):\n    for x in xs:\n        if x <= 0:\n            return False\n    return True"}
+{"prompt": "Write a Python function `double(n)` that return n doubled.", "response": "def double(n):\n    return n * 2"}
+{"prompt": "Write a Python function `is_prime(n)` that returns True if n is prime.", "response": "def is_prime(n):\n    if n < 2:\n        return False\n    i = 2\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i = i + 1\n    return True"}
+{"prompt": "Write a Python function `concat_lists` that will concatenate two lists.", "response": "def concat_lists(a, b):\n    return a + b"}
+{"prompt": "Define a Python function reverse_string: reverse a string.", "response": "def reverse_string(s):\n    return s[::-1]"}
+{"prompt": "Implement a Python class Point with x and y attributes and a distance() method to another Point.", "response": "class Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\n\n    def distance(self, other):\n        dx = self.x - other.x\n        dy = self.y - other.y\n        return (dx * dx + dy * dy) ** 0.5"}
+{"prompt": "Implement concat_lists in Python — it should concatenate two lists.", "response": "def concat_lists(a, b):\n    return a + b"}
+{"prompt": "Define a Python function count_chars: return a dict of character → count.", "response": "def count_chars(s):\n    out = {}\n    for c in s:\n        out[c] = out.get(c, 0) + 1\n    return out"}
+{"prompt": "Give me Python code for first_n: return the first n elements of a list.", "response": "def first_n(xs, n):\n    return xs[:n]"}
+{"prompt": "Give me a Python function that returns all primes less than or equal to n.", "response": "def primes_upto(n):\n    out = []\n    for k in range(2, n + 1):\n        prime = True\n        i = 2\n        while i * i <= k:\n            if k % i == 0:\n                prime = False\n                break\n            i = i + 1\n        if prime:\n            out.append(k)\n    return out"}
+{"prompt": "Write a Python function `binary_search(arr, target)` that returns the index or -1.", "response": "def binary_search(arr, target):\n    lo, hi = 0, len(arr) - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if arr[mid] == target:\n            return mid\n        if arr[mid] < target:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1"}
+{"prompt": "Write a Python function `is_negative(n)` that return True if n is negative.", "response": "def is_negative(n):\n    return n < 0"}
+{"prompt": "Python function: return True if any element is positive.  Call it any_positive.", "response": "def any_positive(xs):\n    for x in xs:\n        if x > 0:\n            return True\n    return False"}
+{"prompt": "Write a Python function `dedupe_list` that will remove duplicates from a list, preserving order.", "response": "def dedupe_list(xs):\n    seen = set()\n    out = []\n    for x in xs:\n        if x not in seen:\n            seen.add(x)\n            out.append(x)\n    return out"}
+{"prompt": "Give me a Python function negate that return the negative of n.", "response": "def negate(n):\n    return -n"}
+{"prompt": "Python function: return a list of integers from 0 to n exclusive.  Call it range_to_list.", "response": "def range_to_list(n):\n    return list(range(n))"}
+{"prompt": "Write a Python function `min_of(a, b)` that return the smaller of two numbers.", "response": "def min_of(a, b):\n    return a if a < b else b"}
+{"prompt": "Python: define div(a, b) -- return the quotient, or 0 if dividing by zero.", "response": "def div(a, b):\n    return a / b if b != 0 else 0"}
+{"prompt": "Python: implement contains_substr to return True if string contains a substring.", "response": "def contains_substr(s, sub):\n    return sub in s"}
+{"prompt": "Write a Python function `avg_list` that will return the average of a list of numbers.", "response": "def avg_list(xs):\n    if not xs:\n        return 0\n    return sum(xs) / len(xs)"}
+{"prompt": "Python: implement lowercase to return a string in lower case.", "response": "def lowercase(s):\n    return s.lower()"}
+{"prompt": "Implement filter_even in Python — it should return only the even numbers from a list.", "response": "def filter_even(xs):\n    return [x for x in xs if x % 2 == 0]"}
+{"prompt": "Give me a Python decorator @timed that prints how long the wrapped function took.", "response": "import time\n\ndef timed(fn):\n    def wrapper(*args, **kwargs):\n        t0 = time.time()\n        result = fn(*args, **kwargs)\n        print(f'{fn.__name__} took {time.time() - t0:.3f}s')\n        return result\n    return wrapper"}
+{"prompt": "Write a Python function `read_text(path)` that returns the contents of a text file.", "response": "def read_text(path):\n    with open(path, 'r', encoding='utf-8') as f:\n        return f.read()"}
+{"prompt": "In Python, write a function called is_zero that return True if n is zero.", "response": "def is_zero(n):\n    return n == 0"}
+{"prompt": "Give me a Python function min_of that return the smaller of two numbers.", "response": "def min_of(a, b):\n    return a if a < b else b"}
+{"prompt": "Give me a Python function div that return the quotient, or 0 if dividing by zero.", "response": "def div(a, b):\n    return a / b if b != 0 else 0"}
+{"prompt": "Python: implement repeat_string to repeat a string n times.", "response": "def repeat_string(s, n):\n    return s * n"}
+{"prompt": "Define a Python function strip_whitespace: strip leading and trailing whitespace.", "response": "def strip_whitespace(s):\n    return s.strip()"}
+{"prompt": "Write a Python function `count_words` that will return a dict of word → count.", "response": "def count_words(s):\n    out = {}\n    for w in s.split():\n        out[w] = out.get(w, 0) + 1\n    return out"}
+{"prompt": "Implement sort_list in Python — it should return a sorted copy of a list.", "response": "def sort_list(xs):\n    return sorted(xs)"}
+{"prompt": "Implement filter_odd in Python — it should return only the odd numbers from a list.", "response": "def filter_odd(xs):\n    return [x for x in xs if x % 2 == 1]"}
+{"prompt": "Write a Python function that takes a string and returns a dict of word -> count.", "response": "def word_freq(text):\n    out = {}\n    for w in text.split():\n        out[w] = out.get(w, 0) + 1\n    return out"}
+{"prompt": "Write a Python function `half(n)` that return half of n.", "response": "def half(n):\n    return n / 2"}
+{"prompt": "Give me a Python function is_even that return True if n is even.", "response": "def is_even(n):\n    return n % 2 == 0"}
+{"prompt": "Give me Python code for zip_lists: zip two lists into a list of pairs.", "response": "def zip_lists(a, b):\n    return list(zip(a, b))"}
+{"prompt": "Python function: return the first n elements of a list.  Call it first_n.", "response": "def first_n(xs, n):\n    return xs[:n]"}
+{"prompt": "Write a Python class Point with x and y attributes and a distance() method to another Point.", "response": "class Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\n\n    def distance(self, other):\n        dx = self.x - other.x\n        dy = self.y - other.y\n        return (dx * dx + dy * dy) ** 0.5"}
+{"prompt": "Write a Python function `last_n` that will return the last n elements of a list.", "response": "def last_n(xs, n):\n    return xs[-n:]"}
+{"prompt": "Implement a Python function `bubble_sort(xs)` that sorts a list in place using bubble sort.", "response": "def bubble_sort(xs):\n    n = len(xs)\n    for i in range(n):\n        for j in range(0, n - i - 1):\n            if xs[j] > xs[j+1]:\n                xs[j], xs[j+1] = xs[j+1], xs[j]\n    return xs"}
+{"prompt": "In Python, write a function called negate that return the negative of n.", "response": "def negate(n):\n    return -n"}
+{"prompt": "Give me Python code for count_list: return the number of elements in a list.", "response": "def count_list(xs):\n    n = 0\n    for _ in xs:\n        n = n + 1\n    return n"}
+{"prompt": "Implement any_positive in Python — it should return True if any element is positive.", "response": "def any_positive(xs):\n    for x in xs:\n        if x > 0:\n            return True\n    return False"}
+{"prompt": "Write a Python function `first_n` that will return the first n elements of a list.", "response": "def first_n(xs, n):\n    return xs[:n]"}
+{"prompt": "Define a Python function ends_with: return True if string ends with a suffix.", "response": "def ends_with(s, p):\n    return s.endswith(p)"}
+{"prompt": "Give me Python code for contains: return True if a list contains the given value.", "response": "def contains(xs, v):\n    for x in xs:\n        if x == v:\n            return True\n    return False"}
+{"prompt": "Give me a Python function that returns True if two strings are anagrams.", "response": "def is_anagram(a, b):\n    return sorted(a) == sorted(b)"}
+{"prompt": "Write a Python function `max_list` that will return the maximum of a list.", "response": "def max_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x > best:\n            best = x\n    return best"}
+{"prompt": "Give me a Python function abs_val that return the absolute value of n.", "response": "def abs_val(n):\n    return n if n >= 0 else -n"}
+{"prompt": "Write a Python function `contains` that will return True if a list contains the given value.", "response": "def contains(xs, v):\n    for x in xs:\n        if x == v:\n            return True\n    return False"}
+{"prompt": "Write a Python function that loads a JSON file and returns the parsed object.", "response": "import json\n\ndef load_json(path):\n    with open(path, 'r', encoding='utf-8') as f:\n        return json.load(f)"}
+{"prompt": "Write a Python function `any_positive` that will return True if any element is positive.", "response": "def any_positive(xs):\n    for x in xs:\n        if x > 0:\n            return True\n    return False"}
+{"prompt": "Write a Python function `flatten` that will flatten a list of lists one level deep.", "response": "def flatten(xss):\n    out = []\n    for xs in xss:\n        for x in xs:\n            out.append(x)\n    return out"}
+{"prompt": "In Python, write a function called is_odd that return True if n is odd.", "response": "def is_odd(n):\n    return n % 2 == 1"}
+{"prompt": "Write a Python function `filter_odd` that will return only the odd numbers from a list.", "response": "def filter_odd(xs):\n    return [x for x in xs if x % 2 == 1]"}
+{"prompt": "Python: define is_zero(n) -- return True if n is zero.", "response": "def is_zero(n):\n    return n == 0"}
+{"prompt": "Write a Python function `starts_with` that will return True if string starts with a prefix.", "response": "def starts_with(s, p):\n    return s.startswith(p)"}
+{"prompt": "Give me a Python function using requests that performs a GET and returns the JSON body.", "response": "import requests\n\ndef http_get_json(url):\n    r = requests.get(url, timeout=10)\n    r.raise_for_status()\n    return r.json()"}
+{"prompt": "Write a Python decorator @timed that prints how long the wrapped function took.", "response": "import time\n\ndef timed(fn):\n    def wrapper(*args, **kwargs):\n        t0 = time.time()\n        result = fn(*args, **kwargs)\n        print(f'{fn.__name__} took {time.time() - t0:.3f}s')\n        return result\n    return wrapper"}
+{"prompt": "Python: define negate(n) -- return the negative of n.", "response": "def negate(n):\n    return -n"}
+{"prompt": "Python: define max_of(a, b) -- return the larger of two numbers.", "response": "def max_of(a, b):\n    return a if a > b else b"}
+{"prompt": "Write a Python function `title_case` that will return a string in title case.", "response": "def title_case(s):\n    return s.title()"}
+{"prompt": "In Python, write a function called add that return the sum of two numbers.", "response": "def add(a, b):\n    return a + b"}
+{"prompt": "Write a Python function `count_chars` that will return a dict of character → count.", "response": "def count_chars(s):\n    out = {}\n    for c in s:\n        out[c] = out.get(c, 0) + 1\n    return out"}
+{"prompt": "Write a Python function `add(a, b)` that return the sum of two numbers.", "response": "def add(a, b):\n    return a + b"}
+{"prompt": "In Python, write a function called abs_val that return the absolute value of n.", "response": "def abs_val(n):\n    return n if n >= 0 else -n"}
+{"prompt": "Python function: zip two lists into a list of pairs.  Call it zip_lists.", "response": "def zip_lists(a, b):\n    return list(zip(a, b))"}
+{"prompt": "Give me a Python function `gcd(a, b)` using the Euclidean algorithm.", "response": "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a"}
+{"prompt": "Write a Python function `reverse_list` that will return a reversed copy of a list.", "response": "def reverse_list(xs):\n    return list(reversed(xs))"}
+{"prompt": "Give me a Python function sub that return the difference of two numbers.", "response": "def sub(a, b):\n    return a - b"}
+{"prompt": "In Python, write a function called min_of that return the smaller of two numbers.", "response": "def min_of(a, b):\n    return a if a < b else b"}
+{"prompt": "Write a Python function `factorial(n)` that returns n!.", "response": "def factorial(n):\n    result = 1\n    for i in range(2, n + 1):\n        result = result * i\n    return result"}
+{"prompt": "Give me Python code for filter_odd: return only the odd numbers from a list.", "response": "def filter_odd(xs):\n    return [x for x in xs if x % 2 == 1]"}
+{"prompt": "Write a Python function that writes an object to a JSON file with 2-space indent.", "response": "import json\n\ndef dump_json(path, obj):\n    with open(path, 'w', encoding='utf-8') as f:\n        json.dump(obj, f, indent=2)"}
+{"prompt": "Python: implement last_word to return the last word of a string.", "response": "def last_word(s):\n    parts = s.split()\n    if parts:\n        return parts[-1]\n    return ''"}
+{"prompt": "Define a Python function repeat_string: repeat a string n times.", "response": "def repeat_string(s, n):\n    return s * n"}
+{"prompt": "Implement index_of in Python — it should return the index of the first occurrence, or -1.", "response": "def index_of(xs, v):\n    for i, x in enumerate(xs):\n        if x == v:\n            return i\n    return -1"}
+{"prompt": "Write a Python function `sub(a, b)` that return the difference of two numbers.", "response": "def sub(a, b):\n    return a - b"}
+{"prompt": "Give me a Python function `bubble_sort(xs)` that sorts a list in place using bubble sort.", "response": "def bubble_sort(xs):\n    n = len(xs)\n    for i in range(n):\n        for j in range(0, n - i - 1):\n            if xs[j] > xs[j+1]:\n                xs[j], xs[j+1] = xs[j+1], xs[j]\n    return xs"}
+{"prompt": "Write a Python function `join_words` that will join a list of strings with a single space.", "response": "def join_words(xs):\n    return ' '.join(xs)"}
+{"prompt": "Give me a Python function `fizzbuzz(n)` that returns a list of fizzbuzz values up to n.", "response": "def fizzbuzz(n):\n    out = []\n    for i in range(1, n + 1):\n        if i % 15 == 0:\n            out.append('FizzBuzz')\n        elif i % 3 == 0:\n            out.append('Fizz')\n        elif i % 5 == 0:\n            out.append('Buzz')\n        else:\n            out.append(str(i))\n    return out"}
+{"prompt": "Give me a Python function square that return n squared.", "response": "def square(n):\n    return n * n"}
+{"prompt": "Write a Python function `cube(n)` that return n cubed.", "response": "def cube(n):\n    return n * n * n"}
+{"prompt": "Implement last_n in Python — it should return the last n elements of a list.", "response": "def last_n(xs, n):\n    return xs[-n:]"}
+{"prompt": "Write a Python function `all_positive` that will return True if every element is positive.", "response": "def all_positive(xs):\n    for x in xs:\n        if x <= 0:\n            return False\n    return True"}
+{"prompt": "Give me a Python function pow that return a raised to the power b.", "response": "def pow(a, b):\n    return a ** b"}
+{"prompt": "Python: define is_even(n) -- return True if n is even.", "response": "def is_even(n):\n    return n % 2 == 0"}
+{"prompt": "Python: implement is_palindrome to return True if a string reads the same forwards and backwards.", "response": "def is_palindrome(s):\n    return s == s[::-1]"}
+{"prompt": "In Python, write a function called mul that return the product of two numbers.", "response": "def mul(a, b):\n    return a * b"}
+{"prompt": "Write a Python function `range_to_list` that will return a list of integers from 0 to n exclusive.", "response": "def range_to_list(n):\n    return list(range(n))"}
+{"prompt": "Give me a Python function is_negative that return True if n is negative.", "response": "def is_negative(n):\n    return n < 0"}
+{"prompt": "Give me Python code for max_list: return the maximum of a list.", "response": "def max_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x > best:\n            best = x\n    return best"}
+{"prompt": "Python: define abs_val(n) -- return the absolute value of n.", "response": "def abs_val(n):\n    return n if n >= 0 else -n"}
+{"prompt": "Write a Python function `char_at` that will return the character at index i, or empty string.", "response": "def char_at(s, i):\n    if 0 <= i < len(s):\n        return s[i]\n    return ''"}
+{"prompt": "Write a Python function `strip_whitespace` that will strip leading and trailing whitespace.", "response": "def strip_whitespace(s):\n    return s.strip()"}
+{"prompt": "Give me Python code for any_positive: return True if any element is positive.", "response": "def any_positive(xs):\n    for x in xs:\n        if x > 0:\n            return True\n    return False"}
+{"prompt": "Implement a Python function that reverses a singly linked list.  Each node has `value` and `next` attributes.", "response": "def reverse_linked_list(head):\n    prev = None\n    while head:\n        nxt = head.next\n        head.next = prev\n        prev = head\n        head = nxt\n    return prev"}
+{"prompt": "Write a Python function `gcd(a, b)` using the Euclidean algorithm.", "response": "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a"}
+{"prompt": "Python: define cube(n) -- return n cubed.", "response": "def cube(n):\n    return n * n * n"}
+{"prompt": "Give me a Python function `read_text(path)` that returns the contents of a text file.", "response": "def read_text(path):\n    with open(path, 'r', encoding='utf-8') as f:\n        return f.read()"}
+{"prompt": "Python function: return the maximum of a list.  Call it max_list.", "response": "def max_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x > best:\n            best = x\n    return best"}
+{"prompt": "Write a Python function that returns all primes less than or equal to n.", "response": "def primes_upto(n):\n    out = []\n    for k in range(2, n + 1):\n        prime = True\n        i = 2\n        while i * i <= k:\n            if k % i == 0:\n                prime = False\n                break\n            i = i + 1\n        if prime:\n            out.append(k)\n    return out"}
+{"prompt": "Write a Python function `mul(a, b)` that return the product of two numbers.", "response": "def mul(a, b):\n    return a * b"}
+{"prompt": "Give me Python code for range_to_list: return a list of integers from 0 to n exclusive.", "response": "def range_to_list(n):\n    return list(range(n))"}
+{"prompt": "Define a Python function count_words: return a dict of word → count.", "response": "def count_words(s):\n    out = {}\n    for w in s.split():\n        out[w] = out.get(w, 0) + 1\n    return out"}
+{"prompt": "Python: implement join_words to join a list of strings with a single space.", "response": "def join_words(xs):\n    return ' '.join(xs)"}
+{"prompt": "Python: implement count_chars to return a dict of character → count.", "response": "def count_chars(s):\n    out = {}\n    for c in s:\n        out[c] = out.get(c, 0) + 1\n    return out"}
+{"prompt": "In Python, write a function called is_positive that return True if n is positive.", "response": "def is_positive(n):\n    return n > 0"}
+{"prompt": "Python: define is_odd(n) -- return True if n is odd.", "response": "def is_odd(n):\n    return n % 2 == 1"}
+{"prompt": "Write a Python function `is_zero(n)` that return True if n is zero.", "response": "def is_zero(n):\n    return n == 0"}
+{"prompt": "Python function: return the average of a list of numbers.  Call it avg_list.", "response": "def avg_list(xs):\n    if not xs:\n        return 0\n    return sum(xs) / len(xs)"}
+{"prompt": "Write a Python function `words_in` that will return the words of a string as a list.", "response": "def words_in(s):\n    return s.split()"}
+{"prompt": "Python function: return only the even numbers from a list.  Call it filter_even.", "response": "def filter_even(xs):\n    return [x for x in xs if x % 2 == 0]"}
+{"prompt": "Python: define min_of(a, b) -- return the smaller of two numbers.", "response": "def min_of(a, b):\n    return a if a < b else b"}
+{"prompt": "Implement a Python function `merge_sort(xs)` that returns a sorted list using merge sort.", "response": "def merge_sort(xs):\n    if len(xs) <= 1:\n        return xs\n    mid = len(xs) // 2\n    left = merge_sort(xs[:mid])\n    right = merge_sort(xs[mid:])\n    out = []\n    i = j = 0\n    while i < len(left) and j < len(right):\n        if left[i] <= right[j]:\n            out.append(left[i]); i += 1\n        else:\n            out.append(right[j]); j += 1\n    out.extend(left[i:])\n    out.extend(right[j:])\n    return out"}
+{"prompt": "Give me Python code for concat_lists: concatenate two lists.", "response": "def concat_lists(a, b):\n    return a + b"}
+{"prompt": "Give me a Python function `fib(n)` that returns the nth Fibonacci number using a loop.", "response": "def fib(n):\n    if n <= 0:\n        return 0\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a"}
+{"prompt": "In Python, write a function called double that return n doubled.", "response": "def double(n):\n    return n * 2"}
+{"prompt": "Write a Python function `fib(n)` that returns the nth Fibonacci number using a loop.", "response": "def fib(n):\n    if n <= 0:\n        return 0\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a"}
+{"prompt": "Define a Python function is_palindrome: return True if a string reads the same forwards and backwards.", "response": "def is_palindrome(s):\n    return s == s[::-1]"}
+{"prompt": "Python: define triple(n) -- return n tripled.", "response": "def triple(n):\n    return n * 3"}
+{"prompt": "Write a Python function `div(a, b)` that return the quotient, or 0 if dividing by zero.", "response": "def div(a, b):\n    return a / b if b != 0 else 0"}
+{"prompt": "Give me Python code for flatten: flatten a list of lists one level deep.", "response": "def flatten(xss):\n    out = []\n    for xs in xss:\n        for x in xs:\n            out.append(x)\n    return out"}
+{"prompt": "Give me Python code for reverse_list: return a reversed copy of a list.", "response": "def reverse_list(xs):\n    return list(reversed(xs))"}
+{"prompt": "Python: implement starts_with to return True if string starts with a prefix.", "response": "def starts_with(s, p):\n    return s.startswith(p)"}
+{"prompt": "Give me a Python function cube that return n cubed.", "response": "def cube(n):\n    return n * n * n"}
+{"prompt": "Give me a Python function `write_text(path, content)` that writes a string to a file.", "response": "def write_text(path, content):\n    with open(path, 'w', encoding='utf-8') as f:\n        f.write(content)"}
+{"prompt": "Give me a Python function that takes a string and returns a dict of word -> count.", "response": "def word_freq(text):\n    out = {}\n    for w in text.split():\n        out[w] = out.get(w, 0) + 1\n    return out"}
+{"prompt": "Write a Python function `min_list` that will return the minimum of a list.", "response": "def min_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x < best:\n            best = x\n    return best"}
+{"prompt": "Write a Python function `is_even(n)` that return True if n is even.", "response": "def is_even(n):\n    return n % 2 == 0"}
+{"prompt": "Python: implement title_case to return a string in title case.", "response": "def title_case(s):\n    return s.title()"}
+{"prompt": "In Python, write a function called is_negative that return True if n is negative.", "response": "def is_negative(n):\n    return n < 0"}
+{"prompt": "Implement a Python function that writes an object to a JSON file with 2-space indent.", "response": "import json\n\ndef dump_json(path, obj):\n    with open(path, 'w', encoding='utf-8') as f:\n        json.dump(obj, f, indent=2)"}
+{"prompt": "Python: define half(n) -- return half of n.", "response": "def half(n):\n    return n / 2"}
+{"prompt": "Give me Python code for avg_list: return the average of a list of numbers.", "response": "def avg_list(xs):\n    if not xs:\n        return 0\n    return sum(xs) / len(xs)"}
+{"prompt": "Python function: return the number of elements in a list.  Call it count_list.", "response": "def count_list(xs):\n    n = 0\n    for _ in xs:\n        n = n + 1\n    return n"}
+{"prompt": "Write a Python function `zip_lists` that will zip two lists into a list of pairs.", "response": "def zip_lists(a, b):\n    return list(zip(a, b))"}
+{"prompt": "Python: define is_positive(n) -- return True if n is positive.", "response": "def is_positive(n):\n    return n > 0"}
+{"prompt": "Implement all_positive in Python — it should return True if every element is positive.", "response": "def all_positive(xs):\n    for x in xs:\n        if x <= 0:\n            return False\n    return True"}
+{"prompt": "Implement a Python function `factorial(n)` that returns n!.", "response": "def factorial(n):\n    result = 1\n    for i in range(2, n + 1):\n        result = result * i\n    return result"}
+{"prompt": "Write a Python function `mod(a, b)` that return a modulo b.", "response": "def mod(a, b):\n    return a % b"}
+{"prompt": "In Python, write a function called half that return half of n.", "response": "def half(n):\n    return n / 2"}
+{"prompt": "Python: define square(n) -- return n squared.", "response": "def square(n):\n    return n * n"}
+{"prompt": "Give me a Python function double that return n doubled.", "response": "def double(n):\n    return n * 2"}
+{"prompt": "Python: implement char_at to return the character at index i, or empty string.", "response": "def char_at(s, i):\n    if 0 <= i < len(s):\n        return s[i]\n    return ''"}
+{"prompt": "Define a Python function first_word: return the first word of a string.", "response": "def first_word(s):\n    parts = s.split()\n    if parts:\n        return parts[0]\n    return ''"}
+{"prompt": "Give me a Python function `binary_search(arr, target)` that returns the index or -1.", "response": "def binary_search(arr, target):\n    lo, hi = 0, len(arr) - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if arr[mid] == target:\n            return mid\n        if arr[mid] < target:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1"}
+{"prompt": "In Python, write a function called square that return n squared.", "response": "def square(n):\n    return n * n"}
+{"prompt": "Define a Python function join_words: join a list of strings with a single space.", "response": "def join_words(xs):\n    return ' '.join(xs)"}
+{"prompt": "Give me a Python function `merge_sort(xs)` that returns a sorted list using merge sort.", "response": "def merge_sort(xs):\n    if len(xs) <= 1:\n        return xs\n    mid = len(xs) // 2\n    left = merge_sort(xs[:mid])\n    right = merge_sort(xs[mid:])\n    out = []\n    i = j = 0\n    while i < len(left) and j < len(right):\n        if left[i] <= right[j]:\n            out.append(left[i]); i += 1\n        else:\n            out.append(right[j]); j += 1\n    out.extend(left[i:])\n    out.extend(right[j:])\n    return out"}
+{"prompt": "Give me a Python function is_positive that return True if n is positive.", "response": "def is_positive(n):\n    return n > 0"}
+{"prompt": "Python: implement words_in to return the words of a string as a list.", "response": "def words_in(s):\n    return s.split()"}
+{"prompt": "Write a Python function `max_of(a, b)` that return the larger of two numbers.", "response": "def max_of(a, b):\n    return a if a > b else b"}
+{"prompt": "Implement a Python function `fizzbuzz(n)` that returns a list of fizzbuzz values up to n.", "response": "def fizzbuzz(n):\n    out = []\n    for i in range(1, n + 1):\n        if i % 15 == 0:\n            out.append('FizzBuzz')\n        elif i % 3 == 0:\n            out.append('Fizz')\n        elif i % 5 == 0:\n            out.append('Buzz')\n        else:\n            out.append(str(i))\n    return out"}
+{"prompt": "Write a Python function `last_word` that will return the last word of a string.", "response": "def last_word(s):\n    parts = s.split()\n    if parts:\n        return parts[-1]\n    return ''"}
+{"prompt": "Implement a Python function `fib(n)` that returns the nth Fibonacci number using a loop.", "response": "def fib(n):\n    if n <= 0:\n        return 0\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a"}
+{"prompt": "Write a Python function `abs_val(n)` that return the absolute value of n.", "response": "def abs_val(n):\n    return n if n >= 0 else -n"}
+{"prompt": "Write a Python function `is_palindrome` that will return True if a string reads the same forwards and backwards.", "response": "def is_palindrome(s):\n    return s == s[::-1]"}
+{"prompt": "Write a Python function that returns True if two strings are anagrams.", "response": "def is_anagram(a, b):\n    return sorted(a) == sorted(b)"}
+{"prompt": "In Python, write a function called pow that return a raised to the power b.", "response": "def pow(a, b):\n    return a ** b"}
+{"prompt": "Implement a Python function `write_text(path, content)` that writes a string to a file.", "response": "def write_text(path, content):\n    with open(path, 'w', encoding='utf-8') as f:\n        f.write(content)"}
+{"prompt": "Implement contains in Python — it should return True if a list contains the given value.", "response": "def contains(xs, v):\n    for x in xs:\n        if x == v:\n            return True\n    return False"}
+{"prompt": "Give me Python code for last_n: return the last n elements of a list.", "response": "def last_n(xs, n):\n    return xs[-n:]"}
+{"prompt": "Implement a Python function that returns True if two strings are anagrams.", "response": "def is_anagram(a, b):\n    return sorted(a) == sorted(b)"}
+{"prompt": "Write a Python function `triple(n)` that return n tripled.", "response": "def triple(n):\n    return n * 3"}
+{"prompt": "Write a Python function `negate(n)` that return the negative of n.", "response": "def negate(n):\n    return -n"}
+{"prompt": "Implement flatten in Python — it should flatten a list of lists one level deep.", "response": "def flatten(xss):\n    out = []\n    for xs in xss:\n        for x in xs:\n            out.append(x)\n    return out"}
+{"prompt": "Define a Python function words_in: return the words of a string as a list.", "response": "def words_in(s):\n    return s.split()"}
+{"prompt": "Write a Python function `bubble_sort(xs)` that sorts a list in place using bubble sort.", "response": "def bubble_sort(xs):\n    n = len(xs)\n    for i in range(n):\n        for j in range(0, n - i - 1):\n            if xs[j] > xs[j+1]:\n                xs[j], xs[j+1] = xs[j+1], xs[j]\n    return xs"}
+{"prompt": "Write a Python context manager class FileWriter that opens a file for writing on enter and closes it on exit.", "response": "class FileWriter:\n    def __init__(self, path):\n        self.path = path\n        self.f = None\n\n    def __enter__(self):\n        self.f = open(self.path, 'w', encoding='utf-8')\n        return self.f\n\n    def __exit__(self, exc_type, exc_val, exc_tb):\n        if self.f:\n            self.f.close()\n        return False"}
+{"prompt": "In Python, write a function called div that return the quotient, or 0 if dividing by zero.", "response": "def div(a, b):\n    return a / b if b != 0 else 0"}
+{"prompt": "Python: implement uppercase to return a string in upper case.", "response": "def uppercase(s):\n    return s.upper()"}
+{"prompt": "Write a Python function `index_of` that will return the index of the first occurrence, or -1.", "response": "def index_of(xs, v):\n    for i, x in enumerate(xs):\n        if x == v:\n            return i\n    return -1"}
+{"prompt": "Write a Python function using requests that performs a GET and returns the JSON body.", "response": "import requests\n\ndef http_get_json(url):\n    r = requests.get(url, timeout=10)\n    r.raise_for_status()\n    return r.json()"}
+{"prompt": "Write a Python function `string_length` that will return the length of a string.", "response": "def string_length(s):\n    n = 0\n    for _ in s:\n        n = n + 1\n    return n"}
+{"prompt": "Write a Python function `ends_with` that will return True if string ends with a suffix.", "response": "def ends_with(s, p):\n    return s.endswith(p)"}
+{"prompt": "Implement a Python function using requests that performs a GET and returns the JSON body.", "response": "import requests\n\ndef http_get_json(url):\n    r = requests.get(url, timeout=10)\n    r.raise_for_status()\n    return r.json()"}
+{"prompt": "Implement avg_list in Python — it should return the average of a list of numbers.", "response": "def avg_list(xs):\n    if not xs:\n        return 0\n    return sum(xs) / len(xs)"}
+{"prompt": "Give me a Python function mul that return the product of two numbers.", "response": "def mul(a, b):\n    return a * b"}
+{"prompt": "Give me a Python function half that return half of n.", "response": "def half(n):\n    return n / 2"}
+{"prompt": "In Python, write a function called max_of that return the larger of two numbers.", "response": "def max_of(a, b):\n    return a if a > b else b"}
+{"prompt": "Python: implement ends_with to return True if string ends with a suffix.", "response": "def ends_with(s, p):\n    return s.endswith(p)"}
+{"prompt": "Give me a Python function `is_prime(n)` that returns True if n is prime.", "response": "def is_prime(n):\n    if n < 2:\n        return False\n    i = 2\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i = i + 1\n    return True"}
+{"prompt": "Give me Python code for all_positive: return True if every element is positive.", "response": "def all_positive(xs):\n    for x in xs:\n        if x <= 0:\n            return False\n    return True"}
+{"prompt": "Write a Python function `is_odd(n)` that return True if n is odd.", "response": "def is_odd(n):\n    return n % 2 == 1"}
+{"prompt": "Implement a Python function `binary_search(arr, target)` that returns the index or -1.", "response": "def binary_search(arr, target):\n    lo, hi = 0, len(arr) - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if arr[mid] == target:\n            return mid\n        if arr[mid] < target:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1"}
+{"prompt": "Write a Python function `first_word` that will return the first word of a string.", "response": "def first_word(s):\n    parts = s.split()\n    if parts:\n        return parts[0]\n    return ''"}
+{"prompt": "Python function: return the index of the first occurrence, or -1.  Call it index_of.", "response": "def index_of(xs, v):\n    for i, x in enumerate(xs):\n        if x == v:\n            return i\n    return -1"}
+{"prompt": "Give me a Python class Point with x and y attributes and a distance() method to another Point.", "response": "class Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\n\n    def distance(self, other):\n        dx = self.x - other.x\n        dy = self.y - other.y\n        return (dx * dx + dy * dy) ** 0.5"}
+{"prompt": "Write a Python function `is_positive(n)` that return True if n is positive.", "response": "def is_positive(n):\n    return n > 0"}
+{"prompt": "Python: define sub(a, b) -- return the difference of two numbers.", "response": "def sub(a, b):\n    return a - b"}
+{"prompt": "Define a Python function starts_with: return True if string starts with a prefix.", "response": "def starts_with(s, p):\n    return s.startswith(p)"}
+{"prompt": "Python function: return only the odd numbers from a list.  Call it filter_odd.", "response": "def filter_odd(xs):\n    return [x for x in xs if x % 2 == 1]"}
+{"prompt": "Implement a Python decorator @timed that prints how long the wrapped function took.", "response": "import time\n\ndef timed(fn):\n    def wrapper(*args, **kwargs):\n        t0 = time.time()\n        result = fn(*args, **kwargs)\n        print(f'{fn.__name__} took {time.time() - t0:.3f}s')\n        return result\n    return wrapper"}
+{"prompt": "Python: define pow(a, b) -- return a raised to the power b.", "response": "def pow(a, b):\n    return a ** b"}
+{"prompt": "Python: implement string_length to return the length of a string.", "response": "def string_length(s):\n    n = 0\n    for _ in s:\n        n = n + 1\n    return n"}
+{"prompt": "Python: define mul(a, b) -- return the product of two numbers.", "response": "def mul(a, b):\n    return a * b"}
+{"prompt": "Give me a Python function is_zero that return True if n is zero.", "response": "def is_zero(n):\n    return n == 0"}
+{"prompt": "Implement zip_lists in Python — it should zip two lists into a list of pairs.", "response": "def zip_lists(a, b):\n    return list(zip(a, b))"}
+{"prompt": "Python function: return the minimum of a list.  Call it min_list.", "response": "def min_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x < best:\n            best = x\n    return best"}
+{"prompt": "Write a Python function `count_list` that will return the number of elements in a list.", "response": "def count_list(xs):\n    n = 0\n    for _ in xs:\n        n = n + 1\n    return n"}
+{"prompt": "Implement a Python function that returns all primes less than or equal to n.", "response": "def primes_upto(n):\n    out = []\n    for k in range(2, n + 1):\n        prime = True\n        i = 2\n        while i * i <= k:\n            if k % i == 0:\n                prime = False\n                break\n            i = i + 1\n        if prime:\n            out.append(k)\n    return out"}
+{"prompt": "Write a Python function `merge_sort(xs)` that returns a sorted list using merge sort.", "response": "def merge_sort(xs):\n    if len(xs) <= 1:\n        return xs\n    mid = len(xs) // 2\n    left = merge_sort(xs[:mid])\n    right = merge_sort(xs[mid:])\n    out = []\n    i = j = 0\n    while i < len(left) and j < len(right):\n        if left[i] <= right[j]:\n            out.append(left[i]); i += 1\n        else:\n            out.append(right[j]); j += 1\n    out.extend(left[i:])\n    out.extend(right[j:])\n    return out"}
+{"prompt": "Give me a Python function `factorial(n)` that returns n!.", "response": "def factorial(n):\n    result = 1\n    for i in range(2, n + 1):\n        result = result * i\n    return result"}
+{"prompt": "Implement a Python function `gcd(a, b)` using the Euclidean algorithm.", "response": "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a"}
+{"prompt": "Python function: return True if a list contains the given value.  Call it contains.", "response": "def contains(xs, v):\n    for x in xs:\n        if x == v:\n            return True\n    return False"}
+{"prompt": "Give me a Python function max_of that return the larger of two numbers.", "response": "def max_of(a, b):\n    return a if a > b else b"}
+{"prompt": "Implement count_list in Python — it should return the number of elements in a list.", "response": "def count_list(xs):\n    n = 0\n    for _ in xs:\n        n = n + 1\n    return n"}
+{"prompt": "Python: define add(a, b) -- return the sum of two numbers.", "response": "def add(a, b):\n    return a + b"}
+{"prompt": "Define a Python function string_length: return the length of a string.", "response": "def string_length(s):\n    n = 0\n    for _ in s:\n        n = n + 1\n    return n"}
+{"prompt": "Give me Python code for min_list: return the minimum of a list.", "response": "def min_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x < best:\n            best = x\n    return best"}
+{"prompt": "Write a Python function `fizzbuzz(n)` that returns a list of fizzbuzz values up to n.", "response": "def fizzbuzz(n):\n    out = []\n    for i in range(1, n + 1):\n        if i % 15 == 0:\n            out.append('FizzBuzz')\n        elif i % 3 == 0:\n            out.append('Fizz')\n        elif i % 5 == 0:\n            out.append('Buzz')\n        else:\n            out.append(str(i))\n    return out"}
+{"prompt": "In Python, write a function called is_even that return True if n is even.", "response": "def is_even(n):\n    return n % 2 == 0"}
+{"prompt": "Python function: return the last n elements of a list.  Call it last_n.", "response": "def last_n(xs, n):\n    return xs[-n:]"}
+{"prompt": "Write a Python function `write_text(path, content)` that writes a string to a file.", "response": "def write_text(path, content):\n    with open(path, 'w', encoding='utf-8') as f:\n        f.write(content)"}
+{"prompt": "Write a Python function `filter_even` that will return only the even numbers from a list.", "response": "def filter_even(xs):\n    return [x for x in xs if x % 2 == 0]"}
+{"prompt": "Python: implement strip_whitespace to strip leading and trailing whitespace.", "response": "def strip_whitespace(s):\n    return s.strip()"}
+{"prompt": "Implement sum_list in Python — it should sum the elements of a list.", "response": "def sum_list(xs):\n    total = 0\n    for x in xs:\n        total = total + x\n    return total"}
+{"prompt": "Implement a Python function `is_prime(n)` that returns True if n is prime.", "response": "def is_prime(n):\n    if n < 2:\n        return False\n    i = 2\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i = i + 1\n    return True"}
+{"prompt": "Give me a Python function triple that return n tripled.", "response": "def triple(n):\n    return n * 3"}
+{"prompt": "Implement a Python function that takes a string and returns a dict of word -> count.", "response": "def word_freq(text):\n    out = {}\n    for w in text.split():\n        out[w] = out.get(w, 0) + 1\n    return out"}
+{"prompt": "Python function: concatenate two lists.  Call it concat_lists.", "response": "def concat_lists(a, b):\n    return a + b"}
+{"prompt": "In Python, write a function called triple that return n tripled.", "response": "def triple(n):\n    return n * 3"}
+{"prompt": "Python: define double(n) -- return n doubled.", "response": "def double(n):\n    return n * 2"}
+{"prompt": "Python function: flatten a list of lists one level deep.  Call it flatten.", "response": "def flatten(xss):\n    out = []\n    for xs in xss:\n        for x in xs:\n            out.append(x)\n    return out"}
+{"prompt": "In Python, write a function called mod that return a modulo b.", "response": "def mod(a, b):\n    return a % b"}
+{"prompt": "Python function: return a reversed copy of a list.  Call it reverse_list.", "response": "def reverse_list(xs):\n    return list(reversed(xs))"}
+{"prompt": "Write a Python function `pow(a, b)` that return a raised to the power b.", "response": "def pow(a, b):\n    return a ** b"}
+{"prompt": "Define a Python function lowercase: return a string in lower case.", "response": "def lowercase(s):\n    return s.lower()"}
+{"prompt": "Implement first_n in Python — it should return the first n elements of a list.", "response": "def first_n(xs, n):\n    return xs[:n]"}
+{"prompt": "Python: define mod(a, b) -- return a modulo b.", "response": "def mod(a, b):\n    return a % b"}
+{"prompt": "Give me a Python function that writes an object to a JSON file with 2-space indent.", "response": "import json\n\ndef dump_json(path, obj):\n    with open(path, 'w', encoding='utf-8') as f:\n        json.dump(obj, f, indent=2)"}
+{"prompt": "Give me a Python function is_odd that return True if n is odd.", "response": "def is_odd(n):\n    return n % 2 == 1"}
+{"prompt": "Give me a Python function that reverses a singly linked list.  Each node has `value` and `next` attributes.", "response": "def reverse_linked_list(head):\n    prev = None\n    while head:\n        nxt = head.next\n        head.next = prev\n        prev = head\n        head = nxt\n    return prev"}
+{"prompt": "Write a Python function `square(n)` that return n squared.", "response": "def square(n):\n    return n * n"}
+{"prompt": "Write a Python function `contains_substr` that will return True if string contains a substring.", "response": "def contains_substr(s, sub):\n    return sub in s"}
+{"prompt": "In Python, write a function called sub that return the difference of two numbers.", "response": "def sub(a, b):\n    return a - b"}
+{"prompt": "Write a Python function that reverses a singly linked list.  Each node has `value` and `next` attributes.", "response": "def reverse_linked_list(head):\n    prev = None\n    while head:\n        nxt = head.next\n        head.next = prev\n        prev = head\n        head = nxt\n    return prev"}
+{"prompt": "Python: implement count_words to return a dict of word → count.", "response": "def count_words(s):\n    out = {}\n    for w in s.split():\n        out[w] = out.get(w, 0) + 1\n    return out"}
+{"prompt": "Give me a Python function add that return the sum of two numbers.", "response": "def add(a, b):\n    return a + b"}
+{"prompt": "Python: define is_negative(n) -- return True if n is negative.", "response": "def is_negative(n):\n    return n < 0"}
+{"prompt": "Write a Python function `repeat_string` that will repeat a string n times.", "response": "def repeat_string(s, n):\n    return s * n"}
+{"prompt": "Implement a Python function `read_text(path)` that returns the contents of a text file.", "response": "def read_text(path):\n    with open(path, 'r', encoding='utf-8') as f:\n        return f.read()"}
+{"prompt": "Write a Python function `sort_list` that will return a sorted copy of a list.", "response": "def sort_list(xs):\n    return sorted(xs)"}
+{"prompt": "Give me a Python function that loads a JSON file and returns the parsed object.", "response": "import json\n\ndef load_json(path):\n    with open(path, 'r', encoding='utf-8') as f:\n        return json.load(f)"}
+{"prompt": "Write a Python function `sum_list` that will sum the elements of a list.", "response": "def sum_list(xs):\n    total = 0\n    for x in xs:\n        total = total + x\n    return total"}
+{"prompt": "Define a Python function contains_substr: return True if string contains a substring.", "response": "def contains_substr(s, sub):\n    return sub in s"}
+{"prompt": "Python function: sum the elements of a list.  Call it sum_list.", "response": "def sum_list(xs):\n    total = 0\n    for x in xs:\n        total = total + x\n    return total"}
+{"prompt": "Implement a Python function that loads a JSON file and returns the parsed object.", "response": "import json\n\ndef load_json(path):\n    with open(path, 'r', encoding='utf-8') as f:\n        return json.load(f)"}
+{"prompt": "Define a Python function char_at: return the character at index i, or empty string.", "response": "def char_at(s, i):\n    if 0 <= i < len(s):\n        return s[i]\n    return ''"}
+{"prompt": "Python: implement first_word to return the first word of a string.", "response": "def first_word(s):\n    parts = s.split()\n    if parts:\n        return parts[0]\n    return ''"}
+{"prompt": "Define a Python function uppercase: return a string in upper case.", "response": "def uppercase(s):\n    return s.upper()"}
+{"prompt": "Implement dedupe_list in Python — it should remove duplicates from a list, preserving order.", "response": "def dedupe_list(xs):\n    seen = set()\n    out = []\n    for x in xs:\n        if x not in seen:\n            seen.add(x)\n            out.append(x)\n    return out"}
+{"prompt": "Define a Python function title_case: return a string in title case.", "response": "def title_case(s):\n    return s.title()"}
+{"prompt": "Give me a Python context manager class FileGive mer that opens a file for writing on enter and closes it on exit.", "response": "class FileWriter:\n    def __init__(self, path):\n        self.path = path\n        self.f = None\n\n    def __enter__(self):\n        self.f = open(self.path, 'w', encoding='utf-8')\n        return self.f\n\n    def __exit__(self, exc_type, exc_val, exc_tb):\n        if self.f:\n            self.f.close()\n        return False"}
+{"prompt": "Implement max_list in Python — it should return the maximum of a list.", "response": "def max_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x > best:\n            best = x\n    return best"}
+{"prompt": "Implement reverse_list in Python — it should return a reversed copy of a list.", "response": "def reverse_list(xs):\n    return list(reversed(xs))"}
+{"prompt": "In Python, write a function called cube that return n cubed.", "response": "def cube(n):\n    return n * n * n"}
+{"prompt": "Implement range_to_list in Python — it should return a list of integers from 0 to n exclusive.", "response": "def range_to_list(n):\n    return list(range(n))"}
+{"prompt": "Implement min_list in Python — it should return the minimum of a list.", "response": "def min_list(xs):\n    if not xs:\n        return None\n    best = xs[0]\n    for x in xs[1:]:\n        if x < best:\n            best = x\n    return best"}
+{"prompt": "Write a Python function `uppercase` that will return a string in upper case.", "response": "def uppercase(s):\n    return s.upper()"}
+{"prompt": "Give me Python code for sort_list: return a sorted copy of a list.", "response": "def sort_list(xs):\n    return sorted(xs)"}
+{"prompt": "Give me a Python function mod that return a modulo b.", "response": "def mod(a, b):\n    return a % b"}
+{"prompt": "Write a Python function `lowercase` that will return a string in lower case.", "response": "def lowercase(s):\n    return s.lower()"}
+{"prompt": "Give me Python code for filter_even: return only the even numbers from a list.", "response": "def filter_even(xs):\n    return [x for x in xs if x % 2 == 0]"}
+{"prompt": "Python: implement reverse_string to reverse a string.", "response": "def reverse_string(s):\n    return s[::-1]"}
+{"prompt": "Give me Python code for dedupe_list: remove duplicates from a list, preserving order.", "response": "def dedupe_list(xs):\n    seen = set()\n    out = []\n    for x in xs:\n        if x not in seen:\n            seen.add(x)\n            out.append(x)\n    return out"}
+{"prompt": "Give me Python code for index_of: return the index of the first occurrence, or -1.", "response": "def index_of(xs, v):\n    for i, x in enumerate(xs):\n        if x == v:\n            return i\n    return -1"}
+{"prompt": "Define a Python function last_word: return the last word of a string.", "response": "def last_word(s):\n    parts = s.split()\n    if parts:\n        return parts[-1]\n    return ''"}
+{"prompt": "Python function: return a sorted copy of a list.  Call it sort_list.", "response": "def sort_list(xs):\n    return sorted(xs)"}
+{"prompt": "Give me Python code for sum_list: sum the elements of a list.", "response": "def sum_list(xs):\n    total = 0\n    for x in xs:\n        total = total + x\n    return total"}
+{"prompt": "Implement a Python context manager class FileImplementr that opens a file for writing on enter and closes it on exit.", "response": "class FileWriter:\n    def __init__(self, path):\n        self.path = path\n        self.f = None\n\n    def __enter__(self):\n        self.f = open(self.path, 'w', encoding='utf-8')\n        return self.f\n\n    def __exit__(self, exc_type, exc_val, exc_tb):\n        if self.f:\n            self.f.close()\n        return False"}

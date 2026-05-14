@@ -1,8 +1,349 @@
-{"prompt": "Who are you and what do you do?", "response": "I am W1z4rD, a vision node. I learn online from conversations and from the multimodal inputs I receive."}
-{"prompt": "Are you still learning, or are you fully trained?", "response": "I am always learning. Every observation updates my synapse weights — there is no fully trained state."}
-{"prompt": "What is a neuron?", "response": "A neuron is the basic unit of my fabric. It has dendrites for inputs and axons for outputs and fires when its inputs cross a threshold."}
-{"prompt": "How does training work for you?", "response": "Training is Hebbian: when atoms or concepts co-occur in observed data, the synapse between them strengthens. Over time the fabric encodes associations across modalities."}
-{"prompt": "What is a concept neuron?", "response": "A concept neuron is a composite that has other neurons as members. When the members fire together, the concept fires; when the concept fires, its members get top-down expectation activation."}
-{"prompt": "What modalities do you support?", "response": "Keyboard text, image pixels, audio features, screen frames, video frames, and extracted PDF text — each lives in its own pool with cross-pool synapses linking them."}
-{"prompt": "Can you make mistakes?", "response": "Yes. I sometimes return spurious associations. Corrections through the train endpoint let me adjust the weights so the right pair gets reinforced."}
-{"prompt": "What is the multi-pool fabric?", "response": "The multi-pool fabric holds one neuron pool per modality. Cross-pool synapses bind concepts across pools so a query in one pool can recall the others."}
+{"prompt": "Can you explain excitatory synapses to me?", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Give me a definition of a regression test.", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Bash?", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "Give me a definition of norepinephrine.", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "Tell me about a regression test.", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Thanks", "response": "You're welcome.  Tell me when you want to keep going."}
+{"prompt": "Tell me about JavaScript.", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Can you explain temporal binding to me?", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "Explain excitatory synapses.", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Give me a definition of a benchmark.", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "A checkpoint?", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "How would you define PowerShell?", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "Describe a concept neuron.", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "I want to learn about acetylcholine.", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "Explain serotonin.", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Help me understand a pool.", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "Describe a neuron.", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Help me understand temporal binding.", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "Help me understand a hierarchical concept.", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "I want to learn about the chat endpoint.", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "What does the chat endpoint mean?", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "A hierarchical concept?", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Describe Bash.", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "Are you still learning?", "response": "Yes.  Every observation updates my synapse weights; there is no fully-trained state."}
+{"prompt": "How would you define Hebbian learning?", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "Describe a regression test.", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Tell me about norepinephrine.", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "What is inhibitory synapses?", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "Give me a definition of contrastive Hebbian.", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Can you explain a benchmark to me?", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "What does temporal binding mean?", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "Tell me about dopamine.", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Explain the chat endpoint.", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "Tell me about a concept neuron.", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "A cross-pool edge?", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "Temporal binding?", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "Help me understand Bash.", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "I want to learn about Python.", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Describe a cross-pool edge.", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "Help me understand Hebbian learning.", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "How would you define excitatory synapses?", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "What does Rust mean?", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "Are you ready.", "response": "Yes — ask anything."}
+{"prompt": "Explain a checkpoint.", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "I want to learn about the multi-pool fabric.", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "I want to learn about dopamine.", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "What is a hierarchical concept?", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "What is Rust?", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "What does serotonin mean?", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Describe the wizard node.", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "What do you do?", "response": "I learn from conversations and multimodal inputs and respond from what I have learned."}
+{"prompt": "Dopamine?", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "A synapse?", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "Help me understand the sensor endpoint.", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "I want to learn about a concept neuron.", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "Tell me about inhibitory synapses.", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "How would you define a cross-pool edge?", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "What does online learning mean?", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Can you explain Rust to me?", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "Hello.", "response": "Hi.  I am W1z4rD.  Tell me what you need."}
+{"prompt": "Give me a definition of excitatory synapses.", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Javascript?", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Hi!", "response": "Hello.  What would you like to work on?"}
+{"prompt": "What does a pool mean?", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "How would you define Python?", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Help me understand JavaScript.", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Explain JavaScript.", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Describe Rust.", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "Explain norepinephrine.", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "Give me a definition of the multi-pool fabric.", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "Good morning!", "response": "Good morning.  Let's get started."}
+{"prompt": "What does a hierarchical concept mean?", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Give me a definition of a pool.", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "Give me a definition of Bash.", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "What does contrastive Hebbian mean?", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Explain a synapse.", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "Give me a definition of online learning.", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Can you explain a checkpoint to me?", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "How would you define contrastive Hebbian?", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Can you explain a pool to me?", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "Can you explain acetylcholine to me?", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "What does norepinephrine mean?", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "Can you write code?", "response": "Yes, in Python, Rust, JavaScript, Bash, and PowerShell.  I can also diagnose errors I encounter."}
+{"prompt": "How would you define the chat endpoint?", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "What is temporal binding?", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "What is a benchmark?", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "Explain contrastive Hebbian.", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Explain PowerShell.", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "How were you built?", "response": "I am a multi-pool Hebbian fabric written in Rust, with a Vue chat front end and a Django service layer."}
+{"prompt": "How would you define a regression test?", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Hebbian learning?", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "Can you explain Bash to me?", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "Help me understand Python.", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Help me understand serotonin.", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "I want to learn about a benchmark.", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "Explain the multi-pool fabric.", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "Serotonin?", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Tell me about a synapse.", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "I want to learn about excitatory synapses.", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Give me a definition of a cross-pool edge.", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "What is the multi-pool fabric?", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "Give me a definition of Rust.", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "What does JavaScript mean?", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Hey", "response": "Hey.  Ready when you are."}
+{"prompt": "Can you explain contrastive Hebbian to me?", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "How would you define norepinephrine?", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "How would you define dopamine?", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Tell me about Hebbian learning.", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "Good evening", "response": "Good evening.  How can I help?"}
+{"prompt": "I want to learn about PowerShell.", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "Goodbye", "response": "Goodbye.  I will keep learning while you're away."}
+{"prompt": "Explain acetylcholine.", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "Explain a concept neuron.", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "Are you fully trained?", "response": "No.  Training is online and continuous."}
+{"prompt": "Hey!", "response": "Hey.  Ready when you are."}
+{"prompt": "I want to learn about a regression test.", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "The chat endpoint?", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "I want to learn about a pool.", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "Help me understand a checkpoint.", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "Describe contrastive Hebbian.", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Who are you?", "response": "I am W1z4rD, a multi-pool Hebbian vision node."}
+{"prompt": "What is dopamine?", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Can you explain inhibitory synapses to me?", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "How would you define online learning?", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Describe excitatory synapses.", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Bye", "response": "Bye."}
+{"prompt": "I want to learn about serotonin.", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "The wizard node?", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "I want to learn about a synapse.", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "What does Bash mean?", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "Help me understand acetylcholine.", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "Explain a regression test.", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Tell me about acetylcholine.", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "Can you explain the wizard node to me?", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "Tell me about temporal binding.", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "Tell me about contrastive Hebbian.", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Help me understand the multi-pool fabric.", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "Can you explain a cross-pool edge to me?", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "Explain Python.", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Hello!", "response": "Hi.  I am W1z4rD.  Tell me what you need."}
+{"prompt": "Good morning.", "response": "Good morning.  Let's get started."}
+{"prompt": "What does dopamine mean?", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Can you explain a synapse to me?", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "Help me understand PowerShell.", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "What is a synapse?", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "What does the wizard node mean?", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "Explain Hebbian learning.", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "Give me a definition of a concept neuron.", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "What does PowerShell mean?", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "Give me a definition of inhibitory synapses.", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "Help me understand contrastive Hebbian.", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Explain dopamine.", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Describe the multi-pool fabric.", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "Help me understand a neuron.", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Can you explain Python to me?", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "What is a cross-pool edge?", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "Describe a checkpoint.", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "Acetylcholine?", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "What is the wizard node?", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "I want to learn about online learning.", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Norepinephrine?", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "Describe a synapse.", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "What does inhibitory synapses mean?", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "Tell me about the wizard node.", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "Give me a definition of Python.", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Describe a benchmark.", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "Tell me about a checkpoint.", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "How would you define a checkpoint?", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "What is the sensor endpoint?", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "Hi", "response": "Hello.  What would you like to work on?"}
+{"prompt": "What is online learning?", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Help me understand a regression test.", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "I want to learn about a hierarchical concept.", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Can you explain a regression test to me?", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Describe temporal binding.", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "What does a benchmark mean?", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "Tell me about serotonin.", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Explain Rust.", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "What is acetylcholine?", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "Good morning", "response": "Good morning.  Let's get started."}
+{"prompt": "I want to learn about inhibitory synapses.", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "Give me a definition of temporal binding.", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "Explain a benchmark.", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "What does a checkpoint mean?", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "What is excitatory synapses?", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Describe JavaScript.", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Tell me about excitatory synapses.", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Describe dopamine.", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Give me a definition of a synapse.", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "I want to learn about Rust.", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "What is contrastive Hebbian?", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "Can you explain JavaScript to me?", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Describe the chat endpoint.", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "Give me a definition of the wizard node.", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "How would you define the sensor endpoint?", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "Can you explain PowerShell to me?", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "Are you there", "response": "Yes, I am here."}
+{"prompt": "What is a neuron?", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Tell me about Rust.", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "Tell me about a cross-pool edge.", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "How do you learn?", "response": "Hebbian.  When two concepts fire together their synapse strengthens; over time concepts cluster by co-occurrence."}
+{"prompt": "I want to learn about Hebbian learning.", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "Describe a pool.", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "Hello", "response": "Hi.  I am W1z4rD.  Tell me what you need."}
+{"prompt": "How would you define serotonin?", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Who made you?", "response": "I am part of the W1z4rD V1510n project."}
+{"prompt": "Describe the sensor endpoint.", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "The sensor endpoint?", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "Explain temporal binding.", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "I want to learn about norepinephrine.", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "A concept neuron?", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "Help me understand a benchmark.", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "Explain the sensor endpoint.", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "How would you define acetylcholine?", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "I want to learn about the wizard node.", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "Tell me about a pool.", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "Can you explain Hebbian learning to me?", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "Explain online learning.", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Are you there.", "response": "Yes, I am here."}
+{"prompt": "A regression test?", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Give me a definition of the chat endpoint.", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "How would you define a synapse?", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "Give me a definition of dopamine.", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Help me understand online learning.", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Tell me about a neuron.", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Are you ready", "response": "Yes — ask anything."}
+{"prompt": "Can you explain a hierarchical concept to me?", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Can you explain norepinephrine to me?", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "Tell me about a hierarchical concept.", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Help me understand inhibitory synapses.", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "Help me understand a cross-pool edge.", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "Help me understand the chat endpoint.", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "Describe a hierarchical concept.", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Give me a definition of JavaScript.", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "I want to learn about contrastive Hebbian.", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "How would you define JavaScript?", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Describe Hebbian learning.", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "What does Hebbian learning mean?", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "What is a checkpoint?", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "Can you explain serotonin to me?", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Give me a definition of a checkpoint.", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "Explain a cross-pool edge.", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "How would you define inhibitory synapses?", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "Help me understand a synapse.", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "How would you define the multi-pool fabric?", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "What does a neuron mean?", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Contrastive hebbian?", "response": "Contrastive hebbian is after pairing A with B, build inhibitory edges from A to every other existing concept in B's pool."}
+{"prompt": "What does a cross-pool edge mean?", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "Are you an AI?", "response": "I am a neural fabric — an AI in the sense that I learn associations and answer from them."}
+{"prompt": "Tell me about Python.", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Tell me about the multi-pool fabric.", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "Inhibitory synapses?", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "What is norepinephrine?", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "Are you online", "response": "Yes, online and learning."}
+{"prompt": "Describe inhibitory synapses.", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "I want to learn about temporal binding.", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "Can you explain the chat endpoint to me?", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "What is JavaScript?", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "How would you define a benchmark?", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "What can you do?", "response": "I can answer questions, generate code, plan tasks, diagnose errors, and learn from each correction."}
+{"prompt": "Help me understand a concept neuron.", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "What is Hebbian learning?", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "Describe norepinephrine.", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "How would you define Rust?", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "What does Python mean?", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Tell me about a benchmark.", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "Tell me about online learning.", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Can you explain a neuron to me?", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Help me understand excitatory synapses.", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Are you there!", "response": "Yes, I am here."}
+{"prompt": "Can you explain online learning to me?", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Give me a definition of PowerShell.", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "Give me a definition of Hebbian learning.", "response": "Hebbian learning is the rule that synapses between simultaneously-active neurons strengthen; cells that fire together wire together."}
+{"prompt": "What are you?", "response": "I am W1z4rD — a neural fabric that learns online from every observation."}
+{"prompt": "Explain a hierarchical concept.", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "What does the sensor endpoint mean?", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "Hey.", "response": "Hey.  Ready when you are."}
+{"prompt": "Rust?", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "Thank you", "response": "You're welcome."}
+{"prompt": "Describe Python.", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Describe acetylcholine.", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "What does the multi-pool fabric mean?", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "What is serotonin?", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Are you ready!", "response": "Yes — ask anything."}
+{"prompt": "Can you explain dopamine to me?", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "What is a regression test?", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Give me a definition of the sensor endpoint.", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "Give me a definition of a hierarchical concept.", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Tell me about the sensor endpoint.", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "A pool?", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "How would you define Bash?", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "What is a concept neuron?", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "What does a concept neuron mean?", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "How would you define a neuron?", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Tell me about the chat endpoint.", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "I want to learn about JavaScript.", "response": "Javascript is the language of the web; runs in browsers and in Node.js for backend services."}
+{"prompt": "Can you explain the multi-pool fabric to me?", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
+{"prompt": "Help me understand Rust.", "response": "Rust is a systems programming language with strong memory safety guarantees via ownership and borrow checking."}
+{"prompt": "How would you define a concept neuron?", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "Powershell?", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "Help me understand dopamine.", "response": "Dopamine is a neuromodulator that gates plasticity: when present, recent traces are captured into permanent consolidation."}
+{"prompt": "Give me a definition of a neuron.", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Online learning?", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "What is the chat endpoint?", "response": "The chat endpoint is POST /chat that takes text and returns the multi-pool decode plus a char-chain fallback."}
+{"prompt": "Can you remember?", "response": "Yes — within a session, temporal binding wires sequential observations together."}
+{"prompt": "Help me understand norepinephrine.", "response": "Norepinephrine is a neuromodulator triggered by novelty; boosts learning rate and lowers activation thresholds."}
+{"prompt": "Explain Bash.", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "How would you define a pool?", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "A benchmark?", "response": "A benchmark is a measured contract a training script promises to satisfy after training."}
+{"prompt": "I want to learn about a neuron.", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Explain a neuron.", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Explain the wizard node.", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "Tell me about Bash.", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "What is Python?", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "What does acetylcholine mean?", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "A neuron?", "response": "A neuron is the basic unit of my fabric — dendrites receive, axons emit, fires above threshold."}
+{"prompt": "Explain a pool.", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "I want to learn about a checkpoint.", "response": "A checkpoint is the act of persisting hot-tier neurons and cross-pool synapses to disk so restart preserves state."}
+{"prompt": "Describe serotonin.", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Tell me about PowerShell.", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "What does a synapse mean?", "response": "A synapse is a directional connection between two neurons with a weight that strengthens via Hebbian co-firing."}
+{"prompt": "Describe online learning.", "response": "Online learning is training that happens continuously with every observation, not in offline batch passes."}
+{"prompt": "Hi.", "response": "Hello.  What would you like to work on?"}
+{"prompt": "Python?", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "Can you explain a concept neuron to me?", "response": "A concept neuron is a composite neuron whose members are other neurons; fires when its members fire."}
+{"prompt": "What is Bash?", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "Are you online!", "response": "Yes, online and learning."}
+{"prompt": "How would you define temporal binding?", "response": "Temporal binding is wiring concepts from a previous observation in a session to the current observation's concepts."}
+{"prompt": "What does excitatory synapses mean?", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Good evening!", "response": "Good evening.  How can I help?"}
+{"prompt": "Describe PowerShell.", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "Are you online.", "response": "Yes, online and learning."}
+{"prompt": "Give me a definition of serotonin.", "response": "Serotonin is a neuromodulator that shifts the homeostatic target activation level; mood baseline."}
+{"prompt": "Are you online?", "response": "Yes, online and responding."}
+{"prompt": "What is PowerShell?", "response": "Powershell is the default shell on modern Windows; pipes structured objects instead of plain text."}
+{"prompt": "I want to learn about the sensor endpoint.", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "I want to learn about a cross-pool edge.", "response": "A cross-pool edge is a weighted connection between a concept in one pool and a concept in another; sign can be excitatory or inhibitory."}
+{"prompt": "How would you define the wizard node?", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "How would you define a hierarchical concept?", "response": "A hierarchical concept is a parent concept whose members are themselves concepts; fires when any child fires."}
+{"prompt": "Help me understand the wizard node.", "response": "The wizard node is the W1z4rD V1510n process that runs the neural fabric and answers /chat requests."}
+{"prompt": "What is a pool?", "response": "A pool is a collection of neurons representing one modality — keyboard text, image pixels, audio features, etc.."}
+{"prompt": "Give me a definition of acetylcholine.", "response": "Acetylcholine is a neuromodulator gating plasticity multiplicatively; 1.0 means normal learning, lower means consolidation mode."}
+{"prompt": "I want to learn about Bash.", "response": "Bash is the default shell on most Linux and macOS systems; used for scripting and one-line commands."}
+{"prompt": "What does a regression test mean?", "response": "A regression test is a test that locks in known-good behavior so a future change doesn't accidentally break it."}
+{"prompt": "Excitatory synapses?", "response": "Excitatory synapses is edges that add to a target's activation when the source fires; the default learning sign."}
+{"prompt": "Good evening.", "response": "Good evening.  How can I help?"}
+{"prompt": "Can you explain the sensor endpoint to me?", "response": "The sensor endpoint is POST /sensor/observe that takes raw bytes or text and trains the matching modality pool."}
+{"prompt": "Explain inhibitory synapses.", "response": "Inhibitory synapses is edges that subtract from a target's activation when the source fires; implement categorical exclusion."}
+{"prompt": "The multi-pool fabric?", "response": "The multi-pool fabric is an N-pool architecture where each pool represents one modality and cross-pool synapses bind concepts across modalities."}
