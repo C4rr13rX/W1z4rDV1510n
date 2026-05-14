@@ -1028,6 +1028,13 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         // src_active size, chosen concept, Jaccard coverage, cross-edge
         // counts per target.  Read-only; safe alongside training.
         .route("/multi_pool/debug_query",   post(multi_pool_debug_query))
+        // POST /multi_pool/hierarchy — promote a parent concept whose
+        // members are existing concept neurons (concept-of-concepts).
+        // body: {pool, parent, children: [string]}
+        // Wires excitatory child↔parent in both directions; lateral
+        // inhibition between this parent and any sibling parents.
+        // Children that don't exist as concepts are silently skipped.
+        .route("/multi_pool/hierarchy",     post(multi_pool_hierarchy))
         // ── Multimodal sensor ingestion ────────────────────────────────────────
         // POST /sensor/observe — multimodal online-learning endpoint.
         //   Body: { kind: "image"|"audio"|"pdf_text"|"screen"|"video_frame"|"text",
@@ -5431,6 +5438,52 @@ async fn multi_pool_ask(
         "input":       req.text,
         "predictions": predictions,
     })))
+}
+
+#[derive(Deserialize)]
+struct MultiPoolHierarchyReq {
+    /// Pool to build the parent inside.
+    pool:     String,
+    /// Label for the new parent concept (e.g. "fruit").
+    parent:   String,
+    /// Labels of existing child concept neurons (e.g. ["apple", "banana"]).
+    /// Children not yet promoted as concepts are silently skipped.
+    children: Vec<String>,
+}
+
+async fn multi_pool_hierarchy(
+    State(state): State<ApiState>,
+    Json(req): Json<MultiPoolHierarchyReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.parent.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "parent must not be empty",
+        })));
+    }
+    if req.children.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "children must contain at least one label",
+        })));
+    }
+    let neuro = state.neuro.clone();
+    let pool = req.pool.clone();
+    let parent = req.parent.clone();
+    let children = req.children.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        neuro.multi_pool_promote_hierarchy(&pool, &parent, &children)
+    }).await.ok().flatten();
+    match res {
+        Some(label) => (StatusCode::OK, Json(serde_json::json!({
+            "parent":  label,
+            "pool":    req.pool,
+            "wired":   req.children.len(),
+        }))),
+        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "no existing concept neurons matched the supplied children",
+            "pool":  req.pool,
+            "children": req.children,
+        }))),
+    }
 }
 
 #[derive(Deserialize)]

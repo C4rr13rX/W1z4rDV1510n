@@ -2226,6 +2226,114 @@ impl NeuronPool {
         out
     }
 
+    /// Resolve a human-readable text string to the stored concept-
+    /// neuron label for it (the composite-of-atoms hash that
+    /// `promote_full_sequence_with` produced during training).  Returns
+    /// the label if a matching concept exists, None otherwise.
+    ///
+    /// Used by hierarchical-concept promotion so callers can refer to
+    /// concepts by the natural names they were trained under (e.g.
+    /// "apple") rather than having to know the position-augmented
+    /// composite-hash representation.
+    pub fn resolve_text_concept(&self, text: &str,
+                                  use_bigrams: bool, use_trigrams: bool) -> Option<String> {
+        if text.is_empty() { return None; }
+        let raw_atoms: Vec<String> = text.chars()
+            .map(|c| crate::streaming::char_label(c))
+            .collect();
+        let pos = position_and_ngram_atoms(&raw_atoms, use_bigrams, use_trigrams);
+        let member_ids: Vec<u32> = pos.iter()
+            .filter_map(|a| self.label_to_id.get(a).copied())
+            .collect();
+        if member_ids.is_empty() { return None; }
+        let label = self.composite_label_for_members(&member_ids)?;
+        // Verify the concept actually exists with members set.
+        let id = *self.label_to_id.get(&label)?;
+        let n = self.get_hot(id as usize)?;
+        if n.members.is_empty() { return None; }
+        Some(label)
+    }
+
+    /// Promote a HIERARCHICAL concept whose members are existing
+    /// **concept neurons**, not atoms.  This is the concept-of-concepts
+    /// machinery — e.g. promote "fruit" whose members are the
+    /// previously-trained "apple" and "banana" concept neurons.
+    ///
+    /// Wires:
+    ///   - parent.members ← [child_concept_ids]
+    ///   - excitatory child → parent synapse for each child (so any
+    ///     child firing partially activates the parent — categorical
+    ///     generalisation)
+    ///   - excitatory parent → child synapse for each child (top-down
+    ///     expectations — when parent fires from another route, all
+    ///     children get a partial activation boost)
+    ///   - children are NOT lateral-inhibition peers of the parent;
+    ///     parent and children co-fire by design.
+    ///   - children ARE peers of each other (existing lateral wiring
+    ///     between siblings preserved — apples and bananas still
+    ///     compete for the singular concept slot when only one is
+    ///     present in input)
+    ///
+    /// Returns the parent concept's label (deterministic from its
+    /// member ids) on success.  None if no children resolve.
+    pub fn promote_hierarchical_concept(
+        &mut self,
+        parent_label: &str,
+        child_labels: &[String],
+        use_bigrams: bool,
+        use_trigrams: bool,
+    ) -> Option<String> {
+        if child_labels.is_empty() { return None; }
+        // Resolve children — only existing concept neurons qualify.
+        let child_ids: Vec<u32> = child_labels.iter().filter_map(|lbl| {
+            let id = *self.label_to_id.get(lbl)?;
+            let is_concept = self.get_hot(id as usize)
+                .map(|n| !n.members.is_empty()).unwrap_or(false);
+            if is_concept { Some(id) } else { None }
+        }).collect();
+        if child_ids.is_empty() { return None; }
+
+        let parent_id = self.get_or_create(parent_label);
+        let scale = self.config.excitatory_scale;
+        // Stamp the parent's members so composite_constituents
+        // recursively yields the children (and their atoms transitively).
+        if let Some(n) = self.get_hot_mut(parent_id as usize) {
+            n.members = child_ids.clone();
+            n.activation = 1.0;
+            n.use_count += 1;
+            n.label = Some(parent_label.to_string());
+        }
+        // Excitatory child ↔ parent.  Bottom-up: child firing partially
+        // activates parent (categorical generalisation).  Top-down:
+        // parent firing partially activates children (expectations).
+        //
+        // Use add_synapse with a fixed delta — hebbian_pair's
+        // activation-product computation returns 0 when neurons
+        // haven't fired recently, which would silently no-op the
+        // structural wiring.  Hierarchy is a deliberate wiring act,
+        // not an activity-dependent one; a fixed weight is correct.
+        let struct_w = scale;
+        for &cid in &child_ids {
+            self.add_synapse(cid, parent_id, struct_w, false);
+            self.add_synapse(parent_id, cid, struct_w, false);
+        }
+        // ALSO wire excitatory atom → parent synapses from the
+        // character atoms of the parent's name, so a user typing
+        // "fruit" can activate the parent via the normal atom-level
+        // propagation path.  Without this, the parent has no atom-
+        // level entry point: its members are only OTHER CONCEPTS, so
+        // chars-of-"fruit" → parent has no connection in the graph.
+        let raw_atoms: Vec<String> = parent_label.chars()
+            .map(|c| crate::streaming::char_label(c))
+            .collect();
+        let pos_atoms = position_and_ngram_atoms(&raw_atoms, use_bigrams, use_trigrams);
+        for atom_label in &pos_atoms {
+            let aid = self.get_or_create(atom_label);
+            self.add_synapse(aid, parent_id, struct_w, false);
+        }
+        Some(parent_label.to_string())
+    }
+
     /// Wire bidirectional **within-pool inhibitory synapses** from
     /// `new_concept_label` to every other concept neuron in this pool
     /// (and back).  This is the lateral-inhibition wiring that turns
@@ -6124,6 +6232,112 @@ impl NeuroRuntime {
         }
     }
 
+    /// Build a hierarchical concept inside `pool_id` whose members are
+    /// existing concept neurons named in `child_labels`.  The parent
+    /// gets excitatory child↔parent synapses (bottom-up + top-down) and
+    /// is treated as a non-peer of its children for lateral inhibition.
+    ///
+    /// Sibling parents (other hierarchical concepts in the same pool —
+    /// concepts whose members include other concepts) DO compete via
+    /// lateral inhibition, wired symmetrically here.
+    ///
+    /// Returns the parent's label on success.  Children that don't
+    /// already exist as concept neurons are silently skipped — a partial
+    /// hierarchy is still meaningful.
+    pub fn multi_pool_promote_hierarchy(
+        &self,
+        pool_id: &str,
+        parent_text: &str,
+        child_texts: &[String],
+    ) -> Option<String> {
+        let use_bg = self.use_bigrams();
+        let use_tg = self.use_trigrams();
+        let mut guard = self.inner.lock();
+        // Lazy pool registration so this endpoint works before any
+        // training has touched the pool.
+        let cfg_template = guard.multi_pool.pool("in")
+            .map(|p| p.config.clone())
+            .unwrap_or_else(NeuroConfig::default);
+        guard.multi_pool.register_pool(pool_id, cfg_template);
+
+        let pool = guard.multi_pool.pool_mut(pool_id)?;
+
+        // Resolve human-readable child texts to stored concept labels.
+        // A child that has never been trained as a concept is silently
+        // skipped — a partial hierarchy is still meaningful, and the
+        // caller can re-invoke after additional training.
+        let resolved_children: Vec<String> = child_texts.iter()
+            .filter_map(|t| pool.resolve_text_concept(t, use_bg, use_tg))
+            .collect();
+        if resolved_children.is_empty() {
+            return None;
+        }
+        // The parent name is what the user types when querying — use
+        // the human label directly so /chat with the same text fires
+        // the parent concept naturally.  The promote_hierarchical_concept
+        // call below creates a neuron with that label whose members
+        // are the resolved child concept neurons.
+        //
+        // Note: this means the parent's label looks like "fruit", NOT
+        // a composite hash.  That's intentional — hierarchical concepts
+        // are addressed by name; child concepts are addressed by their
+        // member-atom hash.  Both coexist in the same pool's label_to_id.
+        let parent = pool.promote_hierarchical_concept(
+            parent_text, &resolved_children, use_bg, use_tg,
+        )?;
+
+        // Identify sibling parents (concepts whose members include
+        // other concepts).  Walk all concept labels in this pool,
+        // filter to ones whose member set overlaps the concept layer.
+        let all_concepts = pool.all_concept_labels();
+        let mut child_id_set: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for cl in &resolved_children {
+            if let Some(&id) = pool.label_to_id.get(cl) {
+                child_id_set.insert(id);
+            }
+        }
+        let sibling_parents: Vec<String> = all_concepts.into_iter()
+            .filter(|lbl| lbl != &parent)
+            .filter(|lbl| {
+                // A sibling parent is a concept whose members are
+                // themselves concept neurons.  Cheap test: at least
+                // one member has its own non-empty members.
+                if let Some(&id) = pool.label_to_id.get(lbl) {
+                    if let Some(n) = pool.get_hot(id as usize) {
+                        return n.members.iter().any(|mid| {
+                            pool.get_hot(*mid as usize)
+                                .map(|m| !m.members.is_empty())
+                                .unwrap_or(false)
+                        });
+                    }
+                }
+                false
+            })
+            .collect();
+        // Collect the (parent_id, sibling_id) pairs before any
+        // mutation so we don't fight the borrow checker between
+        // label_to_id reads and set_synapse mutations.
+        let pid_opt = pool.label_to_id.get(&parent).copied();
+        let sibling_pairs: Vec<(u32, u32)> = match pid_opt {
+            Some(pid) => sibling_parents.iter().filter_map(|sl| {
+                let sid = *pool.label_to_id.get(sl)?;
+                if child_id_set.contains(&sid) { return None; }
+                Some((pid, sid))
+            }).collect(),
+            None => Vec::new(),
+        };
+        // Wire lateral inhibition between this parent and each sibling
+        // parent.  Children are explicitly excluded so the parent does
+        // not suppress its own members.
+        let lateral_w = WITHIN_POOL_LATERAL_INH_WEIGHT;
+        for (pid, sid) in sibling_pairs {
+            pool.set_synapse(pid, sid, lateral_w, true);
+            pool.set_synapse(sid, pid, lateral_w, true);
+        }
+        Some(parent)
+    }
+
     /// Train one source pool simultaneously against many target pools.
     /// Equivalent to calling `multi_pool_train_pair(src, _, tgt_i, _, lr)`
     /// for each target, but resets/promotes the source pool only once.
@@ -6223,6 +6437,41 @@ impl NeuroRuntime {
         active_atoms.sort_by(|a, b| b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal));
         let chosen = top_active_concept(src_pool, &src_active);
+        // Hierarchical-children inspection: when the chosen concept is
+        // a parent (members are concepts), list its children's labels
+        // and per-child cross-edge counts.  Empty when the concept is
+        // a leaf (atom-only members).
+        let mut hierarchical_children: Vec<serde_json::Value> = Vec::new();
+        if let Some(ref ch) = chosen {
+            if let Some(&id) = src_pool.label_to_id.get(ch) {
+                if let Some(neuron) = src_pool.get_hot(id as usize) {
+                    for &mid in &neuron.members {
+                        if let Some(child) = src_pool.get_hot(mid as usize) {
+                            if child.members.is_empty() { continue; }
+                            let clabel = child.label.clone().unwrap_or_default();
+                            // Sum cross-edge counts across every target pool.
+                            let mut per_target: Vec<serde_json::Value> = Vec::new();
+                            for tgt in guard.multi_pool.pool_ids().into_iter()
+                                .filter(|p| p != src_pool_id)
+                            {
+                                let n_edges = guard.multi_pool.cross_for(src_pool_id, &tgt)
+                                    .map(|c| c.forward(&clabel).len()).unwrap_or(0);
+                                if n_edges > 0 {
+                                    per_target.push(serde_json::json!({
+                                        "tgt": tgt, "edges": n_edges,
+                                    }));
+                                }
+                            }
+                            hierarchical_children.push(serde_json::json!({
+                                "label_prefix": &clabel[..clabel.len().min(40)],
+                                "member_count": child.members.len(),
+                                "cross_edges_per_tgt": per_target,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
         let mut jaccard = None;
         let mut concept_atoms_count = 0;
         if let Some(ref c) = chosen {
@@ -6299,11 +6548,43 @@ impl NeuroRuntime {
                 "forward_top_inh_mag":     chosen_inh_top,
             }));
         }
+        // Trace what tgt_seeds would look like if we ran the cross-
+        // projection for image_pixels right now — covers direct edges
+        // AND hierarchical inheritance.  Useful when the production
+        // path returns empty predictions and we need to know which
+        // step zeroed the seeds.
+        let trace_target = "image_pixels";
+        let mut seeds_direct = 0usize;
+        let mut seeds_inherited = 0usize;
+        if let Some(ref chosen) = chosen {
+            if let Some(cross) = guard.multi_pool.cross_for(src_pool_id, trace_target) {
+                seeds_direct = cross.forward(chosen).len();
+                if let Some(&id) = src_pool.label_to_id.get(chosen) {
+                    if let Some(n) = src_pool.get_hot(id as usize) {
+                        for &mid in &n.members {
+                            if let Some(child) = src_pool.get_hot(mid as usize) {
+                                if child.members.is_empty() { continue; }
+                                if let Some(cl) = &child.label {
+                                    seeds_inherited += cross.forward(cl).len();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         serde_json::json!({
             "src_pool":               src_pool_id,
             "input_atoms":            atoms.len(),
             "pos_atoms":              pos_atoms.len(),
             "pos_atoms_sample":       pos_atoms.iter().take(10).collect::<Vec<_>>(),
+            "hierarchical_children":  hierarchical_children,
+            "cross_proj_trace": {
+                "target":      trace_target,
+                "direct":      seeds_direct,
+                "inherited":   seeds_inherited,
+            },
             "src_active_total":       src_active.len(),
             "active_concepts":        active_concepts.iter().take(5).collect::<Vec<_>>(),
             "active_atoms_top":       active_atoms.iter().take(5).collect::<Vec<_>>(),
@@ -6412,37 +6693,39 @@ impl NeuroRuntime {
         let chosen_src_concept = top_active_concept(src_pool, &src_active);
         let chosen_src_label = chosen_src_concept.clone();
 
-        // 1c. Input-coverage gate.  With a small pool the chosen concept's
-        // src_concept_frac is trivially 1.0 (no peer to compete with), and
-        // any input that shares a short prefix with the trained Q —
-        // e.g. "what is the X" — activates the concept above min_strength.
-        // That produced confident-wrong answers like "What is the sun?"
-        // → the Lagrangian definition.
-        //
-        // Architectural fix: measure how much of the concept's atoms the
-        // input actually covered.  A genuine match has the input touching
-        // most of the concept's position-augmented atoms.  A spurious
-        // prefix-only match touches only a small fraction.  Jaccard
-        // between input pos-atoms and the chosen concept's members is
-        // the geometry of that overlap; below 0.55 we reject and let
-        // /chat fall through to char_chain rather than emit a confident
-        // wrong answer.
+        // 1c. Input-coverage gate.  Same logic as before for leaf
+        // (atom-membership) concepts.  HIERARCHICAL concepts (members
+        // are themselves concept neurons) bypass this gate — their
+        // member labels are concept hashes that won't match
+        // character-level pos_atoms by construction; using Jaccard
+        // there would always reject.  Activation magnitude already
+        // verifies a hierarchical parent fired via its name-atom→
+        // parent synapses, which is the right gate for that case.
         if let Some(ref chosen) = chosen_src_concept {
             if let Some(&cid) = src_pool.label_to_id.get(chosen) {
                 if let Some(neuron) = src_pool.get_hot(cid as usize) {
                     if !neuron.members.is_empty() {
-                        let concept_atoms: std::collections::HashSet<String> =
-                            neuron.members.iter()
-                                .filter_map(|mid| src_pool.get_hot(*mid as usize))
-                                .filter_map(|n| n.label.clone())
-                                .collect();
-                        let input_atoms: std::collections::HashSet<String> =
-                            pos_atoms.iter().cloned().collect();
-                        let inter = concept_atoms.intersection(&input_atoms).count();
-                        let union = concept_atoms.union(&input_atoms).count().max(1);
-                        let jaccard = inter as f32 / union as f32;
-                        if jaccard < 0.55 {
-                            return None;  // fall through to char_chain
+                        // Determine if this is a hierarchical concept:
+                        // at least one member is itself a concept.
+                        let is_hierarchical = neuron.members.iter().any(|mid| {
+                            src_pool.get_hot(*mid as usize)
+                                .map(|m| !m.members.is_empty())
+                                .unwrap_or(false)
+                        });
+                        if !is_hierarchical {
+                            let concept_atoms: std::collections::HashSet<String> =
+                                neuron.members.iter()
+                                    .filter_map(|mid| src_pool.get_hot(*mid as usize))
+                                    .filter_map(|n| n.label.clone())
+                                    .collect();
+                            let input_atoms: std::collections::HashSet<String> =
+                                pos_atoms.iter().cloned().collect();
+                            let inter = concept_atoms.intersection(&input_atoms).count();
+                            let union = concept_atoms.union(&input_atoms).count().max(1);
+                            let jaccard = inter as f32 / union as f32;
+                            if jaccard < 0.55 {
+                                return None;
+                            }
                         }
                     }
                 }
@@ -6461,11 +6744,11 @@ impl NeuroRuntime {
             (chosen_src_act / src_concept_total).clamp(0.0, 1.0)
         } else { 0.0 };
 
-        let src_for_cross: HashMap<String, f32> = match chosen_src_concept {
+        let src_for_cross: HashMap<String, f32> = match chosen_src_concept.as_ref() {
             Some(lbl) => {
-                let act = *src_active.get(&lbl).unwrap_or(&0.0);
+                let act = *src_active.get(lbl).unwrap_or(&0.0);
                 let mut m = HashMap::new();
-                m.insert(lbl, act);
+                m.insert(lbl.clone(), act);
                 m
             }
             None => src_active.clone(),
@@ -6476,24 +6759,65 @@ impl NeuroRuntime {
         //    return negative weights.  Both feed the same accumulator;
         //    over-inhibited seeds are clamped at 0 (an over-suppressed
         //    neuron just doesn't fire — same nonlinearity biology uses).
+        //
+        //    Hierarchical inheritance: when a chosen source concept is
+        //    a PARENT (its members are themselves concept neurons,
+        //    not atoms), its children inherit its activation and
+        //    contribute their own cross-pool edges to the projection.
+        //    This is the top-down expectation path — typing "fruit"
+        //    activates the fruit concept which then forwards through
+        //    apple's and banana's image_pixels cross-edges.  Children
+        //    contribute at HIERARCHY_INHERITED_GAIN (< 1.0) so the
+        //    parent's direct edges, if any, dominate.
+        // Hierarchical inheritance gain.  > 1.0 deliberately: when a
+        // parent fires from "above", each child's seed needs to be
+        // strong enough to survive the within-pool lateral inhibition
+        // between sibling target concepts in the next propagate step,
+        // otherwise a single child wins and the parent's "all children
+        // are valid expectations" semantics collapses to WTA between
+        // siblings.  Tuned so two siblings each clear the lateral-
+        // inhibition floor.
+        const HIERARCHY_INHERITED_GAIN: f32 = 1.5;
         let cross = guard.multi_pool.cross_for(src_pool_id, tgt_pool_id)?;
+        let src_pool_ref = guard.multi_pool.pool(src_pool_id)?;
         let mut tgt_seeds: HashMap<String, f32> = HashMap::new();
         let mut chosen_src_edge_total = 0.0f32;
         let mut chosen_src_edge_top = 0.0f32;
         for (src_label, src_act) in &src_for_cross {
+            // Direct edges from this concept.
             for (tgt_label, w) in cross.forward(src_label) {
                 let entry = tgt_seeds.entry(tgt_label).or_insert(0.0);
-                *entry += src_act * w;   // w may be negative (inhibitory)
+                *entry += src_act * w;
                 if Some(src_label) == chosen_src_label.as_ref() {
-                    // For the chosen-target fraction we only count
-                    // excitatory edges — inhibition reduces seeds but
-                    // doesn't compete to "be the prediction".  Without
-                    // this, a strongly inhibited target would inflate
-                    // the cross_edge_frac denominator with negative
-                    // weight magnitude and confuse the confidence calc.
                     if w > 0.0 {
                         chosen_src_edge_total += w;
                         if w > chosen_src_edge_top { chosen_src_edge_top = w; }
+                    }
+                }
+            }
+            // Hierarchical inheritance: enumerate this concept's
+            // CONCEPT-typed members (hierarchical children) and union
+            // their cross-pool edges.  Only EXCITATORY child edges
+            // propagate up — a parent says "all my children are valid
+            // expectations", not "my children's mutual exclusions
+            // apply here too".  Without this filter, sibling children
+            // pass through each other's contrastive inhibitions
+            // (apple_exc to apple_image vs banana_inh to apple_image)
+            // and the net seed cancels to ~0.
+            if let Some(&id) = src_pool_ref.label_to_id.get(src_label) {
+                if let Some(neuron) = src_pool_ref.get_hot(id as usize) {
+                    for &mid in &neuron.members {
+                        if let Some(child_neuron) = src_pool_ref.get_hot(mid as usize) {
+                            if child_neuron.members.is_empty() { continue; }
+                            let child_label = match &child_neuron.label {
+                                Some(l) => l, None => continue,
+                            };
+                            for (tgt_label, mag, inh) in cross.forward_signed(child_label) {
+                                if inh { continue; }  // exc-only inheritance
+                                let entry = tgt_seeds.entry(tgt_label).or_insert(0.0);
+                                *entry += src_act * mag * HIERARCHY_INHERITED_GAIN;
+                            }
+                        }
                     }
                 }
             }
@@ -6517,15 +6841,67 @@ impl NeuroRuntime {
         //     during training) decides the winner naturally during the
         //     within-pool propagate step.
 
-        // 3. Propagate within the target pool.
-        let tgt_acts = tgt_pool.propagate_weighted_sum_no_clamp(
-            &tgt_seeds, hops.max(3), min_activation
-        );
+        // Detect hierarchy on the source side — used to decide whether
+        // within-pool propagation should run (it introduces winner-
+        // take-all, which collapses multi-winner hierarchical recall).
+        let src_is_hierarchical = chosen_src_concept.as_ref()
+            .and_then(|lbl| src_pool.label_to_id.get(lbl).copied())
+            .and_then(|id| src_pool.get_hot(id as usize))
+            .map(|n| n.members.iter().any(|mid| src_pool.get_hot(*mid as usize)
+                .map(|m| !m.members.is_empty()).unwrap_or(false)))
+            .unwrap_or(false);
+
+        // 3. Propagate within the target pool — but ONLY when the
+        // source is a leaf concept.  For hierarchical sources the
+        // cross-projection's tgt_seeds already encode the parent's
+        // multi-child expectation; running propagation would let
+        // within-pool lateral inhibition collapse it to a single
+        // winner, defeating the whole point of hierarchy.  Decode
+        // directly from tgt_seeds in that case.
+        let tgt_acts: HashMap<String, f32> = if src_is_hierarchical {
+            // Use tgt_seeds as the activation map; concept neurons
+            // get their seed value, atoms get propagated from their
+            // parent concept's seed for the decode-by-member path.
+            let mut acts: HashMap<String, f32> = tgt_seeds.clone();
+            // Also activate each seeded concept's atom members so
+            // 4b-bis atom-list decoding has data to work with.  Use
+            // the concept's seed strength scaled by within-pool
+            // concept→atom synapses (constant fraction here — we're
+            // bypassing the full propagate but still need atoms to
+            // appear in the result for non-character target pools).
+            for (lbl, seed) in tgt_seeds.iter() {
+                if let Some(&id) = tgt_pool.label_to_id.get(lbl) {
+                    if let Some(neuron) = tgt_pool.get_hot(id as usize) {
+                        for &mid in &neuron.members {
+                            if let Some(m_neuron) = tgt_pool.get_hot(mid as usize) {
+                                if let Some(m_label) = &m_neuron.label {
+                                    let entry = acts.entry(m_label.clone()).or_insert(0.0);
+                                    *entry += seed * 0.5;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            acts
+        } else {
+            tgt_pool.propagate_weighted_sum_no_clamp(
+                &tgt_seeds, hops.max(3), min_activation
+            )
+        };
         if tgt_acts.is_empty() { return None; }
 
         // 4. Decode.
-        // 4a. Concept walk if a composite/concept fired.
-        let mut best_concept: Option<(String, f32)> = None;
+        // 4a. Concept walk if a composite/concept fired.  Collect ALL
+        //     active target concepts; pick the strongest as the
+        //     primary winner.  When the source was hierarchical, also
+        //     keep every co-active concept above a fractional threshold
+        //     (>= 50% of the top) for multi-winner decoding — a parent
+        //     concept's expectations cover ALL of its children, so the
+        //     decode should include atoms from every co-fired sibling.
+        //
+        // src_is_hierarchical already computed before propagation (above).
+        let mut concept_acts: Vec<(String, f32)> = Vec::new();
         let mut tgt_concept_total = 0.0f32;
         for (lbl, act) in &tgt_acts {
             let id = match tgt_pool.label_to_id.get(lbl) {
@@ -6538,12 +6914,12 @@ impl NeuroRuntime {
             };
             if neuron.members.len() >= 2 {
                 tgt_concept_total += *act;
-                let entry = best_concept.as_ref().map(|x| x.1).unwrap_or(0.0);
-                if *act > entry {
-                    best_concept = Some((lbl.clone(), *act));
-                }
+                concept_acts.push((lbl.clone(), *act));
             }
         }
+        concept_acts.sort_by(|a, b| b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal));
+        let best_concept: Option<(String, f32)> = concept_acts.first().cloned();
         let tgt_concept_frac = match (&best_concept, tgt_concept_total) {
             (Some((_, a)), t) if t > 1e-9 => (*a / t).clamp(0.0, 1.0),
             _ => 0.0,
@@ -6551,37 +6927,65 @@ impl NeuroRuntime {
         // (c) Final confidence: product of the three softmax-like fractions.
         let confidence = (src_concept_frac * cross_edge_frac * tgt_concept_frac)
             .clamp(0.0, 1.0);
-        if let Some((lbl, _)) = best_concept {
-            let parts = tgt_pool.composite_constituents(&lbl);
-            let chars: String = parts.iter()
+        if let Some((lbl, _top_act)) = best_concept {
+            // Hierarchical recall walks parent → children → cross-edge
+            // targets structurally, guaranteeing all children's atoms
+            // appear regardless of which won the in-pool propagate.
+            // Non-hierarchical recall uses the single winning concept.
+            let winners: Vec<String> = if src_is_hierarchical {
+                // Collect every target concept that received a positive
+                // seed from the cross-projection step (tgt_seeds). This
+                // bypasses concept_acts (which ranks by activation) and
+                // gives every child equal footing.
+                let mut w: Vec<String> = tgt_seeds.iter()
+                    .filter(|(seed_lbl, v)| {
+                        if **v <= 0.0 { return false; }
+                        // Only concept neurons (members.len() >= 2).
+                        tgt_pool.label_to_id.get(*seed_lbl)
+                            .and_then(|&id| tgt_pool.get_hot(id as usize))
+                            .map(|n| n.members.len() >= 2)
+                            .unwrap_or(false)
+                    })
+                    .map(|(l, _)| l.clone())
+                    .collect();
+                if w.is_empty() { w.push(lbl.clone()); }
+                w
+            } else {
+                vec![lbl.clone()]
+            };
+
+            let mut all_parts: Vec<String> = Vec::new();
+            for w_lbl in &winners {
+                let parts = tgt_pool.composite_constituents(w_lbl);
+                all_parts.extend(parts);
+            }
+            // Deduplicate while preserving order.
+            let mut seen = std::collections::HashSet::new();
+            all_parts.retain(|p| seen.insert(p.clone()));
+
+            // Character-decode path (works when targets are text concepts).
+            let chars: String = all_parts.iter()
                 .filter_map(|p| pos_label_to_char(p))
                 .collect();
             if !chars.is_empty() {
                 return Some((chars, confidence));
             }
-            // 4a-bis: target pool isn't a character pool (image_pixels,
-            // audio_features, etc.).  pos_label_to_char returned nothing,
-            // but the concept legitimately fired.  Return the concept's
-            // members RANKED BY ACTIVATION so lateral inhibition's effect
-            // shows up: atoms strongly fired by the winning concept come
-            // first, atoms shared with suppressed competitor concepts
-            // (lower activation post-inhibition) sink to the bottom.
-            // Without the activation sort, the first 40 stored members
-            // dominate the response and overlapping early-stored atoms
-            // between visually-similar concepts (apple/ball both circles)
-            // make discrimination look worse than it actually is.
-            if !parts.is_empty() {
-                let mut ranked: Vec<(&String, f32)> = parts.iter()
+            // 4a-bis: target pool isn't a character pool.  Return the
+            // concept members ranked by activation; for hierarchical
+            // sources the union of all co-active concepts' members.
+            if !all_parts.is_empty() {
+                let mut ranked: Vec<(&String, f32)> = all_parts.iter()
                     .map(|p| (p, *tgt_acts.get(p).unwrap_or(&0.0)))
                     .collect();
                 ranked.sort_by(|a, b| b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal));
+                let cap = if src_is_hierarchical { 80 } else { 40 };
                 let decoded: String = ranked.iter()
                     .filter_map(|(p, _)| {
                         let s = strip_position_suffix(p);
                         if s.is_empty() { None } else { Some(s) }
                     })
-                    .take(40)            // cap so the response stays small
+                    .take(cap)
                     .collect::<Vec<_>>()
                     .join(" ");
                 if !decoded.is_empty() {
