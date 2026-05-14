@@ -951,6 +951,11 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/media/playback",       post(media_playback))
         .route("/neuro/propagate",      post(neuro_propagate))
         .route("/neuro/checkpoint",     post(neuro_checkpoint))
+        // POST /shutdown — graceful save + process exit.  Supervisor
+        // calls this on relaunch so in-memory multi-pool state is
+        // flushed to disk before the process dies (instead of taskkill
+        // which loses everything in RAM that hasn't been checkpointed).
+        .route("/shutdown",             post(graceful_shutdown))
         // POST /neuro/reinforce — externally-callable dopamine pulse +
         //   flush.  Captures recently-trained synapses (those with warm
         //   trace tags) into permanent weight boosts.  The verifier
@@ -5628,19 +5633,28 @@ async fn query_integrated(
             &src_pool, &atoms, hops.max(2), min_s.max(0.001),
         );
         let mut all_routes: Vec<serde_json::Value> = Vec::new();
-        let mp_out = mp.get("out").cloned();
-        if let Some((ans, conf)) = mp_out.clone() {
+        // Pick the highest-confidence prediction across ALL target pools
+        // (same-pool recall surfaces under the src pool key; cross-modal
+        // recall under each modality pool key).  No hardcoded "out".
+        let mp_best = mp.iter()
+            .filter(|(_, (a, _))| !a.is_empty())
+            .max_by(|a, b| a.1.1.partial_cmp(&b.1.1)
+                .unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(pool, (a, c))| (pool.clone(), a.clone(), *c));
+        if let Some((winning_pool, ans, conf)) = mp_best.clone() {
             all_routes.push(serde_json::json!({
-                "method":     "multi_pool",
-                "answer":     ans,
-                "confidence": conf,
+                "method":       "multi_pool",
+                "answer":       ans,
+                "confidence":   conf,
+                "winning_pool": winning_pool,
             }));
             if conf >= mp_thr && !ans.is_empty() {
                 return serde_json::json!({
-                    "answer":     ans,
-                    "method":     "multi_pool",
-                    "confidence": conf,
-                    "all_routes": all_routes,
+                    "answer":       ans,
+                    "method":       "multi_pool",
+                    "confidence":   conf,
+                    "winning_pool": winning_pool,
+                    "all_routes":   all_routes,
                 });
             }
         }
@@ -5837,13 +5851,24 @@ async fn neuro_ask(
         }
         let predictions: std::collections::HashMap<String, String> =
             mp.iter().map(|(p, (a, _))| (p.clone(), a.clone())).collect();
-        if let Some((answer, conf)) = mp.get("out").cloned() {
-            if !answer.is_empty() && conf >= mp_thr {
+        // Pick the highest-confidence prediction across ALL target pools
+        // — within-pool paired training (keyboard_text → keyboard_text)
+        // produces an entry under the same pool key as the source, and
+        // multimodal training (text → image_pixels, etc.) produces entries
+        // under each modality.  The right "answer" is the strongest by
+        // confidence regardless of which pool surfaced it.
+        let best = mp.iter()
+            .filter(|(_, (a, _))| !a.is_empty())
+            .max_by(|a, b| a.1.1.partial_cmp(&b.1.1)
+                .unwrap_or(std::cmp::Ordering::Equal));
+        if let Some((winning_pool, (answer, conf))) = best {
+            if *conf >= mp_thr {
                 return serde_json::json!({
                     "question":     text,
                     "answer":       answer,
                     "decoder":      "multi_pool",
                     "confidence":   conf,
+                    "winning_pool": winning_pool,
                     "predictions":  predictions,
                     "hops":         hops,
                     "min_strength": min_str,
@@ -8030,27 +8055,103 @@ async fn neuro_checkpoint(
     }
 }
 
-/// POST /neuro/clear
-/// Reset the in-memory pool to empty and delete pool files on disk.
-/// Use before a fresh training run so the curriculum starts from a blank slate.
-async fn neuro_clear(
+/// POST /shutdown
+/// Graceful shutdown.  Saves the slow-pool, multi-pool hot tiers, and
+/// cross-pool synapse table, then exits the process after the response
+/// is flushed.  The supervisor should call this instead of taskkill so
+/// no in-memory state is lost on relaunch.
+///
+/// Response is sent before the exit timer fires (500ms grace) so the
+/// caller gets a 200 and can sequence its own shutdown.
+async fn graceful_shutdown(
     State(state): State<ApiState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let result = tokio::task::spawn_blocking(move || {
-        state.neuro.clear_pool()
+    let pool_path = state.neuro.pool_state_path().unwrap_or("").to_string();
+    let mp_hot_dir = node_data_dir().join("multi_pool_hot");
+    let mp_cross   = node_data_dir().join("multi_pool_cross.json");
+    let neuro = state.neuro.clone();
+    let save_result = tokio::task::spawn_blocking(move || {
+        let pool_res     = neuro.save_pool();
+        let mp_hot_res   = neuro.multi_pool_save_hot_tiers(&mp_hot_dir);
+        let mp_cross_res = neuro.multi_pool_save_cross_synapses(&mp_cross);
+        (pool_res, mp_hot_res, mp_cross_res)
+    }).await;
+
+    let (pool_ok, mp_hot_ok, mp_cross_ok, errors) = match save_result {
+        Ok((p, h, c)) => {
+            let mut errs: Vec<String> = Vec::new();
+            if let Err(e) = &p { errs.push(format!("pool: {e}")); }
+            if let Err(e) = &h { errs.push(format!("multi_pool hot: {e}")); }
+            if let Err(e) = &c { errs.push(format!("multi_pool cross: {e}")); }
+            (p.is_ok(), h.is_ok(), c.is_ok(), errs)
+        }
+        Err(e) => (false, false, false, vec![e.to_string()]),
+    };
+
+    // Schedule process exit after the response goes out.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        std::process::exit(0);
+    });
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "shutdown":  true,
+        "pool_path": pool_path,
+        "pool_saved":     pool_ok,
+        "mp_hot_saved":   mp_hot_ok,
+        "mp_cross_saved": mp_cross_ok,
+        "errors": errors,
+    })))
+}
+
+/// POST /neuro/clear
+/// Selective reset.  Query params control which subsystems are cleared:
+///   neuro_pool=true|false  (default true)  — raw Hebbian / motif fabric
+///   multi_pool=true|false  (default false) — multi-pool concept fabric
+///
+/// Default (no params) wipes only the raw neuro pool.  This is the safe
+/// default: a stray clear (legacy curriculum, smoke test, accidental
+/// hit) can no longer wipe the multi-pool concept fabric that /chat
+/// queries.  To clear everything explicitly: ?neuro_pool=true&multi_pool=true.
+#[derive(Deserialize, Default)]
+struct NeuroClearReq {
+    #[serde(default = "default_clear_neuro_pool")]
+    neuro_pool: bool,
+    #[serde(default)]
+    multi_pool: bool,
+}
+fn default_clear_neuro_pool() -> bool { true }
+
+async fn neuro_clear(
+    State(state): State<ApiState>,
+    Query(req): Query<NeuroClearReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let clear_neuro = req.neuro_pool;
+    let clear_multi = req.multi_pool;
+    let neuro = state.neuro.clone();
+    let result: Result<(), String> = tokio::task::spawn_blocking(move || {
+        if clear_neuro { neuro.clear_pool()?; }
+        if clear_multi { neuro.clear_multi_pool(); }
+        Ok::<(), String>(())
     }).await.unwrap_or_else(|e| Err(e.to_string()));
-    // Delete persisted multi_pool state so training starts fresh.
-    let _ = std::fs::remove_file(node_data_dir().join("multi_pool_cross.json"));
-    if let Ok(entries) = std::fs::read_dir(node_data_dir().join("multi_pool_hot")) {
-        for e in entries.flatten() { let _ = std::fs::remove_file(e.path()); }
-    }
-    if let Ok(entries) = std::fs::read_dir(node_data_dir().join("multi_pool_cold")) {
-        for e in entries.flatten() {
-            if e.path().is_dir() { let _ = std::fs::remove_dir_all(e.path()); }
+    if clear_multi {
+        // Multi-pool persistence on disk too.
+        let _ = std::fs::remove_file(node_data_dir().join("multi_pool_cross.json"));
+        if let Ok(entries) = std::fs::read_dir(node_data_dir().join("multi_pool_hot")) {
+            for e in entries.flatten() { let _ = std::fs::remove_file(e.path()); }
+        }
+        if let Ok(entries) = std::fs::read_dir(node_data_dir().join("multi_pool_cold")) {
+            for e in entries.flatten() {
+                if e.path().is_dir() { let _ = std::fs::remove_dir_all(e.path()); }
+            }
         }
     }
     match result {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "cleared": true }))),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({
+            "cleared":        true,
+            "neuro_pool":     clear_neuro,
+            "multi_pool":     clear_multi,
+        }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e }))),
     }

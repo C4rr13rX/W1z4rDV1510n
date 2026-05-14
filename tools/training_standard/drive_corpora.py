@@ -90,9 +90,59 @@ def read_corpus_jsonl(path: Path) -> list[dict]:
     return out
 
 
+def smoke_test_memorization(rows: list[dict], n: int = 3,
+                              timeout: float = 5.0) -> tuple[bool, list[dict]]:
+    """Query the first `n` prompts back through /chat and check that the
+    multi_pool decoder fires (not char_chain).  Returns (ok, samples).
+    The pipeline is silently failing if every query falls through to
+    char_chain after a script's first repeat — drive_corpora aborts the
+    run in that case rather than wasting hours.
+
+    "Ok" means at least one of the n queries came back with
+    decoder == "multi_pool".  Strict — if it's char_chain across the
+    board, training is not landing in the queryable fabric.
+    """
+    samples: list[dict] = []
+    multi_pool_hits = 0
+    for row in rows[:n]:
+        prompt = (row.get("prompt") or row.get("question") or "").strip()
+        if not prompt:
+            continue
+        body = json.dumps({"text": prompt}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{NODE_URL.rstrip('/')}/chat",
+            data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                resp = json.loads(r.read())
+        except Exception as e:
+            samples.append({"prompt": prompt, "error": str(e)})
+            continue
+        decoder = resp.get("decoder")
+        if decoder == "multi_pool":
+            multi_pool_hits += 1
+        samples.append({
+            "prompt":     prompt,
+            "decoder":    decoder,
+            "confidence": resp.get("confidence"),
+            "answer":     (resp.get("answer") or "")[:80],
+        })
+    return (multi_pool_hits > 0, samples)
+
+
 def drive_one(script, repeats: int, project_root: Path,
-                verbose: bool = False) -> dict:
-    """Feed one TOML script's corpus to the node, then mark trained."""
+                verbose: bool = False, smoke: bool = True) -> dict:
+    """Feed one TOML script's corpus to the node, then mark trained.
+
+    After the FIRST repeat, runs an inline smoke test querying 3 trained
+    prompts back through /chat.  If every query returns char_chain (not
+    multi_pool), the training pipeline is silently failing — drive_corpora
+    aborts that script and reports the failure.  Caller can pass
+    `smoke=False` to skip (used for re-training scripts whose corpora
+    have only one item, etc.).
+    """
     summary = {
         "script_id":   script.id,
         "category":    script.category,
@@ -101,6 +151,7 @@ def drive_one(script, repeats: int, project_root: Path,
         "posted_ok":   0,
         "posted_fail": 0,
         "repeats":     repeats,
+        "smoke_ok":    None,
     }
     # Each corpus input becomes one stream of paired observations.
     for inp in script.inputs:
@@ -114,19 +165,13 @@ def drive_one(script, repeats: int, project_root: Path,
             continue
         summary["pairs"] += len(rows)
         sess = f"train:{script.id}"
+        smoke_ran = False
         for r in range(repeats):
             for row in rows:
                 prompt = (row.get("prompt") or row.get("question") or "").strip()
                 resp   = (row.get("response") or row.get("answer") or "").strip()
                 if not prompt or not resp:
                     continue
-                # paired_text drives the cross-pool training: keyboard_text
-                # source atoms = response chars, the modality pool (also
-                # keyboard_text for text-only training, which falls back
-                # to within-pool sequence + own-concept reinforcement).
-                # session_id keeps the per-script temporal cache scoped
-                # so two scripts' observations don't bleed into each
-                # other's sequence edges.
                 ok, err = post_observe(prompt, resp, session_id=sess, lr=1.5)
                 if ok:
                     summary["posted_ok"] += 1
@@ -134,6 +179,34 @@ def drive_one(script, repeats: int, project_root: Path,
                     summary["posted_fail"] += 1
                     if verbose:
                         print(f"  [{script.id}] post fail: {err}", flush=True)
+            # Inline smoke after first repeat: verify that /chat now
+            # returns multi_pool (not char_chain) for prompts we just
+            # trained.  Catches silent failures BEFORE we waste another
+            # 5 repeats on a broken pipeline.
+            if smoke and not smoke_ran and r == 0 and rows:
+                smoke_ok, samples = smoke_test_memorization(rows, n=3)
+                summary["smoke_ok"] = smoke_ok
+                summary["smoke_samples"] = samples
+                smoke_ran = True
+                if smoke_ok:
+                    if verbose:
+                        print(f"  [{script.id}] smoke OK (multi_pool decoder fired)",
+                                flush=True)
+                else:
+                    print(f"  [{script.id}] !! SMOKE FAILED — every query fell "
+                            f"to char_chain after first repeat:",
+                            flush=True)
+                    for s in samples:
+                        print(f"     prompt: {s.get('prompt','')[:60]!r}",
+                                flush=True)
+                        print(f"     decoder: {s.get('decoder')}  "
+                                f"conf: {s.get('confidence')}  "
+                                f"ans: {s.get('answer')!r}",
+                                flush=True)
+                    print(f"  [{script.id}] aborting remaining repeats; "
+                            "fabric is not capturing observations.",
+                            flush=True)
+                    break  # bail on remaining repeats for this script
         if verbose:
             print(f"  [{script.id}] corpus done — {repeats} reps × "
                     f"{len(rows)} pairs", flush=True)

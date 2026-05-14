@@ -165,7 +165,7 @@ def train_sequence_passes(node: str, question: str, answer: str, passes: int, lr
         frames.append({
             "modality": "text", "t_secs": t, "lr_scale": 1.0,
             "data_b64": _b64(tok), "text": tok,
-            "pool_namespace": "q",   # Q-pool: labels become q:txt:word_* / q:txt:punct_*
+            "pool_namespace": "legacy_q",   # sandboxed away from keyboard_text — labels become legacy_q:txt:word_* / legacy_q:txt:punct_*
             "spans": _spans(tok, t / max((q_total + a_total - 1) * 0.15, 0.001),
                             seq_index, total_frames),
         })
@@ -178,7 +178,7 @@ def train_sequence_passes(node: str, question: str, answer: str, passes: int, lr
         frames.append({
             "modality": "text", "t_secs": t, "lr_scale": 1.0,
             "data_b64": _b64(tok), "text": tok,
-            "pool_namespace": "a",   # A-pool: labels become a:txt:word_* / a:txt:punct_*
+            "pool_namespace": "legacy_a",   # sandboxed away from keyboard_text — labels become legacy_a:txt:word_* / legacy_a:txt:punct_*
             "spans": _spans(tok, t / max((a_start + (a_total - 1) * 0.10), 0.001),
                             seq_index, total_frames),
         })

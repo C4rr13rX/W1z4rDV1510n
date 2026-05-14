@@ -2226,6 +2226,27 @@ impl NeuronPool {
         out
     }
 
+    /// Pool-level stats for the unified /multi_pool/stats endpoint.
+    /// Returns (atom_count, concept_count, excitatory_synapses, inhibitory_synapses).
+    /// Atoms are leaf neurons (no members), concepts are composite
+    /// neurons (members.len() >= 1).  Cold-tier neurons are not
+    /// counted in either bucket — only the hot tier is visible here.
+    pub fn pool_stats(&self) -> (usize, usize, usize, usize) {
+        let mut atoms = 0usize;
+        let mut concepts = 0usize;
+        let mut excit = 0usize;
+        let mut inhib = 0usize;
+        for slot in self.neurons.iter() {
+            if let NeuronSlot::Hot(n) = slot {
+                if n.members.is_empty() { atoms += 1; }
+                else { concepts += 1; }
+                excit += n.excitatory.len();
+                inhib += n.inhibitory.len();
+            }
+        }
+        (atoms, concepts, excit, inhib)
+    }
+
     /// Resolve a human-readable text string to the stored concept-
     /// neuron label for it (the composite-of-atoms hash that
     /// `promote_full_sequence_with` produced during training).  Returns
@@ -2370,6 +2391,44 @@ impl NeuronPool {
             // Symmetric: new→peer AND peer→new.  Without symmetry the
             // pool would have one-way lateral suppression which violates
             // the "any concept can win" invariant of winner-take-all.
+            self.set_synapse(new_id, pid, weight, true);
+            self.set_synapse(pid, new_id, weight, true);
+            wired += 2;
+        }
+        wired
+    }
+
+    /// Same as `wire_lateral_inhibition_to_peers` but excludes a set of
+    /// labels from the peer set.  Used by same-pool paired training so
+    /// the prompt-concept does not lateral-inhibit the response-concept
+    /// it should co-activate during recall.  Other unrelated concepts
+    /// in the pool are still suppressed normally.
+    pub fn wire_lateral_inhibition_to_peers_except(
+        &mut self,
+        new_concept_label: &str,
+        weight: f32,
+        exclude: &[String],
+    ) -> usize {
+        let new_id = match self.label_to_id.get(new_concept_label) {
+            Some(&id) => id, None => return 0,
+        };
+        let is_concept = self.get_hot(new_id as usize)
+            .map(|n| !n.members.is_empty()).unwrap_or(false);
+        if !is_concept { return 0; }
+        let exclude_ids: std::collections::HashSet<u32> = exclude.iter()
+            .filter_map(|lbl| self.label_to_id.get(lbl).copied())
+            .collect();
+        let peers: Vec<u32> = (0..self.neurons.len()).filter_map(|i| {
+            let iid = i as u32;
+            if iid == new_id { return None; }
+            if exclude_ids.contains(&iid) { return None; }
+            match self.neurons.get(i) {
+                Some(NeuronSlot::Hot(n)) if !n.members.is_empty() => Some(iid),
+                _ => None,
+            }
+        }).collect();
+        let mut wired = 0usize;
+        for pid in peers {
             self.set_synapse(new_id, pid, weight, true);
             self.set_synapse(pid, new_id, weight, true);
             wired += 2;
@@ -4000,6 +4059,33 @@ impl MultiPoolFabric {
         self.cross.get(&(src.to_string(), tgt.to_string()))
     }
 
+    /// Per-pool + cross-edge counts in one pass.  Returns a Vec of
+    /// `(pool_id, atoms, concepts, exc_synapses, inh_synapses)` and a
+    /// Vec of `(src_pool, tgt_pool, edge_count)` for every cross map
+    /// that has any edges (including self-loops cross_for(pool, pool)
+    /// which carry within-pool concept→concept edges from same-modality
+    /// paired training).
+    pub fn fabric_stats(&self) -> (
+        Vec<(String, usize, usize, usize, usize)>,
+        Vec<(String, String, usize)>,
+    ) {
+        let mut pool_stats: Vec<(String, usize, usize, usize, usize)> =
+            self.pool_ids().into_iter().map(|id| {
+                let (a, c, ex, ih) = self.pools.get(&id)
+                    .map(|p| p.pool_stats()).unwrap_or((0, 0, 0, 0));
+                (id, a, c, ex, ih)
+            }).collect();
+        pool_stats.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut cross_stats: Vec<(String, String, usize)> = self.cross.iter()
+            .filter_map(|((s, t), edges)| {
+                let n = edges.len();
+                if n == 0 { None } else { Some((s.clone(), t.clone(), n)) }
+            })
+            .collect();
+        cross_stats.sort();
+        (pool_stats, cross_stats)
+    }
+
     pub fn cross_total_edges(&self) -> usize {
         self.cross.values().map(|c| c.len()).sum()
     }
@@ -5281,27 +5367,48 @@ impl NeuroRuntime {
     /// Called by POST /neuro/clear so training scripts can reset without restarting the node.
     pub fn clear_pool(&self) -> Result<(), String> {
         let path_opt = self.config.pool_state_path.clone();
-        let neuro_cfg = self.config.neuro.clone();
-        let motif_cfg = self.config.motifs.clone();
         {
             let mut guard = self.inner.lock();
+            // Build a fresh raw pool (slow Hebbian fabric + motif layer)
+            // while PRESERVING the multi_pool fabric — same-modality and
+            // cross-modal concept structure should survive a raw-pool
+            // wipe.  Callers that want a full reset must also invoke
+            // `clear_multi_pool` (exposed via /neuro/clear?multi_pool=true).
+            let preserved_multi_pool = std::mem::replace(
+                &mut guard.multi_pool, MultiPoolFabric::new());
+            let preserved_temporal   = std::mem::replace(
+                &mut guard.temporal_prev, HashMap::new());
+            let preserved_cold_dir   = guard.pool.cold_dir.clone();
+            let preserved_cooccur_cap = guard.pool.cooccur_cap;
+            let neuro_cfg = self.config.neuro.clone();
+            let motif_cfg = self.config.motifs.clone();
             let mut fresh = NeuroState::new(neuro_cfg, motif_cfg);
-            // Preserve cold-tier directory path from the old pool.
-            fresh.pool.cold_dir = guard.pool.cold_dir.clone();
-            fresh.pool.cooccur_cap = guard.pool.cooccur_cap;
+            fresh.pool.cold_dir = preserved_cold_dir;
+            fresh.pool.cooccur_cap = preserved_cooccur_cap;
+            fresh.multi_pool = preserved_multi_pool;
+            fresh.temporal_prev = preserved_temporal;
             *guard = fresh;
         }
-        // Delete pool file and entire cold-tier directory tree.
+        // Delete the raw-pool file + cold tree only; multi_pool persistence
+        // lives in separate paths and is left intact here.
         if let Some(ref path) = path_opt {
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_file(format!("{path}.tmp"));
-            // Remove the whole cold-tier tree (contains shard subdirs with many files).
             let cold_dir = format!("{}_cold", path.trim_end_matches(".json"));
             let _ = std::fs::remove_dir_all(&cold_dir);
-            // Recreate the empty directory so the node can write the cold index later.
             let _ = std::fs::create_dir_all(&cold_dir);
         }
         Ok(())
+    }
+
+    /// Wipe the multi-pool concept fabric only.  Leaves the raw Hebbian
+    /// pool and motif layer alone.  Disk persistence (multi_pool_hot,
+    /// multi_pool_cold, multi_pool_cross.json) is the caller's job —
+    /// /neuro/clear?multi_pool=true handles that side.
+    pub fn clear_multi_pool(&self) {
+        let mut guard = self.inner.lock();
+        guard.multi_pool = MultiPoolFabric::new();
+        guard.temporal_prev.clear();
     }
 
     pub fn observe_states<'a, I>(&self, states: I)
@@ -6138,7 +6245,21 @@ impl NeuroRuntime {
         negative: bool,
     ) {
         if src_atoms.is_empty() || tgt_atoms.is_empty() { return; }
-        if src_pool_id == tgt_pool_id { return; }
+        // src == tgt is the SAME-MODALITY paired case (e.g. text Q/A both
+        // in keyboard_text).  Two distinct concepts are formed within the
+        // one pool, joined by within-pool concept→concept synapses stored
+        // in the self-loop cross-edge map cross_for(pool, pool).  Lateral
+        // inhibition still fires, but the paired peer is excluded so the
+        // recall side can co-activate them.
+        let same_pool = src_pool_id == tgt_pool_id;
+
+        // (0) Position-augment atoms (no lock needed for the helper).
+        let src_pos = position_and_ngram_atoms(
+            src_atoms, self.use_bigrams(), self.use_trigrams());
+        let tgt_pos = position_and_ngram_atoms(
+            tgt_atoms, self.use_bigrams(), self.use_trigrams());
+        let apply_idf = self.use_idf();
+
         let mut guard = self.inner.lock();
 
         // Lazily create both pools if missing.
@@ -6146,68 +6267,54 @@ impl NeuroRuntime {
             .map(|p| p.config.clone())
             .unwrap_or_else(NeuroConfig::default);
         guard.multi_pool.register_pool(src_pool_id, cfg_template.clone());
-        guard.multi_pool.register_pool(tgt_pool_id, cfg_template);
+        if !same_pool {
+            guard.multi_pool.register_pool(tgt_pool_id, cfg_template);
+        }
 
-        // (0) Position-augment atoms so concepts whose content overlaps but
-        //     diverges in *position* can be discriminated by neural
-        //     propagation alone — no external decision rule needed.
-        //     When `use_bigrams` is on, ALSO add bigram atoms — position-
-        //     agnostic features over consecutive atom pairs that let
-        //     paraphrases sharing specific words (regardless of where they
-        //     appear in the sentence) share atom-level features.
-        let src_pos = position_and_ngram_atoms(
-            src_atoms, self.use_bigrams(), self.use_trigrams());
-        let tgt_pos = position_and_ngram_atoms(
-            tgt_atoms, self.use_bigrams(), self.use_trigrams());
-
-        // (1) Reset transient activation/trace in the two relevant pools.
-        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { p.reset_transient_state(); }
-        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) { p.reset_transient_state(); }
-
-        // Train within each pool.
-        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) { p.train_weighted(&src_pos, 1.0, false); }
-        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) { p.train_weighted(&tgt_pos, 1.0, false); }
-
-        // (2) Force-promote the full ordered atom sequence to a concept.
-        let apply_idf = self.use_idf();
-        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
+        // (1) + (2) src-side: reset transient → train atoms → promote
+        // concept → snapshot active concept labels.  When same_pool we
+        // process src first, snapshot it, then do the tgt side from a
+        // fresh transient state so the tgt promotion isn't biased by
+        // src atom activation lingering from the previous step.
+        let src_concepts: Vec<String> = if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
+            p.reset_transient_state();
+            p.train_weighted(&src_pos, 1.0, false);
             let _ = p.promote_full_sequence_with(&src_pos, apply_idf);
-        }
-        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) {
+            p.active_concept_labels(0.05)
+        } else { Vec::new() };
+
+        // (1)+(2) tgt-side.  Works for both same_pool and cross-pool
+        // cases — when same_pool, this is the same pool getting reset
+        // and trained again with the response atoms; a NEW distinct
+        // concept neuron is promoted for the tgt sequence.
+        let tgt_concepts: Vec<String> = if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) {
+            p.reset_transient_state();
+            p.train_weighted(&tgt_pos, 1.0, false);
             let _ = p.promote_full_sequence_with(&tgt_pos, apply_idf);
-        }
+            p.active_concept_labels(0.05)
+        } else { Vec::new() };
 
-        // (3) Snapshot active concept labels in each pool.
-        let src_concepts: Vec<String> = guard.multi_pool.pool(src_pool_id)
-            .map(|p| p.active_concept_labels(0.05)).unwrap_or_default();
-        let tgt_concepts: Vec<String> = guard.multi_pool.pool(tgt_pool_id)
-            .map(|p| p.active_concept_labels(0.05)).unwrap_or_default();
-
-        // (4a) Enumerate EXISTING concept labels in the target pool.
-        //      The contrastive Hebbian rule below treats every existing
-        //      target concept that is NOT in the current pairing as a
-        //      "competitor" — the current observation said "A goes with
-        //      B, not with B′" for every B′ that already lives in the
-        //      target pool.  This builds the categorical-exclusion
-        //      structure: after training apple ↔ apple_img, training
-        //      banana ↔ banana_img will inhibit (banana_text → apple_img)
-        //      and (banana_text → audio_features_of_apple) etc.
-        //
-        //      Skipped when `negative` — anti-examples don't define new
-        //      category structure, they only suppress one specific pair.
+        // (3) Competitors = every existing concept in tgt pool except
+        // those in the current tgt pairing.  Used for contrastive
+        // inhibition.  Skipped when `negative` (anti-example).
         let competitors: Vec<String> = if !negative {
             guard.multi_pool.pool(tgt_pool_id)
                 .map(|p| p.all_concept_labels()).unwrap_or_default()
         } else { Vec::new() };
         let tgt_concept_set: std::collections::HashSet<&String> =
             tgt_concepts.iter().collect();
+        let src_concept_set: std::collections::HashSet<&String> =
+            src_concepts.iter().collect();
 
-        // (4b) Polarity-aware concept pairing.
-        //      Positive observation: excitatory edges (a goes with b).
-        //      Negative observation: inhibitory edges (a is NOT b).
-        //      Both directions stored so the query path fires either way.
+        // (4a) Excitatory (positive) or inhibitory (negative) pairing.
+        // Stored bidirectionally via cross_mut.  When same_pool, the
+        // self-loop entry cross_for(pool, pool) is used — the cross-
+        // edge data structure allows (src, tgt) keys with src==tgt.
+        // Self-edges (a → a where a is in both src and tgt sets) are
+        // skipped: a concept does not need to project to itself.
         for a in &src_concepts {
             for b in &tgt_concepts {
+                if same_pool && a == b { continue; }
                 guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
                     .pair_signed(a, b, lr, negative);
                 guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
@@ -6215,24 +6322,19 @@ impl NeuroRuntime {
             }
         }
         if negative {
-            // Anti-example complete: skip competitor inhibition and
-            // lateral wiring.  Return early — the inhibitory pair above
-            // is the entire training signal.
             return;
         }
 
-        // (4c) Contrastive Hebbian — build INHIBITORY edges from each
-        //      newly-trained src concept to every PRE-EXISTING competitor
-        //      target concept.  Soft rate (CROSS_INH_RATE × lr) so a
-        //      single observation doesn't immediately wall off the entire
-        //      pool; repeated training of distinct pairs accumulates the
-        //      inhibition until each text concept actively suppresses
-        //      every non-paired image/audio concept.  Symmetric
-        //      bidirectional storage matches the excitatory pass above.
+        // (4b) Contrastive Hebbian — inhibitory edges from src concepts
+        // to every PRE-EXISTING tgt-pool concept that isn't in the
+        // current pairing.  In the same-pool case we also skip any
+        // competitor that happens to be the src concept itself
+        // (otherwise a concept would suppress itself).
         let inh_lr = lr * CROSS_INH_RATE;
         for a in &src_concepts {
             for b_prime in &competitors {
                 if tgt_concept_set.contains(b_prime) { continue; }
+                if same_pool && (a == b_prime || src_concept_set.contains(b_prime)) { continue; }
                 guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
                     .pair_signed(a, b_prime, inh_lr, true);
                 guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
@@ -6240,29 +6342,34 @@ impl NeuroRuntime {
             }
         }
 
-        // (4d) Within-pool lateral inhibition between concept neurons.
-        //      Each newly-trained concept gets symmetric inhibitory
-        //      synapses to every other concept in its pool, so during
-        //      the target-pool propagate step a winning concept actively
-        //      suppresses its peers.  This is the lateral inhibition
-        //      that cortical inhibitory interneurons provide — without
-        //      it the target pool can co-activate two competing concepts
-        //      when their member atoms overlap (apple/ball both circles).
-        //
-        //      Uses set_synapse semantics: idempotent across the multi-
-        //      pass training loop, fixed structural weight.  The global
-        //      `inhibitory_scale` config (default 0.5) further scales
-        //      this at propagation time so the effective lateral
-        //      inhibition per peer is weight × inhibitory_scale.
+        // (4c) Within-pool lateral inhibition between concept peers.
+        // In the same-pool case both src and tgt concepts live in the
+        // one pool; we wire lateral inhibition for each but exclude
+        // the paired peer set so the prompt-concept doesn't suppress
+        // the response-concept it should be co-activating with at
+        // recall time.  Other (unrelated) peer concepts in the pool
+        // still get suppressed normally — winner-take-all among
+        // competitors, cooperation among paired concepts.
         let lateral_w = WITHIN_POOL_LATERAL_INH_WEIGHT;
-        if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
-            for a in &src_concepts {
-                p.wire_lateral_inhibition_to_peers(a, lateral_w);
+        if same_pool {
+            if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
+                for a in &src_concepts {
+                    p.wire_lateral_inhibition_to_peers_except(a, lateral_w, &tgt_concepts);
+                }
+                for b in &tgt_concepts {
+                    p.wire_lateral_inhibition_to_peers_except(b, lateral_w, &src_concepts);
+                }
             }
-        }
-        if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) {
-            for b in &tgt_concepts {
-                p.wire_lateral_inhibition_to_peers(b, lateral_w);
+        } else {
+            if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
+                for a in &src_concepts {
+                    p.wire_lateral_inhibition_to_peers(a, lateral_w);
+                }
+            }
+            if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) {
+                for b in &tgt_concepts {
+                    p.wire_lateral_inhibition_to_peers(b, lateral_w);
+                }
             }
         }
     }
@@ -6774,11 +6881,13 @@ impl NeuroRuntime {
     ) -> HashMap<String, (String, f32)> {
         let mut out = HashMap::new();
         if atoms.is_empty() { return out; }
+        // Include the src pool itself as a target candidate — within-pool
+        // paired training (same-modality Q/A in keyboard_text) stores its
+        // concept→concept edges in cross_for(pool, pool), so within-pool
+        // recall flows through the same decode path as cross-pool recall.
         let target_ids: Vec<String> = {
             let guard = self.inner.lock();
-            guard.multi_pool.pool_ids().into_iter()
-                .filter(|id| id != src_pool_id)
-                .collect()
+            guard.multi_pool.pool_ids()
         };
         for tgt_pool_id in target_ids {
             if let Some((decoded, conf)) = self.multi_pool_decode_one_with_confidence(
@@ -6987,6 +7096,14 @@ impl NeuroRuntime {
         }
         // Clamp over-inhibited seeds and drop seeds that fell to/below 0.
         tgt_seeds.retain(|_, v| { *v = v.max(0.0); *v > 0.0 });
+        // Same-pool decode: the cross-edge walk already routed src concept
+        // to its paired tgt concept(s).  Make sure the SOURCE concept
+        // itself can't win the decode — it would just echo the input.
+        if src_pool_id == tgt_pool_id {
+            if let Some(ref lbl) = chosen_src_label {
+                tgt_seeds.remove(lbl);
+            }
+        }
         if tgt_seeds.is_empty() { return None; }
         let cross_edge_frac = if chosen_src_edge_total > 1e-9 {
             (chosen_src_edge_top / chosen_src_edge_total).clamp(0.0, 1.0)
@@ -7015,13 +7132,25 @@ impl NeuroRuntime {
             .unwrap_or(false);
 
         // 3. Propagate within the target pool — but ONLY when the
-        // source is a leaf concept.  For hierarchical sources the
-        // cross-projection's tgt_seeds already encode the parent's
-        // multi-child expectation; running propagation would let
-        // within-pool lateral inhibition collapse it to a single
-        // winner, defeating the whole point of hierarchy.  Decode
-        // directly from tgt_seeds in that case.
-        let tgt_acts: HashMap<String, f32> = if src_is_hierarchical {
+        // source is a leaf concept AND the target pool is different
+        // from the source pool.
+        //
+        // For hierarchical sources, the cross-projection's tgt_seeds
+        // already encode the parent's multi-child expectation; running
+        // propagation would let within-pool lateral inhibition collapse
+        // it to a single winner, defeating multi-winner recall.
+        //
+        // For SAME-POOL recall (within-pool paired training: e.g.,
+        // text Q/A both in keyboard_text), propagation is destructive:
+        // the seeded response concept fires its atom members, which via
+        // atom→concept edges activate the SOURCE concept too — and the
+        // source concept (more atoms in common with the input) wins by
+        // atom-feedback even though it's literally the input we were
+        // asked to translate AWAY from.  The cross-edge from src concept
+        // to its paired tgt concept(s) already did the routing work;
+        // decoding directly from tgt_seeds is the right behaviour.
+        let same_pool_recall = src_pool_id == tgt_pool_id;
+        let tgt_acts: HashMap<String, f32> = if src_is_hierarchical || same_pool_recall {
             // Use tgt_seeds as the activation map; concept neurons
             // get their seed value, atoms get propagated from their
             // parent concept's seed for the decode-by-member path.
@@ -7366,7 +7495,54 @@ impl NeuroRuntime {
     }
 
     pub fn multi_pool_stats(&self) -> serde_json::Value {
-        self.two_pool_stats()
+        let (pool_stats, cross_stats) = {
+            let guard = self.inner.lock();
+            guard.multi_pool.fabric_stats()
+        };
+        // Per-pool: atoms, concepts, exc/inh synapses + outgoing/incoming
+        // cross-edge sums for that pool.
+        let mut pool_objs: Vec<serde_json::Value> = Vec::with_capacity(pool_stats.len());
+        let mut total_atoms = 0usize;
+        let mut total_concepts = 0usize;
+        let mut total_exc = 0usize;
+        let mut total_inh = 0usize;
+        for (id, atoms, concepts, exc, inh) in &pool_stats {
+            total_atoms += atoms; total_concepts += concepts;
+            total_exc += exc; total_inh += inh;
+            // Cross-edge breakdown for this pool.
+            let mut outgoing: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            let mut incoming: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for (s, t, n) in &cross_stats {
+                if s == id { outgoing.insert(t.clone(), *n); }
+                if t == id { incoming.insert(s.clone(), *n); }
+            }
+            pool_objs.push(serde_json::json!({
+                "pool":              id,
+                "atoms":             atoms,
+                "concepts":          concepts,
+                "exc_synapses":      exc,
+                "inh_synapses":      inh,
+                "within_pool_total": exc + inh,
+                "cross_outgoing":    outgoing,
+                "cross_incoming":    incoming,
+            }));
+        }
+        let total_cross_edges: usize = cross_stats.iter().map(|(_, _, n)| *n).sum();
+        serde_json::json!({
+            "pools": pool_objs,
+            "totals": {
+                "pool_count":         pool_stats.len(),
+                "atoms":              total_atoms,
+                "concepts":           total_concepts,
+                "exc_synapses":       total_exc,
+                "inh_synapses":       total_inh,
+                "within_pool_total":  total_exc + total_inh,
+                "cross_pool_edges":   total_cross_edges,
+            },
+            "cross_pool_edges": cross_stats.iter()
+                .map(|(s, t, n)| serde_json::json!({"src": s, "tgt": t, "edges": n}))
+                .collect::<Vec<_>>(),
+        })
     }
 
     /// CLS-style replay: re-train the slow pool on concept neurons stored in

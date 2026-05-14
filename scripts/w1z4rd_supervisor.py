@@ -239,6 +239,28 @@ def node_healthy(url: str, timeout: float) -> bool:
         return False
 
 
+def try_graceful_shutdown(url: str, log: Logger, timeout: float = 8.0) -> bool:
+    """POST /shutdown so the node flushes multi-pool hot tiers + cross
+    synapses + raw pool to disk before exiting.  Returns True if the node
+    responded 200 (a 500-ms grace timer fires server-side after the
+    response, so the process IS going to exit even if we don't see it
+    confirm).  Returns False on any error so the caller can fall back to
+    taskkill — better to lose RAM than leave a zombie.
+    """
+    try:
+        req = urllib.request.Request(url, data=b"",
+                                      headers={"Content-Type": "application/json"},
+                                      method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ok = 200 <= r.status < 300
+            if ok:
+                log.info(f"graceful shutdown accepted at {url}")
+            return ok
+    except Exception as exc:
+        log.warn(f"graceful shutdown POST to {url} failed: {exc}")
+        return False
+
+
 def kill_processes_by_image(image_name: str, log: Logger,
                               exclude_pid: int | None = None) -> int:
     """Force-kill every process whose image name matches *image_name*
@@ -304,6 +326,24 @@ def start_node(cfg: dict, log: Logger) -> int | None:
     node_cfg = cfg["node"]
     binary = node_cfg["binary"]
     image = pathlib.Path(binary).name
+    # Try graceful shutdown first so the running node flushes its
+    # multi-pool hot tiers + cross synapses + raw pool to disk before
+    # exiting.  Without this, every taskkill cycle wipes whatever is in
+    # RAM and only the most recent checkpoint survives.  The /shutdown
+    # endpoint schedules a 500-ms exit timer server-side, then taskkill
+    # mops up anything still hanging on (slow saves, file locks).
+    health_url = node_cfg.get("health_url", "")
+    if health_url:
+        # Derive shutdown URL by replacing path suffix with /shutdown.
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(health_url)
+        shutdown_url = urlunsplit((parts.scheme, parts.netloc, "/shutdown", "", ""))
+        if try_graceful_shutdown(shutdown_url, log, timeout=8.0):
+            # Give the node up to 5 s to flush + exit on its own.
+            for _ in range(10):
+                if not node_healthy(health_url, 1.0):
+                    break
+                time.sleep(0.5)
     kill_processes_by_image(image, log)
     # Brief settle so the kernel releases the port + file handles.
     time.sleep(1.0)
