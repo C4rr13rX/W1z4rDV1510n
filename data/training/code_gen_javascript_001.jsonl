@@ -1,98 +1,98 @@
+{"prompt": "In JavaScript, write min_of(a, b) that return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
+{"prompt": "Give me a JavaScript class Point with x and y fields and a distance(other) method.", "response": "class Point {\n    constructor(x, y) {\n        this.x = x;\n        this.y = y;\n    }\n    distance(other) {\n        const dx = this.x - other.x;\n        const dy = this.y - other.y;\n        return Math.sqrt(dx * dx + dy * dy);\n    }\n}"}
+{"prompt": "Give me a JavaScript function fib(n) that returns the nth Fibonacci number using a loop.", "response": "function fib(n) {\n    let a = 0, b = 1;\n    for (let i = 0; i < n; i++) {\n        const t = a + b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"}
+{"prompt": "Write a JavaScript throttle function throttle(fn, ms).", "response": "function throttle(fn, ms) {\n    let last = 0;\n    return function (...args) {\n        const now = Date.now();\n        if (now - last >= ms) {\n            last = now;\n            return fn(...args);\n        }\n    };\n}"}
+{"prompt": "Implement a JavaScript function that takes an array of numbers and returns a new array with each doubled.", "response": "function doubleAll(arr) {\n    return arr.map(x => x * 2);\n}"}
+{"prompt": "In JavaScript, write max_of(a, b) that return the larger of two numbers.", "response": "function max_of(a, b) {\n    return a > b ? a : b;\n}"}
+{"prompt": "In JavaScript, write add(a, b) that return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
+{"prompt": "JavaScript: define a function isEven -- return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
+{"prompt": "Implement a JavaScript throttle function throttle(fn, ms).", "response": "function throttle(fn, ms) {\n    let last = 0;\n    return function (...args) {\n        const now = Date.now();\n        if (now - last >= ms) {\n            last = now;\n            return fn(...args);\n        }\n    };\n}"}
+{"prompt": "JavaScript: define a function square -- return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
 {"prompt": "Write an async JavaScript function postJson(url, body) that POSTs JSON and returns the response JSON.", "response": "async function postJson(url, body) {\n    const resp = await fetch(url, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify(body),\n    });\n    return await resp.json();\n}"}
+{"prompt": "Implement an async JavaScript function getJson(url) that fetches JSON and returns the parsed object.", "response": "async function getJson(url) {\n    const resp = await fetch(url);\n    return await resp.json();\n}"}
+{"prompt": "Give me a JavaScript function called min_of that return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
+{"prompt": "Give me a JavaScript debounce function debounce(fn, ms) that returns a debounced version of fn.", "response": "function debounce(fn, ms) {\n    let t = null;\n    return function (...args) {\n        if (t) clearTimeout(t);\n        t = setTimeout(() => fn(...args), ms);\n    };\n}"}
 {"prompt": "Write a JavaScript function `max_of` that return the larger of two numbers.", "response": "function max_of(a, b) {\n    return a > b ? a : b;\n}"}
+{"prompt": "JavaScript: define a function add -- return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
+{"prompt": "In JavaScript, write isEven(n) that return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
+{"prompt": "Give me a JavaScript function called cube that return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
 {"prompt": "Give me an async JavaScript function getJson(url) that fetches JSON and returns the parsed object.", "response": "async function getJson(url) {\n    const resp = await fetch(url);\n    return await resp.json();\n}"}
+{"prompt": "Give me a JavaScript function that returns only the even numbers from an array.", "response": "function filterEven(arr) {\n    return arr.filter(x => x % 2 === 0);\n}"}
+{"prompt": "Give me a JavaScript function that takes an array of numbers and returns a new array with each doubled.", "response": "function doubleAll(arr) {\n    return arr.map(x => x * 2);\n}"}
+{"prompt": "In JavaScript, write cube(n) that return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
+{"prompt": "Implement a JavaScript function that returns the average of an array.", "response": "function avgArr(arr) {\n    if (arr.length === 0) return 0;\n    return arr.reduce((a, b) => a + b, 0) / arr.length;\n}"}
+{"prompt": "Write a JavaScript function `add` that return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
+{"prompt": "In JavaScript, write square(n) that return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
+{"prompt": "Give me a JavaScript function flatten that flattens an array one level deep.", "response": "function flatten(arr) {\n    return arr.reduce((acc, x) => acc.concat(x), []);\n}"}
+{"prompt": "Implement a JavaScript function factorial(n).", "response": "function factorial(n) {\n    let result = 1;\n    for (let i = 2; i <= n; i++) result *= i;\n    return result;\n}"}
+{"prompt": "Write a JavaScript memoize function that caches the results of a unary function by argument.", "response": "function memoize(fn) {\n    const cache = new Map();\n    return function (x) {\n        if (cache.has(x)) return cache.get(x);\n        const v = fn(x);\n        cache.set(x, v);\n        return v;\n    };\n}"}
+{"prompt": "Implement a JavaScript class Point with x and y fields and a distance(other) method.", "response": "class Point {\n    constructor(x, y) {\n        this.x = x;\n        this.y = y;\n    }\n    distance(other) {\n        const dx = this.x - other.x;\n        const dy = this.y - other.y;\n        return Math.sqrt(dx * dx + dy * dy);\n    }\n}"}
+{"prompt": "Give me a JavaScript function called double that return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
+{"prompt": "JavaScript: define a function isOdd -- return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}
+{"prompt": "Write a JavaScript function that returns only the even numbers from an array.", "response": "function filterEven(arr) {\n    return arr.filter(x => x % 2 === 0);\n}"}
+{"prompt": "Write a JavaScript function flatten that flattens an array one level deep.", "response": "function flatten(arr) {\n    return arr.reduce((acc, x) => acc.concat(x), []);\n}"}
+{"prompt": "Implement a JavaScript function flatten that flattens an array one level deep.", "response": "function flatten(arr) {\n    return arr.reduce((acc, x) => acc.concat(x), []);\n}"}
+{"prompt": "Write a JavaScript function that counts word frequencies in a string, returning an object.", "response": "function wordFreq(text) {\n    const out = {};\n    for (const w of text.split(/\\s+/)) {\n        if (!w) continue;\n        out[w] = (out[w] || 0) + 1;\n    }\n    return out;\n}"}
+{"prompt": "Write a JavaScript function that sums an array of numbers.", "response": "function sumArr(arr) {\n    return arr.reduce((a, b) => a + b, 0);\n}"}
+{"prompt": "Give me a JavaScript function called isEven that return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
+{"prompt": "Implement a JavaScript debounce function debounce(fn, ms) that returns a debounced version of fn.", "response": "function debounce(fn, ms) {\n    let t = null;\n    return function (...args) {\n        if (t) clearTimeout(t);\n        t = setTimeout(() => fn(...args), ms);\n    };\n}"}
+{"prompt": "Write a JavaScript function `mul` that return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
+{"prompt": "JavaScript: define a function div -- return the quotient or 0 if dividing by zero.", "response": "function div(a, b) {\n    return b === 0 ? 0 : a / b;\n}"}
+{"prompt": "Write a JavaScript function `cube` that return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
+{"prompt": "Implement a JavaScript function that reverses a string.", "response": "function reverseStr(s) {\n    return s.split('').reverse().join('');\n}"}
+{"prompt": "Write a JavaScript function that reverses a string.", "response": "function reverseStr(s) {\n    return s.split('').reverse().join('');\n}"}
+{"prompt": "JavaScript: define a function cube -- return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
+{"prompt": "JavaScript: define a function max_of -- return the larger of two numbers.", "response": "function max_of(a, b) {\n    return a > b ? a : b;\n}"}
+{"prompt": "Implement an async JavaScript function postJson(url, body) that POSTs JSON and returns the response JSON.", "response": "async function postJson(url, body) {\n    const resp = await fetch(url, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify(body),\n    });\n    return await resp.json();\n}"}
+{"prompt": "Write an async JavaScript function getJson(url) that fetches JSON and returns the parsed object.", "response": "async function getJson(url) {\n    const resp = await fetch(url);\n    return await resp.json();\n}"}
+{"prompt": "Write a JavaScript class Point with x and y fields and a distance(other) method.", "response": "class Point {\n    constructor(x, y) {\n        this.x = x;\n        this.y = y;\n    }\n    distance(other) {\n        const dx = this.x - other.x;\n        const dy = this.y - other.y;\n        return Math.sqrt(dx * dx + dy * dy);\n    }\n}"}
+{"prompt": "Give me a JavaScript function called isOdd that return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}
+{"prompt": "Give me a JavaScript function that reverses a string.", "response": "function reverseStr(s) {\n    return s.split('').reverse().join('');\n}"}
 {"prompt": "In JavaScript, write div(a, b) that return the quotient or 0 if dividing by zero.", "response": "function div(a, b) {\n    return b === 0 ? 0 : a / b;\n}"}
 {"prompt": "Write a JavaScript function that returns the average of an array.", "response": "function avgArr(arr) {\n    if (arr.length === 0) return 0;\n    return arr.reduce((a, b) => a + b, 0) / arr.length;\n}"}
-{"prompt": "Give me a JavaScript function that removes duplicates from an array preserving order.", "response": "function dedupe(arr) {\n    const seen = new Set();\n    const out = [];\n    for (const x of arr) {\n        if (!seen.has(x)) {\n            seen.add(x);\n            out.push(x);\n        }\n    }\n    return out;\n}"}
-{"prompt": "Write a JavaScript function `div` that return the quotient or 0 if dividing by zero.", "response": "function div(a, b) {\n    return b === 0 ? 0 : a / b;\n}"}
-{"prompt": "JavaScript: define a function isOdd -- return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}
-{"prompt": "Implement a JavaScript memoize function that caches the results of a unary function by argument.", "response": "function memoize(fn) {\n    const cache = new Map();\n    return function (x) {\n        if (cache.has(x)) return cache.get(x);\n        const v = fn(x);\n        cache.set(x, v);\n        return v;\n    };\n}"}
-{"prompt": "Write a JavaScript function fib(n) that returns the nth Fibonacci number using a loop.", "response": "function fib(n) {\n    let a = 0, b = 1;\n    for (let i = 0; i < n; i++) {\n        const t = a + b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"}
-{"prompt": "Implement a JavaScript function that returns only the even numbers from an array.", "response": "function filterEven(arr) {\n    return arr.filter(x => x % 2 === 0);\n}"}
-{"prompt": "In JavaScript, write min_of(a, b) that return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
-{"prompt": "Write a JavaScript function that returns the maximum of an array.", "response": "function maxArr(arr) {\n    return Math.max(...arr);\n}"}
-{"prompt": "Give me a JavaScript function fib(n) that returns the nth Fibonacci number using a loop.", "response": "function fib(n) {\n    let a = 0, b = 1;\n    for (let i = 0; i < n; i++) {\n        const t = a + b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"}
-{"prompt": "Implement a JavaScript debounce function debounce(fn, ms) that returns a debounced version of fn.", "response": "function debounce(fn, ms) {\n    let t = null;\n    return function (...args) {\n        if (t) clearTimeout(t);\n        t = setTimeout(() => fn(...args), ms);\n    };\n}"}
 {"prompt": "Implement a JavaScript function fib(n) that returns the nth Fibonacci number using a loop.", "response": "function fib(n) {\n    let a = 0, b = 1;\n    for (let i = 0; i < n; i++) {\n        const t = a + b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"}
-{"prompt": "JavaScript: define a function double -- return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
-{"prompt": "Write a JavaScript debounce function debounce(fn, ms) that returns a debounced version of fn.", "response": "function debounce(fn, ms) {\n    let t = null;\n    return function (...args) {\n        if (t) clearTimeout(t);\n        t = setTimeout(() => fn(...args), ms);\n    };\n}"}
-{"prompt": "Write a JavaScript function `cube` that return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
-{"prompt": "Write a JavaScript function `square` that return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
-{"prompt": "JavaScript: define a function max_of -- return the larger of two numbers.", "response": "function max_of(a, b) {\n    return a > b ? a : b;\n}"}
-{"prompt": "Write a JavaScript throttle function throttle(fn, ms).", "response": "function throttle(fn, ms) {\n    let last = 0;\n    return function (...args) {\n        const now = Date.now();\n        if (now - last >= ms) {\n            last = now;\n            return fn(...args);\n        }\n    };\n}"}
-{"prompt": "Implement a JavaScript function factorial(n).", "response": "function factorial(n) {\n    let result = 1;\n    for (let i = 2; i <= n; i++) result *= i;\n    return result;\n}"}
-{"prompt": "Give me a JavaScript function called sub that return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
-{"prompt": "Give me a JavaScript function that counts word frequencies in a string, returning an object.", "response": "function wordFreq(text) {\n    const out = {};\n    for (const w of text.split(/\\s+/)) {\n        if (!w) continue;\n        out[w] = (out[w] || 0) + 1;\n    }\n    return out;\n}"}
-{"prompt": "In JavaScript, write mul(a, b) that return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
-{"prompt": "In JavaScript, write max_of(a, b) that return the larger of two numbers.", "response": "function max_of(a, b) {\n    return a > b ? a : b;\n}"}
-{"prompt": "Write a JavaScript function that counts word frequencies in a string, returning an object.", "response": "function wordFreq(text) {\n    const out = {};\n    for (const w of text.split(/\\s+/)) {\n        if (!w) continue;\n        out[w] = (out[w] || 0) + 1;\n    }\n    return out;\n}"}
-{"prompt": "Give me a JavaScript function that returns true if a string is a palindrome.", "response": "function isPalindrome(s) {\n    return s === s.split('').reverse().join('');\n}"}
-{"prompt": "Implement a JavaScript function that sums an array of numbers.", "response": "function sumArr(arr) {\n    return arr.reduce((a, b) => a + b, 0);\n}"}
-{"prompt": "JavaScript: define a function mul -- return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
-{"prompt": "JavaScript: define a function sub -- return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
-{"prompt": "JavaScript: define a function cube -- return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
-{"prompt": "Give me a JavaScript memoize function that caches the results of a unary function by argument.", "response": "function memoize(fn) {\n    const cache = new Map();\n    return function (x) {\n        if (cache.has(x)) return cache.get(x);\n        const v = fn(x);\n        cache.set(x, v);\n        return v;\n    };\n}"}
-{"prompt": "Give me a JavaScript function that returns only the even numbers from an array.", "response": "function filterEven(arr) {\n    return arr.filter(x => x % 2 === 0);\n}"}
-{"prompt": "Implement a JavaScript function that returns true if a string is a palindrome.", "response": "function isPalindrome(s) {\n    return s === s.split('').reverse().join('');\n}"}
-{"prompt": "Give me a JavaScript function called double that return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
-{"prompt": "Implement a JavaScript function that counts word frequencies in a string, returning an object.", "response": "function wordFreq(text) {\n    const out = {};\n    for (const w of text.split(/\\s+/)) {\n        if (!w) continue;\n        out[w] = (out[w] || 0) + 1;\n    }\n    return out;\n}"}
-{"prompt": "JavaScript: define a function isEven -- return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
-{"prompt": "Give me a JavaScript function that returns the average of an array.", "response": "function avgArr(arr) {\n    if (arr.length === 0) return 0;\n    return arr.reduce((a, b) => a + b, 0) / arr.length;\n}"}
-{"prompt": "In JavaScript, write sub(a, b) that return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
-{"prompt": "JavaScript: define a function div -- return the quotient or 0 if dividing by zero.", "response": "function div(a, b) {\n    return b === 0 ? 0 : a / b;\n}"}
-{"prompt": "Give me a JavaScript class Point with x and y fields and a distance(other) method.", "response": "class Point {\n    constructor(x, y) {\n        this.x = x;\n        this.y = y;\n    }\n    distance(other) {\n        const dx = this.x - other.x;\n        const dy = this.y - other.y;\n        return Math.sqrt(dx * dx + dy * dy);\n    }\n}"}
-{"prompt": "Give me a JavaScript function called mul that return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
-{"prompt": "Write a JavaScript function `mul` that return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
-{"prompt": "Write a JavaScript function that sums an array of numbers.", "response": "function sumArr(arr) {\n    return arr.reduce((a, b) => a + b, 0);\n}"}
-{"prompt": "Implement a JavaScript function that removes duplicates from an array preserving order.", "response": "function dedupe(arr) {\n    const seen = new Set();\n    const out = [];\n    for (const x of arr) {\n        if (!seen.has(x)) {\n            seen.add(x);\n            out.push(x);\n        }\n    }\n    return out;\n}"}
-{"prompt": "Implement a JavaScript function that reverses a string.", "response": "function reverseStr(s) {\n    return s.split('').reverse().join('');\n}"}
-{"prompt": "Write a JavaScript memoize function that caches the results of a unary function by argument.", "response": "function memoize(fn) {\n    const cache = new Map();\n    return function (x) {\n        if (cache.has(x)) return cache.get(x);\n        const v = fn(x);\n        cache.set(x, v);\n        return v;\n    };\n}"}
-{"prompt": "JavaScript: define a function add -- return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
-{"prompt": "Implement a JavaScript class Point with x and y fields and a distance(other) method.", "response": "class Point {\n    constructor(x, y) {\n        this.x = x;\n        this.y = y;\n    }\n    distance(other) {\n        const dx = this.x - other.x;\n        const dy = this.y - other.y;\n        return Math.sqrt(dx * dx + dy * dy);\n    }\n}"}
-{"prompt": "Write a JavaScript function `isOdd` that return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}
-{"prompt": "JavaScript: define a function min_of -- return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
-{"prompt": "Write a JavaScript function flatten that flattens an array one level deep.", "response": "function flatten(arr) {\n    return arr.reduce((acc, x) => acc.concat(x), []);\n}"}
-{"prompt": "Write a JavaScript function `min_of` that return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
-{"prompt": "Implement an async JavaScript function getJson(url) that fetches JSON and returns the parsed object.", "response": "async function getJson(url) {\n    const resp = await fetch(url);\n    return await resp.json();\n}"}
-{"prompt": "Write a JavaScript function that reverses a string.", "response": "function reverseStr(s) {\n    return s.split('').reverse().join('');\n}"}
-{"prompt": "Give me a JavaScript function called max_of that return the larger of two numbers.", "response": "function max_of(a, b) {\n    return a > b ? a : b;\n}"}
-{"prompt": "In JavaScript, write square(n) that return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
-{"prompt": "In JavaScript, write isEven(n) that return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
-{"prompt": "Give me a JavaScript function that sums an array of numbers.", "response": "function sumArr(arr) {\n    return arr.reduce((a, b) => a + b, 0);\n}"}
-{"prompt": "Give me a JavaScript function that takes an array of numbers and returns a new array with each doubled.", "response": "function doubleAll(arr) {\n    return arr.map(x => x * 2);\n}"}
-{"prompt": "In JavaScript, write isOdd(n) that return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}
-{"prompt": "Give me a JavaScript function called square that return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
-{"prompt": "Give me a JavaScript function that reverses a string.", "response": "function reverseStr(s) {\n    return s.split('').reverse().join('');\n}"}
-{"prompt": "Write a JavaScript function that returns true if a string is a palindrome.", "response": "function isPalindrome(s) {\n    return s === s.split('').reverse().join('');\n}"}
-{"prompt": "Give me a JavaScript function called cube that return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
-{"prompt": "Give me a JavaScript function called add that return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
-{"prompt": "Write a JavaScript function `add` that return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
-{"prompt": "Implement a JavaScript function that returns the average of an array.", "response": "function avgArr(arr) {\n    if (arr.length === 0) return 0;\n    return arr.reduce((a, b) => a + b, 0) / arr.length;\n}"}
-{"prompt": "Give me a JavaScript function called isOdd that return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}
-{"prompt": "Give me a JavaScript function called isEven that return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
-{"prompt": "Give me a JavaScript debounce function debounce(fn, ms) that returns a debounced version of fn.", "response": "function debounce(fn, ms) {\n    let t = null;\n    return function (...args) {\n        if (t) clearTimeout(t);\n        t = setTimeout(() => fn(...args), ms);\n    };\n}"}
-{"prompt": "Write a JavaScript function that removes duplicates from an array preserving order.", "response": "function dedupe(arr) {\n    const seen = new Set();\n    const out = [];\n    for (const x of arr) {\n        if (!seen.has(x)) {\n            seen.add(x);\n            out.push(x);\n        }\n    }\n    return out;\n}"}
-{"prompt": "Implement a JavaScript function that takes an array of numbers and returns a new array with each doubled.", "response": "function doubleAll(arr) {\n    return arr.map(x => x * 2);\n}"}
-{"prompt": "Write a JavaScript function `double` that return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
-{"prompt": "JavaScript: define a function square -- return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
-{"prompt": "Give me a JavaScript throttle function throttle(fn, ms).", "response": "function throttle(fn, ms) {\n    let last = 0;\n    return function (...args) {\n        const now = Date.now();\n        if (now - last >= ms) {\n            last = now;\n            return fn(...args);\n        }\n    };\n}"}
-{"prompt": "Implement a JavaScript function flatten that flattens an array one level deep.", "response": "function flatten(arr) {\n    return arr.reduce((acc, x) => acc.concat(x), []);\n}"}
-{"prompt": "In JavaScript, write cube(n) that return n cubed.", "response": "function cube(n) {\n    return n * n * n;\n}"}
-{"prompt": "In JavaScript, write double(n) that return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
-{"prompt": "Write a JavaScript function `isEven` that return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
-{"prompt": "Implement a JavaScript throttle function throttle(fn, ms).", "response": "function throttle(fn, ms) {\n    let last = 0;\n    return function (...args) {\n        const now = Date.now();\n        if (now - last >= ms) {\n            last = now;\n            return fn(...args);\n        }\n    };\n}"}
-{"prompt": "Give me a JavaScript function called min_of that return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
-{"prompt": "Give me a JavaScript function factorial(n).", "response": "function factorial(n) {\n    let result = 1;\n    for (let i = 2; i <= n; i++) result *= i;\n    return result;\n}"}
 {"prompt": "Give me a JavaScript function called div that return the quotient or 0 if dividing by zero.", "response": "function div(a, b) {\n    return b === 0 ? 0 : a / b;\n}"}
-{"prompt": "Write a JavaScript function that takes an array of numbers and returns a new array with each doubled.", "response": "function doubleAll(arr) {\n    return arr.map(x => x * 2);\n}"}
-{"prompt": "Write a JavaScript class Point with x and y fields and a distance(other) method.", "response": "class Point {\n    constructor(x, y) {\n        this.x = x;\n        this.y = y;\n    }\n    distance(other) {\n        const dx = this.x - other.x;\n        const dy = this.y - other.y;\n        return Math.sqrt(dx * dx + dy * dy);\n    }\n}"}
-{"prompt": "In JavaScript, write add(a, b) that return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
+{"prompt": "Write a JavaScript function that returns the maximum of an array.", "response": "function maxArr(arr) {\n    return Math.max(...arr);\n}"}
+{"prompt": "Write a JavaScript function `square` that return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
+{"prompt": "Write a JavaScript function `isOdd` that return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}
+{"prompt": "Give me a JavaScript function that counts word frequencies in a string, returning an object.", "response": "function wordFreq(text) {\n    const out = {};\n    for (const w of text.split(/\\s+/)) {\n        if (!w) continue;\n        out[w] = (out[w] || 0) + 1;\n    }\n    return out;\n}"}
+{"prompt": "Give me a JavaScript memoize function that caches the results of a unary function by argument.", "response": "function memoize(fn) {\n    const cache = new Map();\n    return function (x) {\n        if (cache.has(x)) return cache.get(x);\n        const v = fn(x);\n        cache.set(x, v);\n        return v;\n    };\n}"}
+{"prompt": "Give me a JavaScript function called sub that return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
+{"prompt": "JavaScript: define a function double -- return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
+{"prompt": "In JavaScript, write sub(a, b) that return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
+{"prompt": "Implement a JavaScript function that returns true if a string is a palindrome.", "response": "function isPalindrome(s) {\n    return s === s.split('').reverse().join('');\n}"}
+{"prompt": "Write a JavaScript function `min_of` that return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
+{"prompt": "In JavaScript, write mul(a, b) that return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
+{"prompt": "Give me a JavaScript function that removes duplicates from an array preserving order.", "response": "function dedupe(arr) {\n    const seen = new Set();\n    const out = [];\n    for (const x of arr) {\n        if (!seen.has(x)) {\n            seen.add(x);\n            out.push(x);\n        }\n    }\n    return out;\n}"}
+{"prompt": "Give me a JavaScript function factorial(n).", "response": "function factorial(n) {\n    let result = 1;\n    for (let i = 2; i <= n; i++) result *= i;\n    return result;\n}"}
+{"prompt": "JavaScript: define a function min_of -- return the smaller of two numbers.", "response": "function min_of(a, b) {\n    return a < b ? a : b;\n}"}
 {"prompt": "Implement a JavaScript function that returns the maximum of an array.", "response": "function maxArr(arr) {\n    return Math.max(...arr);\n}"}
-{"prompt": "Give me an async JavaScript function postJson(url, body) that POSTs JSON and returns the response JSON.", "response": "async function postJson(url, body) {\n    const resp = await fetch(url, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify(body),\n    });\n    return await resp.json();\n}"}
-{"prompt": "Implement an async JavaScript function postJson(url, body) that POSTs JSON and returns the response JSON.", "response": "async function postJson(url, body) {\n    const resp = await fetch(url, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify(body),\n    });\n    return await resp.json();\n}"}
-{"prompt": "Give me a JavaScript function flatten that flattens an array one level deep.", "response": "function flatten(arr) {\n    return arr.reduce((acc, x) => acc.concat(x), []);\n}"}
-{"prompt": "Write a JavaScript function that returns only the even numbers from an array.", "response": "function filterEven(arr) {\n    return arr.filter(x => x % 2 === 0);\n}"}
-{"prompt": "Write a JavaScript function `sub` that return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
 {"prompt": "Give me a JavaScript function that returns the maximum of an array.", "response": "function maxArr(arr) {\n    return Math.max(...arr);\n}"}
+{"prompt": "Implement a JavaScript function that returns only the even numbers from an array.", "response": "function filterEven(arr) {\n    return arr.filter(x => x % 2 === 0);\n}"}
+{"prompt": "Write a JavaScript function fib(n) that returns the nth Fibonacci number using a loop.", "response": "function fib(n) {\n    let a = 0, b = 1;\n    for (let i = 0; i < n; i++) {\n        const t = a + b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"}
+{"prompt": "JavaScript: define a function mul -- return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
+{"prompt": "In JavaScript, write double(n) that return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
+{"prompt": "Give me a JavaScript function that sums an array of numbers.", "response": "function sumArr(arr) {\n    return arr.reduce((a, b) => a + b, 0);\n}"}
+{"prompt": "Give me a JavaScript function called max_of that return the larger of two numbers.", "response": "function max_of(a, b) {\n    return a > b ? a : b;\n}"}
+{"prompt": "Give me a JavaScript function that returns the average of an array.", "response": "function avgArr(arr) {\n    if (arr.length === 0) return 0;\n    return arr.reduce((a, b) => a + b, 0) / arr.length;\n}"}
+{"prompt": "Write a JavaScript function that removes duplicates from an array preserving order.", "response": "function dedupe(arr) {\n    const seen = new Set();\n    const out = [];\n    for (const x of arr) {\n        if (!seen.has(x)) {\n            seen.add(x);\n            out.push(x);\n        }\n    }\n    return out;\n}"}
+{"prompt": "Give me a JavaScript function called square that return n squared.", "response": "function square(n) {\n    return n * n;\n}"}
+{"prompt": "Implement a JavaScript function that removes duplicates from an array preserving order.", "response": "function dedupe(arr) {\n    const seen = new Set();\n    const out = [];\n    for (const x of arr) {\n        if (!seen.has(x)) {\n            seen.add(x);\n            out.push(x);\n        }\n    }\n    return out;\n}"}
+{"prompt": "Write a JavaScript function `double` that return n doubled.", "response": "function double(n) {\n    return n * 2;\n}"}
+{"prompt": "Give me an async JavaScript function postJson(url, body) that POSTs JSON and returns the response JSON.", "response": "async function postJson(url, body) {\n    const resp = await fetch(url, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify(body),\n    });\n    return await resp.json();\n}"}
+{"prompt": "Give me a JavaScript throttle function throttle(fn, ms).", "response": "function throttle(fn, ms) {\n    let last = 0;\n    return function (...args) {\n        const now = Date.now();\n        if (now - last >= ms) {\n            last = now;\n            return fn(...args);\n        }\n    };\n}"}
+{"prompt": "Write a JavaScript function `div` that return the quotient or 0 if dividing by zero.", "response": "function div(a, b) {\n    return b === 0 ? 0 : a / b;\n}"}
+{"prompt": "Implement a JavaScript function that sums an array of numbers.", "response": "function sumArr(arr) {\n    return arr.reduce((a, b) => a + b, 0);\n}"}
 {"prompt": "Write a JavaScript function factorial(n).", "response": "function factorial(n) {\n    let result = 1;\n    for (let i = 2; i <= n; i++) result *= i;\n    return result;\n}"}
-{"prompt": "Write an async JavaScript function getJson(url) that fetches JSON and returns the parsed object.", "response": "async function getJson(url) {\n    const resp = await fetch(url);\n    return await resp.json();\n}"}
+{"prompt": "Write a JavaScript debounce function debounce(fn, ms) that returns a debounced version of fn.", "response": "function debounce(fn, ms) {\n    let t = null;\n    return function (...args) {\n        if (t) clearTimeout(t);\n        t = setTimeout(() => fn(...args), ms);\n    };\n}"}
+{"prompt": "Give me a JavaScript function called add that return the sum of two numbers.", "response": "function add(a, b) {\n    return a + b;\n}"}
+{"prompt": "Give me a JavaScript function called mul that return the product.", "response": "function mul(a, b) {\n    return a * b;\n}"}
+{"prompt": "Give me a JavaScript function that returns true if a string is a palindrome.", "response": "function isPalindrome(s) {\n    return s === s.split('').reverse().join('');\n}"}
+{"prompt": "Write a JavaScript function that returns true if a string is a palindrome.", "response": "function isPalindrome(s) {\n    return s === s.split('').reverse().join('');\n}"}
+{"prompt": "Write a JavaScript function `sub` that return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
+{"prompt": "Implement a JavaScript function that counts word frequencies in a string, returning an object.", "response": "function wordFreq(text) {\n    const out = {};\n    for (const w of text.split(/\\s+/)) {\n        if (!w) continue;\n        out[w] = (out[w] || 0) + 1;\n    }\n    return out;\n}"}
+{"prompt": "Implement a JavaScript memoize function that caches the results of a unary function by argument.", "response": "function memoize(fn) {\n    const cache = new Map();\n    return function (x) {\n        if (cache.has(x)) return cache.get(x);\n        const v = fn(x);\n        cache.set(x, v);\n        return v;\n    };\n}"}
+{"prompt": "Write a JavaScript function `isEven` that return true if n is even.", "response": "function isEven(n) {\n    return n % 2 === 0;\n}"}
+{"prompt": "Write a JavaScript function that takes an array of numbers and returns a new array with each doubled.", "response": "function doubleAll(arr) {\n    return arr.map(x => x * 2);\n}"}
+{"prompt": "JavaScript: define a function sub -- return the difference.", "response": "function sub(a, b) {\n    return a - b;\n}"}
+{"prompt": "In JavaScript, write isOdd(n) that return true if n is odd.", "response": "function isOdd(n) {\n    return n % 2 !== 0;\n}"}

@@ -1,90 +1,468 @@
-{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities. User: Tell me more. Assistant:", "response": "Most importantly, bash is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is synapses? Assistant: synapses. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is javascript? Assistant: JavaScript. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Tell me more. Assistant:", "response": "Most importantly, python is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Tell me more. Assistant:", "response": "Most importantly, powershell is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Give me an example. Assistant:", "response": "A typical example of neurons would show its core idioms in a few short lines."}
-{"prompt": "User: What is rust? Assistant: Rust. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is multi-pool? Assistant:", "response": "the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses."}
-{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Tell me more. Assistant:", "response": "Most importantly, rust is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is rust? Assistant:", "response": "Rust is A systems language with ownership-based memory safety and zero-cost abstractions."}
-{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is neurons? Assistant: neurons. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is python? Assistant: Python. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is training? Assistant: training. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is rust? Assistant: Rust. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is neurons? Assistant: neurons. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Thanks. Assistant:", "response": "You're welcome."}
-{"prompt": "User: What is powershell? Assistant: PowerShell. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is javascript? Assistant: JavaScript. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is powershell? Assistant: PowerShell. User: Thanks. Assistant:", "response": "You're welcome."}
-{"prompt": "User: What is javascript? Assistant:", "response": "JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js."}
-{"prompt": "User: What is powershell? Assistant: PowerShell. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is synapses? Assistant: synapses. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is training? Assistant: training. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Why is it useful? Assistant:", "response": "Hebbian learning is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Tell me more. Assistant:", "response": "Most importantly, javascript is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is neurons? Assistant: neurons. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is neurons? Assistant: neurons. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is bash? Assistant: Bash. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities. User: Give me an example. Assistant:", "response": "A typical example of bash would show its core idioms in a few short lines."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is synapses? Assistant: synapses. User: Thanks. Assistant:", "response": "You're welcome."}
-{"prompt": "User: What is powershell? Assistant: PowerShell. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is training? Assistant: training. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is hebbian learning? Assistant:", "response": "Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule."}
-{"prompt": "User: What is training? Assistant: training. User: Thanks. Assistant:", "response": "You're welcome."}
-{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Why is it useful? Assistant:", "response": "the multi-pool fabric is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is bash? Assistant:", "response": "Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities."}
-{"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Give me an example. Assistant:", "response": "A typical example of python would show its core idioms in a few short lines."}
-{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Give me an example. Assistant:", "response": "A typical example of training would show its core idioms in a few short lines."}
-{"prompt": "User: What is bash? Assistant: Bash. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is regression tests? Assistant: regression tests. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is acid? Assistant: ACID. User: Nice. Assistant:", "response": "Glad that worked."}
 {"prompt": "User: What is rust? Assistant: Rust. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Why is it useful? Assistant:", "response": "training is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Tell me more. Assistant:", "response": "Most importantly, training is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is python? Assistant: Python. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is python? Assistant: Python. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is powershell? Assistant: PowerShell. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is rust? Assistant: Rust. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Tell me more. Assistant:", "response": "Most importantly, hebbian learning is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Give me an example. Assistant:", "response": "A typical example of synapses would show its core idioms in a few short lines."}
-{"prompt": "User: What is python? Assistant: Python. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is rust? Assistant: Rust. User: Thanks. Assistant:", "response": "You're welcome."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Why is it useful? Assistant:", "response": "synapses is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Give me an example. Assistant:", "response": "A typical example of hebbian learning would show its core idioms in a few short lines."}
-{"prompt": "User: What is powershell? Assistant:", "response": "PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text."}
-{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Tell me more. Assistant:", "response": "Most importantly, synapses is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is training? Assistant: training. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Tell me more. Assistant:", "response": "Most importantly, the multi-pool fabric is what we use day to day — practical and well-supported."}
-{"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Give me an example. Assistant:", "response": "A typical example of powershell would show its core idioms in a few short lines."}
-{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, and POSIX utilities. User: Why is it useful? Assistant:", "response": "Bash is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is hashing? Assistant: hashing. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is merge sort? Assistant: merge sort is A divide-and-conquer sort that splits, sorts the halves, and merges back in O(n log n). User: Tell me more. Assistant:", "response": "Most importantly, merge sort is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is a linked list? Assistant: a linked list. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is threads? Assistant: threads is Execution units within a process; threads share memory and need synchronisation. User: Tell me more. Assistant:", "response": "Most importantly, threads is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is go? Assistant: Go is A compiled language with goroutines for concurrency and a small simple standard library. User: Give me an example. Assistant:", "response": "A typical example of go would show its core idioms in a few short lines."}
+{"prompt": "User: What is typescript? Assistant:", "response": "TypeScript is A typed superset of JavaScript that compiles to plain JavaScript."}
+{"prompt": "User: What is typescript? Assistant: TypeScript is A typed superset of JavaScript that compiles to plain JavaScript. User: Why is it useful? Assistant:", "response": "TypeScript is useful because it solves real problems with idioms that many people already know."}
 {"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Why is it useful? Assistant:", "response": "Python is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Give me an example. Assistant:", "response": "A typical example of javascript would show its core idioms in a few short lines."}
-{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is websockets? Assistant: WebSockets. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is http? Assistant: HTTP is The Hypertext Transfer Protocol; the request-response protocol the web is built on. User: Why is it useful? Assistant:", "response": "HTTP is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is recursion? Assistant: recursion is A function that calls itself; the base case stops the recursion, the recursive case reduces the problem. User: Why is it useful? Assistant:", "response": "recursion is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is json? Assistant: JSON. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is graphql? Assistant: GraphQL is A query language for APIs where the client specifies exactly which fields it needs. User: Tell me more. Assistant:", "response": "Most importantly, graphql is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is http? Assistant:", "response": "HTTP is The Hypertext Transfer Protocol; the request-response protocol the web is built on."}
+{"prompt": "User: What is unit tests? Assistant:", "response": "unit tests is Tests that exercise a small isolated piece of code, ideally a single function."}
+{"prompt": "User: What is transactions? Assistant: transactions. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is ruby? Assistant:", "response": "Ruby is A dynamic interpreted language with elegant syntax; the engine behind Rails."}
+{"prompt": "User: What is c? Assistant:", "response": "C is The original portable systems language; small, fast, close to the hardware."}
+{"prompt": "User: What is integration tests? Assistant: integration tests. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is inhibition? Assistant: inhibition. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is git? Assistant: Git. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is unit tests? Assistant: unit tests is Tests that exercise a small isolated piece of code, ideally a single function. User: Why is it useful? Assistant:", "response": "unit tests is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Give me an example. Assistant:", "response": "A typical example of the multi-pool fabric would show its core idioms in a few short lines."}
+{"prompt": "User: What is a linked list? Assistant: a linked list is A sequence of nodes each pointing to the next; cheap insertions, linear-time random access. User: Why is it useful? Assistant:", "response": "a linked list is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is inhibition? Assistant: inhibition is Edges that reduce a target's activation when the source fires; the source of categorical exclusion. User: Give me an example. Assistant:", "response": "A typical example of inhibition would show its core idioms in a few short lines."}
+{"prompt": "User: What is json? Assistant: JSON. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is rust? Assistant:", "response": "Rust is A systems language with ownership-based memory safety and zero-cost abstractions."}
+{"prompt": "User: What is python? Assistant: Python. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is css? Assistant: CSS. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is integration tests? Assistant: integration tests. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is acid? Assistant: ACID. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is jwt? Assistant: JWT. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is unit tests? Assistant: unit tests is Tests that exercise a small isolated piece of code, ideally a single function. User: Give me an example. Assistant:", "response": "A typical example of unit tests would show its core idioms in a few short lines."}
+{"prompt": "User: What is graphs? Assistant: graphs is Collections of nodes connected by edges; directed or undirected, weighted or unweighted. User: Why is it useful? Assistant:", "response": "graphs is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is encryption? Assistant: encryption is Transforming readable data into ciphertext using a key so only authorised parties can recover it. User: Give me an example. Assistant:", "response": "A typical example of encryption would show its core idioms in a few short lines."}
+{"prompt": "User: What is git? Assistant: Git is A distributed version-control system; every clone has the full history of the project. User: Why is it useful? Assistant:", "response": "Git is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is binary search? Assistant: binary search is A search algorithm that halves the search space at each step on a sorted array. User: Why is it useful? Assistant:", "response": "binary search is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is hashing? Assistant: hashing is A one-way function that maps data to a fixed-size digest; can't be reversed in practice. User: Give me an example. Assistant:", "response": "A typical example of hashing would show its core idioms in a few short lines."}
+{"prompt": "User: What is c? Assistant: C. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is ruby? Assistant: Ruby is A dynamic interpreted language with elegant syntax; the engine behind Rails. User: Tell me more. Assistant:", "response": "Most importantly, ruby is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is java? Assistant: Java. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is acid? Assistant: ACID is Atomicity, Consistency, Isolation, Durability — the guarantees a relational transaction provides. User: Why is it useful? Assistant:", "response": "ACID is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is excitation? Assistant: excitation. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is merge sort? Assistant: merge sort. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Give me an example. Assistant:", "response": "A typical example of python would show its core idioms in a few short lines."}
+{"prompt": "User: What is c? Assistant: C. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is acid? Assistant: ACID is Atomicity, Consistency, Isolation, Durability — the guarantees a relational transaction provides. User: Give me an example. Assistant:", "response": "A typical example of acid would show its core idioms in a few short lines."}
+{"prompt": "User: What is excitation? Assistant: excitation. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is unit tests? Assistant: unit tests. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is git? Assistant: Git. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is typescript? Assistant: TypeScript. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is integration tests? Assistant: integration tests. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is synapses? Assistant:", "response": "synapses is Weighted connections between neurons; the weights are what the fabric actually learns."}
+{"prompt": "User: What is oauth? Assistant: OAuth. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Tell me more. Assistant:", "response": "Most importantly, javascript is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is css? Assistant:", "response": "CSS is The styling language for the web; controls colour, layout, and visual presentation."}
+{"prompt": "User: What is a linked list? Assistant: a linked list is A sequence of nodes each pointing to the next; cheap insertions, linear-time random access. User: Tell me more. Assistant:", "response": "Most importantly, a linked list is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is python? Assistant: Python. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is integration tests? Assistant: integration tests is Tests that exercise multiple components together to catch interaction bugs. User: Tell me more. Assistant:", "response": "Most importantly, integration tests is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is hashing? Assistant: hashing. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is threads? Assistant: threads is Execution units within a process; threads share memory and need synchronisation. User: Give me an example. Assistant:", "response": "A typical example of threads would show its core idioms in a few short lines."}
+{"prompt": "User: What is integration tests? Assistant: integration tests. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is hash tables? Assistant: hash tables. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is python? Assistant: Python. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is hash tables? Assistant: hash tables. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is binary search? Assistant: binary search is A search algorithm that halves the search space at each step on a sorted array. User: Give me an example. Assistant:", "response": "A typical example of binary search would show its core idioms in a few short lines."}
+{"prompt": "User: What is json? Assistant:", "response": "JSON is A lightweight text format for structured data; the default body format for modern web APIs."}
+{"prompt": "User: What is c? Assistant: C is The original portable systems language; small, fast, close to the hardware. User: Tell me more. Assistant:", "response": "Most importantly, c is what we use day to day — practical and well-supported."}
 {"prompt": "User: What is synapses? Assistant: synapses. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is json? Assistant: JSON. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming is Solving a problem by combining solutions to overlapping subproblems and memoising results. User: Give me an example. Assistant:", "response": "A typical example of dynamic programming would show its core idioms in a few short lines."}
+{"prompt": "User: What is indexes? Assistant: indexes. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is http? Assistant: HTTP. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is indexes? Assistant: indexes. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is websockets? Assistant: WebSockets. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is graphs? Assistant: graphs. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is indexes? Assistant: indexes is Database structures that speed up lookups at the cost of slower writes and more storage. User: Tell me more. Assistant:", "response": "Most importantly, indexes is what we use day to day — practical and well-supported."}
 {"prompt": "User: What is bash? Assistant: Bash. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is inhibition? Assistant: inhibition is Edges that reduce a target's activation when the source fires; the source of categorical exclusion. User: Tell me more. Assistant:", "response": "Most importantly, inhibition is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is threads? Assistant:", "response": "threads is Execution units within a process; threads share memory and need synchronisation."}
+{"prompt": "User: What is jwt? Assistant: JWT is A JSON Web Token; a signed token used for stateless authentication. User: Tell me more. Assistant:", "response": "Most importantly, jwt is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is typescript? Assistant: TypeScript is A typed superset of JavaScript that compiles to plain JavaScript. User: Tell me more. Assistant:", "response": "Most importantly, typescript is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is c? Assistant: C. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is merge sort? Assistant: merge sort. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is unit tests? Assistant: unit tests is Tests that exercise a small isolated piece of code, ideally a single function. User: Tell me more. Assistant:", "response": "Most importantly, unit tests is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is processes? Assistant: processes. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is integration tests? Assistant:", "response": "integration tests is Tests that exercise multiple components together to catch interaction bugs."}
+{"prompt": "User: What is excitation? Assistant: excitation is Edges that increase a target's activation when the source fires; the default learning sign. User: Give me an example. Assistant:", "response": "A typical example of excitation would show its core idioms in a few short lines."}
+{"prompt": "User: What is threads? Assistant: threads. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is regression tests? Assistant:", "response": "regression tests is Tests that lock in known-good behaviour so a future change doesn't break it accidentally."}
+{"prompt": "User: What is graphql? Assistant: GraphQL. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is hash tables? Assistant: hash tables is Data structures that map keys to values using a hash function for average-O(1) lookup. User: Give me an example. Assistant:", "response": "A typical example of hash tables would show its core idioms in a few short lines."}
+{"prompt": "User: What is bash? Assistant:", "response": "Bash is The dominant Unix shell; pipes, redirection, glob patterns, POSIX utilities."}
+{"prompt": "User: What is excitation? Assistant: excitation. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is oauth? Assistant: OAuth is An authorisation framework that lets third parties access an account without seeing the password. User: Why is it useful? Assistant:", "response": "OAuth is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes is A container orchestrator that schedules and manages workloads across a cluster of machines. User: Tell me more. Assistant:", "response": "Most importantly, kubernetes is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin is A JVM language that interoperates with Java and is the preferred Android language. User: Give me an example. Assistant:", "response": "A typical example of kotlin would show its core idioms in a few short lines."}
+{"prompt": "User: What is binary search? Assistant: binary search. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is threads? Assistant: threads. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is trees? Assistant: trees is Hierarchical data structures with a root node and child branches. User: Give me an example. Assistant:", "response": "A typical example of trees would show its core idioms in a few short lines."}
+{"prompt": "User: What is sql? Assistant: SQL. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is regression tests? Assistant: regression tests. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is ruby? Assistant: Ruby. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is excitation? Assistant: excitation. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is hebbian learning? Assistant:", "response": "Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is inhibition? Assistant: inhibition is Edges that reduce a target's activation when the source fires; the source of categorical exclusion. User: Why is it useful? Assistant:", "response": "inhibition is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is websockets? Assistant: WebSockets is A protocol that keeps a long-lived bidirectional connection open between client and server. User: Why is it useful? Assistant:", "response": "WebSockets is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is recursion? Assistant:", "response": "recursion is A function that calls itself; the base case stops the recursion, the recursive case reduces the problem."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is docker? Assistant: Docker. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is css? Assistant: CSS. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is graphql? Assistant: GraphQL is A query language for APIs where the client specifies exactly which fields it needs. User: Why is it useful? Assistant:", "response": "GraphQL is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is relational databases? Assistant:", "response": "relational databases is Databases that store data in tables with rows and columns linked by foreign keys."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin is A JVM language that interoperates with Java and is the preferred Android language. User: Tell me more. Assistant:", "response": "Most importantly, kotlin is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Why is it useful? Assistant:", "response": "the multi-pool fabric is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is indexes? Assistant:", "response": "indexes is Database structures that speed up lookups at the cost of slower writes and more storage."}
+{"prompt": "User: What is c++? Assistant: C++ is An object-oriented extension of C with templates and zero-cost abstractions. User: Tell me more. Assistant:", "response": "Most importantly, c++ is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is python? Assistant: Python. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is graphql? Assistant: GraphQL. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is c++? Assistant:", "response": "C++ is An object-oriented extension of C with templates and zero-cost abstractions."}
+{"prompt": "User: What is sql? Assistant: SQL. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is hashing? Assistant: hashing is A one-way function that maps data to a fixed-size digest; can't be reversed in practice. User: Why is it useful? Assistant:", "response": "hashing is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is dopamine? Assistant: dopamine is A neuromodulator that gates plasticity; when it spikes, recent traces consolidate into permanent connections. User: Tell me more. Assistant:", "response": "Most importantly, dopamine is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is hashing? Assistant: hashing. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is relational databases? Assistant: relational databases is Databases that store data in tables with rows and columns linked by foreign keys. User: Why is it useful? Assistant:", "response": "relational databases is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Why is it useful? Assistant:", "response": "JavaScript is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is go? Assistant: Go. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is json? Assistant: JSON. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Tell me more. Assistant:", "response": "Most importantly, the multi-pool fabric is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is graphs? Assistant: graphs is Collections of nodes connected by edges; directed or undirected, weighted or unweighted. User: Give me an example. Assistant:", "response": "A typical example of graphs would show its core idioms in a few short lines."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin is A JVM language that interoperates with Java and is the preferred Android language. User: Why is it useful? Assistant:", "response": "Kotlin is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Why is it useful? Assistant:", "response": "neurons is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is encryption? Assistant: encryption is Transforming readable data into ciphertext using a key so only authorised parties can recover it. User: Why is it useful? Assistant:", "response": "encryption is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is graphql? Assistant: GraphQL is A query language for APIs where the client specifies exactly which fields it needs. User: Give me an example. Assistant:", "response": "A typical example of graphql would show its core idioms in a few short lines."}
+{"prompt": "User: What is trees? Assistant: trees. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is recursion? Assistant: recursion. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is python? Assistant: Python. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Give me an example. Assistant:", "response": "A typical example of rust would show its core idioms in a few short lines."}
+{"prompt": "User: What is graphs? Assistant: graphs. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is websockets? Assistant: WebSockets. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is java? Assistant: Java. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is inhibition? Assistant: inhibition. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is html? Assistant: HTML is The markup language that structures content on the web. User: Give me an example. Assistant:", "response": "A typical example of html would show its core idioms in a few short lines."}
+{"prompt": "User: What is graphs? Assistant: graphs. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is regression tests? Assistant: regression tests. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming is Solving a problem by combining solutions to overlapping subproblems and memoising results. User: Why is it useful? Assistant:", "response": "dynamic programming is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is unit tests? Assistant: unit tests. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is threads? Assistant: threads. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Why is it useful? Assistant:", "response": "training is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is merge sort? Assistant: merge sort. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is processes? Assistant: processes is Instances of running programs with their own memory, file descriptors, and lifecycle. User: Give me an example. Assistant:", "response": "A typical example of processes would show its core idioms in a few short lines."}
+{"prompt": "User: What is a linked list? Assistant: a linked list. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is http? Assistant: HTTP. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is jwt? Assistant: JWT. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is inhibition? Assistant:", "response": "inhibition is Edges that reduce a target's activation when the source fires; the source of categorical exclusion."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is ruby? Assistant: Ruby is A dynamic interpreted language with elegant syntax; the engine behind Rails. User: Why is it useful? Assistant:", "response": "Ruby is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Tell me more. Assistant:", "response": "Most importantly, training is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, POSIX utilities. User: Give me an example. Assistant:", "response": "A typical example of bash would show its core idioms in a few short lines."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming is Solving a problem by combining solutions to overlapping subproblems and memoising results. User: Tell me more. Assistant:", "response": "Most importantly, dynamic programming is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is merge sort? Assistant:", "response": "merge sort is A divide-and-conquer sort that splits, sorts the halves, and merges back in O(n log n)."}
+{"prompt": "User: What is binary search? Assistant: binary search. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is regression tests? Assistant: regression tests is Tests that lock in known-good behaviour so a future change doesn't break it accidentally. User: Why is it useful? Assistant:", "response": "regression tests is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is processes? Assistant: processes is Instances of running programs with their own memory, file descriptors, and lifecycle. User: Tell me more. Assistant:", "response": "Most importantly, processes is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is threads? Assistant: threads. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is a linked list? Assistant: a linked list. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is ruby? Assistant: Ruby. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is a linked list? Assistant: a linked list is A sequence of nodes each pointing to the next; cheap insertions, linear-time random access. User: Give me an example. Assistant:", "response": "A typical example of a linked list would show its core idioms in a few short lines."}
+{"prompt": "User: What is hashing? Assistant: hashing. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is acid? Assistant: ACID. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Why is it useful? Assistant:", "response": "Hebbian learning is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is processes? Assistant: processes. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is dopamine? Assistant: dopamine. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is sql? Assistant: SQL. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is oauth? Assistant: OAuth. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is training? Assistant: training. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is http? Assistant: HTTP is The Hypertext Transfer Protocol; the request-response protocol the web is built on. User: Tell me more. Assistant:", "response": "Most importantly, http is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is a linked list? Assistant: a linked list. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Give me an example. Assistant:", "response": "A typical example of javascript would show its core idioms in a few short lines."}
+{"prompt": "User: What is relational databases? Assistant: relational databases. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is html? Assistant: HTML. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is recursion? Assistant: recursion. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is docker? Assistant: Docker is A container runtime that packages an app with all of its dependencies into a portable image. User: Give me an example. Assistant:", "response": "A typical example of docker would show its core idioms in a few short lines."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs is Resource-oriented web APIs that use HTTP verbs (GET, POST, PUT, DELETE) and JSON bodies. User: Give me an example. Assistant:", "response": "A typical example of rest apis would show its core idioms in a few short lines."}
+{"prompt": "User: What is indexes? Assistant: indexes is Database structures that speed up lookups at the cost of slower writes and more storage. User: Give me an example. Assistant:", "response": "A typical example of indexes would show its core idioms in a few short lines."}
+{"prompt": "User: What is training? Assistant: training. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is excitation? Assistant: excitation is Edges that increase a target's activation when the source fires; the default learning sign. User: Why is it useful? Assistant:", "response": "excitation is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is css? Assistant: CSS is The styling language for the web; controls colour, layout, and visual presentation. User: Tell me more. Assistant:", "response": "Most importantly, css is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is hashing? Assistant: hashing. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, POSIX utilities. User: Why is it useful? Assistant:", "response": "Bash is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is c++? Assistant: C++ is An object-oriented extension of C with templates and zero-cost abstractions. User: Why is it useful? Assistant:", "response": "C++ is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is kotlin? Assistant:", "response": "Kotlin is A JVM language that interoperates with Java and is the preferred Android language."}
+{"prompt": "User: What is sql? Assistant: SQL. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is websockets? Assistant: WebSockets. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is binary search? Assistant: binary search. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is ruby? Assistant: Ruby is A dynamic interpreted language with elegant syntax; the engine behind Rails. User: Give me an example. Assistant:", "response": "A typical example of ruby would show its core idioms in a few short lines."}
+{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Why is it useful? Assistant:", "response": "synapses is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is graphql? Assistant: GraphQL. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is ruby? Assistant: Ruby. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is inhibition? Assistant: inhibition. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Tell me more. Assistant:", "response": "Most importantly, synapses is what we use day to day — practical and well-supported."}
 {"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Why is it useful? Assistant:", "response": "PowerShell is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is ruby? Assistant: Ruby. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is http? Assistant: HTTP. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is recursion? Assistant: recursion. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is unit tests? Assistant: unit tests. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is transactions? Assistant:", "response": "transactions is Units of database work that either fully commit or fully roll back."}
+{"prompt": "User: What is inhibition? Assistant: inhibition. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is sql? Assistant: SQL. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is excitation? Assistant: excitation is Edges that increase a target's activation when the source fires; the default learning sign. User: Tell me more. Assistant:", "response": "Most importantly, excitation is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is hash tables? Assistant: hash tables. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is hash tables? Assistant: hash tables is Data structures that map keys to values using a hash function for average-O(1) lookup. User: Why is it useful? Assistant:", "response": "hash tables is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is sql? Assistant:", "response": "SQL is A declarative language for querying and modifying relational databases."}
+{"prompt": "User: What is oauth? Assistant: OAuth is An authorisation framework that lets third parties access an account without seeing the password. User: Tell me more. Assistant:", "response": "Most importantly, oauth is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is multi-pool? Assistant:", "response": "the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses."}
+{"prompt": "User: What is json? Assistant: JSON. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is go? Assistant: Go is A compiled language with goroutines for concurrency and a small simple standard library. User: Tell me more. Assistant:", "response": "Most importantly, go is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes is A container orchestrator that schedules and manages workloads across a cluster of machines. User: Why is it useful? Assistant:", "response": "Kubernetes is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is go? Assistant: Go. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is binary search? Assistant:", "response": "binary search is A search algorithm that halves the search space at each step on a sorted array."}
+{"prompt": "User: What is training? Assistant:", "response": "training is The process of presenting paired observations so the fabric updates synapse weights."}
+{"prompt": "User: What is java? Assistant: Java is An object-oriented JVM language used heavily in enterprise backends and Android. User: Tell me more. Assistant:", "response": "Most importantly, java is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is typescript? Assistant: TypeScript. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is processes? Assistant: processes. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is go? Assistant: Go. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is graphs? Assistant:", "response": "graphs is Collections of nodes connected by edges; directed or undirected, weighted or unweighted."}
+{"prompt": "User: What is recursion? Assistant: recursion. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs is Resource-oriented web APIs that use HTTP verbs (GET, POST, PUT, DELETE) and JSON bodies. User: Why is it useful? Assistant:", "response": "REST APIs is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is rest apis? Assistant:", "response": "REST APIs is Resource-oriented web APIs that use HTTP verbs (GET, POST, PUT, DELETE) and JSON bodies."}
+{"prompt": "User: What is a linked list? Assistant: a linked list. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is integration tests? Assistant: integration tests is Tests that exercise multiple components together to catch interaction bugs. User: Give me an example. Assistant:", "response": "A typical example of integration tests would show its core idioms in a few short lines."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is jwt? Assistant:", "response": "JWT is A JSON Web Token; a signed token used for stateless authentication."}
+{"prompt": "User: What is dopamine? Assistant:", "response": "dopamine is A neuromodulator that gates plasticity; when it spikes, recent traces consolidate into permanent connections."}
+{"prompt": "User: What is git? Assistant: Git is A distributed version-control system; every clone has the full history of the project. User: Give me an example. Assistant:", "response": "A typical example of git would show its core idioms in a few short lines."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is encryption? Assistant: encryption. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is json? Assistant: JSON is A lightweight text format for structured data; the default body format for modern web APIs. User: Why is it useful? Assistant:", "response": "JSON is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is git? Assistant: Git. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is merge sort? Assistant: merge sort is A divide-and-conquer sort that splits, sorts the halves, and merges back in O(n log n). User: Give me an example. Assistant:", "response": "A typical example of merge sort would show its core idioms in a few short lines."}
+{"prompt": "User: What is merge sort? Assistant: merge sort. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is html? Assistant:", "response": "HTML is The markup language that structures content on the web."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is indexes? Assistant: indexes is Database structures that speed up lookups at the cost of slower writes and more storage. User: Why is it useful? Assistant:", "response": "indexes is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is java? Assistant: Java is An object-oriented JVM language used heavily in enterprise backends and Android. User: Why is it useful? Assistant:", "response": "Java is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is processes? Assistant: processes. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is hash tables? Assistant:", "response": "hash tables is Data structures that map keys to values using a hash function for average-O(1) lookup."}
+{"prompt": "User: What is go? Assistant:", "response": "Go is A compiled language with goroutines for concurrency and a small simple standard library."}
+{"prompt": "User: What is hashing? Assistant:", "response": "hashing is A one-way function that maps data to a fixed-size digest; can't be reversed in practice."}
+{"prompt": "User: What is neurons? Assistant:", "response": "neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal."}
+{"prompt": "User: What is encryption? Assistant:", "response": "encryption is Transforming readable data into ciphertext using a key so only authorised parties can recover it."}
+{"prompt": "User: What is graphql? Assistant: GraphQL. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is relational databases? Assistant: relational databases is Databases that store data in tables with rows and columns linked by foreign keys. User: Tell me more. Assistant:", "response": "Most importantly, relational databases is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is html? Assistant: HTML is The markup language that structures content on the web. User: Tell me more. Assistant:", "response": "Most importantly, html is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is training? Assistant: training. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is docker? Assistant: Docker is A container runtime that packages an app with all of its dependencies into a portable image. User: Tell me more. Assistant:", "response": "Most importantly, docker is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is unit tests? Assistant: unit tests. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is integration tests? Assistant: integration tests. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is oauth? Assistant:", "response": "OAuth is An authorisation framework that lets third parties access an account without seeing the password."}
+{"prompt": "User: What is bash? Assistant: Bash. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is websockets? Assistant: WebSockets. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is processes? Assistant: processes. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is hashing? Assistant: hashing is A one-way function that maps data to a fixed-size digest; can't be reversed in practice. User: Tell me more. Assistant:", "response": "Most importantly, hashing is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is dopamine? Assistant: dopamine. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is typescript? Assistant: TypeScript. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is kubernetes? Assistant:", "response": "Kubernetes is A container orchestrator that schedules and manages workloads across a cluster of machines."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is jwt? Assistant: JWT is A JSON Web Token; a signed token used for stateless authentication. User: Why is it useful? Assistant:", "response": "JWT is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is c++? Assistant: C++. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is trees? Assistant: trees is Hierarchical data structures with a root node and child branches. User: Tell me more. Assistant:", "response": "Most importantly, trees is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is bash? Assistant: Bash is The dominant Unix shell; pipes, redirection, glob patterns, POSIX utilities. User: Tell me more. Assistant:", "response": "Most importantly, bash is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is transactions? Assistant: transactions is Units of database work that either fully commit or fully roll back. User: Why is it useful? Assistant:", "response": "transactions is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is merge sort? Assistant: merge sort. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is css? Assistant: CSS is The styling language for the web; controls colour, layout, and visual presentation. User: Why is it useful? Assistant:", "response": "CSS is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is processes? Assistant:", "response": "processes is Instances of running programs with their own memory, file descriptors, and lifecycle."}
+{"prompt": "User: What is threads? Assistant: threads is Execution units within a process; threads share memory and need synchronisation. User: Why is it useful? Assistant:", "response": "threads is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is recursion? Assistant: recursion is A function that calls itself; the base case stops the recursion, the recursive case reduces the problem. User: Give me an example. Assistant:", "response": "A typical example of recursion would show its core idioms in a few short lines."}
+{"prompt": "User: What is sql? Assistant: SQL is A declarative language for querying and modifying relational databases. User: Tell me more. Assistant:", "response": "Most importantly, sql is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Give me an example. Assistant:", "response": "A typical example of neurons would show its core idioms in a few short lines."}
+{"prompt": "User: What is hash tables? Assistant: hash tables. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is merge sort? Assistant: merge sort is A divide-and-conquer sort that splits, sorts the halves, and merges back in O(n log n). User: Why is it useful? Assistant:", "response": "merge sort is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is regression tests? Assistant: regression tests. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is html? Assistant: HTML is The markup language that structures content on the web. User: Why is it useful? Assistant:", "response": "HTML is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is go? Assistant: Go. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is java? Assistant: Java. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is transactions? Assistant: transactions. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is sql? Assistant: SQL is A declarative language for querying and modifying relational databases. User: Why is it useful? Assistant:", "response": "SQL is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is python? Assistant: Python is A high-level interpreted language; clean syntax, batteries-included standard library. User: Tell me more. Assistant:", "response": "Most importantly, python is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is docker? Assistant: Docker. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is regression tests? Assistant: regression tests is Tests that lock in known-good behaviour so a future change doesn't break it accidentally. User: Tell me more. Assistant:", "response": "Most importantly, regression tests is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is relational databases? Assistant: relational databases. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is websockets? Assistant: WebSockets is A protocol that keeps a long-lived bidirectional connection open between client and server. User: Give me an example. Assistant:", "response": "A typical example of websockets would show its core idioms in a few short lines."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is hash tables? Assistant: hash tables. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is c? Assistant: C is The original portable systems language; small, fast, close to the hardware. User: Why is it useful? Assistant:", "response": "C is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is unit tests? Assistant: unit tests. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is transactions? Assistant: transactions. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is binary search? Assistant: binary search. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is dopamine? Assistant: dopamine is A neuromodulator that gates plasticity; when it spikes, recent traces consolidate into permanent connections. User: Why is it useful? Assistant:", "response": "dopamine is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is c? Assistant: C. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is docker? Assistant: Docker. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is javascript? Assistant: JavaScript. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is typescript? Assistant: TypeScript. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is relational databases? Assistant: relational databases. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is integration tests? Assistant: integration tests is Tests that exercise multiple components together to catch interaction bugs. User: Why is it useful? Assistant:", "response": "integration tests is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is transactions? Assistant: transactions is Units of database work that either fully commit or fully roll back. User: Tell me more. Assistant:", "response": "Most importantly, transactions is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is hash tables? Assistant: hash tables is Data structures that map keys to values using a hash function for average-O(1) lookup. User: Tell me more. Assistant:", "response": "Most importantly, hash tables is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is trees? Assistant: trees. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is training? Assistant: training is The process of presenting paired observations so the fabric updates synapse weights. User: Give me an example. Assistant:", "response": "A typical example of training would show its core idioms in a few short lines."}
+{"prompt": "User: What is graphs? Assistant: graphs. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is html? Assistant: HTML. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is recursion? Assistant: recursion is A function that calls itself; the base case stops the recursion, the recursive case reduces the problem. User: Tell me more. Assistant:", "response": "Most importantly, recursion is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is inhibition? Assistant: inhibition. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is processes? Assistant: processes is Instances of running programs with their own memory, file descriptors, and lifecycle. User: Why is it useful? Assistant:", "response": "processes is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is graphs? Assistant: graphs is Collections of nodes connected by edges; directed or undirected, weighted or unweighted. User: Tell me more. Assistant:", "response": "Most importantly, graphs is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is powershell? Assistant:", "response": "PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text."}
+{"prompt": "User: What is excitation? Assistant: excitation. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Give me an example. Assistant:", "response": "A typical example of hebbian learning would show its core idioms in a few short lines."}
+{"prompt": "User: What is relational databases? Assistant: relational databases. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is trees? Assistant: trees. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is git? Assistant: Git. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Tell me more. Assistant:", "response": "Most importantly, rust is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is acid? Assistant: ACID. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes is A container orchestrator that schedules and manages workloads across a cluster of machines. User: Give me an example. Assistant:", "response": "A typical example of kubernetes would show its core idioms in a few short lines."}
+{"prompt": "User: What is docker? Assistant: Docker. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is graphql? Assistant: GraphQL. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is jwt? Assistant: JWT is A JSON Web Token; a signed token used for stateless authentication. User: Give me an example. Assistant:", "response": "A typical example of jwt would show its core idioms in a few short lines."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is websockets? Assistant: WebSockets is A protocol that keeps a long-lived bidirectional connection open between client and server. User: Tell me more. Assistant:", "response": "Most importantly, websockets is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is c++? Assistant: C++. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is dynamic programming? Assistant: dynamic programming. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is css? Assistant: CSS. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is encryption? Assistant: encryption is Transforming readable data into ciphertext using a key so only authorised parties can recover it. User: Tell me more. Assistant:", "response": "Most importantly, encryption is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is css? Assistant: CSS is The styling language for the web; controls colour, layout, and visual presentation. User: Give me an example. Assistant:", "response": "A typical example of css would show its core idioms in a few short lines."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning is When two neurons fire together the synapse between them strengthens — the basic plasticity rule. User: Tell me more. Assistant:", "response": "Most importantly, hebbian learning is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is encryption? Assistant: encryption. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is acid? Assistant: ACID. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is recursion? Assistant: recursion. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is docker? Assistant:", "response": "Docker is A container runtime that packages an app with all of its dependencies into a portable image."}
+{"prompt": "User: What is neurons? Assistant: neurons. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is python? Assistant:", "response": "Python is A high-level interpreted language; clean syntax, batteries-included standard library."}
+{"prompt": "User: What is jwt? Assistant: JWT. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is synapses? Assistant: synapses is Weighted connections between neurons; the weights are what the fabric actually learns. User: Give me an example. Assistant:", "response": "A typical example of synapses would show its core idioms in a few short lines."}
+{"prompt": "User: What is java? Assistant: Java. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is encryption? Assistant: encryption. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is css? Assistant: CSS. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is java? Assistant:", "response": "Java is An object-oriented JVM language used heavily in enterprise backends and Android."}
+{"prompt": "User: What is training? Assistant: training. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is regression tests? Assistant: regression tests. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is dopamine? Assistant: dopamine is A neuromodulator that gates plasticity; when it spikes, recent traces consolidate into permanent connections. User: Give me an example. Assistant:", "response": "A typical example of dopamine would show its core idioms in a few short lines."}
+{"prompt": "User: What is kotlin? Assistant: Kotlin. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Why is it useful? Assistant:", "response": "Rust is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is dopamine? Assistant: dopamine. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is sql? Assistant: SQL is A declarative language for querying and modifying relational databases. User: Give me an example. Assistant:", "response": "A typical example of sql would show its core idioms in a few short lines."}
+{"prompt": "User: What is binary search? Assistant: binary search. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is git? Assistant: Git is A distributed version-control system; every clone has the full history of the project. User: Tell me more. Assistant:", "response": "Most importantly, git is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is typescript? Assistant: TypeScript is A typed superset of JavaScript that compiles to plain JavaScript. User: Give me an example. Assistant:", "response": "A typical example of typescript would show its core idioms in a few short lines."}
+{"prompt": "User: What is git? Assistant:", "response": "Git is A distributed version-control system; every clone has the full history of the project."}
+{"prompt": "User: What is encryption? Assistant: encryption. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is rest apis? Assistant: REST APIs is Resource-oriented web APIs that use HTTP verbs (GET, POST, PUT, DELETE) and JSON bodies. User: Tell me more. Assistant:", "response": "Most importantly, rest apis is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is transactions? Assistant: transactions. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is graphql? Assistant:", "response": "GraphQL is A query language for APIs where the client specifies exactly which fields it needs."}
+{"prompt": "User: What is dopamine? Assistant: dopamine. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is http? Assistant: HTTP. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is java? Assistant: Java. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is java? Assistant: Java is An object-oriented JVM language used heavily in enterprise backends and Android. User: Give me an example. Assistant:", "response": "A typical example of java would show its core idioms in a few short lines."}
+{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is binary search? Assistant: binary search is A search algorithm that halves the search space at each step on a sorted array. User: Tell me more. Assistant:", "response": "Most importantly, binary search is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is dopamine? Assistant: dopamine. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is git? Assistant: Git. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is c++? Assistant: C++. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is docker? Assistant: Docker is A container runtime that packages an app with all of its dependencies into a portable image. User: Why is it useful? Assistant:", "response": "Docker is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is acid? Assistant: ACID is Atomicity, Consistency, Isolation, Durability — the guarantees a relational transaction provides. User: Tell me more. Assistant:", "response": "Most importantly, acid is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is regression tests? Assistant: regression tests is Tests that lock in known-good behaviour so a future change doesn't break it accidentally. User: Give me an example. Assistant:", "response": "A typical example of regression tests would show its core idioms in a few short lines."}
+{"prompt": "User: What is a linked list? Assistant:", "response": "a linked list is A sequence of nodes each pointing to the next; cheap insertions, linear-time random access."}
+{"prompt": "User: What is jwt? Assistant: JWT. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is oauth? Assistant: OAuth. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is http? Assistant: HTTP. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is c++? Assistant: C++. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is go? Assistant: Go is A compiled language with goroutines for concurrency and a small simple standard library. User: Why is it useful? Assistant:", "response": "Go is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is dynamic programming? Assistant:", "response": "dynamic programming is Solving a problem by combining solutions to overlapping subproblems and memoising results."}
+{"prompt": "User: What is html? Assistant: HTML. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is ruby? Assistant: Ruby. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is trees? Assistant: trees. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is indexes? Assistant: indexes. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is javascript? Assistant:", "response": "JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js."}
+{"prompt": "User: What is oauth? Assistant: OAuth is An authorisation framework that lets third parties access an account without seeing the password. User: Give me an example. Assistant:", "response": "A typical example of oauth would show its core idioms in a few short lines."}
+{"prompt": "User: What is c? Assistant: C is The original portable systems language; small, fast, close to the hardware. User: Give me an example. Assistant:", "response": "A typical example of c would show its core idioms in a few short lines."}
 {"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Tell me more. Assistant:", "response": "Most importantly, neurons is what we use day to day — practical and well-supported."}
 {"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is synapses? Assistant:", "response": "synapses is Weighted connections between neurons; the weights are what the fabric actually learns."}
-{"prompt": "User: What is bash? Assistant: Bash. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is bash? Assistant: Bash. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is synapses? Assistant: synapses. User: Got it. Assistant:", "response": "Glad I could help."}
-{"prompt": "User: What is javascript? Assistant: JavaScript. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Why is it useful? Assistant:", "response": "Rust is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is neurons? Assistant:", "response": "neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal."}
-{"prompt": "User: What is python? Assistant:", "response": "Python is A high-level interpreted language; clean syntax, batteries-included standard library."}
-{"prompt": "User: What is neurons? Assistant: neurons. User: Thanks. Assistant:", "response": "You're welcome."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Cool. Assistant:", "response": "Anytime."}
-{"prompt": "User: What is javascript? Assistant: JavaScript is The language of the web; ubiquitous in browsers and on the server via Node.js. User: Why is it useful? Assistant:", "response": "JavaScript is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is javascript? Assistant: JavaScript. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is relational databases? Assistant: relational databases. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is html? Assistant: HTML. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is css? Assistant: CSS. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is transactions? Assistant: transactions is Units of database work that either fully commit or fully roll back. User: Give me an example. Assistant:", "response": "A typical example of transactions would show its core idioms in a few short lines."}
+{"prompt": "User: What is docker? Assistant: Docker. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is typescript? Assistant: TypeScript. User: Cool. Assistant:", "response": "Anytime."}
 {"prompt": "User: What is javascript? Assistant: JavaScript. User: Awesome. Assistant:", "response": "Let me know what's next."}
-{"prompt": "User: What is rust? Assistant: Rust is A systems language with ownership-based memory safety and zero-cost abstractions. User: Give me an example. Assistant:", "response": "A typical example of rust would show its core idioms in a few short lines."}
-{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric. User: Nice. Assistant:", "response": "Glad that worked."}
-{"prompt": "User: What is multi-pool? Assistant: the multi-pool fabric is N independent neuron pools — one per modality — linked by cross-pool synapses. User: Give me an example. Assistant:", "response": "A typical example of the multi-pool fabric would show its core idioms in a few short lines."}
-{"prompt": "User: What is python? Assistant: Python. User: Thanks. Assistant:", "response": "You're welcome."}
-{"prompt": "User: What is training? Assistant:", "response": "training is The process of presenting paired observations so the fabric updates synapse weights."}
-{"prompt": "User: What is neurons? Assistant: neurons is Cells with dendrites for input, axons for output; fire above threshold and emit a signal. User: Why is it useful? Assistant:", "response": "neurons is useful because it solves real problems with idioms that many people already know."}
-{"prompt": "User: What is hebbian learning? Assistant: Hebbian learning. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Give me an example. Assistant:", "response": "A typical example of powershell would show its core idioms in a few short lines."}
+{"prompt": "User: What is synapses? Assistant: synapses. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is relational databases? Assistant: relational databases is Databases that store data in tables with rows and columns linked by foreign keys. User: Give me an example. Assistant:", "response": "A typical example of relational databases would show its core idioms in a few short lines."}
+{"prompt": "User: What is go? Assistant: Go. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is excitation? Assistant:", "response": "excitation is Edges that increase a target's activation when the source fires; the default learning sign."}
+{"prompt": "User: What is indexes? Assistant: indexes. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is trees? Assistant: trees. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is trees? Assistant: trees is Hierarchical data structures with a root node and child branches. User: Why is it useful? Assistant:", "response": "trees is useful because it solves real problems with idioms that many people already know."}
+{"prompt": "User: What is graphs? Assistant: graphs. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is json? Assistant: JSON is A lightweight text format for structured data; the default body format for modern web APIs. User: Tell me more. Assistant:", "response": "Most importantly, json is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is websockets? Assistant:", "response": "WebSockets is A protocol that keeps a long-lived bidirectional connection open between client and server."}
+{"prompt": "User: What is c++? Assistant: C++. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is jwt? Assistant: JWT. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is html? Assistant: HTML. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is acid? Assistant:", "response": "ACID is Atomicity, Consistency, Isolation, Durability — the guarantees a relational transaction provides."}
+{"prompt": "User: What is transactions? Assistant: transactions. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is oauth? Assistant: OAuth. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is threads? Assistant: threads. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is c++? Assistant: C++ is An object-oriented extension of C with templates and zero-cost abstractions. User: Give me an example. Assistant:", "response": "A typical example of c++ would show its core idioms in a few short lines."}
+{"prompt": "User: What is powershell? Assistant: PowerShell is The structured-object shell from Microsoft; pipes pass objects, not text. User: Tell me more. Assistant:", "response": "Most importantly, powershell is what we use day to day — practical and well-supported."}
+{"prompt": "User: What is oauth? Assistant: OAuth. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is indexes? Assistant: indexes. User: Got it. Assistant:", "response": "Glad I could help."}
+{"prompt": "User: What is rust? Assistant: Rust. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is kubernetes? Assistant: Kubernetes. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Awesome. Assistant:", "response": "Let me know what's next."}
+{"prompt": "User: What is powershell? Assistant: PowerShell. User: Cool. Assistant:", "response": "Anytime."}
+{"prompt": "User: What is http? Assistant: HTTP is The Hypertext Transfer Protocol; the request-response protocol the web is built on. User: Give me an example. Assistant:", "response": "A typical example of http would show its core idioms in a few short lines."}
+{"prompt": "User: What is training? Assistant: training. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is encryption? Assistant: encryption. User: Nice. Assistant:", "response": "Glad that worked."}
+{"prompt": "User: What is c? Assistant: C. User: Thanks. Assistant:", "response": "You're welcome."}
+{"prompt": "User: What is json? Assistant: JSON is A lightweight text format for structured data; the default body format for modern web APIs. User: Give me an example. Assistant:", "response": "A typical example of json would show its core idioms in a few short lines."}
+{"prompt": "User: What is trees? Assistant:", "response": "trees is Hierarchical data structures with a root node and child branches."}
