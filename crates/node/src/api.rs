@@ -1024,6 +1024,15 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/multi_pool/train_fanout",  post(multi_pool_train_fanout))
         .route("/multi_pool/ask",           post(multi_pool_ask))
         .route("/multi_pool/stats",         get(multi_pool_stats))
+        // GET /multi_pool/topology?max_per_pool=40&max_edges=400
+        //   Sample of concept neurons + signed cross-edges between them.
+        //   Used by the live brain-viz for the static fabric skeleton.
+        .route("/multi_pool/topology",      get(multi_pool_topology))
+        // GET /multi_pool/activity?since_seq=N
+        //   Drain firing/training events from the lock-skipping ring
+        //   buffer since the caller's last cursor.  Drives the pulse
+        //   animations in the brain-viz.
+        .route("/multi_pool/activity",      get(multi_pool_activity))
         .route("/multi_pool/replay",        post(multi_pool_replay))
         .route("/multi_pool/delta/export",  get(multi_pool_delta_export))
         .route("/multi_pool/delta/apply",   post(multi_pool_delta_apply))
@@ -5512,6 +5521,53 @@ async fn multi_pool_debug_query(
         neuro.multi_pool_debug_query(&src_pool, &atoms)
     }).await.unwrap_or_else(|_| serde_json::json!({"error": "spawn_blocking panic"}));
     (StatusCode::OK, Json(result))
+}
+
+#[derive(Deserialize, Default)]
+struct TopologyReq {
+    #[serde(default = "default_topology_max_per_pool")]
+    max_per_pool: usize,
+    #[serde(default = "default_topology_max_edges")]
+    max_edges:    usize,
+}
+fn default_topology_max_per_pool() -> usize { 40 }
+fn default_topology_max_edges()    -> usize { 400 }
+
+/// GET /multi_pool/topology — sample of concept neurons + edges for
+/// the live brain-viz.  Caller can tune the sample size; defaults
+/// chosen to give a brain-like density without exploding the
+/// frontend canvas (~40 nodes / ~400 edges).
+async fn multi_pool_topology(
+    State(state): State<ApiState>,
+    Query(req):   Query<TopologyReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let neuro = state.neuro.clone();
+    let max_per_pool = req.max_per_pool.clamp(1, 200);
+    let max_edges    = req.max_edges.clamp(1, 5000);
+    let body = tokio::task::spawn_blocking(move || {
+        neuro.multi_pool_topology(max_per_pool, max_edges)
+    }).await.unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+    (StatusCode::OK, Json(body))
+}
+
+#[derive(Deserialize, Default)]
+struct ActivityReq {
+    #[serde(default)]
+    since_seq: u64,
+}
+
+/// GET /multi_pool/activity?since_seq=N — drain activity events with
+/// seq > since_seq from the lock-skipping ring buffer.  Returns the
+/// new head sequence so the caller can pass it back on next poll.
+async fn multi_pool_activity(
+    State(state): State<ApiState>,
+    Query(req):   Query<ActivityReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (head, events) = state.neuro.activity_since(req.since_seq);
+    (StatusCode::OK, Json(serde_json::json!({
+        "head":   head,
+        "events": events,
+    })))
 }
 
 /// GET /multi_pool/stats — per-pool sizes + total cross-edges.

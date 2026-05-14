@@ -5206,6 +5206,48 @@ pub struct NeuroRuntime {
     use_trigrams: Arc<std::sync::atomic::AtomicBool>,
     /// Atomic flag for IDF-weighted hebbian update at concept-promote time.
     use_idf: Arc<std::sync::atomic::AtomicBool>,
+    /// Lock-skipping activity ring buffer for the live brain-viz.  Each
+    /// time a concept fires (during /chat) or a paired concept is
+    /// promoted (during /sensor/observe), we *try* to push an entry —
+    /// if the buffer mutex is contended, we silently drop, so this
+    /// recording cannot slow the training loop.  Capacity bounded; the
+    /// UI polls `/multi_pool/activity?since_seq=N` to drain new events.
+    activity:     Arc<parking_lot::Mutex<ActivityBuffer>>,
+    activity_seq: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// One entry in the activity ring buffer — a concept fire or train
+/// event, just enough for the visualization to spawn a pulse along
+/// that neuron's axons.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActivityEvent {
+    pub seq:   u64,
+    pub ts_ms: u64,
+    pub pool:  String,
+    pub label: String,
+    /// "fire" (recall path) or "train" (paired training).
+    pub kind:  &'static str,
+    /// Activation magnitude at the moment of firing (0..1+ish).
+    pub activation: f32,
+}
+
+#[derive(Debug)]
+pub struct ActivityBuffer {
+    events:   std::collections::VecDeque<ActivityEvent>,
+    capacity: usize,
+}
+
+impl ActivityBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self { events: std::collections::VecDeque::with_capacity(capacity), capacity }
+    }
+    pub fn push(&mut self, ev: ActivityEvent) {
+        if self.events.len() >= self.capacity { self.events.pop_front(); }
+        self.events.push_back(ev);
+    }
+    pub fn since(&self, seq: u64) -> Vec<ActivityEvent> {
+        self.events.iter().filter(|e| e.seq > seq).cloned().collect()
+    }
 }
 
 pub type NeuroRuntimeHandle = Arc<NeuroRuntime>;
@@ -5325,6 +5367,8 @@ impl NeuroRuntime {
             use_bigrams:  Arc::new(std::sync::atomic::AtomicBool::new(false)),
             use_trigrams: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             use_idf:      Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            activity:     Arc::new(parking_lot::Mutex::new(ActivityBuffer::new(500))),
+            activity_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -6294,6 +6338,20 @@ impl NeuroRuntime {
             p.active_concept_labels(0.05)
         } else { Vec::new() };
 
+        // Activity recording — push a "train" event for every src and
+        // tgt concept promoted this call so the live brain-viz can
+        // flash these neurons.  Lock-skipping (try_lock); zero cost
+        // when the buffer is busy.
+        drop(guard);  // release the inner lock first so record_activity
+                      // can't deadlock on a future re-entrant lock.
+        for lbl in &src_concepts {
+            self.record_activity(src_pool_id, lbl, "train", 1.0);
+        }
+        for lbl in &tgt_concepts {
+            self.record_activity(tgt_pool_id, lbl, "train", 1.0);
+        }
+        let mut guard = self.inner.lock();
+
         // (3) Competitors = every existing concept in tgt pool except
         // those in the current tgt pairing.  Used for contrastive
         // inhibition.  Skipped when `negative` (anti-example).
@@ -6965,6 +7023,14 @@ impl NeuroRuntime {
         let chosen_src_concept = top_active_concept(src_pool, &src_active);
         let chosen_src_label = chosen_src_concept.clone();
 
+        // Activity hook: record the firing of the chosen source concept
+        // so the live brain-viz can flash this neuron as it picks up
+        // the input.  Lock-skipping; no slowdown if buffer is busy.
+        if let Some(ref lbl) = chosen_src_concept {
+            let act = *src_active.get(lbl).unwrap_or(&0.0);
+            self.record_activity(src_pool_id, lbl, "fire", act);
+        }
+
         // 1c. Input-coverage gate.  Same logic as before for leaf
         // (atom-membership) concepts.  HIERARCHICAL concepts (members
         // are themselves concept neurons) bypass this gate — their
@@ -7219,7 +7285,11 @@ impl NeuroRuntime {
         // (c) Final confidence: product of the three softmax-like fractions.
         let confidence = (src_concept_frac * cross_edge_frac * tgt_concept_frac)
             .clamp(0.0, 1.0);
-        if let Some((lbl, _top_act)) = best_concept {
+        if let Some((lbl, top_act)) = best_concept {
+            // Activity hook: record the winning tgt concept's fire so
+            // the brain-viz draws a pulse arriving at this neuron along
+            // its incoming cross-edges from the source concept.
+            self.record_activity(tgt_pool_id, &lbl, "fire", top_act);
             // Hierarchical recall walks parent → children → cross-edge
             // targets structurally, guaranteeing all children's atoms
             // appear regardless of which won the in-pool propagate.
@@ -7491,6 +7561,106 @@ impl NeuroRuntime {
         serde_json::json!({
             "pools":           serde_json::Value::Object(pools),
             "cross_edges":     guard.multi_pool.cross_total_edges(),
+        })
+    }
+
+    /// Lock-skipping push to the activity ring buffer.  Used at every
+    /// concept fire / paired-train point so the live visualization
+    /// can render pulses along the axons of the firing neuron.  If
+    /// the mutex is busy (someone else is draining for the UI poll)
+    /// we silently drop — better to miss an event than slow training.
+    pub fn record_activity(&self, pool: &str, label: &str, kind: &'static str, activation: f32) {
+        let seq = self.activity_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if let Some(mut buf) = self.activity.try_lock() {
+            let ts_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64).unwrap_or(0);
+            buf.push(ActivityEvent {
+                seq, ts_ms,
+                pool: pool.to_string(),
+                label: label.to_string(),
+                kind, activation,
+            });
+        }
+    }
+
+    /// Drain activity events with `seq > since_seq`.  Cheap — single
+    /// mutex acquisition, filter, clone.  UI poll endpoint backing.
+    pub fn activity_since(&self, since_seq: u64) -> (u64, Vec<ActivityEvent>) {
+        let head = self.activity_seq.load(std::sync::atomic::Ordering::Relaxed);
+        let events = self.activity.lock().since(since_seq);
+        (head, events)
+    }
+
+    /// Sample of the multi-pool topology for the brain visualization.
+    /// Returns up to `max_per_pool` concept neurons per pool (highest
+    /// `use_count` first — frequently-fired ones are most likely to
+    /// participate in live activity) and the cross-edges between
+    /// them, up to `max_edges` total.  Cheap-ish: one lock, two
+    /// linear scans per pool.
+    pub fn multi_pool_topology(&self, max_per_pool: usize, max_edges: usize)
+        -> serde_json::Value
+    {
+        let guard = self.inner.lock();
+        let pool_ids = guard.multi_pool.pool_ids();
+        let mut nodes_out: Vec<serde_json::Value> = Vec::new();
+        // pool -> set of sampled labels (so edges only reference shown nodes)
+        let mut shown: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for pid in &pool_ids {
+            let pool = match guard.multi_pool.pool(pid) {
+                Some(p) => p, None => continue,
+            };
+            // Collect (use_count, label, atom_count) for every concept.
+            let mut all: Vec<(u64, String, usize)> = Vec::new();
+            for slot in pool.neurons.iter() {
+                if let NeuronSlot::Hot(n) = slot {
+                    if n.members.is_empty() { continue; }
+                    let lbl = match &n.label { Some(l) => l.clone(), None => continue };
+                    all.push((n.use_count, lbl, n.members.len()));
+                }
+            }
+            // Sort highest use_count first; cap at max_per_pool.
+            all.sort_by(|a, b| b.0.cmp(&a.0));
+            all.truncate(max_per_pool);
+            let mut set = std::collections::HashSet::new();
+            for (uc, lbl, atom_count) in &all {
+                set.insert(lbl.clone());
+                nodes_out.push(serde_json::json!({
+                    "pool":       pid,
+                    "label":      lbl,
+                    "use_count":  uc,
+                    "atom_count": atom_count,
+                }));
+            }
+            shown.insert(pid.clone(), set);
+        }
+
+        // Walk the cross-pool synapse map and emit edges that connect
+        // two SHOWN nodes only.  Includes self-loops (cross_for(p, p))
+        // which are within-pool concept→concept routes from same-pool
+        // paired training.
+        let mut edges_out: Vec<serde_json::Value> = Vec::new();
+        'edges: for ((src_p, tgt_p), cross) in guard.multi_pool.cross.iter() {
+            let Some(src_set) = shown.get(src_p) else { continue };
+            let Some(tgt_set) = shown.get(tgt_p) else { continue };
+            for (a, b, mag, _cons, inh) in cross.iter_weights() {
+                if !src_set.contains(a) || !tgt_set.contains(b) { continue; }
+                edges_out.push(serde_json::json!({
+                    "src_pool":   src_p,
+                    "src_label":  a,
+                    "tgt_pool":   tgt_p,
+                    "tgt_label":  b,
+                    "weight":     mag,
+                    "inhibitory": inh,
+                }));
+                if edges_out.len() >= max_edges { break 'edges; }
+            }
+        }
+        let activity_head = self.activity_seq.load(std::sync::atomic::Ordering::Relaxed);
+        serde_json::json!({
+            "nodes":         nodes_out,
+            "edges":         edges_out,
+            "activity_head": activity_head,
         })
     }
 
