@@ -3755,6 +3755,19 @@ const CROSS_INH_RATE: f32 = 0.3;
 /// once later evidence re-validates the association.
 const CROSS_EXC_TRACE_DECAY: f32 = 0.85;
 const CROSS_INH_TRACE_DECAY: f32 = 0.70;
+/// Temporal binding: rate at which the previous observation's concepts
+/// wire to the current observation's concepts as a temporal edge.
+/// Softer than the main training rate because it's a sequence prior,
+/// not a paired association.  Cross-pool temporal: prev_concept_in_X
+/// → current_concept_in_Y excitatory.  Same-pool temporal:
+/// prev_concept_X → current_concept_X excitatory (sequence in modality).
+const TEMPORAL_BINDING_RATE: f32 = 0.3;
+/// Idle-session eviction TTL (unix seconds).  After this many seconds
+/// without a new observation, the session's prev-concepts cache is
+/// dropped from `temporal_prev`.  Prevents the cache from growing
+/// without bound across long deployments.
+const TEMPORAL_SESSION_TTL_SECS: u64 = 6 * 3600;  // 6 hours
+
 /// Structural lateral-inhibition weight wired between concept neurons
 /// in the same pool during `multi_pool_train_pair`.  Used with
 /// `set_synapse` (idempotent) so repeated training of the same pair
@@ -4140,6 +4153,27 @@ struct NeuroState {
     /// Cold-storage base directory for multi-pool pools.  Stored so newly
     /// registered pools inherit the same paging config as the initial pools.
     multi_pool_cold_base: Option<std::path::PathBuf>,
+    /// Temporal binding cache.  Keyed by session_id, then by pool_id,
+    /// each value is the list of concept labels that fired in that
+    /// pool during the MOST RECENT observation in this session.  On
+    /// the next observation from the same session, these prior
+    /// concepts are wired to the new concepts as temporal cross-edges
+    /// — the "what just happened before this" signal that lets the
+    /// fabric learn sequences across observations.
+    ///
+    /// Sessions are timestamped so they can be evicted after idle
+    /// timeout (TEMPORAL_SESSION_TTL_SECS).  Without eviction the
+    /// cache would grow unboundedly across a long-running deployment.
+    temporal_prev: HashMap<String, TemporalSession>,
+}
+
+#[derive(Debug, Default)]
+struct TemporalSession {
+    /// Per-pool list of concept labels that fired in this session's
+    /// most recent observation.  Empty Vec for pools that didn't fire.
+    prev_concepts: HashMap<String, Vec<String>>,
+    /// Last-touch timestamp (unix seconds) for TTL eviction.
+    last_touch: u64,
 }
 
 impl NeuroState {
@@ -4201,6 +4235,7 @@ impl NeuroState {
             registry: PredictionRegistry::new(),
             motifs: HierarchicalMotifRuntime::new(motif_config),
             multi_pool_cold_base: None,
+            temporal_prev: HashMap::new(),
         }
     }
 
@@ -6336,6 +6371,134 @@ impl NeuroRuntime {
             pool.set_synapse(sid, pid, lateral_w, true);
         }
         Some(parent)
+    }
+
+    /// Temporal-aware training.  Runs the normal pair training, then
+    /// wires temporal edges from the previous observation's concepts
+    /// (per-session cache) to the current observation's concepts.
+    ///
+    /// `session_id` keys the temporal cache; without one, this method
+    /// is equivalent to `multi_pool_train_pair_polarity` (no temporal
+    /// effect).  The cache is updated AFTER training so the NEXT call
+    /// in this session can wire its own temporal edges back to this
+    /// one.
+    ///
+    /// Edge polarity is always excitatory for temporal bindings —
+    /// "X happened, then Y happened" is a co-occurrence signal, not a
+    /// negation.  Strength is CROSS_INH_RATE × lr (same softer rate
+    /// the contrastive Hebbian uses), to keep accidental sequence
+    /// noise from dominating the deliberate associations.
+    pub fn multi_pool_train_pair_temporal(
+        &self,
+        src_pool_id: &str,
+        src_atoms: &[String],
+        tgt_pool_id: &str,
+        tgt_atoms: &[String],
+        lr: f32,
+        negative: bool,
+        session_id: Option<&str>,
+    ) {
+        // First, run the normal training.
+        self.multi_pool_train_pair_polarity(
+            src_pool_id, src_atoms, tgt_pool_id, tgt_atoms, lr, negative,
+        );
+
+        let Some(sess) = session_id else { return; };
+        if sess.is_empty() { return; }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0);
+
+        // Capture the concepts that fired during this training pair so
+        // we can update the cache + wire temporal edges from any prior
+        // session state.
+        let mut guard = self.inner.lock();
+
+        // Evict stale sessions opportunistically — cheap iteration over
+        // a small map; safe to do every training call.
+        guard.temporal_prev.retain(|_, s| now.saturating_sub(s.last_touch)
+            < TEMPORAL_SESSION_TTL_SECS);
+
+        let new_src_concepts: Vec<String> = guard.multi_pool.pool(src_pool_id)
+            .map(|p| p.active_concept_labels(0.05)).unwrap_or_default();
+        let new_tgt_concepts: Vec<String> = guard.multi_pool.pool(tgt_pool_id)
+            .map(|p| p.active_concept_labels(0.05)).unwrap_or_default();
+
+        // Snapshot previous concepts before mutating the cache.
+        let prev_src: Vec<String>;
+        let prev_tgt: Vec<String>;
+        if let Some(session) = guard.temporal_prev.get(sess) {
+            prev_src = session.prev_concepts.get(src_pool_id).cloned().unwrap_or_default();
+            prev_tgt = session.prev_concepts.get(tgt_pool_id).cloned().unwrap_or_default();
+        } else {
+            prev_src = Vec::new();
+            prev_tgt = Vec::new();
+        }
+
+        // Wire temporal edges.  Excitatory only — sequence is
+        // co-occurrence, not exclusion.
+        let temp_lr = lr * TEMPORAL_BINDING_RATE;
+        // (a) same-pool sequence (prev concept → current concept in
+        //     the same pool).  Stored as within-pool concept→concept
+        //     excitatory synapses via add_synapse since these are
+        //     intra-pool wires, not cross-pool.
+        for (pool_id, prev_list, new_list) in [
+            (src_pool_id, &prev_src, &new_src_concepts),
+            (tgt_pool_id, &prev_tgt, &new_tgt_concepts),
+        ] {
+            if prev_list.is_empty() || new_list.is_empty() { continue; }
+            // Collect ID pairs first to avoid borrowing pool both
+            // immutably (label_to_id) and mutably (add_synapse) at once.
+            let pairs: Vec<(u32, u32)> = {
+                let p = match guard.multi_pool.pool(pool_id) {
+                    Some(p) => p, None => continue,
+                };
+                let mut out = Vec::new();
+                for pl in prev_list {
+                    let Some(&pid) = p.label_to_id.get(pl) else { continue; };
+                    for nl in new_list {
+                        let Some(&nid) = p.label_to_id.get(nl) else { continue; };
+                        if pid == nid { continue; }
+                        out.push((pid, nid));
+                    }
+                }
+                out
+            };
+            if let Some(p) = guard.multi_pool.pool_mut(pool_id) {
+                for (pid, nid) in pairs {
+                    p.add_synapse(pid, nid, temp_lr, false);
+                }
+            }
+        }
+        // (b) cross-pool temporal: prev_src_concept → new_tgt_concept
+        //     and prev_tgt_concept → new_src_concept.  These are the
+        //     "previous observation in modality X co-occurred with
+        //     current observation in modality Y" edges.  Excitatory.
+        for a in &prev_src {
+            for b in &new_tgt_concepts {
+                guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
+                    .pair_signed(a, b, temp_lr, false);
+                guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
+                    .pair_signed(b, a, temp_lr, false);
+            }
+        }
+        for a in &prev_tgt {
+            for b in &new_src_concepts {
+                guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
+                    .pair_signed(a, b, temp_lr, false);
+                guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
+                    .pair_signed(b, a, temp_lr, false);
+            }
+        }
+
+        // Update the cache: current concepts become the "previous" set
+        // for the next observation in this session.
+        let session = guard.temporal_prev.entry(sess.to_string())
+            .or_insert_with(TemporalSession::default);
+        session.prev_concepts.insert(src_pool_id.to_string(), new_src_concepts);
+        session.prev_concepts.insert(tgt_pool_id.to_string(), new_tgt_concepts);
+        session.last_touch = now;
     }
 
     /// Train one source pool simultaneously against many target pools.

@@ -8364,6 +8364,14 @@ struct SensorObserveRequest {
     /// vegetable.  Has no effect when paired_text is absent.
     #[serde(default)]
     polarity:    Option<String>,
+    /// Session ID for temporal binding.  When set, the previous
+    /// observation in this session is wired to the current one via
+    /// excitatory temporal edges (within-pool sequence + cross-pool
+    /// co-occurrence).  Without a session ID this observation is
+    /// treated as standalone — no temporal effects.  Sessions idle
+    /// for more than the configured TTL are evicted automatically.
+    #[serde(default)]
+    session_id:  Option<String>,
 }
 
 fn default_sensor_lr() -> f32 { 1.0 }
@@ -8402,6 +8410,7 @@ async fn sensor_observe(
     let negative    = req.polarity.as_deref()
         .map(|s| s.eq_ignore_ascii_case("negative") || s == "-" || s == "anti")
         .unwrap_or(false);
+    let session_id  = req.session_id.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         // Step 1: encode → labels.
@@ -8438,11 +8447,12 @@ async fn sensor_observe(
         let trained_pair_flag = if let Some(pt) = paired_text.as_deref() {
             if !pt.is_empty() {
                 let text_atoms: Vec<String> = pt.chars().map(char_label).collect();
-                neuro.multi_pool_train_pair_polarity(
+                neuro.multi_pool_train_pair_temporal(
                     "keyboard_text", &text_atoms,
                     pool_id,         &labels,
                     lr,
                     negative,
+                    session_id.as_deref(),
                 );
                 true
             } else { false }
