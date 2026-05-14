@@ -1,0 +1,22 @@
+# W1z4rD V1510n supervisor overrides.
+# See supervisor.toml.example for the full list of keys + defaults.
+
+[node]
+# Bumped from 3s/3 misses. With drive_corpora + the bash curriculum
+# both hammering /sensor/observe, node /health latency can briefly
+# spike past 3s even though the node is fine. A false-positive node
+# kill wipes the in-memory motif fabric — losing hours of training.
+health_timeout = 8.0
+health_misses_before_restart = 5
+
+[django]
+# Use the SPA root, NOT /api/wizard-chat/status/. The status endpoint
+# fans out to the node's /health + /brain, which under training load
+# can take 4-6s — pushing past the watchdog timeout and triggering
+# false-positive restarts (which then spawn a fresh CoolCryptoUtilities
+# console every cycle). The SPA root is served by whitenoise from the
+# Vue dist bundle and answers in <10 ms regardless of node state, so
+# it cleanly measures only Django liveness.
+health_url = "http://127.0.0.1:8000/"
+health_timeout = 10.0
+health_misses_before_restart = 5
