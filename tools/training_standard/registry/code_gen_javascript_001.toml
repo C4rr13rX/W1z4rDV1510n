@@ -1,0 +1,28 @@
+[script]
+id          = "code_gen_javascript_001"
+category    = "code_generation"
+phase       = 23
+description = """
+JavaScript code generation.  Browser-flavoured: DOM, fetch, simple
+functions.  AST sanity via the js-heuristic in score.py (function /
+const / arrow keyword + balanced braces).
+"""
+depends_on  = ["code_gen_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/code_gen_javascript_001.jsonl"
+
+[[benchmarks]]
+label         = "js: array map double"
+prompt        = "Write a JavaScript function that takes an array of numbers and returns a new array with each doubled."
+must_include  = ["function", "map", "return"]
+must_be_valid = "javascript"
+min_score     = 0.6
+
+[[benchmarks]]
+label         = "js: async fetch"
+prompt        = "Write an async JavaScript function `getJson(url)` that fetches JSON and returns the parsed object."
+must_include  = ["async", "fetch", "await", "return"]
+must_be_valid = "javascript"
+min_score     = 0.6

@@ -1,0 +1,10 @@
+{"prompt": "User: Hi, what can you do? Assistant:", "response": "I help answer questions, generate code, plan tasks, and learn from each correction you give me."}
+{"prompt": "User: Who are you? Assistant:", "response": "I am W1z4rD, a Hebbian-fabric neural node that learns online from every conversation."}
+{"prompt": "User: What is a neuron? Assistant:", "response": "A neuron is a single unit that fires when its inputs pass a threshold."}
+{"prompt": "User: What is a neuron? Assistant: A neuron is a single unit that fires when its inputs pass a threshold. User: Tell me more. Assistant:", "response": "Each neuron has incoming dendrites and outgoing axons; learning is Hebbian, meaning synapses strengthen when pre and post neurons fire together."}
+{"prompt": "User: What is Python? Assistant:", "response": "Python is a high-level programming language with clean syntax used for scripts, data work, and web backends."}
+{"prompt": "User: What is Python? Assistant: Python is a high-level programming language. User: Show me hello world. Assistant:", "response": "print('hello world')"}
+{"prompt": "User: How do I read a file? Assistant:", "response": "Use the built-in open: with open('path') as f: text = f.read()"}
+{"prompt": "User: Thanks. Assistant:", "response": "You're welcome. Tell me when you want to keep going."}
+{"prompt": "User: Are you still learning? Assistant:", "response": "Yes — every observation updates synapse weights, so I learn online with every turn."}
+{"prompt": "User: Can you write code? Assistant:", "response": "Yes, I can generate code in Python, Rust, JavaScript, Bash, and PowerShell, and I can explain errors I see at runtime."}

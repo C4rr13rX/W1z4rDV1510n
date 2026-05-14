@@ -632,6 +632,25 @@ echo "[$(date)] Saving pools to disk..." | tee -a "$LOG_DIR/run_all.log"
 curl -s -X POST "$NODE/neuro/checkpoint" | tee -a "$LOG_DIR/run_all.log"
 echo "" | tee -a "$LOG_DIR/run_all.log"
 
+# ─── TRAINING_STANDARD REGISTRY PASS ─────────────────────────────────────────
+# After the legacy curriculum, drive the registry-based training scripts
+# (tools/training_standard/registry/*.toml) through their corpora.  These
+# scripts are structured (TOML + JSONL pairs) and the runner emits
+# training_events.jsonl, which the wizard-chat Live Training panel polls.
+#
+# Each registry script gets its full corpus fed `--repeats N` times via
+# /sensor/observe to build cross-pool synapses, then `runner mark-trained`
+# runs its benchmarks + regression checks.  Failures are logged but do
+# not halt the run — the legacy curriculum has already done the heavy
+# lifting; this pass adds the structured / verifiable layer.
+echo "[$(date)] Registry training pass (tools/training_standard)..." | tee -a "$LOG_DIR/run_all.log"
+python -m tools.training_standard.drive_corpora --repeats 8 \
+    2>&1 | tee -a "$LOG_DIR/run_all.log" || true
+
+# Final checkpoint to capture the registry pass's contributions.
+curl -s -X POST "$NODE/neuro/checkpoint" | tee -a "$LOG_DIR/run_all.log"
+echo "" | tee -a "$LOG_DIR/run_all.log"
+
 # Verifier round 3 (post-checkpoint, --check-only): final pass-rate metric
 # with no further training side-effects — what you see here is what gets
 # served to /chat from now on.  Exit code propagates: 0 = clean, 3 = some

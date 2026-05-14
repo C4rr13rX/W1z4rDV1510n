@@ -1,0 +1,27 @@
+[script]
+id          = "code_gen_bash_001"
+category    = "terminal_proficiency_linux"
+phase       = 24
+description = """
+Bash shell scripting on Linux/macOS.  Pipe composition, control
+flow, common one-liners (grep/awk/sed/find).
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/code_gen_bash_001.jsonl"
+
+[[benchmarks]]
+label         = "bash: find + grep one-liner"
+prompt        = "Write a bash one-liner that finds all .log files modified in the last day and greps them for the word ERROR."
+must_include  = ["find", "-mtime", "grep", "ERROR"]
+must_be_valid = "bash"
+min_score     = 0.6
+
+[[benchmarks]]
+label         = "bash: for-loop retry"
+prompt        = "Write a bash script that retries `curl https://example.com` up to 3 times with a 5-second backoff between attempts."
+must_include  = ["for", "curl", "sleep"]
+must_be_valid = "bash"
+min_score     = 0.6

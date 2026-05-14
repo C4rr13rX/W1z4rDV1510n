@@ -1,0 +1,28 @@
+[script]
+id          = "error_diagnosis_001"
+category    = "code_generation"
+phase       = 32
+description = """
+Diagnose a runtime/compile error message and propose the fix.  Pairs
+of (error text + offending code, explanation + corrected code).
+Critical for C0d3rV2 to self-recover after a tool call fails.
+"""
+depends_on  = ["code_gen_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/error_diagnosis_001.jsonl"
+
+[[benchmarks]]
+label        = "python: NameError"
+prompt       = "I got: NameError: name 'x' is not defined.  My code: print(x). What's wrong and how do I fix it?"
+must_include = ["assign", "before", "x ="]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "python: ImportError"
+prompt       = "I got: ModuleNotFoundError: No module named 'requests'.  How do I fix it?"
+must_include = ["pip install", "requests"]
+min_score    = 0.5
+expected_structure = "prose"

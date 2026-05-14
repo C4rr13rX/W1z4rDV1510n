@@ -10,11 +10,7 @@ depends_on  = []
 
 [[inputs]]
 kind = "corpus"
-path = "data/wiki/basic_phrases.jsonl"
-
-[[inputs]]
-kind = "corpus"
-path = "data/wiki/sentences_who_what_where.jsonl"
+path = "data/training/conversation_basics_001.jsonl"
 
 # Each benchmark is a self-contained contract: a prompt + the minimum
 # signal we need to see in the response to call it 'understood'.

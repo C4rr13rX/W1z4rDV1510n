@@ -1,0 +1,29 @@
+[script]
+id          = "agent_planning_001"
+category    = "agent_planning"
+phase       = 30
+description = """
+Decompose plain-English goals into ordered steps suitable for an
+agent runner (C0d3rV2) to execute.  The output shape is structured:
+numbered steps, each a single concrete action describable as a
+shell command, code edit, or web search.
+"""
+depends_on  = ["conversation_basics_001", "code_gen_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/agent_planning_001.jsonl"
+
+[[benchmarks]]
+label        = "plan: build python project"
+prompt       = "Plan how to scaffold a Python project named 'foo' with a src directory, a tests directory, and a pyproject.toml.  Output numbered steps."
+must_include = ["mkdir", "src", "tests", "pyproject.toml"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "plan: debug failing test"
+prompt       = "A pytest just failed with AssertionError: expected 5, got 4. Plan the steps to diagnose and fix it.  Output numbered steps."
+must_include = ["read", "test", "fix", "rerun"]
+min_score    = 0.4
+expected_structure = "prose"

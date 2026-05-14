@@ -1,0 +1,24 @@
+[script]
+id          = "long_context_summary_001"
+category    = "conversation"
+phase       = 35
+description = """
+Read multi-paragraph technical text and summarise the key points.
+Exercises the rolling-context store (multi-paragraph input) and
+ensures the model can compress without losing the load-bearing facts.
+"""
+depends_on  = ["conversation_basics_001", "conversation_dialog_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/long_context_summary_001.jsonl"
+
+[[benchmarks]]
+label        = "summary: 3-paragraph"
+prompt       = "Summarise: The W1z4rD V1510n node is a Hebbian neural fabric with multi-pool architecture.  Pools represent modalities — keyboard text, image pixels, audio features — and cross-pool synapses bind concepts across modalities.  Training is online: every observation updates synapse weights via dopamine-flush consolidation."
+must_include = ["Hebbian", "multi-pool", "cross-pool"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

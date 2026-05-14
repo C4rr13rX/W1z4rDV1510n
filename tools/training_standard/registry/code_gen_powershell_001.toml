@@ -1,0 +1,27 @@
+[script]
+id          = "code_gen_powershell_001"
+category    = "terminal_proficiency_win"
+phase       = 25
+description = """
+PowerShell scripting for Windows hosts.  Cmdlet-noun-verb idioms,
+piping objects (not strings), error handling.
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/code_gen_powershell_001.jsonl"
+
+[[benchmarks]]
+label         = "powershell: list services"
+prompt        = "Write a PowerShell one-liner that lists all running services with the word 'sql' in their name."
+must_include  = ["Get-Service", "Where-Object", "sql"]
+must_be_valid = "powershell"
+min_score     = 0.55
+
+[[benchmarks]]
+label         = "powershell: try/catch fetch"
+prompt        = "Write a PowerShell function `Get-PageStatus` that invokes Invoke-WebRequest on a URL and returns the status code, handling errors with try/catch."
+must_include  = ["function Get-PageStatus", "Invoke-WebRequest", "try", "catch"]
+must_be_valid = "powershell"
+min_score     = 0.55

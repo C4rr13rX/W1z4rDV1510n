@@ -1,0 +1,34 @@
+[script]
+id          = "conversation_dialog_001"
+category    = "conversation"
+phase       = 5
+description = """
+Multi-turn dialog: given the prior user/assistant context, predict the
+appropriate next assistant response.  This is the first script where
+the input is more than a single utterance — the trainer feeds the
+entire conversation transcript as one paired_text observation, and
+the benchmark probes whether the node continues the same dialog
+coherently.
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/conversation_dialog_001.jsonl"
+
+[[benchmarks]]
+label        = "dialog continuation: greeting"
+prompt       = "User: Hi, what can you do?  Assistant:"
+must_include = ["help", "answer"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "dialog continuation: clarify"
+prompt       = "User: What is a neuron?  Assistant: A neuron is the basic unit of the brain.  User: Tell me more.  Assistant:"
+must_include = ["neuron"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

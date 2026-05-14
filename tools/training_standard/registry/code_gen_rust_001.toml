@@ -1,0 +1,32 @@
+[script]
+id          = "code_gen_rust_001"
+category    = "code_generation"
+phase       = 22
+description = """
+Rust code generation from plain-English specs.  Same pattern as
+code_gen_python_001: prompt → idiomatic short function, AST/syntax
+sanity check via the score.py rust-heuristic path (balanced braces,
+fn / let / struct keyword presence).
+"""
+depends_on  = ["code_gen_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/code_gen_rust_001.jsonl"
+
+[[benchmarks]]
+label         = "rust: function definition"
+prompt        = "Write a Rust function `add(a: i32, b: i32) -> i32` that returns the sum."
+must_include  = ["fn add", "->", "return", "i32"]
+must_be_valid = "rust"
+min_score     = 0.6
+
+[[benchmarks]]
+label         = "rust: struct + impl"
+prompt        = "Define a Rust struct `Point` with x and y i32 fields and an impl block with a new() constructor."
+must_include  = ["struct Point", "impl", "fn new"]
+must_be_valid = "rust"
+min_score     = 0.6
+
+[[regression_protects]]
+script_id = "conversation_basics_001"
