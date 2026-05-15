@@ -6338,19 +6338,18 @@ impl NeuroRuntime {
             p.active_concept_labels(0.05)
         } else { Vec::new() };
 
-        // Activity recording — push a "train" event for every src and
-        // tgt concept promoted this call so the live brain-viz can
-        // flash these neurons.  Lock-skipping (try_lock); zero cost
-        // when the buffer is busy.
-        drop(guard);  // release the inner lock first so record_activity
-                      // can't deadlock on a future re-entrant lock.
+        // Activity recording: lock-skipping push to the per-runtime
+        // activity ring buffer.  `record_activity` acquires its OWN
+        // mutex (parking_lot, try_lock) which is independent of the
+        // inner state lock we currently hold, so this is safe and
+        // cheap — no drop-then-reacquire churn that doubled the
+        // lock contention under drive_corpora load.
         for lbl in &src_concepts {
             self.record_activity(src_pool_id, lbl, "train", 1.0);
         }
         for lbl in &tgt_concepts {
             self.record_activity(tgt_pool_id, lbl, "train", 1.0);
         }
-        let mut guard = self.inner.lock();
 
         // (3) Competitors = every existing concept in tgt pool except
         // those in the current tgt pairing.  Used for contrastive

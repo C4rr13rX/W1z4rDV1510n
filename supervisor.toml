@@ -20,3 +20,9 @@ health_misses_before_restart = 5
 health_url = "http://127.0.0.1:8000/"
 health_timeout = 10.0
 health_misses_before_restart = 5
+# 8 threads was the smoking gun for the "Django takes long to load
+# then quietly crashes" pattern: the SPA's parallel polls + each
+# Django request blocking on the node's inner lock saturated waitress
+# and the task queue piled up >16 deep before the panel went dark.
+# 24 covers the worst observed concurrency comfortably.
+threads = 24
