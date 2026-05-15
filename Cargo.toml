@@ -5,6 +5,7 @@ members = [
     "crates/dashboard",
     "crates/experimental-hw",
     "crates/node",
+    "crates/brain",
 ]
 default-members = ["crates/core"]
 resolver = "2"
