@@ -573,6 +573,82 @@ fn word_label_to_chars(label: &str) -> Vec<String> {
 /// (position-augmented) atoms best match the current input — discrimination
 /// is purely neural, emerging from the positional atom encoding plus
 /// max-accumulator propagation plus kWTA.
+/// Among the currently-active concepts in `pool`, pick the one whose
+/// member-atom set best Jaccards with `input_atoms`.  Replaces pure
+/// activation-argmax for the multi_pool source-side selection: at
+/// scale, many concepts that share common atoms (spaces, vowels,
+/// stop-word position-augmented atoms) co-activate at similar
+/// magnitudes from a partially-matching input, and the true answer
+/// concept (which has ALL input atoms as members + few extras) loses
+/// the activation argmax to a longer concept that has more total
+/// matched atoms in absolute terms.  Ranking by Jaccard fixes this:
+/// the answer concept's atom-set exactly matches the input, so its
+/// Jaccard is highest.
+///
+/// Hierarchical concepts (members that are themselves concepts) bypass
+/// the Jaccard test and fall back to activation argmax — their
+/// member labels are concept hashes that won't match character-level
+/// `input_atoms` by construction.
+///
+/// Returns the winning label or None when no concept is active.
+fn top_input_match_concept(
+    pool: &NeuronPool,
+    src_active: &HashMap<String, f32>,
+    input_atoms: &[String],
+) -> Option<String> {
+    let input_set: std::collections::HashSet<String> = input_atoms.iter().cloned().collect();
+    if input_set.is_empty() { return None; }
+    // (jaccard, activation, lexicographic label) sort tuple.
+    // Deterministic tie-break on lexicographic label.
+    let mut best: Option<(f32, f32, String)> = None;
+    for (lbl, act) in src_active.iter() {
+        let id = match pool.label_to_id.get(lbl) {
+            Some(&i) => i, None => continue,
+        };
+        let neuron = match pool.get_hot(id as usize) {
+            Some(n) => n, None => continue,
+        };
+        if neuron.members.is_empty() { continue; }
+        // Detect hierarchical concept (children are themselves concepts):
+        // skip Jaccard, fall through to activation argmax.
+        let is_hierarchical = neuron.members.iter().any(|mid| {
+            pool.get_hot(*mid as usize)
+                .map(|m| !m.members.is_empty())
+                .unwrap_or(false)
+        });
+        let jaccard = if is_hierarchical {
+            // Treat hierarchical concepts as Jaccard 1.0 so they
+            // compete on pure activation against each other.  The
+            // downstream non-hierarchical Jaccard gate is bypassed
+            // for hierarchical concepts elsewhere.
+            1.0
+        } else {
+            let cmem: std::collections::HashSet<String> = neuron.members.iter()
+                .filter_map(|mid| pool.get_hot(*mid as usize))
+                .filter_map(|n| n.label.clone())
+                .collect();
+            if cmem.is_empty() { continue; }
+            let inter = input_set.intersection(&cmem).count() as f32;
+            let union = input_set.union(&cmem).count().max(1) as f32;
+            inter / union
+        };
+        let take = match &best {
+            None => true,
+            Some((bj, ba, bl)) => {
+                if jaccard > *bj { true }
+                else if jaccard < *bj { false }
+                else if *act > *ba { true }
+                else if *act < *ba { false }
+                else { lbl < bl }
+            }
+        };
+        if take {
+            best = Some((jaccard, *act, lbl.clone()));
+        }
+    }
+    best.map(|(_, _, lbl)| lbl)
+}
+
 fn top_active_concept(
     pool: &NeuronPool,
     src_active: &HashMap<String, f32>,
@@ -2113,8 +2189,38 @@ impl NeuronPool {
         hops: usize,
         min_activation: f32,
     ) -> HashMap<String, f32> {
+        self.propagate_weighted_sum_no_clamp_inner(
+            seed_activations, hops, min_activation, true)
+    }
+
+    /// Variant that bypasses the k-WTA sparsity gate.  Used by the
+    /// multi_pool concept-recall path: at scale (1000+ concepts that
+    /// share common atoms like spaces, vowels, "What", "How"), the
+    /// k-WTA cap (default ~180 active neurons per hop) clips the true
+    /// answer concept because atom-level seed activations dominate
+    /// the top-K cut.  The concept layer is a discrete classifier —
+    /// winner-take-all is its purpose, kwta sparsity fights it.
+    /// `top_active_concept` + the Jaccard input-coverage gate already
+    /// pick a unique winner; we don't need a per-hop sparsity gate.
+    pub fn propagate_weighted_sum_no_clamp_no_kwta(
+        &self,
+        seed_activations: &HashMap<String, f32>,
+        hops: usize,
+        min_activation: f32,
+    ) -> HashMap<String, f32> {
+        self.propagate_weighted_sum_no_clamp_inner(
+            seed_activations, hops, min_activation, false)
+    }
+
+    fn propagate_weighted_sum_no_clamp_inner(
+        &self,
+        seed_activations: &HashMap<String, f32>,
+        hops: usize,
+        min_activation: f32,
+        apply_kwta: bool,
+    ) -> HashMap<String, f32> {
         let n = self.neurons.len();
-        let k_active = if self.config.sdr_sparsity > 0.0 {
+        let k_active = if apply_kwta && self.config.sdr_sparsity > 0.0 {
             ((n as f32 * self.config.sdr_sparsity) as usize).max(self.config.sdr_k_min)
         } else { 0 };
 
@@ -6947,7 +7053,9 @@ impl NeuroRuntime {
             atoms, self.use_bigrams(), self.use_trigrams());
         let mut src_seeds: HashMap<String, f32> = HashMap::new();
         for a in &pos_atoms { src_seeds.insert(a.clone(), 1.0); }
-        let src_active = src_pool.propagate_weighted_sum_no_clamp(
+        // Use the no-kwta variant so debug_query reflects the same
+        // propagation behaviour as the production decode path.
+        let src_active = src_pool.propagate_weighted_sum_no_clamp_no_kwta(
             &src_seeds, 1, 0.001,
         );
         // Separate concept-active from atom-active (concepts have members).
@@ -7228,13 +7336,25 @@ impl NeuroRuntime {
         // a fan of paths the short concept can't produce.  One hop keeps
         // the activation proportional to the *fraction* of members in the
         // input — exactly the discrimination signal we need.
-        let src_active = src_pool.propagate_weighted_sum_no_clamp(
+        //
+        // NO k-WTA on this source propagation.  At scale (1000+ concepts
+        // sharing common atoms like spaces, vowels, "What", "How"), the
+        // global k-WTA cap (~180 active neurons) clips the true answer
+        // concept because atom-level seed activations dominate the top-K.
+        // The Jaccard input-coverage gate downstream picks the unique
+        // winner — k-WTA sparsity would fight that.
+        let src_active = src_pool.propagate_weighted_sum_no_clamp_no_kwta(
             &src_seeds, 1, min_activation.min(0.02)
         );
         if src_active.is_empty() { return None; }
 
-        // 1b. Take the strongest active concept — pure neural argmax.
-        let chosen_src_concept = top_active_concept(src_pool, &src_active);
+        // 1b. Pick the active concept that best matches the input by
+        // member-atom Jaccard.  At scale, the answer concept loses
+        // pure-activation argmax to longer concepts that have more
+        // raw atoms matching common input characters (spaces, vowels);
+        // Jaccard picks the concept whose atom set IS the input.
+        let chosen_src_concept = top_input_match_concept(
+            src_pool, &src_active, &pos_atoms);
         let chosen_src_label = chosen_src_concept.clone();
 
         // Activity hook: record the firing of the chosen source concept
