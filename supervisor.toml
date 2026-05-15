@@ -20,6 +20,17 @@ health_misses_before_restart = 5
 health_url = "http://127.0.0.1:8000/"
 health_timeout = 10.0
 health_misses_before_restart = 5
+
+[training]
+# Disable the legacy bash curriculum.  It uses `word_*` labels (in
+# violation of feedback_no_predefined_neurons) and competes for the
+# node's inner lock with drive_corpora, slowing every /sensor/observe
+# call by 10-50x.  drive_corpora is now the canonical text trainer
+# (see tools/training_standard/drive_corpora.py).  Set to true to
+# re-enable; the script still works for its non-text phases (Stage 0
+# toddler, k12, etc) but isn't doing useful work for the current
+# text-only curriculum.
+enabled = false
 # 8 threads was the smoking gun for the "Django takes long to load
 # then quietly crashes" pattern: the SPA's parallel polls + each
 # Django request blocking on the node's inner lock saturated waitress
