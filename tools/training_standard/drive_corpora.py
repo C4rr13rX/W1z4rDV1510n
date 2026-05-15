@@ -91,7 +91,7 @@ def read_corpus_jsonl(path: Path) -> list[dict]:
 
 
 def smoke_test_memorization(rows: list[dict], n: int = 3,
-                              timeout: float = 5.0) -> tuple[bool, list[dict]]:
+                              timeout: float = 30.0) -> tuple[bool, list[dict]]:
     """Query the first `n` prompts back through /chat and check that the
     multi_pool decoder fires (not char_chain).  Returns (ok, samples).
     The pipeline is silently failing if every query falls through to

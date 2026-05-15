@@ -2473,28 +2473,26 @@ impl NeuronPool {
         let new_id = match self.label_to_id.get(new_concept_label) {
             Some(&id) => id, None => return 0,
         };
-        // Compute new concept's member-atom label set up-front.
-        let new_atoms: std::collections::HashSet<String> = {
-            let n = match self.get_hot(new_id as usize) {
-                Some(n) => n, None => return 0,
-            };
-            if n.members.is_empty() { return 0; }
-            n.members.iter()
-                .filter_map(|mid| self.get_hot(*mid as usize))
-                .filter_map(|m| m.label.clone())
-                .collect()
+        // The new concept's atom IDs as a HashSet for O(1) membership
+        // checks.  We compare on member-IDs rather than labels — same
+        // semantics, drops a HashMap<id→label> resolution per peer.
+        let new_atom_ids: std::collections::HashSet<u32> = match self.get_hot(new_id as usize) {
+            Some(n) if !n.members.is_empty() =>
+                n.members.iter().copied().collect(),
+            _ => return 0,
         };
-        if new_atoms.is_empty() { return 0; }
+        if new_atom_ids.is_empty() { return 0; }
+        let new_size = new_atom_ids.len();
         let exclude_ids: std::collections::HashSet<u32> = exclude.iter()
             .filter_map(|lbl| self.label_to_id.get(lbl).copied())
             .collect();
 
-        // Read-only scan: collect peer ids whose atom overlap clears
-        // the threshold.  Cheap-ish: each peer requires building a
-        // HashSet of its atom labels, which is O(members) per peer.
-        // For very large pools this should switch to an inverted
-        // atom→concept index, but at current scales (≤10k concepts)
-        // a linear scan with early-exit on union is fine.
+        // Fast O(N×M) Jaccard scan: for each candidate peer, iterate
+        // its members and count how many are in `new_atom_ids`.  No
+        // HashSet allocation per peer — that was the bottleneck.
+        // Also: a size-mismatch pre-filter rejects pairs that cannot
+        // possibly clear the Jaccard threshold even with perfect
+        // overlap of the smaller set.
         let peers: Vec<u32> = (0..self.neurons.len()).filter_map(|i| {
             let iid = i as u32;
             if iid == new_id { return None; }
@@ -2503,21 +2501,21 @@ impl NeuronPool {
                 Some(NeuronSlot::Hot(n)) if !n.members.is_empty() => n,
                 _ => return None,
             };
-            // Build peer atom set + Jaccard.  Skip cheaply if union
-            // would obviously be too dissimilar (e.g. one concept has
-            // 5 atoms, the other 200 — even full match yields 0.025).
-            let peer_atom_size = peer.members.len();
-            if (peer_atom_size as f32) < min_jaccard * (new_atoms.len() as f32) &&
-               (new_atoms.len() as f32) < min_jaccard * (peer_atom_size as f32) {
-                return None;
+            let peer_size = peer.members.len();
+            // Best-case Jaccard = min(a,b)/max(a,b).  Reject if too low.
+            let max_jaccard = (new_size.min(peer_size) as f32)
+                              / (new_size.max(peer_size) as f32);
+            if max_jaccard < min_jaccard { return None; }
+            // Count overlaps by direct ID membership.  O(peer_size)
+            // per peer; no allocation.
+            let mut shared = 0usize;
+            for &mid in &peer.members {
+                if new_atom_ids.contains(&mid) { shared += 1; }
             }
-            let peer_atoms: std::collections::HashSet<String> = peer.members.iter()
-                .filter_map(|mid| self.get_hot(*mid as usize))
-                .filter_map(|m| m.label.clone())
-                .collect();
-            let inter = new_atoms.intersection(&peer_atoms).count() as f32;
-            let union = new_atoms.union(&peer_atoms).count().max(1) as f32;
-            if (inter / union) >= min_jaccard { Some(iid) } else { None }
+            if shared == 0 { return None; }
+            // Union = |A| + |B| - shared.  Jaccard = shared / union.
+            let union = (new_size + peer_size - shared).max(1) as f32;
+            if (shared as f32 / union) >= min_jaccard { Some(iid) } else { None }
         }).collect();
 
         let mut wired = 0usize;
@@ -6532,52 +6530,61 @@ impl NeuroRuntime {
         }
 
         // (4b) Contrastive Hebbian — inhibitory edges from src concepts
-        // to every PRE-EXISTING tgt-pool concept that isn't in the
-        // current pairing AND whose member-atom set overlaps the new
-        // src atoms enough to be a genuine competitor.  Before this
-        // gate, every paired training wired inhibition to every
-        // existing concept regardless of relevance, producing O(N²)
-        // global inhibition that crushed recall once N grew past a
-        // few hundred.  Now: a competitor only earns inhibition if
-        // its member atoms genuinely overlap with the current src
-        // atom set (Jaccard ≥ CONTRASTIVE_INH_MIN_JACCARD).
+        // to PRE-EXISTING tgt-pool concepts that genuinely compete
+        // (member-atom Jaccard ≥ CONTRASTIVE_INH_MIN_JACCARD).  Skip
+        // unrelated concepts: in same-pool training a paired Q/A about
+        // "encryption" should not inhibit unrelated concepts about
+        // "trees" because their atoms don't overlap, so they never
+        // co-activate from the same input.
         //
-        // Approach: pre-compute the src concepts' atom sets, then for
-        // each competitor compute its atom set and Jaccard against
-        // the union of src atom sets.  Skip non-overlapping ones.
-        let src_atom_sets: Vec<std::collections::HashSet<String>> =
+        // Fast scan: pre-compute src concepts' atom-ID sets, then for
+        // each competitor walk its member list and count overlaps by
+        // direct ID membership — no HashSet allocation per peer.
+        let src_atom_id_sets: Vec<std::collections::HashSet<u32>> =
             if let Some(p) = guard.multi_pool.pool(src_pool_id) {
-                src_concepts.iter().map(|a| concept_atom_label_set(p, a))
-                    .collect()
+                src_concepts.iter().map(|lbl| {
+                    p.label_to_id.get(lbl).copied()
+                        .and_then(|id| p.get_hot(id as usize))
+                        .map(|n| n.members.iter().copied().collect())
+                        .unwrap_or_default()
+                }).collect()
             } else { Vec::new() };
         let inh_lr = lr * CROSS_INH_RATE;
-        // Reuse the same pool reference for atom-set lookup on
-        // competitors — tgt_pool_id == src_pool_id in the same-pool
-        // case (the only case that matters here for atom overlap).
-        let competitor_atom_pool_id = if same_pool { src_pool_id } else { tgt_pool_id };
-        let competitor_atom_sets: Vec<(String, std::collections::HashSet<String>)> =
-            if let Some(p) = guard.multi_pool.pool(competitor_atom_pool_id) {
-                competitors.iter()
-                    .filter(|c| !tgt_concept_set.contains(*c))
-                    .filter(|c| !(same_pool && src_concept_set.contains(*c)))
-                    .map(|c| (c.clone(), concept_atom_label_set(p, c)))
-                    .collect()
-            } else { Vec::new() };
         for (a_idx, a) in src_concepts.iter().enumerate() {
-            let a_atoms = src_atom_sets.get(a_idx);
-            for (b_prime, b_atoms) in &competitor_atom_sets {
-                if same_pool && a == b_prime { continue; }
-                // Overlap gate: skip competitors that share no atoms
-                // with the current src concept.  In cross-pool training
-                // both pools have different atom spaces so we skip the
-                // gate (there's no meaningful Jaccard between
-                // keyboard_text and image_pixels atoms).
+            let a_atoms: &std::collections::HashSet<u32> = match src_atom_id_sets.get(a_idx) {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            };
+            let a_size = a_atoms.len();
+            // Resolve each competitor label → id → member list inline,
+            // without building a HashSet.  Cross-pool: skip the atom
+            // overlap test (atom ID spaces don't compare across pools).
+            for b_prime in &competitors {
+                if tgt_concept_set.contains(b_prime) { continue; }
+                if same_pool && (a == b_prime || src_concept_set.contains(b_prime)) { continue; }
                 if same_pool {
-                    if let Some(a_atoms) = a_atoms {
-                        if jaccard_str(a_atoms, b_atoms) < CONTRASTIVE_INH_MIN_JACCARD {
-                            continue;
-                        }
+                    let competitor_pool = match guard.multi_pool.pool(src_pool_id) {
+                        Some(p) => p, None => continue,
+                    };
+                    let b_id = match competitor_pool.label_to_id.get(b_prime).copied() {
+                        Some(i) => i, None => continue,
+                    };
+                    let b_neuron = match competitor_pool.get_hot(b_id as usize) {
+                        Some(n) if !n.members.is_empty() => n,
+                        _ => continue,
+                    };
+                    let b_size = b_neuron.members.len();
+                    // Size-mismatch pre-filter.
+                    let max_jaccard = (a_size.min(b_size) as f32)
+                                      / (a_size.max(b_size) as f32);
+                    if max_jaccard < CONTRASTIVE_INH_MIN_JACCARD { continue; }
+                    let mut shared = 0usize;
+                    for &mid in &b_neuron.members {
+                        if a_atoms.contains(&mid) { shared += 1; }
                     }
+                    if shared == 0 { continue; }
+                    let union = (a_size + b_size - shared).max(1) as f32;
+                    if (shared as f32 / union) < CONTRASTIVE_INH_MIN_JACCARD { continue; }
                 }
                 guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
                     .pair_signed(a, b_prime, inh_lr, true);
@@ -7132,13 +7139,27 @@ impl NeuroRuntime {
     ) -> HashMap<String, (String, f32)> {
         let mut out = HashMap::new();
         if atoms.is_empty() { return out; }
-        // Include the src pool itself as a target candidate — within-pool
-        // paired training (same-modality Q/A in keyboard_text) stores its
-        // concept→concept edges in cross_for(pool, pool), so within-pool
-        // recall flows through the same decode path as cross-pool recall.
+        // Only attempt decode into target pools that have actual
+        // cross-edges from the source pool.  At scale (thousands of
+        // concepts) src propagation is ~150ms; calling decode_one for
+        // every registered pool — even ones with zero cross edges —
+        // multiplied that by the pool count.  This filter keeps the
+        // src propagation inside decode_one but drops the per-pool
+        // multiplier from N_pools to N_pools_with_cross_edges (usually
+        // 1: the self-loop keyboard_text→keyboard_text).
+        //
+        // Include the src pool itself as a target candidate —
+        // within-pool paired training stores concept→concept edges in
+        // cross_for(pool, pool), so within-pool recall flows through
+        // the same decode path as cross-pool recall.
         let target_ids: Vec<String> = {
             let guard = self.inner.lock();
-            guard.multi_pool.pool_ids()
+            guard.multi_pool.pool_ids().into_iter()
+                .filter(|tgt| {
+                    guard.multi_pool.cross_for(src_pool_id, tgt)
+                        .map(|c| !c.is_empty()).unwrap_or(false)
+                })
+                .collect()
         };
         for tgt_pool_id in target_ids {
             if let Some((decoded, conf)) = self.multi_pool_decode_one_with_confidence(
