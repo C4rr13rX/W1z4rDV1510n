@@ -48,7 +48,7 @@ NODE_URL = os.environ.get("W1Z4RD_NODE_URL", "http://127.0.0.1:8090")
 
 
 def post_observe(text: str, paired_text: str, session_id: str | None,
-                  lr: float = 1.5, timeout: float = 15.0) -> tuple[bool, str]:
+                  lr: float = 1.5, timeout: float = 60.0) -> tuple[bool, str]:
     """Send one paired-text observation.  Returns (ok, error_msg)."""
     body = {
         "kind":        "text",
@@ -179,6 +179,16 @@ def drive_one(script, repeats: int, project_root: Path,
                     summary["posted_fail"] += 1
                     if verbose:
                         print(f"  [{script.id}] post fail: {err}", flush=True)
+                # 200 ms inter-POST breather.  Each /sensor/observe
+                # holds the node's inner Mutex.  Without a pause,
+                # drive_corpora's back-to-back POSTs starve concurrent
+                # readers (Django's /brain refresher, /chat, supervisor
+                # /health probes) — they queue 30-40 seconds behind.
+                # 200 ms gives them a guaranteed slot every cycle.
+                # Cost at full curriculum: 5046 × 6 × 0.2 = ~100 min
+                # added.  Acceptable for a multi-hour run; alternative
+                # is a node-side Mutex → RwLock refactor (larger).
+                time.sleep(0.2)
             # Inline smoke after first repeat: verify that /chat now
             # returns multi_pool (not char_chain) for prompts we just
             # trained.  Catches silent failures BEFORE we waste another
