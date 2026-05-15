@@ -708,6 +708,42 @@ fn position_and_ngram_atoms(
     out
 }
 
+/// Build the set of member-atom labels for a concept neuron.  Used
+/// by the overlap-gated contrastive + lateral-inhibition wiring to
+/// determine whether two concepts genuinely compete for the same
+/// input atoms (the only case where inhibiting between them is
+/// useful).  Empty set on unknown label or non-concept neuron.
+fn concept_atom_label_set(pool: &NeuronPool, concept_label: &str)
+    -> std::collections::HashSet<String>
+{
+    let id = match pool.label_to_id.get(concept_label) {
+        Some(&i) => i,
+        None => return std::collections::HashSet::new(),
+    };
+    let neuron = match pool.get_hot(id as usize) {
+        Some(n) => n,
+        None => return std::collections::HashSet::new(),
+    };
+    if neuron.members.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    neuron.members.iter()
+        .filter_map(|mid| pool.get_hot(*mid as usize))
+        .filter_map(|m| m.label.clone())
+        .collect()
+}
+
+/// Jaccard similarity between two string-label sets.  Returns 0.0
+/// when both sets are empty (sentinel — by convention no overlap).
+fn jaccard_str(a: &std::collections::HashSet<String>,
+                b: &std::collections::HashSet<String>) -> f32
+{
+    if a.is_empty() || b.is_empty() { return 0.0; }
+    let inter = a.intersection(b).count() as f32;
+    let union = a.union(b).count().max(1) as f32;
+    inter / union
+}
+
 /// Strip a trailing `@{digits}` (positional augmentation) from a label,
 /// then run the standard `label_to_char` decoder.  Two-pool decoder paths
 /// (chain-walk and concept-walk) call this so positional atoms stored by
@@ -2106,10 +2142,23 @@ impl NeuronPool {
                         next[tgt] += src_act * syn.effective_weight() * 0.5 / fan_out;
                     }
                 }
+                // Inhibitory fan-out scaling — mirrors the excitatory
+                // path.  Without this, a neuron with thousands of
+                // outgoing inhibitory synapses (e.g. legacy O(N²)
+                // wiring on a large pool) delivered full-strength
+                // inhibition to every target.  With sqrt-fan-out
+                // normalization the same neuron spreads its
+                // inhibition proportionally to the breadth of its
+                // outgoing inhibitory connections — preserving local
+                // competitive structure while preventing global
+                // collapse as N grows.
+                let inh_fan_out = (neuron.inhibitory.len() as f32).sqrt().max(1.0);
                 for syn in &neuron.inhibitory {
                     let tgt = syn.target as usize;
                     if tgt < n {
-                        next[tgt] = (next[tgt] - src_act * syn.effective_weight().abs() * 0.3).max(0.0);
+                        next[tgt] = (next[tgt]
+                            - src_act * syn.effective_weight().abs() * 0.3 / inh_fan_out
+                        ).max(0.0);
                     }
                 }
             }
@@ -2391,6 +2440,88 @@ impl NeuronPool {
             // Symmetric: new→peer AND peer→new.  Without symmetry the
             // pool would have one-way lateral suppression which violates
             // the "any concept can win" invariant of winner-take-all.
+            self.set_synapse(new_id, pid, weight, true);
+            self.set_synapse(pid, new_id, weight, true);
+            wired += 2;
+        }
+        wired
+    }
+
+    /// Lateral inhibition wired ONLY to peers whose member atoms
+    /// overlap the new concept's atoms by ≥ `min_jaccard`.  Two
+    /// concepts that share no atoms can never co-activate from the
+    /// same input, so inhibiting between them is pure noise — and at
+    /// scale produces runaway global inhibition.  This is the
+    /// scalable replacement for `wire_lateral_inhibition_to_peers`:
+    /// it preserves real winner-take-all between concepts that
+    /// genuinely compete (e.g. two paraphrases of the same question)
+    /// while skipping unrelated concepts (different scripts, modalities).
+    ///
+    /// The `exclude` set is honoured on top of the overlap test so
+    /// paired peers (prompt↔response in same-pool training) can't be
+    /// re-included via the overlap rule.
+    ///
+    /// Returns the number of inhibitory synapses wired (always
+    /// symmetric, so 2 per peer).
+    pub fn wire_lateral_inhibition_to_overlapping_peers(
+        &mut self,
+        new_concept_label: &str,
+        weight: f32,
+        min_jaccard: f32,
+        exclude: &[String],
+    ) -> usize {
+        let new_id = match self.label_to_id.get(new_concept_label) {
+            Some(&id) => id, None => return 0,
+        };
+        // Compute new concept's member-atom label set up-front.
+        let new_atoms: std::collections::HashSet<String> = {
+            let n = match self.get_hot(new_id as usize) {
+                Some(n) => n, None => return 0,
+            };
+            if n.members.is_empty() { return 0; }
+            n.members.iter()
+                .filter_map(|mid| self.get_hot(*mid as usize))
+                .filter_map(|m| m.label.clone())
+                .collect()
+        };
+        if new_atoms.is_empty() { return 0; }
+        let exclude_ids: std::collections::HashSet<u32> = exclude.iter()
+            .filter_map(|lbl| self.label_to_id.get(lbl).copied())
+            .collect();
+
+        // Read-only scan: collect peer ids whose atom overlap clears
+        // the threshold.  Cheap-ish: each peer requires building a
+        // HashSet of its atom labels, which is O(members) per peer.
+        // For very large pools this should switch to an inverted
+        // atom→concept index, but at current scales (≤10k concepts)
+        // a linear scan with early-exit on union is fine.
+        let peers: Vec<u32> = (0..self.neurons.len()).filter_map(|i| {
+            let iid = i as u32;
+            if iid == new_id { return None; }
+            if exclude_ids.contains(&iid) { return None; }
+            let peer = match self.neurons.get(i) {
+                Some(NeuronSlot::Hot(n)) if !n.members.is_empty() => n,
+                _ => return None,
+            };
+            // Build peer atom set + Jaccard.  Skip cheaply if union
+            // would obviously be too dissimilar (e.g. one concept has
+            // 5 atoms, the other 200 — even full match yields 0.025).
+            let peer_atom_size = peer.members.len();
+            if (peer_atom_size as f32) < min_jaccard * (new_atoms.len() as f32) &&
+               (new_atoms.len() as f32) < min_jaccard * (peer_atom_size as f32) {
+                return None;
+            }
+            let peer_atoms: std::collections::HashSet<String> = peer.members.iter()
+                .filter_map(|mid| self.get_hot(*mid as usize))
+                .filter_map(|m| m.label.clone())
+                .collect();
+            let inter = new_atoms.intersection(&peer_atoms).count() as f32;
+            let union = new_atoms.union(&peer_atoms).count().max(1) as f32;
+            if (inter / union) >= min_jaccard { Some(iid) } else { None }
+        }).collect();
+
+        let mut wired = 0usize;
+        for pid in peers {
             self.set_synapse(new_id, pid, weight, true);
             self.set_synapse(pid, new_id, weight, true);
             wired += 2;
@@ -3836,6 +3967,24 @@ const TEMPORAL_SESSION_TTL_SECS: u64 = 6 * 3600;  // 6 hours
 /// 0.4 × 0.5 = 0.2 — strong enough to bias winner-take-all, weak
 /// enough that a co-active genuine peer still survives.
 const WITHIN_POOL_LATERAL_INH_WEIGHT: f32 = 0.4;
+
+/// Minimum atom-set Jaccard overlap for wiring lateral inhibition
+/// between two concepts in the same pool.  Two concepts that share
+/// fewer than this fraction of member atoms cannot simultaneously
+/// activate from the same input, so inhibiting between them is
+/// pure noise — and at scale (1000+ concepts in one pool) it
+/// produced runaway global inhibition that crushed recall to zero.
+/// 0.25 = "concepts that share at least a quarter of their atoms
+/// genuinely compete for input space".  Tunable.
+const LATERAL_INH_MIN_JACCARD: f32 = 0.25;
+
+/// Same gate for contrastive Hebbian inhibition.  Slightly more
+/// permissive than lateral (0.15 vs 0.25) because cross-pool
+/// competitors get one observation's worth of contrastive shaping
+/// rather than a structural lateral wiring — we want a wider net of
+/// "this paired training is NOT for you" suppression than the
+/// within-pool peer-competition wiring.
+const CONTRASTIVE_INH_MIN_JACCARD: f32 = 0.15;
 
 impl CrossPoolSynapses {
     pub fn new() -> Self {
@@ -6384,14 +6533,52 @@ impl NeuroRuntime {
 
         // (4b) Contrastive Hebbian — inhibitory edges from src concepts
         // to every PRE-EXISTING tgt-pool concept that isn't in the
-        // current pairing.  In the same-pool case we also skip any
-        // competitor that happens to be the src concept itself
-        // (otherwise a concept would suppress itself).
+        // current pairing AND whose member-atom set overlaps the new
+        // src atoms enough to be a genuine competitor.  Before this
+        // gate, every paired training wired inhibition to every
+        // existing concept regardless of relevance, producing O(N²)
+        // global inhibition that crushed recall once N grew past a
+        // few hundred.  Now: a competitor only earns inhibition if
+        // its member atoms genuinely overlap with the current src
+        // atom set (Jaccard ≥ CONTRASTIVE_INH_MIN_JACCARD).
+        //
+        // Approach: pre-compute the src concepts' atom sets, then for
+        // each competitor compute its atom set and Jaccard against
+        // the union of src atom sets.  Skip non-overlapping ones.
+        let src_atom_sets: Vec<std::collections::HashSet<String>> =
+            if let Some(p) = guard.multi_pool.pool(src_pool_id) {
+                src_concepts.iter().map(|a| concept_atom_label_set(p, a))
+                    .collect()
+            } else { Vec::new() };
         let inh_lr = lr * CROSS_INH_RATE;
-        for a in &src_concepts {
-            for b_prime in &competitors {
-                if tgt_concept_set.contains(b_prime) { continue; }
-                if same_pool && (a == b_prime || src_concept_set.contains(b_prime)) { continue; }
+        // Reuse the same pool reference for atom-set lookup on
+        // competitors — tgt_pool_id == src_pool_id in the same-pool
+        // case (the only case that matters here for atom overlap).
+        let competitor_atom_pool_id = if same_pool { src_pool_id } else { tgt_pool_id };
+        let competitor_atom_sets: Vec<(String, std::collections::HashSet<String>)> =
+            if let Some(p) = guard.multi_pool.pool(competitor_atom_pool_id) {
+                competitors.iter()
+                    .filter(|c| !tgt_concept_set.contains(*c))
+                    .filter(|c| !(same_pool && src_concept_set.contains(*c)))
+                    .map(|c| (c.clone(), concept_atom_label_set(p, c)))
+                    .collect()
+            } else { Vec::new() };
+        for (a_idx, a) in src_concepts.iter().enumerate() {
+            let a_atoms = src_atom_sets.get(a_idx);
+            for (b_prime, b_atoms) in &competitor_atom_sets {
+                if same_pool && a == b_prime { continue; }
+                // Overlap gate: skip competitors that share no atoms
+                // with the current src concept.  In cross-pool training
+                // both pools have different atom spaces so we skip the
+                // gate (there's no meaningful Jaccard between
+                // keyboard_text and image_pixels atoms).
+                if same_pool {
+                    if let Some(a_atoms) = a_atoms {
+                        if jaccard_str(a_atoms, b_atoms) < CONTRASTIVE_INH_MIN_JACCARD {
+                            continue;
+                        }
+                    }
+                }
                 guard.multi_pool.cross_mut(src_pool_id, tgt_pool_id)
                     .pair_signed(a, b_prime, inh_lr, true);
                 guard.multi_pool.cross_mut(tgt_pool_id, src_pool_id)
@@ -6399,37 +6586,44 @@ impl NeuroRuntime {
             }
         }
 
-        // (4c) Within-pool lateral inhibition between concept peers.
-        // In the same-pool case both src and tgt concepts live in the
-        // one pool; we wire lateral inhibition for each but exclude
-        // the paired peer set so the prompt-concept doesn't suppress
-        // the response-concept it should be co-activating with at
-        // recall time.  Other (unrelated) peer concepts in the pool
-        // still get suppressed normally — winner-take-all among
-        // competitors, cooperation among paired concepts.
+        // (4c) Within-pool lateral inhibition.  ONLY wired between
+        // concepts whose member-atom sets overlap by ≥
+        // LATERAL_INH_MIN_JACCARD — the architectural fix for
+        // runaway global inhibition.  Two unrelated concepts in the
+        // same pool no longer mutually suppress; only genuine
+        // competitors (paraphrases, atom-sharing variants) do.
+        // Paired peers (prompt↔response) are excluded explicitly so
+        // they keep co-activating at recall.
         let lateral_w = WITHIN_POOL_LATERAL_INH_WEIGHT;
+        let min_j = LATERAL_INH_MIN_JACCARD;
         if same_pool {
             if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
                 for a in &src_concepts {
-                    p.wire_lateral_inhibition_to_peers_except(a, lateral_w, &tgt_concepts);
+                    p.wire_lateral_inhibition_to_overlapping_peers(
+                        a, lateral_w, min_j, &tgt_concepts);
                 }
                 for b in &tgt_concepts {
-                    p.wire_lateral_inhibition_to_peers_except(b, lateral_w, &src_concepts);
+                    p.wire_lateral_inhibition_to_overlapping_peers(
+                        b, lateral_w, min_j, &src_concepts);
                 }
             }
         } else {
+            let empty: Vec<String> = Vec::new();
             if let Some(p) = guard.multi_pool.pool_mut(src_pool_id) {
                 for a in &src_concepts {
-                    p.wire_lateral_inhibition_to_peers(a, lateral_w);
+                    p.wire_lateral_inhibition_to_overlapping_peers(
+                        a, lateral_w, min_j, &empty);
                 }
             }
             if let Some(p) = guard.multi_pool.pool_mut(tgt_pool_id) {
                 for b in &tgt_concepts {
-                    p.wire_lateral_inhibition_to_peers(b, lateral_w);
+                    p.wire_lateral_inhibition_to_overlapping_peers(
+                        b, lateral_w, min_j, &empty);
                 }
             }
         }
     }
+
 
     /// Build a hierarchical concept inside `pool_id` whose members are
     /// existing concept neurons named in `child_labels`.  The parent

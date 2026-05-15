@@ -5652,7 +5652,7 @@ fn default_integrated_src_pool()    -> String { "in".to_string() }
 // GA-experimental winning genome: 0.345 — slightly higher MP-vs-fallback
 // cutover than the pre-GA 0.30 default; routes fewer noisy multi-pool hits
 // to char-chain/EEM and improved class-paraphrase exact match (18/25 vs prior).
-fn default_mp_confidence_threshold() -> f32 { 0.345 }
+fn default_mp_confidence_threshold() -> f32 { 0.05 }
 fn default_eem_fallback()            -> bool { true }
 
 /// POST /query/integrated — Bayesian-sensor cascaded routing.
