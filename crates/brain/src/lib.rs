@@ -34,6 +34,7 @@ pub mod fabric;
 pub mod grounding;
 pub mod brain;
 pub mod action;
+pub mod eem;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
@@ -43,3 +44,7 @@ pub use grounding::{
 };
 pub use brain::{Brain, BrainConfig, BrainStats};
 pub use action::{ActionEvent, ActionId, ActionRouter, NullRouter, RouteResult};
+pub use eem::{
+    Discipline, DisciplineId, Eem, EemConfig, Equation, EquationApplication,
+    EquationId, Motif, MotifId, Variable, VariableId,
+};

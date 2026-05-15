@@ -13,6 +13,7 @@ use ahash::AHashMap;
 use std::collections::VecDeque;
 
 use crate::action::{ActionEvent, ActionId};
+use crate::eem::{Eem, EemConfig};
 use crate::fabric::{Fabric, FabricConfig};
 use crate::grounding::{AnswerWithGrounding, ConfidenceTier, GroundingReport};
 use crate::neuron::{NeuronId, NeuronKind, NeuronRef, PoolId, Neuron};
@@ -60,6 +61,10 @@ pub struct BrainConfig {
     /// input — it only holds composite concepts whose members live in
     /// other pools.
     pub binding_pool_config: PoolConfig,
+    /// EEM (Environmental Equation Matrix) config.  Spec §4.B.  An
+    /// empty EEM is created on `Brain::new`; the caller seeds it via
+    /// `brain.eem_mut().register_equation(...)`.
+    pub eem: EemConfig,
 }
 
 impl Default for BrainConfig {
@@ -74,6 +79,7 @@ impl Default for BrainConfig {
             binding_emergence_threshold: 3,
             moment_history_window: 64,
             binding_pool_config,
+            eem: EemConfig::default(),
         }
     }
 }
@@ -114,6 +120,11 @@ pub struct Brain {
     /// Tracks which action ids have already been emitted this tick to
     /// prevent firing the same action neuron more than once per tick.
     emitted_this_tick:            ahash::AHashSet<NeuronRef>,
+    /// Phase 5: Environmental Equation Matrix.  Owned by the brain so
+    /// integration can consult equations and report their confidence
+    /// alongside the fabric's.  Caller seeds equations directly via
+    /// `eem_mut().register_equation(...)`.
+    eem:                          Eem,
 }
 
 impl Brain {
@@ -129,6 +140,7 @@ impl Brain {
         );
         fabric.register_pool(binding_pool);
         let window = config.moment_history_window;
+        let eem = Eem::new(config.eem.clone());
         Self {
             fabric,
             config,
@@ -140,8 +152,12 @@ impl Brain {
             pending_actions:       AHashMap::new(),
             next_action_id:        1,
             emitted_this_tick:     ahash::AHashSet::new(),
+            eem,
         }
     }
+
+    pub fn eem(&self) -> &Eem { &self.eem }
+    pub fn eem_mut(&mut self) -> &mut Eem { &mut self.eem }
 
     pub fn fabric(&self) -> &Fabric { &self.fabric }
     pub fn fabric_mut(&mut self) -> &mut Fabric { &mut self.fabric }
@@ -461,6 +477,50 @@ impl Brain {
             confidence_tier,
             next_steps_if_ungrounded: Vec::new(),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 5 — EEM-augmented integration (spec §4.D + §4.B).
+    //
+    // `integrate` returns the fabric's view with `eem_confidence:
+    // None` because no equation was consulted.  When the caller has
+    // an equation that should apply to the current context, they
+    // call `integrate_with_equation(query, target, eq, bindings)`
+    // and the EEM's confidence enters the grounding report.  The
+    // integrated_confidence becomes the geometric mean of fabric and
+    // EEM confidences — both must be grounded for the integrated
+    // answer to be strong, per spec §2.7.
+    // ---------------------------------------------------------------
+
+    /// Like [`Brain::integrate`] but additionally consults the EEM:
+    /// the named equation is evaluated under `bindings` and its
+    /// confidence enters the grounding report.  If the equation is
+    /// not registered or any binding is missing, `eem_confidence`
+    /// stays `None` (honestly: the EEM could not contribute).
+    pub fn integrate_with_equation(
+        &self,
+        query_pool:    PoolId,
+        target_pool:   PoolId,
+        equation_name: &str,
+        bindings:      &AHashMap<&str, f64>,
+    ) -> AnswerWithGrounding {
+        let mut base = self.integrate(query_pool, target_pool);
+        let application = self.eem.apply_by_name(equation_name, bindings);
+        if let Some(app) = application {
+            base.grounding.eem_confidence = Some(app.confidence);
+            // Combine fabric and EEM confidences as a geometric mean
+            // when both are present.  Lifting one without the other
+            // would mask uncertainty.
+            let f = base.grounding.fabric_confidence;
+            let e = app.confidence;
+            base.grounding.integrated_confidence = (f * e).sqrt();
+            base.confidence_tier = ConfidenceTier::from_confidence(
+                base.grounding.integrated_confidence,
+                base.grounding.outside_grounding,
+                base.grounding.speculation_flag,
+            );
+        }
+        base
     }
 
     // ---------------------------------------------------------------
