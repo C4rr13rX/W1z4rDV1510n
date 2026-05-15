@@ -75,6 +75,11 @@ impl Fabric {
 
     pub fn current_tick(&self) -> u64 { self.tick }
 
+    /// Read the current (un-closed) tick's moment.  Used by [`crate::Brain`]
+    /// to capture the multi-pool firing fingerprint for binding-concept
+    /// emergence before `advance_tick` clears it.
+    pub fn current_moment(&self) -> &Moment { &self.current }
+
     pub fn register_pool(&mut self, pool: Pool) -> PoolId {
         let id = pool.id();
         self.pools.insert(id, Arc::new(RwLock::new(pool)));

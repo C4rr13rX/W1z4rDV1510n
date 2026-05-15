@@ -32,6 +32,7 @@ pub mod neuron;
 pub mod pool;
 pub mod fabric;
 pub mod grounding;
+pub mod brain;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
@@ -39,3 +40,4 @@ pub use fabric::{Fabric, FabricConfig, Moment};
 pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,
 };
+pub use brain::{Brain, BrainConfig, BrainStats};

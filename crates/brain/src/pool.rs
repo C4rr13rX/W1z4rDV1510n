@@ -168,6 +168,25 @@ impl Pool {
         self.label_to_id.get(label).copied()
     }
 
+    /// Insert a fully-constructed concept neuron.  Used by the Brain to
+    /// place binding concepts (members span multiple pools) into the
+    /// binding pool without going through atom-stream emergence.  The
+    /// neuron's `id` field is overwritten to match the assigned slot.
+    pub fn append_neuron(&mut self, mut neuron: Neuron, label: String) -> NeuronId {
+        let id = self.neurons.len() as NeuronId;
+        neuron.id = id;
+        self.neurons.push(neuron);
+        self.label_to_id.insert(label, id);
+        id
+    }
+
+    /// Reassemble an activation map back into a sensor frame through
+    /// this pool's encoding contract.  Used by [`crate::Brain::integrate`]
+    /// to produce the `answer: Option<Vec<u8>>` payload.  Spec §3.4.
+    pub fn encoding_reassemble(&self, active: &[(&str, f32)]) -> Vec<u8> {
+        self.encoding.reassemble(active)
+    }
+
     pub fn activation(&self, id: NeuronId) -> f32 {
         self.activation.get(&id).copied().unwrap_or(0.0)
     }
