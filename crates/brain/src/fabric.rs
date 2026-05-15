@@ -172,6 +172,18 @@ impl Fabric {
         fired
     }
 
+    /// Register a neuron as having fired this tick without going through
+    /// `observe_frame`.  Used by injected activations (e.g.
+    /// [`crate::Brain::fire_action`] during supervised training) so the
+    /// moment buffer captures them and cross-pool wiring runs on tick
+    /// close.  Idempotent on repeated calls.
+    pub fn mark_fired(&mut self, pool_id: PoolId, neuron: NeuronId) {
+        let entry = self.current.fired.entry(pool_id).or_default();
+        if !entry.contains(&neuron) {
+            entry.push(neuron);
+        }
+    }
+
     /// Uniform propagation per spec §4.A.  Walks the terminals of every
     /// currently-firing neuron in `from_pool`, depositing activation at
     /// each target (which may be in any pool).  Repeats for `max_hops`.

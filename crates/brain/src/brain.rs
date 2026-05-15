@@ -12,6 +12,7 @@
 use ahash::AHashMap;
 use std::collections::VecDeque;
 
+use crate::action::{ActionEvent, ActionId};
 use crate::fabric::{Fabric, FabricConfig};
 use crate::grounding::{AnswerWithGrounding, ConfidenceTier, GroundingReport};
 use crate::neuron::{NeuronId, NeuronKind, NeuronRef, PoolId, Neuron};
@@ -101,6 +102,18 @@ pub struct Brain {
     /// Fingerprints that have already been promoted, so we don't
     /// re-promote on every re-occurrence past the threshold.
     promoted_fingerprints:        AHashMap<MomentFingerprint, NeuronId>,
+    /// Phase 7: action layer state.  `None` until the caller
+    /// designates an action pool via `designate_action_pool`.
+    action_pool_id:               Option<PoolId>,
+    /// Already-emitted action events waiting on outcome feedback.
+    /// `feed_outcome` looks up the action_id and reinforces (or
+    /// weakens) the source→action_neuron terminals per the outcome
+    /// score.  Bounded by `action_history_max` to keep memory finite.
+    pending_actions:              AHashMap<ActionId, ActionEvent>,
+    next_action_id:               ActionId,
+    /// Tracks which action ids have already been emitted this tick to
+    /// prevent firing the same action neuron more than once per tick.
+    emitted_this_tick:            ahash::AHashSet<NeuronRef>,
 }
 
 impl Brain {
@@ -123,6 +136,10 @@ impl Brain {
             moment_history:        VecDeque::with_capacity(window),
             binding_recurrences:   AHashMap::new(),
             promoted_fingerprints: AHashMap::new(),
+            action_pool_id:        None,
+            pending_actions:       AHashMap::new(),
+            next_action_id:        1,
+            emitted_this_tick:     ahash::AHashSet::new(),
         }
     }
 
@@ -165,6 +182,7 @@ impl Brain {
         };
 
         self.fabric.advance_tick();
+        self.emitted_this_tick.clear();
 
         if let Some(fp) = fingerprint {
             self.register_fingerprint(fp);
@@ -443,6 +461,225 @@ impl Brain {
             confidence_tier,
             next_steps_if_ungrounded: Vec::new(),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 7 — Action layer (spec §4.E).
+    //
+    // Designating an action pool makes that pool's atoms act as action
+    // neurons: when they fire (typically through cross-pool propagation
+    // from sensor input), `take_action` collects them into
+    // `ActionEvent`s with source attribution.  The caller routes the
+    // events externally and later calls `feed_outcome` with a score
+    // that reinforces or weakens the source→action terminals.
+    // ---------------------------------------------------------------
+
+    /// Designate which pool hosts action atoms.  Subsequent atom births
+    /// in that pool (via `register_action`) create action neurons.  At
+    /// most one action pool per brain; calling again replaces the
+    /// designation.
+    pub fn designate_action_pool(&mut self, pool_id: PoolId) {
+        self.action_pool_id = Some(pool_id);
+    }
+
+    pub fn action_pool_id(&self) -> Option<PoolId> {
+        self.action_pool_id
+    }
+
+    /// Create (or look up) an action atom in the designated action
+    /// pool.  Returns the neuron id of the action atom — callers store
+    /// this and pair it with their external effect (webhook URL, MQTT
+    /// topic, function call name, etc.).
+    ///
+    /// Panics if no action pool has been designated, or if the
+    /// designated pool id is unknown.  Action registration is a
+    /// configuration step; getting it wrong is a programmer error,
+    /// not a runtime condition.
+    pub fn register_action(&mut self, label: String) -> NeuronRef {
+        let pool_id = self.action_pool_id
+            .expect("designate_action_pool must be called before register_action");
+        let pool = self.fabric.pool(pool_id)
+            .expect("action pool id is not a registered pool");
+        let mut p = pool.write();
+        if let Some(existing) = p.label_to_id(&label) {
+            return NeuronRef::new(pool_id, existing);
+        }
+        let now = self.fabric.current_tick();
+        let id = p.neuron_count() as NeuronId;
+        let neuron = Neuron::new_atom(id, label.clone(), NeuronKind::Excitatory, now);
+        p.append_neuron(neuron, label);
+        NeuronRef::new(pool_id, id)
+    }
+
+    /// Manually fire an action neuron (e.g. during supervised training
+    /// where the trainer wants to drive the action while sources are
+    /// also firing).  This deposits activation into the action pool;
+    /// `take_action` is what surfaces the corresponding event.
+    pub fn fire_action(&mut self, action: NeuronRef, strength: f32) {
+        if let Some(p) = self.fabric.pool(action.pool) {
+            let tick = self.fabric.current_tick();
+            p.write().inject_activation(action.neuron, strength, tick);
+        }
+        // Register in the moment buffer so cross-pool wiring on tick
+        // close grows source→action terminals.
+        self.fabric.mark_fired(action.pool, action.neuron);
+    }
+
+    /// Collect every action neuron that fired this tick, attribute its
+    /// sources (currently-firing neurons in other pools whose terminals
+    /// target the action neuron), and emit one `ActionEvent` per
+    /// firing.  Caller routes externally and later supplies
+    /// `feed_outcome`.
+    ///
+    /// "Fired" means: present in the action pool's `currently_firing`
+    /// set (from `fire_action`), OR reached via cross-pool propagation
+    /// from any non-action pool with activation ≥ `min_activation`.
+    /// The propagation path is what gives the substrate its agency:
+    /// sensor input → cross-pool axons → action firing → external
+    /// effect → outcome → reinforcement.
+    ///
+    /// Re-fires of the same action neuron within a single tick are
+    /// deduplicated.  Across ticks, each firing produces its own event.
+    pub fn take_action(&mut self, min_activation: f32) -> Vec<ActionEvent> {
+        let pool_id = match self.action_pool_id {
+            Some(p) => p,
+            None    => return Vec::new(),
+        };
+        let pool = match self.fabric.pool(pool_id) {
+            Some(p) => p,
+            None    => return Vec::new(),
+        };
+
+        // Step 1: collect direct firings (from `fire_action` or
+        // observed atoms in the action pool itself).
+        let mut firings: AHashMap<NeuronId, (String, f32)> = AHashMap::new();
+        {
+            let p = pool.read();
+            for nid in p.currently_firing() {
+                if let Some(n) = p.get(nid) {
+                    firings.insert(nid, (n.label.clone(), p.activation(nid)));
+                }
+            }
+        }
+
+        // Step 2: propagate from each non-action pool that has firing
+        // neurons; merge activation reaching the action pool.
+        for src_pool_id in self.fabric.pool_ids() {
+            if src_pool_id == pool_id { continue; }
+            let any_firing = match self.fabric.pool(src_pool_id) {
+                Some(p) => p.read().currently_firing().next().is_some(),
+                None    => false,
+            };
+            if !any_firing { continue; }
+            let propagated = self.fabric.propagate(src_pool_id);
+            if let Some(act_map) = propagated.get(&pool_id) {
+                let p = pool.read();
+                for (&nid, &act) in act_map.iter() {
+                    if act < min_activation { continue; }
+                    if let Some(n) = p.get(nid) {
+                        let entry = firings.entry(nid)
+                            .or_insert_with(|| (n.label.clone(), 0.0));
+                        entry.1 = entry.1.max(act);
+                    }
+                }
+            }
+        }
+
+        if firings.is_empty() { return Vec::new(); }
+
+        let tick = self.fabric.current_tick();
+        let mut events = Vec::with_capacity(firings.len());
+
+        // Step 3: for each fired action neuron, find currently-firing
+        // sources elsewhere in the fabric whose terminals target it.
+        // Credit attribution by inverse-terminal lookup — there's no
+        // fabric-level routing table, so we scan owning neurons.
+        for (action_nid, (action_label, activation)) in firings {
+            let action_ref = NeuronRef::new(pool_id, action_nid);
+            if self.emitted_this_tick.contains(&action_ref) { continue; }
+
+            let mut sources: Vec<NeuronRef> = Vec::new();
+            for src_pool_id in self.fabric.pool_ids() {
+                if src_pool_id == pool_id { continue; }
+                let src_pool = match self.fabric.pool(src_pool_id) {
+                    Some(p) => p,
+                    None    => continue,
+                };
+                let sp = src_pool.read();
+                let firing_here: ahash::AHashSet<NeuronId> = sp.currently_firing().collect();
+                for nid in firing_here.iter().copied() {
+                    if let Some(n) = sp.get(nid) {
+                        if n.terminals.iter().any(|t| t.target == action_ref) {
+                            sources.push(NeuronRef::new(src_pool_id, nid));
+                        }
+                    }
+                }
+            }
+
+            let id = self.next_action_id;
+            self.next_action_id += 1;
+            let event = ActionEvent {
+                id,
+                action_neuron: action_ref,
+                action_label,
+                sources,
+                fired_at_tick: tick,
+                activation,
+            };
+            self.pending_actions.insert(id, event.clone());
+            self.emitted_this_tick.insert(action_ref);
+            events.push(event);
+        }
+
+        events
+    }
+
+    /// Apply an outcome score to a previously-emitted action.  Positive
+    /// scores reinforce source→action terminals; negative scores
+    /// weaken them.  The action_id is removed from `pending_actions`
+    /// after application — outcomes are one-shot per firing.
+    ///
+    /// Returns true if the action_id was found and feedback applied.
+    /// Returns false if the id is unknown (already-fed-back or never-
+    /// emitted).
+    pub fn feed_outcome(&mut self, action_id: ActionId, score: f32) -> bool {
+        let event = match self.pending_actions.remove(&action_id) {
+            Some(e) => e,
+            None    => return false,
+        };
+        let now = self.fabric.current_tick();
+        for src in &event.sources {
+            let src_pool = match self.fabric.pool(src.pool) {
+                Some(p) => p,
+                None    => continue,
+            };
+            let mut sp = src_pool.write();
+            let max_w = sp.config.max_weight;
+            if let Some(n) = sp.get_mut(src.neuron) {
+                // Positive: strengthen via the same idempotent
+                // reinforce path.  Negative: directly subtract from
+                // the existing terminal's weight (clamped at 0; prune
+                // happens on the next housekeeping pass).
+                if score >= 0.0 {
+                    n.reinforce_terminal(event.action_neuron, score, now, max_w);
+                } else {
+                    if let Some(t) = n.terminals.iter_mut()
+                        .find(|t| t.target == event.action_neuron)
+                    {
+                        t.weight = (t.weight + score).max(0.0);
+                        t.last_fired_tick = now;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Number of action events awaiting outcome feedback.  Surfaced
+    /// for caller telemetry — a runaway value indicates outcomes are
+    /// not being supplied for fired actions.
+    pub fn pending_action_count(&self) -> usize {
+        self.pending_actions.len()
     }
 
     pub fn stats(&self) -> BrainStats {
