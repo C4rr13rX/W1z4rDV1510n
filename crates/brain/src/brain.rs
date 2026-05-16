@@ -562,6 +562,111 @@ impl Brain {
     // answer to be strong, per spec §2.7.
     // ---------------------------------------------------------------
 
+    // ---------------------------------------------------------------
+    // Stage 2 — Sequential generation (continuation of spec §4.E).
+    //
+    // `integrate` returns the strongest concept's decoded bytes for
+    // ONE step.  `generate` chains those steps into a sequence: emit
+    // a chunk, feed it back as input via observe + advance_tick, find
+    // the next non-emitted strongest concept in target_pool, append.
+    // Termination is on confidence floor, max step count, or when no
+    // unfired concept clears the floor.
+    //
+    // This is what turns the brain from a recognizer into a speaker.
+    // Generation is recurrent retrieval — each emitted chunk becomes
+    // the next step's context.  Open-ended novel composition is NOT
+    // here; that requires phrase-level concepts (level-3+) trained on
+    // enough natural language to have emerged the relevant
+    // compositions.  What IS here: the substrate emits whatever
+    // sequence its learned concept structure supports.
+    // ---------------------------------------------------------------
+
+    /// Generate a sequence of bytes by iterating
+    /// integrate-then-observe-back.  Each step:
+    ///   1. Propagate from the most-recent firing state (query pool at
+    ///      step 0, target pool thereafter).
+    ///   2. Score active target-pool concepts by
+    ///      `activation / expanded_size` (the density rule from
+    ///      `integrate`); skip concepts already emitted in this call.
+    ///   3. Decode the winner via the recursive walker and append to
+    ///      the output.
+    ///   4. Observe the decoded chunk into target_pool so its atoms
+    ///      fire and any matching concepts collapse (mini-column
+    ///      collapse runs the same way it does for sensor input);
+    ///      then `advance_tick` to capture the state into history.
+    ///
+    /// `max_steps` is a hard cap; `min_confidence` is the activation
+    /// floor (concepts below it don't qualify, ending generation).
+    /// The set of already-emitted concepts is reset per call.
+    ///
+    /// Caller is responsible for observing the prompt into `query_pool`
+    /// before calling — `generate` itself does NOT take a prompt
+    /// argument because the substrate's "prompt" IS the current pool
+    /// state, not a fresh input.  This matches how observation works
+    /// elsewhere in the API.
+    pub fn generate(
+        &mut self,
+        query_pool:     PoolId,
+        target_pool:    PoolId,
+        max_steps:      usize,
+        min_confidence: f32,
+    ) -> Vec<u8> {
+        let mut output: Vec<u8> = Vec::new();
+        let mut already_emitted: ahash::AHashSet<NeuronRef> = ahash::AHashSet::new();
+
+        for step in 0..max_steps {
+            let source = if step == 0 { query_pool } else { target_pool };
+            let propagated = self.fabric.propagate(source);
+
+            // Find the best non-emitted concept in target_pool.
+            let chunk: Option<(NeuronRef, Vec<u8>)> = {
+                let empty: AHashMap<NeuronId, f32> = AHashMap::new();
+                let target_act = propagated.get(&target_pool).unwrap_or(&empty);
+                let pool_arc = match self.fabric.pool(target_pool) {
+                    Some(p) => p,
+                    None => break,
+                };
+                let p = pool_arc.read();
+
+                let mut best: Option<(NeuronRef, f32)> = None;
+                let mut best_score = f32::NEG_INFINITY;
+                for (&nid, &act) in target_act.iter() {
+                    if act < min_confidence { continue; }
+                    let n = match p.get(nid) {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    if n.is_atom() { continue; }
+                    let r = NeuronRef::new(target_pool, nid);
+                    if already_emitted.contains(&r) { continue; }
+                    let size = p.expanded_size(&n.members).max(1);
+                    let score = act / size as f32;
+                    if score > best_score {
+                        best_score = score;
+                        best = Some((r, act));
+                    }
+                }
+                best.and_then(|(r, _)| p.get(r.neuron).map(|n| (r, p.decode_concept_members(&n.members))))
+            };
+
+            let (r, bytes) = match chunk {
+                Some(x) => x,
+                None => break,
+            };
+            if bytes.is_empty() { break; }
+
+            output.extend_from_slice(&bytes);
+            already_emitted.insert(r);
+
+            // Feed the chunk back into target_pool — its atoms fire,
+            // its concepts collapse, the annealer captures the frame.
+            self.observe(target_pool, &bytes);
+            self.advance_tick();
+        }
+
+        output
+    }
+
     /// Like [`Brain::integrate`] but additionally consults the
     /// temporal-prediction annealer for the target pool: the
     /// annealer's convergence energy enters `annealer_confidence` in

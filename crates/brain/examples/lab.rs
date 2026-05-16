@@ -583,6 +583,66 @@ fn concept_depth(pool: &w1z4rd_brain::Pool, id: w1z4rd_brain::NeuronId, depth: u
     max_child
 }
 
+// -----------------------------------------------------------------
+// Experiment I — Generative Sequential Output
+// -----------------------------------------------------------------
+//
+// Train cross-pool (prompt, response) pairs where responses are
+// multi-chunk so generation chains multiple integrate steps.
+// Then probe with a trained prompt; expect the generated sequence
+// to contain the trained response and possibly extend with learned
+// concept neighbors.
+
+fn experiment_i() {
+    println!("--- Experiment I: Generative Sequential Output ---");
+    println!("Trained (prompt → response) pairs; generate() chains responses\n");
+
+    // Distinct single-byte prompts so the substrate retrieves
+    // precisely (Experiment F territory) — responses are multi-byte.
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (b"A".to_vec(), b"AA".to_vec()),
+        (b"B".to_vec(), b"BB".to_vec()),
+        (b"C".to_vec(), b"CC".to_vec()),
+        (b"D".to_vec(), b"DDDDD".to_vec()),
+        (b"E".to_vec(), b"hello".to_vec()),
+        (b"F".to_vec(), b"world".to_vec()),
+        (b"G".to_vec(), b"goodbye".to_vec()),
+    ];
+
+    let mut brain = build_brain(/*window*/ 4096, /*threshold*/ 3);
+    train_corpus(&mut brain, &pairs, 8);
+
+    for (p, target) in &pairs {
+        brain.observe(PROMPT_POOL, p);
+        let generated = brain.generate(
+            PROMPT_POOL, COMPLETION_POOL,
+            /*max_steps*/ 5, /*min_confidence*/ 0.05,
+        );
+        let contains = !target.is_empty()
+            && generated.windows(target.len()).any(|w| w == target.as_slice());
+        println!("    prompt={:?}  target={:?}  generated={:?}  contains={}",
+            fmt_bytes(p), fmt_bytes(target), fmt_bytes(&generated),
+            if contains { "YES" } else { "no" });
+    }
+    println!();
+
+    // Multi-step continuation: train a small continuous text, query
+    // with a prefix, see what unfolds.
+    println!("  -- continuous-text generation --");
+    let mut brain = build_brain(/*window*/ 4096, /*threshold*/ 3);
+    let sentence = "the cat sat on the mat";
+    let pool = COMPLETION_POOL;
+    for _ in 0..15 {
+        brain.observe(pool, sentence.as_bytes());
+        brain.advance_tick();
+    }
+    brain.observe(pool, b"the");
+    let output = brain.generate(pool, pool, /*max_steps*/ 8, /*min_confidence*/ 0.01);
+    println!("    seed   = {:?}", "the");
+    println!("    output = {:?}", fmt_bytes(&output));
+    println!();
+}
+
 fn main() {
     println!("=== W1z4rD Brain — Empirical Validation Harness ===\n");
     experiment_a();
@@ -593,5 +653,6 @@ fn main() {
     experiment_f();
     experiment_g();
     experiment_h();
+    experiment_i();
     println!("=== Done ===");
 }
