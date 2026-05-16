@@ -48,11 +48,25 @@ pub struct FabricConfig {
     /// Per-hop decay multiplier — activation × decay each hop.  Mirrors
     /// biological signal attenuation along long axons.
     pub hop_decay:     f32,
+    /// Reinforcement applied to CROSS-POOL terminals between concept
+    /// neurons (not atoms) that co-fire at the same tick.  This is
+    /// the position-aware binding mechanism: a concept encodes its
+    /// member sequence's position via the order of its `members` vec;
+    /// concept→concept cross-pool terminals therefore bind specific
+    /// positional sequences across pools.  Without this, only
+    /// atom-level wiring runs, which loses positional discrimination
+    /// because firing-sets are deduplicated within a tick.
+    pub cross_pool_concept_lr: f32,
 }
 
 impl Default for FabricConfig {
     fn default() -> Self {
-        Self { cross_pool_lr: 0.15, max_hops: 2, hop_decay: 0.85 }
+        Self {
+            cross_pool_lr:         0.15,
+            max_hops:              2,
+            hop_decay:             0.85,
+            cross_pool_concept_lr: 0.20,
+        }
     }
 }
 
@@ -200,6 +214,71 @@ impl Fabric {
                                     NeuronRef::new(pid_a, na),
                                     lr, self.tick, max_w,
                                 );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Stage 3 (position-aware binding): cross-pool concept→concept
+        // wiring.  Concepts encode positional sequences in their
+        // member-vec; co-firing concepts across pools represent
+        // position-aligned bindings.  Atom-level wiring above can't
+        // distinguish "P000" from "P010" because their firing-sets
+        // are identical.  Concept-level wiring CAN, because the
+        // emerged P000-concept and P010-concept are distinct neurons.
+        let concept_lr = self.config.cross_pool_concept_lr;
+        if concept_lr > 0.0 {
+            // Snapshot per-pool concept firings from currently_firing.
+            let mut concepts_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+            for (pid, pool) in self.pools.iter() {
+                let p = pool.read();
+                let firing: Vec<NeuronId> = p.currently_firing()
+                    .filter_map(|nid| p.get(nid).and_then(|n| {
+                        if n.is_atom() { None } else { Some(nid) }
+                    }))
+                    .collect();
+                if !firing.is_empty() {
+                    concepts_by_pool.insert(*pid, firing);
+                }
+            }
+
+            let active_pool_ids: Vec<PoolId> = concepts_by_pool.keys().copied().collect();
+            for i in 0..active_pool_ids.len() {
+                for j in (i + 1)..active_pool_ids.len() {
+                    let pid_a = active_pool_ids[i];
+                    let pid_b = active_pool_ids[j];
+                    let concepts_a = concepts_by_pool[&pid_a].clone();
+                    let concepts_b = concepts_by_pool[&pid_b].clone();
+
+                    let pool_a = self.pools.get(&pid_a).unwrap().clone();
+                    let pool_b = self.pools.get(&pid_b).unwrap().clone();
+                    {
+                        let mut pa = pool_a.write();
+                        let max_w = pa.config.max_weight;
+                        for &na in &concepts_a {
+                            if let Some(n) = pa.get_mut(na) {
+                                for &nb in &concepts_b {
+                                    n.reinforce_terminal(
+                                        NeuronRef::new(pid_b, nb),
+                                        concept_lr, self.tick, max_w,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    {
+                        let mut pb = pool_b.write();
+                        let max_w = pb.config.max_weight;
+                        for &nb in &concepts_b {
+                            if let Some(n) = pb.get_mut(nb) {
+                                for &na in &concepts_a {
+                                    n.reinforce_terminal(
+                                        NeuronRef::new(pid_a, na),
+                                        concept_lr, self.tick, max_w,
+                                    );
+                                }
                             }
                         }
                     }
