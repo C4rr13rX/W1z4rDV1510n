@@ -25,6 +25,11 @@ tracing = { version = "0.1", features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 w1z4rdv1510n         = { path = "../core" }
 w1z4rdv1510n-cluster = { path = "../cluster" }
+w1z4rd-brain         = { path = "../brain" }
+
+[[bin]]
+name = "w1z4rd_brain_server"
+path = "src/bin/brain_server.rs"
 void = "1.0"
 
 [dev-dependencies]
