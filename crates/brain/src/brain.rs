@@ -13,6 +13,7 @@ use ahash::AHashMap;
 use std::collections::VecDeque;
 
 use crate::action::{ActionEvent, ActionId};
+use crate::annealer::{Annealer, AnnealerConfig};
 use crate::eem::{Eem, EemConfig};
 use crate::fabric::{Fabric, FabricConfig};
 use crate::grounding::{AnswerWithGrounding, ConfidenceTier, GroundingReport};
@@ -65,6 +66,10 @@ pub struct BrainConfig {
     /// empty EEM is created on `Brain::new`; the caller seeds it via
     /// `brain.eem_mut().register_equation(...)`.
     pub eem: EemConfig,
+    /// Temporal-prediction annealer config.  Spec §4.C.  An empty
+    /// annealer is created on `Brain::new`; the brain automatically
+    /// captures one frame per pool per `advance_tick`.
+    pub annealer: AnnealerConfig,
 }
 
 impl Default for BrainConfig {
@@ -80,6 +85,7 @@ impl Default for BrainConfig {
             moment_history_window: 64,
             binding_pool_config,
             eem: EemConfig::default(),
+            annealer: AnnealerConfig::default(),
         }
     }
 }
@@ -125,6 +131,9 @@ pub struct Brain {
     /// alongside the fabric's.  Caller seeds equations directly via
     /// `eem_mut().register_equation(...)`.
     eem:                          Eem,
+    /// Phase 6: Temporal-prediction annealer.  Captures one frame per
+    /// pool per tick; consulted by `integrate_with_prediction`.
+    annealer:                     Annealer,
 }
 
 impl Brain {
@@ -141,6 +150,7 @@ impl Brain {
         fabric.register_pool(binding_pool);
         let window = config.moment_history_window;
         let eem = Eem::new(config.eem.clone());
+        let annealer = Annealer::new(config.annealer.clone());
         Self {
             fabric,
             config,
@@ -153,11 +163,14 @@ impl Brain {
             next_action_id:        1,
             emitted_this_tick:     ahash::AHashSet::new(),
             eem,
+            annealer,
         }
     }
 
     pub fn eem(&self) -> &Eem { &self.eem }
     pub fn eem_mut(&mut self) -> &mut Eem { &mut self.eem }
+    pub fn annealer(&self) -> &Annealer { &self.annealer }
+    pub fn annealer_mut(&mut self) -> &mut Annealer { &mut self.annealer }
 
     pub fn fabric(&self) -> &Fabric { &self.fabric }
     pub fn fabric_mut(&mut self) -> &mut Fabric { &mut self.fabric }
@@ -196,6 +209,24 @@ impl Brain {
             let moment = self.fabric.current_moment();
             MomentFingerprint::from_fabric_moment(&moment.fired)
         };
+
+        // Capture per-pool activation frames into the annealer's
+        // history.  One frame per pool per tick; empty frames are
+        // skipped by Annealer::record_frame.  Done BEFORE
+        // advance_tick because the fabric's housekeeping doesn't
+        // clear pool activation, but the next tick's observes will.
+        for pid in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pid) {
+                let p = pool.read();
+                let frame: AHashMap<NeuronId, f32> = p.currently_firing()
+                    .map(|nid| (nid, p.activation(nid)))
+                    .collect();
+                drop(p);
+                if !frame.is_empty() {
+                    self.annealer.record_frame(pid, frame);
+                }
+            }
+        }
 
         self.fabric.advance_tick();
         self.emitted_this_tick.clear();
@@ -491,6 +522,33 @@ impl Brain {
     // EEM confidences — both must be grounded for the integrated
     // answer to be strong, per spec §2.7.
     // ---------------------------------------------------------------
+
+    /// Like [`Brain::integrate`] but additionally consults the
+    /// temporal-prediction annealer for the target pool: the
+    /// annealer's convergence energy enters `annealer_confidence` in
+    /// the grounding report, and `integrated_confidence` becomes the
+    /// geometric mean of fabric and annealer confidences.  When the
+    /// annealer has fewer than 2 history frames for the target pool,
+    /// `annealer_confidence` stays `None`.
+    pub fn integrate_with_prediction(
+        &self,
+        query_pool:  PoolId,
+        target_pool: PoolId,
+    ) -> AnswerWithGrounding {
+        let mut base = self.integrate(query_pool, target_pool);
+        if let Some(pred) = self.annealer.predict_next(target_pool) {
+            base.grounding.annealer_confidence = Some(pred.confidence);
+            let f = base.grounding.fabric_confidence;
+            let a = pred.confidence;
+            base.grounding.integrated_confidence = (f * a).sqrt();
+            base.confidence_tier = ConfidenceTier::from_confidence(
+                base.grounding.integrated_confidence,
+                base.grounding.outside_grounding,
+                base.grounding.speculation_flag,
+            );
+        }
+        base
+    }
 
     /// Like [`Brain::integrate`] but additionally consults the EEM:
     /// the named equation is evaluated under `bindings` and its
