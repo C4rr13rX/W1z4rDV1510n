@@ -61,15 +61,22 @@ pub struct Fabric {
     pools:      AHashMap<PoolId, Arc<RwLock<Pool>>>,
     current:    Moment,
     tick:       u64,
+    /// Per-pool: which CONCEPT neurons fired during the most-recently
+    /// closed tick.  Stage 2b uses this to grow concept→concept
+    /// terminals when concept A fires then concept B fires next tick
+    /// in the same pool — the within-pool temporal "what follows
+    /// what" wiring.  Transient state; not persisted in snapshots.
+    prev_tick_concepts: AHashMap<PoolId, Vec<NeuronId>>,
 }
 
 impl Fabric {
     pub fn new(config: FabricConfig) -> Self {
         Self {
             config,
-            pools:   AHashMap::new(),
-            current: Moment::new(0),
-            tick:    0,
+            pools:              AHashMap::new(),
+            current:            Moment::new(0),
+            tick:               0,
+            prev_tick_concepts: AHashMap::new(),
         }
     }
 
@@ -102,10 +109,11 @@ impl Fabric {
         mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>>,
     ) -> (Self, Vec<PoolId>) {
         let mut fabric = Self {
-            config:  snap.config,
-            pools:   AHashMap::new(),
-            current: Moment::new(snap.tick),
-            tick:    snap.tick,
+            config:             snap.config,
+            pools:              AHashMap::new(),
+            current:            Moment::new(snap.tick),
+            tick:               snap.tick,
+            prev_tick_concepts: AHashMap::new(),
         };
         let mut missing = Vec::new();
         for pid in snap.pool_order {
@@ -197,6 +205,53 @@ impl Fabric {
                     }
                 }
             }
+        }
+
+        // Stage 2b: within-pool concept→concept temporal wiring.
+        // For each pool, identify the CONCEPT neurons currently firing
+        // (atoms excluded — they're handled by within-pool emergence
+        // and cross-pool axons separately).  Grow a terminal from
+        // every concept that fired last tick to every concept firing
+        // now.  This is what gives the substrate "what follows what"
+        // structure above the atom layer — needed for coherent
+        // sequential generation (Stage 2's `Brain::generate`).
+        let all_pool_ids: Vec<PoolId> = self.pools.keys().copied().collect();
+        for pid in all_pool_ids {
+            let pool = match self.pools.get(&pid) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let current_concepts: Vec<NeuronId> = {
+                let p = pool.read();
+                p.currently_firing()
+                    .filter_map(|nid| p.get(nid).and_then(|n| {
+                        if n.is_atom() { None } else { Some(nid) }
+                    }))
+                    .collect()
+            };
+
+            if let Some(prev) = self.prev_tick_concepts.get(&pid).cloned() {
+                if !prev.is_empty() && !current_concepts.is_empty() {
+                    let mut pw = pool.write();
+                    let max_w = pw.config.max_weight;
+                    for &src in &prev {
+                        // Skip if source no longer exists (pruned).
+                        if pw.get(src).is_none() { continue; }
+                        for &dst in &current_concepts {
+                            if src == dst { continue; }
+                            if let Some(n) = pw.get_mut(src) {
+                                n.reinforce_terminal(
+                                    NeuronRef::new(pid, dst),
+                                    0.3,
+                                    self.tick,
+                                    max_w,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            self.prev_tick_concepts.insert(pid, current_concepts);
         }
 
         // Per-pool housekeeping: decay every terminal, prune sub-floor.
