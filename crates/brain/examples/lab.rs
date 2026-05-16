@@ -636,10 +636,22 @@ fn experiment_i() {
         brain.observe(pool, sentence.as_bytes());
         brain.advance_tick();
     }
-    brain.observe(pool, b"the");
-    let output = brain.generate(pool, pool, /*max_steps*/ 8, /*min_confidence*/ 0.01);
-    println!("    seed   = {:?}", "the");
-    println!("    output = {:?}", fmt_bytes(&output));
+    // Compare annealer weights on continuous text.
+    for &w in &[0.0_f32, 0.5, 1.0, 2.0] {
+        // Fresh brain per weight so previous generation's history
+        // doesn't bleed across runs.
+        let mut brain = build_brain(/*window*/ 4096, /*threshold*/ 3);
+        let sentence = "the cat sat on the mat";
+        for _ in 0..15 {
+            brain.observe(pool, sentence.as_bytes());
+            brain.advance_tick();
+        }
+        brain.observe(pool, b"the");
+        let output = brain.generate_weighted(
+            pool, pool, /*max_steps*/ 8, /*min_confidence*/ 0.01, w);
+        println!("    weight={:>4.1}  seed={:?}  output={:?}",
+            w, "the", fmt_bytes(&output));
+    }
     println!();
 }
 

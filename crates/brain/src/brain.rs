@@ -585,12 +585,19 @@ impl Brain {
     /// integrate-then-observe-back.  Each step:
     ///   1. Propagate from the most-recent firing state (query pool at
     ///      step 0, target pool thereafter).
-    ///   2. Score active target-pool concepts by
-    ///      `activation / expanded_size` (the density rule from
-    ///      `integrate`); skip concepts already emitted in this call.
-    ///   3. Decode the winner via the recursive walker and append to
+    ///   2. Consult the temporal annealer (`Annealer::predict_next`)
+    ///      for `target_pool` — its predicted-next-frame activations
+    ///      are blended additively into each candidate's score so the
+    ///      pick is influenced by "what historically follows the
+    ///      current state," not just propagation strength alone.  When
+    ///      the annealer has <2 history frames the prediction is
+    ///      absent and selection falls back to pure density (Stage 2).
+    ///   3. Score active target-pool concepts by
+    ///         `(act + annealer_weight × pred_act) / expanded_size`
+    ///      skipping concepts already emitted in this call.
+    ///   4. Decode the winner via the recursive walker and append to
     ///      the output.
-    ///   4. Observe the decoded chunk into target_pool so its atoms
+    ///   5. Observe the decoded chunk into target_pool so its atoms
     ///      fire and any matching concepts collapse (mini-column
     ///      collapse runs the same way it does for sensor input);
     ///      then `advance_tick` to capture the state into history.
@@ -611,12 +618,35 @@ impl Brain {
         max_steps:      usize,
         min_confidence: f32,
     ) -> Vec<u8> {
+        self.generate_weighted(query_pool, target_pool, max_steps, min_confidence, 0.5)
+    }
+
+    /// Like [`Brain::generate`] but with an explicit `annealer_weight`
+    /// controlling how much the temporal-prediction signal influences
+    /// next-concept selection.  0.0 = pure density (Stage 2);
+    /// 0.5 = balanced (default); 1.0 = predicted-activation as
+    /// important as propagation-activation.
+    pub fn generate_weighted(
+        &mut self,
+        query_pool:      PoolId,
+        target_pool:     PoolId,
+        max_steps:       usize,
+        min_confidence:  f32,
+        annealer_weight: f32,
+    ) -> Vec<u8> {
         let mut output: Vec<u8> = Vec::new();
         let mut already_emitted: ahash::AHashSet<NeuronRef> = ahash::AHashSet::new();
 
         for step in 0..max_steps {
             let source = if step == 0 { query_pool } else { target_pool };
             let propagated = self.fabric.propagate(source);
+
+            // Stage 3: ask the annealer what the next frame should
+            // look like given the target pool's recent history.  None
+            // when there's <2 history frames; selection then falls
+            // back to pure-density (Stage 2).
+            let prediction = self.annealer.predict_next(target_pool);
+            let pred_frame = prediction.as_ref().map(|p| &p.predicted_frame);
 
             // Find the best non-emitted concept in target_pool.
             let chunk: Option<(NeuronRef, Vec<u8>)> = {
@@ -640,7 +670,11 @@ impl Brain {
                     let r = NeuronRef::new(target_pool, nid);
                     if already_emitted.contains(&r) { continue; }
                     let size = p.expanded_size(&n.members).max(1);
-                    let score = act / size as f32;
+                    let pred_act = pred_frame
+                        .and_then(|pf| pf.get(&nid).copied())
+                        .unwrap_or(0.0);
+                    let blended = act + annealer_weight * pred_act;
+                    let score = blended / size as f32;
                     if score > best_score {
                         best_score = score;
                         best = Some((r, act));
