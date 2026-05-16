@@ -187,6 +187,56 @@ impl Pool {
         self.encoding.reassemble(active)
     }
 
+    /// Snapshot the persistent learning state of this pool.  Transient
+    /// runtime state (currently_firing, activation) is intentionally
+    /// dropped — those represent a single tick's in-flight signal and
+    /// rebuild on the next `observe`.  Spec §6.1.
+    pub fn snapshot(&self) -> crate::persistence::PoolSnapshot {
+        let label_to_id: std::collections::HashMap<String, NeuronId> = self
+            .label_to_id
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let sequences: Vec<(Vec<NeuronId>, u32)> = self
+            .sequences
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        crate::persistence::PoolSnapshot {
+            config:       self.config.clone(),
+            neurons:      self.neurons.clone(),
+            label_to_id,
+            recent_atoms: self.recent_atoms.clone(),
+            sequences,
+        }
+    }
+
+    /// Construct a Pool from a snapshot and a fresh encoding.  The
+    /// caller is responsible for supplying an encoding compatible with
+    /// the atom labels stored in the snapshot — e.g. the same
+    /// `BytePassthroughEncoding { prefix }` used originally.  If the
+    /// encoding contract differs, atoms still hold their labels but
+    /// decode-side reassembly may produce different bytes.
+    pub fn from_snapshot(
+        snap:     crate::persistence::PoolSnapshot,
+        encoding: Box<dyn AtomEncoding>,
+    ) -> Self {
+        let mut label_to_id = AHashMap::new();
+        for (k, v) in snap.label_to_id { label_to_id.insert(k, v); }
+        let mut sequences = AHashMap::new();
+        for (k, v) in snap.sequences { sequences.insert(k, v); }
+        Self {
+            config:           snap.config,
+            encoding,
+            neurons:          snap.neurons,
+            label_to_id,
+            recent_atoms:     snap.recent_atoms,
+            sequences,
+            currently_firing: AHashSet::new(),
+            activation:       AHashMap::new(),
+        }
+    }
+
     pub fn activation(&self, id: NeuronId) -> f32 {
         self.activation.get(&id).copied().unwrap_or(0.0)
     }

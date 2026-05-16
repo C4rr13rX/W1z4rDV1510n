@@ -34,7 +34,7 @@ impl Moment {
 }
 
 /// Fabric-level config.  Pool-specific config lives on each Pool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FabricConfig {
     /// Reinforcement applied to a cross-pool terminal each time both
     /// endpoints fire in the same tick.  Smaller than within-pool atom→
@@ -74,6 +74,54 @@ impl Fabric {
     }
 
     pub fn current_tick(&self) -> u64 { self.tick }
+
+    /// Snapshot the fabric (configs + all pool states + tick).  The
+    /// current in-flight moment is intentionally not captured — see
+    /// [`crate::persistence`] for the rationale.
+    pub fn snapshot(&self) -> crate::persistence::FabricSnapshot {
+        let pool_order: Vec<PoolId> = self.pool_ids();
+        let mut pools = std::collections::HashMap::new();
+        for pid in &pool_order {
+            if let Some(p) = self.pools.get(pid) {
+                pools.insert(*pid, p.read().snapshot());
+            }
+        }
+        crate::persistence::FabricSnapshot {
+            config: self.config.clone(),
+            tick:   self.tick,
+            pool_order,
+            pools,
+        }
+    }
+
+    /// Rebuild a fabric from a snapshot.  `encodings` keys must
+    /// match every pool id in the snapshot — missing encodings cause
+    /// the pool to be skipped (logged via the returned Vec).
+    pub fn from_snapshot(
+        snap:      crate::persistence::FabricSnapshot,
+        mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>>,
+    ) -> (Self, Vec<PoolId>) {
+        let mut fabric = Self {
+            config:  snap.config,
+            pools:   AHashMap::new(),
+            current: Moment::new(snap.tick),
+            tick:    snap.tick,
+        };
+        let mut missing = Vec::new();
+        for pid in snap.pool_order {
+            let pool_snap = match snap.pools.get(&pid) {
+                Some(s) => s.clone(),
+                None    => { missing.push(pid); continue; }
+            };
+            let encoding = match encodings.remove(&pid) {
+                Some(e) => e,
+                None    => { missing.push(pid); continue; }
+            };
+            let pool = crate::pool::Pool::from_snapshot(pool_snap, encoding);
+            fabric.register_pool(pool);
+        }
+        (fabric, missing)
+    }
 
     /// Read the current (un-closed) tick's moment.  Used by [`crate::Brain`]
     /// to capture the multi-pool firing fingerprint for binding-concept

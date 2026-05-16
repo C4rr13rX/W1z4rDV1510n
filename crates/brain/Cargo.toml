@@ -15,7 +15,7 @@ parking_lot = "0.12"
 dashmap = "6.0"           # per-pool RwLock concurrency per spec §8
 rayon = "1.10"            # pool-parallel propagation per spec §8
 thiserror = "1.0"
-ahash = "0.8"             # faster hashing than std for hot maps
+ahash = { version = "0.8", features = ["serde"] }  # faster hashing + serde derive support
 base64 = "0.22"           # raw-bit atom transport encoding (spec §1.1)
 evalexpr = "11"           # MIT — EEM equation evaluator per spec §8
 

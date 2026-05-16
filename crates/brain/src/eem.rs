@@ -106,7 +106,7 @@ pub struct EquationApplication {
     pub confidence:  f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EemConfig {
     /// Starting confidence assigned to freshly-registered equations.
     /// 0.5 expresses "no track record yet, neither trusted nor
@@ -364,5 +364,50 @@ impl Eem {
 
     pub fn iter_equations(&self) -> impl Iterator<Item = &Equation> {
         self.equations.iter()
+    }
+
+    pub fn snapshot(&self) -> crate::persistence::EemSnapshot {
+        let motif_links: Vec<(u32, Vec<u32>)> = self
+            .motif_links
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        crate::persistence::EemSnapshot {
+            config:      self.config.clone(),
+            equations:   self.equations.clone(),
+            variables:   self.variables.clone(),
+            disciplines: self.disciplines.clone(),
+            motifs:      self.motifs.clone(),
+            motif_links,
+        }
+    }
+
+    pub fn from_snapshot(snap: crate::persistence::EemSnapshot) -> Self {
+        let mut eq_by_name   = AHashMap::new();
+        let mut var_by_name  = AHashMap::new();
+        let mut disc_by_name = AHashMap::new();
+        for eq in &snap.equations { eq_by_name.insert(eq.name.clone(), eq.id); }
+        for v in &snap.variables { var_by_name.insert(v.name.clone(), v.id); }
+        for d in &snap.disciplines { disc_by_name.insert(d.name.clone(), d.id); }
+        let mut motif_by_fp = AHashMap::new();
+        for m in &snap.motifs {
+            let mut fp = m.fingerprint.clone();
+            fp.sort();
+            motif_by_fp.insert(fp, m.id);
+        }
+        let mut motif_links = AHashMap::new();
+        for (k, v) in snap.motif_links { motif_links.insert(k, v); }
+        Self {
+            config:       snap.config,
+            equations:    snap.equations,
+            variables:    snap.variables,
+            disciplines:  snap.disciplines,
+            motifs:       snap.motifs,
+            eq_by_name,
+            var_by_name,
+            disc_by_name,
+            motif_by_fp,
+            motif_links,
+        }
     }
 }

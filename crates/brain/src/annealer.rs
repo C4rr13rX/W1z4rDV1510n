@@ -39,7 +39,7 @@ use crate::neuron::{NeuronId, PoolId};
 /// history element and the SA candidate state.
 pub type Frame = AHashMap<NeuronId, f32>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnnealerConfig {
     /// Per-pool history depth.  Older frames roll off the back.
     pub history_window:        usize,
@@ -237,6 +237,33 @@ impl Annealer {
     /// this back as a per-region plasticity multiplier per spec §4.C.
     pub fn report_actual(&self, predicted: &Frame, actual: &Frame) -> f32 {
         frame_distance(predicted, actual)
+    }
+
+    pub fn snapshot(&self) -> crate::persistence::AnnealerSnapshot {
+        let mut history: std::collections::HashMap<PoolId, std::collections::VecDeque<std::collections::HashMap<NeuronId, f32>>> = std::collections::HashMap::new();
+        for (pid, frames) in self.history.iter() {
+            let frames_std: std::collections::VecDeque<std::collections::HashMap<NeuronId, f32>> = frames
+                .iter()
+                .map(|f| f.iter().map(|(k, v)| (*k, *v)).collect())
+                .collect();
+            history.insert(*pid, frames_std);
+        }
+        crate::persistence::AnnealerSnapshot {
+            config:  self.config.clone(),
+            history,
+        }
+    }
+
+    pub fn from_snapshot(snap: crate::persistence::AnnealerSnapshot) -> Self {
+        let mut history = AHashMap::new();
+        for (pid, frames) in snap.history {
+            let dq: std::collections::VecDeque<Frame> = frames
+                .into_iter()
+                .map(|f| f.into_iter().collect::<Frame>())
+                .collect();
+            history.insert(pid, dq);
+        }
+        Self { config: snap.config, history }
     }
 }
 

@@ -47,7 +47,7 @@ impl MomentFingerprint {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BrainConfig {
     pub fabric: FabricConfig,
     /// How many distinct ticks the same multi-pool firing fingerprint
@@ -798,6 +798,120 @@ impl Brain {
     /// not being supplied for fired actions.
     pub fn pending_action_count(&self) -> usize {
         self.pending_actions.len()
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 9 — Checkpoint / restore (spec §6 + §11).
+    //
+    // Persists the entire learned state of the brain to a single
+    // bincode-encoded file.  Restore rebuilds it verbatim; the only
+    // thing the caller re-supplies is the pool encodings (which are
+    // stateless trait objects).
+    // ---------------------------------------------------------------
+
+    /// Capture this brain's full persistent state into a snapshot
+    /// struct.  Use [`crate::persistence::save_snapshot`] to write it
+    /// to disk, or hold it in memory for tests.
+    pub fn snapshot(&self) -> crate::persistence::BrainSnapshot {
+        let moment_history: std::collections::VecDeque<crate::persistence::SerializableFingerprint> =
+            self.moment_history.iter()
+                .map(|f| crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() })
+                .collect();
+        let binding_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)> =
+            self.binding_recurrences.iter()
+                .map(|(f, &c)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, c))
+                .collect();
+        let promoted_fingerprints: Vec<(crate::persistence::SerializableFingerprint, NeuronId)> =
+            self.promoted_fingerprints.iter()
+                .map(|(f, &n)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, n))
+                .collect();
+        let pending_actions: Vec<(ActionId, ActionEvent)> = self.pending_actions
+            .iter().map(|(k, v)| (*k, v.clone())).collect();
+        crate::persistence::BrainSnapshot {
+            binding_pool_id:             self.binding_pool_id,
+            binding_emergence_threshold: self.config.binding_emergence_threshold,
+            moment_history_window:       self.config.moment_history_window,
+            fabric:                      self.fabric.snapshot(),
+            eem:                         self.eem.snapshot(),
+            annealer:                    self.annealer.snapshot(),
+            moment_history,
+            binding_recurrences,
+            promoted_fingerprints,
+            action_pool_id:              self.action_pool_id,
+            pending_actions,
+            next_action_id:              self.next_action_id,
+        }
+    }
+
+    /// Write this brain's state to `path`.  Convenience wrapper over
+    /// `snapshot()` + `persistence::save_snapshot()`.
+    pub fn checkpoint<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+        crate::persistence::save_snapshot(&self.snapshot(), path)
+    }
+
+    /// Rebuild a brain from a snapshot, supplying fresh encodings
+    /// for every pool id in the snapshot.  The binding pool is
+    /// included in `encodings`; pass a `BytePassthroughEncoding`
+    /// matching the original prefix (`"bind"` for default brains).
+    ///
+    /// Returns `(brain, missing_pool_ids)` where `missing_pool_ids`
+    /// lists pool ids in the snapshot for which no encoding was
+    /// supplied — those pools are silently skipped.  Callers should
+    /// treat a non-empty missing list as a misconfiguration.
+    pub fn from_snapshot(
+        snap:      crate::persistence::BrainSnapshot,
+        encodings: std::collections::HashMap<PoolId, Box<dyn AtomEncoding>>,
+    ) -> (Self, Vec<PoolId>) {
+        let (fabric, missing) = Fabric::from_snapshot(snap.fabric, encodings);
+        let config = BrainConfig {
+            fabric: fabric.config.clone(),
+            binding_emergence_threshold: snap.binding_emergence_threshold,
+            moment_history_window:       snap.moment_history_window,
+            binding_pool_config:         PoolConfig::defaults("binding", snap.binding_pool_id),
+            eem:                         snap.eem.config.clone(),
+            annealer:                    snap.annealer.config.clone(),
+        };
+
+        let mut moment_history = VecDeque::with_capacity(snap.moment_history_window);
+        for f in snap.moment_history {
+            moment_history.push_back(MomentFingerprint { pairs: f.pairs });
+        }
+        let mut binding_recurrences = AHashMap::new();
+        for (f, c) in snap.binding_recurrences {
+            binding_recurrences.insert(MomentFingerprint { pairs: f.pairs }, c);
+        }
+        let mut promoted_fingerprints = AHashMap::new();
+        for (f, n) in snap.promoted_fingerprints {
+            promoted_fingerprints.insert(MomentFingerprint { pairs: f.pairs }, n);
+        }
+        let mut pending_actions = AHashMap::new();
+        for (k, v) in snap.pending_actions { pending_actions.insert(k, v); }
+
+        let brain = Self {
+            fabric,
+            config,
+            binding_pool_id:       snap.binding_pool_id,
+            moment_history,
+            binding_recurrences,
+            promoted_fingerprints,
+            action_pool_id:        snap.action_pool_id,
+            pending_actions,
+            next_action_id:        snap.next_action_id,
+            emitted_this_tick:     ahash::AHashSet::new(),
+            eem:                   crate::eem::Eem::from_snapshot(snap.eem),
+            annealer:              crate::annealer::Annealer::from_snapshot(snap.annealer),
+        };
+        (brain, missing)
+    }
+
+    /// Load a brain from `path`.  Convenience wrapper over
+    /// `persistence::load_snapshot()` + `from_snapshot()`.
+    pub fn restore<P: AsRef<std::path::Path>>(
+        path:      P,
+        encodings: std::collections::HashMap<PoolId, Box<dyn AtomEncoding>>,
+    ) -> std::io::Result<(Self, Vec<PoolId>)> {
+        let snap = crate::persistence::load_snapshot(path)?;
+        Ok(Self::from_snapshot(snap, encodings))
     }
 
     pub fn stats(&self) -> BrainStats {
