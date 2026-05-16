@@ -398,7 +398,21 @@ impl Brain {
         };
         let target = target_pool_handle.read();
 
+        // Selection: pick the concept maximizing
+        //     score = activation / expanded_size
+        // where expanded_size is the total atom-leaf count when the
+        // concept's nested members are walked recursively.  This
+        // density score prefers SPECIFIC concepts over hierarchies
+        // that over-expand: a 4-leaf concept-of-concepts with the
+        // same activation as a 2-leaf flat concept loses, because it
+        // would decode twice as many bytes.
+        //
+        // We still expose the raw activation in `fabric_confidence`
+        // for telemetry — the score is a selection heuristic, not a
+        // replacement for activation as the substrate's confidence
+        // signal.
         let mut strongest: Option<(NeuronRef, f32)> = None;
+        let mut best_score: f32 = f32::NEG_INFINITY;
         let mut all_active_concepts: Vec<NeuronRef> = Vec::new();
         for (&nid, &act) in target_activation.iter() {
             if act < 0.001 { continue; }
@@ -406,7 +420,10 @@ impl Brain {
                 if !n.is_atom() {
                     let r = NeuronRef::new(target_pool, nid);
                     all_active_concepts.push(r);
-                    if strongest.map_or(true, |(_, s)| act > s) {
+                    let size = target.expanded_size(&n.members).max(1);
+                    let score = act / size as f32;
+                    if score > best_score {
+                        best_score = score;
                         strongest = Some((r, act));
                     }
                 }
@@ -498,20 +515,13 @@ impl Brain {
         // three once they're built.
         let integrated_confidence = fabric_confidence;
 
-        // Decode the strongest match's atom members back through the
-        // target pool's encode/decode contract.
+        // Decode the strongest match's members back through the target
+        // pool's encode/decode contract.  Uses the recursive walker so
+        // that a concept-of-concepts gets decoded all the way down to
+        // its atom leaves.  Spec §3.4.
         let answer = strongest_match.and_then(|r| {
             target.get(r.neuron).map(|n| {
-                let member_atoms: Vec<(&str, f32)> = n.members.iter()
-                    .filter(|m| m.pool == target_pool)
-                    .filter_map(|m| {
-                        target.get(m.neuron).map(|m_neuron| {
-                            (m_neuron.label.as_str(),
-                             target_activation.get(&m.neuron).copied().unwrap_or(1.0))
-                        })
-                    })
-                    .collect();
-                target.encoding_reassemble(&member_atoms)
+                target.decode_concept_members(&n.members)
             })
         });
 

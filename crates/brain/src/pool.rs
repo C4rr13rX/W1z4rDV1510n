@@ -187,6 +187,56 @@ impl Pool {
         self.encoding.reassemble(active)
     }
 
+    /// Recursive expanded size: number of atom leaves a concept (or
+    /// list of members) decodes to.  Used by [`crate::Brain::integrate`]
+    /// to score candidate strongest-matches — concepts that expand to
+    /// fewer bytes are more specific and preferred when their per-byte
+    /// activation density is comparable.
+    pub fn expanded_size(&self, members: &[NeuronRef]) -> usize {
+        let mut total = 0;
+        for m in members {
+            if m.pool != self.config.id { continue; }
+            if let Some(n) = self.neurons.get(m.neuron as usize) {
+                if n.is_atom() {
+                    total += 1;
+                } else {
+                    total += self.expanded_size(&n.members);
+                }
+            }
+        }
+        total.max(1)
+    }
+
+    /// Recursively decode a concept's member list into raw bytes.
+    /// Atom members decode through the pool's encoding contract; concept
+    /// members recurse into their own `members`.  Members in OTHER pools
+    /// are skipped (caller decodes those separately if needed).
+    ///
+    /// This is the hierarchy-aware decode path used by
+    /// [`crate::Brain::integrate`] when the strongest match is a
+    /// concept-of-concepts.  Without recursion, a concept whose
+    /// members are themselves concepts would decode to nothing — its
+    /// member labels (e.g. `"c:eA~c:Kw"`) aren't valid base64 to the
+    /// atom-level reassemble.
+    pub fn decode_concept_members(&self, members: &[NeuronRef]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for m in members {
+            if m.pool != self.config.id { continue; }
+            let neuron = match self.neurons.get(m.neuron as usize) {
+                Some(n) => n,
+                None => continue,
+            };
+            if neuron.is_atom() {
+                let pairs = [(neuron.label.as_str(), 1.0_f32)];
+                out.extend(self.encoding.reassemble(&pairs));
+            } else {
+                let nested = self.decode_concept_members(&neuron.members);
+                out.extend(nested);
+            }
+        }
+        out
+    }
+
     /// Snapshot the persistent learning state of this pool.  Transient
     /// runtime state (currently_firing, activation) is intentionally
     /// dropped — those represent a single tick's in-flight signal and
@@ -243,8 +293,18 @@ impl Pool {
 
     /// Atomize a sensor frame and fire the corresponding atom neurons.
     /// Creates atoms for previously-unseen labels (neurogenesis).  Returns
-    /// the IDs that fired, in order — the caller (Fabric) uses these to
-    /// update the moment buffer.
+    /// the atom IDs that fired, in order — the caller (Fabric) uses these
+    /// to update the moment buffer.
+    ///
+    /// After atom firing, [`Pool::fire_matching_concepts`] is invoked to
+    /// fire any already-emerged concept neuron whose member-sequence
+    /// matches the tail of `recent_atoms`.  Those concept firings feed
+    /// back into `recent_atoms` so sequences-of-concepts can themselves
+    /// emerge as concepts-of-concepts (level-2 hierarchy) — the
+    /// "Hierarchy birth" rule from spec §4.A.  Concept firings DO NOT
+    /// enter the returned `fired` list; only atoms participate in
+    /// cross-pool wiring on tick close (otherwise every concept firing
+    /// would add a fan-out blowup).
     pub fn observe_frame(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
         let labels = self.encoding.atomize(frame);
         let mut fired = Vec::with_capacity(labels.len());
@@ -264,11 +324,68 @@ impl Pool {
             }
         }
 
+        // Spec §4.A "Hierarchy birth": fire any already-emerged concept
+        // whose member-sequence matches the tail of recent_atoms.  This
+        // pushes the concept id into recent_atoms so subsequent
+        // sequence detection can build concepts-of-concepts.  Single
+        // pass — no recursive cascade to keep work bounded.
+        self.fire_matching_concepts(tick);
+
         // Sequence-fingerprint accounting + concept-emergence detection.
-        // We look back through the recent-atoms window for runs that end
-        // at the latest atom; each run gets its count incremented.
+        // recent_atoms now contains both atoms and concept ids from
+        // matching concepts; sequences spanning both layers can emerge.
         self.check_concept_emergence(tick);
         fired
+    }
+
+    /// Walk the tail of `recent_atoms` for runs whose composite label
+    /// matches an already-promoted concept.  Fire each such concept
+    /// (inject activation, add to currently_firing, push to
+    /// recent_atoms, bump use_count).  Single pass — cascaded
+    /// concept-of-concept firing within one observation isn't done
+    /// here; it lands on the NEXT observation when the just-pushed
+    /// concept id becomes part of the tail.
+    fn fire_matching_concepts(&mut self, tick: u64) {
+        let buf_len = self.recent_atoms.len();
+        if buf_len < 2 { return; }
+        let max_len = self.config.max_concept_member_count.min(buf_len);
+
+        // Build candidate labels for each tail length and look up in
+        // label_to_id; collect ids that exist AND are concepts.
+        let mut concepts_to_fire: Vec<NeuronId> = Vec::new();
+        for len in 2..=max_len {
+            let start = buf_len - len;
+            let mut composite = String::new();
+            let mut ok = true;
+            let ids: Vec<NeuronId> = self.recent_atoms.iter().skip(start).copied().collect();
+            for (i, id) in ids.iter().enumerate() {
+                if let Some(n) = self.neurons.get(*id as usize) {
+                    if i > 0 { composite.push('~'); }
+                    composite.push_str(&n.label);
+                } else { ok = false; break; }
+            }
+            if !ok { continue; }
+            if let Some(&cid) = self.label_to_id.get(&composite) {
+                if let Some(n) = self.neurons.get(cid as usize) {
+                    if !n.is_atom() {
+                        concepts_to_fire.push(cid);
+                    }
+                }
+            }
+        }
+
+        for cid in concepts_to_fire {
+            // Concepts always fire at unit activation when their
+            // member-sequence matches; the matched-and-fired distinction
+            // is what makes this "recognition," not a soft estimate.
+            self.activation.insert(cid, 1.0);
+            self.currently_firing.insert(cid);
+            self.push_recent(cid);
+            if let Some(n) = self.neurons.get_mut(cid as usize) {
+                n.use_count = n.use_count.saturating_add(1);
+                n.last_fired_tick = tick;
+            }
+        }
     }
 
     /// Inject activation into a specific neuron from a propagation walk
