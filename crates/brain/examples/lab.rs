@@ -453,6 +453,7 @@ fn experiment_g() {
                 contains += 1;
             }
         }
+
         let s = brain.stats();
         println!("  {:>4}  {:>7}  {:>6.1}%  {:>9.1}%  {:>8}  {:>10}",
             n, epochs, pct(exact, n), pct(contains, n),

@@ -398,19 +398,42 @@ impl Brain {
         };
         let target = target_pool_handle.read();
 
+        // Stage 3b (selection-side): build a set of target-pool
+        // concepts that are DIRECTLY targeted by a query-pool concept
+        // via Stage 3's concept→concept cross-pool terminal.  These
+        // are the specific binding partners the substrate identified
+        // during training; they get a score boost in selection so the
+        // density-based picker doesn't get drowned out by short,
+        // shared atom-level concepts ("00" beating "C000" etc.).
+        let directly_targeted: ahash::AHashSet<NeuronId> = {
+            let q = query_pool_handle.read();
+            let mut set = ahash::AHashSet::new();
+            for nid in q.currently_firing() {
+                if let Some(qn) = q.get(nid) {
+                    if qn.is_atom() { continue; }
+                    for t in &qn.terminals {
+                        if t.target.pool != target_pool { continue; }
+                        if let Some(tn) = target.get(t.target.neuron) {
+                            if !tn.is_atom() {
+                                set.insert(t.target.neuron);
+                            }
+                        }
+                    }
+                }
+            }
+            set
+        };
+
         // Selection: pick the concept maximizing
-        //     score = activation / expanded_size
-        // where expanded_size is the total atom-leaf count when the
-        // concept's nested members are walked recursively.  This
-        // density score prefers SPECIFIC concepts over hierarchies
-        // that over-expand: a 4-leaf concept-of-concepts with the
-        // same activation as a 2-leaf flat concept loses, because it
-        // would decode twice as many bytes.
-        //
-        // We still expose the raw activation in `fabric_confidence`
-        // for telemetry — the score is a selection heuristic, not a
-        // replacement for activation as the substrate's confidence
-        // signal.
+        //     score = (activation * pathway_boost) / expanded_size
+        // where pathway_boost = `concept_pathway_boost` if this target
+        // concept is in `directly_targeted` (the substrate has a
+        // concept→concept cross-pool terminal pointing at it from a
+        // firing query concept), 1.0 otherwise.  The boost lets
+        // Stage 3's positional wiring actually decide the winner when
+        // raw atom propagation would tie or pick a shared shorter
+        // concept.
+        let pathway_boost = 4.0_f32;
         let mut strongest: Option<(NeuronRef, f32)> = None;
         let mut best_score: f32 = f32::NEG_INFINITY;
         let mut all_active_concepts: Vec<NeuronRef> = Vec::new();
@@ -421,7 +444,8 @@ impl Brain {
                     let r = NeuronRef::new(target_pool, nid);
                     all_active_concepts.push(r);
                     let size = target.expanded_size(&n.members).max(1);
-                    let score = act / size as f32;
+                    let boost = if directly_targeted.contains(&nid) { pathway_boost } else { 1.0 };
+                    let score = (act * boost) / size as f32;
                     if score > best_score {
                         best_score = score;
                         strongest = Some((r, act));
