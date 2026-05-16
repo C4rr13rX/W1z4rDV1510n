@@ -292,19 +292,29 @@ impl Pool {
     }
 
     /// Atomize a sensor frame and fire the corresponding atom neurons.
-    /// Creates atoms for previously-unseen labels (neurogenesis).  Returns
-    /// the atom IDs that fired, in order — the caller (Fabric) uses these
-    /// to update the moment buffer.
+    /// Creates atoms for previously-unseen labels (neurogenesis).
     ///
-    /// After atom firing, [`Pool::fire_matching_concepts`] is invoked to
-    /// fire any already-emerged concept neuron whose member-sequence
-    /// matches the tail of `recent_atoms`.  Those concept firings feed
-    /// back into `recent_atoms` so sequences-of-concepts can themselves
-    /// emerge as concepts-of-concepts (level-2 hierarchy) — the
-    /// "Hierarchy birth" rule from spec §4.A.  Concept firings DO NOT
-    /// enter the returned `fired` list; only atoms participate in
-    /// cross-pool wiring on tick close (otherwise every concept firing
-    /// would add a fan-out blowup).
+    /// After **each** atom fires, the substrate runs:
+    ///  1. **Mini-column collapse** ([`collapse_tail_to_concept`]) —
+    ///     if the tail of `recent_atoms` matches an already-emerged
+    ///     concept's member sequence, those tail entries are *replaced*
+    ///     by the concept's id and the concept fires.  The collapse
+    ///     loops so that level-2 columns (concepts-of-concepts) can
+    ///     form in the same observation when their level-1 components
+    ///     have just collapsed.  This is the spec §4.A "Hierarchy
+    ///     birth" mechanism — bytes become morpheme concepts, morpheme
+    ///     concepts become word concepts, word concepts become phrase
+    ///     concepts, all driven by the same Hebbian sequence rule.
+    ///  2. **Per-atom emergence accounting** ([`check_concept_emergence`])
+    ///     — every tail pattern ending at the just-fired entry gets its
+    ///     recurrence count bumped.  Patterns ending mid-word (like the
+    ///     morpheme `r-u-n` inside `r-u-n-n-i-n-g`) are now caught;
+    ///     previously the per-frame accounting only saw the final
+    ///     position.
+    ///
+    /// The returned `fired` list is **atom-only** — concept firings do
+    /// NOT enter the moment buffer.  Cross-pool wiring stays
+    /// atom-level so fan-out remains bounded.
     pub fn observe_frame(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
         let labels = self.encoding.atomize(frame);
         let mut fired = Vec::with_capacity(labels.len());
@@ -322,43 +332,38 @@ impl Pool {
                 n.use_count = n.use_count.saturating_add(1);
                 n.last_fired_tick = tick;
             }
+
+            // Mini-column collapse: pop matched atoms from the tail of
+            // recent_atoms and push the concept id in their place.
+            // Loop so level-2 columns also collapse in one pass.
+            while self.collapse_tail_to_concept(tick) {}
+
+            // Per-atom emergence counting.  Patterns ending at the
+            // current tail entry (which may be a concept after
+            // collapse) get their counts bumped.
+            self.check_concept_emergence(tick);
         }
 
-        // Spec §4.A "Hierarchy birth": fire any already-emerged concept
-        // whose member-sequence matches the tail of recent_atoms.  This
-        // pushes the concept id into recent_atoms so subsequent
-        // sequence detection can build concepts-of-concepts.  Single
-        // pass — no recursive cascade to keep work bounded.
-        self.fire_matching_concepts(tick);
-
-        // Sequence-fingerprint accounting + concept-emergence detection.
-        // recent_atoms now contains both atoms and concept ids from
-        // matching concepts; sequences spanning both layers can emerge.
-        self.check_concept_emergence(tick);
         fired
     }
 
-    /// Walk the tail of `recent_atoms` for runs whose composite label
-    /// matches an already-promoted concept.  Fire each such concept
-    /// (inject activation, add to currently_firing, push to
-    /// recent_atoms, bump use_count).  Single pass — cascaded
-    /// concept-of-concept firing within one observation isn't done
-    /// here; it lands on the NEXT observation when the just-pushed
-    /// concept id becomes part of the tail.
-    fn fire_matching_concepts(&mut self, tick: u64) {
+    /// Find the LONGEST tail of `recent_atoms` whose joined-label
+    /// matches an existing concept's label.  If found, pop those tail
+    /// entries and push the concept id — this is the mini-column
+    /// collapse.  Returns `true` if a collapse happened (so caller can
+    /// loop to detect level-2+ collapses on the new tail).
+    fn collapse_tail_to_concept(&mut self, tick: u64) -> bool {
         let buf_len = self.recent_atoms.len();
-        if buf_len < 2 { return; }
+        if buf_len < 2 { return false; }
         let max_len = self.config.max_concept_member_count.min(buf_len);
 
-        // Build candidate labels for each tail length and look up in
-        // label_to_id; collect ids that exist AND are concepts.
-        let mut concepts_to_fire: Vec<NeuronId> = Vec::new();
-        for len in 2..=max_len {
+        let mut found: Option<(usize, NeuronId)> = None;
+        // Longest tail wins — wider column receptive field.
+        for len in (2..=max_len).rev() {
             let start = buf_len - len;
             let mut composite = String::new();
             let mut ok = true;
-            let ids: Vec<NeuronId> = self.recent_atoms.iter().skip(start).copied().collect();
-            for (i, id) in ids.iter().enumerate() {
+            for (i, id) in self.recent_atoms.iter().skip(start).enumerate() {
                 if let Some(n) = self.neurons.get(*id as usize) {
                     if i > 0 { composite.push('~'); }
                     composite.push_str(&n.label);
@@ -368,23 +373,27 @@ impl Pool {
             if let Some(&cid) = self.label_to_id.get(&composite) {
                 if let Some(n) = self.neurons.get(cid as usize) {
                     if !n.is_atom() {
-                        concepts_to_fire.push(cid);
+                        found = Some((len, cid));
+                        break;
                     }
                 }
             }
         }
 
-        for cid in concepts_to_fire {
-            // Concepts always fire at unit activation when their
-            // member-sequence matches; the matched-and-fired distinction
-            // is what makes this "recognition," not a soft estimate.
+        if let Some((len, cid)) = found {
+            for _ in 0..len {
+                self.recent_atoms.pop_back();
+            }
+            self.recent_atoms.push_back(cid);
             self.activation.insert(cid, 1.0);
             self.currently_firing.insert(cid);
-            self.push_recent(cid);
             if let Some(n) = self.neurons.get_mut(cid as usize) {
                 n.use_count = n.use_count.saturating_add(1);
                 n.last_fired_tick = tick;
             }
+            true
+        } else {
+            false
         }
     }
 

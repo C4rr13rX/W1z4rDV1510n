@@ -461,6 +461,128 @@ fn experiment_g() {
     println!();
 }
 
+// -----------------------------------------------------------------
+// Experiment H — Morpheme → Word Emergence
+// -----------------------------------------------------------------
+//
+// Train a single pool on a morpheme-rich English corpus.  Each
+// observation is one whole word, repeated many times.  After
+// training, dump emerged concepts grouped by hierarchy level:
+//   level 1 = members all atoms (morphemes like "run", "ing")
+//   level 2 = members include at least one concept (words like
+//             "running" = [run-concept, ing-concept])
+//   level 3+ = members include level-2 concepts (phrases)
+//
+// If the substrate is doing what spec §4.A says it should, common
+// morphemes should appear at level 1 and whole words should appear
+// at level 2.
+
+fn experiment_h() {
+    println!("--- Experiment H: Morpheme → Word Emergence ---");
+    println!("Train on a corpus of inflected English words; show what columns formed.\n");
+
+    // Morpheme-rich vocabulary.  Words deliberately share roots ("run",
+    // "play", "walk") and affixes ("-s", "-ing", "-er", "-ed").
+    let corpus: &[&str] = &[
+        // run family
+        "run", "runs", "running", "runner", "runners",
+        // play family
+        "play", "plays", "playing", "player", "players", "played",
+        // walk family
+        "walk", "walks", "walking", "walker", "walkers", "walked",
+        // jump family
+        "jump", "jumps", "jumping", "jumper", "jumped",
+        // bare morphemes seen alone too
+        "ing", "er", "ed", "s",
+    ];
+
+    let mut cfg = BrainConfig::default();
+    cfg.binding_emergence_threshold = u32::MAX; // single pool, no binding interesting
+    let mut brain = Brain::new(cfg);
+    let mut pc = PoolConfig::defaults("words", 1);
+    pc.recent_atoms_window         = 4096;
+    pc.concept_emergence_threshold = 3;
+    pc.max_concept_member_count    = 16;
+    pc.decay_rate                  = 0.00001;
+    pc.prune_floor                 = 0.0005;
+    let pool = brain.create_pool(pc,
+        Box::new(BytePassthroughEncoding { prefix: "w" }) as Box<dyn AtomEncoding>);
+
+    // 10 epochs over the corpus, shuffled per epoch so cross-word
+    // boundary patterns don't dominate.
+    for ep in 0..10 {
+        let perm = permutation_for_epoch(corpus.len(), ep);
+        for i in perm {
+            brain.observe(pool, corpus[i].as_bytes());
+            brain.advance_tick();
+        }
+    }
+
+    // Inspect: categorize concepts by hierarchy level and decode their
+    // text via the pool's recursive decoder.
+    let pool_arc = brain.fabric().pool(pool).unwrap();
+    let p = pool_arc.read();
+
+    let mut by_level: std::collections::BTreeMap<usize, Vec<(String, usize, u64)>> =
+        std::collections::BTreeMap::new();
+
+    for n in p.iter_neurons() {
+        if n.is_atom() { continue; }
+        // Compute level: 1 = all atom members; 2 = at least one concept member.
+        let mut max_member_level = 0;
+        for m in &n.members {
+            if m.pool != pool { continue; }
+            if let Some(mn) = p.get(m.neuron) {
+                if mn.is_atom() {
+                    max_member_level = max_member_level.max(0);
+                } else {
+                    // Recursively determine level — at minimum 1.
+                    let depth = concept_depth(&p, m.neuron, 0);
+                    max_member_level = max_member_level.max(depth);
+                }
+            }
+        }
+        let level = max_member_level + 1;
+        let decoded = p.decode_concept_members(&n.members);
+        let text = String::from_utf8_lossy(&decoded).into_owned();
+        by_level.entry(level).or_default().push((text, n.members.len(), n.use_count));
+    }
+
+    let total = by_level.values().map(|v| v.len()).sum::<usize>();
+    println!("  Emerged {} concept neurons total.\n", total);
+    for (level, mut concepts) in by_level {
+        concepts.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        println!("  Level {} concepts ({}):", level, concepts.len());
+        println!("      use_count  members   decoded_text");
+        for (text, members, uc) in concepts.iter().take(20) {
+            println!("      {:>9}  {:>7}   {:?}", uc, members, text);
+        }
+        if concepts.len() > 20 {
+            println!("      ... ({} more)", concepts.len() - 20);
+        }
+        println!();
+    }
+}
+
+fn concept_depth(pool: &w1z4rd_brain::Pool, id: w1z4rd_brain::NeuronId, depth: usize) -> usize {
+    if depth > 8 { return depth; } // recursion guard
+    let n = match pool.get(id) { Some(n) => n, None => return depth };
+    if n.is_atom() { return 0; }
+    let mut max_child = 0;
+    for m in &n.members {
+        if m.pool != pool.id() { continue; }
+        if let Some(mn) = pool.get(m.neuron) {
+            if mn.is_atom() {
+                max_child = max_child.max(0);
+            } else {
+                let d = concept_depth(pool, m.neuron, depth + 1);
+                max_child = max_child.max(d + 1);
+            }
+        }
+    }
+    max_child
+}
+
 fn main() {
     println!("=== W1z4rD Brain — Empirical Validation Harness ===\n");
     experiment_a();
@@ -470,5 +592,6 @@ fn main() {
     experiment_e();
     experiment_f();
     experiment_g();
+    experiment_h();
     println!("=== Done ===");
 }
