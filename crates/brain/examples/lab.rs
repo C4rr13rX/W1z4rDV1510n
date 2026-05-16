@@ -49,31 +49,24 @@ fn build_brain(window: usize, concept_threshold: u32) -> Brain {
     brain
 }
 
-/// Deterministic per-epoch permutation.  Each epoch trains in a
-/// different order so cross-pair boundary atom-sequences don't
-/// accumulate to threshold — only the intra-pair completion sequences
-/// (which repeat verbatim each epoch) cross threshold and become
-/// concepts.  This is the closest substrate-faithful analog to "I just
-/// saw a different example, not a continuation of the last one"
-/// without adding an explicit segmentation primitive.
+/// Deterministic per-epoch Fisher-Yates permutation using xorshift64.
+/// Each epoch trains in a different order so cross-pair boundary
+/// atom-sequences don't accumulate to threshold — only the intra-pair
+/// completion sequences (which repeat verbatim each epoch) cross
+/// threshold and become concepts.
 fn permutation_for_epoch(n: usize, epoch: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..n).collect();
-    // Constant-stride rotation per epoch — deterministic shuffle with no PRNG dep.
-    let stride = (1 + epoch * 7) % n.max(1);
-    idx.rotate_left(stride);
-    // Then a deterministic odd/even split so consecutive pairs aren't always neighbors.
-    let mut shuffled = Vec::with_capacity(n);
-    for i in 0..n {
-        let j = (i * 13 + epoch * 31) % n.max(1);
-        shuffled.push(idx[j]);
+    let mut state: u64 = 0xC0FFEE_CAFE_BABE
+        ^ (epoch as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    if state == 0 { state = 0xDEAD_BEEF_C0FFEE; }
+    for i in (1..n).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let j = (state as usize) % (i + 1);
+        idx.swap(i, j);
     }
-    // Drop duplicates introduced by modular jumping while preserving first-seen order.
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(n);
-    for v in shuffled.iter().chain(idx.iter()) {
-        if seen.insert(*v) { out.push(*v); }
-    }
-    out
+    idx
 }
 
 fn train_pair(brain: &mut Brain, prompt: &[u8], completion: &[u8]) {
@@ -378,6 +371,96 @@ fn experiment_e() {
     println!();
 }
 
+// -----------------------------------------------------------------
+// Experiment F — Clean Single-Atom Pairs (substrate granularity test)
+// -----------------------------------------------------------------
+//
+// Each prompt is one byte; each completion is its uppercase letter
+// doubled (e.g. 'A' → "AA").  No within-pair repetition complexity,
+// no cross-pair shared atoms.  This tests whether the substrate
+// retrieves precisely under conditions favoring it.
+
+fn experiment_f() {
+    println!("--- Experiment F: Clean Single-Atom Pairs ---");
+    println!("Each pair: byte X → 'XX'.  Tests substrate's baseline precision.\n");
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (b'A'..=b'Z')
+        .map(|c| (vec![c], vec![c, c]))
+        .collect();
+    let n = pairs.len();
+
+    let mut brain = build_brain(/*window*/ 1024, /*threshold*/ 3);
+    train_corpus(&mut brain, &pairs, 6);
+
+    let mut exact = 0usize;
+    let mut contains = 0usize;
+    let mut samples = Vec::new();
+    for (i, (p, c)) in pairs.iter().enumerate() {
+        let answer = recall(&mut brain, p).unwrap_or_default();
+        if &answer == c { exact += 1; }
+        if !c.is_empty() && answer.windows(c.len()).any(|w| w == c.as_slice()) {
+            contains += 1;
+        }
+        if i < 5 {
+            samples.push((p.clone(), c.clone(), answer));
+        }
+    }
+    let s = brain.stats();
+    println!("  N={}  exact_recall={}/{} ({:.1}%)  contains_recall={}/{} ({:.1}%)",
+        n, exact, n, pct(exact, n), contains, n, pct(contains, n));
+    println!("  neurons={}  terminals={}  total_binding={}",
+        s.total_neurons, s.total_terminals, s.total_binding);
+    for (p, c, a) in &samples {
+        println!("    prompt={:?}  target={:?}  answer={:?}",
+            fmt_bytes(p), fmt_bytes(c), fmt_bytes(a));
+    }
+    println!();
+}
+
+// -----------------------------------------------------------------
+// Experiment G — Clean unique-pair scaling
+// -----------------------------------------------------------------
+//
+// 4-byte prompts mapping to 4-byte completions with every pair
+// genuinely unique (each byte position varies).  Reveals how high
+// the substrate's exact-recall ceiling goes when training data
+// avoids shared-token confusion.
+
+fn experiment_g() {
+    println!("--- Experiment G: Clean Unique-Pair Scaling ---");
+    println!("Pairs: prompt='P'+3 unique digits → completion='C'+SAME 3 digits.");
+    println!("All pairs distinct; same 1-1 mapping the brain must memorize.\n");
+    println!("     N   epochs   exact%   contains%   neurons   terminals");
+    println!("  ----  -------  -------  ----------  --------  ----------");
+    for &n in &[10_usize, 26, 50, 100, 250, 500] {
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..n)
+            .map(|i| {
+                let p = format!("P{:03}", i).into_bytes();
+                let c = format!("C{:03}", i).into_bytes();
+                (p, c)
+            })
+            .collect();
+        let mut brain = build_brain(/*window*/ 4096, /*threshold*/ 3);
+        let epochs = 6;
+        train_corpus(&mut brain, &pairs, epochs);
+
+        let mut exact = 0usize;
+        let mut contains = 0usize;
+        for (p, c) in &pairs {
+            let answer = recall(&mut brain, p).unwrap_or_default();
+            if &answer == c { exact += 1; }
+            if !c.is_empty() && answer.windows(c.len()).any(|w| w == c.as_slice()) {
+                contains += 1;
+            }
+        }
+        let s = brain.stats();
+        println!("  {:>4}  {:>7}  {:>6.1}%  {:>9.1}%  {:>8}  {:>10}",
+            n, epochs, pct(exact, n), pct(contains, n),
+            s.total_neurons, s.total_terminals);
+    }
+    println!();
+}
+
 fn main() {
     println!("=== W1z4rD Brain — Empirical Validation Harness ===\n");
     experiment_a();
@@ -385,5 +468,7 @@ fn main() {
     experiment_c();
     experiment_d();
     experiment_e();
+    experiment_f();
+    experiment_g();
     println!("=== Done ===");
 }
