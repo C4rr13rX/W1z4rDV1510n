@@ -346,7 +346,7 @@ def train_triples(node_url: str, ready: list[tuple[str, str]],
                   verbose: bool) -> dict:
     """Train each (image, audio, text) triple `repeats` times, shuffled
     per epoch.  Reports a summary."""
-    print(f"\n[train] {len(ready)} objects × {repeats} epochs", flush=True)
+    print(f"\n[train] {len(ready)} objects x {repeats} epochs", flush=True)
     fails = 0
     for epoch in range(repeats):
         for word, _category in shuffled(ready, seed=epoch * 1009 + 17):
@@ -451,9 +451,9 @@ def main() -> int:
     res = probe_directions(args.node, ready, cache)
     n = max(res["total"], 1)
     print(f"\n=== CROSS-MODAL RECALL ===")
-    print(f"  image → others:   {res['image']}/{n}  ({100*res['image']/n:.1f}%)")
-    print(f"  audio → others:   {res['audio']}/{n}  ({100*res['audio']/n:.1f}%)")
-    print(f"  text  → others:   {res['text']}/{n}  ({100*res['text']/n:.1f}%)")
+    print(f"  image -> others:   {res['image']}/{n}  ({100*res['image']/n:.1f}%)")
+    print(f"  audio -> others:   {res['audio']}/{n}  ({100*res['audio']/n:.1f}%)")
+    print(f"  text  -> others:   {res['text']}/{n}  ({100*res['text']/n:.1f}%)")
     return 0
 
 

@@ -335,7 +335,7 @@ def shuffled(items: list, seed: int) -> list:
 def train_triples(node_url: str, ready: list[tuple[str, str]],
                   cache_dir: Path, repeats: int, lr: float,
                   verbose: bool) -> dict:
-    print(f"\n[train] {len(ready)} K-12 vocab terms × {repeats} epochs", flush=True)
+    print(f"\n[train] {len(ready)} K-12 vocab terms x {repeats} epochs", flush=True)
     fails = 0
     for epoch in range(repeats):
         for word, _category in shuffled(ready, seed=epoch * 2011 + 31):
@@ -438,9 +438,9 @@ def main() -> int:
     res = probe_directions(args.node, ready, cache)
     n = max(res["total"], 1)
     print(f"\n=== CROSS-MODAL RECALL (K-12) ===")
-    print(f"  image → others:   {res['image']}/{n}  ({100*res['image']/n:.1f}%)")
-    print(f"  audio → others:   {res['audio']}/{n}  ({100*res['audio']/n:.1f}%)")
-    print(f"  text  → others:   {res['text']}/{n}  ({100*res['text']/n:.1f}%)")
+    print(f"  image -> others:   {res['image']}/{n}  ({100*res['image']/n:.1f}%)")
+    print(f"  audio -> others:   {res['audio']}/{n}  ({100*res['audio']/n:.1f}%)")
+    print(f"  text  -> others:   {res['text']}/{n}  ({100*res['text']/n:.1f}%)")
     print(f"\n  by category:")
     for cat, c in sorted(res["by_category"].items()):
         n_cat = max(c["n"], 1)
