@@ -1,0 +1,1047 @@
+[ensure] 134 vocab entries; cache at D:\Projects\W1z4rDV1510n\data\multimodal_toddler_v2
+  [fetch] image for 'lion' (wiki: Lion)
+  [polly] audio for 'lion'
+  [fetch] image for 'tiger' (wiki: Tiger)
+  [polly] audio for 'tiger'
+  [fetch] image for 'bear' (wiki: Bear)
+  [polly] audio for 'bear'
+  [fetch] image for 'elephant' (wiki: Elephant)
+  [polly] audio for 'elephant'
+  [fetch] image for 'monkey' (wiki: Monkey)
+  [polly] audio for 'monkey'
+  [fetch] image for 'rabbit' (wiki: Rabbit)
+  [polly] audio for 'rabbit'
+  [fetch] image for 'mouse' (wiki: Mouse)
+  [polly] audio for 'mouse'
+  [fetch] image for 'frog' (wiki: Frog)
+  [polly] audio for 'frog'
+  [fetch] image for 'butterfly' (wiki: Butterfly)
+  [polly] audio for 'butterfly'
+  [fetch] image for 'snake' (wiki: Snake)
+  [polly] audio for 'snake'
+  [fetch] image for 'turtle' (wiki: Turtle)
+  [polly] audio for 'turtle'
+  [fetch] image for 'owl' (wiki: Owl)
+  [polly] audio for 'owl'
+  [fetch] image for 'bee' (wiki: Bee)
+  [polly] audio for 'bee'
+  [fetch] image for 'ant' (wiki: Ant)
+  [polly] audio for 'ant'
+  [fetch] image for 'giraffe' (wiki: Giraffe)
+  [polly] audio for 'giraffe'
+  [fetch] image for 'apple' (wiki: Apple)
+  [polly] audio for 'apple'
+  [fetch] image for 'banana' (wiki: Banana)
+  [polly] audio for 'banana'
+  [fetch] image for 'bread' (wiki: Bread)
+  [polly] audio for 'bread'
+  [fetch] image for 'milk' (wiki: Milk)
+  [polly] audio for 'milk'
+  [fetch] image for 'cheese' (wiki: Cheese)
+  [polly] audio for 'cheese'
+  [fetch] image for 'egg' (wiki: Egg)
+  [polly] audio for 'egg'
+  [fetch] image for 'juice' (wiki: Juice)
+  [polly] audio for 'juice'
+  [fetch] image for 'water' (wiki: Water)
+  [polly] audio for 'water'
+  [fetch] image for 'cookie' (wiki: Biscuit)
+  [polly] audio for 'cookie'
+  [fetch] image for 'cake' (wiki: Cake)
+  [polly] audio for 'cake'
+  [fetch] image for 'pizza' (wiki: Pizza)
+  [polly] audio for 'pizza'
+  [fetch] image for 'orange' (wiki: Orange_(fruit))
+  [polly] audio for 'orange'
+  [fetch] image for 'grape' (wiki: Grape)
+  [polly] audio for 'grape'
+  [fetch] image for 'strawberry' (wiki: Strawberry)
+  [polly] audio for 'strawberry'
+  [fetch] image for 'carrot' (wiki: Carrot)
+  [polly] audio for 'carrot'
+  [fetch] image for 'potato' (wiki: Potato)
+  [polly] audio for 'potato'
+  [fetch] image for 'tomato' (wiki: Tomato)
+  [polly] audio for 'tomato'
+  [fetch] image for 'rice' (wiki: Rice)
+  [polly] audio for 'rice'
+  [fetch] image for 'pasta' (wiki: Pasta)
+  [polly] audio for 'pasta'
+  [fetch] image for 'soup' (wiki: Soup)
+  [polly] audio for 'soup'
+  [fetch] image for 'honey' (wiki: Honey)
+  [polly] audio for 'honey'
+  [fetch] image for 'butter' (wiki: Butter)
+  [polly] audio for 'butter'
+  [fetch] image for 'eye' (wiki: Human_eye)
+  [polly] audio for 'eye'
+  [fetch] image for 'ear' (wiki: Ear)
+  [polly] audio for 'ear'
+  [fetch] image for 'nose' (wiki: Human_nose)
+  [polly] audio for 'nose'
+  [fetch] image for 'mouth' (wiki: Mouth)
+  [polly] audio for 'mouth'
+  [fetch] image for 'hand' (wiki: Hand)
+  [polly] audio for 'hand'
+  [fetch] image for 'foot' (wiki: Foot)
+  [polly] audio for 'foot'
+  [fetch] image for 'hair' (wiki: Hair)
+  [polly] audio for 'hair'
+  [fetch] image for 'tooth' (wiki: Tooth)
+  [polly] audio for 'tooth'
+  [fetch] image for 'finger' (wiki: Finger)
+  [polly] audio for 'finger'
+  [fetch] image for 'shirt' (wiki: Shirt)
+  [polly] audio for 'shirt'
+  [fetch] image for 'pants' (wiki: Trousers)
+  [polly] audio for 'pants'
+  [fetch] image for 'shoe' (wiki: Shoe)
+  [polly] audio for 'shoe'
+  [fetch] image for 'hat' (wiki: Hat)
+  [polly] audio for 'hat'
+  [fetch] image for 'coat' (wiki: Coat_(clothing))
+  [polly] audio for 'coat'
+  [fetch] image for 'sock' (wiki: Sock)
+  [polly] audio for 'sock'
+  [fetch] image for 'glove' (wiki: Glove)
+  [polly] audio for 'glove'
+  [fetch] image for 'scarf' (wiki: Scarf)
+  [polly] audio for 'scarf'
+  [fetch] image for 'car' (wiki: Car)
+  [polly] audio for 'car'
+  [fetch] image for 'truck' (wiki: Truck)
+  [polly] audio for 'truck'
+  [fetch] image for 'train' (wiki: Train)
+  [polly] audio for 'train'
+  [fetch] image for 'plane' (wiki: Airplane)
+  [polly] audio for 'plane'
+  [fetch] image for 'boat' (wiki: Boat)
+  [polly] audio for 'boat'
+  [fetch] image for 'bike' (wiki: Bicycle)
+  [polly] audio for 'bike'
+  [fetch] image for 'bus' (wiki: Bus)
+  [polly] audio for 'bus'
+  [fetch] image for 'ship' (wiki: Ship)
+  [polly] audio for 'ship'
+  [fetch] image for 'rocket' (wiki: Rocket)
+  [polly] audio for 'rocket'
+  [fetch] image for 'ball' (wiki: Ball)
+  [polly] audio for 'ball'
+  [fetch] image for 'book' (wiki: Book)
+  [polly] audio for 'book'
+  [fetch] image for 'cup' (wiki: Cup)
+  [polly] audio for 'cup'
+  [fetch] image for 'chair' (wiki: Chair)
+  [polly] audio for 'chair'
+  [fetch] image for 'table' (wiki: Table_(furniture))
+  [polly] audio for 'table'
+  [fetch] image for 'bed' (wiki: Bed)
+  [polly] audio for 'bed'
+  [fetch] image for 'clock' (wiki: Clock)
+  [polly] audio for 'clock'
+  [fetch] image for 'phone' (wiki: Telephone)
+  [polly] audio for 'phone'
+  [fetch] image for 'key' (wiki: Key_(lock))
+  [polly] audio for 'key'
+  [fetch] image for 'door' (wiki: Door)
+  [polly] audio for 'door'
+  [fetch] image for 'window' (wiki: Window)
+  [polly] audio for 'window'
+  [fetch] image for 'lamp' (wiki: Lamp_(lighting))
+  [skip] no image for 'lamp'
+  [fetch] image for 'toy' (wiki: Toy)
+  [polly] audio for 'toy'
+  [fetch] image for 'doll' (wiki: Doll)
+  [polly] audio for 'doll'
+  [fetch] image for 'balloon' (wiki: Balloon)
+  [polly] audio for 'balloon'
+  [fetch] image for 'kite' (wiki: Kite)
+  [wiki] error downloading 'https://upload.wikimedia.org/wikipedia/commons/thumb/9/96/Kitesflying.jpg/330px-Kitesflying.jpg': HTTP Error 429: Your bot is making too many requests. Please reduce your request rate or contact bot-traffic@wikimedia.org (f263c81)
+  [skip] no image for 'kite'
+  [fetch] image for 'drum' (wiki: Drum)
+  [polly] audio for 'drum'
+  [fetch] image for 'tree' (wiki: Tree)
+  [polly] audio for 'tree'
+  [fetch] image for 'flower' (wiki: Flower)
+  [polly] audio for 'flower'
+  [fetch] image for 'sun' (wiki: Sun)
+  [polly] audio for 'sun'
+  [fetch] image for 'moon' (wiki: Moon)
+  [polly] audio for 'moon'
+  [fetch] image for 'star' (wiki: Star)
+  [polly] audio for 'star'
+  [fetch] image for 'cloud' (wiki: Cloud)
+  [polly] audio for 'cloud'
+  [fetch] image for 'leaf' (wiki: Leaf)
+  [polly] audio for 'leaf'
+  [fetch] image for 'grass' (wiki: Grass)
+  [polly] audio for 'grass'
+  [fetch] image for 'river' (wiki: River)
+  [polly] audio for 'river'
+  [fetch] image for 'mountain' (wiki: Mountain)
+  [polly] audio for 'mountain'
+  [fetch] image for 'beach' (wiki: Beach)
+  [polly] audio for 'beach'
+  [fetch] image for 'rain' (wiki: Rain)
+  [polly] audio for 'rain'
+  [fetch] image for 'snow' (wiki: Snow)
+  [polly] audio for 'snow'
+  [fetch] image for 'red' (wiki: Red)
+  [polly] audio for 'red'
+  [fetch] image for 'blue' (wiki: Blue)
+  [polly] audio for 'blue'
+  [fetch] image for 'green' (wiki: Green)
+  [polly] audio for 'green'
+  [fetch] image for 'yellow' (wiki: Yellow)
+  [polly] audio for 'yellow'
+  [fetch] image for 'black' (wiki: Black)
+  [polly] audio for 'black'
+  [fetch] image for 'white' (wiki: White)
+  [polly] audio for 'white'
+  [fetch] image for 'orange_color' (wiki: Orange_(colour))
+  [polly] audio for 'orange_color'
+  [fetch] image for 'purple' (wiki: Purple)
+  [polly] audio for 'purple'
+  [fetch] image for 'pink' (wiki: Pink)
+  [polly] audio for 'pink'
+  [fetch] image for 'brown' (wiki: Brown)
+  [polly] audio for 'brown'
+  [fetch] image for 'house' (wiki: House)
+  [polly] audio for 'house'
+  [fetch] image for 'school' (wiki: School)
+  [polly] audio for 'school'
+  [fetch] image for 'hospital' (wiki: Hospital)
+  [polly] audio for 'hospital'
+  [fetch] image for 'farm' (wiki: Farm)
+  [polly] audio for 'farm'
+  [fetch] image for 'park' (wiki: Park)
+  [polly] audio for 'park'
+  [fetch] image for 'zoo' (wiki: Zoo)
+  [polly] audio for 'zoo'
+  [fetch] image for 'shop' (wiki: Shop)
+  [skip] no image for 'shop'
+  [fetch] image for 'bridge' (wiki: Bridge)
+  [polly] audio for 'bridge'
+  [fetch] image for 'spoon' (wiki: Spoon)
+  [polly] audio for 'spoon'
+  [fetch] image for 'fork' (wiki: Fork)
+  [polly] audio for 'fork'
+  [fetch] image for 'knife' (wiki: Knife)
+  [polly] audio for 'knife'
+  [fetch] image for 'pen' (wiki: Pen)
+  [polly] audio for 'pen'
+  [fetch] image for 'pencil' (wiki: Pencil)
+  [polly] audio for 'pencil'
+  [fetch] image for 'brush' (wiki: Brush)
+  [polly] audio for 'brush'
+  [fetch] image for 'scissors' (wiki: Scissors)
+  [polly] audio for 'scissors'
+  [fetch] image for 'hammer' (wiki: Hammer)
+  [polly] audio for 'hammer'
+  [fetch] image for 'umbrella' (wiki: Umbrella)
+  [polly] audio for 'umbrella'
+  [fetch] image for 'bag' (wiki: Bag)
+  [polly] audio for 'bag'
+  [fetch] image for 'box' (wiki: Box)
+  [polly] audio for 'box'
+  [fetch] image for 'plate' (wiki: Plate)
+  [skip] no image for 'plate'
+  [fetch] image for 'bowl' (wiki: Bowl)
+  [polly] audio for 'bowl'
+[ready] 130/134 objects have both image + audio
+
+[train] 130 objects x 6 epochs
+  ep1/6 soup: img_labels=552 aud_labels=61
+  ep1/6 ear: img_labels=376 aud_labels=64
+  ep1/6 truck: img_labels=569 aud_labels=77
+  ep1/6 elephant: img_labels=460 aud_labels=78
+  ep1/6 scissors: img_labels=257 aud_labels=74
+  ep1/6 clock: img_labels=439 aud_labels=74
+  ep1/6 horse: img_labels=524 aud_labels=71
+  ep1/6 tomato: img_labels=334 aud_labels=75
+  ep1/6 train: img_labels=558 aud_labels=74
+  ep1/6 door: img_labels=333 aud_labels=63
+  ep1/6 hospital: img_labels=481 aud_labels=86
+  ep1/6 giraffe: img_labels=626 aud_labels=77
+  ep1/6 brown: img_labels=749 aud_labels=77
+  ep1/6 tiger: img_labels=525 aud_labels=79
+  ep1/6 snow: img_labels=376 aud_labels=70
+  ep1/6 house: img_labels=555 aud_labels=78
+  ep1/6 shirt: img_labels=461 aud_labels=80
+  ep1/6 butter: img_labels=350 aud_labels=75
+  ep1/6 farm: img_labels=410 aud_labels=79
+  ep1/6 scarf: img_labels=341 aud_labels=76
+  ep1/6 cup: img_labels=549 aud_labels=63
+  ep1/6 milk: img_labels=329 aud_labels=62
+  ep1/6 chicken: img_labels=371 aud_labels=81
+  ep1/6 balloon: img_labels=498 aud_labels=74
+  ep1/6 cheese: img_labels=577 aud_labels=69
+  ep1/6 park: img_labels=593 aud_labels=72
+  ep1/6 leaf: img_labels=346 aud_labels=63
+  ep1/6 glove: img_labels=591 aud_labels=68
+  ep1/6 bed: img_labels=446 aud_labels=67
+  ep1/6 hat: img_labels=324 aud_labels=72
+  ep1/6 box: img_labels=307 aud_labels=67
+  ep1/6 cat: img_labels=449 aud_labels=68
+  ep1/6 phone: img_labels=482 aud_labels=79
+  ep1/6 shoe: img_labels=615 aud_labels=90
+  ep1/6 plane: img_labels=289 aud_labels=78
+  ep1/6 orange_color: img_labels=458 aud_labels=117
+  ep1/6 tooth: img_labels=661 aud_labels=66
+  ep1/6 umbrella: img_labels=296 aud_labels=78
+  ep1/6 orange: img_labels=431 aud_labels=87
+  ep1/6 red: img_labels=502 aud_labels=77
+  ep1/6 owl: img_labels=470 aud_labels=90
+  ep1/6 knife: img_labels=427 aud_labels=67
+  ep1/6 turtle: img_labels=523 aud_labels=73
+  ep1/6 hammer: img_labels=528 aud_labels=79
+  ep1/6 mountain: img_labels=515 aud_labels=73
+  ep1/6 moon: img_labels=326 aud_labels=67
+  ep1/6 mouse: img_labels=277 aud_labels=65
+  ep1/6 bag: img_labels=440 aud_labels=67
+  ep1/6 book: img_labels=404 aud_labels=66
+  ep1/6 cake: img_labels=470 aud_labels=62
+  ep1/6 fork: img_labels=400 aud_labels=74
+  ep1/6 strawberry: img_labels=404 aud_labels=83
+  ep1/6 school: img_labels=564 aud_labels=72
+  ep1/6 bear: img_labels=657 aud_labels=74
+  ep1/6 pants: img_labels=415 aud_labels=68
+  ep1/6 mouth: img_labels=551 aud_labels=69
+  ep1/6 cow: img_labels=525 aud_labels=92
+  ep1/6 rain: img_labels=583 aud_labels=72
+  ep1/6 zoo: img_labels=682 aud_labels=69
+  ep1/6 ant: img_labels=588 aud_labels=68
+  ep1/6 cookie: img_labels=344 aud_labels=69
+  ep1/6 flower: img_labels=470 aud_labels=79
+  ep1/6 river: img_labels=523 aud_labels=73
+  ep1/6 bread: img_labels=464 aud_labels=69
+  ep1/6 spoon: img_labels=424 aud_labels=66
+  ep1/6 egg: img_labels=567 aud_labels=70
+  ep1/6 green: img_labels=486 aud_labels=73
+  ep1/6 dog: img_labels=618 aud_labels=78
+  ep1/6 ball: img_labels=633 aud_labels=77
+  ep1/6 sock: img_labels=449 aud_labels=72
+  ep1/6 rocket: img_labels=360 aud_labels=83
+  ep1/6 honey: img_labels=461 aud_labels=77
+  ep1/6 sheep: img_labels=502 aud_labels=80
+  ep1/6 eye: img_labels=453 aud_labels=82
+  ep1/6 finger: img_labels=457 aud_labels=73
+  ep1/6 fish: img_labels=500 aud_labels=64
+  ep1/6 pasta: img_labels=538 aud_labels=80
+  ep1/6 window: img_labels=556 aud_labels=86
+  ep1/6 doll: img_labels=422 aud_labels=79
+  ep1/6 butterfly: img_labels=575 aud_labels=90
+  ep1/6 chair: img_labels=357 aud_labels=68
+  ep1/6 tree: img_labels=549 aud_labels=72
+  ep1/6 coat: img_labels=437 aud_labels=61
+  ep1/6 pink: img_labels=316 aud_labels=62
+  ep1/6 lion: img_labels=470 aud_labels=97
+  ep1/6 foot: img_labels=318 aud_labels=71
+  ep1/6 carrot: img_labels=389 aud_labels=69
+  ep1/6 duck: img_labels=494 aud_labels=68
+  ep1/6 bowl: img_labels=379 aud_labels=90
+  ep1/6 rabbit: img_labels=617 aud_labels=81
+  ep1/6 pen: img_labels=217 aud_labels=74
+  ep1/6 rice: img_labels=736 aud_labels=79
+  ep1/6 banana: img_labels=579 aud_labels=77
+  ep1/6 black: img_labels=384 aud_labels=77
+  ep1/6 ship: img_labels=610 aud_labels=68
+  ep1/6 boat: img_labels=446 aud_labels=69
+  ep1/6 pencil: img_labels=338 aud_labels=75
+  ep1/6 snake: img_labels=432 aud_labels=57
+  ep1/6 apple: img_labels=470 aud_labels=75
+  ep1/6 purple: img_labels=660 aud_labels=67
+  ep1/6 pig: img_labels=496 aud_labels=59
+  ep1/6 bus: img_labels=638 aud_labels=80
+  ep1/6 frog: img_labels=468 aud_labels=82
+  ep1/6 hand: img_labels=384 aud_labels=80
+  ep1/6 star: img_labels=251 aud_labels=83
+  ep1/6 drum: img_labels=567 aud_labels=76
+  ep1/6 key: img_labels=432 aud_labels=64
+  ep1/6 potato: img_labels=472 aud_labels=77
+  ep1/6 blue: img_labels=518 aud_labels=64
+  ep1/6 car: img_labels=628 aud_labels=77
+  ep1/6 water: img_labels=95 aud_labels=90
+  ep1/6 hair: img_labels=431 aud_labels=66
+  ep1/6 grass: img_labels=748 aud_labels=70
+  ep1/6 yellow: img_labels=460 aud_labels=89
+  ep1/6 nose: img_labels=322 aud_labels=78
+  ep1/6 juice: img_labels=350 aud_labels=70
+  ep1/6 bird: img_labels=704 aud_labels=85
+  ep1/6 bridge: img_labels=457 aud_labels=68
+  ep1/6 monkey: img_labels=565 aud_labels=72
+  ep1/6 pizza: img_labels=558 aud_labels=76
+  ep1/6 toy: img_labels=403 aud_labels=74
+  ep1/6 bike: img_labels=494 aud_labels=74
+  ep1/6 brush: img_labels=648 aud_labels=87
+  ep1/6 sun: img_labels=251 aud_labels=73
+  ep1/6 beach: img_labels=465 aud_labels=62
+  ep1/6 bee: img_labels=464 aud_labels=59
+  ep1/6 grape: img_labels=579 aud_labels=73
+  ep1/6 cloud: img_labels=363 aud_labels=84
+  ep1/6 table: img_labels=449 aud_labels=76
+  ep1/6 white: img_labels=503 aud_labels=85
+  [epoch 1/6] done
+  ep2/6 purple: img_labels=660 aud_labels=67
+  ep2/6 brown: img_labels=749 aud_labels=77
+  ep2/6 shirt: img_labels=461 aud_labels=80
+  ep2/6 cow: img_labels=525 aud_labels=92
+  ep2/6 cheese: img_labels=577 aud_labels=69
+  ep2/6 green: img_labels=486 aud_labels=73
+  ep2/6 carrot: img_labels=389 aud_labels=69
+  ep2/6 park: img_labels=593 aud_labels=72
+  ep2/6 truck: img_labels=569 aud_labels=77
+  ep2/6 elephant: img_labels=460 aud_labels=78
+  ep2/6 balloon: img_labels=498 aud_labels=74
+  ep2/6 apple: img_labels=470 aud_labels=75
+  ep2/6 foot: img_labels=318 aud_labels=71
+  ep2/6 hand: img_labels=384 aud_labels=80
+  ep2/6 yellow: img_labels=460 aud_labels=89
+  ep2/6 frog: img_labels=468 aud_labels=82
+  ep2/6 mountain: img_labels=515 aud_labels=73
+  ep2/6 banana: img_labels=579 aud_labels=77
+  ep2/6 owl: img_labels=470 aud_labels=90
+  ep2/6 rabbit: img_labels=617 aud_labels=81
+  ep2/6 scarf: img_labels=341 aud_labels=76
+  ep2/6 pig: img_labels=496 aud_labels=59
+  ep2/6 blue: img_labels=518 aud_labels=64
+  ep2/6 zoo: img_labels=682 aud_labels=69
+  ep2/6 orange: img_labels=431 aud_labels=87
+  ep2/6 hospital: img_labels=481 aud_labels=86
+  ep2/6 juice: img_labels=350 aud_labels=70
+  ep2/6 red: img_labels=502 aud_labels=77
+  ep2/6 flower: img_labels=470 aud_labels=79
+  ep2/6 pencil: img_labels=338 aud_labels=75
+  ep2/6 water: img_labels=95 aud_labels=90
+  ep2/6 duck: img_labels=494 aud_labels=68
+  ep2/6 key: img_labels=432 aud_labels=64
+  ep2/6 butter: img_labels=350 aud_labels=75
+  ep2/6 bag: img_labels=440 aud_labels=67
+  ep2/6 pink: img_labels=316 aud_labels=62
+  ep2/6 clock: img_labels=439 aud_labels=74
+  ep2/6 house: img_labels=555 aud_labels=78
+  ep2/6 cup: img_labels=549 aud_labels=63
+  ep2/6 car: img_labels=628 aud_labels=77
+  ep2/6 drum: img_labels=567 aud_labels=76
+  ep2/6 butterfly: img_labels=575 aud_labels=90
+  ep2/6 farm: img_labels=410 aud_labels=79
+  ep2/6 mouse: img_labels=277 aud_labels=65
+  ep2/6 scissors: img_labels=257 aud_labels=74
+  ep2/6 grass: img_labels=748 aud_labels=70
+  ep2/6 bird: img_labels=704 aud_labels=85
+  ep2/6 coat: img_labels=437 aud_labels=61
+  ep2/6 book: img_labels=404 aud_labels=66
+  ep2/6 bus: img_labels=638 aud_labels=80
+  ep2/6 horse: img_labels=524 aud_labels=71
+  ep2/6 cloud: img_labels=363 aud_labels=84
+  ep2/6 ship: img_labels=610 aud_labels=68
+  ep2/6 brush: img_labels=648 aud_labels=87
+  ep2/6 rocket: img_labels=360 aud_labels=83
+  ep2/6 chicken: img_labels=371 aud_labels=81
+  ep2/6 train: img_labels=558 aud_labels=74
+  ep2/6 bowl: img_labels=379 aud_labels=90
+  ep2/6 snow: img_labels=376 aud_labels=70
+  ep2/6 beach: img_labels=465 aud_labels=62
+  ep2/6 fish: img_labels=500 aud_labels=64
+  ep2/6 knife: img_labels=427 aud_labels=67
+  ep2/6 river: img_labels=523 aud_labels=73
+  ep2/6 tooth: img_labels=661 aud_labels=66
+  ep2/6 eye: img_labels=453 aud_labels=82
+  ep2/6 tiger: img_labels=525 aud_labels=79
+  ep2/6 door: img_labels=333 aud_labels=63
+  ep2/6 box: img_labels=307 aud_labels=67
+  ep2/6 school: img_labels=564 aud_labels=72
+  ep2/6 strawberry: img_labels=404 aud_labels=83
+  ep2/6 orange_color: img_labels=458 aud_labels=117
+  ep2/6 sock: img_labels=449 aud_labels=72
+  ep2/6 lion: img_labels=470 aud_labels=97
+  ep2/6 ant: img_labels=588 aud_labels=68
+  ep2/6 glove: img_labels=591 aud_labels=68
+  ep2/6 moon: img_labels=326 aud_labels=67
+  ep2/6 umbrella: img_labels=296 aud_labels=78
+  ep2/6 window: img_labels=556 aud_labels=86
+  ep2/6 pizza: img_labels=558 aud_labels=76
+  ep2/6 rice: img_labels=736 aud_labels=79
+  ep2/6 finger: img_labels=457 aud_labels=73
+  ep2/6 tomato: img_labels=334 aud_labels=75
+  ep2/6 mouth: img_labels=551 aud_labels=69
+  ep2/6 giraffe: img_labels=626 aud_labels=77
+  ep2/6 soup: img_labels=552 aud_labels=61
+  ep2/6 ear: img_labels=376 aud_labels=64
+  ep2/6 bread: img_labels=464 aud_labels=69
+  ep2/6 turtle: img_labels=523 aud_labels=73
+  ep2/6 snake: img_labels=432 aud_labels=57
+  ep2/6 hat: img_labels=324 aud_labels=72
+  ep2/6 hammer: img_labels=528 aud_labels=79
+  ep2/6 bee: img_labels=464 aud_labels=59
+  ep2/6 table: img_labels=449 aud_labels=76
+  ep2/6 pasta: img_labels=538 aud_labels=80
+  ep2/6 shoe: img_labels=615 aud_labels=90
+  ep2/6 chair: img_labels=357 aud_labels=68
+  ep2/6 toy: img_labels=403 aud_labels=74
+  ep2/6 doll: img_labels=422 aud_labels=79
+  ep2/6 cat: img_labels=449 aud_labels=68
+  ep2/6 dog: img_labels=618 aud_labels=78
+  ep2/6 white: img_labels=503 aud_labels=85
+  ep2/6 spoon: img_labels=424 aud_labels=66
+  ep2/6 cake: img_labels=470 aud_labels=62
+  ep2/6 sun: img_labels=251 aud_labels=73
+  ep2/6 egg: img_labels=567 aud_labels=70
+  ep2/6 bed: img_labels=446 aud_labels=67
+  ep2/6 grape: img_labels=579 aud_labels=73
+  ep2/6 honey: img_labels=461 aud_labels=77
+  ep2/6 phone: img_labels=482 aud_labels=79
+  ep2/6 fork: img_labels=400 aud_labels=74
+  ep2/6 bear: img_labels=657 aud_labels=74
+  ep2/6 monkey: img_labels=565 aud_labels=72
+  ep2/6 plane: img_labels=289 aud_labels=78
+  ep2/6 leaf: img_labels=346 aud_labels=63
+  ep2/6 bridge: img_labels=457 aud_labels=68
+  ep2/6 rain: img_labels=583 aud_labels=72
+  ep2/6 potato: img_labels=472 aud_labels=77
+  ep2/6 bike: img_labels=494 aud_labels=74
+  ep2/6 star: img_labels=251 aud_labels=83
+  ep2/6 pants: img_labels=415 aud_labels=68
+  ep2/6 hair: img_labels=431 aud_labels=66
+  ep2/6 black: img_labels=384 aud_labels=77
+  ep2/6 ball: img_labels=633 aud_labels=77
+  ep2/6 milk: img_labels=329 aud_labels=62
+  ep2/6 cookie: img_labels=344 aud_labels=69
+  ep2/6 tree: img_labels=549 aud_labels=72
+  ep2/6 nose: img_labels=322 aud_labels=78
+  ep2/6 boat: img_labels=446 aud_labels=69
+  ep2/6 pen: img_labels=217 aud_labels=74
+  ep2/6 sheep: img_labels=502 aud_labels=80
+  [epoch 2/6] done
+  ep3/6 green: img_labels=486 aud_labels=73
+  ep3/6 lion: img_labels=470 aud_labels=97
+  ep3/6 ball: img_labels=633 aud_labels=77
+  ep3/6 milk: img_labels=329 aud_labels=62
+  ep3/6 fish: img_labels=500 aud_labels=64
+  ep3/6 owl: img_labels=470 aud_labels=90
+  ep3/6 rocket: img_labels=360 aud_labels=83
+  ep3/6 orange_color: img_labels=458 aud_labels=117
+  ep3/6 phone: img_labels=482 aud_labels=79
+  ep3/6 pizza: img_labels=558 aud_labels=76
+  ep3/6 hat: img_labels=324 aud_labels=72
+  ep3/6 bike: img_labels=494 aud_labels=74
+  ep3/6 white: img_labels=503 aud_labels=85
+  ep3/6 foot: img_labels=318 aud_labels=71
+  ep3/6 sheep: img_labels=502 aud_labels=80
+  ep3/6 finger: img_labels=457 aud_labels=73
+  ep3/6 mouth: img_labels=551 aud_labels=69
+  ep3/6 juice: img_labels=350 aud_labels=70
+  ep3/6 bowl: img_labels=379 aud_labels=90
+  ep3/6 blue: img_labels=518 aud_labels=64
+  ep3/6 turtle: img_labels=523 aud_labels=73
+  ep3/6 giraffe: img_labels=626 aud_labels=77
+  ep3/6 river: img_labels=523 aud_labels=73
+  ep3/6 soup: img_labels=552 aud_labels=61
+  ep3/6 tomato: img_labels=334 aud_labels=75
+  ep3/6 rice: img_labels=736 aud_labels=79
+  ep3/6 key: img_labels=432 aud_labels=64
+  ep3/6 red: img_labels=502 aud_labels=77
+  ep3/6 purple: img_labels=660 aud_labels=67
+  ep3/6 doll: img_labels=422 aud_labels=79
+  ep3/6 cake: img_labels=470 aud_labels=62
+  ep3/6 car: img_labels=628 aud_labels=77
+  ep3/6 boat: img_labels=446 aud_labels=69
+  ep3/6 honey: img_labels=461 aud_labels=77
+  ep3/6 zoo: img_labels=682 aud_labels=69
+  ep3/6 hair: img_labels=431 aud_labels=66
+  ep3/6 beach: img_labels=465 aud_labels=62
+  ep3/6 banana: img_labels=579 aud_labels=77
+  ep3/6 rabbit: img_labels=617 aud_labels=81
+  ep3/6 sock: img_labels=449 aud_labels=72
+  ep3/6 sun: img_labels=251 aud_labels=73
+  ep3/6 chicken: img_labels=371 aud_labels=81
+  ep3/6 shirt: img_labels=461 aud_labels=80
+  ep3/6 ship: img_labels=610 aud_labels=68
+  ep3/6 balloon: img_labels=498 aud_labels=74
+  ep3/6 cat: img_labels=449 aud_labels=68
+  ep3/6 window: img_labels=556 aud_labels=86
+  ep3/6 hand: img_labels=384 aud_labels=80
+  ep3/6 strawberry: img_labels=404 aud_labels=83
+  ep3/6 shoe: img_labels=615 aud_labels=90
+  ep3/6 monkey: img_labels=565 aud_labels=72
+  ep3/6 bag: img_labels=440 aud_labels=67
+  ep3/6 snow: img_labels=376 aud_labels=70
+  ep3/6 dog: img_labels=618 aud_labels=78
+  ep3/6 cheese: img_labels=577 aud_labels=69
+  ep3/6 pants: img_labels=415 aud_labels=68
+  ep3/6 umbrella: img_labels=296 aud_labels=78
+  ep3/6 farm: img_labels=410 aud_labels=79
+  ep3/6 leaf: img_labels=346 aud_labels=63
+  ep3/6 apple: img_labels=470 aud_labels=75
+  ep3/6 black: img_labels=384 aud_labels=77
+  ep3/6 butterfly: img_labels=575 aud_labels=90
+  ep3/6 nose: img_labels=322 aud_labels=78
+  ep3/6 knife: img_labels=427 aud_labels=67
+  ep3/6 brush: img_labels=648 aud_labels=87
+  ep3/6 plane: img_labels=289 aud_labels=78
+  ep3/6 book: img_labels=404 aud_labels=66
+  ep3/6 grape: img_labels=579 aud_labels=73
+  ep3/6 park: img_labels=593 aud_labels=72
+  ep3/6 moon: img_labels=326 aud_labels=67
+  ep3/6 ant: img_labels=588 aud_labels=68
+  ep3/6 scissors: img_labels=257 aud_labels=74
+  ep3/6 rain: img_labels=583 aud_labels=72
+  ep3/6 door: img_labels=333 aud_labels=63
+  ep3/6 snake: img_labels=432 aud_labels=57
+  ep3/6 pink: img_labels=316 aud_labels=62
+  ep3/6 glove: img_labels=591 aud_labels=68
+  ep3/6 box: img_labels=307 aud_labels=67
+  ep3/6 drum: img_labels=567 aud_labels=76
+  ep3/6 mouse: img_labels=277 aud_labels=65
+  ep3/6 pig: img_labels=496 aud_labels=59
+  ep3/6 table: img_labels=449 aud_labels=76
+  ep3/6 bird: img_labels=704 aud_labels=85
+  ep3/6 pen: img_labels=217 aud_labels=74
+  ep3/6 bus: img_labels=638 aud_labels=80
+  ep3/6 spoon: img_labels=424 aud_labels=66
+  ep3/6 grass: img_labels=748 aud_labels=70
+  ep3/6 tree: img_labels=549 aud_labels=72
+  ep3/6 water: img_labels=95 aud_labels=90
+  ep3/6 bridge: img_labels=457 aud_labels=68
+  ep3/6 brown: img_labels=749 aud_labels=77
+  ep3/6 horse: img_labels=524 aud_labels=71
+  ep3/6 tooth: img_labels=661 aud_labels=66
+  ep3/6 coat: img_labels=437 aud_labels=61
+  ep3/6 fork: img_labels=400 aud_labels=74
+  ep3/6 butter: img_labels=350 aud_labels=75
+  ep3/6 truck: img_labels=569 aud_labels=77
+  ep3/6 school: img_labels=564 aud_labels=72
+  ep3/6 pencil: img_labels=338 aud_labels=75
+  ep3/6 toy: img_labels=403 aud_labels=74
+  ep3/6 orange: img_labels=431 aud_labels=87
+  ep3/6 duck: img_labels=494 aud_labels=68
+  ep3/6 egg: img_labels=567 aud_labels=70
+  ep3/6 cookie: img_labels=344 aud_labels=69
+  ep3/6 bee: img_labels=464 aud_labels=59
+  ep3/6 ear: img_labels=376 aud_labels=64
+  ep3/6 mountain: img_labels=515 aud_labels=73
+  ep3/6 bear: img_labels=657 aud_labels=74
+  ep3/6 hammer: img_labels=528 aud_labels=79
+  ep3/6 train: img_labels=558 aud_labels=74
+  ep3/6 potato: img_labels=472 aud_labels=77
+  ep3/6 bread: img_labels=464 aud_labels=69
+  ep3/6 cup: img_labels=549 aud_labels=63
+  ep3/6 tiger: img_labels=525 aud_labels=79
+  ep3/6 cloud: img_labels=363 aud_labels=84
+  ep3/6 yellow: img_labels=460 aud_labels=89
+  ep3/6 hospital: img_labels=481 aud_labels=86
+  ep3/6 house: img_labels=555 aud_labels=78
+  ep3/6 eye: img_labels=453 aud_labels=82
+  ep3/6 elephant: img_labels=460 aud_labels=78
+  ep3/6 clock: img_labels=439 aud_labels=74
+  ep3/6 bed: img_labels=446 aud_labels=67
+  ep3/6 star: img_labels=251 aud_labels=83
+  ep3/6 carrot: img_labels=389 aud_labels=69
+  ep3/6 flower: img_labels=470 aud_labels=79
+  ep3/6 scarf: img_labels=341 aud_labels=76
+  ep3/6 cow: img_labels=525 aud_labels=92
+  ep3/6 frog: img_labels=468 aud_labels=82
+  ep3/6 pasta: img_labels=538 aud_labels=80
+  ep3/6 chair: img_labels=357 aud_labels=68
+  [epoch 3/6] done
+  ep4/6 mouse: img_labels=277 aud_labels=65
+  ep4/6 park: img_labels=593 aud_labels=72
+  ep4/6 train: img_labels=558 aud_labels=74
+  ep4/6 drum: img_labels=567 aud_labels=76
+  ep4/6 brush: img_labels=648 aud_labels=87
+  ep4/6 bed: img_labels=446 aud_labels=67
+  ep4/6 grape: img_labels=579 aud_labels=73
+  ep4/6 coat: img_labels=437 aud_labels=61
+  ep4/6 door: img_labels=333 aud_labels=63
+  ep4/6 phone: img_labels=482 aud_labels=79
+  ep4/6 mouth: img_labels=551 aud_labels=69
+  ep4/6 tooth: img_labels=661 aud_labels=66
+  ep4/6 bear: img_labels=657 aud_labels=74
+  ep4/6 giraffe: img_labels=626 aud_labels=77
+  ep4/6 egg: img_labels=567 aud_labels=70
+  ep4/6 lion: img_labels=470 aud_labels=97
+  ep4/6 bike: img_labels=494 aud_labels=74
+  ep4/6 milk: img_labels=329 aud_labels=62
+  ep4/6 beach: img_labels=465 aud_labels=62
+  ep4/6 frog: img_labels=468 aud_labels=82
+  ep4/6 potato: img_labels=472 aud_labels=77
+  ep4/6 bread: img_labels=464 aud_labels=69
+  ep4/6 red: img_labels=502 aud_labels=77
+  ep4/6 shoe: img_labels=615 aud_labels=90
+  ep4/6 ship: img_labels=610 aud_labels=68
+  ep4/6 bee: img_labels=464 aud_labels=59
+  ep4/6 rice: img_labels=736 aud_labels=79
+  ep4/6 juice: img_labels=350 aud_labels=70
+  ep4/6 chair: img_labels=357 aud_labels=68
+  ep4/6 hat: img_labels=324 aud_labels=72
+  ep4/6 orange_color: img_labels=458 aud_labels=117
+  ep4/6 strawberry: img_labels=404 aud_labels=83
+  ep4/6 hair: img_labels=431 aud_labels=66
+  ep4/6 scissors: img_labels=257 aud_labels=74
+  ep4/6 foot: img_labels=318 aud_labels=71
+  ep4/6 pink: img_labels=316 aud_labels=62
+  ep4/6 ball: img_labels=633 aud_labels=77
+  ep4/6 tree: img_labels=549 aud_labels=72
+  ep4/6 elephant: img_labels=460 aud_labels=78
+  ep4/6 moon: img_labels=326 aud_labels=67
+  ep4/6 butterfly: img_labels=575 aud_labels=90
+  ep4/6 hospital: img_labels=481 aud_labels=86
+  ep4/6 pants: img_labels=415 aud_labels=68
+  ep4/6 spoon: img_labels=424 aud_labels=66
+  ep4/6 cow: img_labels=525 aud_labels=92
+  ep4/6 turtle: img_labels=523 aud_labels=73
+  ep4/6 cloud: img_labels=363 aud_labels=84
+  ep4/6 river: img_labels=523 aud_labels=73
+  ep4/6 boat: img_labels=446 aud_labels=69
+  ep4/6 dog: img_labels=618 aud_labels=78
+  ep4/6 rocket: img_labels=360 aud_labels=83
+  ep4/6 umbrella: img_labels=296 aud_labels=78
+  ep4/6 carrot: img_labels=389 aud_labels=69
+  ep4/6 hand: img_labels=384 aud_labels=80
+  ep4/6 book: img_labels=404 aud_labels=66
+  ep4/6 sock: img_labels=449 aud_labels=72
+  ep4/6 truck: img_labels=569 aud_labels=77
+  ep4/6 blue: img_labels=518 aud_labels=64
+  ep4/6 key: img_labels=432 aud_labels=64
+  ep4/6 doll: img_labels=422 aud_labels=79
+  ep4/6 bird: img_labels=704 aud_labels=85
+  ep4/6 snow: img_labels=376 aud_labels=70
+  ep4/6 toy: img_labels=403 aud_labels=74
+  ep4/6 pizza: img_labels=558 aud_labels=76
+  ep4/6 pig: img_labels=496 aud_labels=59
+  ep4/6 hammer: img_labels=528 aud_labels=79
+  ep4/6 box: img_labels=307 aud_labels=67
+  ep4/6 clock: img_labels=439 aud_labels=74
+  ep4/6 bag: img_labels=440 aud_labels=67
+  ep4/6 cheese: img_labels=577 aud_labels=69
+  ep4/6 sheep: img_labels=502 aud_labels=80
+  ep4/6 cake: img_labels=470 aud_labels=62
+  ep4/6 car: img_labels=628 aud_labels=77
+  ep4/6 plane: img_labels=289 aud_labels=78
+  ep4/6 cup: img_labels=549 aud_labels=63
+  ep4/6 fork: img_labels=400 aud_labels=74
+  ep4/6 bridge: img_labels=457 aud_labels=68
+  ep4/6 rain: img_labels=583 aud_labels=72
+  ep4/6 zoo: img_labels=682 aud_labels=69
+  ep4/6 black: img_labels=384 aud_labels=77
+  ep4/6 knife: img_labels=427 aud_labels=67
+  ep4/6 eye: img_labels=453 aud_labels=82
+  ep4/6 pasta: img_labels=538 aud_labels=80
+  ep4/6 star: img_labels=251 aud_labels=83
+  ep4/6 window: img_labels=556 aud_labels=86
+  ep4/6 snake: img_labels=432 aud_labels=57
+  ep4/6 water: img_labels=95 aud_labels=90
+  ep4/6 rabbit: img_labels=617 aud_labels=81
+  ep4/6 butter: img_labels=350 aud_labels=75
+  ep4/6 farm: img_labels=410 aud_labels=79
+  ep4/6 grass: img_labels=748 aud_labels=70
+  ep4/6 duck: img_labels=494 aud_labels=68
+  ep4/6 sun: img_labels=251 aud_labels=73
+  ep4/6 cookie: img_labels=344 aud_labels=69
+  ep4/6 balloon: img_labels=498 aud_labels=74
+  ep4/6 pencil: img_labels=338 aud_labels=75
+  ep4/6 ear: img_labels=376 aud_labels=64
+  ep4/6 purple: img_labels=660 aud_labels=67
+  ep4/6 finger: img_labels=457 aud_labels=73
+  ep4/6 bowl: img_labels=379 aud_labels=90
+  ep4/6 owl: img_labels=470 aud_labels=90
+  ep4/6 yellow: img_labels=460 aud_labels=89
+  ep4/6 school: img_labels=564 aud_labels=72
+  ep4/6 table: img_labels=449 aud_labels=76
+  ep4/6 cat: img_labels=449 aud_labels=68
+  ep4/6 honey: img_labels=461 aud_labels=77
+  ep4/6 green: img_labels=486 aud_labels=73
+  ep4/6 horse: img_labels=524 aud_labels=71
+  ep4/6 brown: img_labels=749 aud_labels=77
+  ep4/6 ant: img_labels=588 aud_labels=68
+  ep4/6 chicken: img_labels=371 aud_labels=81
+  ep4/6 tiger: img_labels=525 aud_labels=79
+  ep4/6 pen: img_labels=217 aud_labels=74
+  ep4/6 tomato: img_labels=334 aud_labels=75
+  ep4/6 mountain: img_labels=515 aud_labels=73
+  ep4/6 flower: img_labels=470 aud_labels=79
+  ep4/6 glove: img_labels=591 aud_labels=68
+  ep4/6 leaf: img_labels=346 aud_labels=63
+  ep4/6 soup: img_labels=552 aud_labels=61
+  ep4/6 banana: img_labels=579 aud_labels=77
+  ep4/6 orange: img_labels=431 aud_labels=87
+  ep4/6 bus: img_labels=638 aud_labels=80
+  ep4/6 apple: img_labels=470 aud_labels=75
+  ep4/6 fish: img_labels=500 aud_labels=64
+  ep4/6 monkey: img_labels=565 aud_labels=72
+  ep4/6 scarf: img_labels=341 aud_labels=76
+  ep4/6 nose: img_labels=322 aud_labels=78
+  ep4/6 white: img_labels=503 aud_labels=85
+  ep4/6 shirt: img_labels=461 aud_labels=80
+  ep4/6 house: img_labels=555 aud_labels=78
+  [epoch 4/6] done
+  ep5/6 grass: img_labels=748 aud_labels=70
+  ep5/6 balloon: img_labels=498 aud_labels=74
+  ep5/6 hospital: img_labels=481 aud_labels=86
+  ep5/6 pink: img_labels=316 aud_labels=62
+  ep5/6 scissors: img_labels=257 aud_labels=74
+  ep5/6 drum: img_labels=567 aud_labels=76
+  ep5/6 zoo: img_labels=682 aud_labels=69
+  ep5/6 star: img_labels=251 aud_labels=83
+  ep5/6 flower: img_labels=470 aud_labels=79
+  ep5/6 bee: img_labels=464 aud_labels=59
+  ep5/6 hat: img_labels=324 aud_labels=72
+  ep5/6 farm: img_labels=410 aud_labels=79
+  ep5/6 bear: img_labels=657 aud_labels=74
+  ep5/6 phone: img_labels=482 aud_labels=79
+  ep5/6 river: img_labels=523 aud_labels=73
+  ep5/6 cow: img_labels=525 aud_labels=92
+  ep5/6 grape: img_labels=579 aud_labels=73
+  ep5/6 school: img_labels=564 aud_labels=72
+  ep5/6 juice: img_labels=350 aud_labels=70
+  ep5/6 white: img_labels=503 aud_labels=85
+  ep5/6 ship: img_labels=610 aud_labels=68
+  ep5/6 hammer: img_labels=528 aud_labels=79
+  ep5/6 turtle: img_labels=523 aud_labels=73
+  ep5/6 snake: img_labels=432 aud_labels=57
+  ep5/6 bridge: img_labels=457 aud_labels=68
+  ep5/6 cat: img_labels=449 aud_labels=68
+  ep5/6 egg: img_labels=567 aud_labels=70
+  ep5/6 mouse: img_labels=277 aud_labels=65
+  ep5/6 red: img_labels=502 aud_labels=77
+  ep5/6 cup: img_labels=549 aud_labels=63
+  ep5/6 frog: img_labels=468 aud_labels=82
+  ep5/6 yellow: img_labels=460 aud_labels=89
+  ep5/6 monkey: img_labels=565 aud_labels=72
+  ep5/6 banana: img_labels=579 aud_labels=77
+  ep5/6 pencil: img_labels=338 aud_labels=75
+  ep5/6 brown: img_labels=749 aud_labels=77
+  ep5/6 ball: img_labels=633 aud_labels=77
+  ep5/6 bird: img_labels=704 aud_labels=85
+  ep5/6 horse: img_labels=524 aud_labels=71
+  ep5/6 dog: img_labels=618 aud_labels=78
+  ep5/6 sock: img_labels=449 aud_labels=72
+  ep5/6 key: img_labels=432 aud_labels=64
+  ep5/6 potato: img_labels=472 aud_labels=77
+  ep5/6 door: img_labels=333 aud_labels=63
+  ep5/6 cloud: img_labels=363 aud_labels=84
+  ep5/6 duck: img_labels=494 aud_labels=68
+  ep5/6 strawberry: img_labels=404 aud_labels=83
+  ep5/6 shirt: img_labels=461 aud_labels=80
+  ep5/6 clock: img_labels=439 aud_labels=74
+  ep5/6 foot: img_labels=318 aud_labels=71
+  ep5/6 book: img_labels=404 aud_labels=66
+  ep5/6 mouth: img_labels=551 aud_labels=69
+  ep5/6 glove: img_labels=591 aud_labels=68
+  ep5/6 fork: img_labels=400 aud_labels=74
+  ep5/6 tomato: img_labels=334 aud_labels=75
+  ep5/6 pig: img_labels=496 aud_labels=59
+  ep5/6 toy: img_labels=403 aud_labels=74
+  ep5/6 brush: img_labels=648 aud_labels=87
+  ep5/6 doll: img_labels=422 aud_labels=79
+  ep5/6 train: img_labels=558 aud_labels=74
+  ep5/6 sheep: img_labels=502 aud_labels=80
+  ep5/6 beach: img_labels=465 aud_labels=62
+  ep5/6 hand: img_labels=384 aud_labels=80
+  ep5/6 cheese: img_labels=577 aud_labels=69
+  ep5/6 butter: img_labels=350 aud_labels=75
+  ep5/6 tree: img_labels=549 aud_labels=72
+  ep5/6 green: img_labels=486 aud_labels=73
+  ep5/6 nose: img_labels=322 aud_labels=78
+  ep5/6 window: img_labels=556 aud_labels=86
+  ep5/6 honey: img_labels=461 aud_labels=77
+  ep5/6 table: img_labels=449 aud_labels=76
+  ep5/6 carrot: img_labels=389 aud_labels=69
+  ep5/6 umbrella: img_labels=296 aud_labels=78
+  ep5/6 pasta: img_labels=538 aud_labels=80
+  ep5/6 bread: img_labels=464 aud_labels=69
+  ep5/6 box: img_labels=307 aud_labels=67
+  ep5/6 cake: img_labels=470 aud_labels=62
+  ep5/6 eye: img_labels=453 aud_labels=82
+  ep5/6 scarf: img_labels=341 aud_labels=76
+  ep5/6 pen: img_labels=217 aud_labels=74
+  ep5/6 water: img_labels=95 aud_labels=90
+  ep5/6 owl: img_labels=470 aud_labels=90
+  ep5/6 hair: img_labels=431 aud_labels=66
+  ep5/6 plane: img_labels=289 aud_labels=78
+  ep5/6 snow: img_labels=376 aud_labels=70
+  ep5/6 finger: img_labels=457 aud_labels=73
+  ep5/6 ant: img_labels=588 aud_labels=68
+  ep5/6 fish: img_labels=500 aud_labels=64
+  ep5/6 pizza: img_labels=558 aud_labels=76
+  ep5/6 tiger: img_labels=525 aud_labels=79
+  ep5/6 moon: img_labels=326 aud_labels=67
+  ep5/6 boat: img_labels=446 aud_labels=69
+  ep5/6 lion: img_labels=470 aud_labels=97
+  ep5/6 chair: img_labels=357 aud_labels=68
+  ep5/6 car: img_labels=628 aud_labels=77
+  ep5/6 rice: img_labels=736 aud_labels=79
+  ep5/6 bag: img_labels=440 aud_labels=67
+  ep5/6 ear: img_labels=376 aud_labels=64
+  ep5/6 bike: img_labels=494 aud_labels=74
+  ep5/6 coat: img_labels=437 aud_labels=61
+  ep5/6 knife: img_labels=427 aud_labels=67
+  ep5/6 mountain: img_labels=515 aud_labels=73
+  ep5/6 spoon: img_labels=424 aud_labels=66
+  ep5/6 leaf: img_labels=346 aud_labels=63
+  ep5/6 purple: img_labels=660 aud_labels=67
+  ep5/6 elephant: img_labels=460 aud_labels=78
+  ep5/6 truck: img_labels=569 aud_labels=77
+  ep5/6 rain: img_labels=583 aud_labels=72
+  ep5/6 apple: img_labels=470 aud_labels=75
+  ep5/6 black: img_labels=384 aud_labels=77
+  ep5/6 park: img_labels=593 aud_labels=72
+  ep5/6 bowl: img_labels=379 aud_labels=90
+  ep5/6 orange_color: img_labels=458 aud_labels=117
+  ep5/6 orange: img_labels=431 aud_labels=87
+  ep5/6 blue: img_labels=518 aud_labels=64
+  ep5/6 giraffe: img_labels=626 aud_labels=77
+  ep5/6 rabbit: img_labels=617 aud_labels=81
+  ep5/6 milk: img_labels=329 aud_labels=62
+  ep5/6 rocket: img_labels=360 aud_labels=83
+  ep5/6 soup: img_labels=552 aud_labels=61
+  ep5/6 bed: img_labels=446 aud_labels=67
+  ep5/6 bus: img_labels=638 aud_labels=80
+  ep5/6 butterfly: img_labels=575 aud_labels=90
+  ep5/6 sun: img_labels=251 aud_labels=73
+  ep5/6 shoe: img_labels=615 aud_labels=90
+  ep5/6 pants: img_labels=415 aud_labels=68
+  ep5/6 cookie: img_labels=344 aud_labels=69
+  ep5/6 tooth: img_labels=661 aud_labels=66
+  ep5/6 house: img_labels=555 aud_labels=78
+  ep5/6 chicken: img_labels=371 aud_labels=81
+  [epoch 5/6] done
+  ep6/6 zoo: img_labels=682 aud_labels=69
+  ep6/6 bed: img_labels=446 aud_labels=67
+  ep6/6 bowl: img_labels=379 aud_labels=90
+  ep6/6 rocket: img_labels=360 aud_labels=83
+  ep6/6 purple: img_labels=660 aud_labels=67
+  ep6/6 shirt: img_labels=461 aud_labels=80
+  ep6/6 rain: img_labels=583 aud_labels=72
+  ep6/6 snow: img_labels=376 aud_labels=70
+  ep6/6 school: img_labels=564 aud_labels=72
+  ep6/6 park: img_labels=593 aud_labels=72
+  ep6/6 cup: img_labels=549 aud_labels=63
+  ep6/6 ship: img_labels=610 aud_labels=68
+  ep6/6 clock: img_labels=439 aud_labels=74
+  ep6/6 bike: img_labels=494 aud_labels=74
+  ep6/6 ear: img_labels=376 aud_labels=64
+  ep6/6 bear: img_labels=657 aud_labels=74
+  ep6/6 banana: img_labels=579 aud_labels=77
+  ep6/6 red: img_labels=502 aud_labels=77
+  ep6/6 star: img_labels=251 aud_labels=83
+  ep6/6 apple: img_labels=470 aud_labels=75
+  ep6/6 pizza: img_labels=558 aud_labels=76
+  ep6/6 honey: img_labels=461 aud_labels=77
+  ep6/6 plane: img_labels=289 aud_labels=78
+  ep6/6 door: img_labels=333 aud_labels=63
+  ep6/6 hat: img_labels=324 aud_labels=72
+  ep6/6 grass: img_labels=748 aud_labels=70
+  ep6/6 horse: img_labels=524 aud_labels=71
+  ep6/6 water: img_labels=95 aud_labels=90
+  ep6/6 juice: img_labels=350 aud_labels=70
+  ep6/6 brown: img_labels=749 aud_labels=77
+  ep6/6 window: img_labels=556 aud_labels=86
+  ep6/6 bus: img_labels=638 aud_labels=80
+  ep6/6 doll: img_labels=422 aud_labels=79
+  ep6/6 box: img_labels=307 aud_labels=67
+  ep6/6 fork: img_labels=400 aud_labels=74
+  ep6/6 ball: img_labels=633 aud_labels=77
+  ep6/6 frog: img_labels=468 aud_labels=82
+  ep6/6 sheep: img_labels=502 aud_labels=80
+  ep6/6 flower: img_labels=470 aud_labels=79
+  ep6/6 brush: img_labels=648 aud_labels=87
+  ep6/6 ant: img_labels=588 aud_labels=68
+  ep6/6 tomato: img_labels=334 aud_labels=75
+  ep6/6 pencil: img_labels=338 aud_labels=75
+  ep6/6 bee: img_labels=464 aud_labels=59
+  ep6/6 carrot: img_labels=389 aud_labels=69
+  ep6/6 strawberry: img_labels=404 aud_labels=83
+  ep6/6 moon: img_labels=326 aud_labels=67
+  ep6/6 scissors: img_labels=257 aud_labels=74
+  ep6/6 rice: img_labels=736 aud_labels=79
+  ep6/6 sun: img_labels=251 aud_labels=73
+  ep6/6 leaf: img_labels=346 aud_labels=63
+  ep6/6 soup: img_labels=552 aud_labels=61
+  ep6/6 toy: img_labels=403 aud_labels=74
+  ep6/6 key: img_labels=432 aud_labels=64
+  ep6/6 milk: img_labels=329 aud_labels=62
+  ep6/6 tree: img_labels=549 aud_labels=72
+  ep6/6 orange: img_labels=431 aud_labels=87
+  ep6/6 orange_color: img_labels=458 aud_labels=117
+  ep6/6 cake: img_labels=470 aud_labels=62
+  ep6/6 duck: img_labels=494 aud_labels=68
+  ep6/6 sock: img_labels=449 aud_labels=72
+  ep6/6 book: img_labels=404 aud_labels=66
+  ep6/6 bread: img_labels=464 aud_labels=69
+  ep6/6 hair: img_labels=431 aud_labels=66
+  ep6/6 boat: img_labels=446 aud_labels=69
+  ep6/6 house: img_labels=555 aud_labels=78
+  ep6/6 eye: img_labels=453 aud_labels=82
+  ep6/6 car: img_labels=628 aud_labels=77
+  ep6/6 balloon: img_labels=498 aud_labels=74
+  ep6/6 cow: img_labels=525 aud_labels=92
+  ep6/6 giraffe: img_labels=626 aud_labels=77
+  ep6/6 table: img_labels=449 aud_labels=76
+  ep6/6 pasta: img_labels=538 aud_labels=80
+  ep6/6 train: img_labels=558 aud_labels=74
+  ep6/6 rabbit: img_labels=617 aud_labels=81
+  ep6/6 umbrella: img_labels=296 aud_labels=78
+  ep6/6 potato: img_labels=472 aud_labels=77
+  ep6/6 bridge: img_labels=457 aud_labels=68
+  ep6/6 cookie: img_labels=344 aud_labels=69
+  ep6/6 chair: img_labels=357 aud_labels=68
+  ep6/6 hospital: img_labels=481 aud_labels=86
+  ep6/6 snake: img_labels=432 aud_labels=57
+  ep6/6 truck: img_labels=569 aud_labels=77
+  ep6/6 chicken: img_labels=371 aud_labels=81
+  ep6/6 monkey: img_labels=565 aud_labels=72
+  ep6/6 pink: img_labels=316 aud_labels=62
+  ep6/6 lion: img_labels=470 aud_labels=97
+  ep6/6 phone: img_labels=482 aud_labels=79
+  ep6/6 pen: img_labels=217 aud_labels=74
+  ep6/6 glove: img_labels=591 aud_labels=68
+  ep6/6 tooth: img_labels=661 aud_labels=66
+  ep6/6 scarf: img_labels=341 aud_labels=76
+  ep6/6 elephant: img_labels=460 aud_labels=78
+  ep6/6 black: img_labels=384 aud_labels=77
+  ep6/6 white: img_labels=503 aud_labels=85
+  ep6/6 grape: img_labels=579 aud_labels=73
+  ep6/6 butterfly: img_labels=575 aud_labels=90
+  ep6/6 cheese: img_labels=577 aud_labels=69
+  ep6/6 pants: img_labels=415 aud_labels=68
+  ep6/6 cloud: img_labels=363 aud_labels=84
+  ep6/6 foot: img_labels=318 aud_labels=71
+  ep6/6 shoe: img_labels=615 aud_labels=90
+  ep6/6 owl: img_labels=470 aud_labels=90
+  ep6/6 beach: img_labels=465 aud_labels=62
+  ep6/6 egg: img_labels=567 aud_labels=70
+  ep6/6 tiger: img_labels=525 aud_labels=79
+  ep6/6 butter: img_labels=350 aud_labels=75
+  ep6/6 mouse: img_labels=277 aud_labels=65
+  ep6/6 farm: img_labels=410 aud_labels=79
+  ep6/6 coat: img_labels=437 aud_labels=61
+  ep6/6 knife: img_labels=427 aud_labels=67
+  ep6/6 fish: img_labels=500 aud_labels=64
+  ep6/6 pig: img_labels=496 aud_labels=59
+  ep6/6 dog: img_labels=618 aud_labels=78
+  ep6/6 river: img_labels=523 aud_labels=73
+  ep6/6 turtle: img_labels=523 aud_labels=73
+  ep6/6 drum: img_labels=567 aud_labels=76
+  ep6/6 finger: img_labels=457 aud_labels=73
+  ep6/6 mountain: img_labels=515 aud_labels=73
+  ep6/6 mouth: img_labels=551 aud_labels=69
+  ep6/6 cat: img_labels=449 aud_labels=68
+  ep6/6 nose: img_labels=322 aud_labels=78
+  ep6/6 green: img_labels=486 aud_labels=73
+  ep6/6 blue: img_labels=518 aud_labels=64
+  ep6/6 hand: img_labels=384 aud_labels=80
+  ep6/6 yellow: img_labels=460 aud_labels=89
+  ep6/6 bag: img_labels=440 aud_labels=67
+  ep6/6 bird: img_labels=704 aud_labels=85
+  ep6/6 hammer: img_labels=528 aud_labels=79
+  ep6/6 spoon: img_labels=424 aud_labels=66
+  [epoch 6/6] done
+[train summary] {'trained_objects': 130, 'epochs': 6, 'fails': 0}
+
+[probe] testing bidirectional cross-modal recall...
+
+=== CROSS-MODAL RECALL ===
+  image -> others:   130/130  (100.0%)
+  audio -> others:   130/130  (100.0%)
+  text  -> others:   130/130  (100.0%)

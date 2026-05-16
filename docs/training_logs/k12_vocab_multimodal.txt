@@ -1,0 +1,1210 @@
+[ensure] 160 K-12 vocab terms; cache at D:\Projects\W1z4rDV1510n\data\multimodal_k12
+  [polly] audio for 'number'
+  [polly] audio for 'triangle'
+  [polly] audio for 'circle'
+  [polly] audio for 'square'
+  [polly] audio for 'rectangle'
+  [polly] audio for 'pentagon'
+  [polly] audio for 'hexagon'
+  [polly] audio for 'octagon'
+  [polly] audio for 'sphere'
+  [polly] audio for 'cube'
+  [polly] audio for 'cone'
+  [polly] audio for 'cylinder'
+  [polly] audio for 'pyramid'
+  [polly] audio for 'fraction'
+  [polly] audio for 'decimal'
+  [fetch] image for 'equation' (wiki: Equation)
+  [skip] no image for 'equation'
+  [polly] audio for 'angle'
+  [polly] audio for 'graph'
+  [fetch] image for 'pi' (wiki: Pi)
+  [skip] no image for 'pi'
+  [polly] audio for 'infinity'
+  [polly] audio for 'addition'
+  [polly] audio for 'subtraction'
+  [fetch] image for 'multiplication' (wiki: Multiplication)
+  [polly] audio for 'multiplication'
+  [fetch] image for 'division' (wiki: Division_(mathematics))
+  [polly] audio for 'division'
+  [fetch] image for 'percentage' (wiki: Percentage)
+  [polly] audio for 'percentage'
+  [fetch] image for 'ruler' (wiki: Ruler)
+  [polly] audio for 'ruler'
+  [fetch] image for 'protractor' (wiki: Protractor)
+  [polly] audio for 'protractor'
+  [fetch] image for 'compass' (wiki: Compass_(drafting))
+  [polly] audio for 'compass'
+  [fetch] image for 'abacus' (wiki: Abacus)
+  [polly] audio for 'abacus'
+  [polly] audio for 'atom'
+  [polly] audio for 'molecule'
+  [polly] audio for 'electron'
+  [polly] audio for 'proton'
+  [polly] audio for 'neutron'
+  [polly] audio for 'element'
+  [polly] audio for 'water'
+  [polly] audio for 'ice'
+  [fetch] image for 'steam' (wiki: Steam)
+  [polly] audio for 'steam'
+  [fetch] image for 'magnet' (wiki: Magnet)
+  [polly] audio for 'magnet'
+  [polly] audio for 'battery'
+  [fetch] image for 'circuit' (wiki: Electrical_network)
+  [polly] audio for 'circuit'
+  [polly] audio for 'lightbulb'
+  [fetch] image for 'prism' (wiki: Prism)
+  [skip] no image for 'prism'
+  [fetch] image for 'rainbow' (wiki: Rainbow)
+  [polly] audio for 'rainbow'
+  [fetch] image for 'microscope' (wiki: Microscope)
+  [polly] audio for 'microscope'
+  [polly] audio for 'telescope'
+  [polly] audio for 'thermometer'
+  [fetch] image for 'scale' (wiki: Weighing_scale)
+  [polly] audio for 'scale'
+  [polly] audio for 'gear'
+  [fetch] image for 'pulley' (wiki: Pulley)
+  [polly] audio for 'pulley'
+  [fetch] image for 'lever' (wiki: Lever)
+  [polly] audio for 'lever'
+  [fetch] image for 'pendulum' (wiki: Pendulum)
+  [polly] audio for 'pendulum'
+  [polly] audio for 'planet'
+  [polly] audio for 'mercury'
+  [polly] audio for 'venus'
+  [polly] audio for 'earth'
+  [polly] audio for 'mars'
+  [polly] audio for 'jupiter'
+  [polly] audio for 'saturn'
+  [polly] audio for 'uranus'
+  [polly] audio for 'neptune'
+  [polly] audio for 'comet'
+  [polly] audio for 'asteroid'
+  [polly] audio for 'galaxy'
+  [polly] audio for 'nebula'
+  [polly] audio for 'eclipse'
+  [fetch] image for 'constellation' (wiki: Constellation)
+  [polly] audio for 'constellation'
+  [fetch] image for 'cell' (wiki: Cell_(biology))
+  [polly] audio for 'cell'
+  [fetch] image for 'dna' (wiki: DNA)
+  [polly] audio for 'dna'
+  [fetch] image for 'bacteria' (wiki: Bacteria)
+  [polly] audio for 'bacteria'
+  [fetch] image for 'virus' (wiki: Virus)
+  [polly] audio for 'virus'
+  [fetch] image for 'plant' (wiki: Plant)
+  [polly] audio for 'plant'
+  [fetch] image for 'animal' (wiki: Animal)
+  [polly] audio for 'animal'
+  [fetch] image for 'fungus' (wiki: Fungus)
+  [polly] audio for 'fungus'
+  [fetch] image for 'seed' (wiki: Seed)
+  [polly] audio for 'seed'
+  [fetch] image for 'root' (wiki: Root)
+  [polly] audio for 'root'
+  [fetch] image for 'stem' (wiki: Plant_stem)
+  [polly] audio for 'stem'
+  [fetch] image for 'leaf' (wiki: Leaf)
+  [polly] audio for 'leaf'
+  [fetch] image for 'flower' (wiki: Flower)
+  [polly] audio for 'flower'
+  [fetch] image for 'fruit' (wiki: Fruit)
+  [polly] audio for 'fruit'
+  [fetch] image for 'brain' (wiki: Brain)
+  [polly] audio for 'brain'
+  [fetch] image for 'heart' (wiki: Heart)
+  [polly] audio for 'heart'
+  [fetch] image for 'lung' (wiki: Lung)
+  [polly] audio for 'lung'
+  [fetch] image for 'liver' (wiki: Liver)
+  [polly] audio for 'liver'
+  [fetch] image for 'kidney' (wiki: Kidney)
+  [polly] audio for 'kidney'
+  [fetch] image for 'bone' (wiki: Bone)
+  [polly] audio for 'bone'
+  [fetch] image for 'muscle' (wiki: Muscle)
+  [polly] audio for 'muscle'
+  [fetch] image for 'blood' (wiki: Blood)
+  [polly] audio for 'blood'
+  [fetch] image for 'skin' (wiki: Skin)
+  [polly] audio for 'skin'
+  [fetch] image for 'continent' (wiki: Continent)
+  [polly] audio for 'continent'
+  [fetch] image for 'africa' (wiki: Africa)
+  [polly] audio for 'africa'
+  [fetch] image for 'asia' (wiki: Asia)
+  [polly] audio for 'asia'
+  [fetch] image for 'europe' (wiki: Europe)
+  [polly] audio for 'europe'
+  [fetch] image for 'north_america' (wiki: North_America)
+  [polly] audio for 'north_america'
+  [fetch] image for 'south_america' (wiki: South_America)
+  [polly] audio for 'south_america'
+  [fetch] image for 'australia' (wiki: Australia)
+  [polly] audio for 'australia'
+  [fetch] image for 'antarctica' (wiki: Antarctica)
+  [polly] audio for 'antarctica'
+  [fetch] image for 'ocean' (wiki: Ocean)
+  [polly] audio for 'ocean'
+  [fetch] image for 'river' (wiki: River)
+  [polly] audio for 'river'
+  [fetch] image for 'lake' (wiki: Lake)
+  [polly] audio for 'lake'
+  [fetch] image for 'mountain' (wiki: Mountain)
+  [polly] audio for 'mountain'
+  [fetch] image for 'volcano' (wiki: Volcano)
+  [polly] audio for 'volcano'
+  [fetch] image for 'desert' (wiki: Desert)
+  [polly] audio for 'desert'
+  [fetch] image for 'forest' (wiki: Forest)
+  [polly] audio for 'forest'
+  [fetch] image for 'island' (wiki: Island)
+  [polly] audio for 'island'
+  [fetch] image for 'peninsula' (wiki: Peninsula)
+  [polly] audio for 'peninsula'
+  [fetch] image for 'valley' (wiki: Valley)
+  [polly] audio for 'valley'
+  [fetch] image for 'canyon' (wiki: Canyon)
+  [polly] audio for 'canyon'
+  [fetch] image for 'glacier' (wiki: Glacier)
+  [polly] audio for 'glacier'
+  [fetch] image for 'map' (wiki: Map)
+  [polly] audio for 'map'
+  [fetch] image for 'globe' (wiki: Globe)
+  [polly] audio for 'globe'
+  [fetch] image for 'compass_navigation' (wiki: Compass)
+  [polly] audio for 'compass_navigation'
+  [fetch] image for 'flag' (wiki: Flag)
+  [polly] audio for 'flag'
+  [fetch] image for 'government' (wiki: Government)
+  [polly] audio for 'government'
+  [fetch] image for 'president' (wiki: President)
+  [skip] no image for 'president'
+  [fetch] image for 'congress' (wiki: United_States_Congress)
+  [polly] audio for 'congress'
+  [fetch] image for 'court' (wiki: Court)
+  [polly] audio for 'court'
+  [fetch] image for 'law' (wiki: Law)
+  [polly] audio for 'law'
+  [fetch] image for 'vote' (wiki: Voting)
+  [polly] audio for 'vote'
+  [fetch] image for 'election' (wiki: Election)
+  [polly] audio for 'election'
+  [fetch] image for 'constitution' (wiki: Constitution_of_the_United_States)
+  [polly] audio for 'constitution'
+  [fetch] image for 'liberty' (wiki: Statue_of_Liberty)
+  [polly] audio for 'liberty'
+  [fetch] image for 'alphabet' (wiki: Alphabet)
+  [polly] audio for 'alphabet'
+  [fetch] image for 'letter' (wiki: Letter_(alphabet))
+  [skip] no image for 'letter'
+  [fetch] image for 'word' (wiki: Word)
+  [polly] audio for 'word'
+  [fetch] image for 'sentence' (wiki: Sentence_(linguistics))
+  [skip] no image for 'sentence'
+  [fetch] image for 'paragraph' (wiki: Paragraph)
+  [skip] no image for 'paragraph'
+  [fetch] image for 'book_la' (wiki: Book)
+  [polly] audio for 'book_la'
+  [fetch] image for 'library' (wiki: Library)
+  [polly] audio for 'library'
+  [fetch] image for 'dictionary' (wiki: Dictionary)
+  [polly] audio for 'dictionary'
+  [fetch] image for 'poem' (wiki: Poetry)
+  [skip] no image for 'poem'
+  [fetch] image for 'story' (wiki: Narrative)
+  [polly] audio for 'story'
+  [fetch] image for 'piano' (wiki: Piano)
+  [polly] audio for 'piano'
+  [fetch] image for 'guitar' (wiki: Guitar)
+  [polly] audio for 'guitar'
+  [fetch] image for 'violin' (wiki: Violin)
+  [polly] audio for 'violin'
+  [fetch] image for 'trumpet' (wiki: Trumpet)
+  [polly] audio for 'trumpet'
+  [fetch] image for 'drum' (wiki: Drum)
+  [polly] audio for 'drum'
+  [fetch] image for 'flute' (wiki: Flute)
+  [polly] audio for 'flute'
+  [fetch] image for 'note' (wiki: Musical_note)
+  [skip] no image for 'note'
+  [fetch] image for 'paintbrush' (wiki: Paintbrush)
+  [polly] audio for 'paintbrush'
+  [fetch] image for 'palette' (wiki: Palette_(painting))
+  [polly] audio for 'palette'
+  [fetch] image for 'sculpture' (wiki: Sculpture)
+  [polly] audio for 'sculpture'
+  [fetch] image for 'museum' (wiki: Museum)
+  [polly] audio for 'museum'
+  [fetch] image for 'cloud' (wiki: Cloud)
+  [polly] audio for 'cloud'
+  [fetch] image for 'rain' (wiki: Rain)
+  [polly] audio for 'rain'
+  [fetch] image for 'snow' (wiki: Snow)
+  [polly] audio for 'snow'
+  [fetch] image for 'storm' (wiki: Storm)
+  [polly] audio for 'storm'
+  [fetch] image for 'lightning' (wiki: Lightning)
+  [polly] audio for 'lightning'
+  [fetch] image for 'tornado' (wiki: Tornado)
+  [polly] audio for 'tornado'
+  [fetch] image for 'hurricane' (wiki: Tropical_cyclone)
+  [polly] audio for 'hurricane'
+  [fetch] image for 'fog' (wiki: Fog)
+  [polly] audio for 'fog'
+  [fetch] image for 'wind' (wiki: Wind)
+  [polly] audio for 'wind'
+  [fetch] image for 'light' (wiki: Light)
+  [polly] audio for 'light'
+  [fetch] image for 'sound' (wiki: Sound)
+  [polly] audio for 'sound'
+  [fetch] image for 'heat' (wiki: Heat)
+  [polly] audio for 'heat'
+  [fetch] image for 'electricity' (wiki: Electricity)
+  [polly] audio for 'electricity'
+  [fetch] image for 'gravity' (wiki: Gravity)
+  [polly] audio for 'gravity'
+  [fetch] image for 'speed' (wiki: Speed)
+  [polly] audio for 'speed'
+  [fetch] image for 'wheel' (wiki: Wheel)
+  [polly] audio for 'wheel'
+  [fetch] image for 'spring' (wiki: Spring_(device))
+  [polly] audio for 'spring'
+[ready] 151/160 terms have both image + audio
+
+[train] 151 K-12 vocab terms x 6 epochs
+  ep1/6 cloud: img_labels=363 aud_labels=86
+  ep1/6 liver: img_labels=399 aud_labels=64
+  ep1/6 root: img_labels=528 aud_labels=42
+  ep1/6 continent: img_labels=344 aud_labels=57
+  ep1 circuit FAILED: HTTP Error 400: Bad Request
+  ep1/6 graph: img_labels=148 aud_labels=63
+  ep1/6 fraction: img_labels=300 aud_labels=84
+  ep1/6 decimal: img_labels=248 aud_labels=76
+  ep1/6 circle: img_labels=237 aud_labels=50
+  ep1/6 skin: img_labels=431 aud_labels=55
+  ep1/6 snow: img_labels=376 aud_labels=63
+  ep1/6 kidney: img_labels=410 aud_labels=63
+  ep1/6 scale: img_labels=455 aud_labels=54
+  ep1/6 river: img_labels=523 aud_labels=63
+  ep1/6 rain: img_labels=583 aud_labels=64
+  ep1/6 europe: img_labels=336 aud_labels=57
+  ep1 law FAILED: HTTP Error 400: Bad Request
+  ep1/6 brain: img_labels=594 aud_labels=75
+  ep1/6 flower: img_labels=470 aud_labels=82
+  ep1/6 lightning: img_labels=444 aud_labels=75
+  ep1/6 number: img_labels=347 aud_labels=72
+  ep1/6 plant: img_labels=552 aud_labels=60
+  ep1/6 constellation: img_labels=388 aud_labels=88
+  ep1 rectangle FAILED: HTTP Error 400: Bad Request
+  ep1/6 gravity: img_labels=454 aud_labels=85
+  ep1/6 drum: img_labels=567 aud_labels=78
+  ep1/6 triangle: img_labels=109 aud_labels=74
+  ep1/6 museum: img_labels=740 aud_labels=62
+  ep1/6 multiplication: img_labels=305 aud_labels=87
+  ep1/6 wind: img_labels=600 aud_labels=63
+  ep1/6 lung: img_labels=315 aud_labels=74
+  ep1/6 flag: img_labels=644 aud_labels=63
+  ep1/6 bacteria: img_labels=377 aud_labels=82
+  ep1/6 element: img_labels=301 aud_labels=75
+  ep1/6 wheel: img_labels=639 aud_labels=63
+  ep1/6 planet: img_labels=290 aud_labels=58
+  ep1/6 paintbrush: img_labels=484 aud_labels=66
+  ep1/6 cube: img_labels=231 aud_labels=49
+  ep1/6 cone: img_labels=71 aud_labels=63
+  ep1/6 sculpture: img_labels=628 aud_labels=75
+  ep1/6 galaxy: img_labels=383 aud_labels=90
+  ep1/6 jupiter: img_labels=396 aud_labels=59
+  ep1/6 dictionary: img_labels=477 aud_labels=87
+  ep1/6 heart: img_labels=372 aud_labels=47
+  ep1/6 congress: img_labels=352 aud_labels=57
+  ep1/6 government: img_labels=366 aud_labels=64
+  ep1/6 eclipse: img_labels=354 aud_labels=55
+  ep1/6 compass_navigation: img_labels=404 aud_labels=97
+  ep1/6 hurricane: img_labels=430 aud_labels=69
+  ep1/6 desert: img_labels=351 aud_labels=61
+  ep1/6 violin: img_labels=331 aud_labels=86
+  ep1/6 asia: img_labels=322 aud_labels=79
+  ep1/6 division: img_labels=292 aud_labels=66
+  ep1/6 cell: img_labels=531 aud_labels=68
+  ep1/6 neptune: img_labels=187 aud_labels=62
+  ep1/6 electron: img_labels=196 aud_labels=84
+  ep1/6 court: img_labels=475 aud_labels=48
+  ep1/6 dna: img_labels=107 aud_labels=66
+  ep1/6 volcano: img_labels=449 aud_labels=75
+  ep1/6 constitution: img_labels=402 aud_labels=85
+  ep1/6 microscope: img_labels=480 aud_labels=81
+  ep1/6 subtraction: img_labels=230 aud_labels=71
+  ep1/6 comet: img_labels=427 aud_labels=68
+  ep1/6 electricity: img_labels=302 aud_labels=85
+  ep1/6 venus: img_labels=194 aud_labels=52
+  ep1/6 library: img_labels=607 aud_labels=78
+  ep1 alphabet FAILED: HTTP Error 400: Bad Request
+  ep1/6 peninsula: img_labels=596 aud_labels=71
+  ep1/6 south_america: img_labels=290 aud_labels=87
+  ep1/6 election: img_labels=505 aud_labels=96
+  ep1/6 canyon: img_labels=625 aud_labels=76
+  ep1/6 mountain: img_labels=515 aud_labels=75
+  ep1/6 animal: img_labels=576 aud_labels=92
+  ep1/6 seed: img_labels=524 aud_labels=46
+  ep1/6 percentage: img_labels=218 aud_labels=68
+  ep1/6 lightbulb: img_labels=454 aud_labels=80
+  ep1/6 pyramid: img_labels=440 aud_labels=61
+  ep1/6 lake: img_labels=551 aud_labels=53
+  ep1/6 rainbow: img_labels=497 aud_labels=91
+  ep1/6 trumpet: img_labels=337 aud_labels=66
+  ep1/6 story: img_labels=622 aud_labels=72
+  ep1/6 stem: img_labels=589 aud_labels=50
+  ep1/6 north_america: img_labels=310 aud_labels=82
+  ep1/6 tornado: img_labels=408 aud_labels=75
+  ep1/6 thermometer: img_labels=451 aud_labels=71
+  ep1/6 water: img_labels=95 aud_labels=83
+  ep1/6 flute: img_labels=385 aud_labels=42
+  ep1/6 nebula: img_labels=655 aud_labels=75
+  ep1/6 light: img_labels=266 aud_labels=59
+  ep1/6 bone: img_labels=348 aud_labels=74
+  ep1/6 piano: img_labels=582 aud_labels=65
+  ep1/6 protractor: img_labels=122 aud_labels=73
+  ep1/6 lever: img_labels=315 aud_labels=80
+  ep1/6 antarctica: img_labels=298 aud_labels=83
+  ep1/6 saturn: img_labels=181 aud_labels=78
+  ep1/6 map: img_labels=535 aud_labels=46
+  ep1/6 liberty: img_labels=293 aud_labels=63
+  ep1/6 muscle: img_labels=370 aud_labels=60
+  ep1/6 uranus: img_labels=226 aud_labels=67
+  ep1/6 virus: img_labels=458 aud_labels=78
+  ep1/6 ocean: img_labels=416 aud_labels=75
+  ep1/6 heat: img_labels=421 aud_labels=37
+  ep1/6 spring: img_labels=82 aud_labels=59
+  ep1/6 pendulum: img_labels=85 aud_labels=72
+  ep1/6 island: img_labels=448 aud_labels=84
+  ep1/6 addition: img_labels=251 aud_labels=84
+  ep1/6 word: img_labels=491 aud_labels=69
+  ep1 infinity FAILED: HTTP Error 400: Bad Request
+  ep1/6 gear: img_labels=270 aud_labels=50
+  ep1/6 palette: img_labels=510 aud_labels=69
+  ep1/6 globe: img_labels=507 aud_labels=54
+  ep1/6 hexagon: img_labels=245 aud_labels=79
+  ep1/6 octagon: img_labels=245 aud_labels=86
+  ep1/6 fungus: img_labels=556 aud_labels=59
+  ep1/6 blood: img_labels=655 aud_labels=51
+  ep1/6 leaf: img_labels=346 aud_labels=48
+  ep1/6 mars: img_labels=252 aud_labels=69
+  ep1/6 atom: img_labels=176 aud_labels=84
+  ep1/6 australia: img_labels=270 aud_labels=84
+  ep1/6 guitar: img_labels=238 aud_labels=70
+  ep1/6 neutron: img_labels=249 aud_labels=59
+  ep1/6 fruit: img_labels=541 aud_labels=45
+  ep1/6 pulley: img_labels=536 aud_labels=50
+  ep1/6 mercury: img_labels=358 aud_labels=57
+  ep1/6 telescope: img_labels=551 aud_labels=76
+  ep1/6 abacus: img_labels=362 aud_labels=75
+  ep1/6 compass: img_labels=400 aud_labels=62
+  ep1/6 africa: img_labels=297 aud_labels=72
+  ep1/6 valley: img_labels=491 aud_labels=86
+  ep1/6 pentagon: img_labels=296 aud_labels=84
+  ep1/6 proton: img_labels=300 aud_labels=82
+  ep1/6 ruler: img_labels=676 aud_labels=74
+  ep1/6 earth: img_labels=377 aud_labels=68
+  ep1/6 glacier: img_labels=403 aud_labels=89
+  ep1/6 vote: img_labels=458 aud_labels=67
+  ep1/6 fog: img_labels=311 aud_labels=70
+  ep1/6 ice: img_labels=527 aud_labels=82
+  ep1/6 angle: img_labels=49 aud_labels=65
+  ep1/6 sphere: img_labels=367 aud_labels=43
+  ep1/6 battery: img_labels=458 aud_labels=81
+  ep1/6 sound: img_labels=594 aud_labels=63
+  ep1/6 asteroid: img_labels=221 aud_labels=73
+  ep1/6 storm: img_labels=461 aud_labels=71
+  ep1/6 speed: img_labels=490 aud_labels=50
+  ep1/6 steam: img_labels=434 aud_labels=46
+  ep1 cylinder FAILED: HTTP Error 400: Bad Request
+  ep1/6 magnet: img_labels=404 aud_labels=52
+  ep1/6 forest: img_labels=488 aud_labels=72
+  ep1/6 molecule: img_labels=361 aud_labels=82
+  ep1/6 book_la: img_labels=404 aud_labels=64
+  ep1/6 square: img_labels=41 aud_labels=57
+  [epoch 1/6] done
+  ep2/6 speed: img_labels=490 aud_labels=50
+  ep2/6 ice: img_labels=527 aud_labels=82
+  ep2/6 atom: img_labels=176 aud_labels=84
+  ep2/6 saturn: img_labels=181 aud_labels=78
+  ep2/6 wheel: img_labels=639 aud_labels=63
+  ep2/6 liver: img_labels=399 aud_labels=64
+  ep2/6 library: img_labels=607 aud_labels=78
+  ep2/6 fruit: img_labels=541 aud_labels=45
+  ep2/6 court: img_labels=475 aud_labels=48
+  ep2/6 piano: img_labels=582 aud_labels=65
+  ep2/6 peninsula: img_labels=596 aud_labels=71
+  ep2/6 blood: img_labels=655 aud_labels=51
+  ep2/6 addition: img_labels=251 aud_labels=84
+  ep2/6 telescope: img_labels=551 aud_labels=76
+  ep2/6 octagon: img_labels=245 aud_labels=86
+  ep2/6 volcano: img_labels=449 aud_labels=75
+  ep2/6 book_la: img_labels=404 aud_labels=64
+  ep2/6 pentagon: img_labels=296 aud_labels=84
+  ep2/6 hurricane: img_labels=430 aud_labels=69
+  ep2/6 forest: img_labels=488 aud_labels=72
+  ep2/6 electron: img_labels=196 aud_labels=84
+  ep2/6 ocean: img_labels=416 aud_labels=75
+  ep2/6 steam: img_labels=434 aud_labels=46
+  ep2/6 thermometer: img_labels=451 aud_labels=71
+  ep2/6 cone: img_labels=71 aud_labels=63
+  ep2/6 light: img_labels=266 aud_labels=59
+  ep2/6 lake: img_labels=551 aud_labels=53
+  ep2/6 australia: img_labels=270 aud_labels=84
+  ep2/6 lever: img_labels=315 aud_labels=80
+  ep2/6 ruler: img_labels=676 aud_labels=74
+  ep2/6 heat: img_labels=421 aud_labels=37
+  ep2/6 government: img_labels=366 aud_labels=64
+  ep2/6 constitution: img_labels=402 aud_labels=85
+  ep2/6 hexagon: img_labels=245 aud_labels=79
+  ep2/6 protractor: img_labels=122 aud_labels=73
+  ep2/6 drum: img_labels=567 aud_labels=78
+  ep2/6 subtraction: img_labels=230 aud_labels=71
+  ep2/6 bacteria: img_labels=377 aud_labels=82
+  ep2/6 glacier: img_labels=403 aud_labels=89
+  ep2/6 mountain: img_labels=515 aud_labels=75
+  ep2/6 map: img_labels=535 aud_labels=46
+  ep2/6 south_america: img_labels=290 aud_labels=87
+  ep2 law FAILED: HTTP Error 400: Bad Request
+  ep2/6 pulley: img_labels=536 aud_labels=50
+  ep2/6 liberty: img_labels=293 aud_labels=63
+  ep2/6 pendulum: img_labels=85 aud_labels=72
+  ep2/6 circle: img_labels=237 aud_labels=50
+  ep2 cylinder FAILED: HTTP Error 400: Bad Request
+  ep2/6 storm: img_labels=461 aud_labels=71
+  ep2 alphabet FAILED: HTTP Error 400: Bad Request
+  ep2/6 seed: img_labels=524 aud_labels=46
+  ep2/6 magnet: img_labels=404 aud_labels=52
+  ep2/6 scale: img_labels=455 aud_labels=54
+  ep2/6 europe: img_labels=336 aud_labels=57
+  ep2/6 proton: img_labels=300 aud_labels=82
+  ep2/6 fungus: img_labels=556 aud_labels=59
+  ep2/6 dictionary: img_labels=477 aud_labels=87
+  ep2/6 brain: img_labels=594 aud_labels=75
+  ep2/6 antarctica: img_labels=298 aud_labels=83
+  ep2/6 comet: img_labels=427 aud_labels=68
+  ep2/6 story: img_labels=622 aud_labels=72
+  ep2/6 cloud: img_labels=363 aud_labels=86
+  ep2/6 eclipse: img_labels=354 aud_labels=55
+  ep2/6 spring: img_labels=82 aud_labels=59
+  ep2/6 nebula: img_labels=655 aud_labels=75
+  ep2/6 square: img_labels=41 aud_labels=57
+  ep2/6 plant: img_labels=552 aud_labels=60
+  ep2/6 compass_navigation: img_labels=404 aud_labels=97
+  ep2/6 desert: img_labels=351 aud_labels=61
+  ep2/6 dna: img_labels=107 aud_labels=66
+  ep2/6 word: img_labels=491 aud_labels=69
+  ep2/6 number: img_labels=347 aud_labels=72
+  ep2/6 lightbulb: img_labels=454 aud_labels=80
+  ep2/6 sphere: img_labels=367 aud_labels=43
+  ep2/6 uranus: img_labels=226 aud_labels=67
+  ep2 infinity FAILED: HTTP Error 400: Bad Request
+  ep2/6 planet: img_labels=290 aud_labels=58
+  ep2/6 north_america: img_labels=310 aud_labels=82
+  ep2/6 jupiter: img_labels=396 aud_labels=59
+  ep2/6 continent: img_labels=344 aud_labels=57
+  ep2/6 cube: img_labels=231 aud_labels=49
+  ep2/6 microscope: img_labels=480 aud_labels=81
+  ep2/6 percentage: img_labels=218 aud_labels=68
+  ep2/6 snow: img_labels=376 aud_labels=63
+  ep2/6 leaf: img_labels=346 aud_labels=48
+  ep2/6 battery: img_labels=458 aud_labels=81
+  ep2/6 fog: img_labels=311 aud_labels=70
+  ep2/6 stem: img_labels=589 aud_labels=50
+  ep2/6 kidney: img_labels=410 aud_labels=63
+  ep2/6 museum: img_labels=740 aud_labels=62
+  ep2/6 river: img_labels=523 aud_labels=63
+  ep2/6 decimal: img_labels=248 aud_labels=76
+  ep2/6 palette: img_labels=510 aud_labels=69
+  ep2/6 molecule: img_labels=361 aud_labels=82
+  ep2/6 valley: img_labels=491 aud_labels=86
+  ep2/6 flag: img_labels=644 aud_labels=63
+  ep2/6 flower: img_labels=470 aud_labels=82
+  ep2/6 mars: img_labels=252 aud_labels=69
+  ep2/6 venus: img_labels=194 aud_labels=52
+  ep2/6 rainbow: img_labels=497 aud_labels=91
+  ep2/6 tornado: img_labels=408 aud_labels=75
+  ep2/6 vote: img_labels=458 aud_labels=67
+  ep2/6 pyramid: img_labels=440 aud_labels=61
+  ep2/6 canyon: img_labels=625 aud_labels=76
+  ep2/6 mercury: img_labels=358 aud_labels=57
+  ep2/6 wind: img_labels=600 aud_labels=63
+  ep2/6 neutron: img_labels=249 aud_labels=59
+  ep2/6 violin: img_labels=331 aud_labels=86
+  ep2/6 galaxy: img_labels=383 aud_labels=90
+  ep2/6 root: img_labels=528 aud_labels=42
+  ep2/6 graph: img_labels=148 aud_labels=63
+  ep2/6 earth: img_labels=377 aud_labels=68
+  ep2/6 gear: img_labels=270 aud_labels=50
+  ep2/6 virus: img_labels=458 aud_labels=78
+  ep2/6 abacus: img_labels=362 aud_labels=75
+  ep2/6 neptune: img_labels=187 aud_labels=62
+  ep2/6 element: img_labels=301 aud_labels=75
+  ep2/6 water: img_labels=95 aud_labels=83
+  ep2/6 lightning: img_labels=444 aud_labels=75
+  ep2/6 sound: img_labels=594 aud_labels=63
+  ep2 rectangle FAILED: HTTP Error 400: Bad Request
+  ep2/6 muscle: img_labels=370 aud_labels=60
+  ep2/6 bone: img_labels=348 aud_labels=74
+  ep2/6 sculpture: img_labels=628 aud_labels=75
+  ep2/6 fraction: img_labels=300 aud_labels=84
+  ep2/6 africa: img_labels=297 aud_labels=72
+  ep2/6 cell: img_labels=531 aud_labels=68
+  ep2/6 island: img_labels=448 aud_labels=84
+  ep2/6 electricity: img_labels=302 aud_labels=85
+  ep2/6 trumpet: img_labels=337 aud_labels=66
+  ep2/6 angle: img_labels=49 aud_labels=65
+  ep2/6 multiplication: img_labels=305 aud_labels=87
+  ep2/6 gravity: img_labels=454 aud_labels=85
+  ep2/6 lung: img_labels=315 aud_labels=74
+  ep2/6 congress: img_labels=352 aud_labels=57
+  ep2/6 animal: img_labels=576 aud_labels=92
+  ep2/6 paintbrush: img_labels=484 aud_labels=66
+  ep2/6 asia: img_labels=322 aud_labels=79
+  ep2/6 rain: img_labels=583 aud_labels=64
+  ep2/6 election: img_labels=505 aud_labels=96
+  ep2/6 guitar: img_labels=238 aud_labels=70
+  ep2/6 constellation: img_labels=388 aud_labels=88
+  ep2/6 division: img_labels=292 aud_labels=66
+  ep2/6 triangle: img_labels=109 aud_labels=74
+  ep2/6 globe: img_labels=507 aud_labels=54
+  ep2/6 compass: img_labels=400 aud_labels=62
+  ep2/6 heart: img_labels=372 aud_labels=47
+  ep2 circuit FAILED: HTTP Error 400: Bad Request
+  ep2/6 flute: img_labels=385 aud_labels=42
+  ep2/6 asteroid: img_labels=221 aud_labels=73
+  ep2/6 skin: img_labels=431 aud_labels=55
+  [epoch 2/6] done
+  ep3/6 telescope: img_labels=551 aud_labels=76
+  ep3/6 hurricane: img_labels=430 aud_labels=69
+  ep3/6 asia: img_labels=322 aud_labels=79
+  ep3/6 cloud: img_labels=363 aud_labels=86
+  ep3/6 multiplication: img_labels=305 aud_labels=87
+  ep3/6 south_america: img_labels=290 aud_labels=87
+  ep3/6 drum: img_labels=567 aud_labels=78
+  ep3 alphabet FAILED: HTTP Error 400: Bad Request
+  ep3/6 canyon: img_labels=625 aud_labels=76
+  ep3/6 seed: img_labels=524 aud_labels=46
+  ep3/6 stem: img_labels=589 aud_labels=50
+  ep3/6 constitution: img_labels=402 aud_labels=85
+  ep3/6 speed: img_labels=490 aud_labels=50
+  ep3 rectangle FAILED: HTTP Error 400: Bad Request
+  ep3/6 comet: img_labels=427 aud_labels=68
+  ep3/6 gravity: img_labels=454 aud_labels=85
+  ep3/6 square: img_labels=41 aud_labels=57
+  ep3/6 lung: img_labels=315 aud_labels=74
+  ep3/6 pentagon: img_labels=296 aud_labels=84
+  ep3/6 protractor: img_labels=122 aud_labels=73
+  ep3/6 scale: img_labels=455 aud_labels=54
+  ep3/6 percentage: img_labels=218 aud_labels=68
+  ep3/6 compass: img_labels=400 aud_labels=62
+  ep3/6 court: img_labels=475 aud_labels=48
+  ep3/6 abacus: img_labels=362 aud_labels=75
+  ep3/6 rainbow: img_labels=497 aud_labels=91
+  ep3/6 ocean: img_labels=416 aud_labels=75
+  ep3/6 kidney: img_labels=410 aud_labels=63
+  ep3/6 eclipse: img_labels=354 aud_labels=55
+  ep3/6 lake: img_labels=551 aud_labels=53
+  ep3/6 bone: img_labels=348 aud_labels=74
+  ep3/6 cone: img_labels=71 aud_labels=63
+  ep3/6 hexagon: img_labels=245 aud_labels=79
+  ep3/6 proton: img_labels=300 aud_labels=82
+  ep3/6 antarctica: img_labels=298 aud_labels=83
+  ep3/6 light: img_labels=266 aud_labels=59
+  ep3/6 galaxy: img_labels=383 aud_labels=90
+  ep3/6 australia: img_labels=270 aud_labels=84
+  ep3/6 wheel: img_labels=639 aud_labels=63
+  ep3/6 electricity: img_labels=302 aud_labels=85
+  ep3/6 fruit: img_labels=541 aud_labels=45
+  ep3/6 triangle: img_labels=109 aud_labels=74
+  ep3/6 word: img_labels=491 aud_labels=69
+  ep3/6 island: img_labels=448 aud_labels=84
+  ep3/6 angle: img_labels=49 aud_labels=65
+  ep3/6 fraction: img_labels=300 aud_labels=84
+  ep3/6 sphere: img_labels=367 aud_labels=43
+  ep3/6 glacier: img_labels=403 aud_labels=89
+  ep3/6 compass_navigation: img_labels=404 aud_labels=97
+  ep3/6 dna: img_labels=107 aud_labels=66
+  ep3/6 africa: img_labels=297 aud_labels=72
+  ep3/6 palette: img_labels=510 aud_labels=69
+  ep3/6 uranus: img_labels=226 aud_labels=67
+  ep3/6 subtraction: img_labels=230 aud_labels=71
+  ep3/6 leaf: img_labels=346 aud_labels=48
+  ep3/6 desert: img_labels=351 aud_labels=61
+  ep3/6 wind: img_labels=600 aud_labels=63
+  ep3 law FAILED: HTTP Error 400: Bad Request
+  ep3/6 nebula: img_labels=655 aud_labels=75
+  ep3/6 microscope: img_labels=480 aud_labels=81
+  ep3 circuit FAILED: HTTP Error 400: Bad Request
+  ep3/6 rain: img_labels=583 aud_labels=64
+  ep3/6 storm: img_labels=461 aud_labels=71
+  ep3/6 lightning: img_labels=444 aud_labels=75
+  ep3/6 magnet: img_labels=404 aud_labels=52
+  ep3/6 volcano: img_labels=449 aud_labels=75
+  ep3/6 sculpture: img_labels=628 aud_labels=75
+  ep3/6 molecule: img_labels=361 aud_labels=82
+  ep3/6 earth: img_labels=377 aud_labels=68
+  ep3/6 sound: img_labels=594 aud_labels=63
+  ep3/6 tornado: img_labels=408 aud_labels=75
+  ep3/6 liver: img_labels=399 aud_labels=64
+  ep3/6 octagon: img_labels=245 aud_labels=86
+  ep3/6 piano: img_labels=582 aud_labels=65
+  ep3/6 number: img_labels=347 aud_labels=72
+  ep3/6 graph: img_labels=148 aud_labels=63
+  ep3/6 forest: img_labels=488 aud_labels=72
+  ep3/6 animal: img_labels=576 aud_labels=92
+  ep3/6 guitar: img_labels=238 aud_labels=70
+  ep3 infinity FAILED: HTTP Error 400: Bad Request
+  ep3/6 river: img_labels=523 aud_labels=63
+  ep3/6 valley: img_labels=491 aud_labels=86
+  ep3/6 blood: img_labels=655 aud_labels=51
+  ep3/6 heat: img_labels=421 aud_labels=37
+  ep3/6 muscle: img_labels=370 aud_labels=60
+  ep3/6 decimal: img_labels=248 aud_labels=76
+  ep3/6 asteroid: img_labels=221 aud_labels=73
+  ep3/6 pyramid: img_labels=440 aud_labels=61
+  ep3/6 electron: img_labels=196 aud_labels=84
+  ep3/6 pulley: img_labels=536 aud_labels=50
+  ep3/6 dictionary: img_labels=477 aud_labels=87
+  ep3/6 cell: img_labels=531 aud_labels=68
+  ep3/6 snow: img_labels=376 aud_labels=63
+  ep3/6 election: img_labels=505 aud_labels=96
+  ep3/6 gear: img_labels=270 aud_labels=50
+  ep3/6 brain: img_labels=594 aud_labels=75
+  ep3/6 map: img_labels=535 aud_labels=46
+  ep3/6 globe: img_labels=507 aud_labels=54
+  ep3/6 lightbulb: img_labels=454 aud_labels=80
+  ep3/6 water: img_labels=95 aud_labels=83
+  ep3/6 thermometer: img_labels=451 aud_labels=71
+  ep3/6 museum: img_labels=740 aud_labels=62
+  ep3/6 flower: img_labels=470 aud_labels=82
+  ep3/6 continent: img_labels=344 aud_labels=57
+  ep3/6 spring: img_labels=82 aud_labels=59
+  ep3/6 ice: img_labels=527 aud_labels=82
+  ep3/6 lever: img_labels=315 aud_labels=80
+  ep3/6 north_america: img_labels=310 aud_labels=82
+  ep3/6 constellation: img_labels=388 aud_labels=88
+  ep3/6 fungus: img_labels=556 aud_labels=59
+  ep3/6 element: img_labels=301 aud_labels=75
+  ep3/6 trumpet: img_labels=337 aud_labels=66
+  ep3/6 flute: img_labels=385 aud_labels=42
+  ep3/6 mars: img_labels=252 aud_labels=69
+  ep3/6 library: img_labels=607 aud_labels=78
+  ep3/6 virus: img_labels=458 aud_labels=78
+  ep3/6 heart: img_labels=372 aud_labels=47
+  ep3/6 saturn: img_labels=181 aud_labels=78
+  ep3/6 peninsula: img_labels=596 aud_labels=71
+  ep3/6 ruler: img_labels=676 aud_labels=74
+  ep3/6 circle: img_labels=237 aud_labels=50
+  ep3/6 government: img_labels=366 aud_labels=64
+  ep3/6 steam: img_labels=434 aud_labels=46
+  ep3 cylinder FAILED: HTTP Error 400: Bad Request
+  ep3/6 story: img_labels=622 aud_labels=72
+  ep3/6 violin: img_labels=331 aud_labels=86
+  ep3/6 plant: img_labels=552 aud_labels=60
+  ep3/6 division: img_labels=292 aud_labels=66
+  ep3/6 skin: img_labels=431 aud_labels=55
+  ep3/6 flag: img_labels=644 aud_labels=63
+  ep3/6 mountain: img_labels=515 aud_labels=75
+  ep3/6 book_la: img_labels=404 aud_labels=64
+  ep3/6 mercury: img_labels=358 aud_labels=57
+  ep3/6 atom: img_labels=176 aud_labels=84
+  ep3/6 paintbrush: img_labels=484 aud_labels=66
+  ep3/6 venus: img_labels=194 aud_labels=52
+  ep3/6 planet: img_labels=290 aud_labels=58
+  ep3/6 addition: img_labels=251 aud_labels=84
+  ep3/6 root: img_labels=528 aud_labels=42
+  ep3/6 pendulum: img_labels=85 aud_labels=72
+  ep3/6 neutron: img_labels=249 aud_labels=59
+  ep3/6 neptune: img_labels=187 aud_labels=62
+  ep3/6 europe: img_labels=336 aud_labels=57
+  ep3/6 fog: img_labels=311 aud_labels=70
+  ep3/6 battery: img_labels=458 aud_labels=81
+  ep3/6 liberty: img_labels=293 aud_labels=63
+  ep3/6 vote: img_labels=458 aud_labels=67
+  ep3/6 bacteria: img_labels=377 aud_labels=82
+  ep3/6 jupiter: img_labels=396 aud_labels=59
+  ep3/6 congress: img_labels=352 aud_labels=57
+  ep3/6 cube: img_labels=231 aud_labels=49
+  [epoch 3/6] done
+  ep4/6 word: img_labels=491 aud_labels=69
+  ep4/6 violin: img_labels=331 aud_labels=86
+  ep4/6 rainbow: img_labels=497 aud_labels=91
+  ep4/6 flower: img_labels=470 aud_labels=82
+  ep4/6 snow: img_labels=376 aud_labels=63
+  ep4/6 kidney: img_labels=410 aud_labels=63
+  ep4/6 octagon: img_labels=245 aud_labels=86
+  ep4/6 asia: img_labels=322 aud_labels=79
+  ep4/6 dictionary: img_labels=477 aud_labels=87
+  ep4/6 africa: img_labels=297 aud_labels=72
+  ep4/6 blood: img_labels=655 aud_labels=51
+  ep4/6 electron: img_labels=196 aud_labels=84
+  ep4/6 number: img_labels=347 aud_labels=72
+  ep4 alphabet FAILED: HTTP Error 400: Bad Request
+  ep4/6 globe: img_labels=507 aud_labels=54
+  ep4/6 antarctica: img_labels=298 aud_labels=83
+  ep4/6 ocean: img_labels=416 aud_labels=75
+  ep4/6 congress: img_labels=352 aud_labels=57
+  ep4/6 desert: img_labels=351 aud_labels=61
+  ep4/6 pulley: img_labels=536 aud_labels=50
+  ep4/6 scale: img_labels=455 aud_labels=54
+  ep4/6 saturn: img_labels=181 aud_labels=78
+  ep4/6 pyramid: img_labels=440 aud_labels=61
+  ep4/6 muscle: img_labels=370 aud_labels=60
+  ep4/6 proton: img_labels=300 aud_labels=82
+  ep4/6 magnet: img_labels=404 aud_labels=52
+  ep4/6 multiplication: img_labels=305 aud_labels=87
+  ep4/6 island: img_labels=448 aud_labels=84
+  ep4/6 gear: img_labels=270 aud_labels=50
+  ep4/6 palette: img_labels=510 aud_labels=69
+  ep4/6 guitar: img_labels=238 aud_labels=70
+  ep4/6 cube: img_labels=231 aud_labels=49
+  ep4/6 thermometer: img_labels=451 aud_labels=71
+  ep4/6 volcano: img_labels=449 aud_labels=75
+  ep4/6 lightning: img_labels=444 aud_labels=75
+  ep4/6 lever: img_labels=315 aud_labels=80
+  ep4/6 glacier: img_labels=403 aud_labels=89
+  ep4/6 bacteria: img_labels=377 aud_labels=82
+  ep4/6 storm: img_labels=461 aud_labels=71
+  ep4/6 lung: img_labels=315 aud_labels=74
+  ep4/6 molecule: img_labels=361 aud_labels=82
+  ep4/6 compass_navigation: img_labels=404 aud_labels=97
+  ep4/6 europe: img_labels=336 aud_labels=57
+  ep4 circuit FAILED: HTTP Error 400: Bad Request
+  ep4/6 spring: img_labels=82 aud_labels=59
+  ep4/6 lake: img_labels=551 aud_labels=53
+  ep4/6 graph: img_labels=148 aud_labels=63
+  ep4/6 south_america: img_labels=290 aud_labels=87
+  ep4/6 abacus: img_labels=362 aud_labels=75
+  ep4/6 protractor: img_labels=122 aud_labels=73
+  ep4/6 liberty: img_labels=293 aud_labels=63
+  ep4/6 trumpet: img_labels=337 aud_labels=66
+  ep4/6 planet: img_labels=290 aud_labels=58
+  ep4/6 comet: img_labels=427 aud_labels=68
+  ep4/6 fruit: img_labels=541 aud_labels=45
+  ep4/6 sphere: img_labels=367 aud_labels=43
+  ep4/6 flag: img_labels=644 aud_labels=63
+  ep4/6 canyon: img_labels=625 aud_labels=76
+  ep4/6 steam: img_labels=434 aud_labels=46
+  ep4/6 rain: img_labels=583 aud_labels=64
+  ep4/6 subtraction: img_labels=230 aud_labels=71
+  ep4/6 piano: img_labels=582 aud_labels=65
+  ep4/6 wheel: img_labels=639 aud_labels=63
+  ep4/6 decimal: img_labels=248 aud_labels=76
+  ep4/6 virus: img_labels=458 aud_labels=78
+  ep4 cylinder FAILED: HTTP Error 400: Bad Request
+  ep4/6 mountain: img_labels=515 aud_labels=75
+  ep4/6 map: img_labels=535 aud_labels=46
+  ep4/6 cone: img_labels=71 aud_labels=63
+  ep4/6 stem: img_labels=589 aud_labels=50
+  ep4/6 water: img_labels=95 aud_labels=83
+  ep4/6 electricity: img_labels=302 aud_labels=85
+  ep4/6 continent: img_labels=344 aud_labels=57
+  ep4/6 election: img_labels=505 aud_labels=96
+  ep4/6 sculpture: img_labels=628 aud_labels=75
+  ep4/6 vote: img_labels=458 aud_labels=67
+  ep4/6 jupiter: img_labels=396 aud_labels=59
+  ep4/6 court: img_labels=475 aud_labels=48
+  ep4/6 dna: img_labels=107 aud_labels=66
+  ep4/6 mars: img_labels=252 aud_labels=69
+  ep4/6 nebula: img_labels=655 aud_labels=75
+  ep4 infinity FAILED: HTTP Error 400: Bad Request
+  ep4/6 book_la: img_labels=404 aud_labels=64
+  ep4/6 museum: img_labels=740 aud_labels=62
+  ep4/6 heat: img_labels=421 aud_labels=37
+  ep4/6 mercury: img_labels=358 aud_labels=57
+  ep4/6 library: img_labels=607 aud_labels=78
+  ep4/6 angle: img_labels=49 aud_labels=65
+  ep4/6 leaf: img_labels=346 aud_labels=48
+  ep4/6 galaxy: img_labels=383 aud_labels=90
+  ep4/6 root: img_labels=528 aud_labels=42
+  ep4/6 atom: img_labels=176 aud_labels=84
+  ep4/6 brain: img_labels=594 aud_labels=75
+  ep4/6 compass: img_labels=400 aud_labels=62
+  ep4/6 battery: img_labels=458 aud_labels=81
+  ep4/6 square: img_labels=41 aud_labels=57
+  ep4/6 ice: img_labels=527 aud_labels=82
+  ep4/6 animal: img_labels=576 aud_labels=92
+  ep4/6 wind: img_labels=600 aud_labels=63
+  ep4/6 fungus: img_labels=556 aud_labels=59
+  ep4/6 element: img_labels=301 aud_labels=75
+  ep4/6 speed: img_labels=490 aud_labels=50
+  ep4/6 liver: img_labels=399 aud_labels=64
+  ep4/6 light: img_labels=266 aud_labels=59
+  ep4/6 river: img_labels=523 aud_labels=63
+  ep4/6 pentagon: img_labels=296 aud_labels=84
+  ep4/6 uranus: img_labels=226 aud_labels=67
+  ep4/6 australia: img_labels=270 aud_labels=84
+  ep4/6 telescope: img_labels=551 aud_labels=76
+  ep4/6 asteroid: img_labels=221 aud_labels=73
+  ep4/6 hurricane: img_labels=430 aud_labels=69
+  ep4/6 north_america: img_labels=310 aud_labels=82
+  ep4/6 addition: img_labels=251 aud_labels=84
+  ep4/6 earth: img_labels=377 aud_labels=68
+  ep4/6 gravity: img_labels=454 aud_labels=85
+  ep4/6 flute: img_labels=385 aud_labels=42
+  ep4/6 forest: img_labels=488 aud_labels=72
+  ep4/6 venus: img_labels=194 aud_labels=52
+  ep4/6 bone: img_labels=348 aud_labels=74
+  ep4/6 heart: img_labels=372 aud_labels=47
+  ep4/6 pendulum: img_labels=85 aud_labels=72
+  ep4/6 hexagon: img_labels=245 aud_labels=79
+  ep4/6 seed: img_labels=524 aud_labels=46
+  ep4/6 skin: img_labels=431 aud_labels=55
+  ep4/6 paintbrush: img_labels=484 aud_labels=66
+  ep4/6 cloud: img_labels=363 aud_labels=86
+  ep4/6 constellation: img_labels=388 aud_labels=88
+  ep4/6 drum: img_labels=567 aud_labels=78
+  ep4/6 sound: img_labels=594 aud_labels=63
+  ep4/6 neptune: img_labels=187 aud_labels=62
+  ep4/6 neutron: img_labels=249 aud_labels=59
+  ep4/6 eclipse: img_labels=354 aud_labels=55
+  ep4/6 ruler: img_labels=676 aud_labels=74
+  ep4/6 triangle: img_labels=109 aud_labels=74
+  ep4/6 percentage: img_labels=218 aud_labels=68
+  ep4/6 division: img_labels=292 aud_labels=66
+  ep4/6 government: img_labels=366 aud_labels=64
+  ep4/6 peninsula: img_labels=596 aud_labels=71
+  ep4/6 cell: img_labels=531 aud_labels=68
+  ep4/6 valley: img_labels=491 aud_labels=86
+  ep4/6 lightbulb: img_labels=454 aud_labels=80
+  ep4/6 microscope: img_labels=480 aud_labels=81
+  ep4 rectangle FAILED: HTTP Error 400: Bad Request
+  ep4/6 circle: img_labels=237 aud_labels=50
+  ep4/6 story: img_labels=622 aud_labels=72
+  ep4/6 fraction: img_labels=300 aud_labels=84
+  ep4/6 constitution: img_labels=402 aud_labels=85
+  ep4/6 tornado: img_labels=408 aud_labels=75
+  ep4 law FAILED: HTTP Error 400: Bad Request
+  ep4/6 fog: img_labels=311 aud_labels=70
+  ep4/6 plant: img_labels=552 aud_labels=60
+  [epoch 4/6] done
+  ep5/6 mercury: img_labels=358 aud_labels=57
+  ep5/6 lung: img_labels=315 aud_labels=74
+  ep5/6 proton: img_labels=300 aud_labels=82
+  ep5/6 number: img_labels=347 aud_labels=72
+  ep5/6 court: img_labels=475 aud_labels=48
+  ep5/6 globe: img_labels=507 aud_labels=54
+  ep5/6 leaf: img_labels=346 aud_labels=48
+  ep5/6 river: img_labels=523 aud_labels=63
+  ep5/6 guitar: img_labels=238 aud_labels=70
+  ep5/6 addition: img_labels=251 aud_labels=84
+  ep5/6 nebula: img_labels=655 aud_labels=75
+  ep5/6 ice: img_labels=527 aud_labels=82
+  ep5/6 multiplication: img_labels=305 aud_labels=87
+  ep5/6 water: img_labels=95 aud_labels=83
+  ep5/6 root: img_labels=528 aud_labels=42
+  ep5/6 circle: img_labels=237 aud_labels=50
+  ep5/6 volcano: img_labels=449 aud_labels=75
+  ep5/6 kidney: img_labels=410 aud_labels=63
+  ep5/6 gravity: img_labels=454 aud_labels=85
+  ep5/6 flute: img_labels=385 aud_labels=42
+  ep5/6 thermometer: img_labels=451 aud_labels=71
+  ep5/6 snow: img_labels=376 aud_labels=63
+  ep5/6 light: img_labels=266 aud_labels=59
+  ep5/6 battery: img_labels=458 aud_labels=81
+  ep5/6 rainbow: img_labels=497 aud_labels=91
+  ep5/6 south_america: img_labels=290 aud_labels=87
+  ep5/6 asteroid: img_labels=221 aud_labels=73
+  ep5 law FAILED: HTTP Error 400: Bad Request
+  ep5/6 molecule: img_labels=361 aud_labels=82
+  ep5/6 muscle: img_labels=370 aud_labels=60
+  ep5/6 lightning: img_labels=444 aud_labels=75
+  ep5/6 hurricane: img_labels=430 aud_labels=69
+  ep5/6 fraction: img_labels=300 aud_labels=84
+  ep5/6 story: img_labels=622 aud_labels=72
+  ep5 alphabet FAILED: HTTP Error 400: Bad Request
+  ep5/6 telescope: img_labels=551 aud_labels=76
+  ep5/6 dna: img_labels=107 aud_labels=66
+  ep5/6 forest: img_labels=488 aud_labels=72
+  ep5/6 pendulum: img_labels=85 aud_labels=72
+  ep5/6 spring: img_labels=82 aud_labels=59
+  ep5/6 government: img_labels=366 aud_labels=64
+  ep5/6 drum: img_labels=567 aud_labels=78
+  ep5/6 mars: img_labels=252 aud_labels=69
+  ep5/6 lightbulb: img_labels=454 aud_labels=80
+  ep5/6 fungus: img_labels=556 aud_labels=59
+  ep5/6 skin: img_labels=431 aud_labels=55
+  ep5/6 bacteria: img_labels=377 aud_labels=82
+  ep5/6 wind: img_labels=600 aud_labels=63
+  ep5/6 jupiter: img_labels=396 aud_labels=59
+  ep5/6 tornado: img_labels=408 aud_labels=75
+  ep5 circuit FAILED: HTTP Error 400: Bad Request
+  ep5/6 planet: img_labels=290 aud_labels=58
+  ep5/6 venus: img_labels=194 aud_labels=52
+  ep5 infinity FAILED: HTTP Error 400: Bad Request
+  ep5/6 stem: img_labels=589 aud_labels=50
+  ep5/6 heart: img_labels=372 aud_labels=47
+  ep5/6 pyramid: img_labels=440 aud_labels=61
+  ep5/6 cube: img_labels=231 aud_labels=49
+  ep5/6 palette: img_labels=510 aud_labels=69
+  ep5/6 wheel: img_labels=639 aud_labels=63
+  ep5/6 election: img_labels=505 aud_labels=96
+  ep5/6 division: img_labels=292 aud_labels=66
+  ep5/6 heat: img_labels=421 aud_labels=37
+  ep5/6 paintbrush: img_labels=484 aud_labels=66
+  ep5/6 cloud: img_labels=363 aud_labels=86
+  ep5/6 ruler: img_labels=676 aud_labels=74
+  ep5/6 sphere: img_labels=367 aud_labels=43
+  ep5/6 lever: img_labels=315 aud_labels=80
+  ep5/6 atom: img_labels=176 aud_labels=84
+  ep5/6 constellation: img_labels=388 aud_labels=88
+  ep5/6 percentage: img_labels=218 aud_labels=68
+  ep5/6 flower: img_labels=470 aud_labels=82
+  ep5/6 pentagon: img_labels=296 aud_labels=84
+  ep5/6 library: img_labels=607 aud_labels=78
+  ep5/6 element: img_labels=301 aud_labels=75
+  ep5/6 australia: img_labels=270 aud_labels=84
+  ep5/6 brain: img_labels=594 aud_labels=75
+  ep5/6 island: img_labels=448 aud_labels=84
+  ep5/6 steam: img_labels=434 aud_labels=46
+  ep5 rectangle FAILED: HTTP Error 400: Bad Request
+  ep5/6 canyon: img_labels=625 aud_labels=76
+  ep5/6 angle: img_labels=49 aud_labels=65
+  ep5/6 storm: img_labels=461 aud_labels=71
+  ep5/6 scale: img_labels=455 aud_labels=54
+  ep5/6 seed: img_labels=524 aud_labels=46
+  ep5/6 sound: img_labels=594 aud_labels=63
+  ep5/6 vote: img_labels=458 aud_labels=67
+  ep5/6 continent: img_labels=344 aud_labels=57
+  ep5/6 lake: img_labels=551 aud_labels=53
+  ep5/6 graph: img_labels=148 aud_labels=63
+  ep5/6 electricity: img_labels=302 aud_labels=85
+  ep5/6 piano: img_labels=582 aud_labels=65
+  ep5/6 north_america: img_labels=310 aud_labels=82
+  ep5/6 neutron: img_labels=249 aud_labels=59
+  ep5/6 book_la: img_labels=404 aud_labels=64
+  ep5/6 plant: img_labels=552 aud_labels=60
+  ep5/6 dictionary: img_labels=477 aud_labels=87
+  ep5/6 congress: img_labels=352 aud_labels=57
+  ep5/6 sculpture: img_labels=628 aud_labels=75
+  ep5 cylinder FAILED: HTTP Error 400: Bad Request
+  ep5/6 pulley: img_labels=536 aud_labels=50
+  ep5/6 octagon: img_labels=245 aud_labels=86
+  ep5/6 bone: img_labels=348 aud_labels=74
+  ep5/6 triangle: img_labels=109 aud_labels=74
+  ep5/6 compass_navigation: img_labels=404 aud_labels=97
+  ep5/6 constitution: img_labels=402 aud_labels=85
+  ep5/6 europe: img_labels=336 aud_labels=57
+  ep5/6 compass: img_labels=400 aud_labels=62
+  ep5/6 magnet: img_labels=404 aud_labels=52
+  ep5/6 map: img_labels=535 aud_labels=46
+  ep5/6 microscope: img_labels=480 aud_labels=81
+  ep5/6 africa: img_labels=297 aud_labels=72
+  ep5/6 peninsula: img_labels=596 aud_labels=71
+  ep5/6 saturn: img_labels=181 aud_labels=78
+  ep5/6 virus: img_labels=458 aud_labels=78
+  ep5/6 subtraction: img_labels=230 aud_labels=71
+  ep5/6 valley: img_labels=491 aud_labels=86
+  ep5/6 violin: img_labels=331 aud_labels=86
+  ep5/6 blood: img_labels=655 aud_labels=51
+  ep5/6 gear: img_labels=270 aud_labels=50
+  ep5/6 mountain: img_labels=515 aud_labels=75
+  ep5/6 fruit: img_labels=541 aud_labels=45
+  ep5/6 neptune: img_labels=187 aud_labels=62
+  ep5/6 cell: img_labels=531 aud_labels=68
+  ep5/6 word: img_labels=491 aud_labels=69
+  ep5/6 antarctica: img_labels=298 aud_labels=83
+  ep5/6 museum: img_labels=740 aud_labels=62
+  ep5/6 decimal: img_labels=248 aud_labels=76
+  ep5/6 comet: img_labels=427 aud_labels=68
+  ep5/6 abacus: img_labels=362 aud_labels=75
+  ep5/6 speed: img_labels=490 aud_labels=50
+  ep5/6 electron: img_labels=196 aud_labels=84
+  ep5/6 desert: img_labels=351 aud_labels=61
+  ep5/6 liver: img_labels=399 aud_labels=64
+  ep5/6 galaxy: img_labels=383 aud_labels=90
+  ep5/6 rain: img_labels=583 aud_labels=64
+  ep5/6 glacier: img_labels=403 aud_labels=89
+  ep5/6 fog: img_labels=311 aud_labels=70
+  ep5/6 earth: img_labels=377 aud_labels=68
+  ep5/6 square: img_labels=41 aud_labels=57
+  ep5/6 hexagon: img_labels=245 aud_labels=79
+  ep5/6 liberty: img_labels=293 aud_labels=63
+  ep5/6 eclipse: img_labels=354 aud_labels=55
+  ep5/6 asia: img_labels=322 aud_labels=79
+  ep5/6 trumpet: img_labels=337 aud_labels=66
+  ep5/6 cone: img_labels=71 aud_labels=63
+  ep5/6 flag: img_labels=644 aud_labels=63
+  ep5/6 protractor: img_labels=122 aud_labels=73
+  ep5/6 uranus: img_labels=226 aud_labels=67
+  ep5/6 ocean: img_labels=416 aud_labels=75
+  ep5/6 animal: img_labels=576 aud_labels=92
+  [epoch 5/6] done
+  ep6 rectangle FAILED: HTTP Error 400: Bad Request
+  ep6/6 guitar: img_labels=238 aud_labels=70
+  ep6/6 snow: img_labels=376 aud_labels=63
+  ep6/6 lake: img_labels=551 aud_labels=53
+  ep6/6 tornado: img_labels=408 aud_labels=75
+  ep6/6 graph: img_labels=148 aud_labels=63
+  ep6/6 number: img_labels=347 aud_labels=72
+  ep6/6 storm: img_labels=461 aud_labels=71
+  ep6/6 vote: img_labels=458 aud_labels=67
+  ep6/6 constellation: img_labels=388 aud_labels=88
+  ep6/6 south_america: img_labels=290 aud_labels=87
+  ep6/6 ruler: img_labels=676 aud_labels=74
+  ep6/6 dna: img_labels=107 aud_labels=66
+  ep6/6 brain: img_labels=594 aud_labels=75
+  ep6/6 division: img_labels=292 aud_labels=66
+  ep6/6 compass: img_labels=400 aud_labels=62
+  ep6/6 telescope: img_labels=551 aud_labels=76
+  ep6/6 europe: img_labels=336 aud_labels=57
+  ep6/6 forest: img_labels=488 aud_labels=72
+  ep6/6 heat: img_labels=421 aud_labels=37
+  ep6/6 water: img_labels=95 aud_labels=83
+  ep6/6 election: img_labels=505 aud_labels=96
+  ep6/6 mercury: img_labels=358 aud_labels=57
+  ep6/6 hurricane: img_labels=430 aud_labels=69
+  ep6/6 trumpet: img_labels=337 aud_labels=66
+  ep6/6 government: img_labels=366 aud_labels=64
+  ep6/6 plant: img_labels=552 aud_labels=60
+  ep6/6 electron: img_labels=196 aud_labels=84
+  ep6/6 stem: img_labels=589 aud_labels=50
+  ep6/6 protractor: img_labels=122 aud_labels=73
+  ep6/6 decimal: img_labels=248 aud_labels=76
+  ep6/6 cloud: img_labels=363 aud_labels=86
+  ep6/6 australia: img_labels=270 aud_labels=84
+  ep6/6 ice: img_labels=527 aud_labels=82
+  ep6/6 sound: img_labels=594 aud_labels=63
+  ep6/6 north_america: img_labels=310 aud_labels=82
+  ep6/6 pendulum: img_labels=85 aud_labels=72
+  ep6/6 atom: img_labels=176 aud_labels=84
+  ep6/6 desert: img_labels=351 aud_labels=61
+  ep6/6 octagon: img_labels=245 aud_labels=86
+  ep6/6 lightbulb: img_labels=454 aud_labels=80
+  ep6/6 root: img_labels=528 aud_labels=42
+  ep6/6 violin: img_labels=331 aud_labels=86
+  ep6/6 angle: img_labels=49 aud_labels=65
+  ep6/6 book_la: img_labels=404 aud_labels=64
+  ep6/6 jupiter: img_labels=396 aud_labels=59
+  ep6/6 neptune: img_labels=187 aud_labels=62
+  ep6/6 mountain: img_labels=515 aud_labels=75
+  ep6/6 piano: img_labels=582 aud_labels=65
+  ep6/6 flute: img_labels=385 aud_labels=42
+  ep6/6 sphere: img_labels=367 aud_labels=43
+  ep6/6 lightning: img_labels=444 aud_labels=75
+  ep6/6 circle: img_labels=237 aud_labels=50
+  ep6/6 flag: img_labels=644 aud_labels=63
+  ep6/6 story: img_labels=622 aud_labels=72
+  ep6/6 valley: img_labels=491 aud_labels=86
+  ep6/6 electricity: img_labels=302 aud_labels=85
+  ep6/6 comet: img_labels=427 aud_labels=68
+  ep6/6 dictionary: img_labels=477 aud_labels=87
+  ep6/6 rainbow: img_labels=497 aud_labels=91
+  ep6/6 bacteria: img_labels=377 aud_labels=82
+  ep6/6 glacier: img_labels=403 aud_labels=89
+  ep6/6 neutron: img_labels=249 aud_labels=59
+  ep6/6 lever: img_labels=315 aud_labels=80
+  ep6/6 square: img_labels=41 aud_labels=57
+  ep6/6 fruit: img_labels=541 aud_labels=45
+  ep6/6 mars: img_labels=252 aud_labels=69
+  ep6/6 cell: img_labels=531 aud_labels=68
+  ep6/6 wind: img_labels=600 aud_labels=63
+  ep6/6 paintbrush: img_labels=484 aud_labels=66
+  ep6/6 percentage: img_labels=218 aud_labels=68
+  ep6/6 thermometer: img_labels=451 aud_labels=71
+  ep6/6 flower: img_labels=470 aud_labels=82
+  ep6/6 steam: img_labels=434 aud_labels=46
+  ep6/6 leaf: img_labels=346 aud_labels=48
+  ep6/6 continent: img_labels=344 aud_labels=57
+  ep6/6 word: img_labels=491 aud_labels=69
+  ep6/6 volcano: img_labels=449 aud_labels=75
+  ep6/6 cone: img_labels=71 aud_labels=63
+  ep6/6 rain: img_labels=583 aud_labels=64
+  ep6/6 museum: img_labels=740 aud_labels=62
+  ep6/6 kidney: img_labels=410 aud_labels=63
+  ep6/6 virus: img_labels=458 aud_labels=78
+  ep6/6 river: img_labels=523 aud_labels=63
+  ep6/6 eclipse: img_labels=354 aud_labels=55
+  ep6/6 liberty: img_labels=293 aud_labels=63
+  ep6/6 library: img_labels=607 aud_labels=78
+  ep6/6 seed: img_labels=524 aud_labels=46
+  ep6/6 fog: img_labels=311 aud_labels=70
+  ep6/6 spring: img_labels=82 aud_labels=59
+  ep6/6 peninsula: img_labels=596 aud_labels=71
+  ep6/6 scale: img_labels=455 aud_labels=54
+  ep6/6 venus: img_labels=194 aud_labels=52
+  ep6/6 globe: img_labels=507 aud_labels=54
+  ep6/6 liver: img_labels=399 aud_labels=64
+  ep6/6 microscope: img_labels=480 aud_labels=81
+  ep6/6 molecule: img_labels=361 aud_labels=82
+  ep6/6 proton: img_labels=300 aud_labels=82
+  ep6/6 congress: img_labels=352 aud_labels=57
+  ep6/6 cube: img_labels=231 aud_labels=49
+  ep6/6 fungus: img_labels=556 aud_labels=59
+  ep6/6 gravity: img_labels=454 aud_labels=85
+  ep6/6 lung: img_labels=315 aud_labels=74
+  ep6/6 court: img_labels=475 aud_labels=48
+  ep6/6 element: img_labels=301 aud_labels=75
+  ep6/6 triangle: img_labels=109 aud_labels=74
+  ep6/6 battery: img_labels=458 aud_labels=81
+  ep6/6 skin: img_labels=431 aud_labels=55
+  ep6/6 planet: img_labels=290 aud_labels=58
+  ep6 circuit FAILED: HTTP Error 400: Bad Request
+  ep6/6 asia: img_labels=322 aud_labels=79
+  ep6/6 animal: img_labels=576 aud_labels=92
+  ep6 alphabet FAILED: HTTP Error 400: Bad Request
+  ep6/6 pyramid: img_labels=440 aud_labels=61
+  ep6/6 asteroid: img_labels=221 aud_labels=73
+  ep6/6 sculpture: img_labels=628 aud_labels=75
+  ep6/6 gear: img_labels=270 aud_labels=50
+  ep6/6 compass_navigation: img_labels=404 aud_labels=97
+  ep6/6 speed: img_labels=490 aud_labels=50
+  ep6/6 pulley: img_labels=536 aud_labels=50
+  ep6/6 abacus: img_labels=362 aud_labels=75
+  ep6/6 blood: img_labels=655 aud_labels=51
+  ep6/6 subtraction: img_labels=230 aud_labels=71
+  ep6/6 addition: img_labels=251 aud_labels=84
+  ep6/6 magnet: img_labels=404 aud_labels=52
+  ep6/6 heart: img_labels=372 aud_labels=47
+  ep6/6 fraction: img_labels=300 aud_labels=84
+  ep6/6 bone: img_labels=348 aud_labels=74
+  ep6/6 saturn: img_labels=181 aud_labels=78
+  ep6/6 pentagon: img_labels=296 aud_labels=84
+  ep6/6 africa: img_labels=297 aud_labels=72
+  ep6 infinity FAILED: HTTP Error 400: Bad Request
+  ep6/6 constitution: img_labels=402 aud_labels=85
+  ep6/6 multiplication: img_labels=305 aud_labels=87
+  ep6/6 drum: img_labels=567 aud_labels=78
+  ep6/6 canyon: img_labels=625 aud_labels=76
+  ep6/6 nebula: img_labels=655 aud_labels=75
+  ep6/6 ocean: img_labels=416 aud_labels=75
+  ep6/6 map: img_labels=535 aud_labels=46
+  ep6/6 galaxy: img_labels=383 aud_labels=90
+  ep6/6 palette: img_labels=510 aud_labels=69
+  ep6 law FAILED: HTTP Error 400: Bad Request
+  ep6/6 uranus: img_labels=226 aud_labels=67
+  ep6/6 light: img_labels=266 aud_labels=59
+  ep6/6 wheel: img_labels=639 aud_labels=63
+  ep6/6 island: img_labels=448 aud_labels=84
+  ep6/6 muscle: img_labels=370 aud_labels=60
+  ep6/6 earth: img_labels=377 aud_labels=68
+  ep6/6 hexagon: img_labels=245 aud_labels=79
+  ep6/6 antarctica: img_labels=298 aud_labels=83
+  ep6 cylinder FAILED: HTTP Error 400: Bad Request
+  [epoch 6/6] done
+[train summary] {'trained_terms': 151, 'epochs': 6, 'fails': 36}
+
+[probe] testing bidirectional cross-modal recall...
+
+=== CROSS-MODAL RECALL (K-12) ===
+  image -> others:   145/151  (96.0%)
+  audio -> others:   145/151  (96.0%)
+  text  -> others:   145/151  (96.0%)
+
+  by category:
+    art            n=4    img=4  (100%)  aud=4  (100%)  txt=4  (100%)
+    astronomy      n=15   img=15 (100%)  aud=15 (100%)  txt=15 (100%)
+    biology        n=22   img=22 (100%)  aud=22 (100%)  txt=22 (100%)
+    civics         n=9    img=8  (89%)  aud=8  (89%)  txt=8  (89%)
+    geography      n=23   img=23 (100%)  aud=23 (100%)  txt=23 (100%)
+    language       n=6    img=5  (83%)  aud=5  (83%)  txt=5  (83%)
+    math           n=27   img=24 (89%)  aud=24 (89%)  txt=24 (89%)
+    music          n=6    img=6  (100%)  aud=6  (100%)  txt=6  (100%)
+    physics        n=8    img=8  (100%)  aud=8  (100%)  txt=8  (100%)
+    science        n=22   img=21 (95%)  aud=21 (95%)  txt=21 (95%)
+    weather        n=9    img=9  (100%)  aud=9  (100%)  txt=9  (100%)
