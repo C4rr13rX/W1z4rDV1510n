@@ -172,6 +172,9 @@ impl Eem {
     pub fn equation(&self, id: EquationId) -> Option<&Equation> {
         self.equations.get(id as usize)
     }
+    pub fn equation_mut(&mut self, id: EquationId) -> Option<&mut Equation> {
+        self.equations.get_mut(id as usize)
+    }
     pub fn variable(&self, id: VariableId) -> Option<&Variable> {
         self.variables.get(id as usize)
     }

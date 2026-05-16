@@ -20,6 +20,10 @@ use crate::grounding::{AnswerWithGrounding, ConfidenceTier, GroundingReport};
 use crate::identity::{
     BrainIdentitySpec, IdentityBuildError, PoolKind, PoolPrototypeRegistry,
 };
+use crate::network::{
+    BrainId, GossipEquation, GossipMotif, NetworkState, PeerAccuracy,
+    PeerContribution,
+};
 use crate::neuron::{NeuronId, NeuronKind, NeuronRef, PoolId, Neuron};
 use crate::pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
 
@@ -137,6 +141,11 @@ pub struct Brain {
     /// Phase 6: Temporal-prediction annealer.  Captures one frame per
     /// pool per tick; consulted by `integrate_with_prediction`.
     annealer:                     Annealer,
+    /// Phase 8: distributed-network state.  Pending outbound motif/
+    /// equation gossip, received peer motifs, peer accuracy track
+    /// record.  Transport (cluster) lives outside this crate; this
+    /// state is the brain-side data model.
+    network:                      NetworkState,
 }
 
 impl Brain {
@@ -167,6 +176,7 @@ impl Brain {
             emitted_this_tick:     ahash::AHashSet::new(),
             eem,
             annealer,
+            network:               NetworkState::new(""),
         }
     }
 
@@ -253,11 +263,25 @@ impl Brain {
         let count = self.binding_recurrences.entry(fp.clone()).or_insert(0);
         *count = count.saturating_add(1);
 
-        if *count >= self.config.binding_emergence_threshold
+        let recurrence = *count;
+        if recurrence >= self.config.binding_emergence_threshold
             && !self.promoted_fingerprints.contains_key(&fp)
         {
             let new_id = self.promote_binding_concept(&fp);
             if let Some(id) = new_id {
+                // Auto-emit a gossip record for the just-promoted
+                // binding (spec §5.1: motif fingerprints are gossiped
+                // on discovery).  Transport drains via
+                // `drain_motif_gossip`.
+                self.network.pending_motif_out.push(GossipMotif {
+                    source_brain:      self.network.brain_id.clone(),
+                    fingerprint:       fp.pairs.clone(),
+                    observation_count: recurrence,
+                    local_confidence:  (recurrence as f32
+                        / (self.config.binding_emergence_threshold.max(1) as f32))
+                        .min(1.0),
+                    observed_at_tick:  self.fabric.current_tick(),
+                });
                 self.promoted_fingerprints.insert(fp, id);
             }
         }
@@ -407,6 +431,7 @@ impl Brain {
                         integrated_confidence: 0.0,
                         outside_grounding: true,
                         speculation_flag: false,
+                        peer_contributions: Vec::new(),
                     },
                     confidence_tier: ConfidenceTier::Ungrounded,
                     next_steps_if_ungrounded: vec![
@@ -507,6 +532,7 @@ impl Brain {
                 integrated_confidence,
                 outside_grounding,
                 speculation_flag,
+                peer_contributions: Vec::new(),
             },
             confidence_tier,
             next_steps_if_ungrounded: Vec::new(),
@@ -804,6 +830,204 @@ impl Brain {
     }
 
     // ---------------------------------------------------------------
+    // Phase 8 — Distributed network (spec §5).
+    //
+    // The brain crate defines protocol + data model; transport lives
+    // outside (cluster gossip plugs in here via the drain/ingest
+    // methods).  Spec §1.7 puts the network as a property of the
+    // brain factory, not a baked-in stack.
+    // ---------------------------------------------------------------
+
+    pub fn brain_id(&self) -> &str { &self.network.brain_id }
+    pub fn set_brain_id(&mut self, id: impl Into<String>) {
+        self.network.brain_id = id.into();
+    }
+
+    /// Drain all pending outbound motif records.  Transport calls
+    /// this periodically (or after each `advance_tick`) and ships
+    /// the result over the cluster.  Returns the drained motifs;
+    /// the brain's outbound queue is left empty.
+    pub fn drain_motif_gossip(&mut self) -> Vec<GossipMotif> {
+        std::mem::take(&mut self.network.pending_motif_out)
+    }
+
+    /// Number of motif records currently queued for outbound gossip.
+    pub fn pending_motif_count(&self) -> usize {
+        self.network.pending_motif_out.len()
+    }
+
+    /// Ingest motif records gossiped from peer brains.  Records from
+    /// this brain's own id are dropped (self-loop guard) — motif
+    /// echoes from broadcast topologies should not show up in the
+    /// network index.  Repeat records from the same peer about the
+    /// same fingerprint update the existing entry rather than
+    /// duplicating.
+    pub fn ingest_motif_gossip(&mut self, motifs: Vec<GossipMotif>) {
+        for mut m in motifs {
+            if m.source_brain == self.network.brain_id { continue; }
+            m.fingerprint.sort();
+            let key = (m.source_brain.clone(), m.fingerprint.clone());
+            if let Some(slot) = self.network.received_motifs.iter_mut()
+                .find(|(k, _)| *k == key)
+            {
+                slot.1 = m;
+            } else {
+                self.network.received_motifs.push((key, m));
+            }
+        }
+    }
+
+    pub fn received_motif_count(&self) -> usize {
+        self.network.received_motifs.len()
+    }
+
+    pub fn received_motifs_from(&self, peer: &str) -> Vec<&GossipMotif> {
+        self.network.received_motifs.iter()
+            .filter(|((b, _), _)| b == peer)
+            .map(|(_, m)| m)
+            .collect()
+    }
+
+    /// Snapshot every registered equation as a `GossipEquation`
+    /// suitable for cluster broadcast.  Simple whole-state-sync is
+    /// honest and idempotent — receivers merge by confidence.
+    pub fn export_equations_for_gossip(&self) -> Vec<GossipEquation> {
+        let id = self.network.brain_id.clone();
+        self.eem.iter_equations().map(|eq| {
+            let variable_names = eq.variables.iter()
+                .filter_map(|vid| self.eem.variable(*vid).map(|v| v.name.clone()))
+                .collect();
+            let discipline_name = eq.discipline
+                .and_then(|did| self.eem.discipline(did).map(|d| d.name.clone()));
+            GossipEquation {
+                source_brain:         id.clone(),
+                name:                 eq.name.clone(),
+                expression:           eq.expression.clone(),
+                variable_names,
+                discipline_name,
+                confidence:           eq.confidence,
+                validation_successes: eq.validation_successes,
+                validation_failures:  eq.validation_failures,
+            }
+        }).collect()
+    }
+
+    /// Merge peer equation deltas into the local EEM.  Conflict
+    /// resolution per spec §5.2: per-equation confidence wins.  A
+    /// peer equation strictly higher in confidence than the local
+    /// copy replaces the expression and adopts the peer's validation
+    /// counters; otherwise the local copy is kept.  Unknown
+    /// equations are added at the peer's confidence.
+    pub fn ingest_equation_gossip(&mut self, equations: Vec<GossipEquation>) {
+        for ge in equations {
+            if ge.source_brain == self.network.brain_id { continue; }
+            // Variables: register by name (idempotent).
+            let var_ids: Vec<_> = ge.variable_names.iter()
+                .map(|n| self.eem.register_variable(n.clone(), None))
+                .collect();
+            let disc_id = ge.discipline_name.as_ref()
+                .map(|n| self.eem.register_discipline(n.clone()));
+
+            match self.eem.equation_by_name(&ge.name) {
+                Some(eq_id) => {
+                    let local_conf = self.eem.confidence(eq_id).unwrap_or(0.0);
+                    if ge.confidence > local_conf {
+                        // Replace expression and re-seat confidence /
+                        // validation counters from the peer.
+                        self.eem.replace_equation_expression(eq_id, ge.expression.clone());
+                        if let Some(eq) = self.eem.equation_mut(eq_id) {
+                            eq.confidence           = ge.confidence;
+                            eq.validation_successes = ge.validation_successes;
+                            eq.validation_failures  = ge.validation_failures;
+                        }
+                    }
+                }
+                None => {
+                    let eq_id = self.eem.register_equation(
+                        ge.name.clone(),
+                        ge.expression.clone(),
+                        var_ids,
+                        disc_id,
+                    );
+                    if let Some(eq) = self.eem.equation_mut(eq_id) {
+                        eq.confidence           = ge.confidence;
+                        eq.validation_successes = ge.validation_successes;
+                        eq.validation_failures  = ge.validation_failures;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn peer_accuracy(&self, peer: &str) -> Option<&PeerAccuracy> {
+        self.network.peer_accuracy.get(peer)
+    }
+
+    /// Record an outcome for a peer's contribution.  Drives the
+    /// per-peer accuracy rate used by `integrate_with_peers`.
+    pub fn report_peer_outcome(&mut self, peer: impl Into<String>, success: bool) {
+        let entry = self.network.peer_accuracy.entry(peer.into()).or_default();
+        if success {
+            entry.successful_contributions = entry.successful_contributions.saturating_add(1);
+        } else {
+            entry.failed_contributions = entry.failed_contributions.saturating_add(1);
+        }
+    }
+
+    pub fn known_peers(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.network.peer_accuracy.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Like [`Brain::integrate`] but folds caller-supplied peer
+    /// contributions into the grounding report.  Each peer's
+    /// `fabric_confidence` is weighted by its [`PeerAccuracy::rate`]
+    /// (unknown peers get 0.5 — neutral) and surfaces in
+    /// `GroundingReport.peer_contributions`.  The
+    /// `integrated_confidence` becomes a weighted blend of the local
+    /// fabric confidence and the average weighted peer confidence.
+    pub fn integrate_with_peers(
+        &self,
+        query_pool:  PoolId,
+        target_pool: PoolId,
+        peers:       &[PeerContribution],
+    ) -> AnswerWithGrounding {
+        let mut base = self.integrate(query_pool, target_pool);
+        if peers.is_empty() { return base; }
+
+        let mut weighted: Vec<(BrainId, f32)> = Vec::with_capacity(peers.len());
+        let mut sum_weights = 0.0_f32;
+        let mut sum_weighted_conf = 0.0_f32;
+        for p in peers {
+            let rate = self.network.peer_accuracy
+                .get(&p.brain_id).map(|a| a.rate()).unwrap_or(0.5);
+            let weighted_conf = (p.fabric_confidence * rate).clamp(0.0, 1.0);
+            weighted.push((p.brain_id.clone(), weighted_conf));
+            sum_weights += rate;
+            sum_weighted_conf += weighted_conf * rate;
+        }
+
+        let local_fabric = base.grounding.fabric_confidence;
+        let peer_blend = if sum_weights > 1e-9 {
+            sum_weighted_conf / sum_weights
+        } else { 0.0 };
+
+        // Blend local + peer 50/50 by weighted contribution mass.
+        // A stronger local signal still dominates; a confident-and-
+        // accurate peer chorus lifts the integrated score.
+        let blended = (local_fabric + peer_blend) / 2.0;
+        base.grounding.peer_contributions = weighted;
+        base.grounding.integrated_confidence = blended;
+        base.confidence_tier = ConfidenceTier::from_confidence(
+            base.grounding.integrated_confidence,
+            base.grounding.outside_grounding,
+            base.grounding.speculation_flag,
+        );
+        base
+    }
+
+    // ---------------------------------------------------------------
     // Phase 10 — Brain factory (spec §3 + §11).
     //
     // Builds a fully-wired brain from a declarative
@@ -962,6 +1186,7 @@ impl Brain {
             emitted_this_tick:     ahash::AHashSet::new(),
             eem:                   crate::eem::Eem::from_snapshot(snap.eem),
             annealer:              crate::annealer::Annealer::from_snapshot(snap.annealer),
+            network:               NetworkState::new(""),
         };
         (brain, missing)
     }

@@ -38,6 +38,7 @@ pub mod eem;
 pub mod annealer;
 pub mod persistence;
 pub mod identity;
+pub mod network;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
@@ -59,4 +60,8 @@ pub use persistence::{
 pub use identity::{
     BrainIdentitySpec, EncodingFactory, IdentityBuildError, PoolKind,
     PoolPrototypeRegistry, PoolSpec,
+};
+pub use network::{
+    BrainId, GossipEquation, GossipMotif, NetworkState, PeerAccuracy,
+    PeerContribution,
 };

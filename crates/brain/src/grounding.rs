@@ -34,6 +34,12 @@ pub struct GroundingReport {
     /// True if the answer came from cross-pool composition rather than
     /// direct retrieval of a single trained pair.  Spec §2.3.
     pub speculation_flag:       bool,
+    /// Peer contributions that fed into integration.  Each entry is
+    /// `(BrainId, weighted_confidence)` — the local integration's
+    /// view of a specific peer's contribution after accuracy
+    /// weighting.  Empty when no peers were consulted.  Spec §2.1.
+    #[serde(default)]
+    pub peer_contributions:     Vec<(crate::network::BrainId, f32)>,
 }
 
 impl GroundingReport {
@@ -49,6 +55,7 @@ impl GroundingReport {
             integrated_confidence:  0.0,
             outside_grounding:      true,
             speculation_flag:       false,
+            peer_contributions:     Vec::new(),
         }
     }
 }
