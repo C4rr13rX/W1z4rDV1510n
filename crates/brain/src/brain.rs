@@ -1236,6 +1236,64 @@ impl Brain {
     }
 
     // ---------------------------------------------------------------
+    // Stage 4 — Sleep cycle (spec §6.3).
+    //
+    // Identifies weak/stale concept neurons across all pools and
+    // soft-prunes them: their outgoing terminals are zeroed and all
+    // inbound terminals (within-pool AND cross-pool) are removed.
+    // Then runs an extra housekeeping pass on every pool so the
+    // zeroed terminals drop below the prune floor.
+    //
+    // Sleep is what makes "survival of fittest" actually surface
+    // strong emergence — without it, every cross-pair boundary
+    // pattern that crosses the emergence threshold sticks around and
+    // dilutes the substrate's concept space.
+    // ---------------------------------------------------------------
+
+    /// Soft-prune all concept neurons across all pools whose
+    /// `use_count` is below `min_use_count` and whose `last_fired_tick`
+    /// is more than `stale_ticks` in the past.
+    ///
+    /// Returns the total number of concepts pruned.
+    pub fn sleep(&mut self, min_use_count: u64, stale_ticks: u64) -> usize {
+        let current_tick = self.fabric.current_tick();
+        let mut total_pruned = 0usize;
+        let mut pruned_refs: ahash::AHashSet<NeuronRef> = ahash::AHashSet::new();
+
+        // Phase 1: per-pool prune; collect (pool, neuron) refs.
+        for pid in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pid) {
+                let pruned_ids = pool.write()
+                    .prune_weak_concepts(min_use_count, stale_ticks, current_tick);
+                total_pruned += pruned_ids.len();
+                for nid in pruned_ids {
+                    pruned_refs.insert(NeuronRef::new(pid, nid));
+                }
+            }
+        }
+
+        // Phase 2: clean cross-pool inbound terminals targeting
+        // anything pruned.
+        if !pruned_refs.is_empty() {
+            for pid in self.fabric.pool_ids() {
+                if let Some(pool) = self.fabric.pool(pid) {
+                    pool.write().prune_inbound_to(&pruned_refs);
+                }
+            }
+        }
+
+        // Phase 3: extra housekeeping so any zero-weight residuals
+        // drop below the prune floor.
+        for pid in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pid) {
+                pool.write().tick_housekeeping();
+            }
+        }
+
+        total_pruned
+    }
+
+    // ---------------------------------------------------------------
     // Phase 9 — Checkpoint / restore (spec §6 + §11).
     //
     // Persists the entire learned state of the brain to a single

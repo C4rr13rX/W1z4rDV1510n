@@ -422,6 +422,93 @@ impl Pool {
         }
     }
 
+    /// Sleep-cycle pruning per spec §6.3.  Walks every concept neuron;
+    /// if its `use_count` is below `min_use_count` AND it was last
+    /// fired more than `stale_ticks` ago, it's treated as noise (an
+    /// emergence artifact that never consolidated through repeated
+    /// use) and made inert:
+    ///   - Its outgoing terminals are zeroed (housekeeping prunes
+    ///     them on subsequent ticks).
+    ///   - All other neurons' terminals TARGETING this concept are
+    ///     removed.
+    ///
+    /// The concept itself remains in the `neurons` Vec because
+    /// removing it would re-index every higher-id neuron — an
+    /// expensive cascading rewrite.  Soft prune is the spec-aligned
+    /// "survival of fittest" outcome: weak emergence withers, strong
+    /// emergence persists.
+    ///
+    /// Returns the set of pruned concept ids.
+    pub fn prune_weak_concepts(
+        &mut self,
+        min_use_count: u64,
+        stale_ticks:   u64,
+        current_tick:  u64,
+    ) -> ahash::AHashSet<NeuronId> {
+        // Identify pruneable concept ids first to avoid borrow conflicts.
+        let mut to_prune: ahash::AHashSet<NeuronId> = ahash::AHashSet::new();
+        for n in self.neurons.iter() {
+            if n.is_atom() { continue; }
+            let age = current_tick.saturating_sub(n.last_fired_tick);
+            if n.use_count < min_use_count && age > stale_ticks {
+                to_prune.insert(n.id);
+            }
+        }
+        if to_prune.is_empty() { return to_prune; }
+
+        // Zero outgoing terminals of pruned concepts and remove their
+        // entries from label_to_id (so they can't collapse again).
+        for &cid in &to_prune {
+            if let Some(n) = self.neurons.get_mut(cid as usize) {
+                n.terminals.clear();
+                let label = n.label.clone();
+                self.label_to_id.remove(&label);
+            }
+        }
+
+        // Remove inbound terminals targeting pruned concepts from EVERY
+        // other neuron in this pool.  Cross-pool terminals targeting
+        // these concepts from other pools must be cleaned up by the
+        // caller (Fabric::sleep does this).
+        let pool_id = self.config.id;
+        for n in self.neurons.iter_mut() {
+            n.terminals.retain(|t| {
+                !(t.target.pool == pool_id && to_prune.contains(&t.target.neuron))
+            });
+        }
+
+        // Clear currently_firing / activation entries for pruned ids.
+        for cid in &to_prune {
+            self.currently_firing.remove(cid);
+            self.activation.remove(cid);
+        }
+
+        // Remove sequences map entries that reference pruned ids.
+        self.sequences.retain(|k, _| !k.iter().any(|id| to_prune.contains(id)));
+
+        // Remove recent_atoms entries that point to pruned ids.
+        self.recent_atoms.retain(|id| !to_prune.contains(id));
+
+        to_prune
+    }
+
+    /// Remove terminals in this pool that target any of the
+    /// specified (pool, neuron) ids.  Used by `Fabric::sleep` to
+    /// clean up cross-pool terminals after another pool pruned
+    /// some of its concepts.
+    pub fn prune_inbound_to(
+        &mut self,
+        targets: &ahash::AHashSet<NeuronRef>,
+    ) -> usize {
+        let mut removed = 0;
+        for n in self.neurons.iter_mut() {
+            let before = n.terminals.len();
+            n.terminals.retain(|t| !targets.contains(&t.target));
+            removed += before - n.terminals.len();
+        }
+        removed
+    }
+
     fn ensure_atom(&mut self, label: String, tick: u64) -> NeuronId {
         if let Some(&id) = self.label_to_id.get(&label) {
             return id;
