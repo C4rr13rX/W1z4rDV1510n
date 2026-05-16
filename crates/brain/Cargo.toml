@@ -18,6 +18,7 @@ thiserror = "1.0"
 ahash = { version = "0.8", features = ["serde"] }  # faster hashing + serde derive support
 base64 = "0.22"           # raw-bit atom transport encoding (spec §1.1)
 evalexpr = "11"           # MIT — EEM equation evaluator per spec §8
+toml = "0.8"              # MIT — BrainIdentitySpec serializer per spec §3.3
 
 [dev-dependencies]
 # nothing yet — built-in #[test] is enough for the integration test.

@@ -17,6 +17,9 @@ use crate::annealer::{Annealer, AnnealerConfig};
 use crate::eem::{Eem, EemConfig};
 use crate::fabric::{Fabric, FabricConfig};
 use crate::grounding::{AnswerWithGrounding, ConfidenceTier, GroundingReport};
+use crate::identity::{
+    BrainIdentitySpec, IdentityBuildError, PoolKind, PoolPrototypeRegistry,
+};
 use crate::neuron::{NeuronId, NeuronKind, NeuronRef, PoolId, Neuron};
 use crate::pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
 
@@ -798,6 +801,65 @@ impl Brain {
     /// not being supplied for fired actions.
     pub fn pending_action_count(&self) -> usize {
         self.pending_actions.len()
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 10 — Brain factory (spec §3 + §11).
+    //
+    // Builds a fully-wired brain from a declarative
+    // `BrainIdentitySpec` plus a `PoolPrototypeRegistry` that knows
+    // how to instantiate encodings.  The Action pool (if any) is
+    // auto-designated; the EEM and annealer come up empty for the
+    // caller to seed.
+    // ---------------------------------------------------------------
+
+    pub fn from_identity(
+        identity: &BrainIdentitySpec,
+        registry: &PoolPrototypeRegistry,
+    ) -> Result<Self, IdentityBuildError> {
+        // Detect collisions and binding-pool-id reservations up front
+        // so the brain isn't half-built when an error surfaces.
+        let binding_pool_id: PoolId = 0;
+        let mut seen_ids = ahash::AHashSet::new();
+        for ps in &identity.pools {
+            if ps.id == binding_pool_id {
+                return Err(IdentityBuildError::BindingPoolIdCollision(ps.id));
+            }
+            if !seen_ids.insert(ps.id) {
+                return Err(IdentityBuildError::DuplicatePoolId(ps.id));
+            }
+        }
+
+        let mut binding_pool_config = PoolConfig::defaults("binding", binding_pool_id);
+        binding_pool_config.concept_emergence_threshold = u32::MAX;
+        let config = BrainConfig {
+            fabric:                      identity.fabric.clone(),
+            binding_emergence_threshold: identity.binding_emergence_threshold,
+            moment_history_window:       identity.moment_history_window,
+            binding_pool_config,
+            eem:                         identity.eem.clone(),
+            annealer:                    identity.annealer.clone(),
+        };
+        let mut brain = Self::new(config);
+
+        for ps in &identity.pools {
+            let encoding = registry
+                .build(&ps.prototype, &ps.atom_encoding_prefix)
+                .ok_or_else(|| IdentityBuildError::UnknownPrototype(ps.prototype.clone()))?;
+            brain.create_pool(ps.to_pool_config(), encoding);
+        }
+
+        // Auto-designate the first Action pool, if any.  At most one
+        // Action pool is meaningful per spec §4.E; later Action pools
+        // in the spec are stored but not designated.
+        for ps in &identity.pools {
+            if matches!(ps.kind, PoolKind::Action) {
+                brain.designate_action_pool(ps.id);
+                break;
+            }
+        }
+
+        Ok(brain)
     }
 
     // ---------------------------------------------------------------

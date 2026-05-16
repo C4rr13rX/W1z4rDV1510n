@@ -37,6 +37,7 @@ pub mod action;
 pub mod eem;
 pub mod annealer;
 pub mod persistence;
+pub mod identity;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
@@ -54,4 +55,8 @@ pub use annealer::{Annealer, AnnealerConfig, Frame, PredictionResult};
 pub use persistence::{
     AnnealerSnapshot, BrainSnapshot, EemSnapshot, FabricSnapshot, PoolSnapshot,
     SerializableFingerprint, load_snapshot, save_snapshot,
+};
+pub use identity::{
+    BrainIdentitySpec, EncodingFactory, IdentityBuildError, PoolKind,
+    PoolPrototypeRegistry, PoolSpec,
 };
