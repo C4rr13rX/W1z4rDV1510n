@@ -58,6 +58,35 @@ pub struct BindingMatch {
     pub tier:      MatchTier,
 }
 
+/// Stage 13A — one neuron in a single pool's decoded extrusion.
+#[derive(Debug, Clone)]
+pub struct DecodedConcept {
+    pub neuron:     NeuronRef,
+    pub activation: f32,
+    pub label:      String,
+    pub bytes:      Vec<u8>,
+}
+
+/// Stage 13A — one pool's top-K decoded concepts from a settled state.
+#[derive(Debug, Clone)]
+pub struct PoolExtrusion {
+    pub pool:    PoolId,
+    pub decoded: Vec<DecodedConcept>,
+}
+
+/// Stage 13A — full multi-pool extrusion produced by
+/// [`Brain::integrate_resonant`].  This is the substrate-level
+/// support for the "epoxy mould" creation model: one input pattern
+/// fires the constraint into the substrate, settling iterates the
+/// resonance, and `pools` carries the coherent multi-pool state
+/// that satisfied the constraint.
+#[derive(Debug, Clone)]
+pub struct ResonantExtrusion {
+    pub iterations_run: usize,
+    pub converged:      bool,
+    pub pools:          Vec<PoolExtrusion>,
+}
+
 impl BindingMatch {
     pub const NONE: Self = Self {
         precision: 0.0, recall: 0.0, tier: MatchTier::None,
@@ -1143,6 +1172,135 @@ impl Brain {
             }
         }
         best
+    }
+
+    /// Stage 13A — resonant multi-pool extrusion (the "epoxy mould"
+    /// path per the architecture spec).  Where [`Self::integrate`]
+    /// retrieves one target concept from a single target pool via a
+    /// one-pass propagation, `integrate_resonant` runs
+    /// [`Fabric::settle`] (iterative fixed-point with sharpening)
+    /// then reads the top-N decoded concepts in *every* requested
+    /// target pool simultaneously.
+    ///
+    /// This is the substrate-level support for "fire a constraint
+    /// into the substrate, extrude the coherent multi-pool state."
+    /// Categorical retrieval (`integrate`) is unchanged and remains
+    /// the contract for `/chat`.
+    ///
+    /// `top_per_pool`: how many concepts to decode per target pool.
+    /// `max_iter`/`eps`: settling parameters; see `Fabric::settle`.
+    pub fn integrate_resonant(
+        &self,
+        query_pool:    PoolId,
+        target_pools:  &[PoolId],
+        top_per_pool:  usize,
+        max_iter:      usize,
+        eps:           f32,
+    ) -> ResonantExtrusion {
+        let settle = self.fabric.settle(
+            query_pool,
+            max_iter,
+            /*top_k for sharpening*/ top_per_pool.max(8),
+            eps,
+        );
+
+        let mut per_pool: Vec<PoolExtrusion> = Vec::with_capacity(target_pools.len());
+        for &tp in target_pools {
+            let pool_handle = match self.fabric.pool(tp) {
+                Some(p) => p,
+                None    => {
+                    per_pool.push(PoolExtrusion {
+                        pool: tp,
+                        decoded: Vec::new(),
+                    });
+                    continue;
+                }
+            };
+            let pool = pool_handle.read();
+
+            // Build a fast lookup of the settled atom activations in
+            // this pool (raw output of the fixed-point iteration).
+            let empty: ahash::AHashMap<NeuronId, f32> = ahash::AHashMap::new();
+            let atom_acts = settle.pool_activations.get(&tp).unwrap_or(&empty);
+
+            // Rank CONCEPTS by their average-member-activation derived
+            // from the settled atom state (the same idea integrate()
+            // uses to score concept candidates).  Cross-pool axons
+            // target atoms, not concepts, so to read a coherent
+            // concept-level extrusion we have to compose it from the
+            // member atoms' settled activations.
+            //
+            // For each concept neuron in the target pool: compute
+            // avg(member activations).  Atoms get their settled
+            // activation directly.  The combined list is sorted
+            // descending; we take the top `top_per_pool`.
+            let mut ranked: Vec<(NeuronId, f32, bool)> = Vec::new(); // (id, score, is_concept)
+            for n in pool.iter_neurons() {
+                if n.is_atom() {
+                    let act = atom_acts.get(&n.id).copied().unwrap_or(0.0);
+                    if act > 0.001 {
+                        ranked.push((n.id, act, false));
+                    }
+                } else {
+                    let in_pool_members: Vec<NeuronId> = n.members.iter()
+                        .filter(|m| m.pool == tp)
+                        .map(|m| m.neuron)
+                        .collect();
+                    if in_pool_members.is_empty() { continue; }
+                    let sum: f32 = in_pool_members.iter()
+                        .map(|nid| atom_acts.get(nid).copied().unwrap_or(0.0))
+                        .sum();
+                    let avg = sum / in_pool_members.len() as f32;
+                    if avg > 0.001 {
+                        // Concept score includes a small bonus for
+                        // longer concepts (sqrt of length) so that
+                        // when atom activations are similar, the
+                        // larger emergent unit wins over its atoms.
+                        // This matches the spirit of integrate()'s
+                        // length factor.
+                        let length_bonus = (in_pool_members.len() as f32).sqrt();
+                        ranked.push((n.id, avg * length_bonus, true));
+                    }
+                }
+            }
+            // Concepts first by their composed score, then atoms.
+            // The is_concept flag lets us tiebreak: concept > atom
+            // at the same score so emergent units are surfaced.
+            ranked.sort_by(|a, b| {
+                let s = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+                if s == std::cmp::Ordering::Equal {
+                    return b.2.cmp(&a.2);
+                }
+                s
+            });
+            ranked.truncate(top_per_pool);
+
+            let mut decoded: Vec<DecodedConcept> = Vec::with_capacity(ranked.len());
+            for (nid, score, _is_concept) in ranked {
+                let neuron = match pool.get(nid) {
+                    Some(n) => n,
+                    None    => continue,
+                };
+                let bytes: Vec<u8> = if neuron.is_atom() {
+                    pool.encoding_reassemble(&[(neuron.label.as_str(), 1.0)])
+                } else {
+                    pool.decode_concept_members(&neuron.members)
+                };
+                decoded.push(DecodedConcept {
+                    neuron:     NeuronRef::new(tp, nid),
+                    activation: score,
+                    label:      neuron.label.clone(),
+                    bytes,
+                });
+            }
+            per_pool.push(PoolExtrusion { pool: tp, decoded });
+        }
+
+        ResonantExtrusion {
+            iterations_run: settle.iterations_run,
+            converged:      settle.converged,
+            pools:          per_pool,
+        }
     }
 
     /// Critical-thinking integration.  When fabric retrieval has low

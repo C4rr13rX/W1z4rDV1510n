@@ -424,4 +424,226 @@ impl Fabric {
 
         acts
     }
+
+    /// Stage 13A — iterative settling for the "epoxy mould" creation
+    /// model (ARCHITECTURE.md §1.3 resonance dynamics).
+    ///
+    /// Where [`Self::propagate`] does `max_hops` of monotonic
+    /// accumulation, `settle` runs *fixed-point iteration*: each step
+    /// propagates one hop forward from the current state, then
+    /// **sharpens** each pool's activation map (soft top-K
+    /// normalization) so the next iteration propagates from the
+    /// sharpened state rather than the accumulated total.  This is
+    /// what lets cross-pool feedback resonate — a coherent state in
+    /// one pool fires its concepts in another pool, which fires back,
+    /// and the substrate settles into a joint configuration where all
+    /// active pools "agree."
+    ///
+    /// Convergence: returns as soon as no pool's top-K activation set
+    /// has changed more than `eps` since the previous iteration, or
+    /// after `max_iter` iterations.
+    ///
+    /// This is PARALLEL to `propagate`; the existing one-pass path
+    /// remains the contract for `integrate()` and `/chat`.  Stage 13
+    /// only adds the resonant path — it does not modify the
+    /// retrieval-side dynamics that the Stage 7-12 work depends on.
+    pub fn settle(
+        &self,
+        from_pool: PoolId,
+        max_iter:  usize,
+        top_k:     usize,
+        eps:       f32,
+    ) -> SettleResult {
+        let pool_arc = match self.pools.get(&from_pool) {
+            Some(p) => p.clone(),
+            None    => return SettleResult::empty(),
+        };
+
+        // Seed state from source pool's currently-firing neurons.
+        // The seed atoms are the "mould" — they must remain pinned at
+        // activation 1.0 for the entire settling run so cross-pool
+        // feedback can flow around them rather than displace them.
+        // Without this pin, the substrate collapses to whichever
+        // attractor has the densest axon network, regardless of
+        // what was queried.
+        let mut state: AHashMap<PoolId, AHashMap<NeuronId, f32>> = AHashMap::new();
+        let seed_atoms: AHashMap<NeuronId, f32> = {
+            let pool = pool_arc.read();
+            let mut seed: AHashMap<NeuronId, f32> = AHashMap::new();
+            for nid in pool.currently_firing() {
+                seed.insert(nid, 1.0);
+            }
+            seed
+        };
+        if seed_atoms.is_empty() { return SettleResult::empty(); }
+        state.insert(from_pool, seed_atoms.clone());
+
+        let mut iterations_run = 0usize;
+        let mut converged = false;
+        // Damping retains some of the prior state into the next
+        // iteration — without this, the source pool's activation
+        // could be replaced by feedback from other pools and the
+        // mould "drifts" off the prompt.  0.5 retains half the prior
+        // sharpened activation as a persistent constraint.
+        let damping: f32 = 0.5;
+
+        for it in 0..max_iter {
+            iterations_run = it + 1;
+
+            // One propagation hop forward from the *current* state.
+            let mut next: AHashMap<PoolId, AHashMap<NeuronId, f32>> = AHashMap::new();
+            // Carry forward damped current state — this is the
+            // "persistence" that prevents the mould from drifting.
+            for (pid, neurons) in state.iter() {
+                let entry = next.entry(*pid).or_default();
+                for (&nid, &a) in neurons.iter() {
+                    *entry.entry(nid).or_insert(0.0) += a * damping;
+                }
+            }
+            // Propagate from each currently-active neuron one hop.
+            for (pid, neurons) in state.iter() {
+                let pool_a = match self.pools.get(pid) {
+                    Some(p) => p.clone(),
+                    None    => continue,
+                };
+                let pool = pool_a.read();
+                for (&nid, &activation) in neurons.iter() {
+                    if activation < 0.001 { continue; }
+                    let neuron = match pool.get(nid) {
+                        Some(n) => n,
+                        None    => continue,
+                    };
+                    let fan_out = (neuron.terminals.len() as f32).sqrt().max(1.0);
+                    for t in &neuron.terminals {
+                        let contribution = activation
+                            * t.effective_weight()
+                            * self.config.hop_decay
+                            / fan_out;
+                        if contribution.abs() < 0.0001 { continue; }
+                        let tgt_pool = next.entry(t.target.pool).or_default();
+                        *tgt_pool.entry(t.target.neuron).or_insert(0.0) += contribution;
+                    }
+                }
+            }
+
+            // Sharpen each pool: keep top_k by activation, normalize
+            // top to 1.0.  This is the soft-WTA that makes successive
+            // iterations propagate from a SHARPER state, not the
+            // accumulated sum.
+            let mut sharpened: AHashMap<PoolId, AHashMap<NeuronId, f32>> =
+                AHashMap::with_capacity(next.len());
+            for (pid, neurons) in next.iter() {
+                let mut entries: Vec<(NeuronId, f32)> = neurons.iter()
+                    .map(|(k, v)| (*k, *v)).collect();
+                entries.sort_by(|a, b|
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                entries.truncate(top_k);
+                let max = entries.first().map(|(_, a)| *a).unwrap_or(0.0);
+                let mut pool_state: AHashMap<NeuronId, f32> =
+                    AHashMap::with_capacity(entries.len());
+                if max > 0.0 {
+                    for (nid, a) in entries {
+                        pool_state.insert(nid, a / max);
+                    }
+                }
+                if !pool_state.is_empty() {
+                    sharpened.insert(*pid, pool_state);
+                }
+            }
+
+            // Pin the mould — re-clamp the source pool's seed atoms
+            // to activation 1.0 in the sharpened state.  Without this,
+            // feedback from other pools can sharpen the source pool
+            // around DIFFERENT atoms than the query, and the substrate
+            // settles onto the wrong constraint.
+            let source_entry = sharpened.entry(from_pool).or_default();
+            for (&nid, &v) in seed_atoms.iter() {
+                source_entry.insert(nid, v);
+            }
+
+            // Convergence check: did any pool's top-K set change by
+            // more than eps?  We compare sharpened to previous state.
+            let delta = top_k_delta(&state, &sharpened, top_k);
+            state = sharpened;
+            if delta < eps {
+                converged = true;
+                break;
+            }
+        }
+
+        SettleResult {
+            pool_activations: state,
+            iterations_run,
+            converged,
+        }
+    }
+}
+
+/// Stage 13A — return shape for [`Fabric::settle`].
+#[derive(Debug, Clone)]
+pub struct SettleResult {
+    pub pool_activations: AHashMap<PoolId, AHashMap<NeuronId, f32>>,
+    pub iterations_run:   usize,
+    pub converged:        bool,
+}
+
+impl SettleResult {
+    fn empty() -> Self {
+        Self {
+            pool_activations: AHashMap::new(),
+            iterations_run:   0,
+            converged:        true,
+        }
+    }
+    /// Top-N (NeuronId, activation) entries in a given pool from the
+    /// settled state.  Returned in descending activation order.
+    pub fn top_in_pool(&self, pool: PoolId, n: usize) -> Vec<(NeuronId, f32)> {
+        let pool_map = match self.pool_activations.get(&pool) {
+            Some(m) => m,
+            None    => return Vec::new(),
+        };
+        let mut entries: Vec<(NeuronId, f32)> = pool_map.iter()
+            .map(|(k, v)| (*k, *v)).collect();
+        entries.sort_by(|a, b|
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        entries.truncate(n);
+        entries
+    }
+}
+
+/// L1-distance between two settled states over their top-K active
+/// neurons per pool.  Used as the convergence criterion inside
+/// [`Fabric::settle`].
+fn top_k_delta(
+    prev: &AHashMap<PoolId, AHashMap<NeuronId, f32>>,
+    next: &AHashMap<PoolId, AHashMap<NeuronId, f32>>,
+    top_k: usize,
+) -> f32 {
+    let mut total = 0.0_f32;
+    let pools: ahash::AHashSet<&PoolId> = prev.keys().chain(next.keys()).collect();
+    for pid in pools {
+        let p = prev.get(pid);
+        let n = next.get(pid);
+        // Collect top-k of each side.
+        let topk = |m: Option<&AHashMap<NeuronId, f32>>| -> Vec<(NeuronId, f32)> {
+            let mut v: Vec<(NeuronId, f32)> = m.into_iter()
+                .flat_map(|h| h.iter().map(|(k, v)| (*k, *v)))
+                .collect();
+            v.sort_by(|a, b|
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            v.truncate(top_k);
+            v
+        };
+        let pv = topk(p);
+        let nv = topk(n);
+        let pset: AHashMap<NeuronId, f32> = pv.into_iter().collect();
+        let nset: AHashMap<NeuronId, f32> = nv.into_iter().collect();
+        let all_keys: ahash::AHashSet<NeuronId> = pset.keys().chain(nset.keys()).copied().collect();
+        for k in all_keys {
+            let a = pset.get(&k).copied().unwrap_or(0.0);
+            let b = nset.get(&k).copied().unwrap_or(0.0);
+            total += (a - b).abs();
+        }
+    }
+    total
 }

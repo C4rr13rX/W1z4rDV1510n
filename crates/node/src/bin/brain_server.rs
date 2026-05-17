@@ -378,6 +378,104 @@ async fn integrate(
     })
 }
 
+#[derive(Deserialize, Debug)]
+struct ResonantRequest {
+    query_pool:    PoolId,
+    /// One or more target pool ids whose settled state should be
+    /// decoded and returned.  Empty/omitted defaults to "every pool
+    /// the brain knows about" (including the source pool, so callers
+    /// see the persistent mould).
+    #[serde(default)]
+    target_pools:  Vec<PoolId>,
+    /// Top concepts to decode per pool.  Default 8.
+    #[serde(default)]
+    top_per_pool:  Option<usize>,
+    /// Max iterations the settling fixed-point will run.  Default 12.
+    #[serde(default)]
+    max_iter:      Option<usize>,
+    /// Convergence threshold (L1 distance over top-K).  Default 0.01.
+    #[serde(default)]
+    eps:           Option<f32>,
+}
+
+#[derive(Serialize, Debug)]
+struct ResonantConceptOut {
+    pool:        PoolId,
+    pool_name:   String,
+    neuron_id:   w1z4rd_brain::NeuronId,
+    label:       String,
+    activation:  f32,
+    bytes_b64:   String,
+    bytes_utf8:  Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct ResonantPoolOut {
+    pool:       PoolId,
+    pool_name:  String,
+    decoded:    Vec<ResonantConceptOut>,
+}
+
+#[derive(Serialize, Debug)]
+struct ResonantResponse {
+    iterations_run: usize,
+    converged:      bool,
+    pools:          Vec<ResonantPoolOut>,
+}
+
+/// Stage 13A — `/integrate_resonant`.  Runs the settling fixed-point
+/// over the substrate and returns the decoded top-K concepts per
+/// requested target pool.  Parallel to `/integrate`; the existing
+/// retrieval path is unchanged.
+async fn integrate_resonant(
+    State(s): State<AppState>,
+    Json(req): Json<ResonantRequest>,
+) -> Json<ResonantResponse> {
+    let brain = s.brain.lock().await;
+
+    let target_pools: Vec<PoolId> = if req.target_pools.is_empty() {
+        brain.fabric().pool_ids().into_iter().collect()
+    } else {
+        req.target_pools.clone()
+    };
+    let top_per_pool = req.top_per_pool.unwrap_or(8);
+    let max_iter     = req.max_iter.unwrap_or(12);
+    let eps          = req.eps.unwrap_or(0.01);
+
+    let extrusion = brain.integrate_resonant(
+        req.query_pool, &target_pools, top_per_pool, max_iter, eps);
+
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut out_pools: Vec<ResonantPoolOut> = Vec::with_capacity(extrusion.pools.len());
+    for pe in extrusion.pools {
+        let pool_name = pool_name(pe.pool).to_string();
+        let decoded: Vec<ResonantConceptOut> = pe.decoded.into_iter().map(|d| {
+            let bytes_b64 = engine.encode(&d.bytes);
+            let bytes_utf8 = std::str::from_utf8(&d.bytes).ok().map(|s| s.to_string());
+            ResonantConceptOut {
+                pool:       pe.pool,
+                pool_name:  pool_name.clone(),
+                neuron_id:  d.neuron.neuron,
+                label:      d.label,
+                activation: d.activation,
+                bytes_b64,
+                bytes_utf8,
+            }
+        }).collect();
+        out_pools.push(ResonantPoolOut {
+            pool:      pe.pool,
+            pool_name,
+            decoded,
+        });
+    }
+
+    Json(ResonantResponse {
+        iterations_run: extrusion.iterations_run,
+        converged:      extrusion.converged,
+        pools:          out_pools,
+    })
+}
+
 async fn checkpoint(
     State(s): State<AppState>,
 ) -> Result<Json<CheckpointResponse>, (axum::http::StatusCode, String)> {
@@ -687,6 +785,7 @@ async fn main() -> Result<()> {
         .route("/observe",               post(observe))
         .route("/tick",                  post(tick))
         .route("/integrate",             post(integrate))
+        .route("/integrate_resonant",    post(integrate_resonant))
         .route("/checkpoint",            post(checkpoint))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))

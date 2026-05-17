@@ -42,11 +42,14 @@ pub mod network;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
-pub use fabric::{Fabric, FabricConfig, Moment};
+pub use fabric::{Fabric, FabricConfig, Moment, SettleResult};
 pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,
 };
-pub use brain::{Brain, BrainConfig, BrainStats, BindingMatch, MatchTier};
+pub use brain::{
+    Brain, BrainConfig, BrainStats, BindingMatch, MatchTier,
+    DecodedConcept, PoolExtrusion, ResonantExtrusion,
+};
 pub use action::{ActionEvent, ActionId, ActionRouter, NullRouter, RouteResult};
 pub use eem::{
     ChainResult, Discipline, DisciplineId, Eem, EemConfig, Equation,
