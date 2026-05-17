@@ -424,15 +424,38 @@ impl Brain {
             set
         };
 
-        // Selection: pick the concept maximizing
-        //     score = (activation * pathway_boost) / expanded_size
-        // where pathway_boost = `concept_pathway_boost` if this target
-        // concept is in `directly_targeted` (the substrate has a
-        // concept→concept cross-pool terminal pointing at it from a
-        // firing query concept), 1.0 otherwise.  The boost lets
-        // Stage 3's positional wiring actually decide the winner when
-        // raw atom propagation would tie or pick a shared shorter
-        // concept.
+        // Selection (Stage 6 — coverage-aware density):
+        //
+        //   score = avg_member_activation
+        //         × pathway_boost
+        //         × sqrt(direct_member_count)
+        //         × unique_ratio
+        //
+        // where:
+        //   avg_member_activation = mean of target_activation across the
+        //                           concept's in-pool member neurons.
+        //                           High when ALL members of the concept
+        //                           are firing strongly — i.e., the
+        //                           concept's full pattern is present.
+        //   sqrt(direct_member_count) — rewards longer concepts when
+        //                           coverage is good (so "color" wins
+        //                           over "co" when all of c,o,l,r are
+        //                           active), without letting concepts
+        //                           with 20+ repetitions dominate (sqrt
+        //                           grows slowly).
+        //   unique_ratio = unique_member_ids / direct_member_count.
+        //                  Penalizes concepts with REPEATED members —
+        //                  the long-pattern concepts from Experiment A
+        //                  (4× "x+y}" pattern) have unique_ratio 0.25
+        //                  while clean concepts have 1.0.
+        //   pathway_boost — same 4× factor as before for concepts that
+        //                  a query-pool concept directly targets via
+        //                  Stage 3 concept→concept cross-pool wiring.
+        //
+        // This replaces the earlier `(act × boost) / expanded_size`
+        // density rule, which favored short concepts so aggressively
+        // that trained full-word responses lost to 2-byte prefix
+        // concepts during chat retrieval.
         let pathway_boost = 4.0_f32;
         let mut strongest: Option<(NeuronRef, f32)> = None;
         let mut best_score: f32 = f32::NEG_INFINITY;
@@ -443,9 +466,26 @@ impl Brain {
                 if !n.is_atom() {
                     let r = NeuronRef::new(target_pool, nid);
                     all_active_concepts.push(r);
-                    let size = target.expanded_size(&n.members).max(1);
+
+                    let in_pool_members: Vec<NeuronId> = n.members.iter()
+                        .filter(|m| m.pool == target_pool)
+                        .map(|m| m.neuron)
+                        .collect();
+                    let member_count = in_pool_members.len().max(1);
+                    let unique_count: usize = in_pool_members.iter()
+                        .collect::<ahash::AHashSet<_>>().len().max(1);
+                    let unique_ratio = unique_count as f32 / member_count as f32;
+                    let member_activation_sum: f32 = in_pool_members.iter()
+                        .map(|nid| target_activation.get(nid).copied().unwrap_or(0.0))
+                        .sum();
+                    let avg_member_act = member_activation_sum / member_count as f32;
+
                     let boost = if directly_targeted.contains(&nid) { pathway_boost } else { 1.0 };
-                    let score = (act * boost) / size as f32;
+                    let length_factor = (member_count as f32).sqrt();
+                    let score = avg_member_act * boost * length_factor * unique_ratio;
+                    // Hold on to raw activation for grounding metric.
+                    let _ = act;
+                    let _ = target.expanded_size(&n.members);
                     if score > best_score {
                         best_score = score;
                         strongest = Some((r, act));
