@@ -1,0 +1,48 @@
+[script]
+id          = "k12_categories_only_001"
+category    = "conversation"
+phase       = 1
+description = """
+Stage 12 follow-up corpus: ONLY short (concept, category) pairs from
+concept_dataset.  No definitions, no QA pairs.  Used to test whether
+the tie-breaking conflict in Stage 7 binding-pool routing — caused
+by multiple bindings sharing identical text-pool member sets but
+having different-length action-pool member sets — was the root
+cause of K-12 prompts failing to retrieve their trained category.
+
+Built by tools/training_standard/compile_k12_categories_only.py
+from data/foundation/concept_dataset.jsonl + class_corpus.jsonl.
+"""
+depends_on  = ["greetings_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/k12_categories_only_001.jsonl"
+
+[[benchmarks]]
+label        = "categorical: piano"
+prompt       = "piano"
+must_include = ["musical_instrument", "music"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: rose"
+prompt       = "rose"
+must_include = ["plant"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: hammer"
+prompt       = "hammer"
+must_include = ["tool"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: triangle"
+prompt       = "triangle"
+must_include = ["shape"]
+min_score    = 0.5
+expected_structure = "prose"
