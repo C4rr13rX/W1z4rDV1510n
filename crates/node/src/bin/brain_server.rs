@@ -51,6 +51,14 @@ const POOL_TEXT:   PoolId = 1;
 const POOL_IMAGE:  PoolId = 2;
 const POOL_AUDIO:  PoolId = 3;
 const POOL_ACTION: PoolId = 4;
+/// Stage 11B — turn pool.  Client-supplied opaque turn IDs land here
+/// as raw bytes; the brain treats them like any other atom, and the
+/// cross-pool fingerprint between a turn neuron and a text neuron
+/// becomes the binding the dialogue continuation walker can chain
+/// through.  Brain owns no session semantics — the client (typically
+/// the Wizard frontend) decides when to advance the turn id and when
+/// to expire old turns via `POST /observe/expire`.
+const POOL_TURN:   PoolId = 5;
 
 fn pool_name(id: PoolId) -> &'static str {
     match id {
@@ -82,6 +90,7 @@ fn pool_prefixes() -> HashMap<PoolId, String> {
     p.insert(POOL_IMAGE,  "i".to_string());
     p.insert(POOL_AUDIO,  "a".to_string());
     p.insert(POOL_ACTION, "act".to_string());
+    p.insert(POOL_TURN,   "turn".to_string());
     p
 }
 
@@ -135,6 +144,21 @@ fn build_fresh_brain() -> Result<Brain> {
     brain.create_pool(action,
         Box::new(BytePassthroughEncoding { prefix: "act" }) as Box<dyn AtomEncoding>);
     brain.designate_action_pool(POOL_ACTION);
+
+    // Stage 11B — turn pool.  Aggressive decay + low prune floor so old
+    // turn-id neurons fall out of the pool naturally (audit-2 LRU
+    // behavior without needing a hard cap in the substrate).  The
+    // recent_atoms window is small because we only need adjacency
+    // information within a single conversation — older turns should
+    // not influence newer ones.
+    let mut turn = PoolConfig::defaults("turn", POOL_TURN);
+    turn.recent_atoms_window         = 32;
+    turn.concept_emergence_threshold = u32::MAX;  // turn ids never collapse into concepts
+    turn.max_concept_member_count    = 4;
+    turn.decay_rate                  = 0.001;     // ~50× faster than text/image/audio
+    turn.prune_floor                 = 0.01;      // aggressive — old turn neurons recede fast
+    brain.create_pool(turn,
+        Box::new(BytePassthroughEncoding { prefix: "turn" }) as Box<dyn AtomEncoding>);
 
     Ok(brain)
 }
@@ -405,6 +429,21 @@ async fn sensor_observe(
             let frame = decode_base64_flexible(&b64)
                 .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
             (POOL_AUDIO, frame)
+        }
+        "turn" => {
+            // Stage 11B: client-supplied opaque turn id (bytes).  May
+            // arrive as plain `text` (recommended — turn ids are short
+            // string tokens like "session-abc:turn-42") or as
+            // `bytes_b64` for binary ids.  Brain owns no session
+            // semantics: any byte sequence is fine.
+            let frame = if let Some(t) = req.text.as_ref() {
+                t.clone().into_bytes()
+            } else {
+                let b64 = req.bytes_b64.unwrap_or_default();
+                decode_base64_flexible(&b64)
+                    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?
+            };
+            (POOL_TURN, frame)
         }
         other => {
             return Err((axum::http::StatusCode::BAD_REQUEST,
