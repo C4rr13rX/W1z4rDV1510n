@@ -45,6 +45,7 @@ pub type EquationId = u32;
 pub type VariableId = u32;
 pub type MotifId    = u32;
 pub type DisciplineId = u32;
+pub type FactId       = u32;
 
 /// Symbolic equation with `evalexpr`-compatible expression text.  When
 /// evaluated, the caller supplies `bindings: VariableId → f64`; the
@@ -106,6 +107,17 @@ pub struct EquationApplication {
     pub confidence:  f32,
 }
 
+/// Result of [`Eem::chain_explore`].  `reached_members` maps every
+/// (pool, neuron) ref reached during the walk to its best-chain
+/// confidence (product of fact confidences along the shortest path).
+/// `visited_facts` is the set of fact ids traversed — caller can
+/// inspect what reasoning chain produced an answer.
+#[derive(Debug, Clone)]
+pub struct ChainResult {
+    pub reached_members: ahash::AHashMap<(PoolId, NeuronId), f32>,
+    pub visited_facts:   Vec<FactId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EemConfig {
     /// Starting confidence assigned to freshly-registered equations.
@@ -129,6 +141,34 @@ impl Default for EemConfig {
     }
 }
 
+/// One grounded fact the EEM has crystallized from validated sensor
+/// experience.  A fact = a co-firing pattern across pools that the
+/// substrate observed enough times (via binding-concept promotion) to
+/// promote into a stable cross-pool relationship.
+///
+/// Facts are the EEM's bridge between the fabric's concept graph and
+/// the equation/variable layer: each fact's `members` are NeuronRefs
+/// pointing into specific pools, so the chain explorer can walk from
+/// firing concepts to facts that involve them, then to OTHER concepts
+/// in those facts (i.e., the trained partners), then to ANOTHER fact
+/// involving those partners, and so on — ivy-growth equation chaining
+/// over grounded experience.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroundedFact {
+    pub id:                FactId,
+    /// Brain's binding-pool neuron id that this fact crystallized from.
+    pub source_binding:    NeuronId,
+    /// (pool, neuron) refs of every atom/concept that co-fired in the
+    /// binding event.  Stored sorted for deterministic chain matching.
+    pub members:           Vec<(PoolId, NeuronId)>,
+    /// Confidence ∈ [0, 1].  Starts at 1.0 (it crystallized from
+    /// repeated co-firing — high prior).  Decays/grows as the fact is
+    /// re-validated or contradicted.
+    pub confidence:        f32,
+    /// How many times this binding fingerprint has been observed.
+    pub observation_count: u32,
+}
+
 /// In-memory property-graph EEM.  Owned by [`crate::Brain`].
 pub struct Eem {
     pub config:    EemConfig,
@@ -136,6 +176,7 @@ pub struct Eem {
     variables:     Vec<Variable>,
     disciplines:   Vec<Discipline>,
     motifs:        Vec<Motif>,
+    facts:         Vec<GroundedFact>,
     /// Equation name → id, for label-based lookup.
     eq_by_name:    AHashMap<String, EquationId>,
     var_by_name:   AHashMap<String, VariableId>,
@@ -146,6 +187,14 @@ pub struct Eem {
     /// motif_id → list of equation_ids it's been linked to (the
     /// OBSERVED_AT edges).
     motif_links:   AHashMap<MotifId, Vec<EquationId>>,
+    /// Reverse index: (pool, neuron) → fact ids that include it.
+    /// Enables O(1) "what facts involve this concept" lookups during
+    /// chain exploration.
+    fact_by_member: AHashMap<(PoolId, NeuronId), Vec<FactId>>,
+    /// Source binding id → fact id (so re-emergence of the same
+    /// binding doesn't create duplicate facts; instead bumps
+    /// observation_count).
+    fact_by_source: AHashMap<NeuronId, FactId>,
 }
 
 impl Eem {
@@ -156,11 +205,14 @@ impl Eem {
             variables:    Vec::new(),
             disciplines:  Vec::new(),
             motifs:       Vec::new(),
+            facts:        Vec::new(),
             eq_by_name:   AHashMap::new(),
             var_by_name:  AHashMap::new(),
             disc_by_name: AHashMap::new(),
             motif_by_fp:  AHashMap::new(),
             motif_links:  AHashMap::new(),
+            fact_by_member: AHashMap::new(),
+            fact_by_source: AHashMap::new(),
         }
     }
 
@@ -168,6 +220,142 @@ impl Eem {
     pub fn variable_count(&self)   -> usize { self.variables.len() }
     pub fn discipline_count(&self) -> usize { self.disciplines.len() }
     pub fn motif_count(&self)      -> usize { self.motifs.len() }
+    pub fn fact_count(&self)       -> usize { self.facts.len() }
+    pub fn fact(&self, id: FactId) -> Option<&GroundedFact> {
+        self.facts.get(id as usize)
+    }
+    pub fn iter_facts(&self) -> impl Iterator<Item = &GroundedFact> {
+        self.facts.iter()
+    }
+
+    /// Register (or update) a grounded fact for a binding emergence
+    /// event.  Idempotent on `source_binding` — repeat calls bump
+    /// `observation_count` rather than creating duplicates.  Members
+    /// are stored sorted for deterministic chain-walking.
+    pub fn register_fact(
+        &mut self,
+        source_binding: NeuronId,
+        mut members: Vec<(PoolId, NeuronId)>,
+    ) -> FactId {
+        members.sort();
+        if let Some(&fid) = self.fact_by_source.get(&source_binding) {
+            if let Some(f) = self.facts.get_mut(fid as usize) {
+                f.observation_count = f.observation_count.saturating_add(1);
+                f.confidence = (f.confidence + 0.02).min(1.0);
+            }
+            return fid;
+        }
+        let id = self.facts.len() as FactId;
+        let fact = GroundedFact {
+            id,
+            source_binding,
+            members: members.clone(),
+            confidence: 1.0,
+            observation_count: 1,
+        };
+        for &m in &members {
+            self.fact_by_member.entry(m).or_default().push(id);
+        }
+        self.fact_by_source.insert(source_binding, id);
+        self.facts.push(fact);
+        id
+    }
+
+    /// Find every grounded fact that includes the given (pool, neuron)
+    /// ref as one of its members.  This is the "Stage 3 equation
+    /// matcher" — given a firing concept, find facts of the substrate's
+    /// world-knowledge that are relevant.  O(1) via reverse index.
+    pub fn facts_involving(&self, pool: PoolId, neuron: NeuronId) -> Vec<&GroundedFact> {
+        match self.fact_by_member.get(&(pool, neuron)) {
+            Some(ids) => ids.iter()
+                .filter_map(|id| self.facts.get(*id as usize))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Bulk variant: union of all facts that involve ANY of the given
+    /// member refs, deduplicated.  Used by `Brain::integrate_autonomous`
+    /// when launching chain exploration from the firing concepts of a
+    /// query.
+    pub fn facts_for_concepts<I>(&self, members: I) -> Vec<&GroundedFact>
+    where I: IntoIterator<Item = (PoolId, NeuronId)>
+    {
+        let mut seen: ahash::AHashSet<FactId> = ahash::AHashSet::new();
+        let mut out = Vec::new();
+        for m in members {
+            if let Some(ids) = self.fact_by_member.get(&m) {
+                for &id in ids {
+                    if seen.insert(id) {
+                        if let Some(f) = self.facts.get(id as usize) {
+                            out.push(f);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Chain-explore the fact graph starting from `seed_members`.  At
+    /// each step, find facts that involve any current member; expand
+    /// to include OTHER members of those facts.  Bounds by `max_depth`
+    /// (graph hops) and `max_visit` (total facts traversed) so the
+    /// walk doesn't explode.
+    ///
+    /// Returns the set of (pool, neuron) refs reached AND the set of
+    /// facts traversed along the way.  Caller can score / decode the
+    /// result.  Per spec: this is the ivy-growth equation chain.
+    ///
+    /// Confidence of a reached member = product of `fact.confidence`
+    /// along the shortest chain (recorded in `member_confidence`).
+    pub fn chain_explore(
+        &self,
+        seed_members: &[(PoolId, NeuronId)],
+        max_depth:    usize,
+        max_visit:    usize,
+    ) -> ChainResult {
+        let mut frontier: ahash::AHashMap<(PoolId, NeuronId), f32> = ahash::AHashMap::new();
+        let mut reached:  ahash::AHashMap<(PoolId, NeuronId), f32> = ahash::AHashMap::new();
+        let mut visited_facts: ahash::AHashSet<FactId> = ahash::AHashSet::new();
+        for m in seed_members {
+            frontier.insert(*m, 1.0);
+            reached.insert(*m, 1.0);
+        }
+        for _depth in 0..max_depth {
+            if visited_facts.len() >= max_visit || frontier.is_empty() { break; }
+            let mut next_frontier: ahash::AHashMap<(PoolId, NeuronId), f32> = ahash::AHashMap::new();
+            for (member, src_conf) in frontier.iter() {
+                if visited_facts.len() >= max_visit { break; }
+                let fids = match self.fact_by_member.get(member) {
+                    Some(ids) => ids.clone(),
+                    None => continue,
+                };
+                for fid in fids {
+                    if !visited_facts.insert(fid) { continue; }
+                    let fact = match self.facts.get(fid as usize) {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    let new_conf = src_conf * fact.confidence;
+                    for &other in &fact.members {
+                        if other == *member { continue; }
+                        // Keep the BEST confidence seen for any reached
+                        // member.
+                        let entry = next_frontier.entry(other).or_insert(0.0);
+                        if new_conf > *entry { *entry = new_conf; }
+                        let r_entry = reached.entry(other).or_insert(0.0);
+                        if new_conf > *r_entry { *r_entry = new_conf; }
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+        ChainResult {
+            reached_members: reached,
+            visited_facts:   visited_facts.into_iter().collect(),
+        }
+    }
 
     pub fn equation(&self, id: EquationId) -> Option<&Equation> {
         self.equations.get(id as usize)
@@ -382,6 +570,7 @@ impl Eem {
             disciplines: self.disciplines.clone(),
             motifs:      self.motifs.clone(),
             motif_links,
+            facts:       self.facts.clone(),
         }
     }
 
@@ -400,17 +589,29 @@ impl Eem {
         }
         let mut motif_links = AHashMap::new();
         for (k, v) in snap.motif_links { motif_links.insert(k, v); }
+        // Rebuild fact reverse indices.
+        let mut fact_by_member: AHashMap<(PoolId, NeuronId), Vec<FactId>> = AHashMap::new();
+        let mut fact_by_source: AHashMap<NeuronId, FactId> = AHashMap::new();
+        for f in &snap.facts {
+            for &m in &f.members {
+                fact_by_member.entry(m).or_default().push(f.id);
+            }
+            fact_by_source.insert(f.source_binding, f.id);
+        }
         Self {
-            config:       snap.config,
-            equations:    snap.equations,
-            variables:    snap.variables,
-            disciplines:  snap.disciplines,
-            motifs:       snap.motifs,
+            config:         snap.config,
+            equations:      snap.equations,
+            variables:      snap.variables,
+            disciplines:    snap.disciplines,
+            motifs:         snap.motifs,
+            facts:          snap.facts,
             eq_by_name,
             var_by_name,
             disc_by_name,
             motif_by_fp,
             motif_links,
+            fact_by_member,
+            fact_by_source,
         }
     }
 }

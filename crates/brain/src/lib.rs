@@ -49,8 +49,9 @@ pub use grounding::{
 pub use brain::{Brain, BrainConfig, BrainStats};
 pub use action::{ActionEvent, ActionId, ActionRouter, NullRouter, RouteResult};
 pub use eem::{
-    Discipline, DisciplineId, Eem, EemConfig, Equation, EquationApplication,
-    EquationId, Motif, MotifId, Variable, VariableId,
+    ChainResult, Discipline, DisciplineId, Eem, EemConfig, Equation,
+    EquationApplication, EquationId, FactId, GroundedFact, Motif, MotifId,
+    Variable, VariableId,
 };
 pub use annealer::{Annealer, AnnealerConfig, Frame, PredictionResult};
 pub use persistence::{

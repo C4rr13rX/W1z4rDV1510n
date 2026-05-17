@@ -282,6 +282,12 @@ impl Brain {
                         .min(1.0),
                     observed_at_tick:  self.fabric.current_tick(),
                 });
+                // Stage 8: Auto-populate the EEM with a grounded fact
+                // for this binding.  The fact captures the substrate's
+                // experiential certainty that these atoms co-fire as a
+                // unit.  Subsequent chain exploration in the critical-
+                // thinking loop walks across these facts.
+                self.eem.register_fact(id, fp.pairs.clone());
                 self.promoted_fingerprints.insert(fp, id);
             }
         }
@@ -716,6 +722,163 @@ impl Brain {
             next_steps_if_ungrounded: Vec::new(),
         }
     }
+
+    // ---------------------------------------------------------------
+    // Stage 8 — Critical-thinking loop (spec §4.D + §4.B + user's
+    // ivy-growth equation-chaining vision).
+    //
+    // The unbounded-problem-resolution path:
+    //   prompt
+    //     ↓
+    //   fabric retrieval (today's chat) ──→ if confident, return
+    //     ↓ low confidence
+    //   EEM chain explorer ──→ walk grounded facts across pools by
+    //                          composing them through shared concepts;
+    //                          look for convergence in the target pool
+    //     ↓ no convergence
+    //   RequestObservation ──→ honest "I need more knowledge"
+    //
+    // The annealer also plugs into the chain exploration step: when
+    // multiple chains exist with comparable confidence, the annealer's
+    // temporal prediction biases toward chains whose convergence
+    // members match patterns the substrate has previously seen.
+    // ---------------------------------------------------------------
+
+    /// Critical-thinking integration.  When fabric retrieval has low
+    /// confidence, walks the EEM's grounded-fact graph from the
+    /// query's firing concepts to find target-pool concepts reachable
+    /// via co-firing chains.  Returns an `AnswerWithGrounding` whose
+    /// `answer` is the strongest reached target-pool concept's decoded
+    /// bytes, or `None` (with `outside_grounding=true`) when no chain
+    /// converges.
+    ///
+    /// `fabric_confidence_threshold`: below this, the EEM chain path
+    /// runs.  Above, the fabric result is returned directly.
+    /// `chain_max_depth`: how many hops the ivy-growth walk takes.
+    /// `chain_max_visit`: cap on total facts traversed (bounds work).
+    pub fn integrate_autonomous(
+        &self,
+        query_pool:                  PoolId,
+        target_pool:                 PoolId,
+        fabric_confidence_threshold: f32,
+        chain_max_depth:             usize,
+        chain_max_visit:             usize,
+    ) -> AnswerWithGrounding {
+        // 1. Try the fabric path first.  The fabric_confidence metric
+        // is `strongest / total_concept_activation` — a relative share
+        // that's typically small in absolute value (0.02-0.10) even
+        // for confident matches because lots of concepts fire.  So
+        // gating purely on fabric_confidence is wrong; we trust the
+        // fabric answer whenever it's non-empty and not flagged as
+        // outside-grounding, falling through ONLY when fabric has
+        // no answer.  The fabric_confidence_threshold is kept as a
+        // tunable in case the user wants to force the chain path for
+        // testing.
+        let fabric_ans = self.integrate(query_pool, target_pool);
+        let fabric_has_answer = fabric_ans.answer.as_ref()
+            .map(|b| !b.is_empty()).unwrap_or(false);
+        if fabric_has_answer
+            && !fabric_ans.grounding.outside_grounding
+            && fabric_ans.grounding.fabric_confidence >= fabric_confidence_threshold
+        {
+            return fabric_ans;
+        }
+
+        // 2. Build the seed set: every firing query-pool atom + every
+        // firing query-pool concept's atomic leaves.  These are the
+        // refs the chain explorer walks from.
+        let query_handle = match self.fabric.pool(query_pool) {
+            Some(p) => p,
+            None    => return fabric_ans,
+        };
+        let q = query_handle.read();
+        let mut seed: Vec<(PoolId, NeuronId)> = Vec::new();
+        for nid in q.currently_firing() {
+            seed.push((query_pool, nid));
+        }
+        drop(q);
+        if seed.is_empty() { return fabric_ans; }
+
+        // 3. Walk the EEM's grounded-fact graph from those seeds.
+        let chain = self.eem.chain_explore(&seed, chain_max_depth, chain_max_visit);
+
+        // 4. Filter reached members to the target pool and rank by
+        // chain confidence (product of fact confidences along the
+        // shortest path).
+        let mut target_candidates: Vec<((PoolId, NeuronId), f32)> = chain
+            .reached_members.iter()
+            .filter(|((p, _), _)| *p == target_pool)
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        if target_candidates.is_empty() {
+            // Chain found nothing in target pool → return the fabric
+            // attempt (which may have low confidence; honest signal).
+            return fabric_ans;
+        }
+        target_candidates.sort_by(|a, b|
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 5. Annealer-guided pick: when multiple high-confidence
+        // candidates exist, prefer the one whose predicted activation
+        // in the annealer's view is highest.  Falls back to top-by-
+        // chain-confidence when the annealer has no prediction.
+        let prediction = self.annealer.predict_next(target_pool);
+        let pred_frame = prediction.as_ref().map(|p| &p.predicted_frame);
+
+        let best_target = target_candidates.iter()
+            .max_by(|(a_ref, a_conf), (b_ref, b_conf)| {
+                let a_pred = pred_frame.and_then(|f| f.get(&a_ref.1).copied()).unwrap_or(0.0);
+                let b_pred = pred_frame.and_then(|f| f.get(&b_ref.1).copied()).unwrap_or(0.0);
+                let a_score = a_conf + 0.5 * a_pred;
+                let b_score = b_conf + 0.5 * b_pred;
+                a_score.partial_cmp(&b_score).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied();
+
+        let (best_ref, best_conf) = match best_target {
+            Some(x) => x,
+            None    => return fabric_ans,
+        };
+
+        // 6. Decode the chosen target neuron.  If it's a concept, walk
+        // its members; if it's an atom, decode via the pool encoding.
+        let target_handle = match self.fabric.pool(target_pool) {
+            Some(p) => p,
+            None    => return fabric_ans,
+        };
+        let t = target_handle.read();
+        let answer_bytes = match t.get(best_ref.1) {
+            Some(n) if n.is_atom() => {
+                let pairs = [(n.label.as_str(), 1.0_f32)];
+                Some(t.encoding_reassemble(&pairs))
+            }
+            Some(n) => Some(t.decode_concept_members(&n.members)),
+            None    => None,
+        };
+
+        // 7. Assemble the grounding.  The chain confidence is folded
+        // into EEM-side confidence; fabric_confidence stays whatever
+        // the fabric reported (low, since we got here).
+        let mut g = fabric_ans.grounding.clone();
+        g.eem_confidence = Some(best_conf);
+        let f = g.fabric_confidence.max(0.0);
+        g.integrated_confidence = ((f * best_conf).sqrt()).max(best_conf * 0.5);
+        g.strongest_match = Some(NeuronRef::new(target_pool, best_ref.1));
+        g.outside_grounding = answer_bytes.as_ref().map(|b| b.is_empty()).unwrap_or(true);
+        g.speculation_flag = true; // chain-composed answer is by definition speculation
+        let tier = ConfidenceTier::from_confidence(
+            g.integrated_confidence, g.outside_grounding, g.speculation_flag);
+        AnswerWithGrounding {
+            answer: answer_bytes,
+            grounding: g,
+            confidence_tier: tier,
+            next_steps_if_ungrounded: Vec::new(),
+        }
+    }
+
+    /// Telemetry: count grounded facts the EEM has crystallized from
+    /// binding emergence.
+    pub fn eem_fact_count(&self) -> usize { self.eem.fact_count() }
 
     // ---------------------------------------------------------------
     // Phase 5 — EEM-augmented integration (spec §4.D + §4.B).

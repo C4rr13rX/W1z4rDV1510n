@@ -34,7 +34,7 @@ use std::path::Path;
 
 use crate::action::{ActionEvent, ActionId};
 use crate::annealer::AnnealerConfig;
-use crate::eem::{Discipline, EemConfig, Equation, Motif, Variable};
+use crate::eem::{Discipline, EemConfig, Equation, GroundedFact, Motif, Variable};
 use crate::fabric::FabricConfig;
 use crate::neuron::{Neuron, NeuronId, PoolId};
 use crate::pool::PoolConfig;
@@ -71,6 +71,8 @@ pub struct EemSnapshot {
     pub disciplines: Vec<Discipline>,
     pub motifs:      Vec<Motif>,
     pub motif_links: Vec<(u32, Vec<u32>)>,
+    #[serde(default)]
+    pub facts:       Vec<GroundedFact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

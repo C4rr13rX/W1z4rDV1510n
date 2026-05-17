@@ -479,11 +479,17 @@ async fn chat(
     // Observe the prompt into the text pool.
     brain.observe(POOL_TEXT, prompt.as_bytes());
 
-    // PRIMARY: cross-pool integrate text→action.  This surfaces
-    // trained Q→A bindings — the user's "what category is X"
-    // memory.  Stage 7 binding-pool routing + Stage 6/7 selectors
-    // do the heavy lifting.
-    let xpool = brain.integrate(POOL_TEXT, POOL_ACTION);
+    // PRIMARY: autonomous critical-thinking integrate.  Tries
+    // fabric retrieval first; if low confidence, falls through to
+    // EEM grounded-fact chain exploration (ivy-growth across the
+    // substrate's accumulated world knowledge).  This is the path
+    // the user's vision describes — translate the unbounded prompt
+    // into bounded math chains over learned facts.
+    let xpool = brain.integrate_autonomous(
+        POOL_TEXT, POOL_ACTION,
+        /*fabric_threshold*/ 0.0,    // accept any non-empty fabric answer
+        /*chain_max_depth*/   4,
+        /*chain_max_visit*/   200);
     let xpool_reply: Option<String> = xpool.answer.as_ref().map(|b|
         String::from_utf8_lossy(b).into_owned());
 
@@ -539,12 +545,20 @@ async fn chat(
         }
     }
 
-    // Decoder telemetry: "multi_pool" when the cross-pool integrate
-    // produced a non-empty answer (binding-routed retrieval —
-    // confident path); "char_chain" when we fell through to same-pool
-    // generate (associative fragments — UNCERTAIN path).
+    // Decoder telemetry — which path produced the reply:
+    //  "multi_pool" : fabric retrieval was confident (Stage 7 path)
+    //  "eem"        : EEM chain exploration produced the answer
+    //                 (Stage 8 ivy-growth path)
+    //  "char_chain" : both upstream paths empty; same-pool generate
+    //                 fragments are all we have (uncertain)
     let decoder = if xpool_reply.as_deref().map_or(false, |a| !a.is_empty()) {
-        "multi_pool"
+        if xpool.grounding.eem_confidence.is_some()
+            && xpool.grounding.fabric_confidence < 0.3
+        {
+            "eem"
+        } else {
+            "multi_pool"
+        }
     } else {
         "char_chain"
     }.to_string();
