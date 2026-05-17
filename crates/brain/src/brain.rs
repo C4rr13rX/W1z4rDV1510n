@@ -424,6 +424,65 @@ impl Brain {
             set
         };
 
+        // Stage 7 (binding-pool routing): find the binding concept
+        // whose QUERY-POOL member atoms BEST MATCH the currently-firing
+        // query atom set.  Its target-pool member atoms then form a
+        // strong hint for which action concept the substrate associated
+        // with this prompt during training.
+        //
+        // We rank bindings by precision × recall over query atoms
+        // rather than raw activation — raw activation favors bindings
+        // with more total atoms (more activation paths in propagation),
+        // which is the wrong signal.  We want the binding whose
+        // text-pool member set IS the query's firing set.
+        let binding_target_atoms: ahash::AHashSet<NeuronId> = {
+            let bpid = self.binding_pool_id;
+            if bpid == target_pool || bpid == query_pool {
+                ahash::AHashSet::new()
+            } else {
+                // Query pool's currently-firing atom set.
+                let q_atoms: ahash::AHashSet<NeuronId> = {
+                    let q = query_pool_handle.read();
+                    q.currently_firing()
+                        .filter(|nid| q.get(*nid).map_or(false, |n| n.is_atom()))
+                        .collect()
+                };
+                if q_atoms.is_empty() {
+                    ahash::AHashSet::new()
+                } else if let Some(bp) = self.fabric.pool(bpid) {
+                    let bp_read = bp.read();
+                    let mut best: Option<(NeuronId, f32)> = None;
+                    for n in bp_read.iter_neurons() {
+                        if n.is_atom() { continue; }
+                        let bind_query: ahash::AHashSet<NeuronId> = n.members.iter()
+                            .filter(|m| m.pool == query_pool)
+                            .map(|m| m.neuron)
+                            .collect();
+                        let bind_target_has = n.members.iter()
+                            .any(|m| m.pool == target_pool);
+                        if bind_query.is_empty() || !bind_target_has { continue; }
+                        let intersect = bind_query.iter()
+                            .filter(|a| q_atoms.contains(a))
+                            .count() as f32;
+                        let precision = intersect / bind_query.len() as f32;
+                        let recall = intersect / q_atoms.len() as f32;
+                        let score = precision * recall;
+                        if score > 0.0 && best.map_or(true, |(_, s)| score > s) {
+                            best = Some((n.id, score));
+                        }
+                    }
+                    if let Some((bnid, _)) = best {
+                        if let Some(n) = bp_read.get(bnid) {
+                            n.members.iter()
+                                .filter(|m| m.pool == target_pool)
+                                .map(|m| m.neuron)
+                                .collect()
+                        } else { ahash::AHashSet::new() }
+                    } else { ahash::AHashSet::new() }
+                } else { ahash::AHashSet::new() }
+            }
+        };
+
         // Selection (Stage 6 — coverage-aware density):
         //
         //   score = avg_member_activation
@@ -474,7 +533,6 @@ impl Brain {
                     let member_count = in_pool_members.len().max(1);
                     let unique_count: usize = in_pool_members.iter()
                         .collect::<ahash::AHashSet<_>>().len().max(1);
-                    let unique_ratio = unique_count as f32 / member_count as f32;
                     let member_activation_sum: f32 = in_pool_members.iter()
                         .map(|nid| target_activation.get(nid).copied().unwrap_or(0.0))
                         .sum();
@@ -482,7 +540,53 @@ impl Brain {
 
                     let boost = if directly_targeted.contains(&nid) { pathway_boost } else { 1.0 };
                     let length_factor = (member_count as f32).sqrt();
-                    let score = avg_member_act * boost * length_factor * unique_ratio;
+
+                    // Information factor: rewards unique-atom count
+                    // while penalizing pure repetition.  Linear ratio
+                    // was too punitive on small repetitions like
+                    // "animal" (one repeated 'a') vs "nimal" (no
+                    // repetition).  This form gives "animal" a slight
+                    // edge over "nimal" because of its extra atom,
+                    // while still strongly penalizing concepts that
+                    // are mostly repetition (4× "x+y}" loses to
+                    // "x+y}").
+                    //
+                    //   info = unique_count - 0.3 × (member_count - unique_count)
+                    //
+                    // For 4-unique-of-4: info = 4
+                    // For 4-unique-of-8: info = 4 - 0.3*4 = 2.8
+                    // For 4-unique-of-16: info = 4 - 0.3*12 = 0.4
+                    // For 6-unique-of-7 (vehicle): info = 6 - 0.3 = 5.7
+                    // For 5-unique-of-6 (animal): info = 5 - 0.3 = 4.7
+                    // For 5-unique-of-5 (nimal): info = 5
+                    let repetition = (member_count - unique_count) as f32;
+                    let info_factor = (unique_count as f32 - 0.3 * repetition).max(0.1);
+
+                    // Stage 7 binding-pool routing boost.  If the
+                    // strongest active binding's target-pool atoms are
+                    // a subset of (or close match to) this candidate
+                    // concept's member-atom set, boost it.  This routes
+                    // selection through the pair-specific binding
+                    // structure the substrate built during training.
+                    let binding_boost = if !binding_target_atoms.is_empty() {
+                        let in_pool_member_set: ahash::AHashSet<NeuronId> =
+                            in_pool_members.iter().copied().collect();
+                        let matched = binding_target_atoms.iter()
+                            .filter(|a| in_pool_member_set.contains(a))
+                            .count() as f32;
+                        let coverage_of_binding = matched / binding_target_atoms.len() as f32;
+                        if coverage_of_binding >= 0.99 {
+                            8.0
+                        } else if coverage_of_binding >= 0.75 {
+                            3.0
+                        } else if coverage_of_binding >= 0.5 {
+                            1.5
+                        } else {
+                            1.0
+                        }
+                    } else { 1.0 };
+
+                    let score = avg_member_act * boost * length_factor * info_factor * binding_boost;
                     // Hold on to raw activation for grounding metric.
                     let _ = act;
                     let _ = target.expanded_size(&n.members);
