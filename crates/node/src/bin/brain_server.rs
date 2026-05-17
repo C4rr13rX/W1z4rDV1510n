@@ -252,9 +252,22 @@ struct ChatRequest {
 
 #[derive(Serialize)]
 struct ChatResponse {
-    reply:        String,
-    predictions:  HashMap<String, Vec<String>>,
-    grounding:    ChatGrounding,
+    // `reply` is the primary chat-engine response string.
+    reply:           String,
+    // `answer` mirrors `reply` so the Wizard-chat Django frontend's
+    // legacy parser (which reads data["answer"]) sees a value here.
+    answer:          String,
+    // `decoder` tells the Wizard frontend which selection path
+    // produced the reply.  "multi_pool" maps to high confidence in
+    // the frontend's tier logic; "char_chain" maps to low.
+    decoder:         String,
+    predictions:     HashMap<String, Vec<String>>,
+    grounding:       ChatGrounding,
+    // Empty list mirrors what the legacy /chat endpoint returned so
+    // the frontend's `activated_concepts` parse step has a no-op
+    // fallback to walk.
+    activated_concepts: Vec<String>,
+    word_activations:   Vec<serde_json::Value>,
 }
 
 #[derive(Serialize, Default)]
@@ -438,6 +451,21 @@ async fn sensor_observe_triple(
     }))
 }
 
+/// Strip Wizard-chat context-wrapper boilerplate so the brain only
+/// observes the actual question.  The Django frontend prepends a
+/// rolling context blob + "[Now answer concisely]\n<question>" cue;
+/// without unwrapping we'd train against the boilerplate atoms more
+/// than the real question.
+fn unwrap_wizard_prompt(text: &str) -> &str {
+    if let Some(idx) = text.rfind("[Now answer concisely]") {
+        let after = &text[idx..];
+        if let Some(nl) = after.find('\n') {
+            return after[nl + 1..].trim();
+        }
+    }
+    text.trim()
+}
+
 async fn chat(
     State(s): State<AppState>,
     Json(req): Json<ChatRequest>,
@@ -446,31 +474,42 @@ async fn chat(
     let min_confidence = 0.01_f32;
     let mut brain = s.brain.lock().await;
 
-    // Observe the prompt into the text pool.
-    brain.observe(POOL_TEXT, req.text.as_bytes());
-    brain.advance_tick();
+    let prompt = unwrap_wizard_prompt(&req.text);
 
-    // Read fabric grounding from a text→text integrate (mainly for
-    // confidence + speculation flag telemetry).
-    let ans = brain.integrate(POOL_TEXT, POOL_TEXT);
-    let g = ChatGrounding {
-        fabric_confidence:     ans.grounding.fabric_confidence,
-        integrated_confidence: ans.grounding.integrated_confidence,
-        outside_grounding:     ans.grounding.outside_grounding,
-        speculation_flag:      ans.grounding.speculation_flag,
+    // Observe the prompt into the text pool.
+    brain.observe(POOL_TEXT, prompt.as_bytes());
+
+    // PRIMARY: cross-pool integrate text→action.  This surfaces
+    // trained Q→A bindings — the user's "what category is X"
+    // memory.  Stage 7 binding-pool routing + Stage 6/7 selectors
+    // do the heavy lifting.
+    let xpool = brain.integrate(POOL_TEXT, POOL_ACTION);
+    let xpool_reply: Option<String> = xpool.answer.as_ref().map(|b|
+        String::from_utf8_lossy(b).into_owned());
+
+    // SECONDARY: same-pool generate text→text for free-form
+    // associative continuation.  Useful when the cross-pool path
+    // returns nothing or for the "tell me more" follow-up surface.
+    brain.observe(POOL_TEXT, prompt.as_bytes());
+    let gen_bytes = brain.generate(POOL_TEXT, POOL_TEXT, max_steps, min_confidence);
+    let gen_reply = String::from_utf8_lossy(&gen_bytes).into_owned();
+
+    let reply = match xpool_reply {
+        Some(ref a) if !a.is_empty() => a.clone(),
+        _ => gen_reply.clone(),
     };
 
-    // Re-observe the prompt (the integrate path doesn't mutate state,
-    // but we want the next observation cycle to drive generate()'s
-    // first step from the current prompt firing).
-    brain.observe(POOL_TEXT, req.text.as_bytes());
-    let reply_bytes = brain.generate(POOL_TEXT, POOL_TEXT, max_steps, min_confidence);
-    let reply = String::from_utf8_lossy(&reply_bytes).into_owned();
+    let g = ChatGrounding {
+        fabric_confidence:     xpool.grounding.fabric_confidence,
+        integrated_confidence: xpool.grounding.integrated_confidence,
+        outside_grounding:     xpool.grounding.outside_grounding,
+        speculation_flag:      xpool.grounding.speculation_flag,
+    };
 
     // Cross-modal predictions: re-observe prompt and read the firing
     // state in image and audio pools (cross-pool propagation does the
     // work automatically; we just snapshot what's active).
-    brain.observe(POOL_TEXT, req.text.as_bytes());
+    brain.observe(POOL_TEXT, prompt.as_bytes());
     let mut predictions: HashMap<String, Vec<String>> = HashMap::new();
     for other in [POOL_IMAGE, POOL_AUDIO] {
         // Run propagation manually to populate cross-pool activation.
@@ -500,7 +539,25 @@ async fn chat(
         }
     }
 
-    Json(ChatResponse { reply, predictions, grounding: g })
+    // Decoder telemetry: "multi_pool" when the cross-pool integrate
+    // produced a non-empty answer (binding-routed retrieval —
+    // confident path); "char_chain" when we fell through to same-pool
+    // generate (associative fragments — UNCERTAIN path).
+    let decoder = if xpool_reply.as_deref().map_or(false, |a| !a.is_empty()) {
+        "multi_pool"
+    } else {
+        "char_chain"
+    }.to_string();
+
+    Json(ChatResponse {
+        reply: reply.clone(),
+        answer: reply,
+        decoder,
+        predictions,
+        grounding: g,
+        activated_concepts: Vec::new(),
+        word_activations: Vec::new(),
+    })
 }
 
 // -----------------------------------------------------------------
