@@ -100,6 +100,69 @@ fn chain_explore_walks_from_seed_to_target_pool() {
 }
 
 #[test]
+fn out_of_vocabulary_prompt_returns_outside_grounding_not_hallucination() {
+    // After training on small toddler-category vocab, a query whose
+    // atoms only WEAKLY overlap any trained binding (e.g. "Hello"
+    // against trained X→Y, A→B) must be honestly flagged as
+    // outside_grounding rather than picking the strongest random
+    // match.  This is the Stage 8 honesty gate.
+
+    let (mut brain, pool_a, pool_b) = build_three_pool_brain();
+
+    // Train two pairs whose atoms overlap with "Hello" only partially.
+    for _ in 0..5 {
+        brain.observe(pool_a, b"yellow");
+        brain.observe(pool_b, b"color");
+        brain.advance_tick();
+        brain.observe(pool_a, b"red");
+        brain.observe(pool_b, b"color");
+        brain.advance_tick();
+    }
+
+    // Trained query: should ground.
+    brain.observe(pool_a, b"yellow");
+    let trained = brain.integrate_autonomous(pool_a, pool_b, 0.0, 4, 200);
+    assert!(!trained.grounding.outside_grounding,
+        "'yellow' is a trained prompt; must NOT be outside_grounding");
+    assert!(trained.answer.is_some(),
+        "trained prompt must produce an answer");
+
+    // Out-of-vocab query: should reject.
+    brain.observe(pool_a, b"Hello");
+    let oov = brain.integrate_autonomous(pool_a, pool_b, 0.0, 4, 200);
+    assert!(oov.grounding.outside_grounding,
+        "'Hello' shares only weak atom overlap with trained \
+         bindings — must be flagged outside_grounding; got {:?}",
+        oov.grounding);
+    assert!(oov.answer.is_none(),
+        "OOV prompt must return None answer; got {:?}", oov.answer);
+}
+
+#[test]
+fn best_binding_match_high_for_trained_query_low_for_oov() {
+    let (mut brain, pool_a, pool_b) = build_three_pool_brain();
+    for _ in 0..5 {
+        brain.observe(pool_a, b"dog");
+        brain.observe(pool_b, b"animal");
+        brain.advance_tick();
+    }
+
+    // Trained query → high precision.
+    brain.observe(pool_a, b"dog");
+    let (prec_trained, recall_trained) = brain.best_binding_match(pool_a);
+    assert!(prec_trained >= 0.99,
+        "exact-trained query must yield precision >= 0.99; got {}", prec_trained);
+    assert!(recall_trained >= 0.99,
+        "exact-trained query must yield recall >= 0.99; got {}", recall_trained);
+
+    // Out-of-vocab query → low precision.
+    brain.observe(pool_a, b"xyz");
+    let (prec_oov, _) = brain.best_binding_match(pool_a);
+    assert!(prec_oov < 0.5,
+        "OOV query must yield precision < 0.5; got {}", prec_oov);
+}
+
+#[test]
 fn integrate_autonomous_returns_fabric_answer_when_confidence_high() {
     let (mut brain, pool_a, pool_b) = build_three_pool_brain();
     // Heavy training so fabric confidence is high.

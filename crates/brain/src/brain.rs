@@ -744,18 +744,76 @@ impl Brain {
     // members match patterns the substrate has previously seen.
     // ---------------------------------------------------------------
 
+    /// Score the best matching binding for the query's firing atom set.
+    /// Returns (precision, recall) of the best binding's query-pool
+    /// member set against the actually-firing query atoms.  This is the
+    /// substrate's "do I have a trained pattern that matches this
+    /// prompt?" signal — used by `integrate_autonomous` to detect
+    /// out-of-vocabulary prompts and honestly report outside_grounding
+    /// rather than hallucinating an answer from accidentally-overlapping
+    /// atoms.
+    pub fn best_binding_match(&self, query_pool: PoolId) -> (f32, f32) {
+        let q_atoms: ahash::AHashSet<NeuronId> = {
+            let q = match self.fabric.pool(query_pool) {
+                Some(p) => p,
+                None    => return (0.0, 0.0),
+            };
+            let q = q.read();
+            q.currently_firing()
+                .filter(|nid| q.get(*nid).map_or(false, |n| n.is_atom()))
+                .collect()
+        };
+        if q_atoms.is_empty() { return (0.0, 0.0); }
+
+        let bpid = self.binding_pool_id;
+        let bp = match self.fabric.pool(bpid) {
+            Some(p) => p,
+            None    => return (0.0, 0.0),
+        };
+        let bp_read = bp.read();
+        let mut best: (f32, f32, f32) = (0.0, 0.0, 0.0); // (score, precision, recall)
+        for n in bp_read.iter_neurons() {
+            if n.is_atom() { continue; }
+            let bind_query: ahash::AHashSet<NeuronId> = n.members.iter()
+                .filter(|m| m.pool == query_pool)
+                .map(|m| m.neuron)
+                .collect();
+            if bind_query.is_empty() { continue; }
+            let intersect = bind_query.iter()
+                .filter(|a| q_atoms.contains(a))
+                .count() as f32;
+            let precision = intersect / bind_query.len() as f32;
+            let recall = intersect / q_atoms.len() as f32;
+            let score = precision * recall;
+            if score > best.0 {
+                best = (score, precision, recall);
+            }
+        }
+        (best.1, best.2)
+    }
+
     /// Critical-thinking integration.  When fabric retrieval has low
     /// confidence, walks the EEM's grounded-fact graph from the
     /// query's firing concepts to find target-pool concepts reachable
     /// via co-firing chains.  Returns an `AnswerWithGrounding` whose
     /// `answer` is the strongest reached target-pool concept's decoded
     /// bytes, or `None` (with `outside_grounding=true`) when no chain
-    /// converges.
+    /// converges or the prompt is out-of-vocabulary.
     ///
     /// `fabric_confidence_threshold`: below this, the EEM chain path
     /// runs.  Above, the fabric result is returned directly.
     /// `chain_max_depth`: how many hops the ivy-growth walk takes.
     /// `chain_max_visit`: cap on total facts traversed (bounds work).
+    /// `binding_match_threshold`: precision floor for trusting the
+    /// fabric answer.  When the best binding's query-pool member set
+    /// has < this precision against the firing query atoms, the
+    /// prompt is treated as out-of-vocabulary regardless of what
+    /// fabric returns (prevents "Hello → color" hallucinations).
+    /// Default-threshold version of [`Self::integrate_autonomous_tuned`].
+    /// Uses 0.70 as the binding-match precision floor — sufficient to
+    /// reject out-of-vocabulary prompts (like "Hello" against a
+    /// toddler-category brain) while still accepting partial-match
+    /// prompts ("doggy" → animal, "blue!" → color).
     pub fn integrate_autonomous(
         &self,
         query_pool:                  PoolId,
@@ -764,16 +822,60 @@ impl Brain {
         chain_max_depth:             usize,
         chain_max_visit:             usize,
     ) -> AnswerWithGrounding {
-        // 1. Try the fabric path first.  The fabric_confidence metric
-        // is `strongest / total_concept_activation` — a relative share
-        // that's typically small in absolute value (0.02-0.10) even
-        // for confident matches because lots of concepts fire.  So
-        // gating purely on fabric_confidence is wrong; we trust the
-        // fabric answer whenever it's non-empty and not flagged as
-        // outside-grounding, falling through ONLY when fabric has
-        // no answer.  The fabric_confidence_threshold is kept as a
-        // tunable in case the user wants to force the chain path for
-        // testing.
+        self.integrate_autonomous_tuned(
+            query_pool, target_pool,
+            fabric_confidence_threshold,
+            chain_max_depth, chain_max_visit,
+            0.70,
+        )
+    }
+
+    pub fn integrate_autonomous_tuned(
+        &self,
+        query_pool:                  PoolId,
+        target_pool:                 PoolId,
+        fabric_confidence_threshold: f32,
+        chain_max_depth:             usize,
+        chain_max_visit:             usize,
+        binding_match_threshold:     f32,
+    ) -> AnswerWithGrounding {
+        // 0. Out-of-vocab gate.  If no binding has its query-pool
+        // members substantially contained in the firing query atoms,
+        // the prompt isn't something the substrate has been trained
+        // on — return an honest outside_grounding answer instead of
+        // letting fabric pick the strongest random match.
+        let (best_precision, best_recall) = self.best_binding_match(query_pool);
+        let binding_score = best_precision * best_recall;
+        if best_precision < binding_match_threshold {
+            return AnswerWithGrounding {
+                answer: None,
+                grounding: GroundingReport {
+                    input_atom_coverage: 0.0,
+                    strongest_match: None,
+                    strongest_match_jaccard: 0.0,
+                    composition_used: Vec::new(),
+                    fabric_confidence: binding_score,
+                    eem_confidence: None,
+                    annealer_confidence: None,
+                    integrated_confidence: binding_score,
+                    outside_grounding: true,
+                    speculation_flag: false,
+                    peer_contributions: Vec::new(),
+                },
+                confidence_tier: ConfidenceTier::Ungrounded,
+                next_steps_if_ungrounded: vec![
+                    crate::grounding::RequestObservation {
+                        domain: "no trained binding matches this prompt's atoms with sufficient precision".into(),
+                        examples_needed: 1,
+                        why: format!("best binding precision={:.2} < threshold={:.2}",
+                            best_precision, binding_match_threshold).into(),
+                        pool: query_pool,
+                    },
+                ],
+            };
+        }
+
+        // 1. Try the fabric path.
         let fabric_ans = self.integrate(query_pool, target_pool);
         let fabric_has_answer = fabric_ans.answer.as_ref()
             .map(|b| !b.is_empty()).unwrap_or(false);

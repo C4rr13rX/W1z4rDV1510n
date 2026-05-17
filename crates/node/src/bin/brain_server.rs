@@ -482,27 +482,39 @@ async fn chat(
     // PRIMARY: autonomous critical-thinking integrate.  Tries
     // fabric retrieval first; if low confidence, falls through to
     // EEM grounded-fact chain exploration (ivy-growth across the
-    // substrate's accumulated world knowledge).  This is the path
-    // the user's vision describes — translate the unbounded prompt
-    // into bounded math chains over learned facts.
+    // substrate's accumulated world knowledge).  Also enforces the
+    // out-of-vocabulary gate: if no trained binding has its query
+    // members substantially contained in the firing prompt atoms,
+    // returns outside_grounding=true honestly rather than picking
+    // a noisy strongest-match (the "Hello → color" hallucination
+    // failure mode).
     let xpool = brain.integrate_autonomous(
         POOL_TEXT, POOL_ACTION,
         /*fabric_threshold*/ 0.0,    // accept any non-empty fabric answer
         /*chain_max_depth*/   4,
         /*chain_max_visit*/   200);
-    let xpool_reply: Option<String> = xpool.answer.as_ref().map(|b|
-        String::from_utf8_lossy(b).into_owned());
+    // Honor outside_grounding: return EMPTY answer so the downstream
+    // Wizard frontend renders the "no confident answer" UX instead
+    // of pretending we know.
+    let xpool_reply: Option<String> = if xpool.grounding.outside_grounding {
+        None
+    } else {
+        xpool.answer.as_ref().map(|b| String::from_utf8_lossy(b).into_owned())
+    };
 
-    // SECONDARY: same-pool generate text→text for free-form
-    // associative continuation.  Useful when the cross-pool path
-    // returns nothing or for the "tell me more" follow-up surface.
-    brain.observe(POOL_TEXT, prompt.as_bytes());
-    let gen_bytes = brain.generate(POOL_TEXT, POOL_TEXT, max_steps, min_confidence);
-    let gen_reply = String::from_utf8_lossy(&gen_bytes).into_owned();
-
+    // SECONDARY: same-pool generate text→text ONLY when the prompt is
+    // in-vocabulary but the cross-pool path returned nothing.  When
+    // the prompt is out-of-vocabulary (outside_grounding), the
+    // associative-fragment generate path is just hallucinated junk —
+    // returning it would un-do the OOV honesty.  Keep silent instead.
     let reply = match xpool_reply {
         Some(ref a) if !a.is_empty() => a.clone(),
-        _ => gen_reply.clone(),
+        _ if xpool.grounding.outside_grounding => String::new(),
+        _ => {
+            brain.observe(POOL_TEXT, prompt.as_bytes());
+            let gen_bytes = brain.generate(POOL_TEXT, POOL_TEXT, max_steps, min_confidence);
+            String::from_utf8_lossy(&gen_bytes).into_owned()
+        }
     };
 
     let g = ChatGrounding {
