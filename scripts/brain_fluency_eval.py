@@ -97,6 +97,16 @@ PANEL: list[tuple[str, str | None, str]] = [
     ("What does light mean?",  "light", "k12_qa"),
     ("What does sound mean?",  "sound", "k12_qa"),
 
+    # Stage 11C multi-fact probes — these concepts appear in the
+    # concept_dataset with both a category-binding AND a definition-
+    # binding.  After K-12 training, chain_explore should visit BOTH
+    # facts and the assembler should compose the two answers.
+    ("piano",     "music",   "multi_fact"),
+    ("rose",      "plant",   "multi_fact"),
+    ("hammer",    "tool",    "multi_fact"),
+    ("triangle",  "shape",   "multi_fact"),
+    ("doctor",    "people",  "multi_fact"),
+
     # Out-of-vocabulary (must be honestly OOG)
     ("xyzzy",            None, "oov"),
     ("foobarbaz",        None, "oov"),

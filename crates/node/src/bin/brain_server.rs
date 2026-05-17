@@ -140,7 +140,25 @@ fn build_fresh_brain() -> Result<Brain> {
     brain.create_pool(audio,
         Box::new(BytePassthroughEncoding { prefix: "a" }) as Box<dyn AtomEncoding>);
 
-    let action = PoolConfig::defaults("action", POOL_ACTION);
+    // Stage 12 (config-only): match the action-pool window to the
+    // text-pool window so K-12 / greeting responses can crystallize as
+    // concept neurons.  Empirical math audit (scripts/math_audit_*.py)
+    // showed that with the default window=32, no K-12 response had a
+    // chance to repeat within recent_atoms — round-robin training
+    // pushes 7K+ unrelated bytes between successive instances of any
+    // given response.  Only toddler categories (animal/vehicle/color/
+    // ...) emerged as concepts because they were trained in 8 dense
+    // epochs that fit their 6-byte responses within the 32-byte
+    // window.  Raising to 4096 (matching text pool) lets every K-12
+    // response take part in concept emergence on the same footing.
+    // max_concept_member_count raised so multi-byte responses like
+    // "musical_instrument" (18 bytes) fit as a single concept.
+    let mut action = PoolConfig::defaults("action", POOL_ACTION);
+    action.recent_atoms_window         = 4096;
+    action.concept_emergence_threshold = 3;
+    action.max_concept_member_count    = 32;
+    action.decay_rate                  = 0.00002;
+    action.prune_floor                 = 0.001;
     brain.create_pool(action,
         Box::new(BytePassthroughEncoding { prefix: "act" }) as Box<dyn AtomEncoding>);
     brain.designate_action_pool(POOL_ACTION);
