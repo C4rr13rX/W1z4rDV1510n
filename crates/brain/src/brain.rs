@@ -57,13 +57,47 @@ impl MomentFingerprint {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BrainConfig {
     pub fabric: FabricConfig,
-    /// How many distinct ticks the same multi-pool firing fingerprint
-    /// must recur before a binding concept is promoted.
+    /// "Consolidated" tier emergence threshold.  How many recurrences
+    /// of the same multi-pool firing fingerprint promote a *full*
+    /// binding — the kind that auto-populates the EEM with a grounded
+    /// fact and gets gossiped to peers.  Defaults to 3.
     pub binding_emergence_threshold: u32,
+    /// "Tentative" tier emergence threshold.  A lower bar that
+    /// produces a binding neuron in the binding pool *without*
+    /// registering an EEM fact or emitting gossip.  This is what /chat
+    /// retrieval reads — so sparsely-trained pairs become recallable
+    /// after `tentative_emergence_threshold` co-firings instead of
+    /// having to clear the (much higher) consolidated bar.  Defaults
+    /// to 1 — every cross-pool co-firing becomes a tentative binding.
+    ///
+    /// Set to `u32::MAX` to disable the tentative tier (legacy
+    /// single-tier behavior).
+    #[serde(default = "default_tentative_emergence_threshold")]
+    pub tentative_emergence_threshold: u32,
     /// Sliding window over which fingerprint recurrence is counted.
     /// Older moments age out so only "recently sustained" co-firings
     /// produce bindings.
     pub moment_history_window: usize,
+    /// Pressure-feedback band on the binding density signal
+    /// (`bindings_per_observation`).  When the signal sits below
+    /// `pressure_band_low` for `pressure_observation_grace` consecutive
+    /// observations, the *consolidated* threshold ratchets down by 1
+    /// (floor: 1).  When the signal climbs above `pressure_band_high`,
+    /// the threshold ratchets up by 1 (ceiling: `pressure_threshold_max`).
+    /// Hysteresis prevents oscillation.
+    ///
+    /// Set `pressure_adjust_enabled = false` to lock the threshold at
+    /// its configured value (legacy static behavior).
+    #[serde(default = "default_pressure_band_low")]
+    pub pressure_band_low: f32,
+    #[serde(default = "default_pressure_band_high")]
+    pub pressure_band_high: f32,
+    #[serde(default = "default_pressure_threshold_max")]
+    pub pressure_threshold_max: u32,
+    #[serde(default = "default_pressure_observation_grace")]
+    pub pressure_observation_grace: u64,
+    #[serde(default = "default_pressure_adjust_enabled")]
+    pub pressure_adjust_enabled: bool,
     /// Per-pool config for the auto-created "binding pool" that hosts
     /// binding concepts.  Binding pool atoms are never used for sensor
     /// input — it only holds composite concepts whose members live in
@@ -79,6 +113,13 @@ pub struct BrainConfig {
     pub annealer: AnnealerConfig,
 }
 
+fn default_tentative_emergence_threshold() -> u32 { 1 }
+fn default_pressure_band_low() -> f32 { 0.001 }
+fn default_pressure_band_high() -> f32 { 0.05 }
+fn default_pressure_threshold_max() -> u32 { 10 }
+fn default_pressure_observation_grace() -> u64 { 256 }
+fn default_pressure_adjust_enabled() -> bool { true }
+
 impl Default for BrainConfig {
     fn default() -> Self {
         let mut binding_pool_config = PoolConfig::defaults("binding", 0);
@@ -89,7 +130,13 @@ impl Default for BrainConfig {
         Self {
             fabric: FabricConfig::default(),
             binding_emergence_threshold: 3,
+            tentative_emergence_threshold: default_tentative_emergence_threshold(),
             moment_history_window: 64,
+            pressure_band_low: default_pressure_band_low(),
+            pressure_band_high: default_pressure_band_high(),
+            pressure_threshold_max: default_pressure_threshold_max(),
+            pressure_observation_grace: default_pressure_observation_grace(),
+            pressure_adjust_enabled: default_pressure_adjust_enabled(),
             binding_pool_config,
             eem: EemConfig::default(),
             annealer: AnnealerConfig::default(),
@@ -108,6 +155,22 @@ pub struct BrainStats {
     pub total_terminals:     usize,
     pub binding_pool_id:     PoolId,
     pub fingerprints_window: usize,
+    /// Bindings that crossed `tentative_emergence_threshold` but not
+    /// (yet) `binding_emergence_threshold`.  Visible to /chat retrieval;
+    /// invisible to EEM chain exploration.
+    pub tentative_bindings:  usize,
+    /// Bindings that crossed `binding_emergence_threshold` and carry
+    /// an EEM grounded fact.
+    pub consolidated_bindings: usize,
+    /// Current effective consolidated threshold (may differ from
+    /// config if pressure-feedback adjusted it).
+    pub current_threshold:   u32,
+    /// Total observations (advance_tick calls with non-empty fingerprint)
+    /// since brain construction or last snapshot restore.
+    pub total_observations:  u64,
+    /// `(tentative+consolidated)/total_observations` — drives the
+    /// pressure feedback loop.
+    pub binding_pressure:    f32,
 }
 
 pub struct Brain {
@@ -116,11 +179,38 @@ pub struct Brain {
     binding_pool_id:              PoolId,
     /// Fingerprint history.  Bounded by `moment_history_window`.
     moment_history:               VecDeque<MomentFingerprint>,
-    /// Active-count of each fingerprint within the window.
+    /// Active-count of each fingerprint within the window.  Decays
+    /// when an old fingerprint scrolls out of `moment_history`.
     binding_recurrences:          AHashMap<MomentFingerprint, u32>,
-    /// Fingerprints that have already been promoted, so we don't
-    /// re-promote on every re-occurrence past the threshold.
+    /// Lifetime co-firing count per fingerprint — *never* decays.
+    /// Sparsely-trained patterns (round-robin training where the
+    /// same pair recurs far outside `moment_history_window`) never
+    /// accumulate in `binding_recurrences`, so this is the fallback
+    /// signal for promotion under sparse schedules.
+    lifetime_recurrences:         AHashMap<MomentFingerprint, u32>,
+    /// "Tentative" tier promotion — bindings that have a neuron in
+    /// the binding pool but no EEM fact yet.  Visible to /chat
+    /// retrieval (Stage 7 binding-pool routing reads ALL binding-pool
+    /// concepts regardless of tier).  Invisible to EEM chain
+    /// exploration.  Upgraded to `promoted_fingerprints` when the
+    /// count crosses `binding_emergence_threshold`.
+    tentative_promoted:           AHashMap<MomentFingerprint, NeuronId>,
+    /// "Consolidated" tier promotion — these have an EEM grounded
+    /// fact and have been gossiped to peers.
     promoted_fingerprints:        AHashMap<MomentFingerprint, NeuronId>,
+    /// Count of advance_tick calls that produced a non-empty
+    /// fingerprint.  Drives the pressure-feedback loop along with
+    /// `len(tentative_promoted) + len(promoted_fingerprints)`.
+    total_observations:           u64,
+    /// Current pressure-adjusted *consolidated* threshold.  Tracks
+    /// `config.binding_emergence_threshold` at construction, then
+    /// drifts under the pressure feedback loop within
+    /// `[1, config.pressure_threshold_max]`.
+    current_threshold:            u32,
+    /// Tick of the last pressure-adjust attempt; we only adjust once
+    /// per `config.pressure_observation_grace` observations to avoid
+    /// reacting to single-observation noise.
+    last_pressure_check_obs:      u64,
     /// Phase 7: action layer state.  `None` until the caller
     /// designates an action pool via `designate_action_pool`.
     action_pool_id:               Option<PoolId>,
@@ -163,13 +253,19 @@ impl Brain {
         let window = config.moment_history_window;
         let eem = Eem::new(config.eem.clone());
         let annealer = Annealer::new(config.annealer.clone());
+        let initial_threshold = config.binding_emergence_threshold.max(1);
         Self {
             fabric,
             config,
             binding_pool_id,
-            moment_history:        VecDeque::with_capacity(window),
-            binding_recurrences:   AHashMap::new(),
-            promoted_fingerprints: AHashMap::new(),
+            moment_history:          VecDeque::with_capacity(window),
+            binding_recurrences:     AHashMap::new(),
+            lifetime_recurrences:    AHashMap::new(),
+            tentative_promoted:      AHashMap::new(),
+            promoted_fingerprints:   AHashMap::new(),
+            total_observations:      0,
+            current_threshold:       initial_threshold,
+            last_pressure_check_obs: 0,
             action_pool_id:        None,
             pending_actions:       AHashMap::new(),
             next_action_id:        1,
@@ -250,7 +346,8 @@ impl Brain {
     }
 
     fn register_fingerprint(&mut self, fp: MomentFingerprint) {
-        // Decay the oldest entry out of the window.
+        // Decay the oldest entry out of the window.  Lifetime count
+        // does NOT decay — it's the sparse-schedule fallback.
         if self.moment_history.len() >= self.config.moment_history_window {
             if let Some(old) = self.moment_history.pop_front() {
                 if let Some(c) = self.binding_recurrences.get_mut(&old) {
@@ -260,37 +357,162 @@ impl Brain {
             }
         }
         self.moment_history.push_back(fp.clone());
-        let count = self.binding_recurrences.entry(fp.clone()).or_insert(0);
-        *count = count.saturating_add(1);
+        let win_count = self.binding_recurrences.entry(fp.clone()).or_insert(0);
+        *win_count = win_count.saturating_add(1);
+        let windowed = *win_count;
 
-        let recurrence = *count;
-        if recurrence >= self.config.binding_emergence_threshold
-            && !self.promoted_fingerprints.contains_key(&fp)
+        let life_count = self.lifetime_recurrences.entry(fp.clone()).or_insert(0);
+        *life_count = life_count.saturating_add(1);
+        let lifetime = *life_count;
+
+        self.total_observations = self.total_observations.saturating_add(1);
+
+        // Promotion is driven by whichever signal is stronger: either
+        // a dense recent burst (windowed) or sustained lifetime
+        // co-occurrence (lifetime).  Sparse round-robin training
+        // schedules — where the same pair recurs once every several
+        // thousand ticks — never accumulate windowed count but DO
+        // accumulate lifetime count, so this is the fix for the K-12
+        // failure mode where 22K observations produced zero new
+        // bindings under the old single-signal rule.
+        let effective_count = windowed.max(lifetime);
+
+        let tentative_thr = self.config.tentative_emergence_threshold;
+        let consolidated_thr = self.current_threshold;
+        let already_tentative = self.tentative_promoted.contains_key(&fp);
+        let already_consolidated = self.promoted_fingerprints.contains_key(&fp);
+
+        // Tier 1: tentative promotion.  Cheap — creates a binding
+        // neuron in the binding pool but no EEM fact and no gossip.
+        // Visible to /chat retrieval; invisible to EEM chain
+        // exploration.
+        if !already_tentative
+            && !already_consolidated
+            && effective_count >= tentative_thr
+            && tentative_thr < u32::MAX
         {
-            let new_id = self.promote_binding_concept(&fp);
-            if let Some(id) = new_id {
-                // Auto-emit a gossip record for the just-promoted
-                // binding (spec §5.1: motif fingerprints are gossiped
-                // on discovery).  Transport drains via
-                // `drain_motif_gossip`.
+            if let Some(id) = self.promote_binding_concept(&fp) {
+                self.tentative_promoted.insert(fp.clone(), id);
+            }
+        }
+
+        // Tier 2: consolidated promotion.  Registers an EEM grounded
+        // fact and gossips the motif.  Upgrades the tentative-tier
+        // binding (reuses its neuron id) when one exists.
+        if !already_consolidated
+            && effective_count >= consolidated_thr
+        {
+            let upgrade_id = self.tentative_promoted.remove(&fp);
+            let id = match upgrade_id {
+                Some(id) => Some(id),
+                None     => self.promote_binding_concept(&fp),
+            };
+            if let Some(id) = id {
                 self.network.pending_motif_out.push(GossipMotif {
                     source_brain:      self.network.brain_id.clone(),
                     fingerprint:       fp.pairs.clone(),
-                    observation_count: recurrence,
-                    local_confidence:  (recurrence as f32
-                        / (self.config.binding_emergence_threshold.max(1) as f32))
+                    observation_count: effective_count,
+                    local_confidence:  (effective_count as f32
+                        / (consolidated_thr.max(1) as f32))
                         .min(1.0),
                     observed_at_tick:  self.fabric.current_tick(),
                 });
-                // Stage 8: Auto-populate the EEM with a grounded fact
-                // for this binding.  The fact captures the substrate's
-                // experiential certainty that these atoms co-fire as a
-                // unit.  Subsequent chain exploration in the critical-
-                // thinking loop walks across these facts.
                 self.eem.register_fact(id, fp.pairs.clone());
                 self.promoted_fingerprints.insert(fp, id);
             }
         }
+
+        // Pressure feedback: every `pressure_observation_grace`
+        // observations, nudge `current_threshold` up or down based
+        // on the binding density signal.  Hysteresis: only adjust
+        // when the signal is *outside* the [low, high] band.
+        if self.config.pressure_adjust_enabled
+            && self.total_observations
+                .saturating_sub(self.last_pressure_check_obs)
+                >= self.config.pressure_observation_grace
+        {
+            self.adjust_threshold_by_pressure();
+            self.last_pressure_check_obs = self.total_observations;
+        }
+    }
+
+    /// Bindings-per-observation ratio — the input to the pressure
+    /// feedback loop.  Counts both tiers because both are valid
+    /// bindings; the EEM-fact gate is what separates them.
+    pub fn binding_pressure(&self) -> f32 {
+        if self.total_observations == 0 {
+            return 0.0;
+        }
+        let total_bindings = self.tentative_promoted.len()
+            + self.promoted_fingerprints.len();
+        (total_bindings as f32) / (self.total_observations as f32)
+    }
+
+    /// One step of the pressure feedback loop.  Public so callers
+    /// (e.g. the supervisor) can force a recheck outside the
+    /// observation-grace schedule.  Returns the *new* threshold.
+    pub fn adjust_threshold_by_pressure(&mut self) -> u32 {
+        let pressure = self.binding_pressure();
+        let low = self.config.pressure_band_low;
+        let high = self.config.pressure_band_high;
+        let max = self.config.pressure_threshold_max.max(1);
+
+        if pressure < low && self.current_threshold > 1 {
+            self.current_threshold -= 1;
+        } else if pressure > high && self.current_threshold < max {
+            self.current_threshold += 1;
+        }
+        self.current_threshold
+    }
+
+    /// Failure-feedback hook: force-promote every fingerprint whose
+    /// lifetime recurrence count is at least `min_count`, regardless
+    /// of whether the windowed signal has decayed it.  Used by
+    /// `/chat` when an OOV miss is reported — the system says "I
+    /// don't know" precisely because the would-be binding never
+    /// crossed threshold; this lets the next retrieval find it.
+    ///
+    /// Returns the list of fingerprint neuron ids that were newly
+    /// tentative-promoted by this call.  Already-promoted
+    /// fingerprints are not re-promoted (idempotent).
+    pub fn force_promote_tentative(&mut self, min_count: u32) -> Vec<NeuronId> {
+        let candidates: Vec<MomentFingerprint> = self.lifetime_recurrences.iter()
+            .filter(|&(_, c)| *c >= min_count)
+            .filter(|&(fp, _)|
+                !self.tentative_promoted.contains_key(fp)
+                && !self.promoted_fingerprints.contains_key(fp))
+            .map(|(fp, _)| fp.clone())
+            .collect();
+        let mut out = Vec::with_capacity(candidates.len());
+        for fp in candidates {
+            if let Some(id) = self.promote_binding_concept(&fp) {
+                self.tentative_promoted.insert(fp, id);
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// Number of bindings in the tentative tier (binding-pool neuron
+    /// exists, no EEM fact registered yet).
+    pub fn tentative_binding_count(&self) -> usize {
+        self.tentative_promoted.len()
+    }
+
+    /// Number of bindings in the consolidated tier (EEM fact registered).
+    pub fn consolidated_binding_count(&self) -> usize {
+        self.promoted_fingerprints.len()
+    }
+
+    /// Current pressure-adjusted consolidated emergence threshold.
+    pub fn current_emergence_threshold(&self) -> u32 {
+        self.current_threshold
+    }
+
+    /// Total observations (advance_tick calls with non-empty
+    /// fingerprint) since construction or last snapshot restore.
+    pub fn total_observations(&self) -> u64 {
+        self.total_observations
     }
 
     fn promote_binding_concept(&mut self, fp: &MomentFingerprint) -> Option<NeuronId> {
@@ -1659,7 +1881,13 @@ impl Brain {
         let config = BrainConfig {
             fabric:                      identity.fabric.clone(),
             binding_emergence_threshold: identity.binding_emergence_threshold,
+            tentative_emergence_threshold: default_tentative_emergence_threshold(),
             moment_history_window:       identity.moment_history_window,
+            pressure_band_low:           default_pressure_band_low(),
+            pressure_band_high:          default_pressure_band_high(),
+            pressure_threshold_max:      default_pressure_threshold_max(),
+            pressure_observation_grace:  default_pressure_observation_grace(),
+            pressure_adjust_enabled:     default_pressure_adjust_enabled(),
             binding_pool_config,
             eem:                         identity.eem.clone(),
             annealer:                    identity.annealer.clone(),
@@ -1769,6 +1997,14 @@ impl Brain {
             self.promoted_fingerprints.iter()
                 .map(|(f, &n)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, n))
                 .collect();
+        let tentative_promoted: Vec<(crate::persistence::SerializableFingerprint, NeuronId)> =
+            self.tentative_promoted.iter()
+                .map(|(f, &n)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, n))
+                .collect();
+        let lifetime_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)> =
+            self.lifetime_recurrences.iter()
+                .map(|(f, &c)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, c))
+                .collect();
         let pending_actions: Vec<(ActionId, ActionEvent)> = self.pending_actions
             .iter().map(|(k, v)| (*k, v.clone())).collect();
         crate::persistence::BrainSnapshot {
@@ -1781,6 +2017,11 @@ impl Brain {
             moment_history,
             binding_recurrences,
             promoted_fingerprints,
+            tentative_promoted,
+            lifetime_recurrences,
+            tentative_emergence_threshold: self.config.tentative_emergence_threshold,
+            current_threshold:             self.current_threshold,
+            total_observations:            self.total_observations,
             action_pool_id:              self.action_pool_id,
             pending_actions,
             next_action_id:              self.next_action_id,
@@ -1810,7 +2051,13 @@ impl Brain {
         let config = BrainConfig {
             fabric: fabric.config.clone(),
             binding_emergence_threshold: snap.binding_emergence_threshold,
+            tentative_emergence_threshold: snap.tentative_emergence_threshold,
             moment_history_window:       snap.moment_history_window,
+            pressure_band_low:           default_pressure_band_low(),
+            pressure_band_high:          default_pressure_band_high(),
+            pressure_threshold_max:      default_pressure_threshold_max(),
+            pressure_observation_grace:  default_pressure_observation_grace(),
+            pressure_adjust_enabled:     default_pressure_adjust_enabled(),
             binding_pool_config:         PoolConfig::defaults("binding", snap.binding_pool_id),
             eem:                         snap.eem.config.clone(),
             annealer:                    snap.annealer.config.clone(),
@@ -1828,16 +2075,34 @@ impl Brain {
         for (f, n) in snap.promoted_fingerprints {
             promoted_fingerprints.insert(MomentFingerprint { pairs: f.pairs }, n);
         }
+        let mut tentative_promoted = AHashMap::new();
+        for (f, n) in snap.tentative_promoted {
+            tentative_promoted.insert(MomentFingerprint { pairs: f.pairs }, n);
+        }
+        let mut lifetime_recurrences = AHashMap::new();
+        for (f, c) in snap.lifetime_recurrences {
+            lifetime_recurrences.insert(MomentFingerprint { pairs: f.pairs }, c);
+        }
         let mut pending_actions = AHashMap::new();
         for (k, v) in snap.pending_actions { pending_actions.insert(k, v); }
 
+        let restored_threshold = if snap.current_threshold == 0 {
+            snap.binding_emergence_threshold.max(1)
+        } else {
+            snap.current_threshold
+        };
         let brain = Self {
             fabric,
             config,
             binding_pool_id:       snap.binding_pool_id,
             moment_history,
             binding_recurrences,
+            lifetime_recurrences,
+            tentative_promoted,
             promoted_fingerprints,
+            total_observations:      snap.total_observations,
+            current_threshold:       restored_threshold,
+            last_pressure_check_obs: snap.total_observations,
             action_pool_id:        snap.action_pool_id,
             pending_actions,
             next_action_id:        snap.next_action_id,
@@ -1869,6 +2134,11 @@ impl Brain {
             total_terminals:     0,
             binding_pool_id:     self.binding_pool_id,
             fingerprints_window: self.moment_history.len(),
+            tentative_bindings:    self.tentative_promoted.len(),
+            consolidated_bindings: self.promoted_fingerprints.len(),
+            current_threshold:     self.current_threshold,
+            total_observations:    self.total_observations,
+            binding_pressure:      self.binding_pressure(),
         };
         for pid in self.fabric.pool_ids() {
             if let Some(p) = self.fabric.pool(pid) {

@@ -94,6 +94,11 @@ pub struct SerializableFingerprint {
 pub struct BrainSnapshot {
     pub binding_pool_id:            PoolId,
     pub binding_emergence_threshold: u32,
+    /// Two-tier emergence: tentative threshold (default 1).  Defaults
+    /// to 1 on restore from older snapshots that didn't carry the
+    /// field — matches `default_tentative_emergence_threshold()`.
+    #[serde(default = "default_tentative_threshold_for_restore")]
+    pub tentative_emergence_threshold: u32,
     pub moment_history_window:       usize,
     pub fabric:                     FabricSnapshot,
     pub eem:                        EemSnapshot,
@@ -101,10 +106,29 @@ pub struct BrainSnapshot {
     pub moment_history:             VecDeque<SerializableFingerprint>,
     pub binding_recurrences:        Vec<(SerializableFingerprint, u32)>,
     pub promoted_fingerprints:      Vec<(SerializableFingerprint, NeuronId)>,
+    /// Two-tier emergence: tentative-tier promotions.  Defaults to
+    /// empty on restore from older snapshots.
+    #[serde(default)]
+    pub tentative_promoted:         Vec<(SerializableFingerprint, NeuronId)>,
+    /// Lifetime (non-decaying) recurrence count per fingerprint.
+    /// Defaults to empty on restore — the brain will re-accumulate
+    /// from subsequent observations.
+    #[serde(default)]
+    pub lifetime_recurrences:       Vec<(SerializableFingerprint, u32)>,
+    /// Pressure-adjusted consolidated threshold at snapshot time.
+    /// Zero on restore from older snapshots, which from_snapshot
+    /// treats as "use `binding_emergence_threshold` instead".
+    #[serde(default)]
+    pub current_threshold:          u32,
+    /// Total non-empty-fingerprint observations since construction.
+    #[serde(default)]
+    pub total_observations:         u64,
     pub action_pool_id:             Option<PoolId>,
     pub pending_actions:            Vec<(ActionId, ActionEvent)>,
     pub next_action_id:             ActionId,
 }
+
+fn default_tentative_threshold_for_restore() -> u32 { 1 }
 
 /// Write a [`BrainSnapshot`] to `path` using bincode.  Returns an
 /// `io::Error` for filesystem failures or `InvalidData` for
