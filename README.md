@@ -167,15 +167,28 @@ Silence and uncertainty are first-class outputs here. A tokenized model cannot p
 
 ## Benchmarks
 
+### Brain crate (`crates/brain`, port 8095)
+
+| Task | Score | Notes |
+|------|-------|-------|
+| Brain unit + integration tests | **67/67 pass** | `cargo test -p w1z4rd-brain --tests` — including 8 critical-thinking + 7 dynamic-emergence regression pins |
+| Toddler 32-pair cross-pool recall | **23/32 (71.9%)** | `scripts/brain_xpool_chat_test.py` via `POST /integrate`; stable Stage 7 → Stage 10 |
+| Greetings binding crystallization | **+187 bindings / 186 pairs** | `tools/training_standard/drive_corpora_brain.py --script greetings_001` against a fresh brain — Stage 10's tentative tier is what made this non-zero (the same run pre-Stage-10 produced 0 new bindings) |
+| OOV honesty | **2/3** | `xyzzy`, `zzzzqqqq` → `outside_grounding=true`; `foobarbaz` partially bleeds to nearest atom-overlap binding |
+
+Use [`scripts/brain_fluency_eval.py`](scripts/brain_fluency_eval.py) for the live 61-probe panel that spans toddler + greeting + k12 + oov categories.
+
+### Legacy NeuroRuntime + multi-pool fabric (`crates/core`, ports 8080/8090)
+
 | Task | Score | Notes |
 |------|-------|-------|
 | Multi-pool fwd/rev recall (8-pair small + 30-45k char large corpus) | **1.000 / 8-of-8** | `POST /multi_pool/ask`; 7/7 Rust + 30/30 Python integration tests pass |
 | Multi-pool 32-pair encyclopedia (cross-domain) | **0.987 / 32-of-32 fwd** | Same path, harder corpus |
 | GA combined score (NCBI memorization + paraphrase generalization) | **0.837** | Recipe B: bigrams+trigrams+IDF, passes=7, lr=0.167; measured on 25 NCBI pairs + 15 class descriptions |
 | Class paraphrase exact recall | **60% (9/15)** | Recipe B with trigrams; was 0% before n-gram encoding |
-| Chat / generate quality | **0.630** | `POST /chat`, `POST /neuro/generate` |
+| Chat / generate quality | **0.630** | `POST /chat`, `POST /neuro/generate` against the legacy node |
 
-These scores are corpus-dependent — they shift as more training data is ingested. `/query/integrated` uses the precision-weighted cascade: N-pool fabric as the high-confidence primary sensor, slow NeuronPool char-chain decoder and EEM as fallbacks. The GA-discovered Recipe B (combined=0.837) provides the current best configuration for paraphrase-heavy corpora.
+These scores are corpus-dependent — they shift as more training data is ingested. `/query/integrated` (legacy node) uses the precision-weighted cascade: N-pool fabric as the high-confidence primary sensor, slow NeuronPool char-chain decoder and EEM as fallbacks. The GA-discovered Recipe B (combined=0.837) provides the current best configuration for paraphrase-heavy corpora.
 
 ---
 
@@ -273,49 +286,179 @@ When the EEM can't explain a label cluster — when something is happening that 
 
 ## Architecture overview
 
+The repository currently houses **two parallel substrates**, each shipped as a separate binary.  Both run on Hebbian co-occurrence; both are domain-agnostic; they differ in maturity and in what they encode at the atomic level.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                     w1z4rd_node  (one binary)                        │
+│  Binary 1:  w1z4rd_node.exe                                          │
+│  Crates:    crates/core (NeuroRuntime) + crates/node                 │
 │                                                                      │
-│  :8080  Neuro API ── NeuroRuntime (snapshot reads, propagation)     │
-│  :8090  Node  API ── all training + inference routes:               │
-│         Media API ── /media/train  /media/playback  /neuro/propagate│
-│         Chat API  ── /chat  /neuro/generate                         │
-│         Hyp  API  ── /hypothesis/queue  /hypothesis/resolve         │
-│         EEM  API  ── /equations/*  /causal/graph                    │
-│         MP   API  ── /multi_pool/{register,train_pair,             │
-│                       train_fanout,ask,replay,delta/*,use_ngrams}    │
-│         Cascade   ── /query/integrated  (MP → char-chain → EEM)     │
-│         Cluster   ── ClusterNode  ── HashRing ── OtpRegistry        │
-│         Dist      ── DistributedCoordinator (round-robin, delta sync)│
+│  :8080  Neuro API ── NeuroRuntime (snapshot reads, propagation)      │
+│  :8090  Node  API ── /chat /media/train /multi_pool/* /neuro/* …    │
 │                                                                      │
-│  ┌───────── Cross-wiring feedback loops ────────────────────────┐   │
-│  │  EEM ──fb_eem_into_mp──► MP weights (at training time)      │   │
-│  │  MP  ──fb_mp_into_slowpool──► slow pool /media/train        │   │
-│  │  low confidence ──fb_replay_low_conf──► /multi_pool/replay   │   │
-│  │  route disagreement ──fb_disagreement_ne──► NE spike → ↑LR  │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                                                                      │
-│  KnowledgeRuntime ── HierarchicalMotifs ── FabricTrainer            │
-│  P2P Gossip / Data Mesh / Blockchain Layer                           │
+│  Multi-pool associative fabric · 339-equation EEM runtime ·          │
+│  Hypothesis queue · Knowledge graph · /query/integrated cascade ·    │
+│  Cluster (port 51611) · Dashboard binary (w1z4rd_dashboard.exe)      │
 └──────────────────────────────────────────────────────────────────────┘
-          ▲                 ▲                  ▲                ▲
-          │                 │                  │                │
-   ┌──────────────────────────────────────────────────────────┐
-   │          Multimodal encoder library  (crates/core)        │
-   │  ImageBitsEncoder  AudioBitsEncoder  TextBitsEncoder      │
-   │  MotionBitsEncoder  KeyboardBitsEncoder                   │
-   │  shared 8×8 grid vocabulary — img:, aud:, txt:, mov:, key:│
-   └──────────────────────────────────────────────────────────┘
-          ▲                 ▲                  ▲                ▲
-          │                 │                  │                │
-   chess_training     rtsp_pose_bridge   rss_topic_bridge  w1z4rd-dashboard
-   _loop.py           .py                .py               (GUI client binary)
-   research_agent.py  train_obstacle.py  playback_obstacle.py
-   (app / script)     (app / script)     (app / script)
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  Binary 2:  w1z4rd_brain_server.exe   (active research frontier)     │
+│  Crate:     crates/brain                                             │
+│                                                                      │
+│  :8095  Brain API ── /observe /tick /integrate /chat /sensor/* …    │
+│                                                                      │
+│  Five-pool fabric (binding / text / image / audio / action) ·        │
+│  Two-tier emergent binding (tentative + consolidated, Stage 10) ·    │
+│  EEM grounded facts + chain explorer · OOV honesty gate ·            │
+│  Annealer-guided integration · Pressure-feedback emergence loop      │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  Shared substrate                                                    │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │  Multimodal encoder library  (crates/core/streaming/)           │ │
+│  │  Image · Audio · Text · Motion · Keyboard encoders              │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │  Training pipeline  (tools/training_standard/)                  │ │
+│  │  registry/*.toml schemas · runner.py · score.py                 │ │
+│  │  drive_corpora.py        → port 8090 (legacy node)              │ │
+│  │  drive_corpora_brain.py  → port 8095 (brain server)             │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-Both APIs start automatically when the node binary launches — no separate service process. The dashboard is a lightweight GUI binary that polls the node APIs; it does not need to run on the same machine.
+**Why two substrates side by side.** The legacy `NeuroRuntime` carries the multimodal/encoder infrastructure, the 339-equation EEM, the cluster ring, the hypothesis queue, and the Recipe B GA result described in the benchmarks below.  The new `crates/brain` is a from-scratch substrate built against [`ARCHITECTURE.md`](ARCHITECTURE.md) §11 — it intentionally has *no* tokenizer-adjacent encoding (no position-augmented atoms, no precomputed bigrams/trigrams, no kWTA, no Jaccard ranker, no mini-columns).  Atoms are raw bytes through a pluggable `AtomEncoding` trait; concepts and bindings emerge entirely from co-firing.  Both substrates are live and tested; user-facing chat currently routes through `:8095` (the brain) for Wizard-frontend integration.
+
+The dashboard binary (`w1z4rd_dashboard.exe`) is a lightweight GUI client that polls the legacy node APIs; it does not need to run on the same machine.
+
+---
+
+## Brain crate (`crates/brain`) — active research frontier
+
+The brain crate is the substrate that compounds toward the [`ARCHITECTURE.md`](ARCHITECTURE.md) spec.  It is intentionally smaller and more conservative than the legacy `NeuroRuntime`: no kWTA, no mini-columns, no neuromodulators, no precomputed n-grams.  Everything is grown from co-firing, and the rules for *when* a binding emerges are themselves feedback-driven.
+
+### Substrate
+
+A single `Brain` owns a `Fabric` of named `Pool`s plus an `Eem`, an `Annealer`, an `ActionRouter`, and `NetworkState` for distributed gossip.  Each pool plugs in an `AtomEncoding` trait — the brain server registers five pools:
+
+| Pool id | Name | Encoding prefix | Purpose |
+|---------|------|-----------------|---------|
+| 0 | `binding` | `bind` | Cross-pool composite concepts.  Atoms are never used here directly. |
+| 1 | `text` | `t` | Text bytes → byte-passthrough atoms |
+| 2 | `image` | `i` | Image bytes → byte-passthrough atoms |
+| 3 | `audio` | `a` | Audio bytes → byte-passthrough atoms |
+| 4 | `action` | `act` | Action / response bytes (the target side of `text → action` pairs that /chat reads) |
+
+Atoms are labeled as `<prefix>:<base64url(bytes)>`.  Concept neurons emerge from `recent_atoms` co-firing within each pool; binding concepts (in pool 0) emerge from cross-pool firing fingerprints.
+
+### Stage 10 — dynamic emergent binding
+
+The flagship change to the brain in this iteration.  A single `binding_emergence_threshold = N` had to serve four subsystems with opposing needs (/chat retrieval wants broad recall, EEM wants robust facts, annealer wants frequent motifs, gossip wants high-confidence findings).  Stage 10 replaces that single number with four feedback loops over signals the substrate was already tracking.
+
+* **Two-tier promotion**
+  * *Tentative* tier (threshold = 1 by default): a binding-pool neuron crystallizes on **first** cross-pool co-firing.  Visible to `/chat` retrieval.  No EEM fact registered, no gossip emitted.
+  * *Consolidated* tier (threshold = `current_threshold`, default 3): registers an EEM grounded fact and emits motif gossip on the upgrade.  Reuses the tentative neuron id when upgrading in place.
+
+* **Lifetime recurrence**
+  `lifetime_recurrences` never decays, parallel to the windowed `binding_recurrences` (which scrolls with `moment_history_window = 64`).  Promotion runs against `max(windowed, lifetime)` — so sparse round-robin training schedules (the K-12 failure mode where the same pair recurs once every 7 000 ticks, far outside the window) still cross threshold via the lifetime signal.
+
+* **Pressure feedback loop**
+  The `bindings_per_observation` ratio is the input.  Every `pressure_observation_grace = 256` observations the loop checks: if the signal sits below `pressure_band_low = 0.001` the consolidated threshold ratchets down by 1 (floor: 1); if it climbs above `pressure_band_high = 0.05` the threshold ratchets up by 1 (ceiling: `pressure_threshold_max = 10`).  Hysteresis prevents oscillation.  Locked via `pressure_adjust_enabled = false`.
+
+* **Failure-feedback API**
+  `Brain::force_promote_tentative(min_count)` scans the lifetime recurrence map and promotes any fingerprint with count ≥ `min_count` that isn't yet in either tier.  Idempotent.  Designed to be called from `/chat`'s OOV path so a "I don't know" answer trains the substrate for the next ask.
+
+Public surface added to `Brain`:
+
+```rust
+pub fn binding_pressure(&self) -> f32;
+pub fn adjust_threshold_by_pressure(&mut self) -> u32;
+pub fn force_promote_tentative(&mut self, min_count: u32) -> Vec<NeuronId>;
+pub fn tentative_binding_count(&self) -> usize;
+pub fn consolidated_binding_count(&self) -> usize;
+pub fn current_emergence_threshold(&self) -> u32;
+pub fn total_observations(&self) -> u64;
+```
+
+### Critical-thinking loop (Stage 8 + Stage 9)
+
+`integrate_autonomous(query_pool, target_pool, fabric_threshold, chain_max_depth, chain_max_visit)` is the entry point Wizard-chat hits via `/chat`:
+
+1. **OOV gate.**  `best_binding_match(query_pool)` returns the precision and recall of the strongest matching trained binding against the currently-firing atoms.  If precision < `binding_match_threshold` (default 0.70), the call returns `outside_grounding = true` and `answer = None` — the honest "I don't know" path that fixed the "Hello → color" hallucination.
+2. **Fabric retrieval.**  Calls `integrate(query_pool, target_pool)` and, if it returns a non-empty answer above `fabric_threshold`, accepts that answer (Stage 9.1: the inner `integrate`'s own outside_grounding flag is *not* re-applied, because step 1 is the single source of truth).
+3. **EEM chain explorer.**  When fabric retrieval is weak, builds a seed set from firing query-pool atoms and walks the EEM's `GroundedFact` graph (`Eem::chain_explore`) toward the target pool.  Auto-populated from every consolidated binding promotion in Stage 8.
+4. **Annealer-guided pick.**  When multiple chain candidates exist, weighs each by `chain_confidence + 0.5 × annealer_predicted_activation`.
+5. **Decode + tier.**  Decodes the chosen target neuron to bytes via the pool encoding (or member walk for concept neurons) and returns an `AnswerWithGrounding` with `ConfidenceTier` set per `(fabric_confidence, eem_confidence, annealer_confidence)`.
+
+### Brain HTTP API (`:8095`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Liveness probe |
+| `/stats` | GET | tick, neurons, concepts, bindings, terminals, checkpoint path, **tentative_bindings**, **consolidated_bindings**, **current_threshold**, **total_observations**, **binding_pressure** |
+| `/observe` | POST | `{pool_id, frame}` — frame is base64url bytes |
+| `/tick` | POST | Close the moment; runs cross-pool wiring + emergence checks |
+| `/integrate` | POST | `{query_pool, target_pool}` — raw cross-pool retrieval (used by `brain_xpool_chat_test.py`) |
+| `/sensor/observe` | POST | `{kind: "text"|"image"|"audio", text? OR bytes_b64}` — single modality with predictions snapshot |
+| `/sensor/observe_triple` | POST | `{text, image_b64, audio_b64}` — three modalities in one tick |
+| `/chat` | POST | `{text}` → `integrate_autonomous` with OOV gate; returns `{reply, answer, decoder, predictions, grounding}` |
+| `/checkpoint` | POST | Persist `brain.bin` (single-file bincode snapshot) |
+
+### Test posture
+
+`crates/brain/tests/` carries 60+ unit + integration tests.  The Stage 10 work added `dynamic_emergence.rs` with 7 dedicated tests:
+
+* `tentative_tier_promotes_on_first_co_firing` — first co-firing produces a tentative binding, no EEM fact
+* `consolidation_upgrades_tentative_and_registers_eem_fact` — third recurrence upgrades in place, EEM fact appears
+* `lifetime_count_promotes_sparse_schedule` — the K-12 failure mode: same pair recurs every 200 ticks (window = 64), still consolidates via lifetime signal
+* `force_promote_tentative_picks_up_pending_fingerprints` — failure-feedback API, idempotent
+* `pressure_feedback_lowers_threshold_when_density_below_band` — closed loop verified
+* `pressure_feedback_is_disabled_when_flag_off` — locked-mode guarantee
+* `snapshot_roundtrip_preserves_tentative_and_lifetime_state` — persistence regression pin
+
+`crates/brain/tests/critical_thinking.rs` carries 8 Stage 8/9/9.1 tests, including `integrate_autonomous_does_not_double_gate_via_inner_integrate_oog` which adds 50 decay ticks before querying to prove the trained `dog → animal` cross-pool binding still resolves after activation has decayed.
+
+### Training pipeline
+
+[tools/training_standard/drive_corpora_brain.py](tools/training_standard/drive_corpora_brain.py) is the brain-server curriculum executor.  Sibling to `drive_corpora.py` (legacy node port 8090); both walk the same TOML registry under `tools/training_standard/registry/`.  Native contract:
+
+```python
+# One cross-pool training step
+POST /observe { pool_id: 1 (text),   frame: b64url(prompt) }
+POST /observe { pool_id: 4 (action), frame: b64url(response) }
+POST /tick
+```
+
+Shipping corpora (compiled from on-disk third-party data only — no fabricated text):
+
+| Corpus | Pairs | Compiler | Sources |
+|--------|-------|----------|---------|
+| `data/training/greetings_001.jsonl` | 186 | [`compile_greetings_corpus.py`](tools/training_standard/compile_greetings_corpus.py) | greeting subset of `conversation_basics_001.jsonl` + `social_word`/`social` rows of `concept_dataset.jsonl` |
+| `data/training/k12_subjects_001.jsonl` | 7 237 | [`compile_k12_corpus.py`](tools/training_standard/compile_k12_corpus.py) | 34 non-social categories of `concept_dataset.jsonl` + `class_corpus.jsonl` CS vocab |
+| `data/training/conversation_basics_001.jsonl` | 2 120 | `generate_corpora.py` (pre-existing) | committed artifacts |
+| `data/training/code_gen_*.jsonl` | 887 across 5 langs | `generate_corpora.py` (pre-existing) | committed artifacts |
+
+### Empirical posture (as of Stage 10)
+
+* **Toddler 32-pair cross-pool recall.**  23/32 exact (71.9%) via `/integrate` on `scripts/brain_xpool_chat_test.py`.  Stable across Stage 7 → Stage 10.
+* **Greetings consolidation lift.**  Fresh brain → 6 reps of `greetings_001` (186 pairs) → `total_binding` 32 → **219** (+187, near-perfect 1:1 with corpus size).  The same corpus under the legacy single-tier rule produced **0** new bindings.
+* **`/chat` honesty.**  Out-of-vocabulary prompts (`xyzzy`, `foobarbaz`, `zzzzqqqq`) return `outside_grounding = true` with empty answer rather than confidently grounding to the nearest trained category — the explicit Stage 9 fix for the "Hello → color" failure shown in screenshot on 2026-05-16.
+* **`scripts/brain_fluency_eval.py`** runs a 61-probe panel across toddler / greeting / k12 / oov categories and reports per-source hit rates.  Use this as the live regression dashboard after training runs.
+
+### What's explicitly absent
+
+Per [`ARCHITECTURE.md`](ARCHITECTURE.md) §9 the brain crate deliberately does NOT include:
+
+* No position-augmented atoms.  Atoms are raw bytes via base64 transport.
+* No precomputed bigrams/trigrams.  Sequences emerge as concepts via `Pool::register_sequence_atoms`.
+* No kWTA / sparsity gate.  Sparsity emerges from decay + prune.
+* No Jaccard ranker in the API surface.  Callers read activation directly.
+* No confidence threshold gate at the API boundary.  Callers read the `GroundingReport`.
+* No `MultiPoolFabric.cross` map.  Cross-pool wiring is per-neuron via `Terminal`.
+* No `paired_text` / `session_id` arguments in `observe`.
+
+These exclusions are deliberate — the brain crate is the substrate that compounds without inheriting the tokenizer-adjacent shortcuts the legacy fabric accepted.
 
 **The node is domain-agnostic. Scripts and apps define the domain.** The node has no knowledge of chess, poses, pixels, or cursor movement — it sees labels and co-occurrences. The encoder library translates raw sensor data (images, audio, text, mouse trajectories, keystrokes) into the node's label vocabulary. Everything is composable because everything speaks the same language.
 
@@ -764,9 +907,21 @@ Both APIs (`:8080` neuro, `:8090` node) run in either mode. Cluster commands are
 
 ---
 
+## HTTP API surface
+
+Three ports.  Use the one that matches the substrate you're working on:
+
+| Port | Binary | Purpose |
+|------|--------|---------|
+| `:8080` | `w1z4rd_node.exe` | Legacy Neuro API — `NeuroRuntime` propagation, snapshot reads |
+| `:8090` | `w1z4rd_node.exe` | Legacy Node API — all training + inference routes listed below |
+| `:8095` | `w1z4rd_brain_server.exe` | Brain crate API — see the *Brain crate* section above for the full endpoint table |
+
+The default `WIZARD_BRAIN_CHAT_URL` (consumed by the Django frontend at `D:/Projects/CoolCryptoUtilities/web`) is `http://localhost:8095` — user-facing `/chat` routes through the brain.
+
 ## Node API endpoints
 
-All endpoints are on `:8090` (Node API). Start the node with no subcommand:
+All endpoints below are on `:8090` (legacy Node API).  Start the legacy node with no subcommand:
 ```bash
 W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 ```
@@ -1159,26 +1314,22 @@ export PATH="$PATH:/c/Users/Node/.cargo/bin:/c/Users/Node/AppData/Local/Microsof
 # Python dependencies (install once)
 pip install httpx httpx[http2] aiohttp pillow requests nltk
 
-# Node binary in bin/ (build or use pre-built)
+# Node binaries in bin/ (build or use pre-built)
 cargo build --release --workspace
-cp target/release/w1z4rdv1510n-node.exe bin/w1z4rd_node.exe   # Windows
+cp target/release/w1z4rdv1510n-node.exe        bin/w1z4rd_node.exe          # Windows
+cp target/release/w1z4rd_brain_server.exe      bin/w1z4rd_brain_server.exe  # Brain server (port 8095)
 # cp target/release/w1z4rdv1510n-node  bin/w1z4rd_node        # Linux/macOS
 ```
 
 ---
 
-### 1. Start the node
+### 1. Start the binaries
 
-The node exposes two APIs on startup:
-- **`:8090` — Node API**: all training routes (`/media/train`, `/multi_pool/*`, `/query/integrated`, `/chat`,
-  `/neuro/*`, `/hypothesis/*`, `/equations/*`, `/health`, etc.)
-- **`:8080` — Neuro API**: an internal lighter API for snapshot reads and propagation
+There are two binaries.  Run whichever (or both) matches the substrate you're working on.
 
-**Use port 8090 for all training scripts.** Always launch from the project root with
-`W1Z4RDV1510N_DATA_DIR` set so the neural pool data persists to the right location.
+**Legacy node** — exposes `:8080` (Neuro API) + `:8090` (Node API) on startup:
 
 ```bash
-# Windows (Git Bash / PowerShell)
 cd /d/Projects/W1z4rDV1510n
 W1Z4RDV1510N_DATA_DIR="D:\\w1z4rdv1510n-data" ./bin/w1z4rd_node.exe
 
@@ -1187,32 +1338,92 @@ curl http://127.0.0.1:8080/healthz  # neuro API (uses /healthz, not /health)
 curl http://127.0.0.1:8090/health   # node API
 ```
 
-Expected output for node API: `{"status":"OK","node_id":"node-...","uptime_secs":0,...}`
+**Brain server** — exposes `:8095` (Brain API).  Persists `brain.bin` under `$W1Z4RDV1510N_DATA_DIR/` (use a separate directory from the legacy node so the two substrates don't fight over snapshot file paths):
 
-> **Port note:** Use `:8090` for all training scripts and API calls. The `:8090` node API
-> exposes all routes: `/chat`, `/multi_pool/*`, `/query/integrated`, `/neuro/*`,
-> `/media/*`, `/hypothesis/*`, `/equations/*`, `/cluster/*`, and admin routes.
-> The `:8080` neuro API is a lighter internal surface (snapshot reads, propagation) —
-> it does **not** expose cluster or media routes.
+```bash
+cd /d/Projects/W1z4rDV1510n
+W1Z4RDV1510N_DATA_DIR="D:/Projects/W1z4rDV1510n/brain-data-text" ./bin/w1z4rd_brain_server.exe
+
+# Verify the brain is up
+curl http://127.0.0.1:8095/health   # → "ok"
+curl http://127.0.0.1:8095/stats    # tick, neurons, bindings, tentative/consolidated counts, threshold, pressure
+```
+
+The Wizard frontend reads `WIZARD_BRAIN_CHAT_URL` (defaulting to `http://localhost:8095`) for the `/chat` route, so the brain is what the user-facing chat hits.  Legacy training scripts continue to target `:8090`.
+
+> **Port note:** `:8080` = legacy NeuroRuntime read-only surface.  `:8090` = legacy training + inference (all `/chat`, `/multi_pool/*`, `/neuro/*`, `/media/*`, `/equations/*`, `/cluster/*` routes).  `:8095` = brain crate (`/observe`, `/tick`, `/integrate`, `/sensor/*`, `/chat`, `/stats`, `/checkpoint`).
 
 ---
 
 ### 2. Interactive chat
 
 ```bash
-# Simple curl one-shot
+# Brain crate /chat (port 8095) — current user-facing path
+curl -s -X POST http://127.0.0.1:8095/chat \
+  -H "Content-Type: application/json" \
+  -d '{"text": "dog"}'
+# Returns {reply, answer, decoder, predictions, grounding:{outside_grounding, fabric_confidence, ...}}
+
+# Legacy node /chat (port 8090) — Recipe B multi-pool fabric path
 curl -s -X POST http://127.0.0.1:8090/chat \
   -H "Content-Type: application/json" \
   -d '{"text": "What is gravity?", "hops": 2, "top_k": 5}'
 
-# Full conversational interface with hypothesis tracking and affect
+# Full conversational interface with hypothesis tracking and affect (legacy)
 python scripts/chat.py --node http://127.0.0.1:8090
 # Type /help inside the chat for commands, /quit to exit
 ```
 
+The brain `/chat` will return `outside_grounding: true` and an empty answer when the prompt's atoms don't substantially match any trained binding — that is the deliberate Stage 9 honesty gate, not a bug.
+
 ---
 
-### 3. Stage 0 — Toddler foundation training
+### 3. Brain crate training (port 8095)
+
+The brain crate has its own curriculum executor that uses cross-pool `/observe → /observe → /tick` instead of `/sensor/observe` with paired_text.
+
+**Step 1 — Compile the corpora** (output goes to `data/training/` and is git-ignored):
+
+```bash
+python -m tools.training_standard.compile_greetings_corpus  # → greetings_001.jsonl (186 pairs)
+python -m tools.training_standard.compile_k12_corpus        # → k12_subjects_001.jsonl (7237 pairs)
+```
+
+**Step 2 — Drive the corpora against the live brain server:**
+
+```bash
+# Greetings — small, fast (~20 s for 6 reps)
+python -m tools.training_standard.drive_corpora_brain --script greetings_001 --repeats 6
+
+# K-12 subject vocabulary — larger (~30 min for 3 reps)
+python -m tools.training_standard.drive_corpora_brain --script k12_subjects_001 --repeats 3 --no-smoke
+
+# Or all registered scripts in phase order
+python -m tools.training_standard.drive_corpora_brain --repeats 6
+```
+
+**Step 3 — Empirically evaluate:**
+
+```bash
+# Toddler 32-pair recall (preserves the 71.9% baseline)
+python scripts/brain_xpool_chat_test.py
+
+# Full 61-probe fluency panel across toddler + greeting + k12 + oov categories
+python scripts/brain_fluency_eval.py
+```
+
+**Step 4 — Persist the brain state:**
+
+```bash
+curl -s -X POST http://127.0.0.1:8095/checkpoint -d '{}'
+# Writes $W1Z4RDV1510N_DATA_DIR/brain.bin (bincode snapshot)
+```
+
+> **Stage 10 implication:** under the default config (`tentative_emergence_threshold = 1`), every cross-pool training pair crystallizes a tentative binding on first co-firing.  You'll see `total_binding` in `/stats` climb roughly 1:1 with the number of distinct prompt/response pairs trained.  The `consolidated_bindings` count (which is what `/integrate` and the EEM walk) grows when the pressure-feedback loop's threshold is satisfied.
+
+---
+
+### 4. Legacy Stage 0 — Toddler foundation training (port 8090)
 
 Stage 0 builds the base vocabulary: ~1,675 concepts from letters through kindergarten-level ideas.
 Run this after a fresh node start (empty pool) before any other training.
@@ -1245,7 +1456,7 @@ python scripts/test_stage0.py --node http://127.0.0.1:8090
 
 ---
 
-### 4. Foundation language training (Simple English Wikipedia)
+### 5. Foundation language training (Simple English Wikipedia)
 
 Builds broad English word co-occurrence from ~200k articles.
 Requires downloading the Wikipedia dump first (~300 MB compressed).
@@ -1264,7 +1475,7 @@ python scripts/train_foundation.py \
 
 ---
 
-### 5. K-12 full curriculum training
+### 6. K-12 full curriculum training
 
 Trains through all three stages — toddler (Stage 0), introductory textbooks (Stage 1),
 and full K-12 curriculum (Stage 2). Requires LibreTexts PDFs placed in `textbooks/`
@@ -1297,7 +1508,7 @@ python scripts/train_k12.py --node http://127.0.0.1:8090 --clear-progress
 
 ---
 
-### 6. Bovine anatomy training pipeline
+### 7. Bovine anatomy training pipeline
 
 `scripts/build_cow_dataset.py` builds a multi-modal bovine anatomy dataset and ingests it directly into the node. This is the primary training pipeline for the W1z4rD V1510n bovine perception system. It runs six stages:
 
@@ -1338,7 +1549,7 @@ curl -s -X POST http://127.0.0.1:8090/chat \
 
 ---
 
-### 7. Multi-pool training and query
+### 8. Multi-pool training and query (legacy `crates/core` fabric, port 8090)
 
 ```bash
 # Register an additional pool (in/out are pre-registered)
@@ -1406,7 +1617,7 @@ curl http://127.0.0.1:8090/multi_pool/stats
 
 ---
 
-### 8. Checkpoint (save pool to disk)
+### 9. Checkpoint (save pool to disk)
 
 The node accumulates learning in RAM. Checkpoint persists it.
 Training scripts call this automatically, but you can trigger it manually:
@@ -1418,7 +1629,7 @@ curl -s -X POST http://127.0.0.1:8090/neuro/checkpoint
 
 ---
 
-### 10. Autonomous research agent
+### 10. Autonomous research agent (legacy)
 
 Polls the hypothesis queue, fetches Wikipedia + ArXiv answers, ingests them,
 and resolves each hypothesis with a dopamine reward signal.
