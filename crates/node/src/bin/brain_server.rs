@@ -586,7 +586,10 @@ async fn chat(
     // work automatically; we just snapshot what's active).
     brain.observe(POOL_TEXT, prompt.as_bytes());
     let mut predictions: HashMap<String, Vec<String>> = HashMap::new();
-    for other in [POOL_IMAGE, POOL_AUDIO] {
+    // Stage 12 diagnostic: include POOL_ACTION so we can see which
+    // action-pool concepts the integrate selection was choosing
+    // between.  Pure observability — does NOT change /chat behavior.
+    for other in [POOL_IMAGE, POOL_AUDIO, POOL_ACTION] {
         // Run propagation manually to populate cross-pool activation.
         let propagated = brain.fabric().propagate(POOL_TEXT);
         let empty: std::collections::HashMap<w1z4rd_brain::NeuronId, f32> = std::collections::HashMap::new();
@@ -632,13 +635,26 @@ async fn chat(
         "char_chain"
     }.to_string();
 
+    // Stage 12 diagnostic: surface `composition_used` neuron labels as
+    // `activated_concepts` so /chat callers can see WHICH binding-pool
+    // neurons fed the answer.  The labels follow the binding pool's
+    // composite-label format: "p<pool>n<neuron>|..." for binding-pool
+    // members.  Empty unless integrate_autonomous returned an answer.
+    let activated: Vec<String> = xpool.grounding.composition_used.iter()
+        .filter_map(|nref| {
+            brain.fabric().pool(nref.pool).and_then(|p| {
+                p.read().get(nref.neuron).map(|n| n.label.clone())
+            })
+        })
+        .collect();
+
     Json(ChatResponse {
         reply: reply.clone(),
         answer: reply,
         decoder,
         predictions,
         grounding: g,
-        activated_concepts: Vec::new(),
+        activated_concepts: activated,
         word_activations: Vec::new(),
     })
 }
