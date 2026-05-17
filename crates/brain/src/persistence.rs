@@ -90,8 +90,25 @@ pub struct SerializableFingerprint {
     pub pairs: Vec<(PoolId, NeuronId)>,
 }
 
+/// Current persisted-snapshot format version.  Bumped whenever the
+/// `BrainSnapshot` field layout changes in a way bincode-1.3's
+/// positional encoder cannot reconcile via `#[serde(default)]`.
+///
+/// Version history:
+/// * `0`  legacy snapshots predating the audit (treated identically to v1)
+/// * `1`  Stage 10 baseline (tentative-tier + lifetime + pressure fields)
+/// * `2`  Stage 11 (concept-tier OOV reserved — no new persisted fields
+///        in Stage 11A itself, but reserved here as the forward
+///        contract so Stage 11B/C can layer on without further bumps)
+pub const CURRENT_SNAPSHOT_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainSnapshot {
+    /// Snapshot format version — see `CURRENT_SNAPSHOT_VERSION`.
+    /// `#[serde(default)]` returns 0 for pre-Stage-11 snapshots so
+    /// `from_snapshot` can dispatch the right restore path.
+    #[serde(default)]
+    pub format_version:             u32,
     pub binding_pool_id:            PoolId,
     pub binding_emergence_threshold: u32,
     /// Two-tier emergence: tentative threshold (default 1).  Defaults

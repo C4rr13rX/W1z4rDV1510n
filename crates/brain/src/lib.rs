@@ -46,7 +46,7 @@ pub use fabric::{Fabric, FabricConfig, Moment};
 pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,
 };
-pub use brain::{Brain, BrainConfig, BrainStats};
+pub use brain::{Brain, BrainConfig, BrainStats, BindingMatch, MatchTier};
 pub use action::{ActionEvent, ActionId, ActionRouter, NullRouter, RouteResult};
 pub use eem::{
     ChainResult, Discipline, DisciplineId, Eem, EemConfig, Equation,

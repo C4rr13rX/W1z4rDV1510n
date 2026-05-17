@@ -27,6 +27,46 @@ use crate::network::{
 use crate::neuron::{NeuronId, NeuronKind, NeuronRef, PoolId, Neuron};
 use crate::pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
 
+/// Which tier of substrate a [`BindingMatch`] succeeded at.  Stage 11
+/// (concept-tier OOV) audits #1, #4 and #8 in the design log: the
+/// tier tag travels alongside precision/recall so the single OOV gate
+/// in `integrate_autonomous` can reason about WHAT kind of match it
+/// passed (or rejected), without re-deriving it from the precision
+/// number alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MatchTier {
+    /// No binding produced any non-zero intersection at either tier.
+    None,
+    /// Match succeeded only at the atom level (raw bytes).  This is
+    /// the Stage 9 baseline behavior.
+    Atom,
+    /// Match succeeded at the concept level (composite neurons that
+    /// emerged via `recent_atoms` co-firing) and passed the coverage
+    /// gate.  This is the Stage 11 add — for multi-character prompts
+    /// like "photosynthesis" once a single concept neuron has emerged
+    /// for the whole word, the binding match jumps from atom-precision
+    /// ~0.4 to concept-precision 1.0.
+    Concept,
+}
+
+/// Result of [`Brain::best_binding_match_v2`].  Carries the
+/// precision/recall pair plus the tier at which the match was found.
+#[derive(Debug, Clone, Copy)]
+pub struct BindingMatch {
+    pub precision: f32,
+    pub recall:    f32,
+    pub tier:      MatchTier,
+}
+
+impl BindingMatch {
+    pub const NONE: Self = Self {
+        precision: 0.0, recall: 0.0, tier: MatchTier::None,
+    };
+    /// Composite score used to pick the strongest match across tiers.
+    #[inline]
+    pub fn score(&self) -> f32 { self.precision * self.recall }
+}
+
 /// Sorted (pool, neuron) signature of a single tick's multi-pool
 /// firing.  Used to detect recurring binding patterns: when the same
 /// multi-pool firing-set has been observed `binding_emergence_threshold`
@@ -974,26 +1014,54 @@ impl Brain {
     /// out-of-vocabulary prompts and honestly report outside_grounding
     /// rather than hallucinating an answer from accidentally-overlapping
     /// atoms.
+    /// Atom-tier best-binding match — the legacy Stage 9 signature.
+    /// Kept for tests and external callers that don't need tier
+    /// awareness.  Internally now delegates to
+    /// [`Self::best_binding_match_v2`] and discards the tier tag.
     pub fn best_binding_match(&self, query_pool: PoolId) -> (f32, f32) {
+        let m = self.best_binding_match_atom_tier(query_pool);
+        (m.precision, m.recall)
+    }
+
+    /// Stage 11 tier-aware best-binding match.  Tries concept-level
+    /// matching first; falls back to atom-level when either side has
+    /// fewer than one concept or fails the coverage gate.  Returns
+    /// the highest-scoring match across both tiers along with the
+    /// tier tag, so callers (notably `integrate_autonomous`) can
+    /// reason about whether the match is concept-grade.
+    ///
+    /// Coverage gate (concept tier only): the fraction of currently-
+    /// firing query-pool items that are concepts must be at least
+    /// 0.5.  Without this, a single concept lit by noise alongside
+    /// many loose atoms would falsely pass the gate at precision=1.0.
+    pub fn best_binding_match_v2(&self, query_pool: PoolId) -> BindingMatch {
+        let concept = self.best_binding_match_concept_tier(query_pool);
+        if concept.tier == MatchTier::Concept {
+            return concept;
+        }
+        self.best_binding_match_atom_tier(query_pool)
+    }
+
+    fn best_binding_match_atom_tier(&self, query_pool: PoolId) -> BindingMatch {
         let q_atoms: ahash::AHashSet<NeuronId> = {
             let q = match self.fabric.pool(query_pool) {
                 Some(p) => p,
-                None    => return (0.0, 0.0),
+                None    => return BindingMatch::NONE,
             };
             let q = q.read();
             q.currently_firing()
                 .filter(|nid| q.get(*nid).map_or(false, |n| n.is_atom()))
                 .collect()
         };
-        if q_atoms.is_empty() { return (0.0, 0.0); }
+        if q_atoms.is_empty() { return BindingMatch::NONE; }
 
         let bpid = self.binding_pool_id;
         let bp = match self.fabric.pool(bpid) {
             Some(p) => p,
-            None    => return (0.0, 0.0),
+            None    => return BindingMatch::NONE,
         };
         let bp_read = bp.read();
-        let mut best: (f32, f32, f32) = (0.0, 0.0, 0.0); // (score, precision, recall)
+        let mut best = BindingMatch::NONE;
         for n in bp_read.iter_neurons() {
             if n.is_atom() { continue; }
             let bind_query: ahash::AHashSet<NeuronId> = n.members.iter()
@@ -1006,12 +1074,75 @@ impl Brain {
                 .count() as f32;
             let precision = intersect / bind_query.len() as f32;
             let recall = intersect / q_atoms.len() as f32;
-            let score = precision * recall;
-            if score > best.0 {
-                best = (score, precision, recall);
+            let candidate = BindingMatch { precision, recall, tier: MatchTier::Atom };
+            if candidate.score() > best.score() {
+                best = candidate;
             }
         }
-        (best.1, best.2)
+        best
+    }
+
+    fn best_binding_match_concept_tier(&self, query_pool: PoolId) -> BindingMatch {
+        // Pre-collect: which neuron ids in query_pool are *concepts*
+        // (composite, not atoms)?  One read of the query pool covers
+        // both this set and the firing snapshot below.
+        let (query_concept_set, firing_concepts, firing_total) = {
+            let qp = match self.fabric.pool(query_pool) {
+                Some(p) => p,
+                None    => return BindingMatch::NONE,
+            };
+            let q = qp.read();
+            let concept_set: ahash::AHashSet<NeuronId> = q.iter_neurons()
+                .filter(|n| !n.is_atom())
+                .map(|n| n.id)
+                .collect();
+            let firing: Vec<NeuronId> = q.currently_firing().collect();
+            let firing_concepts: ahash::AHashSet<NeuronId> = firing.iter()
+                .copied()
+                .filter(|nid| concept_set.contains(nid))
+                .collect();
+            (concept_set, firing_concepts, firing.len())
+        };
+
+        if firing_concepts.is_empty() || firing_total == 0 {
+            return BindingMatch::NONE;
+        }
+
+        // Coverage gate: concept-mass must be >= 50% of total firing.
+        // A single concept among many loose atoms (audit 2 false-positive
+        // scenario) is rejected here so it can't carry precision=1.0
+        // through to the OOV gate on a fundamentally atom-shaped query.
+        let concept_mass = firing_concepts.len() as f32 / firing_total as f32;
+        if concept_mass < 0.5 {
+            return BindingMatch::NONE;
+        }
+
+        let bpid = self.binding_pool_id;
+        let bp = match self.fabric.pool(bpid) {
+            Some(p) => p,
+            None    => return BindingMatch::NONE,
+        };
+        let bp_read = bp.read();
+        let mut best = BindingMatch::NONE;
+        for n in bp_read.iter_neurons() {
+            if n.is_atom() { continue; }
+            let bind_concepts: ahash::AHashSet<NeuronId> = n.members.iter()
+                .filter(|m| m.pool == query_pool)
+                .map(|m| m.neuron)
+                .filter(|nid| query_concept_set.contains(nid))
+                .collect();
+            if bind_concepts.is_empty() { continue; }
+            let intersect = bind_concepts.iter()
+                .filter(|a| firing_concepts.contains(a))
+                .count() as f32;
+            let precision = intersect / bind_concepts.len() as f32;
+            let recall = intersect / firing_concepts.len() as f32;
+            let candidate = BindingMatch { precision, recall, tier: MatchTier::Concept };
+            if candidate.score() > best.score() {
+                best = candidate;
+            }
+        }
+        best
     }
 
     /// Critical-thinking integration.  When fabric retrieval has low
@@ -1061,14 +1192,14 @@ impl Brain {
         chain_max_visit:             usize,
         binding_match_threshold:     f32,
     ) -> AnswerWithGrounding {
-        // 0. Out-of-vocab gate.  If no binding has its query-pool
-        // members substantially contained in the firing query atoms,
-        // the prompt isn't something the substrate has been trained
-        // on — return an honest outside_grounding answer instead of
-        // letting fabric pick the strongest random match.
-        let (best_precision, best_recall) = self.best_binding_match(query_pool);
-        let binding_score = best_precision * best_recall;
-        if best_precision < binding_match_threshold {
+        // 0. Out-of-vocab gate (Stage 9 + Stage 11 concept tier).
+        // SINGLE source of truth for "is this prompt grounded".  Tries
+        // concept-tier matching first (sparse, high-precision) and
+        // falls back to atom-tier.  The audit-4 rule: this is the only
+        // gate site; downstream code does not re-decide.
+        let bm = self.best_binding_match_v2(query_pool);
+        let binding_score = bm.score();
+        if bm.precision < binding_match_threshold {
             return AnswerWithGrounding {
                 answer: None,
                 grounding: GroundingReport {
@@ -1087,10 +1218,14 @@ impl Brain {
                 confidence_tier: ConfidenceTier::Ungrounded,
                 next_steps_if_ungrounded: vec![
                     crate::grounding::RequestObservation {
-                        domain: "no trained binding matches this prompt's atoms with sufficient precision".into(),
+                        domain: format!(
+                            "no trained binding matches this prompt at tier={:?} \
+                             with sufficient precision",
+                            bm.tier).into(),
                         examples_needed: 1,
-                        why: format!("best binding precision={:.2} < threshold={:.2}",
-                            best_precision, binding_match_threshold).into(),
+                        why: format!(
+                            "best binding precision={:.2} (tier={:?}) < threshold={:.2}",
+                            bm.precision, bm.tier, binding_match_threshold).into(),
                         pool: query_pool,
                     },
                 ],
@@ -2008,6 +2143,7 @@ impl Brain {
         let pending_actions: Vec<(ActionId, ActionEvent)> = self.pending_actions
             .iter().map(|(k, v)| (*k, v.clone())).collect();
         crate::persistence::BrainSnapshot {
+            format_version:              crate::persistence::CURRENT_SNAPSHOT_VERSION,
             binding_pool_id:             self.binding_pool_id,
             binding_emergence_threshold: self.config.binding_emergence_threshold,
             moment_history_window:       self.config.moment_history_window,
