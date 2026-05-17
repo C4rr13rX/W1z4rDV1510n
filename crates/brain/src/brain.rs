@@ -1295,52 +1295,130 @@ impl Brain {
         target_candidates.sort_by(|a, b|
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // 5. Annealer-guided pick: when multiple high-confidence
-        // candidates exist, prefer the one whose predicted activation
-        // in the annealer's view is highest.  Falls back to top-by-
-        // chain-confidence when the annealer has no prediction.
+        // 5. Annealer-guided ranking + Stage 11C multi-fact assembly.
+        //
+        // Ranking: combine chain confidence with the annealer's
+        // predicted activation in the target pool, just like the
+        // Stage 8 single-pick path did.
         let prediction = self.annealer.predict_next(target_pool);
         let pred_frame = prediction.as_ref().map(|p| &p.predicted_frame);
 
-        let best_target = target_candidates.iter()
-            .max_by(|(a_ref, a_conf), (b_ref, b_conf)| {
-                let a_pred = pred_frame.and_then(|f| f.get(&a_ref.1).copied()).unwrap_or(0.0);
-                let b_pred = pred_frame.and_then(|f| f.get(&b_ref.1).copied()).unwrap_or(0.0);
-                let a_score = a_conf + 0.5 * a_pred;
-                let b_score = b_conf + 0.5 * b_pred;
-                a_score.partial_cmp(&b_score).unwrap_or(std::cmp::Ordering::Equal)
+        let mut ranked: Vec<((PoolId, NeuronId), f32, f32)> = target_candidates.iter()
+            .map(|(nref, conf)| {
+                let pred = pred_frame.and_then(|f| f.get(&nref.1).copied()).unwrap_or(0.0);
+                let score = conf + 0.5 * pred;
+                (*nref, *conf, score)
             })
-            .copied();
+            .collect();
+        ranked.sort_by(|a, b|
+            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
-        let (best_ref, best_conf) = match best_target {
+        // Multi-fact gate.  Audit-2 hard cap: at most 4 facts assembled.
+        // Audit-10 confidence-delta gate: facts 2..N are only included
+        // if their chain confidence is at least 0.6 × the top fact's.
+        // Audit-8 single-fact preservation: when only one fact passes,
+        // the output is byte-identical to the Stage 8 single-decode
+        // path — no separator, no period, no behavior change for the
+        // toddler 32-pair regression baseline.
+        const MULTI_FACT_CAP: usize = 4;
+        const MULTI_FACT_MIN_RATIO: f32 = 0.6;
+        const MULTI_FACT_SEP: &[u8] = b". ";
+
+        let top_conf = ranked.first().map(|(_, c, _)| *c).unwrap_or(0.0);
+        let selected: Vec<((PoolId, NeuronId), f32)> = ranked.iter()
+            .take(MULTI_FACT_CAP)
+            .enumerate()
+            .filter(|(i, (_, c, _))|
+                *i == 0 || *c >= top_conf * MULTI_FACT_MIN_RATIO)
+            .map(|(_, (nref, c, _))| (*nref, *c))
+            .collect();
+
+        let (best_ref, best_conf) = match selected.first().copied() {
             Some(x) => x,
             None    => return fabric_ans,
         };
 
-        // 6. Decode the chosen target neuron.  If it's a concept, walk
-        // its members; if it's an atom, decode via the pool encoding.
+        // Multi-fact trigger correction (audit-8 single-fact pin).
+        // The reached_members list may contain many distinct atoms
+        // even when chain explored a *single* EEM grounded fact
+        // (e.g., the single trained pair `dog → animal` exposes 5
+        // pool_b atoms — a, n, i, m, l).  Concatenating all 5 with
+        // ". " separators produces nonsense like "a. n. i. m. l".
+        //
+        // The right granularity is *facts*, not member atoms.  We
+        // only fire the multi-fact concat path when the chain
+        // actually traversed >= 2 distinct EEM facts.  Single-fact
+        // chains decode their single best target as before
+        // (byte-identical to the Stage 8 path).
+        let fire_multi_fact = chain.visited_facts.len() >= 2 && selected.len() >= 2;
+
+        // 6. Decode each selected target neuron.  Single-fact path
+        // produces a single byte sequence; multi-fact path joins with
+        // the period+space separator.
         let target_handle = match self.fabric.pool(target_pool) {
             Some(p) => p,
             None    => return fabric_ans,
         };
         let t = target_handle.read();
-        let answer_bytes = match t.get(best_ref.1) {
-            Some(n) if n.is_atom() => {
-                let pairs = [(n.label.as_str(), 1.0_f32)];
-                Some(t.encoding_reassemble(&pairs))
+
+        let decode_one = |nid: NeuronId| -> Option<Vec<u8>> {
+            match t.get(nid) {
+                Some(n) if n.is_atom() => {
+                    let pairs = [(n.label.as_str(), 1.0_f32)];
+                    Some(t.encoding_reassemble(&pairs))
+                }
+                Some(n) => Some(t.decode_concept_members(&n.members)),
+                None    => None,
             }
-            Some(n) => Some(t.decode_concept_members(&n.members)),
-            None    => None,
         };
 
-        // 7. Assemble the grounding.  The chain confidence is folded
-        // into EEM-side confidence; fabric_confidence stays whatever
-        // the fabric reported (low, since we got here).
+        let answer_bytes: Option<Vec<u8>> = if !fire_multi_fact {
+            // Single-fact preservation (audit-8).  Byte-identical to
+            // the Stage 8 path.
+            decode_one(best_ref.1)
+        } else {
+            // Multi-fact assembly.  Decode each, drop empties, join.
+            let mut decoded_parts: Vec<Vec<u8>> = Vec::with_capacity(selected.len());
+            for (nref, _conf) in selected.iter() {
+                if let Some(bytes) = decode_one(nref.1) {
+                    if !bytes.is_empty() {
+                        decoded_parts.push(bytes);
+                    }
+                }
+            }
+            if decoded_parts.is_empty() {
+                None
+            } else if decoded_parts.len() == 1 {
+                Some(decoded_parts.into_iter().next().unwrap())
+            } else {
+                let mut out = Vec::new();
+                for (i, part) in decoded_parts.iter().enumerate() {
+                    if i > 0 { out.extend_from_slice(MULTI_FACT_SEP); }
+                    out.extend_from_slice(part);
+                }
+                Some(out)
+            }
+        };
+
+        // 7. Assemble the grounding.  Multi-fact path also populates
+        // `composition_used` so callers can audit which target
+        // neurons contributed to the assembled answer.
         let mut g = fabric_ans.grounding.clone();
         g.eem_confidence = Some(best_conf);
         let f = g.fabric_confidence.max(0.0);
         g.integrated_confidence = ((f * best_conf).sqrt()).max(best_conf * 0.5);
         g.strongest_match = Some(NeuronRef::new(target_pool, best_ref.1));
+        g.composition_used = if fire_multi_fact {
+            selected.iter()
+                .map(|(nref, _)| NeuronRef::new(nref.0, nref.1))
+                .collect()
+        } else {
+            // Single-fact path records exactly the one neuron it
+            // decoded — the back-compat regression pin in
+            // single_fact_returns_single_decoded_answer requires
+            // composition_used.len() == 1 here.
+            vec![NeuronRef::new(target_pool, best_ref.1)]
+        };
         g.outside_grounding = answer_bytes.as_ref().map(|b| b.is_empty()).unwrap_or(true);
         g.speculation_flag = true; // chain-composed answer is by definition speculation
         let tier = ConfidenceTier::from_confidence(
