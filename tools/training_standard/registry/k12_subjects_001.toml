@@ -1,0 +1,53 @@
+[script]
+id          = "k12_subjects_001"
+category    = "conversation"
+phase       = 1
+description = """
+K-12 cross-subject vocabulary, definitions, and categorical
+associations.  Covers the 34 non-social semantic categories of
+concept_dataset.jsonl (animal, body, color, food, language, math,
+musical_instrument, nature, plant, science, shape, sport, time,
+...) plus the data-structures vocab in class_corpus.jsonl.
+
+Phase 1 — runs after greetings_001 so social atoms are already
+bound and won't capture vocab queries by accident.  Promises not
+to regress the conversation_basics_001 and greetings_001 floors.
+
+Corpus is compiled by tools/training_standard/compile_k12_corpus.py
+from existing on-disk third-party data:
+  - data/foundation/concept_dataset.jsonl  (1675 concepts, 36 cats)
+  - data/foundation/class_corpus.jsonl     (155 CS class descriptions)
+"""
+depends_on  = ["greetings_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/k12_subjects_001.jsonl"
+
+[[benchmarks]]
+label        = "categorical: dog"
+prompt       = "dog"
+must_include = ["animal"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: red"
+prompt       = "red"
+must_include = ["color"]
+min_score    = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: piano"
+prompt       = "piano"
+must_include = ["musical_instrument", "music"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "what is: water"
+prompt       = "What does water mean?"
+must_include = ["water"]
+min_score    = 0.3
+expected_structure = "prose"

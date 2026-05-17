@@ -183,6 +183,50 @@ fn integrate_autonomous_returns_fabric_answer_when_confidence_high() {
 }
 
 #[test]
+fn integrate_autonomous_does_not_double_gate_via_inner_integrate_oog() {
+    // Regression pin for Stage 9.1: when step-0's binding-precision
+    // gate passes (query is in-vocab), integrate_autonomous must NOT
+    // also re-gate via the inner self.integrate()'s outside_grounding
+    // flag.  That inner flag is computed with a stricter fabric-
+    // confidence threshold and can flip to true on legitimately
+    // trained pairs when activation has decayed across many ticks —
+    // which would push the call into chain_explore unnecessarily and
+    // return a degraded single-byte answer instead of the trained
+    // cross-pool answer.
+    //
+    // Concretely: a trained (dog, animal) pair should still return
+    // "animal" from integrate_autonomous even if the inner integrate
+    // flagged outside_grounding=true on its own confidence floor —
+    // the step-0 gate is the single source of truth.
+    let (mut brain, pool_a, pool_b) = build_three_pool_brain();
+    for _ in 0..5 {
+        brain.observe(pool_a, b"dog");
+        brain.observe(pool_b, b"animal");
+        brain.advance_tick();
+    }
+    // Simulate many subsequent ticks of activity so activation decays —
+    // this is what nudges the inner integrate to set outside_grounding
+    // on the query in real long-running deployments.
+    for _ in 0..50 {
+        brain.observe(pool_a, b"x");
+        brain.advance_tick();
+    }
+    // Now ask the trained question.
+    brain.observe(pool_a, b"dog");
+    let ans = brain.integrate_autonomous(pool_a, pool_b, 0.0, 4, 200);
+    // Step-0 gate should pass (precision high for exact-trained query).
+    assert!(!ans.grounding.outside_grounding,
+        "trained dog→animal must not be flagged outside_grounding by integrate_autonomous \
+         even after decay; got {:?}", ans.grounding);
+    // The returned answer should contain "animal" (the trained target).
+    let answer_bytes = ans.answer.as_ref().expect("answer should be Some");
+    let answer_str = String::from_utf8_lossy(answer_bytes);
+    assert!(answer_str.contains("animal"),
+        "trained dog→animal must return 'animal' (not a degraded char_chain fragment); \
+         got {:?}", answer_str);
+}
+
+#[test]
 fn integrate_autonomous_falls_through_to_chain_when_fabric_low() {
     // Train cross-pool so facts populate, but use a very high fabric
     // threshold so the chain path runs and produces the answer.

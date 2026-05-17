@@ -8,6 +8,11 @@
 *.exe
 *.pdb
 
+# ── Brain persisted state (rebuildable from corpora + drive_corpora_brain.py) ─
+/brain-data-text/
+/brain-data/
+.supervisor_training_started
+
 # ── Machine-specific launcher scripts ─────────────────────────────────────────
 *.bat
 *.ps1

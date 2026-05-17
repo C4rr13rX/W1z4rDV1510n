@@ -876,14 +876,32 @@ impl Brain {
         }
 
         // 1. Try the fabric path.
+        //
+        // We already passed the step-0 binding-precision gate, so this
+        // prompt is in-vocabulary as far as Stage 9 honesty is
+        // concerned.  The inner `integrate` may still flag its own
+        // `outside_grounding=true` based on a stricter fabric-
+        // confidence threshold — we deliberately *don't* propagate
+        // that flag here, because step 0 is now the single source of
+        // truth on "is this prompt grounded".  If `integrate` returned
+        // a non-empty answer at or above `fabric_confidence_threshold`,
+        // accept it instead of letting chain_explore re-decide.
         let fabric_ans = self.integrate(query_pool, target_pool);
         let fabric_has_answer = fabric_ans.answer.as_ref()
             .map(|b| !b.is_empty()).unwrap_or(false);
         if fabric_has_answer
-            && !fabric_ans.grounding.outside_grounding
             && fabric_ans.grounding.fabric_confidence >= fabric_confidence_threshold
         {
-            return fabric_ans;
+            // Clear the inner outside_grounding flag — step 0 already
+            // owns that decision and said this query IS grounded.
+            let mut g = fabric_ans.grounding.clone();
+            g.outside_grounding = false;
+            return AnswerWithGrounding {
+                answer: fabric_ans.answer,
+                grounding: g,
+                confidence_tier: fabric_ans.confidence_tier,
+                next_steps_if_ungrounded: fabric_ans.next_steps_if_ungrounded,
+            };
         }
 
         // 2. Build the seed set: every firing query-pool atom + every

@@ -1,0 +1,49 @@
+[script]
+id          = "greetings_001"
+category    = "conversation"
+phase       = 0
+description = """
+Baseline greetings, courtesies, and short social-word recall.  This
+sits at phase 0 because it's a small, dense corpus that needs to
+ground first — every later phase asks 'who are you' / 'thanks' style
+prompts during benchmarking, so the social atoms must already be
+sharply bound before broader vocab adds noise.
+
+Corpus is compiled by tools/training_standard/compile_greetings_corpus.py
+from existing on-disk third-party data:
+  - data/training/conversation_basics_001.jsonl  (greeting subset)
+  - data/foundation/concept_dataset.jsonl        (social_word + social)
+"""
+depends_on  = []
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/greetings_001.jsonl"
+
+[[benchmarks]]
+label        = "greeting: hello"
+prompt       = "Hello"
+must_include = ["W1z4rD"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "greeting: thanks"
+prompt       = "Thank you"
+must_include = ["welcome"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "greeting: bye"
+prompt       = "Goodbye"
+must_include = ["bye"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "social: no"
+prompt       = "What does no mean?"
+must_include = ["stop", "not"]
+min_score    = 0.3
+expected_structure = "prose"
