@@ -1,24 +1,32 @@
-//! Standalone HTTP server for the W1z4rD brain.
+//! Standalone HTTP server for the W1z4rD brain (crates/brain) with the
+//! same multimodal endpoint shape the existing training scripts use,
+//! plus a /chat endpoint that routes through Brain::generate().
 //!
-//! Embeds `w1z4rd_brain::Brain` with persistence at the configured
-//! data directory and exposes a small REST surface so external
-//! tools (the dashboard, the cluster, the experiment harness) can
-//! drive it without entangling the main node's existing API.
+//! Pools (built from a custom identity, NOT default_general_observer):
+//!     id=1  text    (keyboard/byte-passthrough, prefix "t")
+//!     id=2  image   (byte-passthrough of raw image bytes, prefix "i")
+//!     id=3  audio   (byte-passthrough of raw audio bytes, prefix "a")
+//!     id=4  action  (byte-passthrough of action emissions, prefix "act")
+//!  (id=0 is the auto-created binding pool, prefix "bind")
 //!
-//! Endpoints (all JSON unless noted):
-//!   GET  /health                       — liveness probe
-//!   GET  /stats                        — `BrainStats`
-//!   POST /observe  { pool_id, frame }  — frame is base64-url-safe of bytes
-//!   POST /tick                         — advance_tick
-//!   POST /integrate { query_pool, target_pool }
-//!                                       — returns answer (base64) + grounding
-//!   POST /checkpoint                   — flush to data dir
+//! Endpoints (JSON):
+//!   GET  /health
+//!   GET  /stats
+//!   POST /observe                { pool_id, frame }           — frame base64url
+//!   POST /tick
+//!   POST /integrate              { query_pool, target_pool }
+//!   POST /checkpoint
 //!
-//! Data dir is `W1Z4RDV1510N_DATA_DIR` (matching the main node's
-//! conventions) or `./brain-data` if unset.  The brain is loaded
-//! from `<data_dir>/brain.bin` on startup if it exists; otherwise a
-//! `default_general_observer` identity is instantiated.  An
-//! automatic checkpoint runs on SIGINT/SIGTERM.
+//!   # Multimodal (compatible with scripts/sensors/*.py):
+//!   POST /sensor/observe         { kind: "text"|"image"|"audio", bytes_b64 OR text }
+//!                                returns { predictions: { pool_name: [labels] } }
+//!   POST /sensor/observe_triple  { text, image_b64, audio_b64, lr? }
+//!                                returns { img_labels, aud_labels }
+//!   POST /chat                   { text }
+//!                                returns { reply, predictions: { pool: [labels] } }
+//!
+//! Data dir is `W1Z4RDV1510N_DATA_DIR` (or ./brain-data).  Brain
+//! persists to `<data_dir>/brain.bin` on shutdown.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -35,9 +43,25 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use w1z4rd_brain::{
-    AtomEncoding, Brain, BrainIdentitySpec, BrainStats, BytePassthroughEncoding,
-    PoolId, PoolPrototypeRegistry,
+    AtomEncoding, Brain, BrainConfig, BrainStats, BytePassthroughEncoding,
+    PoolConfig, PoolId,
 };
+
+const POOL_TEXT:   PoolId = 1;
+const POOL_IMAGE:  PoolId = 2;
+const POOL_AUDIO:  PoolId = 3;
+const POOL_ACTION: PoolId = 4;
+
+fn pool_name(id: PoolId) -> &'static str {
+    match id {
+        0 => "binding",
+        1 => "text",
+        2 => "image",
+        3 => "audio",
+        4 => "action",
+        _ => "other",
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -51,6 +75,16 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("brain-data"))
 }
 
+fn pool_prefixes() -> HashMap<PoolId, String> {
+    let mut p = HashMap::new();
+    p.insert(0,           "bind".to_string());
+    p.insert(POOL_TEXT,   "t".to_string());
+    p.insert(POOL_IMAGE,  "i".to_string());
+    p.insert(POOL_AUDIO,  "a".to_string());
+    p.insert(POOL_ACTION, "act".to_string());
+    p
+}
+
 fn build_encodings(prefixes: &HashMap<PoolId, String>) -> HashMap<PoolId, Box<dyn AtomEncoding>> {
     prefixes.iter().map(|(pid, prefix)| {
         let leaked: &'static str = Box::leak(prefix.clone().into_boxed_str());
@@ -59,34 +93,66 @@ fn build_encodings(prefixes: &HashMap<PoolId, String>) -> HashMap<PoolId, Box<dy
     }).collect()
 }
 
-fn load_or_build_brain(checkpoint_path: &PathBuf)
-    -> Result<(Brain, HashMap<PoolId, String>)>
-{
-    // Always derive the prefix map from the identity (default observer).
-    // If a snapshot is present, restore from it; otherwise build fresh
-    // from the identity.
-    let identity = BrainIdentitySpec::default_general_observer();
-    let mut prefixes: HashMap<PoolId, String> = HashMap::new();
-    prefixes.insert(0, "bind".into()); // binding pool, auto-created
-    for ps in &identity.pools {
-        prefixes.insert(ps.id, ps.atom_encoding_prefix.clone());
-    }
+fn build_fresh_brain() -> Result<Brain> {
+    let mut cfg = BrainConfig::default();
+    cfg.binding_emergence_threshold = 3;
+    cfg.moment_history_window = 256;
+    let mut brain = Brain::new(cfg);
 
+    // Tuning notes: image/audio bytes have very different distributions
+    // than text bytes (JPEG headers, FFT bin labels, etc.), so each pool
+    // gets a wide recent_atoms window for solid concept emergence and
+    // a relatively low decay so cross-modal binding has time to set.
+
+    let mut text = PoolConfig::defaults("text", POOL_TEXT);
+    text.recent_atoms_window         = 4096;
+    text.concept_emergence_threshold = 3;
+    text.max_concept_member_count    = 32;
+    text.decay_rate                  = 0.00002;
+    text.prune_floor                 = 0.001;
+    brain.create_pool(text,
+        Box::new(BytePassthroughEncoding { prefix: "t" }) as Box<dyn AtomEncoding>);
+
+    let mut image = PoolConfig::defaults("image", POOL_IMAGE);
+    image.recent_atoms_window         = 4096;
+    image.concept_emergence_threshold = 3;
+    image.max_concept_member_count    = 32;
+    image.decay_rate                  = 0.00002;
+    image.prune_floor                 = 0.001;
+    brain.create_pool(image,
+        Box::new(BytePassthroughEncoding { prefix: "i" }) as Box<dyn AtomEncoding>);
+
+    let mut audio = PoolConfig::defaults("audio", POOL_AUDIO);
+    audio.recent_atoms_window         = 4096;
+    audio.concept_emergence_threshold = 3;
+    audio.max_concept_member_count    = 32;
+    audio.decay_rate                  = 0.00002;
+    audio.prune_floor                 = 0.001;
+    brain.create_pool(audio,
+        Box::new(BytePassthroughEncoding { prefix: "a" }) as Box<dyn AtomEncoding>);
+
+    let action = PoolConfig::defaults("action", POOL_ACTION);
+    brain.create_pool(action,
+        Box::new(BytePassthroughEncoding { prefix: "act" }) as Box<dyn AtomEncoding>);
+    brain.designate_action_pool(POOL_ACTION);
+
+    Ok(brain)
+}
+
+fn load_or_build_brain(checkpoint_path: &PathBuf) -> Result<Brain> {
     if checkpoint_path.exists() {
         info!("restoring brain from {}", checkpoint_path.display());
-        let encodings = build_encodings(&prefixes);
+        let encodings = build_encodings(&pool_prefixes());
         let (brain, missing) = Brain::restore(checkpoint_path, encodings)
             .with_context(|| format!("restore {}", checkpoint_path.display()))?;
         if !missing.is_empty() {
             warn!("restore missing encodings for pool ids {:?}", missing);
         }
-        Ok((brain, prefixes))
+        Ok(brain)
     } else {
-        info!("no checkpoint at {}; building fresh from default identity", checkpoint_path.display());
-        let registry = PoolPrototypeRegistry::with_defaults();
-        let brain = Brain::from_identity(&identity, &registry)
-            .map_err(|e| anyhow::anyhow!("from_identity: {}", e))?;
-        Ok((brain, prefixes))
+        info!("no checkpoint at {}; building fresh multimodal brain",
+            checkpoint_path.display());
+        build_fresh_brain()
     }
 }
 
@@ -97,8 +163,7 @@ fn load_or_build_brain(checkpoint_path: &PathBuf)
 #[derive(Deserialize)]
 struct ObserveRequest {
     pool_id: PoolId,
-    /// Frame bytes, base64-url-safe encoded (no padding).
-    frame:   String,
+    frame:   String, // base64-url-safe
 }
 
 #[derive(Serialize)]
@@ -114,29 +179,27 @@ struct IntegrateRequest {
 
 #[derive(Serialize)]
 struct IntegrateResponse {
-    /// base64-url-safe (no padding) of the answer bytes, or null
-    /// when the brain is outside-grounding.
-    answer:               Option<String>,
-    confidence_tier:      String,
-    fabric_confidence:    f32,
-    eem_confidence:       Option<f32>,
-    annealer_confidence:  Option<f32>,
+    answer:                Option<String>,
+    confidence_tier:       String,
+    fabric_confidence:     f32,
+    eem_confidence:        Option<f32>,
+    annealer_confidence:   Option<f32>,
     integrated_confidence: f32,
-    outside_grounding:    bool,
-    speculation_flag:     bool,
+    outside_grounding:     bool,
+    speculation_flag:      bool,
 }
 
 #[derive(Serialize)]
 struct StatsResponse {
-    tick:               u64,
-    pool_count:         usize,
-    total_neurons:      usize,
-    total_concepts:     usize,
-    total_binding:      usize,
-    total_terminals:    usize,
-    binding_pool_id:    PoolId,
+    tick:                u64,
+    pool_count:          usize,
+    total_neurons:       usize,
+    total_concepts:      usize,
+    total_binding:       usize,
+    total_terminals:     usize,
+    binding_pool_id:     PoolId,
     fingerprints_window: usize,
-    checkpoint_path:    String,
+    checkpoint_path:     String,
 }
 
 #[derive(Serialize)]
@@ -145,8 +208,65 @@ struct CheckpointResponse {
     path:          String,
 }
 
+// ── /sensor/observe (single modality) ──
+
+#[derive(Deserialize)]
+struct SensorObserveRequest {
+    kind:      String,            // "text" | "image" | "audio"
+    bytes_b64: Option<String>,    // base64 (any flavor — we try both)
+    text:      Option<String>,    // raw text (when kind="text")
+}
+
+#[derive(Serialize)]
+struct SensorObserveResponse {
+    fired_neurons: usize,
+    predictions:   HashMap<String, Vec<String>>,
+}
+
+// ── /sensor/observe_triple ──
+
+#[derive(Deserialize)]
+struct ObserveTripleRequest {
+    text:      String,
+    image_b64: String,
+    audio_b64: String,
+    #[serde(default)]
+    lr:        Option<f32>,
+}
+
+#[derive(Serialize)]
+struct ObserveTripleResponse {
+    img_labels: usize,
+    aud_labels: usize,
+    txt_labels: usize,
+}
+
+// ── /chat ──
+
+#[derive(Deserialize)]
+struct ChatRequest {
+    text: String,
+    #[serde(default)]
+    max_steps: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ChatResponse {
+    reply:        String,
+    predictions:  HashMap<String, Vec<String>>,
+    grounding:    ChatGrounding,
+}
+
+#[derive(Serialize, Default)]
+struct ChatGrounding {
+    fabric_confidence:     f32,
+    integrated_confidence: f32,
+    outside_grounding:     bool,
+    speculation_flag:      bool,
+}
+
 // -----------------------------------------------------------------
-// Handlers
+// Handlers — basic
 // -----------------------------------------------------------------
 
 async fn health() -> &'static str { "ok\n" }
@@ -155,15 +275,15 @@ async fn stats(State(s): State<AppState>) -> Json<StatsResponse> {
     let brain = s.brain.lock().await;
     let bs: BrainStats = brain.stats();
     Json(StatsResponse {
-        tick:               bs.tick,
-        pool_count:         bs.pool_count,
-        total_neurons:      bs.total_neurons,
-        total_concepts:     bs.total_concepts,
-        total_binding:      bs.total_binding,
-        total_terminals:    bs.total_terminals,
-        binding_pool_id:    bs.binding_pool_id,
+        tick:                bs.tick,
+        pool_count:          bs.pool_count,
+        total_neurons:       bs.total_neurons,
+        total_concepts:      bs.total_concepts,
+        total_binding:       bs.total_binding,
+        total_terminals:     bs.total_terminals,
+        binding_pool_id:     bs.binding_pool_id,
         fingerprints_window: bs.fingerprints_window,
-        checkpoint_path:    s.checkpoint_path.display().to_string(),
+        checkpoint_path:     s.checkpoint_path.display().to_string(),
     })
 }
 
@@ -171,10 +291,8 @@ async fn observe(
     State(s): State<AppState>,
     Json(req): Json<ObserveRequest>,
 ) -> Result<Json<ObserveResponse>, (axum::http::StatusCode, String)> {
-    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let frame = engine.decode(&req.frame).map_err(|e| {
-        (axum::http::StatusCode::BAD_REQUEST, format!("invalid base64: {}", e))
-    })?;
+    let frame = decode_base64_flexible(&req.frame)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("invalid base64: {}", e)))?;
     let mut brain = s.brain.lock().await;
     let fired = brain.observe(req.pool_id, &frame);
     Ok(Json(ObserveResponse { fired_neurons: fired.len() }))
@@ -221,6 +339,171 @@ async fn checkpoint(
 }
 
 // -----------------------------------------------------------------
+// Handlers — multimodal
+// -----------------------------------------------------------------
+
+/// Decode base64 trying URL-safe (with/without padding) and standard
+/// (with/without padding) — training scripts mix flavors.
+fn decode_base64_flexible(s: &str) -> Result<Vec<u8>, String> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    if let Ok(b) = URL_SAFE_NO_PAD.decode(s) { return Ok(b); }
+    if let Ok(b) = URL_SAFE.decode(s)        { return Ok(b); }
+    if let Ok(b) = STANDARD_NO_PAD.decode(s) { return Ok(b); }
+    if let Ok(b) = STANDARD.decode(s)        { return Ok(b); }
+    Err("none of the base64 flavors decoded this payload".into())
+}
+
+/// Pull non-atom (concept) labels currently firing in a pool, top-N
+/// by activation, for inclusion in `predictions` responses.
+fn top_concept_labels(brain: &Brain, pool: PoolId, top_n: usize) -> Vec<String> {
+    let arc = match brain.fabric().pool(pool) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let p = arc.read();
+    let mut pairs: Vec<(String, f32)> = Vec::new();
+    for nid in p.currently_firing() {
+        if let Some(n) = p.get(nid) {
+            let act = p.activation(nid);
+            pairs.push((n.label.clone(), act));
+        }
+    }
+    pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.into_iter().take(top_n).map(|(l, _)| l).collect()
+}
+
+async fn sensor_observe(
+    State(s): State<AppState>,
+    Json(req): Json<SensorObserveRequest>,
+) -> Result<Json<SensorObserveResponse>, (axum::http::StatusCode, String)> {
+    let (pool_id, frame) = match req.kind.as_str() {
+        "text" => {
+            let txt = req.text.unwrap_or_default();
+            (POOL_TEXT, txt.into_bytes())
+        }
+        "image" => {
+            let b64 = req.bytes_b64.unwrap_or_default();
+            let frame = decode_base64_flexible(&b64)
+                .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+            (POOL_IMAGE, frame)
+        }
+        "audio" => {
+            let b64 = req.bytes_b64.unwrap_or_default();
+            let frame = decode_base64_flexible(&b64)
+                .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+            (POOL_AUDIO, frame)
+        }
+        other => {
+            return Err((axum::http::StatusCode::BAD_REQUEST,
+                format!("unknown kind {:?}", other)));
+        }
+    };
+    let mut brain = s.brain.lock().await;
+    let fired = brain.observe(pool_id, &frame);
+    brain.advance_tick();
+
+    // Predictions: walk all OTHER pools, take their top firing concepts.
+    let mut predictions: HashMap<String, Vec<String>> = HashMap::new();
+    for other in [POOL_TEXT, POOL_IMAGE, POOL_AUDIO] {
+        if other == pool_id { continue; }
+        let labels = top_concept_labels(&brain, other, 16);
+        if !labels.is_empty() {
+            predictions.insert(pool_name(other).to_string(), labels);
+        }
+    }
+
+    Ok(Json(SensorObserveResponse {
+        fired_neurons: fired.len(),
+        predictions,
+    }))
+}
+
+async fn sensor_observe_triple(
+    State(s): State<AppState>,
+    Json(req): Json<ObserveTripleRequest>,
+) -> Result<Json<ObserveTripleResponse>, (axum::http::StatusCode, String)> {
+    let img = decode_base64_flexible(&req.image_b64)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("image: {}", e)))?;
+    let aud = decode_base64_flexible(&req.audio_b64)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("audio: {}", e)))?;
+    let mut brain = s.brain.lock().await;
+    let txt_fired = brain.observe(POOL_TEXT, req.text.as_bytes());
+    let img_fired = brain.observe(POOL_IMAGE, &img);
+    let aud_fired = brain.observe(POOL_AUDIO, &aud);
+    brain.advance_tick();
+    Ok(Json(ObserveTripleResponse {
+        txt_labels: txt_fired.len(),
+        img_labels: img_fired.len(),
+        aud_labels: aud_fired.len(),
+    }))
+}
+
+async fn chat(
+    State(s): State<AppState>,
+    Json(req): Json<ChatRequest>,
+) -> Json<ChatResponse> {
+    let max_steps = req.max_steps.unwrap_or(8);
+    let min_confidence = 0.01_f32;
+    let mut brain = s.brain.lock().await;
+
+    // Observe the prompt into the text pool.
+    brain.observe(POOL_TEXT, req.text.as_bytes());
+    brain.advance_tick();
+
+    // Read fabric grounding from a text→text integrate (mainly for
+    // confidence + speculation flag telemetry).
+    let ans = brain.integrate(POOL_TEXT, POOL_TEXT);
+    let g = ChatGrounding {
+        fabric_confidence:     ans.grounding.fabric_confidence,
+        integrated_confidence: ans.grounding.integrated_confidence,
+        outside_grounding:     ans.grounding.outside_grounding,
+        speculation_flag:      ans.grounding.speculation_flag,
+    };
+
+    // Re-observe the prompt (the integrate path doesn't mutate state,
+    // but we want the next observation cycle to drive generate()'s
+    // first step from the current prompt firing).
+    brain.observe(POOL_TEXT, req.text.as_bytes());
+    let reply_bytes = brain.generate(POOL_TEXT, POOL_TEXT, max_steps, min_confidence);
+    let reply = String::from_utf8_lossy(&reply_bytes).into_owned();
+
+    // Cross-modal predictions: re-observe prompt and read the firing
+    // state in image and audio pools (cross-pool propagation does the
+    // work automatically; we just snapshot what's active).
+    brain.observe(POOL_TEXT, req.text.as_bytes());
+    let mut predictions: HashMap<String, Vec<String>> = HashMap::new();
+    for other in [POOL_IMAGE, POOL_AUDIO] {
+        // Run propagation manually to populate cross-pool activation.
+        let propagated = brain.fabric().propagate(POOL_TEXT);
+        let empty: std::collections::HashMap<w1z4rd_brain::NeuronId, f32> = std::collections::HashMap::new();
+        let act_map = propagated.get(&other);
+        let it: Box<dyn Iterator<Item = (&w1z4rd_brain::NeuronId, &f32)>> = match act_map {
+            Some(m) => Box::new(m.iter()),
+            None    => Box::new(empty.iter()),
+        };
+        let act_pairs: Vec<(w1z4rd_brain::NeuronId, f32)> =
+            it.map(|(k, v)| (*k, *v)).collect();
+        if let Some(p) = brain.fabric().pool(other) {
+            let p = p.read();
+            let mut pairs: Vec<(String, f32)> = Vec::new();
+            for (nid, a) in act_pairs.iter().copied() {
+                if a < 0.05 { continue; }
+                if let Some(n) = p.get(nid) {
+                    pairs.push((n.label.clone(), a));
+                }
+            }
+            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let labels: Vec<String> = pairs.into_iter().take(16).map(|(l, _)| l).collect();
+            if !labels.is_empty() {
+                predictions.insert(pool_name(other).to_string(), labels);
+            }
+        }
+    }
+
+    Json(ChatResponse { reply, predictions, grounding: g })
+}
+
+// -----------------------------------------------------------------
 // main
 // -----------------------------------------------------------------
 
@@ -232,7 +515,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data).with_context(|| format!("mkdir {}", data.display()))?;
     let checkpoint_path = data.join("brain.bin");
 
-    let (brain, _prefixes) = load_or_build_brain(&checkpoint_path)?;
+    let brain = load_or_build_brain(&checkpoint_path)?;
     let bs = brain.stats();
     info!("brain ready  tick={}  pools={}  neurons={}  terminals={}",
         bs.tick, bs.pool_count, bs.total_neurons, bs.total_terminals);
@@ -243,12 +526,15 @@ async fn main() -> Result<()> {
     };
 
     let app = Router::new()
-        .route("/health",     get(health))
-        .route("/stats",      get(stats))
-        .route("/observe",    post(observe))
-        .route("/tick",       post(tick))
-        .route("/integrate",  post(integrate))
-        .route("/checkpoint", post(checkpoint))
+        .route("/health",                get(health))
+        .route("/stats",                 get(stats))
+        .route("/observe",               post(observe))
+        .route("/tick",                  post(tick))
+        .route("/integrate",             post(integrate))
+        .route("/checkpoint",            post(checkpoint))
+        .route("/sensor/observe",        post(sensor_observe))
+        .route("/sensor/observe_triple", post(sensor_observe_triple))
+        .route("/chat",                  post(chat))
         .with_state(state.clone());
 
     let port: u16 = std::env::var("W1Z4RD_BRAIN_PORT")
@@ -259,7 +545,6 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await
         .with_context(|| format!("bind {}", addr))?;
 
-    // Graceful checkpoint on Ctrl-C.
     let shutdown_state = state.clone();
     let shutdown = async move {
         match tokio::signal::ctrl_c().await {
