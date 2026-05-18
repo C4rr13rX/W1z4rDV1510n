@@ -270,6 +270,87 @@ Users compose pools to construct a brain identity. The kit provides a sensible d
 
 **Output:** `AnswerWithGrounding { answer, grounding, confidence_tier, next_steps_if_ungrounded }`.
 
+### 4.D.1 Inference is Hierarchical Confidence Traversal — NOT Flat Retrieval
+
+**This is the central inference contract.  Every integration path
+must honor it; flattening the hierarchy is the architectural defect
+the Stage 7-13 work kept reintroducing.**
+
+The substrate stores knowledge as a **layered hierarchy of neurons**:
+
+  Layer 0 — atoms (raw sensor bits, one byte per atom in byte pools)
+  Layer 1 — atom concepts: emerged sequences of atoms ("a-p-p-l-e")
+  Layer 2 — concept-of-concept: emerged sequences of concepts
+            ("apple-juice", "the-cat-sat")
+  Layer 3+ — recursive; same emergence rule applies
+  Binding pool — cross-pool composites; members may live in any pool
+                 at any layer
+
+Atoms are the substrate for learning concepts.  Concepts are the
+substrate for learning meta-concepts.  Both directions are wired
+automatically:
+
+  - **Bottom-up**: each member atom gets a terminal to its parent
+    concept at promotion time.  Activation flows up the hierarchy
+    by propagation through those terminals.
+  - **Top-down**: each concept gets terminals back to its member
+    atoms at promotion time.  When a concept fires (e.g., by
+    cross-pool feedback), its members re-fire.
+  - **Collapse**: at observation time, the longest matching tail of
+    `recent_atoms` collapses to the deepest concept that recognises
+    it.  Both the constituent atoms AND the concept end up in
+    `currently_firing` — that is the multi-layer signal subsequent
+    inference must walk.
+
+**The inference rule:**
+
+When the integration layer reads the firing state to produce an
+answer, it walks the hierarchy **top-down by layer depth, gated by
+confidence**:
+
+```
+for layer in (deepest firing layer .. atoms):
+    candidates = bindings/concepts in target pool whose members
+                 intersect the firing set at this layer
+    if any candidate has confidence ≥ θ_layer:
+        return decode(that candidate)
+# no layer was confident:
+    construct from atom-sequence using within-pool transitions
+    (the generative path — bytes the substrate never saw as a unit
+     but assembles from accumulated co-occurrence)
+```
+
+**Consequences:**
+
+  - **Trained input → trained output.**  When the input collapses
+    to an emerged concept and that concept has a confident
+    cross-pool binding, the deepest-layer path wins on the first
+    try.  This is the "glorified lookup table" behavior — fast and
+    exact, but only for inputs the substrate has fully crystallised.
+  - **Untrained input → untrained output.**  When no concept layer
+    has a confident match, the inference does NOT fail.  It drops
+    to the atom layer and assembles the answer from the
+    confidence-weighted superposition of every component atom's
+    learned cross-pool response.  The within-pool atom-to-atom
+    transition weights (also learned automatically) order the
+    emission as a sequence.  The output is **constructed**, not
+    retrieved — sequence-coherent bytes the substrate never
+    produced as a whole during training, but every transition
+    individually has Hebbian support.
+  - **No autoregressive token loop.**  The generative path is one
+    settling pass over the fabric followed by a confidence-ordered
+    walk of the action-pool atom field.  No iterative next-token
+    sampling.
+  - **The coverage gate is layer-aware.**  When a firing concept's
+    own constituent atoms also fire (the normal case after
+    `collapse_tail_to_concept`), those atoms count as concept-layer
+    evidence, not atom-layer noise.  Any gate that flattens this is
+    an architectural bug.
+
+**This is what mini-columns + concept neurons + atom-to-concept
+propagation were designed to do.**  The substrate already wires it;
+the integration layer must traverse it correctly.
+
 ### 4.E Action Layer
 
 **Action pool:** a designated pool whose neurons are not sensor-input atoms but `ActionAtom`s. When an action neuron fires:
