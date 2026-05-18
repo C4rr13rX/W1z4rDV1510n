@@ -113,8 +113,25 @@ fn build_fresh_brain() -> Result<Brain> {
     // gets a wide recent_atoms window for solid concept emergence and
     // a relatively low decay so cross-modal binding has time to set.
 
+    // Stage 13 — text pool recent_atoms_window must be large enough
+    // that, under round-robin training across a wide corpus, an
+    // individual prompt sequence (e.g. "apple") repeats within the
+    // window for `concept_emergence_threshold` (=3) hits and gets
+    // promoted to a concept neuron.
+    //
+    // Math (per ARCHITECTURE.md §4.D.1 — sequence has precedence over
+    // bag-of-atoms):
+    //   - Unified corpus is ~7K prompts × avg 7 bytes ≈ 49K bytes / epoch
+    //   - Window must hold >= 2 full epochs so the per-prompt sequence
+    //     count reaches 3 within window across reps 1-3 of training
+    //   - 65,536 atoms ≈ 9.4K positions ≈ 1.3 epochs → safe margin
+    //
+    // Without this, prompt-concepts never emerge under round-robin
+    // training (Stage 12 found the same defect on the action pool
+    // and raised that window from 32 → 4096; the text pool needs a
+    // larger value because its prompts cycle through more entries).
     let mut text = PoolConfig::defaults("text", POOL_TEXT);
-    text.recent_atoms_window         = 4096;
+    text.recent_atoms_window         = 65536;
     text.concept_emergence_threshold = 3;
     text.max_concept_member_count    = 32;
     text.decay_rate                  = 0.00002;
@@ -153,8 +170,14 @@ fn build_fresh_brain() -> Result<Brain> {
     // response take part in concept emergence on the same footing.
     // max_concept_member_count raised so multi-byte responses like
     // "musical_instrument" (18 bytes) fit as a single concept.
+    // Action pool window — same rationale as text pool above.  At 4096
+    // (Stage 12) the high-population category responses (food, animal,
+    // vehicle ...) emerge fine, but rarer responses (musical_instrument)
+    // emerge late or not at all.  Bumping to 65536 matches the text
+    // pool and gives consistent emergence across both sides of the
+    // cross-pool fingerprint.
     let mut action = PoolConfig::defaults("action", POOL_ACTION);
-    action.recent_atoms_window         = 4096;
+    action.recent_atoms_window         = 65536;
     action.concept_emergence_threshold = 3;
     action.max_concept_member_count    = 32;
     action.decay_rate                  = 0.00002;
