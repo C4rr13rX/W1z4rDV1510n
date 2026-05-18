@@ -120,6 +120,16 @@ pub struct Pool {
     encoding:         Box<dyn AtomEncoding>,
     neurons:          Vec<Neuron>,
     label_to_id:      AHashMap<String, NeuronId>,
+    /// Stage 13 — atom-multiset dedup index.  Key = sorted Vec of atom
+    /// leaf NeuronIds (the multiset signature of a concept's full
+    /// expansion).  Value = the FIRST concept promoted with that
+    /// multiset (the canonical one).  Prevents permutation-variant
+    /// concepts like ("f,o,o,d" + "o,o,d,f" + "ood,f") from cluttering
+    /// the pool when round-robin training under destructive collapse
+    /// produces multiple member orderings of the same byte multiset.
+    /// See scripts/brain_dense_burst_toddler_categorical.py for the
+    /// empirical observation that motivated this.
+    concept_multiset_to_id: AHashMap<Vec<NeuronId>, NeuronId>,
     /// Streaming buffer of recently-fired atom/concept IDs.  Drives concept
     /// emergence.  Bounded by `config.recent_atoms_window`.
     recent_atoms:     VecDeque<NeuronId>,
@@ -143,6 +153,7 @@ impl Pool {
             encoding,
             neurons:          Vec::new(),
             label_to_id:      AHashMap::new(),
+            concept_multiset_to_id: AHashMap::new(),
             recent_atoms:     VecDeque::with_capacity(window),
             sequences:        AHashMap::new(),
             currently_firing: AHashSet::new(),
@@ -275,16 +286,56 @@ impl Pool {
         for (k, v) in snap.label_to_id { label_to_id.insert(k, v); }
         let mut sequences = AHashMap::new();
         for (k, v) in snap.sequences { sequences.insert(k, v); }
-        Self {
+        let mut pool = Self {
             config:           snap.config,
             encoding,
             neurons:          snap.neurons,
             label_to_id,
+            concept_multiset_to_id: AHashMap::new(),
             recent_atoms:     snap.recent_atoms,
             sequences,
             currently_firing: AHashSet::new(),
             activation:       AHashMap::new(),
+        };
+        // Rebuild the multiset dedup index from restored concept
+        // neurons.  The index isn't part of the snapshot format (it
+        // can always be rebuilt from members) so restore from older
+        // snapshots remains lossless.
+        let concept_ids: Vec<NeuronId> = pool.neurons.iter()
+            .filter(|n| !n.is_atom())
+            .map(|n| n.id)
+            .collect();
+        for cid in concept_ids {
+            let member_ids: Vec<NeuronId> = pool.neurons[cid as usize].members.iter()
+                .filter(|m| m.pool == pool.config.id)
+                .map(|m| m.neuron)
+                .collect();
+            let mut leaves = pool.expand_to_atom_leaves(&member_ids);
+            leaves.sort();
+            pool.concept_multiset_to_id.entry(leaves).or_insert(cid);
         }
+        pool
+    }
+
+    /// Recursively expand a member list into the atom-leaf NeuronIds.
+    /// Concept members are walked into their own members.  Members in
+    /// OTHER pools are skipped.
+    fn expand_to_atom_leaves(&self, member_ids: &[NeuronId]) -> Vec<NeuronId> {
+        let mut leaves = Vec::new();
+        for &id in member_ids {
+            if let Some(n) = self.neurons.get(id as usize) {
+                if n.is_atom() {
+                    leaves.push(id);
+                } else {
+                    let sub: Vec<NeuronId> = n.members.iter()
+                        .filter(|m| m.pool == self.config.id)
+                        .map(|m| m.neuron)
+                        .collect();
+                    leaves.extend(self.expand_to_atom_leaves(&sub));
+                }
+            }
+        }
+        leaves
     }
 
     pub fn activation(&self, id: NeuronId) -> f32 {
@@ -571,6 +622,23 @@ impl Pool {
             // Already promoted (e.g. via a different sequence path).  Skip.
             return;
         }
+
+        // Stage 13 — atom-multiset dedup.  Two sequences with the same
+        // atom-leaf multiset (e.g. [f,o,o,d] and [o,o,d,f], or
+        // [a, pp-concept, l, e] and [a, p, p, l, e]) represent the
+        // SAME word; round-robin training under destructive collapse
+        // can spawn many such variant orderings.  Keep only the FIRST
+        // (canonical) one — subsequent variants are dropped.
+        //
+        // The decoded byte sequence of the first-promoted concept
+        // tends to be the linguistically correct one because it
+        // emerged from a clean atom run before fragment collapse
+        // disrupted the sequence.
+        let mut leaves: Vec<NeuronId> = self.expand_to_atom_leaves(&members);
+        leaves.sort();
+        if self.concept_multiset_to_id.contains_key(&leaves) {
+            return; // canonical concept already exists for this multiset
+        }
         let id = self.neurons.len() as NeuronId;
         let member_refs: Vec<NeuronRef> = members.iter()
             .map(|m| NeuronRef::new(self.config.id, *m))
@@ -593,5 +661,6 @@ impl Pool {
         }
         self.neurons.push(concept);
         self.label_to_id.insert(composite_label, id);
+        self.concept_multiset_to_id.insert(leaves, id);
     }
 }

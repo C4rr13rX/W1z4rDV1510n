@@ -499,6 +499,81 @@ async fn integrate_resonant(
     })
 }
 
+#[derive(Deserialize, Debug)]
+struct PoolConceptsRequest {
+    pool_id:     PoolId,
+    /// Substring filter on decoded bytes (case-insensitive). Empty
+    /// = no filter, returns all concepts up to `limit`.
+    #[serde(default)]
+    contains:    Option<String>,
+    #[serde(default)]
+    limit:       Option<usize>,
+}
+
+#[derive(Serialize, Debug)]
+struct PoolConceptOut {
+    neuron_id:   w1z4rd_brain::NeuronId,
+    label:       String,
+    member_count: usize,
+    decoded:     String,
+}
+
+#[derive(Serialize, Debug)]
+struct PoolConceptsResponse {
+    pool:        PoolId,
+    pool_name:   String,
+    total_concepts: usize,
+    returned:    usize,
+    concepts:    Vec<PoolConceptOut>,
+}
+
+/// Diagnostic — list emerged CONCEPT neurons in a pool with their
+/// decoded byte sequence.  Read-only.  Used to verify which
+/// hierarchical concepts the substrate has actually built.
+async fn pool_concepts(
+    State(s): State<AppState>,
+    Json(req): Json<PoolConceptsRequest>,
+) -> Result<Json<PoolConceptsResponse>, (axum::http::StatusCode, String)> {
+    let brain = s.brain.lock().await;
+    let pool_handle = brain.fabric().pool(req.pool_id).ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        format!("unknown pool id {}", req.pool_id),
+    ))?;
+    let pool = pool_handle.read();
+    let limit = req.limit.unwrap_or(64);
+    let filter = req.contains.as_deref().map(|s| s.to_lowercase());
+
+    let mut total = 0usize;
+    let mut out: Vec<PoolConceptOut> = Vec::new();
+    for n in pool.iter_neurons() {
+        if n.is_atom() { continue; }
+        total += 1;
+        let bytes = pool.decode_concept_members(&n.members);
+        let decoded = String::from_utf8_lossy(&bytes).into_owned();
+        if let Some(f) = &filter {
+            if !decoded.to_lowercase().contains(f) {
+                continue;
+            }
+        }
+        if out.len() < limit {
+            out.push(PoolConceptOut {
+                neuron_id:    n.id,
+                label:        n.label.clone(),
+                member_count: n.members.len(),
+                decoded,
+            });
+        }
+    }
+
+    Ok(Json(PoolConceptsResponse {
+        pool:           req.pool_id,
+        pool_name:      pool_name(req.pool_id).to_string(),
+        total_concepts: total,
+        returned:       out.len(),
+        concepts:       out,
+    }))
+}
+
 async fn checkpoint(
     State(s): State<AppState>,
 ) -> Result<Json<CheckpointResponse>, (axum::http::StatusCode, String)> {
@@ -809,6 +884,7 @@ async fn main() -> Result<()> {
         .route("/tick",                  post(tick))
         .route("/integrate",             post(integrate))
         .route("/integrate_resonant",    post(integrate_resonant))
+        .route("/pool/concepts",         post(pool_concepts))
         .route("/checkpoint",            post(checkpoint))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
