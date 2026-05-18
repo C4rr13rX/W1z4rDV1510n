@@ -1,0 +1,69 @@
+[script]
+id          = "categorical_unified_001"
+category    = "conversation"
+phase       = 1
+description = """
+Unified categorical training corpus compiled from THREE third-party
+sources:
+
+  1. WordNet hyponym closures (NLTK), curated by Brown-corpus
+     frequency filter to retain only common-English words.
+  2. concept_dataset.jsonl — pre-existing K-12-curated entries.
+  3. The toddler 32-pair baseline — included so the unified corpus
+     REINFORCES the 71.9% recall pin rather than competing with it.
+
+Each pair is `(lemma, category)` — the shape the substrate's
+emergence math (window=4096, threshold=3) can crystallize.
+
+34 categories cross the ~26-pair emergence threshold (vs. 21 in
+k12_categories_only_001).
+
+Compiler: tools/training_standard/compile_categorical_unified.py
+"""
+depends_on  = ["greetings_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/categorical_unified_001.jsonl"
+
+[[benchmarks]]
+label        = "categorical: piano"
+prompt       = "piano"
+must_include = ["musical_instrument", "music"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: hammer"
+prompt       = "hammer"
+must_include = ["tool"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: triangle"
+prompt       = "triangle"
+must_include = ["shape"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "categorical: rose"
+prompt       = "rose"
+must_include = ["plant"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "verb: run"
+prompt       = "run"
+must_include = ["motion"]
+min_score    = 0.4
+expected_structure = "prose"
+
+[[benchmarks]]
+label        = "verb: speak"
+prompt       = "speak"
+must_include = ["communication"]
+min_score    = 0.4
+expected_structure = "prose"
