@@ -101,17 +101,27 @@ def compile_greetings() -> list[dict]:
         if GREET_PAT.match(prompt):
             _add(prompt, resp, source="conversation_basics_001")
 
-    # 2) Pull social_word / social concepts from concept_dataset.
-    #    Schema:  concept, definition, category, qa_pairs[{question, answer}]
+    # 2) Pull social_word / social concepts from concept_dataset
+    #    ONLY when the definition itself is a short greeting-style
+    #    response (not a long definition).  The qa_pairs section is
+    #    DROPPED entirely because it contains example sentences like
+    #    "He moved his family to Virginia" that crystallise as
+    #    pollutant concepts in the action pool when trained dense-burst.
+    #    Empirical: those sentences won selection for toddler queries
+    #    that share atoms with the long string, destroying the 71.9%
+    #    floor.
     for row in _iter_jsonl(CONCEPT_PATH):
         cat = (row.get("category") or "").lower()
         if cat not in SOCIAL_CATEGORIES:
             continue
         concept = (row.get("concept") or "").strip()
         defn    = (row.get("definition") or "").strip()
-        if concept and defn:
-            _add(concept, defn, source="concept_dataset:social")
-        for qa in row.get("qa_pairs") or []:
+        # Keep definition only if it's short AND greeting-like (lower
+        # case, no terminal punctuation patterns from sentences).
+        if concept and defn and len(defn) <= 16:
+            _add(concept, defn, source="concept_dataset:social_short")
+        # Skip the qa_pairs section unconditionally.
+        for qa in []:  # explicitly skip
             q = (qa.get("question") or "").strip()
             a = (qa.get("answer") or "").strip()
             if q and a:
