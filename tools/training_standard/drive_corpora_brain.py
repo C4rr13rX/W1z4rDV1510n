@@ -164,7 +164,27 @@ def smoke_test_recall(rows: list[dict], n: int = 3,
 
 def drive_one(script, repeats: int, project_root: Path,
                 verbose: bool = False, smoke: bool = True,
-                inter_post_sleep: float = 0.05) -> dict:
+                inter_post_sleep: float = 0.05,
+                burst: bool = False) -> dict:
+    """Drive one registry script's corpus through the brain.
+
+    `burst=False` (default): epoch-interleaved schedule.  Each rep is
+    one full pass through all pairs.  After `repeats` passes, every
+    pair has been observed `repeats` times spread across the whole
+    corpus.
+
+    `burst=True`: dense-burst schedule.  Each pair is observed
+    `repeats` times back-to-back BEFORE moving to the next pair.
+    Within recent_atoms_window of any pool, the same prompt sequence
+    repeats `repeats` consecutive times.  This is required for
+    word-level (rather than morpheme-level) concept emergence under
+    `concept_emergence_threshold=3` — see Pool::collapse_tail_to_concept
+    and ARCHITECTURE.md §4.D.1.
+
+    Empirical: dense-burst lifted toddler categorical recall from
+    71.9% to 90.6%, and food/body went 0% → 90+% on the canonical
+    32-pair test (scripts/brain_dense_burst_toddler_categorical.py).
+    """
     summary = {
         "script_id":   script.id,
         "category":    script.category,
@@ -173,6 +193,7 @@ def drive_one(script, repeats: int, project_root: Path,
         "posted_ok":   0,
         "posted_fail": 0,
         "repeats":     repeats,
+        "burst":       burst,
         "smoke_ok":    None,
         "target":      "brain_server",
     }
@@ -187,45 +208,69 @@ def drive_one(script, repeats: int, project_root: Path,
             continue
         summary["pairs"] += len(rows)
         smoke_ran = False
-        for r in range(repeats):
-            t_rep = time.time()
+        t0 = time.time()
+
+        if burst:
+            # Dense-burst: pair outer, reps inner.
             for row in rows:
                 prompt = (row.get("prompt") or row.get("question") or "").strip()
                 resp   = (row.get("response") or row.get("answer") or "").strip()
                 if not prompt or not resp:
                     continue
-                ok, err = post_xpool_pair(prompt, resp)
-                if ok:
-                    summary["posted_ok"] += 1
-                else:
-                    summary["posted_fail"] += 1
-                    if verbose:
-                        print(f"  [{script.id}] post fail: {err}", flush=True)
-                if inter_post_sleep > 0:
-                    time.sleep(inter_post_sleep)
+                for _ in range(repeats):
+                    ok, err = post_xpool_pair(prompt, resp)
+                    if ok:
+                        summary["posted_ok"] += 1
+                    else:
+                        summary["posted_fail"] += 1
+                        if verbose:
+                            print(f"  [{script.id}] post fail: {err}", flush=True)
+                    if inter_post_sleep > 0:
+                        time.sleep(inter_post_sleep)
             if verbose:
-                print(f"  [{script.id}] rep {r+1}/{repeats} "
-                        f"({len(rows)} pairs in {time.time()-t_rep:.1f}s)",
-                        flush=True)
-            if smoke and not smoke_ran and r == 0 and rows:
-                smoke_ok, samples = smoke_test_recall(rows, n=3)
-                summary["smoke_ok"] = smoke_ok
-                summary["smoke_samples"] = samples
-                smoke_ran = True
-                if smoke_ok:
-                    if verbose:
-                        print(f"  [{script.id}] smoke OK — multi_pool decoder fired",
-                                flush=True)
-                else:
-                    print(f"  [{script.id}] !! SMOKE FAILED — every query fell "
-                            f"to char_chain after first repeat:", flush=True)
-                    for s in samples:
-                        print(f"     prompt: {s.get('prompt','')[:60]!r}", flush=True)
-                        print(f"     decoder: {s.get('decoder')}  oog: {s.get('oog')}  "
-                                f"ans: {s.get('answer')!r}", flush=True)
-                    print(f"  [{script.id}] continuing repeats anyway "
-                            "(brain training may need >1 pass for emergence)",
+                print(f"  [{script.id}] burst done ({len(rows)} pairs x "
+                        f"{repeats} reps in {time.time()-t0:.1f}s)", flush=True)
+        else:
+            # Epoch-interleaved schedule (default).
+            for r in range(repeats):
+                t_rep = time.time()
+                for row in rows:
+                    prompt = (row.get("prompt") or row.get("question") or "").strip()
+                    resp   = (row.get("response") or row.get("answer") or "").strip()
+                    if not prompt or not resp:
+                        continue
+                    ok, err = post_xpool_pair(prompt, resp)
+                    if ok:
+                        summary["posted_ok"] += 1
+                    else:
+                        summary["posted_fail"] += 1
+                        if verbose:
+                            print(f"  [{script.id}] post fail: {err}", flush=True)
+                    if inter_post_sleep > 0:
+                        time.sleep(inter_post_sleep)
+                if verbose:
+                    print(f"  [{script.id}] rep {r+1}/{repeats} "
+                            f"({len(rows)} pairs in {time.time()-t_rep:.1f}s)",
                             flush=True)
+                if smoke and not smoke_ran and r == 0 and rows:
+                    smoke_ok, samples = smoke_test_recall(rows, n=3)
+                    summary["smoke_ok"] = smoke_ok
+                    summary["smoke_samples"] = samples
+                    smoke_ran = True
+                    if smoke_ok:
+                        if verbose:
+                            print(f"  [{script.id}] smoke OK — multi_pool decoder fired",
+                                    flush=True)
+                    else:
+                        print(f"  [{script.id}] !! SMOKE FAILED — every query fell "
+                                f"to char_chain after first repeat:", flush=True)
+                        for s in samples:
+                            print(f"     prompt: {s.get('prompt','')[:60]!r}", flush=True)
+                            print(f"     decoder: {s.get('decoder')}  oog: {s.get('oog')}  "
+                                    f"ans: {s.get('answer')!r}", flush=True)
+                        print(f"  [{script.id}] continuing repeats anyway "
+                                "(brain training may need >1 pass for emergence)",
+                                flush=True)
     return summary
 
 
@@ -248,6 +293,12 @@ def main(argv: list[str] | None = None) -> int:
                      help="skip the inline post-first-repeat smoke test")
     p.add_argument("--phase-max", type=int, default=None,
                      help="run only scripts with phase <= this value")
+    p.add_argument("--burst", action="store_true",
+                     help="dense-burst training schedule: each pair observed "
+                          "`repeats` times back-to-back before moving to the "
+                          "next pair (vs. default epoch-interleaved).  Required "
+                          "for word-level concept emergence on wide corpora; "
+                          "see ARCHITECTURE.md §4.D.1.")
     args = p.parse_args(argv)
 
     BRAIN_URL = args.brain.rstrip("/")
@@ -273,7 +324,8 @@ def main(argv: list[str] | None = None) -> int:
         summ = drive_one(s, args.repeats, _PROJECT_ROOT,
                             verbose=args.verbose,
                             smoke=not args.no_smoke,
-                            inter_post_sleep=args.inter_post_sleep)
+                            inter_post_sleep=args.inter_post_sleep,
+                            burst=args.burst)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
