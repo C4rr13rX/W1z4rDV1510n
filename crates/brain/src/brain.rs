@@ -1112,10 +1112,22 @@ impl Brain {
     }
 
     fn best_binding_match_concept_tier(&self, query_pool: PoolId) -> BindingMatch {
-        // Pre-collect: which neuron ids in query_pool are *concepts*
-        // (composite, not atoms)?  One read of the query pool covers
-        // both this set and the firing snapshot below.
-        let (query_concept_set, firing_concepts, firing_total) = {
+        // Pre-collect:
+        //   - `query_concept_set` — every concept neuron id in query pool
+        //   - `firing_concepts`   — concepts that are currently firing
+        //   - `firing_atoms`      — atoms that are currently firing
+        //   - `concept_member_atoms` — atoms that are members of any
+        //                              firing concept (per §4.D.1 of
+        //                              ARCHITECTURE.md, these are
+        //                              concept-LAYER evidence not
+        //                              atom-LAYER noise)
+        let (
+            query_concept_set,
+            firing_concepts,
+            firing_atoms,
+            concept_member_atoms,
+            firing_total,
+        ) = {
             let qp = match self.fabric.pool(query_pool) {
                 Some(p) => p,
                 None    => return BindingMatch::NONE,
@@ -1130,19 +1142,62 @@ impl Brain {
                 .copied()
                 .filter(|nid| concept_set.contains(nid))
                 .collect();
-            (concept_set, firing_concepts, firing.len())
+            let firing_atoms: ahash::AHashSet<NeuronId> = firing.iter()
+                .copied()
+                .filter(|nid| !concept_set.contains(nid))
+                .collect();
+            // Atoms that belong to a firing concept's member set.  When a
+            // concept collapses from its constituent atoms during
+            // `Pool::observe_frame`, both the concept AND its atoms end
+            // up in `currently_firing`.  Counting those atoms as
+            // atom-layer noise would discard the trained sequence-precedence
+            // signal — the Stage 11A bug fixed here.
+            let mut concept_member_atoms: ahash::AHashSet<NeuronId> =
+                ahash::AHashSet::new();
+            for &cid in &firing_concepts {
+                if let Some(c) = q.get(cid) {
+                    for m in &c.members {
+                        if m.pool == query_pool && firing_atoms.contains(&m.neuron) {
+                            concept_member_atoms.insert(m.neuron);
+                        }
+                    }
+                }
+            }
+            (concept_set, firing_concepts, firing_atoms, concept_member_atoms, firing.len())
         };
 
         if firing_concepts.is_empty() || firing_total == 0 {
             return BindingMatch::NONE;
         }
 
-        // Coverage gate: concept-mass must be >= 50% of total firing.
-        // A single concept among many loose atoms (audit 2 false-positive
-        // scenario) is rejected here so it can't carry precision=1.0
-        // through to the OOV gate on a fundamentally atom-shaped query.
-        let concept_mass = firing_concepts.len() as f32 / firing_total as f32;
-        if concept_mass < 0.5 {
+        // §4.D.1 layer-aware coverage gate.
+        //
+        // OLD (Stage 11A, broken): concept_mass = firing_concepts /
+        // total_firing.  This treated atoms that are CONSTITUENTS of a
+        // firing concept as atom-layer noise, which discarded the
+        // sequence-precedence signal the substrate explicitly produces
+        // via `collapse_tail_to_concept`.
+        //
+        // NEW (§4.D.1): the concept layer's evidence INCLUDES both the
+        // concept neurons themselves and the atoms that belong to any
+        // firing concept's member set (i.e. atoms that just got
+        // collapsed UP into a concept).  Loose atoms — atoms firing
+        // that are NOT members of any firing concept — are the only
+        // atom-layer noise.
+        //
+        // Example for "apple": firing = {a, p, p, l, e atoms +
+        // apple-concept} = 6 things, concept_layer_evidence = 1 concept
+        // + 5 atoms-of-concept = 6, total = 6, ratio = 1.0.  Passes.
+        //
+        // Example for "ball is fun": firing = {b, a, l, l atoms +
+        // ball-concept + i, s, f, u, n loose atoms} = 11 things,
+        // concept_layer = 1 + 4 = 5, total = 11, ratio = 0.45.  Falls
+        // back to atom-tier — correct, because the query IS dominated
+        // by loose atoms.
+        let concept_layer_evidence =
+            firing_concepts.len() + concept_member_atoms.len();
+        let layer_coverage = concept_layer_evidence as f32 / firing_total as f32;
+        if layer_coverage < 0.5 {
             return BindingMatch::NONE;
         }
 

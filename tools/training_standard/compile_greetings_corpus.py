@@ -69,10 +69,23 @@ def compile_greetings() -> list[dict]:
     pairs: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
+    # Hard cap on response length.  Long definitional responses
+    # (e.g. "Problem is a state of difficulty that needs to be
+    # resolved.") crystallise as long action-pool concepts that
+    # poison categorical retrieval by atom overlap.  Per ARCHITECTURE.md
+    # §4.D.1 the substrate is supposed to use the deepest CONFIDENT
+    # layer; bloated definitional concepts with many atoms compete
+    # against legitimate short category responses at the atom layer
+    # and win on bag-of-letters bleed.  Cap at 32 bytes — fits within
+    # the action pool's max_concept_member_count (Stage 12 config).
+    _MAX_RESP_LEN = 32
+
     def _add(prompt: str, response: str, source: str) -> None:
         p, r = prompt.strip(), response.strip()
         if not p or not r:
             return
+        if len(r) > _MAX_RESP_LEN:
+            return  # drop polluting long responses
         key = (p.lower(), r.lower())
         if key in seen:
             return
