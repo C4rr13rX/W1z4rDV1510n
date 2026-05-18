@@ -102,9 +102,21 @@ impl BindingMatch {
 /// times within the history window, the brain births a binding concept
 /// in the binding pool whose members reference every neuron in the
 /// signature.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 struct MomentFingerprint {
+    /// Sorted (pool, neuron) pairs used as the dedup key for
+    /// recurring-fingerprint emergence detection.
     pairs: Vec<(PoolId, NeuronId)>,
+    /// Original firing order (per-pool sequence).  Preserved
+    /// separately from `pairs` so binding-pool concepts retain the
+    /// temporal order in which atoms fired — which is what
+    /// `decode_concept_members` walks to reconstruct the trained
+    /// answer bytes.  Without this, decoded bindings appear in
+    /// NeuronId-sorted order (e.g. 'animal' decodes as 'aaniml').
+    /// Not part of equality/hash — same atom set in different
+    /// firing orders is still the same binding for emergence
+    /// purposes.
+    ordered_per_pool: Vec<(PoolId, Vec<NeuronId>)>,
 }
 
 impl MomentFingerprint {
@@ -118,8 +130,27 @@ impl MomentFingerprint {
         // Binding candidates require ≥2 pools — single-pool firing is
         // a within-pool concept-emergence concern, not a binding one.
         if pools_represented.len() < 2 { return None; }
+        // Capture firing order per pool BEFORE we sort `pairs`.
+        let mut ordered_per_pool: Vec<(PoolId, Vec<NeuronId>)> = fired.iter()
+            .map(|(&pid, ns)| (pid, ns.clone()))
+            .collect();
+        ordered_per_pool.sort_by_key(|(p, _)| *p);
         pairs.sort();
-        Some(Self { pairs })
+        Some(Self { pairs, ordered_per_pool })
+    }
+}
+
+// Equality + Hash on MomentFingerprint only consider `pairs` so the
+// dedup index treats the same firing SET as one fingerprint
+// regardless of firing order.  `ordered_per_pool` is metadata used
+// only at promotion time.
+impl std::cmp::PartialEq for MomentFingerprint {
+    fn eq(&self, other: &Self) -> bool { self.pairs == other.pairs }
+}
+impl std::cmp::Eq for MomentFingerprint {}
+impl std::hash::Hash for MomentFingerprint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.pairs.hash(state);
     }
 }
 
@@ -588,7 +619,7 @@ impl Brain {
         let binding_pool = self.fabric.pool(self.binding_pool_id)?;
         let mut binding = binding_pool.write();
         // Composite label = sorted member references, joined.  Stable
-        // and unique per fingerprint.
+        // and unique per fingerprint (used for dedup).
         let label: String = fp.pairs.iter()
             .map(|(p, n)| format!("p{}n{}", p, n))
             .collect::<Vec<_>>()
@@ -596,8 +627,14 @@ impl Brain {
         if binding.label_to_id(&label).is_some() {
             return None;  // already exists, idempotent.
         }
-        let members: Vec<NeuronRef> = fp.pairs.iter()
-            .map(|(p, n)| NeuronRef::new(*p, *n))
+        // Members stored in FIRING ORDER (per-pool sequence as
+        // observed at training time), NOT NeuronId-sorted order.
+        // This preserves the temporal order required for clean
+        // decoding via decode_concept_members — without it,
+        // 'animal' atoms (a,n,i,m,a,l) decode as 'aaniml' because
+        // sorting by NeuronId interleaves the duplicates.
+        let members: Vec<NeuronRef> = fp.ordered_per_pool.iter()
+            .flat_map(|(pid, ns)| ns.iter().map(|&nid| NeuronRef::new(*pid, nid)))
             .collect();
         let max_w = binding.config.max_weight;
         let now = self.fabric.current_tick();
@@ -1254,6 +1291,139 @@ impl Brain {
             return concept;
         }
         self.best_binding_match_atom_tier(query_pool)
+    }
+
+    /// Find the best binding for the current query-pool firing state
+    /// AND decode its target-pool members verbatim.
+    ///
+    /// This is the "trained-answer" retrieval path: the binding
+    /// stores the exact atoms that co-fired with the query at
+    /// training time, so decoding its target-pool members returns
+    /// the literal trained response — no scoring formulas, no
+    /// avg-activation gymnastics, no concept-emergence side
+    /// effects like 'animala' suffix-pollution.
+    ///
+    /// Match tie-breaking: highest score (precision × recall).
+    /// Among ties, prefer the binding whose target-pool member
+    /// count is SMALLEST — cleanest binding wins.  Prefer
+    /// concept-tier matches over atom-tier when both exist.
+    ///
+    /// Returns `Some(bytes)` if a binding was found AND its
+    /// target-pool members decode to non-empty bytes.  `None`
+    /// otherwise (caller falls back to atom-level or chain path).
+    pub fn decode_best_trained_binding(
+        &self,
+        query_pool:  PoolId,
+        target_pool: PoolId,
+    ) -> Option<Vec<u8>> {
+        if query_pool == target_pool { return None; }
+        let bpid = self.binding_pool_id;
+        if bpid == query_pool || bpid == target_pool { return None; }
+
+        // Collect firing query state: atoms and concepts separately.
+        let (q_atoms, q_concepts) = {
+            let q = self.fabric.pool(query_pool)?;
+            let q = q.read();
+            let mut atoms = ahash::AHashSet::new();
+            let mut concepts = ahash::AHashSet::new();
+            for nid in q.currently_firing() {
+                match q.get(nid) {
+                    Some(n) if n.is_atom() => { atoms.insert(nid); }
+                    Some(_)                => { concepts.insert(nid); }
+                    None                   => {}
+                }
+            }
+            (atoms, concepts)
+        };
+        if q_atoms.is_empty() && q_concepts.is_empty() { return None; }
+
+        // Walk binding-pool concepts, score each.
+        let bp = self.fabric.pool(bpid)?;
+        let bp_read = bp.read();
+        // (binding_id, score, target_member_count, has_concept_match)
+        let mut best: Option<(NeuronId, f32, usize, bool)> = None;
+        for n in bp_read.iter_neurons() {
+            if n.is_atom() { continue; }
+            // Partition this binding's members by pool.
+            let mut bind_q_atoms:    Vec<NeuronId> = Vec::new();
+            let mut bind_q_concepts: Vec<NeuronId> = Vec::new();
+            let mut bind_target_members: Vec<NeuronId> = Vec::new();
+            {
+                let q = self.fabric.pool(query_pool)?;
+                let q = q.read();
+                for m in &n.members {
+                    if m.pool == query_pool {
+                        match q.get(m.neuron) {
+                            Some(qn) if qn.is_atom() => bind_q_atoms.push(m.neuron),
+                            Some(_)                  => bind_q_concepts.push(m.neuron),
+                            None                     => {}
+                        }
+                    } else if m.pool == target_pool {
+                        bind_target_members.push(m.neuron);
+                    }
+                }
+            }
+            if bind_target_members.is_empty() { continue; }
+            if bind_q_atoms.is_empty() && bind_q_concepts.is_empty() { continue; }
+
+            // Compute score: prefer concept-tier when concept members
+            // overlap firing concepts; else atom-tier.
+            let concept_intersect = bind_q_concepts.iter()
+                .filter(|c| q_concepts.contains(c))
+                .count() as f32;
+            let concept_score = if !bind_q_concepts.is_empty() && !q_concepts.is_empty() {
+                let p = concept_intersect / bind_q_concepts.len() as f32;
+                let r = concept_intersect / q_concepts.len().max(1) as f32;
+                p * r
+            } else { 0.0 };
+            let atom_intersect = bind_q_atoms.iter()
+                .filter(|a| q_atoms.contains(a))
+                .count() as f32;
+            let atom_score = if !bind_q_atoms.is_empty() && !q_atoms.is_empty() {
+                let p = atom_intersect / bind_q_atoms.len() as f32;
+                let r = atom_intersect / q_atoms.len().max(1) as f32;
+                p * r
+            } else { 0.0 };
+            // Concept-tier match preempts atom-tier when both exist.
+            let (score, has_concept) = if concept_score > 0.0 {
+                (concept_score + 1.0, true) // +1 to ensure concept-tier beats any atom-tier
+            } else {
+                (atom_score, false)
+            };
+            if score <= 0.0 { continue; }
+            let target_count = bind_target_members.len();
+            let consider = match &best {
+                None => true,
+                Some((_, prev_score, prev_target_count, prev_has_concept)) => {
+                    // Concept-tier beats atom-tier.
+                    if has_concept && !*prev_has_concept { true }
+                    else if !has_concept && *prev_has_concept { false }
+                    // Same tier — higher score wins.
+                    else if score > *prev_score { true }
+                    else if score < *prev_score { false }
+                    // Tie on score — prefer SMALLER target member count
+                    // (cleaner binding, less decoder residual).
+                    else { target_count < *prev_target_count }
+                }
+            };
+            if consider {
+                best = Some((n.id, score, target_count, has_concept));
+            }
+        }
+
+        let (bnid, _, _, _) = best?;
+        let bnode = bp_read.get(bnid)?;
+        // Decode the binding's target-pool members.
+        let target_handle = self.fabric.pool(target_pool)?;
+        let t = target_handle.read();
+        // Filter members to target pool only.
+        let target_members: Vec<NeuronRef> = bnode.members.iter()
+            .filter(|m| m.pool == target_pool)
+            .copied()
+            .collect();
+        if target_members.is_empty() { return None; }
+        let bytes = t.decode_concept_members(&target_members);
+        if bytes.is_empty() { None } else { Some(bytes) }
     }
 
     fn best_binding_match_atom_tier(&self, query_pool: PoolId) -> BindingMatch {
@@ -2677,23 +2847,23 @@ impl Brain {
 
         let mut moment_history = VecDeque::with_capacity(snap.moment_history_window);
         for f in snap.moment_history {
-            moment_history.push_back(MomentFingerprint { pairs: f.pairs });
+            moment_history.push_back(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() });
         }
         let mut binding_recurrences = AHashMap::new();
         for (f, c) in snap.binding_recurrences {
-            binding_recurrences.insert(MomentFingerprint { pairs: f.pairs }, c);
+            binding_recurrences.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, c);
         }
         let mut promoted_fingerprints = AHashMap::new();
         for (f, n) in snap.promoted_fingerprints {
-            promoted_fingerprints.insert(MomentFingerprint { pairs: f.pairs }, n);
+            promoted_fingerprints.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, n);
         }
         let mut tentative_promoted = AHashMap::new();
         for (f, n) in snap.tentative_promoted {
-            tentative_promoted.insert(MomentFingerprint { pairs: f.pairs }, n);
+            tentative_promoted.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, n);
         }
         let mut lifetime_recurrences = AHashMap::new();
         for (f, c) in snap.lifetime_recurrences {
-            lifetime_recurrences.insert(MomentFingerprint { pairs: f.pairs }, c);
+            lifetime_recurrences.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, c);
         }
         let mut pending_actions = AHashMap::new();
         for (k, v) in snap.pending_actions { pending_actions.insert(k, v); }

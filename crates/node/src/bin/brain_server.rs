@@ -385,28 +385,47 @@ async fn tick(State(s): State<AppState>) -> Json<u64> {
 /// Concept-first integration — the user's "deepest layer wins"
 /// retrieval contract from ARCHITECTURE.md §4.D.1.  Does NOT touch
 /// the legacy /integrate path.
+///
+/// Now ALSO returns the trained-binding decode as a sibling field
+/// — this is the substrate's literal trained answer (the binding's
+/// target-pool members verbatim), without the decoder residual that
+/// concept-first scoring sometimes adds.
 async fn integrate_concept_first(
     State(s): State<AppState>,
     Json(req): Json<IntegrateRequest>,
 ) -> Json<IntegrateConceptFirstResponse> {
     let brain = s.brain.lock().await;
-    let answer_bytes = brain.integrate_concept_first(req.query_pool, req.target_pool);
+    let scored = brain.integrate_concept_first(req.query_pool, req.target_pool);
+    let trained = brain.decode_best_trained_binding(req.query_pool, req.target_pool);
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let (b64, utf8) = match &answer_bytes {
+    let (b64, utf8) = match &scored {
+        Some(b) => (Some(engine.encode(b)),
+                    std::str::from_utf8(b).ok().map(|s| s.to_string())),
+        None    => (None, None),
+    };
+    let (tb64, tutf8) = match &trained {
         Some(b) => (Some(engine.encode(b)),
                     std::str::from_utf8(b).ok().map(|s| s.to_string())),
         None    => (None, None),
     };
     Json(IntegrateConceptFirstResponse {
-        answer_b64:  b64,
-        answer_utf8: utf8,
+        answer_b64:        b64,
+        answer_utf8:       utf8,
+        trained_answer_b64:  tb64,
+        trained_answer_utf8: tutf8,
     })
 }
 
 #[derive(Serialize, Debug)]
 struct IntegrateConceptFirstResponse {
-    answer_b64:  Option<String>,
-    answer_utf8: Option<String>,
+    answer_b64:          Option<String>,
+    answer_utf8:         Option<String>,
+    /// Decoded bytes of the best-matching binding's target-pool
+    /// members.  This is the substrate's literal trained answer
+    /// for the query — the binding stores exactly what co-fired at
+    /// training time, so its decode IS the trained response.
+    trained_answer_b64:  Option<String>,
+    trained_answer_utf8: Option<String>,
 }
 
 async fn integrate(
