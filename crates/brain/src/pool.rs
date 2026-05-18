@@ -634,11 +634,39 @@ impl Pool {
         // tends to be the linguistically correct one because it
         // emerged from a clean atom run before fragment collapse
         // disrupted the sequence.
-        let mut leaves: Vec<NeuronId> = self.expand_to_atom_leaves(&members);
+        // Atom-leaf sequence in original order (used for the
+        // periodicity check below).
+        let leaves_seq: Vec<NeuronId> = self.expand_to_atom_leaves(&members);
+        // Sorted copy used as the multiset key.
+        let mut leaves: Vec<NeuronId> = leaves_seq.clone();
         leaves.sort();
         if self.concept_multiset_to_id.contains_key(&leaves) {
             return; // canonical concept already exists for this multiset
         }
+
+        // Stage 13.1 — runaway-emergence guard part 1: refuse to
+        // promote a concept whose member list contains the SAME
+        // concept neuron more than once.  Catches the layer-2+
+        // recursive tower [sport-concept, sport-concept, ...].
+        let mut seen: ahash::AHashSet<NeuronId> = ahash::AHashSet::new();
+        for &mid in &members {
+            if let Some(n) = self.neurons.get(mid as usize) {
+                if !n.is_atom() {
+                    if !seen.insert(mid) {
+                        return; // duplicate concept member — runaway pattern
+                    }
+                }
+            }
+        }
+
+        // Note: emergence-time periodicity/ratio guards were
+        // empirically tried and removed.  They blocked legitimate
+        // K-12 concept emergence as collateral damage.  The
+        // runaway-concept issue is now addressed at READ time in
+        // `Brain::integrate_concept_first` via a sanity filter on
+        // the candidate concept's decoded byte length.  This keeps
+        // emergence flexible enough for real vocabulary while
+        // preventing runaways from winning selection.
         let id = self.neurons.len() as NeuronId;
         let member_refs: Vec<NeuronRef> = members.iter()
             .map(|m| NeuronRef::new(self.config.id, *m))

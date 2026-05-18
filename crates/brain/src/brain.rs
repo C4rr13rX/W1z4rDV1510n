@@ -647,6 +647,191 @@ impl Brain {
     /// Produce an [`AnswerWithGrounding`] by propagating from
     /// `query_pool`'s currently-firing state and reading the resulting
     /// activation in `target_pool`.  Every output carries a
+    /// Recursively compute the depth of a concept neuron: atoms are
+    /// depth 0; concepts whose members are all atoms are depth 1;
+    /// concepts whose members include concepts of depth N are depth
+    /// N+1.  Used by [`Self::integrate_concept_first`] to pick the
+    /// DEEPEST firing concept — the substrate's "highest layer that
+    /// matches the input" per ARCHITECTURE.md §4.D.1.
+    pub fn concept_depth(&self, pool_id: PoolId, nid: NeuronId) -> usize {
+        let p = match self.fabric.pool(pool_id) {
+            Some(p) => p,
+            None    => return 0,
+        };
+        let p_read = p.read();
+        let n = match p_read.get(nid) {
+            Some(n) => n,
+            None    => return 0,
+        };
+        if n.is_atom() { return 0; }
+        let mut max_d = 0;
+        for m in &n.members {
+            if m.pool != pool_id { continue; }
+            let d = self.concept_depth_inner(&p_read, m.neuron, 0, 16);
+            if d > max_d { max_d = d; }
+        }
+        max_d + 1
+    }
+
+    fn concept_depth_inner(&self, p: &crate::pool::Pool, nid: NeuronId,
+                            current: usize, cap: usize) -> usize {
+        if current >= cap { return current; }
+        let n = match p.get(nid) {
+            Some(n) => n,
+            None    => return current,
+        };
+        if n.is_atom() { return current; }
+        let mut max_d = current;
+        for m in &n.members {
+            if m.pool != p.id() { continue; }
+            let d = self.concept_depth_inner(p, m.neuron, current + 1, cap);
+            if d > max_d { max_d = d; }
+        }
+        max_d
+    }
+
+    /// Concept-first retrieval — the user's "always look at the
+    /// deepest level we see" inference contract from ARCHITECTURE.md
+    /// §4.D.1.
+    ///
+    /// 1. Propagate from query_pool across the fabric using the
+    ///    substrate's existing axon/dendrite wiring (no scoring
+    ///    formula — just Hebbian terminals doing their job).
+    /// 2. In target_pool, find the DEEPEST emerged concept neuron
+    ///    with non-trivial activation.  That concept's hierarchical
+    ///    depth tells us it represents the highest-layer match the
+    ///    substrate has crystallised for this input.
+    /// 3. Decode it via decode_concept_members and return.
+    ///
+    /// Falls back to atom-level reassembly only when NO concept in
+    /// target_pool reaches the activation floor.  Trained-input
+    /// retrieval should hit deterministic 100% via this path because
+    /// the cross-pool axon between trained query-concept and trained
+    /// target-concept lights up the target deterministically.
+    ///
+    /// Parallel to [`Self::integrate`] — does NOT touch its scoring
+    /// formula or downstream consumers.
+    pub fn integrate_concept_first(
+        &self,
+        query_pool:  PoolId,
+        target_pool: PoolId,
+    ) -> Option<Vec<u8>> {
+        let propagated = self.fabric.propagate(query_pool);
+        let target_acts = propagated.get(&target_pool)?;
+        if target_acts.is_empty() { return None; }
+
+        let pool_handle = self.fabric.pool(target_pool)?;
+        let p = pool_handle.read();
+
+        const ACTIVATION_FLOOR: f32 = 0.001;
+        // Skip runaway-emergence concepts.  The substrate's emergence
+        // can produce concepts whose decode runs many characters by
+        // tiling a shorter pattern (e.g., "animalanimalanimal" or
+        // "bodybodybody" emerging under dense-burst training).
+        // Trained category responses are short (≤ 18 bytes for
+        // "musical_instrument", ≤ 6 for most).  A 24-byte cap keeps
+        // legitimate trained answers while filtering runaways.
+        const MAX_REASONABLE_DECODE: usize = 24;
+
+        // Score concepts by AVG-MEMBER-ACTIVATION (the same signal
+        // /integrate's Stage 6 selection uses): the concept whose
+        // members ALL fire strongly is the one whose pattern was
+        // actually triggered by the cross-pool propagation.  A
+        // concept whose members partly fire (because it includes
+        // extra atoms from unrelated words) gets a lower score.
+        //
+        // Tiebreak by concept depth (deeper hierarchy wins).
+        //
+        // Sanity filters reject runaway-emergence concepts:
+        //   - decode > 24 bytes (longer than any trained categorical
+        //     response; runaway tilings exceed this)
+        //   - low unique-byte ratio for decodes >= 8 bytes (catches
+        //     'bodybody' / 'animalanim' style partial repeats)
+        let mut best: Option<(NeuronId, Vec<u8>, f32, usize)> = None;
+        for (nid, _act) in target_acts.iter() {
+            let n = match p.get(*nid) {
+                Some(n) => n,
+                None    => continue,
+            };
+            if n.is_atom() { continue; }
+            // Compute avg member activation in target pool.
+            let in_pool_members: Vec<NeuronId> = n.members.iter()
+                .filter(|m| m.pool == target_pool)
+                .map(|m| m.neuron)
+                .collect();
+            if in_pool_members.is_empty() { continue; }
+            let member_sum: f32 = in_pool_members.iter()
+                .map(|mid| target_acts.get(mid).copied().unwrap_or(0.0))
+                .sum();
+            let avg_member_act = member_sum / in_pool_members.len() as f32;
+            if avg_member_act < ACTIVATION_FLOOR { continue; }
+            // Decode + sanity filters.
+            let decoded = p.decode_concept_members(&n.members);
+            if decoded.is_empty() || decoded.len() > MAX_REASONABLE_DECODE {
+                continue;
+            }
+            if decoded.len() >= 8 {
+                let unique: ahash::AHashSet<u8> = decoded.iter().copied().collect();
+                let ratio = unique.len() as f32 / decoded.len() as f32;
+                if ratio < 0.6 {
+                    continue;
+                }
+            }
+            let depth = {
+                let mut max_d = 0;
+                for m in &n.members {
+                    if m.pool != target_pool { continue; }
+                    let d = self.concept_depth_inner(&p, m.neuron, 0, 16);
+                    if d > max_d { max_d = d; }
+                }
+                max_d + 1
+            };
+            // Score = avg_member_activation × sqrt(member_count).
+            // The √len factor rewards longer concepts when their
+            // member activation pattern is well-covered.  Pure short
+            // morphemes ('ala', 'oo') get a small √2-√3 boost, but
+            // a fully-activated word-level concept ('animal' = √6)
+            // wins decisively over morpheme fragments.
+            let length_factor = (in_pool_members.len() as f32).sqrt();
+            let score = avg_member_act * length_factor;
+            match &best {
+                None => best = Some((*nid, decoded, score, depth)),
+                Some((_, _, prev_score, prev_depth)) => {
+                    if score > *prev_score
+                       || (score == *prev_score && depth > *prev_depth) {
+                        best = Some((*nid, decoded, score, depth));
+                    }
+                }
+            }
+        }
+
+        match best {
+            Some((_nid, decoded, _score, _depth)) => {
+                Some(decoded)
+            }
+            None => {
+                // No concept fired — fall back to atom-level
+                // reassembly.  Walk firing target atoms in
+                // descending activation order and emit their bytes.
+                let mut atom_acts: Vec<(NeuronId, f32)> = target_acts.iter()
+                    .filter(|(nid, _)| p.get(**nid).map_or(false, |n| n.is_atom()))
+                    .filter(|(_, a)| **a >= ACTIVATION_FLOOR)
+                    .map(|(k, v)| (*k, *v))
+                    .collect();
+                if atom_acts.is_empty() { return None; }
+                atom_acts.sort_by(|a, b|
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let mut out = Vec::new();
+                for (nid, _) in atom_acts.iter().take(32) {
+                    if let Some(n) = p.get(*nid) {
+                        out.extend(p.encoding_reassemble(&[(n.label.as_str(), 1.0)]));
+                    }
+                }
+                if out.is_empty() { None } else { Some(out) }
+            }
+        }
+    }
+
     /// [`GroundingReport`] per spec §2.7.
     ///
     /// The brain doesn't decide whether to surface uncertainty —

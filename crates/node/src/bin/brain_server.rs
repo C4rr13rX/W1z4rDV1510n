@@ -382,6 +382,33 @@ async fn tick(State(s): State<AppState>) -> Json<u64> {
     Json(brain.stats().tick)
 }
 
+/// Concept-first integration — the user's "deepest layer wins"
+/// retrieval contract from ARCHITECTURE.md §4.D.1.  Does NOT touch
+/// the legacy /integrate path.
+async fn integrate_concept_first(
+    State(s): State<AppState>,
+    Json(req): Json<IntegrateRequest>,
+) -> Json<IntegrateConceptFirstResponse> {
+    let brain = s.brain.lock().await;
+    let answer_bytes = brain.integrate_concept_first(req.query_pool, req.target_pool);
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let (b64, utf8) = match &answer_bytes {
+        Some(b) => (Some(engine.encode(b)),
+                    std::str::from_utf8(b).ok().map(|s| s.to_string())),
+        None    => (None, None),
+    };
+    Json(IntegrateConceptFirstResponse {
+        answer_b64:  b64,
+        answer_utf8: utf8,
+    })
+}
+
+#[derive(Serialize, Debug)]
+struct IntegrateConceptFirstResponse {
+    answer_b64:  Option<String>,
+    answer_utf8: Option<String>,
+}
+
 async fn integrate(
     State(s): State<AppState>,
     Json(req): Json<IntegrateRequest>,
@@ -883,6 +910,7 @@ async fn main() -> Result<()> {
         .route("/observe",               post(observe))
         .route("/tick",                  post(tick))
         .route("/integrate",             post(integrate))
+        .route("/integrate_concept_first", post(integrate_concept_first))
         .route("/integrate_resonant",    post(integrate_resonant))
         .route("/pool/concepts",         post(pool_concepts))
         .route("/checkpoint",            post(checkpoint))
