@@ -1,6 +1,6 @@
 # Brain Substrate — Empirical & Architectural State
 
-*Snapshot for session continuity.  Last updated: 2026-05-18.*
+*Snapshot for session continuity.  Last updated: 2026-05-19.*
 
 ## What works (architecturally validated, empirically pinned)
 
@@ -10,9 +10,13 @@
 - **Dense-burst training schedule** (`--burst` flag in `drive_corpora_brain`, commit `0cd80b3`) — required for word-level concept emergence under wide round-robin corpora.  Each (prompt, response) pair observed N reps back-to-back.
 - **Layer-aware coverage gate** in `best_binding_match_v2` (commit `427a3b5`) — atoms that are members of a firing concept count toward concept-tier evidence, not atom-tier noise.
 
-### Two retrieval paths
-- **`/chat`** → `integrate_autonomous` → `best_binding_match_v2` (concept-tier aware) → fabric retrieval → chain explorer fallback → multi-fact assembler (Stage 11C).  This is the user-facing path.
-- **`/integrate`** → `integrate()` → Stage 7 atom-level binding-pool routing → coverage-based selection.  This is the internal retrieval path; **stays atom-level by load-bearing design.**
+### Three retrieval paths (post-Stage 14)
+- **`/chat`** → `decode_best_trained_binding(POOL_TEXT, POOL_ACTION)` as AUTHORITATIVE primary; when it returns None, /chat is silent (empty reply, outside_grounding=true).  The binding's target-pool members in firing order ARE the trained answer by construction.  `integrate_autonomous` is computed only as a secondary signal for the `outside_grounding` flag.
+- **`/integrate`** → `integrate()` → Stage 7 atom-level binding-pool routing → coverage-based selection.  Substrate floor — preserved at 96.9% contains.
+- **`/integrate_concept_first`** → returns both concept-scored answer AND `trained_answer_*` (binding-decoded).  Diagnostic endpoint.
+
+### OOV-honesty floor (Stage 14, commit 47038a3)
+`decode_best_trained_binding` applies `MIN_ATOM_SCORE = 0.50` uniformly to both `atom_score` and the RAW `concept_score` (before the +1.0 concept-tier bonus).  Without this, a runaway mega-binding with a 797-member POOL_TEXT footprint won every query at concept_score ≈ 0.005 because the +1.0 bonus pushed its total above any legitimate single-pair binding's atom-tier score ('eye'→'animal' bug).
 
 ### Architectural contract
 `ARCHITECTURE.md §4.D.1` documents the deepest-confident-layer-wins inference contract.  The substrate produces the hierarchical firing state; the integration layer should walk it top-down by layer depth, gated by confidence.  Currently `/chat`'s OOV gate honors this; `/integrate`'s selection does not.
@@ -21,13 +25,13 @@
 
 | Probe | Value | Notes |
 |---|---|---|
-| `/chat` toddler (the no-regression floor) | **23/32 (71.9%)** | Held across all Stage 7-13 work |
-| `/integrate` toddler strict-substring | **25/32 (78.1%)** | +2 above floor |
-| `/integrate` toddler categorical (3+ byte) | 26/32 (81.2%) | Architectural-correct metric |
-| K-12 categorical | 2/16 (12.5%) | First non-zero hits via dense-burst + dedup |
-| multi_fact | 1/5 (20%) | First non-zero hit |
-| OOV honesty | 2/3 (66.7%) | xyzzy, zzzzqqqq honestly OOG |
-| Greetings | 1/7 (14.3%) | Down from 2/7 (greetings corpus dropped to prevent pollution) |
+| `/chat` toddler EXACT (decode_best_trained_binding) | **30/32 (93.8%)** | Stage 14 — trained_decode as authoritative reply |
+| `/integrate` toddler contains | **31/32 (96.9%)** | Substrate floor (was 23/32 in Stage 7-12) |
+| `/integrate` toddler EXACT | 17/32 (53.1%) | Decoder-residual on partial matches |
+| OOV honesty (`/chat`) | **3/3 (100%)** | xyzzy, foobarbaz, zzzzqqqq all OOG-correct |
+| K-12 categorical | 0/16 (0%) | Needs categorical_unified retrain under new path |
+| multi_fact | 0/5 (0%) | Needs retrain |
+| Greetings | 0/7 (0%) | Greetings corpus still excluded |
 | Brain crate unit tests | 83/83 ✓ | All green |
 
 ## What fails (and why)
