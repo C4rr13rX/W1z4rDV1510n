@@ -1337,6 +1337,22 @@ impl Brain {
         };
         if q_atoms.is_empty() && q_concepts.is_empty() { return None; }
 
+        // Minimum atom-tier score for an OOV-honest match.  A score
+        // of `p * r` where p = precision (intersect/bind_atoms.len())
+        // and r = recall (intersect/q_atoms.len()).  Empirically:
+        //   trained, full-overlap query (e.g. 'ball'->'toy'): 1.0
+        //   trained, concept-tier match (e.g. 'hand'->'body'):  >= 1.0
+        //   OOV partial atom bleed ('foobarbaz'->food): 0.44
+        //     (propagation inflates q_atoms ∩ bind atoms beyond
+        //      raw byte overlap, because bidirectional terminals
+        //      fire POOL_TEXT atoms co-trained with food)
+        //   OOV single-atom bleed ('xyzzy'->'body'):   0.08
+        // A 0.50 floor still passes trained queries (full-overlap
+        // atom-tier scores 1.0; concept-tier matches always score
+        // ≥ 1.0 via the concept-tier bonus when concept_score
+        // itself crosses the floor) and rejects OOV bleed.
+        const MIN_ATOM_SCORE: f32 = 0.50;
+
         // Walk binding-pool concepts, score each.
         let bp = self.fabric.pool(bpid)?;
         let bp_read = bp.read();
@@ -1384,13 +1400,23 @@ impl Brain {
                 let r = atom_intersect / q_atoms.len().max(1) as f32;
                 p * r
             } else { 0.0 };
-            // Concept-tier match preempts atom-tier when both exist.
-            let (score, has_concept) = if concept_score > 0.0 {
-                (concept_score + 1.0, true) // +1 to ensure concept-tier beats any atom-tier
+            // OOV-honesty floor applies BOTH to atom-tier and to the
+            // raw concept_score.  Without this, a mega-binding with a
+            // 797-member POOL_TEXT footprint (runaway concept-of-
+            // concept emergence) wins every query with concept_score
+            // ≈ 0.005 because the +1.0 bonus pushes its total above
+            // any legitimate single-pair binding's atom-tier score.
+            let concept_ok = concept_score >= MIN_ATOM_SCORE;
+            let atom_ok    = atom_score    >= MIN_ATOM_SCORE;
+            if !concept_ok && !atom_ok { continue; }
+
+            // Concept-tier match preempts atom-tier ONLY when the
+            // concept_score itself crosses the floor.
+            let (score, has_concept) = if concept_ok {
+                (concept_score + 1.0, true) // +1 to ensure concept-tier beats atom-tier
             } else {
                 (atom_score, false)
             };
-            if score <= 0.0 { continue; }
             let target_count = bind_target_members.len();
             let consider = match &best {
                 None => true,

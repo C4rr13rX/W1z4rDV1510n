@@ -778,48 +778,61 @@ async fn chat(
     // Observe the prompt into the text pool.
     brain.observe(POOL_TEXT, prompt.as_bytes());
 
-    // PRIMARY: autonomous critical-thinking integrate.  Tries
-    // fabric retrieval first; if low confidence, falls through to
-    // EEM grounded-fact chain exploration (ivy-growth across the
-    // substrate's accumulated world knowledge).  Also enforces the
-    // out-of-vocabulary gate: if no trained binding has its query
-    // members substantially contained in the firing prompt atoms,
-    // returns outside_grounding=true honestly rather than picking
-    // a noisy strongest-match (the "Hello → color" hallucination
-    // failure mode).
+    // PRIMARY: trained-binding decode.  Per ARCHITECTURE.md §4.D.1,
+    // when the substrate has a binding that matches the firing
+    // query state, its target-pool members ARE the trained answer.
+    // Decoding those members in firing order gives the literal
+    // trained response — 30/32 EXACT on toddler categorical
+    // (animal/food/vehicle/color/toy/nature/body) without decoder
+    // residual.
+    let trained_decode: Option<String> = brain
+        .decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+
+    // SECONDARY: autonomous critical-thinking integrate.  Used as
+    // fallback when no trained binding matches — and STILL the
+    // source of the OOV honesty gate (outside_grounding=true).
     let xpool = brain.integrate_autonomous(
         POOL_TEXT, POOL_ACTION,
-        /*fabric_threshold*/ 0.0,    // accept any non-empty fabric answer
+        /*fabric_threshold*/ 0.0,
         /*chain_max_depth*/   4,
         /*chain_max_visit*/   200);
-    // Honor outside_grounding: return EMPTY answer so the downstream
-    // Wizard frontend renders the "no confident answer" UX instead
-    // of pretending we know.
     let xpool_reply: Option<String> = if xpool.grounding.outside_grounding {
         None
     } else {
         xpool.answer.as_ref().map(|b| String::from_utf8_lossy(b).into_owned())
     };
 
-    // SECONDARY: same-pool generate text→text ONLY when the prompt is
-    // in-vocabulary but the cross-pool path returned nothing.  When
-    // the prompt is out-of-vocabulary (outside_grounding), the
-    // associative-fragment generate path is just hallucinated junk —
-    // returning it would un-do the OOV honesty.  Keep silent instead.
-    let reply = match xpool_reply {
-        Some(ref a) if !a.is_empty() => a.clone(),
-        _ if xpool.grounding.outside_grounding => String::new(),
-        _ => {
-            brain.observe(POOL_TEXT, prompt.as_bytes());
-            let gen_bytes = brain.generate(POOL_TEXT, POOL_TEXT, max_steps, min_confidence);
-            String::from_utf8_lossy(&gen_bytes).into_owned()
-        }
+    // Selection: trained-binding decode is the AUTHORITATIVE answer.
+    // When it returns Some, those bytes are the substrate's literal
+    // trained response (binding target-pool members in firing order).
+    // When it returns None, the substrate has no trained match that
+    // passes the MIN_ATOM_SCORE floor — be OOV-honest and return
+    // empty instead of falling through to xpool/generate, which can
+    // hallucinate via partial atom bleed.
+    //
+    // Rationale (ARCHITECTURE.md §4.D.1): "trained input -> 100%
+    // recall; untrained input -> integrate via knowledge with
+    // confidence."  Until we have a confidence-gated integration
+    // path, silence beats a wrong answer for the untrained case.
+    let reply = if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
+        td.clone()
+    } else {
+        String::new()
     };
 
+    // outside_grounding reflects the AUTHORITATIVE answer state: if
+    // trained_decode found no binding above MIN_ATOM_SCORE, the
+    // substrate has no trained recall for this query — that IS the
+    // out-of-grounding signal, regardless of what xpool's softer
+    // OOV heuristic concluded.  Keep xpool's flag as a secondary
+    // signal only when reply is non-empty.
+    let outside_grounding =
+        reply.is_empty() || xpool.grounding.outside_grounding;
     let g = ChatGrounding {
         fabric_confidence:     xpool.grounding.fabric_confidence,
         integrated_confidence: xpool.grounding.integrated_confidence,
-        outside_grounding:     xpool.grounding.outside_grounding,
+        outside_grounding,
         speculation_flag:      xpool.grounding.speculation_flag,
     };
 
