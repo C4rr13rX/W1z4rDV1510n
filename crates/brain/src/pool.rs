@@ -108,10 +108,24 @@ pub struct PoolConfig {
     /// Prevents complete silence in low-traffic pools.
     #[serde(default = "default_sparsity_min_neurons")]
     pub sparsity_min_neurons:        usize,
+
+    /// Heterosynaptic long-term depression ratio.  After each tick,
+    /// for any neuron that had a terminal reinforced this tick, all
+    /// of its OTHER terminals weaken by `weight *= 1 - ratio`.
+    /// Biological motivation: heterosynaptic LTD (Royer & Paré 2003;
+    /// Turrigiano 2008) provides homeostatic competition between
+    /// synapses on the same neuron — pure Hebbian potentiation runs
+    /// away because there is no mechanism to weaken non-reinforced
+    /// synapses.  Empirically the ratio is small (1-5% per LTP event)
+    /// because the mechanism is collective, not single-event.
+    /// Default 0.0 = disabled (no behaviour change).  Range [0.0, 0.5].
+    #[serde(default = "default_heterosynaptic_ltd_ratio")]
+    pub heterosynaptic_ltd_ratio:    f32,
 }
 
 fn default_sparsity_top_k_frac() -> f32 { 1.0 }
 fn default_sparsity_min_neurons() -> usize { 1 }
+fn default_heterosynaptic_ltd_ratio() -> f32 { 0.0 }
 
 impl PoolConfig {
     pub fn defaults(name: impl Into<String>, id: PoolId) -> Self {
@@ -128,6 +142,7 @@ impl PoolConfig {
             plasticity_baseline: 0.1,
             sparsity_top_k_frac: 1.0,
             sparsity_min_neurons: 1,
+            heterosynaptic_ltd_ratio: 0.0,
         }
     }
 }
@@ -489,13 +504,37 @@ impl Pool {
 
     /// Tick housekeeping: every neuron's terminals decay; sub-floor terminals
     /// are pruned.  Spec §1.5: this is the only forgetting mechanism.
-    pub fn tick_housekeeping(&mut self) {
+    pub fn tick_housekeeping(&mut self, current_tick: u64) {
         let decay = self.config.decay_rate;
         let floor = self.config.prune_floor;
         for n in self.neurons.iter_mut() {
             n.decay_and_prune(decay, floor);
         }
+        self.apply_heterosynaptic_ltd(current_tick);
         self.apply_kwta_sparsity();
+    }
+
+    /// Heterosynaptic LTD: for each neuron whose terminal was
+    /// reinforced this tick (terminal.last_fired_tick == current_tick),
+    /// weaken all of its OTHER terminals by `weight *= 1 - ratio`.
+    /// Biological mechanism: when one synapse undergoes LTP, the
+    /// neuron's other synapses undergo a small homeostatic LTD that
+    /// keeps total dendritic input normalised.  Without this,
+    /// pure Hebbian potentiation accumulates indefinitely.
+    fn apply_heterosynaptic_ltd(&mut self, current_tick: u64) {
+        let ratio = self.config.heterosynaptic_ltd_ratio;
+        if ratio <= 0.0 { return; }
+        let keep = 1.0 - ratio;
+        for n in self.neurons.iter_mut() {
+            let has_recent = n.terminals.iter()
+                .any(|t| t.last_fired_tick == current_tick);
+            if !has_recent { continue; }
+            for t in n.terminals.iter_mut() {
+                if t.last_fired_tick != current_tick {
+                    t.weight *= keep;
+                }
+            }
+        }
     }
 
     /// Biologically-motivated k-WTA sparsity gate.  After housekeeping

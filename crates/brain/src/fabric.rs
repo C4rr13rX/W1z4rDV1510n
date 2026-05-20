@@ -333,9 +333,10 @@ impl Fabric {
             self.prev_tick_concepts.insert(pid, current_concepts);
         }
 
-        // Per-pool housekeeping: decay every terminal, prune sub-floor.
+        // Per-pool housekeeping: decay every terminal, prune sub-floor,
+        // apply heterosynaptic LTD, apply k-WTA sparsity.
         for (_, pool) in self.pools.iter() {
-            pool.write().tick_housekeeping();
+            pool.write().tick_housekeeping(self.tick);
         }
 
         self.tick += 1;

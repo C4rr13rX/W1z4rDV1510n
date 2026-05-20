@@ -2776,9 +2776,10 @@ impl Brain {
 
         // Phase 3: extra housekeeping so any zero-weight residuals
         // drop below the prune floor.
+        let now = self.fabric.current_tick();
         for pid in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pid) {
-                pool.write().tick_housekeeping();
+                pool.write().tick_housekeeping(now);
             }
         }
 

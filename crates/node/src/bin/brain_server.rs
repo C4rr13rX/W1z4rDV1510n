@@ -248,6 +248,7 @@ fn apply_env_overrides(cfg: &mut PoolConfig) {
     };
     if let Some(v) = pick_f32("SPARSITY")     { cfg.sparsity_top_k_frac = v.clamp(0.01, 1.0); }
     if let Some(v) = pick_usize("SPARSITY_MIN"){ cfg.sparsity_min_neurons = v.max(1); }
+    if let Some(v) = pick_f32("HET_LTD")      { cfg.heterosynaptic_ltd_ratio = v.clamp(0.0, 0.9); }
     if let Some(v) = pick_usize("WINDOW")     { cfg.recent_atoms_window = v; }
     if let Some(v) = pick_u32("EMERGENCE")    { cfg.concept_emergence_threshold = v; }
     if let Some(v) = pick_usize("MAX_MEMBERS"){ cfg.max_concept_member_count = v; }
