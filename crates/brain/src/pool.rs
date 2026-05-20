@@ -121,11 +121,29 @@ pub struct PoolConfig {
     /// Default 0.0 = disabled (no behaviour change).  Range [0.0, 0.5].
     #[serde(default = "default_heterosynaptic_ltd_ratio")]
     pub heterosynaptic_ltd_ratio:    f32,
+
+    /// Predictive-coding gate strength.  Each observe step computes
+    /// `surprise = 1 - |prediction ∩ new_firing| / |new_firing|`,
+    /// where `prediction` is the set of intra-pool terminal targets
+    /// of the PREVIOUS tick's firing set.  The pool maintains an EMA
+    /// of recent surprise; concept emergence is GATED so it only
+    /// runs when EMA(surprise) >= predict_gate_strength.
+    /// Biological motivation: predictive coding (Rao & Ballard 1999;
+    /// Friston 2005) — cortex sends predictions down via L6, error
+    /// signals up via L5.  New concepts crystallise in higher cortex
+    /// to explain unpredicted error, NOT to record already-predicted
+    /// patterns.  This is the deepest constraint against runaway
+    /// concept-of-concept emergence (P1 k-WTA bounds breadth; P2 LTD
+    /// bounds synapse hoarding; P3 prevents redundant concepts
+    /// outright).  Default 0.0 = disabled.  Range [0.0, 0.9].
+    #[serde(default = "default_predict_gate_strength")]
+    pub predict_gate_strength:       f32,
 }
 
 fn default_sparsity_top_k_frac() -> f32 { 1.0 }
 fn default_sparsity_min_neurons() -> usize { 1 }
 fn default_heterosynaptic_ltd_ratio() -> f32 { 0.0 }
+fn default_predict_gate_strength() -> f32 { 0.0 }
 
 impl PoolConfig {
     pub fn defaults(name: impl Into<String>, id: PoolId) -> Self {
@@ -143,6 +161,7 @@ impl PoolConfig {
             sparsity_top_k_frac: 1.0,
             sparsity_min_neurons: 1,
             heterosynaptic_ltd_ratio: 0.0,
+            predict_gate_strength: 0.0,
         }
     }
 }
@@ -182,6 +201,12 @@ pub struct Pool {
     /// Per-neuron transient activation for the current tick.  Cleared at
     /// the start of each observe call.
     activation:       AHashMap<NeuronId, f32>,
+
+    /// EMA of "surprise" — fraction of firing atoms that were NOT
+    /// in the previous tick's intra-pool terminal-target prediction.
+    /// Drives the predictive-coding gate on concept emergence.
+    /// Cleared on new(); transient runtime state (not serialised).
+    recent_surprise:  f32,
 }
 
 impl Pool {
@@ -197,6 +222,7 @@ impl Pool {
             sequences:        AHashMap::new(),
             currently_firing: AHashSet::new(),
             activation:       AHashMap::new(),
+            recent_surprise:  1.0,
         }
     }
 
@@ -335,6 +361,7 @@ impl Pool {
             sequences,
             currently_firing: AHashSet::new(),
             activation:       AHashMap::new(),
+            recent_surprise:  1.0,
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
@@ -408,6 +435,27 @@ impl Pool {
     pub fn observe_frame(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
         let labels = self.encoding.atomize(frame);
         let mut fired = Vec::with_capacity(labels.len());
+
+        // Predictive-coding prediction (P3): before clearing the
+        // firing set, compute the intra-pool prediction of what will
+        // fire next based on terminals of currently-firing neurons.
+        // This is the substrate of L6→L4 cortical prediction.
+        let prediction: AHashSet<NeuronId> = if self.config.predict_gate_strength > 0.0
+            && !self.currently_firing.is_empty()
+        {
+            let mut set = AHashSet::with_capacity(self.currently_firing.len() * 4);
+            for &nid in &self.currently_firing {
+                if let Some(n) = self.neurons.get(nid as usize) {
+                    for t in &n.terminals {
+                        if t.target.pool == self.config.id {
+                            set.insert(t.target.neuron);
+                        }
+                    }
+                }
+            }
+            set
+        } else { AHashSet::new() };
+
         self.activation.clear();
         self.currently_firing.clear();
 
@@ -432,6 +480,20 @@ impl Pool {
             // current tail entry (which may be a concept after
             // collapse) get their counts bumped.
             self.check_concept_emergence(tick);
+        }
+
+        // Predictive-coding surprise update (P3).  Compute the
+        // fraction of the new firing set that was NOT in the
+        // pre-clear prediction, then update the EMA.  Gate
+        // decisions downstream (`check_concept_emergence`) read
+        // this value.
+        if self.config.predict_gate_strength > 0.0 && !self.currently_firing.is_empty() {
+            let unpredicted: usize = self.currently_firing.iter()
+                .filter(|id| !prediction.contains(id))
+                .count();
+            let surprise = unpredicted as f32 / self.currently_firing.len() as f32;
+            // EMA with α = 0.3 (recent surprise weighted ~3 ticks).
+            self.recent_surprise = self.recent_surprise * 0.7 + surprise * 0.3;
         }
 
         fired
@@ -688,6 +750,14 @@ impl Pool {
     /// produce overly-specific concepts (memorize one phrase verbatim);
     /// the cap keeps emergent concepts useful.
     fn check_concept_emergence(&mut self, tick: u64) {
+        // P3 predictive-coding gate.  Only crystallise new concepts
+        // when the substrate's recent surprise is above the gate
+        // strength.  Already-predicted patterns add no information
+        // and would just inflate the concept inventory.
+        if self.config.predict_gate_strength > 0.0
+            && self.recent_surprise < self.config.predict_gate_strength {
+            return;
+        }
         let buf_len = self.recent_atoms.len();
         if buf_len < 2 { return; }
 
