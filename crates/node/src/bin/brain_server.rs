@@ -136,6 +136,7 @@ fn build_fresh_brain() -> Result<Brain> {
     text.max_concept_member_count    = 32;
     text.decay_rate                  = 0.00002;
     text.prune_floor                 = 0.001;
+    apply_env_overrides(&mut text);
     brain.create_pool(text,
         Box::new(BytePassthroughEncoding { prefix: "t" }) as Box<dyn AtomEncoding>);
 
@@ -145,6 +146,7 @@ fn build_fresh_brain() -> Result<Brain> {
     image.max_concept_member_count    = 32;
     image.decay_rate                  = 0.00002;
     image.prune_floor                 = 0.001;
+    apply_env_overrides(&mut image);
     brain.create_pool(image,
         Box::new(BytePassthroughEncoding { prefix: "i" }) as Box<dyn AtomEncoding>);
 
@@ -154,6 +156,7 @@ fn build_fresh_brain() -> Result<Brain> {
     audio.max_concept_member_count    = 32;
     audio.decay_rate                  = 0.00002;
     audio.prune_floor                 = 0.001;
+    apply_env_overrides(&mut audio);
     brain.create_pool(audio,
         Box::new(BytePassthroughEncoding { prefix: "a" }) as Box<dyn AtomEncoding>);
 
@@ -182,6 +185,7 @@ fn build_fresh_brain() -> Result<Brain> {
     action.max_concept_member_count    = 32;
     action.decay_rate                  = 0.00002;
     action.prune_floor                 = 0.001;
+    apply_env_overrides(&mut action);
     brain.create_pool(action,
         Box::new(BytePassthroughEncoding { prefix: "act" }) as Box<dyn AtomEncoding>);
     brain.designate_action_pool(POOL_ACTION);
@@ -198,10 +202,57 @@ fn build_fresh_brain() -> Result<Brain> {
     turn.max_concept_member_count    = 4;
     turn.decay_rate                  = 0.001;     // ~50× faster than text/image/audio
     turn.prune_floor                 = 0.01;      // aggressive — old turn neurons recede fast
+    apply_env_overrides(&mut turn);
     brain.create_pool(turn,
         Box::new(BytePassthroughEncoding { prefix: "turn" }) as Box<dyn AtomEncoding>);
 
     Ok(brain)
+}
+
+/// Read per-pool env-var overrides for tunable knobs.  Convention:
+/// `BRAIN_<KNOB>_<POOLNAME>` (case-insensitive pool name, uppercased
+/// here), with `BRAIN_<KNOB>_DEFAULT` as a global fallback.  Pool-
+/// specific override wins over the default.  Knobs:
+///   SPARSITY      → sparsity_top_k_frac  (f32 in (0.0, 1.0])
+///   SPARSITY_MIN  → sparsity_min_neurons (usize >= 1)
+///   WINDOW        → recent_atoms_window  (usize)
+///   EMERGENCE     → concept_emergence_threshold (u32)
+///   MAX_MEMBERS   → max_concept_member_count (usize)
+///   DECAY         → decay_rate (f32)
+///   PRUNE_FLOOR   → prune_floor (f32)
+/// All overrides are optional; missing env var leaves the field
+/// untouched.  Used by the GA harness to vary genome values without
+/// recompiling.  See data/foundation/ga_brain_search.jsonl.
+fn apply_env_overrides(cfg: &mut PoolConfig) {
+    fn read_f32(key: &str) -> Option<f32> {
+        std::env::var(key).ok().and_then(|v| v.parse().ok())
+    }
+    fn read_usize(key: &str) -> Option<usize> {
+        std::env::var(key).ok().and_then(|v| v.parse().ok())
+    }
+    fn read_u32(key: &str) -> Option<u32> {
+        std::env::var(key).ok().and_then(|v| v.parse().ok())
+    }
+    let upper = cfg.name.to_uppercase();
+    let pick_f32 = |knob: &str| -> Option<f32> {
+        read_f32(&format!("BRAIN_{knob}_{upper}"))
+            .or_else(|| read_f32(&format!("BRAIN_{knob}_DEFAULT")))
+    };
+    let pick_usize = |knob: &str| -> Option<usize> {
+        read_usize(&format!("BRAIN_{knob}_{upper}"))
+            .or_else(|| read_usize(&format!("BRAIN_{knob}_DEFAULT")))
+    };
+    let pick_u32 = |knob: &str| -> Option<u32> {
+        read_u32(&format!("BRAIN_{knob}_{upper}"))
+            .or_else(|| read_u32(&format!("BRAIN_{knob}_DEFAULT")))
+    };
+    if let Some(v) = pick_f32("SPARSITY")     { cfg.sparsity_top_k_frac = v.clamp(0.01, 1.0); }
+    if let Some(v) = pick_usize("SPARSITY_MIN"){ cfg.sparsity_min_neurons = v.max(1); }
+    if let Some(v) = pick_usize("WINDOW")     { cfg.recent_atoms_window = v; }
+    if let Some(v) = pick_u32("EMERGENCE")    { cfg.concept_emergence_threshold = v; }
+    if let Some(v) = pick_usize("MAX_MEMBERS"){ cfg.max_concept_member_count = v; }
+    if let Some(v) = pick_f32("DECAY")        { cfg.decay_rate = v; }
+    if let Some(v) = pick_f32("PRUNE_FLOOR")  { cfg.prune_floor = v; }
 }
 
 fn load_or_build_brain(checkpoint_path: &PathBuf) -> Result<Brain> {

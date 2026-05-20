@@ -89,7 +89,29 @@ pub struct PoolConfig {
     pub decay_rate:                  f32,
     pub prune_floor:                 f32,
     pub plasticity_baseline:         f32,
+
+    /// k-WTA sparsity target.  After every `tick_housekeeping`, only the
+    /// top fraction of currently-firing neurons (ranked by activation)
+    /// remain firing — the rest are inhibited.  Biological motivation:
+    /// V1 firing rates ~2-5% (Vinje & Gallant 2000); cortical sparse
+    /// coding (Olshausen & Field 1996); local interneuron k-WTA
+    /// (Maass 2000).  Default 1.0 = no sparsity (substrate behaviour
+    /// unchanged).  Range: (0.0, 1.0].  Empirical falsification of
+    /// Stage 14 showed unconstrained Hebbian co-firing produces
+    /// runaway concept-of-concept emergence (mega-bindings of 797 +
+    /// members); k-WTA is the smallest biological mechanism that
+    /// directly bounds this.
+    #[serde(default = "default_sparsity_top_k_frac")]
+    pub sparsity_top_k_frac:         f32,
+    /// Minimum number of neurons that stay firing after the k-WTA
+    /// gate even when `sparsity_top_k_frac` would round to fewer.
+    /// Prevents complete silence in low-traffic pools.
+    #[serde(default = "default_sparsity_min_neurons")]
+    pub sparsity_min_neurons:        usize,
 }
+
+fn default_sparsity_top_k_frac() -> f32 { 1.0 }
+fn default_sparsity_min_neurons() -> usize { 1 }
 
 impl PoolConfig {
     pub fn defaults(name: impl Into<String>, id: PoolId) -> Self {
@@ -104,6 +126,8 @@ impl PoolConfig {
             decay_rate: 0.0005,
             prune_floor: 0.01,
             plasticity_baseline: 0.1,
+            sparsity_top_k_frac: 1.0,
+            sparsity_min_neurons: 1,
         }
     }
 }
@@ -470,6 +494,47 @@ impl Pool {
         let floor = self.config.prune_floor;
         for n in self.neurons.iter_mut() {
             n.decay_and_prune(decay, floor);
+        }
+        self.apply_kwta_sparsity();
+    }
+
+    /// Biologically-motivated k-WTA sparsity gate.  After housekeeping
+    /// decay, sort `currently_firing` by activation strength descending
+    /// and keep only the top `sparsity_top_k_frac` fraction (with a
+    /// floor of `sparsity_min_neurons`).  The rest are evicted from
+    /// the firing set AND from the activation map so downstream
+    /// propagation does not see them.
+    ///
+    /// Rationale: unconstrained Hebbian co-firing accumulates ever-
+    /// larger concept-of-concept bindings (empirically 797+ members
+    /// in the Stage 14 falsification).  Biology constrains this via
+    /// local inhibitory interneurons enforcing 2-5% firing rates.
+    /// k-WTA captures the functional effect without modelling
+    /// individual interneurons.
+    fn apply_kwta_sparsity(&mut self) {
+        let frac = self.config.sparsity_top_k_frac;
+        if frac >= 1.0 { return; }
+        let n_firing = self.currently_firing.len();
+        if n_firing == 0 { return; }
+        let target_k = ((frac * n_firing as f32).ceil() as usize)
+            .max(self.config.sparsity_min_neurons)
+            .min(n_firing);
+        if target_k >= n_firing { return; }
+
+        // Collect (id, activation) for all currently-firing neurons.
+        let mut ranked: Vec<(NeuronId, f32)> = self.currently_firing.iter()
+            .map(|&id| (id, *self.activation.get(&id).unwrap_or(&0.0)))
+            .collect();
+        // Sort descending by activation; ties broken by id (stable).
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+
+        // Evict everything below rank target_k.
+        for &(id, _) in ranked.iter().skip(target_k) {
+            self.currently_firing.remove(&id);
+            self.activation.remove(&id);
         }
     }
 

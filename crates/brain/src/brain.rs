@@ -1351,7 +1351,13 @@ impl Brain {
         // atom-tier scores 1.0; concept-tier matches always score
         // ≥ 1.0 via the concept-tier bonus when concept_score
         // itself crosses the floor) and rejects OOV bleed.
-        const MIN_ATOM_SCORE: f32 = 0.50;
+        // GA-tunable via `BRAIN_MIN_ATOM_SCORE` env var; falls back
+        // to 0.50 when unset / unparseable.
+        let min_atom_score: f32 = std::env::var("BRAIN_MIN_ATOM_SCORE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|v: f32| v.clamp(0.0, 1.0))
+            .unwrap_or(0.50);
 
         // Walk binding-pool concepts, score each.
         let bp = self.fabric.pool(bpid)?;
@@ -1406,8 +1412,8 @@ impl Brain {
             // concept emergence) wins every query with concept_score
             // ≈ 0.005 because the +1.0 bonus pushes its total above
             // any legitimate single-pair binding's atom-tier score.
-            let concept_ok = concept_score >= MIN_ATOM_SCORE;
-            let atom_ok    = atom_score    >= MIN_ATOM_SCORE;
+            let concept_ok = concept_score >= min_atom_score;
+            let atom_ok    = atom_score    >= min_atom_score;
             if !concept_ok && !atom_ok { continue; }
 
             // Concept-tier match preempts atom-tier ONLY when the
