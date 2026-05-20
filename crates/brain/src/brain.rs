@@ -1435,7 +1435,13 @@ impl Brain {
             // concept emergence) wins every query with concept_score
             // ≈ 0.005 because the +1.0 bonus pushes its total above
             // any legitimate single-pair binding's atom-tier score.
-            let concept_ok = concept_score >= min_atom_score;
+            // Concept-tier requires BOTH concept_score AND some atom
+            // corroboration.  Without the atom check, a single concept
+            // matching by partial-substring emergence (e.g. 'fox'
+            // concept fires from OOV 'foobarbaz') wins concept-tier
+            // preempt and breaks OOV honesty.
+            let concept_ok = concept_score >= min_atom_score
+                          && atom_score    >= 0.20;
             let atom_ok    = atom_score    >= min_atom_score;
             if !concept_ok && !atom_ok { continue; }
 
