@@ -59,9 +59,57 @@ Root cause: `/integrate`'s Stage 7 routing outputs `binding_target_atoms` which 
 
 The right architectural answer is **not** to retrofit `/integrate` but to keep the concept-aware path in `/chat` and let `/integrate` stay atom-level as the high-precision internal retrieval.
 
+## Stage 14 falsification — categorical_unified retrain (2026-05-19)
+
+Tested whether the Stage 14 design (trained_decode authoritative +
+MIN_ATOM_SCORE=0.50 floor) generalizes beyond the 32 toddler pairs
+by training `categorical_unified_001.jsonl` (6,972 pairs, 34 categories
+above the 26-pair emergence threshold) with `--burst --reps=4`.
+
+**Result: design does NOT yet generalize.**
+
+| Probe | Toddler-only | After categorical training | Δ |
+|---|---|---|---|
+| toddler EXACT | 30/32 (93.8%) | **4/32 (12.5%)** | −26 |
+| OOV honesty | 3/3 (100%) | 1/3 (33%) | −2 |
+| K-12 EXACT | 0/16 | 0/16 | 0 |
+
+Diagnosis: layer-2+ runaway dominated.  Binding pool exploded from
+33 → 6,920 bindings.  POOL_ACTION concepts ballooned to 46,227.
+Two mega-bindings emerged with 912 and 149 members.  More crucially,
+DOZENS of bindings emerged with 23-29 member counts containing
+heterogeneous action targets (`p4n0|p4n1|p4n2|p4n3|p4n4|p4n96|p4n98|
+p4n168|p4n209|p4n231|p4n518|p4n3328`) — a META-binding pattern that
+unifies multiple category atoms.  When `decode_best_trained_binding`
+walks these in firing order, the decoder returns whichever fragment
+decodes first ('body' won for every query).
+
+Tested falsification predictions from Stage 14:
+- ❌ K-12 lift off zero — did NOT occur
+- ❌ OOV honesty hold at 3/3 — regressed to 1/3
+- ❌ Toddler hold at 30/32 — collapsed to 4/32
+- ✅ Runaway mega-binding question — emerged at scale as predicted
+
+Substrate ground truth verified intact: `/integrate piano →
+musical_instrumentmu` (decoder residual but correct binding exists).
+The retrieval mechanism is correct in principle; the **substrate-side
+runaway emergence is the gating defect**.
+
+Toddler-only brain.bin backed up to
+`brain.bin.toddler-only-30of32` (8.3 MB) so 30/32 + 3/3 is preserved
+as a known-good restore point.
+
 ## Open architectural questions for future sessions
 
-1. **Layer-2+ concept emergence runaway**: under dense-burst training of moderately deep corpora, layer-2+ concepts accumulate with very long member chains.  Should there be a max-depth cap on concept-of-concept emergence?  Or a degree-of-uniqueness filter?
+1. **Layer-2+ concept emergence runaway — NOW LOAD-BEARING**: under
+   dense-burst training of moderately deep corpora, layer-2+
+   concepts accumulate into mega-bindings (912+ member counts) and
+   into heterogeneous meta-bindings (23-29 members mixing multiple
+   category targets).  This is no longer a future concern — it
+   prevents Stage 14 from generalizing.  Approaches to consider:
+   max-depth cap on `Pool::collapse_tail_to_concept`; degree-of-
+   uniqueness filter at binding promotion; bind_q_atoms.len() / 
+   q_atoms.len() ratio penalty in `decode_best_trained_binding`.
 
 2. **`/chat`'s integrate_autonomous fabric path uses `/integrate` under the hood**.  So body/K-12 failures persist in `/chat` too.  The OOV gate catches them as `outside_grounding=true` only when the binding precision is below 0.70 — for partial-match queries the path passes through to the atom-level fabric retrieval.  A concept-aware fabric-retrieval *parallel path* in `integrate_autonomous` (rather than retrofitting `/integrate`) would be the safe next step.
 
