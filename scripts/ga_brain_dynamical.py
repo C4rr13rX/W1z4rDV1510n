@@ -59,6 +59,18 @@ import pathlib
 import random
 import socket
 import subprocess
+
+# Defensive: force stdout/stderr to utf-8 on Windows so any Unicode
+# characters in print statements don't crash the run.  The previous
+# Stage 15.X stall was caused by a single `→` arrow in a
+# BEST_PROGRESS message hitting cp1252's encoding limit.
+import sys as _sys
+if hasattr(_sys.stdout, "reconfigure"):
+    try: _sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except Exception: pass
+if hasattr(_sys.stderr, "reconfigure"):
+    try: _sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except Exception: pass
 import sys
 import time
 import urllib.request
@@ -504,16 +516,17 @@ def _write_best(rec: dict) -> None:
 
 def _significant_improvement(prev_best: dict | None, candidate: dict) -> str | None:
     """Return a short reason string if `candidate` is meaningfully
-    better than `prev_best`.  Used to drive Monitor pings."""
+    better than `prev_best`.  Used to drive Monitor pings.
+    ASCII-only (Windows cp1252 console can't encode Unicode arrows)."""
     if prev_best is None: return "first-recorded best"
     cm = candidate.get("metrics", {})
     pm = prev_best.get("metrics", {})
     if cm.get("k12_frac", 0) >= pm.get("k12_frac", 0) + 0.08:
-        return f"K-12 lifted {pm.get('k12_frac','?')} → {cm.get('k12_frac','?')}"
+        return f"K-12 lifted {pm.get('k12_frac','?')} -> {cm.get('k12_frac','?')}"
     if cm.get("toddler_frac", 0) >= pm.get("toddler_frac", 0) + 0.05:
-        return f"toddler lifted {pm.get('toddler_frac','?')} → {cm.get('toddler_frac','?')}"
+        return f"toddler lifted {pm.get('toddler_frac','?')} -> {cm.get('toddler_frac','?')}"
     if candidate.get("fitness", 0) >= prev_best.get("fitness", 0) + 0.5:
-        return f"fitness {prev_best.get('fitness'):.2f} → {candidate.get('fitness'):.2f}"
+        return f"fitness {prev_best.get('fitness'):.2f} -> {candidate.get('fitness'):.2f}"
     return None
 
 
