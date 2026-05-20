@@ -68,17 +68,33 @@ CORPUS_PATH  = PROJECT_ROOT / "data" / "training" / "categorical_unified_001.jso
 
 # Gene definitions — every gene is a knob on the dynamical system.
 # Format: (env_var_name, min, max, kind)  kind in {"float", "int", "log_float", "log_int"}
+#
+# Range choices reflect what the P1-only GA discovered:
+#   - Sparsity below ~0.5 kills OOV honesty (substrate can't fire enough atoms
+#     for the binding-match path to reach the precision floor).  Tightened
+#     to [0.50, 1.00] so the GA explores meaningful regimes only.
+#   - Heterosynaptic LTD is empirically small (1-5% per LTP event); cap at
+#     0.30 so the GA can't wipe synapses.
+#   - Predict-gate over 0.7 likely suppresses ALL concept emergence
+#     (substrate stays at atom-level); cap at 0.7.
+#   - Emergence-threshold range raised so the GA can suppress runaway
+#     concept-of-concept emergence at the SOURCE (higher = fewer emerges).
 GENES = [
-    # Sparsity per pool — primary lever against runaway concept-of-concept emergence.
-    ("BRAIN_SPARSITY_TEXT",       0.05,   1.0,    "float"),
-    ("BRAIN_SPARSITY_ACTION",     0.05,   1.0,    "float"),
-    ("BRAIN_SPARSITY_DEFAULT",    0.05,   1.0,    "float"),
+    # P1 — k-WTA sparsity per pool (Vinje & Gallant 2000).
+    ("BRAIN_SPARSITY_TEXT",       0.50,   1.0,    "float"),
+    ("BRAIN_SPARSITY_ACTION",     0.50,   1.0,    "float"),
+    ("BRAIN_SPARSITY_DEFAULT",    0.50,   1.0,    "float"),
+    # P2 — Heterosynaptic LTD per pool (Royer & Paré 2003; Turrigiano 2008).
+    ("BRAIN_HET_LTD_DEFAULT",     0.0,    0.30,   "float"),
+    # P3 — Predictive-coding gate (Rao & Ballard 1999; Friston 2005).
+    ("BRAIN_PREDICT_GATE_TEXT",   0.0,    0.70,   "float"),
+    ("BRAIN_PREDICT_GATE_ACTION", 0.0,    0.70,   "float"),
     # Decode-time floor — OOV honesty / partial-match threshold.
-    ("BRAIN_MIN_ATOM_SCORE",      0.10,   0.90,   "float"),
-    # Concept emergence threshold — how many co-fires before a concept crystallises.
-    # Higher = more conservative, fewer concepts, slower runaway.
-    ("BRAIN_EMERGENCE_TEXT",      3,      12,     "int"),
-    ("BRAIN_EMERGENCE_ACTION",    3,      12,     "int"),
+    ("BRAIN_MIN_ATOM_SCORE",      0.30,   0.85,   "float"),
+    # Concept emergence threshold — higher = fewer concepts emerge,
+    # slower runaway under repeated training.
+    ("BRAIN_EMERGENCE_TEXT",      3,      20,     "int"),
+    ("BRAIN_EMERGENCE_ACTION",    3,      20,     "int"),
     # Recent-atoms window — fingerprint memory depth.
     ("BRAIN_WINDOW_TEXT",         4096,   131072, "log_int"),
     ("BRAIN_WINDOW_ACTION",       4096,   131072, "log_int"),
@@ -141,14 +157,17 @@ def random_genome(gen: int = 0) -> Genome:
 
 
 def seed_genome(gen: int = 0) -> Genome:
-    """The known-good baseline: substrate defaults (k-WTA off, the
-    server's hardcoded windows/decays).  Guarantees the initial
+    """The known-good baseline: substrate defaults (P1 off, P2 off,
+    P3 off, hardcoded windows/decays).  Guarantees the initial
     population has at least one genome that hits the 30/32 + 3/3
-    floor we already validated."""
+    floor we already validated on the P1+P2+P3 binary at defaults."""
     vals = {
         "BRAIN_SPARSITY_TEXT":       1.0,
         "BRAIN_SPARSITY_ACTION":     1.0,
         "BRAIN_SPARSITY_DEFAULT":    1.0,
+        "BRAIN_HET_LTD_DEFAULT":     0.0,
+        "BRAIN_PREDICT_GATE_TEXT":   0.0,
+        "BRAIN_PREDICT_GATE_ACTION": 0.0,
         "BRAIN_MIN_ATOM_SCORE":      0.50,
         "BRAIN_EMERGENCE_TEXT":      3,
         "BRAIN_EMERGENCE_ACTION":    3,
