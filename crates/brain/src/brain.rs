@@ -2786,6 +2786,63 @@ impl Brain {
         total_pruned
     }
 
+    /// P4 sleep-cycle REPLAY (Wilson & McNaughton 1994; McClelland,
+    /// McNaughton, O'Reilly 1995 — Complementary Learning Systems).
+    /// Re-fires the last `count` moment fingerprints in their original
+    /// firing order at reduced activation `strength`, then ticks the
+    /// fabric so cross-pool terminals reinforce the same patterns.
+    ///
+    /// Biological purpose: during sleep / quiet wakefulness, the
+    /// hippocampus replays recent activity in compressed form, driving
+    /// repeated reactivation of cortical patterns.  This consolidates
+    /// recent episodic memories into long-term cortical statistical
+    /// representations and is the mechanism by which CLS resolves the
+    /// stability/plasticity dilemma.
+    ///
+    /// Returns the number of fingerprints replayed.  Intended to be
+    /// called AFTER `sleep()` prunes weak concepts so replay only
+    /// strengthens patterns that survived pruning.
+    pub fn replay_recent_moments(&mut self, count: usize, strength: f32) -> usize {
+        if count == 0 || strength <= 0.0 { return 0; }
+        // Snapshot the last `count` fingerprints.  Replay in original
+        // temporal order (oldest first) so any sequential structure
+        // between them is preserved.
+        let recent: Vec<MomentFingerprint> = self.moment_history.iter()
+            .rev().take(count).cloned().collect::<Vec<_>>()
+            .into_iter().rev().collect();
+        let mut replayed = 0usize;
+        for fp in &recent {
+            let now = self.fabric.current_tick();
+            // Re-inject each member's activation in its source pool.
+            // Walks ordered_per_pool (preserves firing order) when
+            // available, else falls back to the sorted `pairs`.
+            if !fp.ordered_per_pool.is_empty() {
+                for (pid, ns) in &fp.ordered_per_pool {
+                    if let Some(pool) = self.fabric.pool(*pid) {
+                        let mut pp = pool.write();
+                        for &nid in ns {
+                            pp.inject_activation(nid, strength, now);
+                        }
+                    }
+                }
+            } else {
+                for &(pid, nid) in &fp.pairs {
+                    if let Some(pool) = self.fabric.pool(pid) {
+                        pool.write().inject_activation(nid, strength, now);
+                    }
+                }
+            }
+            // Advance: drives cross-pool terminal reinforcement,
+            // fingerprint re-registration (which may strengthen
+            // consolidated bindings), and the standard decay/
+            // sparsity pipeline.  This is what turns replay into
+            // actual synaptic change.
+            self.fabric.advance_tick();
+            replayed += 1;
+        }
+        replayed
+    }
+
     // ---------------------------------------------------------------
     // Phase 9 — Checkpoint / restore (spec §6 + §11).
     //

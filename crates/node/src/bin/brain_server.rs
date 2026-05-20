@@ -688,6 +688,45 @@ async fn checkpoint(
     }))
 }
 
+#[derive(Deserialize, Default)]
+struct SleepRequest {
+    #[serde(default = "default_sleep_min_use_count")]
+    min_use_count:    u64,
+    #[serde(default = "default_sleep_stale_ticks")]
+    stale_ticks:      u64,
+    #[serde(default)]
+    replay_count:     usize,
+    #[serde(default = "default_sleep_replay_strength")]
+    replay_strength:  f32,
+}
+fn default_sleep_min_use_count()  -> u64 { 2 }
+fn default_sleep_stale_ticks()    -> u64 { 1000 }
+fn default_sleep_replay_strength()-> f32 { 0.5 }
+
+#[derive(Serialize)]
+struct SleepResponse {
+    pruned:    usize,
+    replayed:  usize,
+    tick_now:  u64,
+}
+
+/// P4 sleep cycle: prune weak concepts (SHY hypothesis — Tononi &
+/// Cirelli) then replay recent moment fingerprints to consolidate
+/// surviving patterns (CLS — McClelland, McNaughton, O'Reilly 1995).
+/// Call at idle / between training epochs; not called automatically.
+async fn sleep_cycle(
+    State(s): State<AppState>,
+    Json(req): Json<SleepRequest>,
+) -> Json<SleepResponse> {
+    let mut brain = s.brain.lock().await;
+    let pruned = brain.sleep(req.min_use_count, req.stale_ticks);
+    let replayed = if req.replay_count > 0 {
+        brain.replay_recent_moments(req.replay_count, req.replay_strength)
+    } else { 0 };
+    let tick_now = brain.fabric_mut().current_tick();
+    Json(SleepResponse { pruned, replayed, tick_now })
+}
+
 // -----------------------------------------------------------------
 // Handlers — multimodal
 // -----------------------------------------------------------------
@@ -999,6 +1038,7 @@ async fn main() -> Result<()> {
         .route("/integrate_resonant",    post(integrate_resonant))
         .route("/pool/concepts",         post(pool_concepts))
         .route("/checkpoint",            post(checkpoint))
+        .route("/sleep",                 post(sleep_cycle))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))
