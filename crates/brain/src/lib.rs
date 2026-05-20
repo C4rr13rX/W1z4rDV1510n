@@ -41,7 +41,7 @@ pub mod identity;
 pub mod network;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
-pub use pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
+pub use pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig};
 pub use fabric::{Fabric, FabricConfig, Moment, SettleResult};
 pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,

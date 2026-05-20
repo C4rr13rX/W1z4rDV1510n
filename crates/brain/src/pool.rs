@@ -74,6 +74,85 @@ impl AtomEncoding for BytePassthroughEncoding {
     fn name(&self) -> &'static str { "byte-passthrough" }
 }
 
+/// Substrate-internal signal that can drive a knob.  These are the
+/// observables the pool tracks every tick.  Genes pick WHICH signal
+/// drives WHICH knob, not the knob's static value — the dynamical-
+/// system interpretation of evolutionary search.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum ControlSignal {
+    /// EMA of unpredicted-firing fraction.  Range ~[0, 1].  High =
+    /// novel input.
+    Surprise,
+    /// 1 - Surprise.  Range ~[0, 1].  High = predicted / stable.
+    InvSurprise,
+    /// EMA of firing-set size, normalised against neuron_count.
+    /// Range ~[0, 0.5] typically.  High = dense firing.
+    FiringRate,
+    /// 1 - FiringRate (clamped).  Range ~[0, 1].  High = sparse firing.
+    InvFiringRate,
+    /// EMA of decode_best_trained_binding's winning atom_score for
+    /// queries against this pool.  Range ~[0, 1].  High = retrieval
+    /// landing on confident bindings.
+    DecodePrecisionEma,
+    /// 1 - DecodePrecisionEma.  High = retrieval struggling.
+    InvDecodePrecisionEma,
+    /// EMA of concept_count.  Range potentially huge — normalised
+    /// by `concept_count_norm` parameter in DrivenBy.
+    ConceptCountEma,
+    /// EMA of terminal count.  High = dense connectivity.
+    TerminalCountEma,
+}
+
+/// How a knob's effective value is computed each tick.  Genome
+/// encodes one ControlMode per knob; the GA explores wirings
+/// (which signal × scale × offset).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ControlMode {
+    /// Static value — backward-compatible default.
+    Constant(f32),
+    /// effective = clamp(min, max, offset + scale * signal_value()).
+    DrivenBy {
+        signal: ControlSignal,
+        scale:  f32,
+        offset: f32,
+        min:    f32,
+        max:    f32,
+    },
+}
+
+impl ControlMode {
+    /// Compute the effective value given current pool ControlState.
+    pub fn evaluate(&self, st: &ControlState) -> f32 {
+        match self {
+            ControlMode::Constant(v) => *v,
+            ControlMode::DrivenBy { signal, scale, offset, min, max } => {
+                let raw = match signal {
+                    ControlSignal::Surprise              => st.surprise,
+                    ControlSignal::InvSurprise           => 1.0 - st.surprise,
+                    ControlSignal::FiringRate            => st.firing_rate,
+                    ControlSignal::InvFiringRate         => 1.0 - st.firing_rate,
+                    ControlSignal::DecodePrecisionEma    => st.decode_precision,
+                    ControlSignal::InvDecodePrecisionEma => 1.0 - st.decode_precision,
+                    ControlSignal::ConceptCountEma       => st.concept_count_norm,
+                    ControlSignal::TerminalCountEma      => st.terminal_count_norm,
+                };
+                (offset + scale * raw).clamp(*min, *max)
+            }
+        }
+    }
+}
+
+/// Snapshot of one pool's observable signals for ControlMode evaluation.
+/// Materialised once per tick / per-knob-read, not stored — small.
+#[derive(Debug, Clone, Copy)]
+pub struct ControlState {
+    pub surprise:           f32,  // [0, 1] from recent_surprise EMA
+    pub firing_rate:        f32,  // [0, 1] normalised
+    pub decode_precision:   f32,  // [0, 1] from decode_precision_ema
+    pub concept_count_norm: f32,  // log10(concept_count+1)/4 ≈ [0, ~1]
+    pub terminal_count_norm:f32,  // log10(terminal_count+1)/7 ≈ [0, ~1]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
     pub name:                        String,
@@ -90,60 +169,44 @@ pub struct PoolConfig {
     pub prune_floor:                 f32,
     pub plasticity_baseline:         f32,
 
-    /// k-WTA sparsity target.  After every `tick_housekeeping`, only the
-    /// top fraction of currently-firing neurons (ranked by activation)
-    /// remain firing — the rest are inhibited.  Biological motivation:
-    /// V1 firing rates ~2-5% (Vinje & Gallant 2000); cortical sparse
-    /// coding (Olshausen & Field 1996); local interneuron k-WTA
-    /// (Maass 2000).  Default 1.0 = no sparsity (substrate behaviour
-    /// unchanged).  Range: (0.0, 1.0].  Empirical falsification of
-    /// Stage 14 showed unconstrained Hebbian co-firing produces
-    /// runaway concept-of-concept emergence (mega-bindings of 797 +
-    /// members); k-WTA is the smallest biological mechanism that
-    /// directly bounds this.
-    #[serde(default = "default_sparsity_top_k_frac")]
-    pub sparsity_top_k_frac:         f32,
+    /// k-WTA sparsity target — DYNAMICAL.  ControlMode driven by a
+    /// substrate-internal signal each tick.  Default is
+    /// Constant(1.0) (no-op).  When DrivenBy is selected, e.g.
+    /// `DrivenBy { signal: InvSurprise, scale: 0.7, offset: 0.3 }`,
+    /// sparsity adapts: stable / predicted firings get sparsified;
+    /// novel / surprising firings keep more atoms active.
+    /// Biological motivation: cortical inhibitory interneurons
+    /// modulate sparsity dynamically with input regularity, not
+    /// statically.
+    #[serde(default = "default_sparsity_mode")]
+    pub sparsity_mode:               ControlMode,
     /// Minimum number of neurons that stay firing after the k-WTA
     /// gate even when `sparsity_top_k_frac` would round to fewer.
     /// Prevents complete silence in low-traffic pools.
     #[serde(default = "default_sparsity_min_neurons")]
     pub sparsity_min_neurons:        usize,
 
-    /// Heterosynaptic long-term depression ratio.  After each tick,
-    /// for any neuron that had a terminal reinforced this tick, all
-    /// of its OTHER terminals weaken by `weight *= 1 - ratio`.
-    /// Biological motivation: heterosynaptic LTD (Royer & Paré 2003;
-    /// Turrigiano 2008) provides homeostatic competition between
-    /// synapses on the same neuron — pure Hebbian potentiation runs
-    /// away because there is no mechanism to weaken non-reinforced
-    /// synapses.  Empirically the ratio is small (1-5% per LTP event)
-    /// because the mechanism is collective, not single-event.
-    /// Default 0.0 = disabled (no behaviour change).  Range [0.0, 0.5].
-    #[serde(default = "default_heterosynaptic_ltd_ratio")]
-    pub heterosynaptic_ltd_ratio:    f32,
+    /// Heterosynaptic long-term depression — DYNAMICAL.  ControlMode
+    /// driven by substrate state.  Constant(0.0) default = disabled.
+    /// When DrivenBy is selected, ratio adapts: high terminal density
+    /// could drive higher LTD; high decode precision could lower it
+    /// (don't weaken what's working).
+    #[serde(default = "default_heterosynaptic_ltd_mode")]
+    pub heterosynaptic_ltd_mode:     ControlMode,
 
-    /// Predictive-coding gate strength.  Each observe step computes
-    /// `surprise = 1 - |prediction ∩ new_firing| / |new_firing|`,
-    /// where `prediction` is the set of intra-pool terminal targets
-    /// of the PREVIOUS tick's firing set.  The pool maintains an EMA
-    /// of recent surprise; concept emergence is GATED so it only
-    /// runs when EMA(surprise) >= predict_gate_strength.
-    /// Biological motivation: predictive coding (Rao & Ballard 1999;
-    /// Friston 2005) — cortex sends predictions down via L6, error
-    /// signals up via L5.  New concepts crystallise in higher cortex
-    /// to explain unpredicted error, NOT to record already-predicted
-    /// patterns.  This is the deepest constraint against runaway
-    /// concept-of-concept emergence (P1 k-WTA bounds breadth; P2 LTD
-    /// bounds synapse hoarding; P3 prevents redundant concepts
-    /// outright).  Default 0.0 = disabled.  Range [0.0, 0.9].
-    #[serde(default = "default_predict_gate_strength")]
-    pub predict_gate_strength:       f32,
+    /// Predictive-coding gate — DYNAMICAL.  Constant(0.0) default
+    /// = always emerge.  When DrivenBy(InvSurprise, ...) is selected,
+    /// the gate self-tightens when surprise drops (substrate becomes
+    /// stable → emergence pauses), and self-loosens when surprise
+    /// rises (novel input → emergence resumes).
+    #[serde(default = "default_predict_gate_mode")]
+    pub predict_gate_mode:           ControlMode,
 }
 
-fn default_sparsity_top_k_frac() -> f32 { 1.0 }
+fn default_sparsity_mode() -> ControlMode { ControlMode::Constant(1.0) }
 fn default_sparsity_min_neurons() -> usize { 1 }
-fn default_heterosynaptic_ltd_ratio() -> f32 { 0.0 }
-fn default_predict_gate_strength() -> f32 { 0.0 }
+fn default_heterosynaptic_ltd_mode() -> ControlMode { ControlMode::Constant(0.0) }
+fn default_predict_gate_mode() -> ControlMode { ControlMode::Constant(0.0) }
 
 impl PoolConfig {
     pub fn defaults(name: impl Into<String>, id: PoolId) -> Self {
@@ -158,10 +221,10 @@ impl PoolConfig {
             decay_rate: 0.0005,
             prune_floor: 0.01,
             plasticity_baseline: 0.1,
-            sparsity_top_k_frac: 1.0,
+            sparsity_mode: ControlMode::Constant(1.0),
             sparsity_min_neurons: 1,
-            heterosynaptic_ltd_ratio: 0.0,
-            predict_gate_strength: 0.0,
+            heterosynaptic_ltd_mode: ControlMode::Constant(0.0),
+            predict_gate_mode: ControlMode::Constant(0.0),
         }
     }
 }
@@ -207,6 +270,28 @@ pub struct Pool {
     /// Drives the predictive-coding gate on concept emergence.
     /// Cleared on new(); transient runtime state (not serialised).
     recent_surprise:  f32,
+
+    /// EMA of `currently_firing.len()` post-k-WTA — driven by every
+    /// observe.  Used as a ControlSignal: sparsity controllers can
+    /// read this to drive their own thresholds.
+    firing_rate_ema:  f32,
+
+    /// EMA of post-emergence concept_count.  Tracks how aggressively
+    /// the pool is crystallising new concepts.  Rising fast =
+    /// concept-of-concept runaway signal.
+    concept_count_ema: f32,
+
+    /// EMA of total terminal count across all neurons.  Tracks
+    /// synaptic density.  High terminal count + small neuron count
+    /// = dense connectivity (high-LTD candidate).
+    terminal_count_ema: f32,
+
+    /// External signal — set by Brain::decode_best_trained_binding
+    /// when this pool is the query_pool of a decode.  Rolling avg
+    /// of the winning binding's atom_score (the precision×recall
+    /// produced).  Used as a ControlSignal so decode-time floor
+    /// adapters can read it.
+    pub decode_precision_ema: f32,
 }
 
 impl Pool {
@@ -223,6 +308,10 @@ impl Pool {
             currently_firing: AHashSet::new(),
             activation:       AHashMap::new(),
             recent_surprise:  1.0,
+            firing_rate_ema:  0.0,
+            concept_count_ema: 0.0,
+            terminal_count_ema: 0.0,
+            decode_precision_ema: 0.0,
         }
     }
 
@@ -231,6 +320,46 @@ impl Pool {
     pub fn neuron_count(&self) -> usize { self.neurons.len() }
     pub fn concept_count(&self) -> usize {
         self.neurons.iter().filter(|n| !n.is_atom()).count()
+    }
+
+    /// Snapshot the pool's observable signals for ControlMode evaluation.
+    /// Normalised so signals are roughly in [0, 1] and ControlModes can
+    /// compose without each signal having its own scale calibration.
+    pub fn control_state(&self) -> ControlState {
+        let neurons = self.neurons.len() as f32;
+        let firing_rate = if neurons > 0.0 {
+            (self.firing_rate_ema / neurons).clamp(0.0, 1.0)
+        } else { 0.0 };
+        ControlState {
+            surprise:            self.recent_surprise.clamp(0.0, 1.0),
+            firing_rate,
+            decode_precision:    self.decode_precision_ema.clamp(0.0, 1.0),
+            // log-norm so a pool with 10K concepts isn't 10× more
+            // influential than one with 1K.  /4 keeps log10(10K)=4 at 1.0.
+            concept_count_norm:  (self.concept_count_ema.max(1.0).log10() / 4.0).clamp(0.0, 1.0),
+            terminal_count_norm: (self.terminal_count_ema.max(1.0).log10() / 7.0).clamp(0.0, 1.0),
+        }
+    }
+
+    /// Update observable EMAs.  Called every observe + every
+    /// tick_housekeeping.  α = 0.1 — recent ~10 events weighted heavily.
+    fn update_emas(&mut self) {
+        const ALPHA: f32 = 0.1;
+        let firing = self.currently_firing.len() as f32;
+        self.firing_rate_ema = self.firing_rate_ema * (1.0 - ALPHA) + firing * ALPHA;
+        let n_concepts = self.neurons.iter().filter(|n| !n.is_atom()).count() as f32;
+        self.concept_count_ema = self.concept_count_ema * (1.0 - ALPHA) + n_concepts * ALPHA;
+        let n_terms: usize = self.neurons.iter().map(|n| n.terminals.len()).sum();
+        self.terminal_count_ema = self.terminal_count_ema * (1.0 - ALPHA) + (n_terms as f32) * ALPHA;
+    }
+
+    /// Record one decode-time precision sample (winning binding's
+    /// atom_score).  Called by Brain::decode_best_trained_binding
+    /// when this pool is query_pool.
+    pub fn record_decode_precision(&mut self, score: f32) {
+        const ALPHA: f32 = 0.15;
+        self.decode_precision_ema =
+            self.decode_precision_ema * (1.0 - ALPHA) + score.clamp(0.0, 1.0) * ALPHA;
     }
     pub fn currently_firing(&self) -> impl Iterator<Item = NeuronId> + '_ {
         self.currently_firing.iter().copied()
@@ -362,6 +491,10 @@ impl Pool {
             currently_firing: AHashSet::new(),
             activation:       AHashMap::new(),
             recent_surprise:  1.0,
+            firing_rate_ema:  0.0,
+            concept_count_ema: 0.0,
+            terminal_count_ema: 0.0,
+            decode_precision_ema: 0.0,
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
@@ -439,10 +572,11 @@ impl Pool {
         // Predictive-coding prediction (P3): before clearing the
         // firing set, compute the intra-pool prediction of what will
         // fire next based on terminals of currently-firing neurons.
-        // This is the substrate of L6→L4 cortical prediction.
-        let prediction: AHashSet<NeuronId> = if self.config.predict_gate_strength > 0.0
-            && !self.currently_firing.is_empty()
-        {
+        // Substrate of L6→L4 cortical prediction.  Always computed
+        // (modest overhead) so `recent_surprise` is always available
+        // as a ControlSignal — knobs can read it whether or not
+        // predict_gate_mode is non-Constant.
+        let prediction: AHashSet<NeuronId> = if !self.currently_firing.is_empty() {
             let mut set = AHashSet::with_capacity(self.currently_firing.len() * 4);
             for &nid in &self.currently_firing {
                 if let Some(n) = self.neurons.get(nid as usize) {
@@ -482,12 +616,12 @@ impl Pool {
             self.check_concept_emergence(tick);
         }
 
-        // Predictive-coding surprise update (P3).  Compute the
-        // fraction of the new firing set that was NOT in the
-        // pre-clear prediction, then update the EMA.  Gate
-        // decisions downstream (`check_concept_emergence`) read
-        // this value.
-        if self.config.predict_gate_strength > 0.0 && !self.currently_firing.is_empty() {
+        // Predictive-coding surprise update (P3).  Always update
+        // (cheap) so the EMA can serve as a ControlSignal for any
+        // ControlMode that reads it.  Gate decisions downstream
+        // (`check_concept_emergence` and any DrivenBy on Surprise)
+        // read this value.
+        if !self.currently_firing.is_empty() {
             let unpredicted: usize = self.currently_firing.iter()
                 .filter(|id| !prediction.contains(id))
                 .count();
@@ -503,6 +637,10 @@ impl Pool {
         // capture in Fabric::tick — that placement made the gate
         // useless against the binding-pool runaway.
         self.apply_kwta_sparsity();
+
+        // Update EMAs feeding the dynamical control state.  Done
+        // AFTER k-WTA so firing_rate reflects post-gate sparsity.
+        self.update_emas();
 
         fired
     }
@@ -594,7 +732,8 @@ impl Pool {
     /// keeps total dendritic input normalised.  Without this,
     /// pure Hebbian potentiation accumulates indefinitely.
     fn apply_heterosynaptic_ltd(&mut self, current_tick: u64) {
-        let ratio = self.config.heterosynaptic_ltd_ratio;
+        let state = self.control_state();
+        let ratio = self.config.heterosynaptic_ltd_mode.evaluate(&state).clamp(0.0, 0.9);
         if ratio <= 0.0 { return; }
         let keep = 1.0 - ratio;
         for n in self.neurons.iter_mut() {
@@ -623,7 +762,11 @@ impl Pool {
     /// k-WTA captures the functional effect without modelling
     /// individual interneurons.
     fn apply_kwta_sparsity(&mut self) {
-        let frac = self.config.sparsity_top_k_frac;
+        // Evaluate ControlMode against current pool ControlState.
+        // Constant(1.0) returns 1.0 → early return (no behaviour change).
+        // DrivenBy adapts each call based on the substrate's own signals.
+        let state = self.control_state();
+        let frac = self.config.sparsity_mode.evaluate(&state).clamp(0.01, 1.0);
         if frac >= 1.0 { return; }
         let n_firing = self.currently_firing.len();
         if n_firing == 0 { return; }
@@ -764,8 +907,14 @@ impl Pool {
         // when the substrate's recent surprise is above the gate
         // strength.  Already-predicted patterns add no information
         // and would just inflate the concept inventory.
-        if self.config.predict_gate_strength > 0.0
-            && self.recent_surprise < self.config.predict_gate_strength {
+        // Evaluate predict-gate ControlMode against current pool state.
+        // Constant(0.0) → 0.0 → `recent_surprise < 0` is never true →
+        // emergence always proceeds (backward-compatible default).
+        // DrivenBy lets the gate adapt: e.g. `DrivenBy(InvSurprise, 0.5, 0.3)`
+        // tightens the gate when the substrate is predicting well.
+        let state = self.control_state();
+        let gate = self.config.predict_gate_mode.evaluate(&state).clamp(0.0, 0.95);
+        if gate > 0.0 && self.recent_surprise < gate {
             return;
         }
         let buf_len = self.recent_atoms.len();

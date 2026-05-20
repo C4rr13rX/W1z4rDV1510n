@@ -210,20 +210,30 @@ fn build_fresh_brain() -> Result<Brain> {
 }
 
 /// Read per-pool env-var overrides for tunable knobs.  Convention:
-/// `BRAIN_<KNOB>_<POOLNAME>` (case-insensitive pool name, uppercased
-/// here), with `BRAIN_<KNOB>_DEFAULT` as a global fallback.  Pool-
-/// specific override wins over the default.  Knobs:
-///   SPARSITY      → sparsity_top_k_frac  (f32 in (0.0, 1.0])
+/// `BRAIN_<KNOB>_<POOLNAME>` (uppercased), with `BRAIN_<KNOB>_DEFAULT`
+/// as a global fallback.  Pool-specific override wins over the default.
+///
+/// Dynamical-system knobs (parsed as ControlMode JSON, OR as a bare
+/// number which becomes Constant(value)):
+///   SPARSITY      → sparsity_mode             (ControlMode)
+///   HET_LTD       → heterosynaptic_ltd_mode   (ControlMode)
+///   PREDICT_GATE  → predict_gate_mode         (ControlMode)
+///
+/// JSON examples (for ControlMode):
+///   BRAIN_SPARSITY_TEXT='{"Constant":0.7}'
+///   BRAIN_SPARSITY_TEXT='{"DrivenBy":{"signal":"InvSurprise","scale":0.7,"offset":0.3,"min":0.05,"max":1.0}}'
+///
+/// Static knobs (still scalar):
 ///   SPARSITY_MIN  → sparsity_min_neurons (usize >= 1)
 ///   WINDOW        → recent_atoms_window  (usize)
 ///   EMERGENCE     → concept_emergence_threshold (u32)
 ///   MAX_MEMBERS   → max_concept_member_count (usize)
 ///   DECAY         → decay_rate (f32)
 ///   PRUNE_FLOOR   → prune_floor (f32)
-/// All overrides are optional; missing env var leaves the field
-/// untouched.  Used by the GA harness to vary genome values without
-/// recompiling.  See data/foundation/ga_brain_search.jsonl.
+///
+/// All overrides are optional.
 fn apply_env_overrides(cfg: &mut PoolConfig) {
+    use w1z4rd_brain::ControlMode;
     fn read_f32(key: &str) -> Option<f32> {
         std::env::var(key).ok().and_then(|v| v.parse().ok())
     }
@@ -232,6 +242,22 @@ fn apply_env_overrides(cfg: &mut PoolConfig) {
     }
     fn read_u32(key: &str) -> Option<u32> {
         std::env::var(key).ok().and_then(|v| v.parse().ok())
+    }
+    /// ControlMode parser: accepts either a bare number (→ Constant)
+    /// or JSON spec like '{"DrivenBy":{"signal":"InvSurprise","scale":...}}'.
+    fn read_control_mode(key: &str) -> Option<ControlMode> {
+        let raw = std::env::var(key).ok()?;
+        let raw = raw.trim();
+        if let Ok(v) = raw.parse::<f32>() {
+            return Some(ControlMode::Constant(v));
+        }
+        match serde_json::from_str::<ControlMode>(raw) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                warn!("env var {} parse failed: {} (raw: {:?})", key, e, raw);
+                None
+            }
+        }
     }
     let upper = cfg.name.to_uppercase();
     let pick_f32 = |knob: &str| -> Option<f32> {
@@ -246,15 +272,19 @@ fn apply_env_overrides(cfg: &mut PoolConfig) {
         read_u32(&format!("BRAIN_{knob}_{upper}"))
             .or_else(|| read_u32(&format!("BRAIN_{knob}_DEFAULT")))
     };
-    if let Some(v) = pick_f32("SPARSITY")     { cfg.sparsity_top_k_frac = v.clamp(0.01, 1.0); }
+    let pick_mode = |knob: &str| -> Option<ControlMode> {
+        read_control_mode(&format!("BRAIN_{knob}_{upper}"))
+            .or_else(|| read_control_mode(&format!("BRAIN_{knob}_DEFAULT")))
+    };
+    if let Some(m) = pick_mode("SPARSITY")     { cfg.sparsity_mode = m; }
     if let Some(v) = pick_usize("SPARSITY_MIN"){ cfg.sparsity_min_neurons = v.max(1); }
-    if let Some(v) = pick_f32("HET_LTD")      { cfg.heterosynaptic_ltd_ratio = v.clamp(0.0, 0.9); }
-    if let Some(v) = pick_f32("PREDICT_GATE") { cfg.predict_gate_strength    = v.clamp(0.0, 0.95); }
-    if let Some(v) = pick_usize("WINDOW")     { cfg.recent_atoms_window = v; }
-    if let Some(v) = pick_u32("EMERGENCE")    { cfg.concept_emergence_threshold = v; }
-    if let Some(v) = pick_usize("MAX_MEMBERS"){ cfg.max_concept_member_count = v; }
-    if let Some(v) = pick_f32("DECAY")        { cfg.decay_rate = v; }
-    if let Some(v) = pick_f32("PRUNE_FLOOR")  { cfg.prune_floor = v; }
+    if let Some(m) = pick_mode("HET_LTD")      { cfg.heterosynaptic_ltd_mode = m; }
+    if let Some(m) = pick_mode("PREDICT_GATE") { cfg.predict_gate_mode = m; }
+    if let Some(v) = pick_usize("WINDOW")      { cfg.recent_atoms_window = v; }
+    if let Some(v) = pick_u32("EMERGENCE")     { cfg.concept_emergence_threshold = v; }
+    if let Some(v) = pick_usize("MAX_MEMBERS") { cfg.max_concept_member_count = v; }
+    if let Some(v) = pick_f32("DECAY")         { cfg.decay_rate = v; }
+    if let Some(v) = pick_f32("PRUNE_FLOOR")   { cfg.prune_floor = v; }
 }
 
 fn load_or_build_brain(checkpoint_path: &PathBuf) -> Result<Brain> {

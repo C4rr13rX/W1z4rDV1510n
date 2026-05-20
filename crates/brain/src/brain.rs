@@ -1374,13 +1374,34 @@ impl Brain {
         // atom-tier scores 1.0; concept-tier matches always score
         // ≥ 1.0 via the concept-tier bonus when concept_score
         // itself crosses the floor) and rejects OOV bleed.
-        // GA-tunable via `BRAIN_MIN_ATOM_SCORE` env var; falls back
-        // to 0.50 when unset / unparseable.
-        let min_atom_score: f32 = std::env::var("BRAIN_MIN_ATOM_SCORE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(|v: f32| v.clamp(0.0, 1.0))
-            .unwrap_or(0.50);
+        // GA-tunable via `BRAIN_MIN_ATOM_SCORE` env var.
+        //
+        // DYNAMICAL: accepts either a scalar (→ Constant) OR a
+        // ControlMode JSON spec.  When DrivenBy, the floor adapts
+        // each call to current substrate state.  E.g.
+        // `DrivenBy(DecodePrecisionEma, 0.7, 0.2)` means "raise
+        // the floor when recent decodes have been confident; lower
+        // it when retrieval has been struggling so partial matches
+        // can still get through".  Read from query_pool's ControlState.
+        let min_atom_score: f32 = {
+            let raw = std::env::var("BRAIN_MIN_ATOM_SCORE").ok();
+            // Build query-pool state for ControlMode evaluation.
+            let state = self.fabric.pool(query_pool)
+                .map(|p| p.read().control_state());
+            match (raw, state) {
+                (Some(s), Some(st)) => {
+                    let s = s.trim().to_string();
+                    if let Ok(v) = s.parse::<f32>() {
+                        v.clamp(0.0, 1.0)
+                    } else if let Ok(mode) = serde_json::from_str::<crate::ControlMode>(&s) {
+                        mode.evaluate(&st).clamp(0.0, 1.0)
+                    } else {
+                        0.50
+                    }
+                }
+                _ => 0.50,
+            }
+        };
 
         // Walk binding-pool concepts, score each.
         let bp = self.fabric.pool(bpid)?;
