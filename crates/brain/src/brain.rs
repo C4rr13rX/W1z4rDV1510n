@@ -1413,19 +1413,34 @@ impl Brain {
 
             // Compute score: prefer concept-tier when concept members
             // overlap firing concepts; else atom-tier.
-            let concept_intersect = bind_q_concepts.iter()
+            //
+            // CRITICAL: intersect must be UNIQUE-set intersect, not
+            // multi-set.  bind_q_atoms is a Vec (allows duplicates from
+            // multi-source fingerprints — same atom appearing twice in
+            // the binding's POOL_TEXT members), while q_atoms is a
+            // HashSet (deduplicated firing set).  Without dedup:
+            //   bind=[a,a,b,b,c,c,x]  q={a,b,c}
+            //   atom_intersect = 6 (counts each duplicate hit)
+            //   recall = 6 / 3 = 2.0   ← BROKEN, should cap at 1.0
+            // Toddler-collapse bug: this let multi-source bindings
+            // overscore single-pair bindings on duplicate atoms.
+            let bind_q_atoms_set: ahash::AHashSet<NeuronId> =
+                bind_q_atoms.iter().copied().collect();
+            let bind_q_concepts_set: ahash::AHashSet<NeuronId> =
+                bind_q_concepts.iter().copied().collect();
+            let concept_intersect = bind_q_concepts_set.iter()
                 .filter(|c| q_concepts.contains(c))
                 .count() as f32;
-            let concept_score = if !bind_q_concepts.is_empty() && !q_concepts.is_empty() {
-                let p = concept_intersect / bind_q_concepts.len() as f32;
+            let concept_score = if !bind_q_concepts_set.is_empty() && !q_concepts.is_empty() {
+                let p = concept_intersect / bind_q_concepts_set.len() as f32;
                 let r = concept_intersect / q_concepts.len().max(1) as f32;
                 p * r
             } else { 0.0 };
-            let atom_intersect = bind_q_atoms.iter()
+            let atom_intersect = bind_q_atoms_set.iter()
                 .filter(|a| q_atoms.contains(a))
                 .count() as f32;
-            let atom_score = if !bind_q_atoms.is_empty() && !q_atoms.is_empty() {
-                let p = atom_intersect / bind_q_atoms.len() as f32;
+            let atom_score = if !bind_q_atoms_set.is_empty() && !q_atoms.is_empty() {
+                let p = atom_intersect / bind_q_atoms_set.len() as f32;
                 let r = atom_intersect / q_atoms.len().max(1) as f32;
                 p * r
             } else { 0.0 };

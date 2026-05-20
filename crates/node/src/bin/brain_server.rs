@@ -615,6 +615,7 @@ struct PoolConceptOut {
     label:       String,
     member_count: usize,
     decoded:     String,
+    use_count:   u64,
 }
 
 #[derive(Serialize, Debug)]
@@ -660,6 +661,7 @@ async fn pool_concepts(
                 label:        n.label.clone(),
                 member_count: n.members.len(),
                 decoded,
+                use_count:    n.use_count,
             });
         }
     }
