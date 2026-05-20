@@ -467,6 +467,29 @@ impl Brain {
 
         self.total_observations = self.total_observations.saturating_add(1);
 
+        // Hebbian frequency tracking: when an EXISTING promoted binding's
+        // fingerprint recurs, bump its use_count so the decoder can weight
+        // it.  This is what makes frequently-trained bindings (toddler
+        // 'cat→animal' trained 8 times in toddler corpus + 3 times in
+        // categorical_unified = 11) dominate competing bindings from
+        // conflicting category entries ('cat→vehicle' trained only 3
+        // times).  Without this, all bindings score by atom precision
+        // (uniformly 1.0 for full overlap) and the decoder's smaller-
+        // target-count tiebreak arbitrarily picks shorter category names.
+        let existing_bid: Option<NeuronId> = self.promoted_fingerprints.get(&fp)
+            .copied()
+            .or_else(|| self.tentative_promoted.get(&fp).copied());
+        if let Some(bid) = existing_bid {
+            let now = self.fabric.current_tick();
+            if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
+                let mut bp = bp.write();
+                if let Some(n) = bp.get_mut(bid) {
+                    n.use_count = n.use_count.saturating_add(1);
+                    n.last_fired_tick = now;
+                }
+            }
+        }
+
         // Promotion is driven by whichever signal is stronger: either
         // a dense recent burst (windowed) or sustained lifetime
         // co-occurrence (lifetime).  Sparse round-robin training
@@ -1418,11 +1441,32 @@ impl Brain {
 
             // Concept-tier match preempts atom-tier ONLY when the
             // concept_score itself crosses the floor.
-            let (score, has_concept) = if concept_ok {
-                (concept_score + 1.0, true) // +1 to ensure concept-tier beats atom-tier
+            let base_score = if concept_ok {
+                concept_score + 1.0   // concept-tier preempt bonus
             } else {
-                (atom_score, false)
+                atom_score
             };
+            let has_concept = concept_ok;
+
+            // Hebbian frequency weight: bindings trained more times
+            // dominate competing bindings.  Multiplier = (1 + ln(use_count)),
+            // so use_count=1 contributes weight 1.0, use_count=10 ≈ 3.3,
+            // use_count=100 ≈ 5.6.  Sub-linear so a single mega-frequent
+            // binding can't completely drown out moderate competitors.
+            //
+            // This is the substrate-level fix for the toddler-collapse
+            // failure mode under categorical_unified training: when
+            // (cat, animal) is trained 8 reps in toddler + 3 reps in
+            // categorical = 11 total, while (cat, vehicle) is trained
+            // only 3 times in categorical, the frequency-weighted
+            // decoder picks cat→animal.  Without this, both bindings
+            // score 1.0 (full atom precision) and the smaller-target-
+            // count tiebreak arbitrarily picks shorter category names
+            // (food=4 bytes beats animal=6).
+            let uc = n.use_count.max(1) as f32;
+            let freq_weight = 1.0 + uc.ln();
+            let score = base_score * freq_weight;
+
             let target_count = bind_target_members.len();
             let consider = match &best {
                 None => true,
