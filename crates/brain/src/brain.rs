@@ -1529,7 +1529,7 @@ impl Brain {
             }
         }
 
-        let (bnid, _, _, _) = best?;
+        let (bnid, winning_score, _, _) = best?;
         let bnode = bp_read.get(bnid)?;
         // Decode the binding's target-pool members.
         let target_handle = self.fabric.pool(target_pool)?;
@@ -1541,6 +1541,25 @@ impl Brain {
             .collect();
         if target_members.is_empty() { return None; }
         let bytes = t.decode_concept_members(&target_members);
+        drop(t);
+        drop(bp_read);
+
+        // Feedback: record this decode's score into the query pool's
+        // decode_precision_ema so DecodePrecisionEma ControlSignal
+        // reflects how confidently the substrate is retrieving lately.
+        // ControlModes that read it can adapt — e.g. raise the floor
+        // when decodes are confident, lower it when struggling.
+        // Divide winning_score by the freq_weight to recover the raw
+        // precision×recall (which is what we want as a [0,1] signal).
+        if let Some(qp) = self.fabric.pool(query_pool) {
+            let raw_score = if winning_score > 1.0 {
+                // Has concept-tier bonus (+1.0).  Recover the freq-weighted
+                // concept portion, then clamp to [0,1].
+                (winning_score - 1.0).min(1.0)
+            } else { winning_score.min(1.0) };
+            qp.write().record_decode_precision(raw_score);
+        }
+
         if bytes.is_empty() { None } else { Some(bytes) }
     }
 
