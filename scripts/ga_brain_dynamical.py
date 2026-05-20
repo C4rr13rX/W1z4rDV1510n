@@ -432,6 +432,11 @@ def _eval_panel(port: int) -> dict:
         r = _post(f"{base}/chat", {"text": p})
         if r and r.get("reply") == "" and r.get("grounding", {}).get("outside_grounding") is True:
             counts["oov_hit"] += 1
+    # /integrate substrate-floor: hit if the trained-toddler expected
+    # category OR any other trained categorical for that prompt
+    # appears as a substring of /integrate's decoded answer.  Strict
+    # substring (no startswith) tolerates decoder residual like
+    # 'animala' for 'animal' but still demands the trained answer.
     for p, exp in toddler:
         _post(f"{base}/observe", {"pool_id": 1, "frame": _b64u(p.encode())})
         r = _post(f"{base}/integrate", {"query_pool": 1, "target_pool": 4})
@@ -440,7 +445,9 @@ def _eval_panel(port: int) -> dict:
             try:
                 ans = base64.urlsafe_b64decode(ans_b64 + "==").decode("utf-8", "replace")
             except Exception: ans = ""
-            if exp in ans: counts["int_contains"] += 1
+            valid_responses = accepted.get(p, set()) | {exp}
+            if any(v and v in ans for v in valid_responses):
+                counts["int_contains"] += 1
     return counts
 
 
@@ -449,13 +456,16 @@ def _fitness(metrics: dict) -> tuple[float, dict]:
     o = metrics["oov_hit"]     / max(1, metrics["oov_total"])
     k = metrics["k12_hit"]     / max(1, metrics["k12_total"])
     i = metrics["int_contains"]/ max(1, metrics["int_total"])
-    raw = 1.0*t + 1.0*o + 1.5*k + 1.0*i
+    raw = 1.0*t + 1.0*o + 1.5*k + 1.5*i
     penalty = 0.0
-    # Tightened guardrails: we already have toddler 100% and OOV 100%
-    # at defaults, so any genome that loses ground gets penalised hard.
-    if t < 1.0:    penalty += (1.0  - t) * 10.0
-    if o < 1.0:    penalty += (1.0  - o) * 5.0
-    if i < 0.85:   penalty += (0.85 - i) * 3.0
+    # All four metrics target 100%.  Per the user's instruction, the
+    # /integrate substrate-floor path is equally important as /chat
+    # — both must hit 100% recall on trained input.  Heavy penalties
+    # below 100% drive the GA to find wirings that satisfy ALL paths.
+    if t < 1.0:    penalty += (1.0 - t) * 10.0
+    if o < 1.0:    penalty += (1.0 - o) * 5.0
+    if i < 1.0:    penalty += (1.0 - i) * 5.0   # was: (0.85-i)*3.0
+    if k < 1.0:    penalty += (1.0 - k) * 2.0   # gentle nudge to pursue 100%
     return raw - penalty, {
         "toddler_frac": round(t,3), "oov_frac": round(o,3),
         "k12_frac": round(k,3),     "int_contains_frac": round(i,3),
