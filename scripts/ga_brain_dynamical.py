@@ -559,16 +559,27 @@ def _write_best(rec: dict) -> None:
 def _significant_improvement(prev_best: dict | None, candidate: dict) -> str | None:
     """Return a short reason string if `candidate` is meaningfully
     better than `prev_best`.  Used to drive Monitor pings.
-    ASCII-only (Windows cp1252 console can't encode Unicode arrows)."""
+    ASCII-only (Windows cp1252 console can't encode Unicode arrows).
+
+    Pareto-aware: refuse to declare improvement if the candidate's
+    overall fitness regressed by more than 0.3 — otherwise a wiring
+    that lifts K-12 by 1 hit but crashes /integrate to 0 would
+    overwrite the better-fitness baseline (this happened on first
+    run of the relaxed-K-12 metric)."""
     if prev_best is None: return "first-recorded best"
     cm = candidate.get("metrics", {})
     pm = prev_best.get("metrics", {})
+    cand_fit = candidate.get("fitness", 0)
+    prev_fit = prev_best.get("fitness", 0)
+    # Pareto guard: fitness must not have regressed materially.
+    if cand_fit < prev_fit - 0.3:
+        return None
     if cm.get("k12_frac", 0) >= pm.get("k12_frac", 0) + 0.08:
         return f"K-12 lifted {pm.get('k12_frac','?')} -> {cm.get('k12_frac','?')}"
     if cm.get("toddler_frac", 0) >= pm.get("toddler_frac", 0) + 0.05:
         return f"toddler lifted {pm.get('toddler_frac','?')} -> {cm.get('toddler_frac','?')}"
-    if candidate.get("fitness", 0) >= prev_best.get("fitness", 0) + 0.5:
-        return f"fitness {prev_best.get('fitness'):.2f} -> {candidate.get('fitness'):.2f}"
+    if cand_fit >= prev_fit + 0.5:
+        return f"fitness {prev_fit:.2f} -> {cand_fit:.2f}"
     return None
 
 
