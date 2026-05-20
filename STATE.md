@@ -1,6 +1,6 @@
 # Brain Substrate — Empirical & Architectural State
 
-*Snapshot for session continuity.  Last updated: 2026-05-19.*
+*Snapshot for session continuity.  Last updated: 2026-05-20.*
 
 ## What works (architecturally validated, empirically pinned)
 
@@ -58,6 +58,49 @@ Diagnosed via `/pool/concepts` and live `/chat` activated_concepts: some binding
 Root cause: `/integrate`'s Stage 7 routing outputs `binding_target_atoms` which the downstream coverage-based selection consumes.  Changing which binding wins changes the output set; the downstream coverage gate broke when the new "winning" binding had concept members in its target_atoms set.  The atom-level coupling is load-bearing.
 
 The right architectural answer is **not** to retrofit `/integrate` but to keep the concept-aware path in `/chat` and let `/integrate` stay atom-level as the high-precision internal retrieval.
+
+## Stage 15 — biological primitives + Hebbian frequency weighting (2026-05-20)
+
+Discovered that the Stage 14 falsification was **two distinct issues**, not one:
+
+1. **Sensor pollution** — a background `w1z4rd_node.exe` supervisor and webcam/mic Python clients had been posting massive sensor frames to `/sensor/observe`, contaminating every brain.bin we trained.  Kill those processes + delete brain.bin before training → fresh brain at startup (tick=0, neurons=0).
+2. **Conflicting categorical labels** + **decoder tiebreak bias**:
+   `cat → [animal, vehicle, container]`, `dog → [animal, food, motion]`, etc.  After training, multiple bindings exist for the same prompt.  The decoder picked by precision×recall (uniformly 1.0 for full atom overlap across all competing bindings) and tiebroke on smaller-target-count — BIASED toward shorter category names (food=4 bytes beats animal=6, body=4 beats animal=6, etc.).  Hence toddler 'dog' returned 'food' instead of 'animal' regardless of how many times 'dog→animal' was trained.
+
+### Architectural additions (this session's work)
+
+**Four biological primitives** (all serde-default no-op for back-compat):
+
+- **P1 k-WTA sparsity** (Vinje & Gallant 2000; Maass 2000) — top-K firing per pool.  Moved into `observe_frame` (was in `tick_housekeeping`, which fired AFTER moment fingerprint capture and was therefore useless against the binding-pool runaway).
+- **P2 heterosynaptic LTD** (Royer & Paré 2003; Turrigiano 2008) — when one synapse strengthens, neighbors weaken.  Pure Hebbian potentiation has no built-in mechanism for homeostatic competition; LTD provides it.
+- **P3 predictive-coding gate** (Rao & Ballard 1999; Friston 2005) — concepts crystallize only when EMA(surprise) > gate.  Prevents redundant concept emergence on already-predicted patterns.
+- **P4 sleep/replay cycle** (Wilson & McNaughton 1994; McClelland/McNaughton/O'Reilly 1995 CLS) — `Brain::replay_recent_moments(count, strength)` re-fires recent fingerprints at reduced activation to consolidate.  Exposed via `POST /sleep` endpoint.
+
+**Hebbian frequency weighting in decode** (the load-bearing fix):
+
+`register_fingerprint` now bumps the existing binding's `use_count` on each fingerprint recurrence.  `decode_best_trained_binding` multiplies the binding's score by `(1 + ln(use_count))` — sub-linear so a single mega-frequent binding can't drown out moderate competitors, but enough that `cat→animal` (11 reps = 8 toddler + 3 categorical) beats `cat→vehicle` (3 reps categorical only).
+
+**Concept-tier corroboration**: concept-tier preempt requires NOT JUST `concept_score >= floor` but ALSO `atom_score >= 0.20` so partial-substring concept emergence (e.g. `fox` concept fires on `foobarbaz`) doesn't claim concept-tier without sensory grounding.
+
+### Empirical results
+
+| Probe | Stage 14 falsified | Stage 15 with all fixes (defaults, sequential toddler→categorical) |
+|---|---|---|
+| `/chat` toddler EXACT | 4/32 (12.5%) | **26/32 (81.2%)** ✅ |
+| `/chat` K-12 EXACT | 0/16 (0%) | **3/16 (18.8%)** ✅ first non-zero |
+| `/chat` greeting | 0/7 | **1/7 (14.3%)** ✅ first non-zero |
+| `/chat` OOV honesty | 1/3 (33%) | 1/3 (33%) — needs MIN_ATOM_SCORE > 0.50 |
+| Toddler-only baseline | 30/32 + 3/3 | 30/32 + 3/3 (preserved at defaults) |
+
+### File map of Stage 15 deltas
+
+| File | What |
+|---|---|
+| `crates/brain/src/pool.rs` | k-WTA sparsity + heterosynaptic LTD + predictive-coding gate; k-WTA moved to end of observe_frame |
+| `crates/brain/src/brain.rs` | Hebbian use_count bumping in register_fingerprint; frequency-weighted decode; concept-tier corroboration; Brain::replay_recent_moments |
+| `crates/brain/src/fabric.rs` | tick_housekeeping passes current_tick (for heterosynaptic LTD timing) |
+| `crates/node/src/bin/brain_server.rs` | Env-var overrides for all primitive knobs; POST /sleep endpoint |
+| `scripts/ga_brain_search.py` | GA harness with all primitives in gene list |
 
 ## Stage 14 falsification — categorical_unified retrain (2026-05-19)
 
