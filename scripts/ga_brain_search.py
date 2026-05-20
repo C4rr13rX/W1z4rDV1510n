@@ -140,6 +140,31 @@ def random_genome(gen: int = 0) -> Genome:
     return Genome(values=vals, born_gen=gen)
 
 
+def seed_genome(gen: int = 0) -> Genome:
+    """The known-good baseline: substrate defaults (k-WTA off, the
+    server's hardcoded windows/decays).  Guarantees the initial
+    population has at least one genome that hits the 30/32 + 3/3
+    floor we already validated."""
+    vals = {
+        "BRAIN_SPARSITY_TEXT":       1.0,
+        "BRAIN_SPARSITY_ACTION":     1.0,
+        "BRAIN_SPARSITY_DEFAULT":    1.0,
+        "BRAIN_MIN_ATOM_SCORE":      0.50,
+        "BRAIN_EMERGENCE_TEXT":      3,
+        "BRAIN_EMERGENCE_ACTION":    3,
+        "BRAIN_WINDOW_TEXT":         65536,
+        "BRAIN_WINDOW_ACTION":       65536,
+        "BRAIN_DECAY_DEFAULT":       0.00002,
+        "BRAIN_PRUNE_FLOOR_DEFAULT": 0.001,
+    }
+    return Genome(values=vals, born_gen=gen)
+
+
+def near_seed_genome(gen: int = 0) -> Genome:
+    """Mutated seed — narrow exploration around the known-good baseline."""
+    return mutate(seed_genome(gen), gen)
+
+
 def mutate(g: Genome, gen: int) -> Genome:
     import math
     vals = dict(g.values)
@@ -208,20 +233,43 @@ def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
 
 
 def _kill_port(port: int) -> None:
-    """Best-effort kill of a process listening on `port` on Windows."""
+    """Best-effort kill of any process listening on `port` on Windows.
+    Walks netstat output for the LISTENING state, kills each PID with
+    /F /T (tree).  Retries up to 3× because Windows sometimes leaves
+    the port in TIME_WAIT briefly after the process dies."""
+    for _ in range(3):
+        killed_any = False
+        try:
+            out = subprocess.check_output(["netstat", "-ano", "-p", "TCP"],
+                text=True, errors="ignore")
+            for line in out.splitlines():
+                if f":{port} " in line and "LISTENING" in line:
+                    pid = line.split()[-1]
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+                        capture_output=True, text=True)
+                    killed_any = True
+        except Exception:
+            pass
+        if not killed_any:
+            return
+        time.sleep(0.5)
+
+
+def _port_is_free(port: int) -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.3)
     try:
-        out = subprocess.check_output(["netstat", "-ano", "-p", "TCP"], text=True, errors="ignore")
-        for line in out.splitlines():
-            if f":{port} " in line and "LISTENING" in line:
-                pid = line.split()[-1]
-                subprocess.run(["taskkill", "/F", "/PID", pid],
-                    capture_output=True, text=True)
+        s.connect(("127.0.0.1", port))
+        s.close()
+        return False
     except Exception:
-        pass
+        return True
 
 
-def _train_toddler(port: int) -> int:
-    """Dense-burst toddler 32 pairs × 4 reps.  Returns ticks."""
+def _train_toddler(port: int, reps: int = 8) -> int:
+    """Dense-burst toddler 32 pairs × N reps (default 8 = matches the
+    canonical brain_dense_burst_toddler.py that hits 30/32).  Returns
+    total ticks issued."""
     pairs = [
         ("dog","animal"),("cat","animal"),("cow","animal"),("horse","animal"),
         ("bird","animal"),("fish","animal"),
@@ -237,7 +285,7 @@ def _train_toddler(port: int) -> int:
     base = f"http://127.0.0.1:{port}"
     total = 0
     for prompt, response in pairs:
-        for _ in range(4):
+        for _ in range(reps):
             _post(f"{base}/observe", {"pool_id": 1, "frame": _b64u(prompt.encode())})
             _post(f"{base}/observe", {"pool_id": 4, "frame": _b64u(response.encode())})
             _post(f"{base}/tick", {})
@@ -361,16 +409,38 @@ def worker_evaluate(args: tuple) -> dict:
     env["W1Z4RDV1510N_DATA_DIR"] = str(data_dir)
     env.update(genome.env())
 
+    # Aggressively clear the port BEFORE spawning so we never inherit a
+    # stale brain server from the previous genome.  Windows + Python's
+    # ProcessPoolExecutor sometimes leaves the prior task's
+    # subprocess.Popen child alive after proc.terminate() returns,
+    # which used to cause every subsequent genome on the same port to
+    # run against the OLD brain and produce identical fitness scores.
     _kill_port(port)
-    time.sleep(0.5)
+    # Wait for the OS to release the port.  Bail loudly if it doesn't.
+    for _ in range(30):
+        if _port_is_free(port): break
+        time.sleep(0.5)
+    else:
+        return {"genome": asdict(genome), "fitness": -100.0,
+                "metrics": {}, "eval_kind": "failed",
+                "reason": f"port {port} stuck busy after _kill_port"}
+
+    # CREATE_NEW_PROCESS_GROUP so taskkill /T works cleanly on the
+    # tree we are about to start.
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
     proc = subprocess.Popen(
         [str(BRAIN_BIN)],
         env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
     )
     try:
         if not _wait_for_server(port, timeout=30):
-            proc.kill()
+            try: proc.kill()
+            except Exception: pass
+            _kill_port(port)
             return {"genome": asdict(genome), "fitness": -100.0,
                     "metrics": {}, "eval_kind": "failed",
                     "reason": "server didn't come up"}
@@ -396,12 +466,20 @@ def worker_evaluate(args: tuple) -> dict:
                 "metrics": {**metrics, **breakdown},
                 "eval_kind": eval_kind}
     finally:
+        # Cascade: terminate -> kill -> taskkill /F /T by PID -> port sweep.
+        # Each step is a no-op if the previous one already worked, but
+        # the cumulative effect is that the port is guaranteed free
+        # before this worker returns to the pool.
         try:
             proc.terminate()
-            proc.wait(timeout=10)
-        except Exception:
-            try: proc.kill()
+            try: proc.wait(timeout=5)
             except Exception: pass
+        except Exception: pass
+        try: proc.kill()
+        except Exception: pass
+        if sys.platform == "win32" and proc.pid:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, text=True)
         _kill_port(port)
 
 
@@ -444,19 +522,49 @@ def main(argv: list[str] | None = None) -> int:
     random.seed(args.seed)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # Initial population.
-    pop: list[Genome] = [random_genome(0) for _ in range(args.pop)]
+    # Initial population: 1 seed (known-good baseline), then half
+    # near-seed (mutations of the baseline for narrow exploration) and
+    # half random (broad exploration of the gene space).  Guarantees
+    # at least one viable starting genome so the GA has signal from
+    # generation 0 instead of converging from a noise floor.
+    pop: list[Genome] = [seed_genome(0)]
+    n_near = max(1, (args.pop - 1) // 2)
+    pop.extend(near_seed_genome(0) for _ in range(n_near))
+    pop.extend(random_genome(0) for _ in range(args.pop - len(pop)))
     print(f"[ga_brain] starting: workers={args.workers} pop={args.pop} "
           f"generations={args.generations} log={LOG_PATH}", flush=True)
+
+    # Genome -> (fitness, metrics, eval_kind) cache.  Skips re-evaluating
+    # elites that already have a score at the current eval_kind, which
+    # stops noisy re-runs from dropping a known-good genome's fitness.
+    # Keyed by sorted-tuple of (k,v) pairs from the values dict.
+    fitness_cache: dict = {}
+    def _gkey(g: Genome, kind: str) -> tuple:
+        return (kind, tuple(sorted(g.values.items())))
 
     for gen in range(args.generations):
         eval_kind = "full" if (args.eval == "full" or (args.eval == "both" and gen >= args.full_after_gen)) else "smoke"
         print(f"\n=== gen {gen}  (eval={eval_kind}) ===", flush=True)
         t_gen = time.time()
 
-        # Distribute genomes across workers.
-        tasks = [(g, idx % args.workers, eval_kind) for idx, g in enumerate(pop)]
+        # Distribute genomes across workers, skipping cached ones.
         results: list[dict] = []
+        tasks = []
+        for idx, g in enumerate(pop):
+            cached = fitness_cache.get(_gkey(g, eval_kind))
+            if cached is not None:
+                rec = {"genome": asdict(g), "fitness": cached["fitness"],
+                       "metrics": cached["metrics"], "eval_kind": eval_kind,
+                       "gen": gen, "cached": True}
+                results.append(rec)
+                m = rec["metrics"]
+                print(f"  [gen{gen}] fitness={rec['fitness']:.3f}  "
+                      f"t={m.get('toddler_frac','?')} o={m.get('oov_frac','?')} "
+                      f"k={m.get('k12_frac','?')} i={m.get('int_contains_frac','?')} "
+                      f"[{eval_kind}, cached]", flush=True)
+            else:
+                tasks.append((g, idx % args.workers, eval_kind))
+
         with ProcessPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(worker_evaluate, t): t for t in tasks}
             for fut in as_completed(futs):
@@ -468,6 +576,11 @@ def main(argv: list[str] | None = None) -> int:
                 rec["gen"] = gen
                 results.append(rec)
                 _append_log(rec)
+                # Cache the fresh result.
+                g_obj = Genome(**{k:v for k,v in rec["genome"].items()
+                                  if k in ("values","fitness","metrics","eval_kind","born_gen")})
+                fitness_cache[_gkey(g_obj, rec.get("eval_kind", eval_kind))] = {
+                    "fitness": rec["fitness"], "metrics": rec.get("metrics", {})}
                 m = rec.get("metrics", {})
                 print(f"  [gen{gen}] fitness={rec['fitness']:.3f}  "
                       f"t={m.get('toddler_frac','?')} o={m.get('oov_frac','?')} "
