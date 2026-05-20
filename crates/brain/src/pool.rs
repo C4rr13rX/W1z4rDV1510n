@@ -496,6 +496,14 @@ impl Pool {
             self.recent_surprise = self.recent_surprise * 0.7 + surprise * 0.3;
         }
 
+        // P1 k-WTA sparsity gate.  CRITICAL: must run BEFORE the
+        // Fabric captures the moment fingerprint from currently_firing,
+        // otherwise mega-bindings still form (the falsification cause).
+        // Originally lived in tick_housekeeping which runs AFTER moment
+        // capture in Fabric::tick — that placement made the gate
+        // useless against the binding-pool runaway.
+        self.apply_kwta_sparsity();
+
         fired
     }
 
@@ -573,7 +581,9 @@ impl Pool {
             n.decay_and_prune(decay, floor);
         }
         self.apply_heterosynaptic_ltd(current_tick);
-        self.apply_kwta_sparsity();
+        // Note: k-WTA sparsity gate moved to observe_frame() so it
+        // runs BEFORE the Fabric captures the moment fingerprint.
+        // Calling it again here would be redundant.
     }
 
     /// Heterosynaptic LTD: for each neuron whose terminal was
