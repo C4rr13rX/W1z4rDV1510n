@@ -549,15 +549,32 @@ def main(argv=None) -> int:
     random.seed(args.seed)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # Initial population: 1 seed + 4 near-seeds (mutations of baseline)
-    # + rest random.  Seeds the search with the known-good genome so the
-    # GA is anchored to a valid starting point.
+    # Initial population:
+    #   - 1 default-seed (every knob Constant at safe default)
+    #   - 1 best-from-disk seed if available (resumes from prior runs)
+    #   - N/3 near-default-seeds (mutated baselines)
+    #   - N/3 near-best-seeds (mutated best wirings, for exploration
+    #     around the known-good region)
+    #   - rest random (broad exploration)
     pop: list[Genome] = [seed_genome(0)]
+    prior_best = _read_best()
+    best_genome: Genome | None = None
+    if prior_best and isinstance(prior_best.get("genome"), dict):
+        knobs = prior_best["genome"].get("knobs")
+        if isinstance(knobs, dict) and set(knobs.keys()) == set(KNOB_SPECS.keys()):
+            best_genome = Genome(knobs=knobs, born_gen=0)
+            pop.append(best_genome)
+            print(f"[ga_dyn] seeding pop with best from disk: fit={prior_best.get('fitness','?')}",
+                  flush=True)
     n_near = max(2, args.pop // 3)
     for _ in range(n_near):
         pop.append(mutate(seed_genome(0), 0))
+    if best_genome is not None:
+        for _ in range(n_near):
+            pop.append(mutate(best_genome, 0))
     while len(pop) < args.pop:
         pop.append(random_genome(0))
+    pop = pop[:args.pop]
 
     fitness_cache: dict[str, dict] = {}
     def gkey(g: Genome) -> str:
