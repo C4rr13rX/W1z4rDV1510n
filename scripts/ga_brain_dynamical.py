@@ -276,7 +276,17 @@ def _kill_port(port: int) -> None:
         time.sleep(0.5)
 
 
-def _train_toddler(port: int, reps: int = 8) -> None:
+def _server_alive(port: int) -> bool:
+    """Quick health probe — distinct from _wait_for_server which retries."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+            return bool(r.read())
+    except Exception:
+        return False
+
+
+def _train_toddler(port: int, reps: int = 8, deadline: float | None = None) -> bool:
+    """Returns False if the brain server died mid-training."""
     pairs = [
         ("dog","animal"),("cat","animal"),("cow","animal"),("horse","animal"),
         ("bird","animal"),("fish","animal"),
@@ -290,23 +300,49 @@ def _train_toddler(port: int, reps: int = 8) -> None:
         ("hand","body"),("foot","body"),("eye","body"),("mouth","body"),
     ]
     base = f"http://127.0.0.1:{port}"
+    fail_streak = 0
     for p, r in pairs:
+        if deadline and time.time() > deadline: return False
         for _ in range(reps):
-            _post(f"{base}/observe", {"pool_id": 1, "frame": _b64u(p.encode())})
-            _post(f"{base}/observe", {"pool_id": 4, "frame": _b64u(r.encode())})
-            _post(f"{base}/tick", {})
+            ok1 = _post(f"{base}/observe", {"pool_id": 1, "frame": _b64u(p.encode())}, timeout=5) is not None
+            ok2 = _post(f"{base}/observe", {"pool_id": 4, "frame": _b64u(r.encode())}, timeout=5) is not None
+            ok3 = _post(f"{base}/tick", {}, timeout=5) is not None
+            if ok1 and ok2 and ok3:
+                fail_streak = 0
+            else:
+                fail_streak += 1
+                if fail_streak >= 10:
+                    # Server is dead; abandon this genome.
+                    return False
+    return True
 
 
-def _train_corpus(port: int, corpus: list[dict], reps: int = 3) -> None:
+def _train_corpus(port: int, corpus: list[dict], reps: int = 3,
+                  deadline: float | None = None) -> bool:
+    """Returns False if server died or deadline expired."""
     base = f"http://127.0.0.1:{port}"
-    for row in corpus:
+    fail_streak = 0
+    # Periodic health re-check every N requests so a dead server is
+    # detected within a bounded number of failed posts.
+    for i, row in enumerate(corpus):
+        if deadline and time.time() > deadline: return False
+        if i > 0 and i % 200 == 0:
+            if not _server_alive(port):
+                return False
         p = (row.get("prompt") or "").strip()
         r = (row.get("response") or "").strip()
         if not p or not r: continue
         for _ in range(reps):
-            _post(f"{base}/observe", {"pool_id": 1, "frame": _b64u(p.encode())}, timeout=5)
-            _post(f"{base}/observe", {"pool_id": 4, "frame": _b64u(r.encode())}, timeout=5)
-            _post(f"{base}/tick", {}, timeout=5)
+            ok1 = _post(f"{base}/observe", {"pool_id": 1, "frame": _b64u(p.encode())}, timeout=5) is not None
+            ok2 = _post(f"{base}/observe", {"pool_id": 4, "frame": _b64u(r.encode())}, timeout=5) is not None
+            ok3 = _post(f"{base}/tick", {}, timeout=5) is not None
+            if ok1 and ok2 and ok3:
+                fail_streak = 0
+            else:
+                fail_streak += 1
+                if fail_streak >= 10:
+                    return False
+    return True
 
 
 def _eval_panel(port: int) -> dict:
@@ -374,7 +410,14 @@ def _fitness(metrics: dict) -> tuple[float, dict]:
 
 
 def worker_evaluate(args: tuple) -> dict:
+    """Per-genome budget: 25 minutes wall clock.  Past that we abort
+    and return -100 fitness for this genome.  Without this bound, a
+    genome that crashes its brain server mid-training would hang the
+    GA indefinitely (62K HTTP calls × 5s timeout = days)."""
     genome, worker_id = args
+    GENOME_BUDGET_S = 1500.0  # 25 min hard ceiling
+    started = time.time()
+    deadline = started + GENOME_BUDGET_S
     port = 8095 + worker_id
     data_dir = PROJECT_ROOT / "data" / f"ga_brain_w{worker_id}"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -408,7 +451,10 @@ def worker_evaluate(args: tuple) -> dict:
             return {"genome": asdict(genome), "fitness": -100.0, "metrics": {},
                     "eval_kind": "failed", "reason": "server didn't come up"}
 
-        _train_toddler(port)
+        if not _train_toddler(port, deadline=deadline):
+            return {"genome": asdict(genome), "fitness": -100.0, "metrics": {},
+                    "eval_kind": "failed",
+                    "reason": "server died during toddler train OR deadline expired"}
         corpus = []
         with CORPUS_PATH.open("r", encoding="utf-8") as f:
             for line in f:
@@ -416,7 +462,13 @@ def worker_evaluate(args: tuple) -> dict:
                 if not line: continue
                 try: corpus.append(json.loads(line))
                 except Exception: continue
-        _train_corpus(port, corpus, reps=3)
+        if not _train_corpus(port, corpus, reps=3, deadline=deadline):
+            return {"genome": asdict(genome), "fitness": -100.0, "metrics": {},
+                    "eval_kind": "failed",
+                    "reason": "server died during corpus train OR deadline expired"}
+        if not _server_alive(port):
+            return {"genome": asdict(genome), "fitness": -100.0, "metrics": {},
+                    "eval_kind": "failed", "reason": "server died before eval"}
         metrics = _eval_panel(port)
         score, breakdown = _fitness(metrics)
         return {"genome": asdict(genome), "fitness": score,
