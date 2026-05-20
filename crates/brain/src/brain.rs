@@ -1491,22 +1491,33 @@ impl Brain {
             let has_concept = concept_ok;
 
             // Hebbian frequency weight: bindings trained more times
-            // dominate competing bindings.  Multiplier = (1 + ln(use_count)),
-            // so use_count=1 contributes weight 1.0, use_count=10 ≈ 3.3,
-            // use_count=100 ≈ 5.6.  Sub-linear so a single mega-frequent
-            // binding can't completely drown out moderate competitors.
-            //
-            // This is the substrate-level fix for the toddler-collapse
-            // failure mode under categorical_unified training: when
-            // (cat, animal) is trained 8 reps in toddler + 3 reps in
-            // categorical = 11 total, while (cat, vehicle) is trained
-            // only 3 times in categorical, the frequency-weighted
-            // decoder picks cat→animal.  Without this, both bindings
-            // score 1.0 (full atom precision) and the smaller-target-
-            // count tiebreak arbitrarily picks shorter category names
-            // (food=4 bytes beats animal=6).
+            // dominate competing bindings.  Default multiplier =
+            // (1 + ln(use_count)).  DYNAMICAL: strength is read each
+            // call from BRAIN_FREQ_WEIGHT env var as a ControlMode.
+            // Constant(1.0) preserves the canonical formula; higher
+            // values amplify the gap between high- and low-uc
+            // bindings (helps resolve K-12 ties between bindings
+            // with similar use_count); DrivenBy(ConceptCountEma, ...)
+            // would let the multiplier grow as the substrate's
+            // binding pool grows, sharpening discrimination under
+            // dense training.
+            let freq_strength: f32 = {
+                let raw = std::env::var("BRAIN_FREQ_WEIGHT").ok();
+                let st = self.fabric.pool(query_pool)
+                    .map(|p| p.read().control_state());
+                match (raw, st) {
+                    (Some(s), Some(state)) => {
+                        let s = s.trim();
+                        if let Ok(v) = s.parse::<f32>() { v.clamp(0.0, 8.0) }
+                        else if let Ok(mode) = serde_json::from_str::<crate::ControlMode>(s) {
+                            mode.evaluate(&state).clamp(0.0, 8.0)
+                        } else { 1.0 }
+                    }
+                    _ => 1.0,
+                }
+            };
             let uc = n.use_count.max(1) as f32;
-            let freq_weight = 1.0 + uc.ln();
+            let freq_weight = 1.0 + freq_strength * uc.ln();
             let score = base_score * freq_weight;
 
             let target_count = bind_target_members.len();

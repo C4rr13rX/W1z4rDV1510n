@@ -105,6 +105,14 @@ KNOB_SPECS = {
                                   "scale_range": (-0.7, 0.7), "offset_range": (0.0, 0.5)},
     "BRAIN_MIN_ATOM_SCORE":      {"default_const": 0.65, "min": 0.20, "max": 0.95,
                                   "scale_range": (-0.5, 0.5), "offset_range": (0.2, 0.85)},
+    # Hebbian frequency-weight multiplier on use_count.ln().
+    # Default 1.0 = canonical formula `1 + ln(use_count)`.  Higher
+    # amplifies the gap between trained-many-times and trained-once
+    # bindings — should let K-12 prompts with conflicting categorical
+    # entries pick the right one when the right binding has been
+    # reinforced even slightly more than competitors.
+    "BRAIN_FREQ_WEIGHT":         {"default_const": 1.0, "min": 0.0, "max": 8.0,
+                                  "scale_range": (-3.0, 3.0), "offset_range": (0.0, 4.0)},
 }
 
 POP_SIZE     = 12
@@ -561,10 +569,20 @@ def main(argv=None) -> int:
     best_genome: Genome | None = None
     if prior_best and isinstance(prior_best.get("genome"), dict):
         knobs = prior_best["genome"].get("knobs")
-        if isinstance(knobs, dict) and set(knobs.keys()) == set(KNOB_SPECS.keys()):
-            best_genome = Genome(knobs=knobs, born_gen=0)
+        if isinstance(knobs, dict):
+            # Tolerate gene-set growth: backfill missing knobs with
+            # their default Constant so a best.json from an earlier
+            # gene-space lineage can still seed the new run.
+            patched = {}
+            for k in KNOB_SPECS:
+                if k in knobs:
+                    patched[k] = knobs[k]
+                else:
+                    patched[k] = make_constant(k)
+            best_genome = Genome(knobs=patched, born_gen=0)
             pop.append(best_genome)
-            print(f"[ga_dyn] seeding pop with best from disk: fit={prior_best.get('fitness','?')}",
+            print(f"[ga_dyn] seeding pop with best from disk: fit={prior_best.get('fitness','?')}"
+                  f" (knobs={list(knobs.keys())}, backfilled={set(KNOB_SPECS)-set(knobs)})",
                   flush=True)
     n_near = max(2, args.pop // 3)
     for _ in range(n_near):
