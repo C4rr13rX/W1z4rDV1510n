@@ -271,6 +271,13 @@ pub struct Pool {
     /// Cleared on new(); transient runtime state (not serialised).
     recent_surprise:  f32,
 
+    /// Last-observed atom sequence (ordered, no concepts).  Rebuilt
+    /// on every observe_frame call.  Lets the decoder distinguish
+    /// anagram queries: 'sad' query has last_observed_sequence
+    /// [s,a,d] while 'das' query has [d,a,s].  Transient runtime
+    /// state (not serialised).
+    last_observed_sequence: Vec<NeuronId>,
+
     /// EMA of `currently_firing.len()` post-k-WTA — driven by every
     /// observe.  Used as a ControlSignal: sparsity controllers can
     /// read this to drive their own thresholds.
@@ -312,6 +319,7 @@ impl Pool {
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
             decode_precision_ema: 0.0,
+            last_observed_sequence: Vec::new(),
         }
     }
 
@@ -363,6 +371,11 @@ impl Pool {
     }
     pub fn currently_firing(&self) -> impl Iterator<Item = NeuronId> + '_ {
         self.currently_firing.iter().copied()
+    }
+    /// Atom sequence from the most recent observe_frame call.
+    /// Used by the decoder for anagram disambiguation.
+    pub fn last_observed_sequence(&self) -> &[NeuronId] {
+        &self.last_observed_sequence
     }
     pub fn get(&self, id: NeuronId) -> Option<&Neuron>           { self.neurons.get(id as usize) }
     pub fn get_mut(&mut self, id: NeuronId) -> Option<&mut Neuron> { self.neurons.get_mut(id as usize) }
@@ -495,6 +508,7 @@ impl Pool {
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
             decode_precision_ema: 0.0,
+            last_observed_sequence: Vec::new(),
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
@@ -643,6 +657,11 @@ impl Pool {
         // Update EMAs feeding the dynamical control state.  Done
         // AFTER k-WTA so firing_rate reflects post-gate sparsity.
         self.update_emas();
+
+        // Snapshot the ordered firing sequence for this observation.
+        // Read by the decoder's sequence-match preempt to distinguish
+        // anagram queries (e.g. 'sad' [s,a,d] vs 'das' [d,a,s]).
+        self.last_observed_sequence = fired.clone();
 
         fired
     }

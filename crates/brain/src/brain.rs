@@ -1403,14 +1403,28 @@ impl Brain {
             }
         };
 
+        // Capture the QUERY's last-observed ordered atom sequence
+        // from the query pool itself.  Pool::last_observed_sequence
+        // is rebuilt every observe_frame() call (no cross-query
+        // accumulation, unlike Fabric::current.fired which only
+        // resets on advance_tick).  This lets us preempt anagram
+        // ambiguity: 'sad' query (last_observed [s,a,d]) picks
+        // sad->emotion (ordered text [s,a,d]) over das->animal
+        // (ordered text [d,a,s]).
+        let query_seq: Vec<NeuronId> = self.fabric.pool(query_pool)
+            .map(|p| p.read().last_observed_sequence().to_vec())
+            .unwrap_or_default();
+
         // Walk binding-pool concepts, score each.
         let bp = self.fabric.pool(bpid)?;
         let bp_read = bp.read();
-        // (binding_id, score, target_member_count, has_concept_match)
-        let mut best: Option<(NeuronId, f32, usize, bool)> = None;
+        // (binding_id, score, target_member_count, has_concept_match, seq_match)
+        let mut best: Option<(NeuronId, f32, usize, bool, bool)> = None;
         for n in bp_read.iter_neurons() {
             if n.is_atom() { continue; }
             // Partition this binding's members by pool.
+            // bind_q_atoms is a Vec (preserves ORDER from the moment
+            // fingerprint that promoted this binding).
             let mut bind_q_atoms:    Vec<NeuronId> = Vec::new();
             let mut bind_q_concepts: Vec<NeuronId> = Vec::new();
             let mut bind_target_members: Vec<NeuronId> = Vec::new();
@@ -1521,11 +1535,23 @@ impl Brain {
             let score = base_score * freq_weight;
 
             let target_count = bind_target_members.len();
+
+            // Sequence-match preempt (anagram tiebreaker).  When the
+            // binding's text-side ordered sequence EXACTLY equals the
+            // query's observed firing sequence, this is a stronger
+            // signal than just atom-set match.  Distinguishes 'sad'
+            // query from 'das' binding even though both have the same
+            // multiset.  Empty query_seq disables this check.
+            let seq_match = !query_seq.is_empty() && bind_q_atoms == query_seq;
+
             let consider = match &best {
                 None => true,
-                Some((_, prev_score, prev_target_count, prev_has_concept)) => {
+                Some((_, prev_score, prev_target_count, prev_has_concept, prev_seq_match)) => {
+                    // Sequence-match preempt is the highest tier.
+                    if seq_match && !*prev_seq_match { true }
+                    else if !seq_match && *prev_seq_match { false }
                     // Concept-tier beats atom-tier.
-                    if has_concept && !*prev_has_concept { true }
+                    else if has_concept && !*prev_has_concept { true }
                     else if !has_concept && *prev_has_concept { false }
                     // Same tier — higher score wins.
                     else if score > *prev_score { true }
@@ -1563,11 +1589,11 @@ impl Brain {
                 }
             };
             if consider {
-                best = Some((n.id, score, target_count, has_concept));
+                best = Some((n.id, score, target_count, has_concept, seq_match));
             }
         }
 
-        let (bnid, winning_score, _, _) = best?;
+        let (bnid, winning_score, _, _, _) = best?;
         let bnode = bp_read.get(bnid)?;
         // Decode the binding's target-pool members.
         let target_handle = self.fabric.pool(target_pool)?;
