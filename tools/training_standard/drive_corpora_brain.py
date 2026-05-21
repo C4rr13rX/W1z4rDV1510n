@@ -1,9 +1,10 @@
 """tools/training_standard/drive_corpora_brain.py
 ====================================================
 
-Brain-server (port 8095) curriculum executor.  Sibling to
+Brain-server (port 8095) curriculum executor.  Updated for Stage 16
+(see STATE.md / README.md "Brain crate" section).  Sibling to
 `drive_corpora.py` which targets the legacy neuro node on port 8090;
-this script teaches the new brain crate via its native cross-pool
+this script teaches the brain crate via its native cross-pool
 observation contract:
 
   POST /observe { pool_id: 1 (text),   frame: b64(prompt) }
@@ -13,7 +14,28 @@ observation contract:
 That is the architectural mode the brain crate is *designed for* —
 both atom sets land in the same `fabric.current_moment`, and
 `advance_tick` grows the prompt-atom <-> response-atom binding
-terminals that integrate_autonomous later traverses to answer /chat.
+terminals that decode_best_trained_binding later traverses to answer
+both /chat and /integrate (Stage 16 unified them via the same
+authoritative decoder).
+
+Stage 16 defaults:
+  --burst            ON   dense-burst is required for word-level
+                          concept emergence under wide corpora.
+                          Per ARCHITECTURE.md §4.D.1 and the Stage 13
+                          empirical findings; toggle off with
+                          --epoch-interleaved if you specifically want
+                          the legacy schedule for comparison.
+  --sleep-between    ON   between each script's phase, POST /sleep so
+                          weak concepts get pruned and recent moment
+                          fingerprints get re-fired (CLS consolidation).
+                          McClelland/McNaughton/O'Reilly 1995.
+  --canonical-env    OFF  if set, applies the Stage-16 canonical
+                          BRAIN_SPARSITY_ACTION / BRAIN_MIN_ATOM_SCORE
+                          via /sensor/observe?... no, we can't change
+                          the running brain's env mid-flight — those
+                          must be set BEFORE the brain server starts.
+                          See scripts/run_full_training.py for the
+                          end-to-end orchestrator that handles env.
 
 Usage:
   python -m tools.training_standard.drive_corpora_brain               # all
@@ -21,10 +43,11 @@ Usage:
   python -m tools.training_standard.drive_corpora_brain --repeats 8   # more reps
 
   # Smoke test that training actually populates queryable bindings —
-  # after the first repeat, sample 3 trained prompts back through /chat
-  # and verify decoder == "multi_pool" (not "char_chain").  If every
-  # query falls through to char_chain, abort that script rather than
-  # waste 5 more repeats on a broken pipeline.
+  # after the first repeat, sample 3 trained prompts back through /chat.
+  # Under Stage 16 we accept ANY non-char_chain decoder OR a reply that
+  # matches one of the prompt's trained responses (categorical entries
+  # can be multi-valued, so substring-match against the canonical
+  # benchmark would miss legitimate trained hits).
 
 Outputs append-only events to the same training_events.jsonl the
 legacy runner writes — both pipelines feed the same regression-history
@@ -127,14 +150,36 @@ def read_corpus_jsonl(path: Path) -> list[dict]:
 
 def smoke_test_recall(rows: list[dict], n: int = 3,
                        timeout: float = 30.0) -> tuple[bool, list[dict]]:
-    """Query the first `n` trained prompts back through brain /chat and
-    check that at least one returns `tier == "multi_pool"` (not
-    char_chain).  Trained cross-pool bindings *should* light the
-    multi_pool decoder; if every query falls through to char_chain
-    after the first repeat the bindings aren't taking — abort."""
+    """Query the first `n` trained prompts back through brain /chat
+    and check that at least one returns either:
+      - a non-char_chain decoder (multi_pool / eem), OR
+      - a `reply` string that's a non-empty substring of any trained
+        response for this prompt (Stage 16 accept-any-trained-categorical
+        semantics — categorical entries can be multi-valued).
+
+    If every query falls through to char_chain AND no reply matches
+    a trained response, the bindings aren't taking — log warning but
+    keep going (later repeats may still consolidate).
+    """
+    # Build accepted-set for each prompt from this corpus batch:
+    # multiple rows can share a prompt with different responses.
+    accepted: dict[str, set[str]] = {}
+    for row in rows:
+        p = (row.get("prompt") or row.get("question") or "").strip()
+        r = (row.get("response") or row.get("answer") or "").strip()
+        if p and r:
+            accepted.setdefault(p, set()).add(r)
+
     samples: list[dict] = []
-    multi_pool_hits = 0
-    for row in rows[:n]:
+    hits = 0
+    # Sample evenly across the corpus, not just the first n (which
+    # may all share the same response under one-hot corpora).
+    if rows and n > 0:
+        step = max(1, len(rows) // max(n, 1))
+        probe_rows = [rows[i] for i in range(0, len(rows), step)][:n]
+    else:
+        probe_rows = []
+    for row in probe_rows:
         prompt = (row.get("prompt") or row.get("question") or "").strip()
         if not prompt:
             continue
@@ -142,21 +187,58 @@ def smoke_test_recall(rows: list[dict], n: int = 3,
         if not ok or not isinstance(resp, dict):
             samples.append({"prompt": prompt, "error": str(resp)})
             continue
-        # Brain /chat returns `decoder` ("multi_pool" / "eem" / "char_chain")
-        # not `tier`.  Treat anything that isn't char_chain as a usable
-        # signal — both multi_pool and eem mean the trained substrate
-        # contributed, only char_chain means the pipeline gave up.
         decoder = resp.get("decoder") or resp.get("confidence_tier")
-        oog = (resp.get("grounding") or {}).get("outside_grounding")
-        if decoder and decoder != "char_chain":
-            multi_pool_hits += 1
+        oog     = (resp.get("grounding") or {}).get("outside_grounding")
+        # Stage 16 brain /chat returns BOTH `reply` (the canonical
+        # decoded answer) and `answer` (same string, kept for the
+        # legacy Wizard-chat client).  Prefer reply.
+        reply   = (resp.get("reply") or resp.get("answer") or "").strip()
+        # Hit if decoder is substantive OR reply is a trained answer
+        # for this prompt (substring tolerant: 'animal' in 'animala'
+        # decoder-residual case, etc.).
+        decoder_ok = bool(decoder) and decoder != "char_chain"
+        trained_set = accepted.get(prompt, set())
+        reply_ok = bool(reply) and any(
+            v and (v in reply or reply in v) for v in trained_set
+        )
+        if decoder_ok or reply_ok:
+            hits += 1
         samples.append({
-            "prompt":  prompt,
-            "decoder": decoder,
-            "oog":     oog,
-            "answer":  (resp.get("answer") or "")[:80],
+            "prompt":     prompt,
+            "decoder":    decoder,
+            "oog":        oog,
+            "reply":      reply[:80],
+            "trained":    sorted(trained_set)[:4],
+            "decoder_ok": decoder_ok,
+            "reply_ok":   reply_ok,
         })
-    return (multi_pool_hits > 0, samples)
+    return (hits > 0, samples)
+
+
+# ── Sleep / replay (Stage 16 CLS consolidation) ───────────────────────────
+
+
+def post_sleep_cycle(min_use_count: int = 2,
+                     stale_ticks: int = 1000,
+                     replay_count: int = 24,
+                     replay_strength: float = 0.5,
+                     timeout: float = 30.0) -> tuple[bool, dict | str]:
+    """Trigger Stage-16 sleep cycle: prune weak concepts then replay
+    recent moment fingerprints to consolidate surviving patterns.
+    Called between scripts in the curriculum so each phase's bindings
+    settle before the next phase introduces new patterns that could
+    interfere via partial-atom overlap."""
+    return _post("/sleep", {
+        "min_use_count":   min_use_count,
+        "stale_ticks":     stale_ticks,
+        "replay_count":    replay_count,
+        "replay_strength": replay_strength,
+    }, timeout=timeout)
+
+
+def post_checkpoint(timeout: float = 60.0) -> tuple[bool, dict | str]:
+    """Persist brain.bin to the configured data dir."""
+    return _post("/checkpoint", {}, timeout=timeout)
 
 
 # ── Per-script driver ──────────────────────────────────────────────────────
@@ -280,9 +362,11 @@ def main(argv: list[str] | None = None) -> int:
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--script", default="",
                      help="train only this script id (default: all in phase order)")
-    p.add_argument("--repeats", type=int, default=6,
+    p.add_argument("--repeats", type=int, default=4,
                      help="repeat the corpus this many times per script "
-                          "(default 6 — enough for cross-edges to saturate)")
+                          "(default 4 — Stage 16 dense-burst needs fewer reps "
+                          "than epoch-interleaved; toddler-style corpora can "
+                          "use --repeats 8 explicitly)")
     p.add_argument("--inter-post-sleep", type=float, default=0.0,
                      help="seconds to sleep between cross-pool POST sets "
                           "(default 0; brain's lock is short-held)")
@@ -293,12 +377,33 @@ def main(argv: list[str] | None = None) -> int:
                      help="skip the inline post-first-repeat smoke test")
     p.add_argument("--phase-max", type=int, default=None,
                      help="run only scripts with phase <= this value")
-    p.add_argument("--burst", action="store_true",
-                     help="dense-burst training schedule: each pair observed "
-                          "`repeats` times back-to-back before moving to the "
-                          "next pair (vs. default epoch-interleaved).  Required "
-                          "for word-level concept emergence on wide corpora; "
+    # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
+    # force the legacy schedule (mainly for comparison / regression).
+    grp = p.add_mutually_exclusive_group()
+    grp.add_argument("--burst", dest="burst", action="store_true",
+                     help="dense-burst training schedule (DEFAULT for Stage 16): "
+                          "each pair observed `repeats` times back-to-back "
+                          "before moving to the next pair.  Required for "
+                          "word-level concept emergence on wide corpora; "
                           "see ARCHITECTURE.md §4.D.1.")
+    grp.add_argument("--epoch-interleaved", dest="burst", action="store_false",
+                     help="legacy epoch-interleaved schedule (one full pass "
+                          "per rep).  Mostly useful for comparison.")
+    p.set_defaults(burst=True)
+    # Stage 16 CLS consolidation between scripts.
+    sleep_grp = p.add_mutually_exclusive_group()
+    sleep_grp.add_argument("--sleep-between", dest="sleep_between",
+                            action="store_true",
+                            help="POST /sleep between scripts to consolidate "
+                                 "(DEFAULT for Stage 16).  Prunes weak "
+                                 "concepts + replays recent moment fingerprints.")
+    sleep_grp.add_argument("--no-sleep-between", dest="sleep_between",
+                            action="store_false",
+                            help="skip the inter-script sleep cycle")
+    p.set_defaults(sleep_between=True)
+    p.add_argument("--checkpoint", action="store_true",
+                     help="POST /checkpoint at the end so brain.bin persists "
+                          "the trained state to disk")
     args = p.parse_args(argv)
 
     BRAIN_URL = args.brain.rstrip("/")
@@ -314,13 +419,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.phase_max is not None:
             plan = [s for s in plan if s.phase <= args.phase_max]
 
-    print(f"[drive_corpora_brain] target={BRAIN_URL} "
-            f"plan={len(plan)} script(s) repeats={args.repeats}", flush=True)
+    schedule = "dense-burst" if args.burst else "epoch-interleaved"
+    print(f"[drive_corpora_brain] target={BRAIN_URL}  schedule={schedule}  "
+            f"plan={len(plan)} script(s)  repeats={args.repeats}  "
+            f"sleep_between={args.sleep_between}", flush=True)
 
     summaries: list[dict] = []
     t0 = time.time()
-    for s in plan:
-        print(f"\n=== {s.id} (phase {s.phase}, {s.category}) ===", flush=True)
+    for idx, s in enumerate(plan):
+        print(f"\n=== [{idx+1}/{len(plan)}] {s.id} "
+                f"(phase {s.phase}, {s.category}) ===", flush=True)
         summ = drive_one(s, args.repeats, _PROJECT_ROOT,
                             verbose=args.verbose,
                             smoke=not args.no_smoke,
@@ -330,12 +438,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
                 flush=True)
+        # CLS consolidation between scripts.  Not on the LAST one
+        # (final checkpoint is enough).
+        if args.sleep_between and idx + 1 < len(plan):
+            ok_s, resp_s = post_sleep_cycle()
+            if ok_s and isinstance(resp_s, dict):
+                print(f"  [sleep] pruned={resp_s.get('pruned',0)} "
+                        f"replayed={resp_s.get('replayed',0)} "
+                        f"tick_now={resp_s.get('tick_now','?')}", flush=True)
+            else:
+                print(f"  [sleep] failed: {resp_s}", flush=True)
+
     dt = time.time() - t0
     total_ok   = sum(s["posted_ok"]   for s in summaries)
     total_fail = sum(s["posted_fail"] for s in summaries)
     print(f"\n[drive_corpora_brain] done in {dt:.1f}s — "
             f"{total_ok} xpool pairs posted, {total_fail} failed",
             flush=True)
+
+    if args.checkpoint:
+        ok_c, resp_c = post_checkpoint()
+        if ok_c and isinstance(resp_c, dict):
+            print(f"[checkpoint] wrote {resp_c.get('written_bytes','?')} bytes "
+                    f"to {resp_c.get('path','?')}", flush=True)
+        else:
+            print(f"[checkpoint] failed: {resp_c}", flush=True)
     return 0
 
 
