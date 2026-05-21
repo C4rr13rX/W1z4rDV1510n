@@ -26,6 +26,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 w1z4rdv1510n         = { path = "../core" }
 w1z4rdv1510n-cluster = { path = "../cluster" }
 w1z4rd-brain         = { path = "../brain" }
+ahash                = { version = "0.8", features = ["serde"] }   # match brain; needed for Stage 17.4 sleep decomposition
 
 [[bin]]
 name = "w1z4rd_brain_server"

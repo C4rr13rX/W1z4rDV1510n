@@ -75,6 +75,65 @@ fn pool_name(id: PoolId) -> &'static str {
 struct AppState {
     brain: Arc<Mutex<Brain>>,
     checkpoint_path: PathBuf,
+    /// Per [`ARCHITECTURE.md`] §17.4: the current (or last completed) sleep
+    /// job's progress.  Updated by the background tokio task spawned from
+    /// the `/sleep` handler; readable by `/sleep/status`.  `None` means
+    /// no sleep has ever been requested on this brain instance.
+    sleep_status: Arc<std::sync::Mutex<Option<SleepJobStatus>>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SleepJobStatus {
+    /// Monotonically increasing job id within a single brain process.
+    job_id:           u64,
+    /// "running" | "complete" | "failed"
+    phase:            String,
+    /// Pools in this brain.  Each entry transitions through phase1 →
+    /// phase2 → housekeeping in order.
+    pools_total:      usize,
+    /// How many pools have completed PHASE 1 prune.
+    pools_phase1_done: usize,
+    /// How many pools have completed PHASE 2 cross-pool cleanup.
+    pools_phase2_done: usize,
+    /// How many pools have completed PHASE 3 housekeeping.
+    pools_phase3_done: usize,
+    /// Cumulative count of concepts pruned across all phase-1 pools so far.
+    pruned_so_far:    usize,
+    /// Cumulative moments replayed (set after replay phase completes).
+    replayed:         usize,
+    /// Tick at the start of this sleep run.
+    tick_start:       u64,
+    /// Tick at the end of this sleep run (set when phase = "complete").
+    tick_end:         u64,
+    /// Wall-time start (ms since UNIX epoch).
+    started_at_ms:    i64,
+    /// Wall-time end (ms since UNIX epoch), zero if still running.
+    finished_at_ms:   i64,
+    /// Set on phase = "failed".
+    error:            Option<String>,
+}
+
+impl SleepJobStatus {
+    fn new(job_id: u64, pools_total: usize, tick_start: u64) -> Self {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64).unwrap_or(0);
+        Self {
+            job_id,
+            phase:             "running".into(),
+            pools_total,
+            pools_phase1_done: 0,
+            pools_phase2_done: 0,
+            pools_phase3_done: 0,
+            pruned_so_far:     0,
+            replayed:          0,
+            tick_start,
+            tick_end:          tick_start,
+            started_at_ms:     now_ms,
+            finished_at_ms:    0,
+            error:             None,
+        }
+    }
 }
 
 fn data_dir() -> PathBuf {
@@ -752,7 +811,7 @@ async fn flush(
     Ok(Json(FlushResponse { wal_bytes: store.log_size_bytes() }))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct SleepRequest {
     #[serde(default = "default_sleep_min_use_count")]
     min_use_count:    u64,
@@ -762,6 +821,12 @@ struct SleepRequest {
     replay_count:     usize,
     #[serde(default = "default_sleep_replay_strength")]
     replay_strength:  f32,
+    /// Stage 17.4: when true, spawn the sleep as a background tokio task
+    /// and return immediately.  Poll `GET /sleep/status` for progress.
+    /// Default false for backward compatibility — the legacy synchronous
+    /// shape still works.
+    #[serde(default)]
+    background:       bool,
 }
 fn default_sleep_min_use_count()  -> u64 { 2 }
 fn default_sleep_stale_ticks()    -> u64 { 1000 }
@@ -772,23 +837,191 @@ struct SleepResponse {
     pruned:    usize,
     replayed:  usize,
     tick_now:  u64,
+    /// Stage 17.4 additions — backward compatible because old clients
+    /// just ignore these.
+    #[serde(default)]
+    job_id:     u64,
+    #[serde(default)]
+    background: bool,
+    #[serde(default)]
+    phase:      String,
 }
 
-/// P4 sleep cycle: prune weak concepts (SHY hypothesis — Tononi &
-/// Cirelli) then replay recent moment fingerprints to consolidate
-/// surviving patterns (CLS — McClelland, McNaughton, O'Reilly 1995).
-/// Call at idle / between training epochs; not called automatically.
+/// P4 sleep cycle per [`ARCHITECTURE.md`] §17.4 — decomposed per-pool with
+/// brain-mutex released between phases so /stats, /chat, /flush stay
+/// responsive throughout.  Two response modes:
+///
+/// - `{ "background": false }` (default — backward compatible): handler
+///   runs the full sleep synchronously and returns the totals.  Same shape
+///   as the legacy /sleep response.  Long sleep operations may exceed
+///   HTTP client timeouts at scale; use background mode then.
+/// - `{ "background": true }`: handler spawns a tokio task to run the
+///   sleep cycle, returns immediately with the `job_id` and current
+///   status.  Poll `GET /sleep/status` for progress.
+///
+/// SHY hypothesis (Tononi & Cirelli, 2014) for the prune half;
+/// hippocampal replay (Wilson & McNaughton, 1994; McClelland et al., 1995
+/// CLS) for the replay half.  Both decomposed across pools so a sleep
+/// pass on a 100M-terminal brain doesn't hold the brain mutex for the
+/// entire scan.
 async fn sleep_cycle(
     State(s): State<AppState>,
     Json(req): Json<SleepRequest>,
 ) -> Json<SleepResponse> {
-    let mut brain = s.brain.lock().await;
-    let pruned = brain.sleep(req.min_use_count, req.stale_ticks);
+    // Pick up the pool list and starting tick under a brief lock.
+    let (pool_ids, tick_start) = {
+        let brain = s.brain.lock().await;
+        (brain.fabric().pool_ids(), brain.fabric().current_tick())
+    };
+
+    // Allocate a job id from the status slot (cheap monotonic counter).
+    let job_id = {
+        let mut slot = s.sleep_status.lock().unwrap();
+        let next = slot.as_ref().map(|j| j.job_id + 1).unwrap_or(1);
+        *slot = Some(SleepJobStatus::new(next, pool_ids.len(), tick_start));
+        next
+    };
+
+    if req.background {
+        // Spawn background; return immediately with current status.
+        let state_for_task = s.clone();
+        let req_for_task = req.clone();
+        let pool_ids_for_task = pool_ids.clone();
+        tokio::spawn(async move {
+            run_decomposed_sleep(state_for_task, req_for_task, pool_ids_for_task, tick_start).await;
+        });
+        let snap = s.sleep_status.lock().unwrap().clone().unwrap();
+        return Json(SleepResponse {
+            pruned:    snap.pruned_so_far,
+            replayed:  snap.replayed,
+            tick_now:  tick_start,
+            job_id,
+            background: true,
+            phase:     snap.phase,
+        });
+    }
+
+    // Foreground mode: run the same decomposition inline, but yield
+    // tokio between phases so /stats can interleave even within one
+    // /sleep request.
+    run_decomposed_sleep(s.clone(), req.clone(), pool_ids, tick_start).await;
+    let snap = s.sleep_status.lock().unwrap().clone().unwrap();
+    Json(SleepResponse {
+        pruned:    snap.pruned_so_far,
+        replayed:  snap.replayed,
+        tick_now:  snap.tick_end,
+        job_id,
+        background: false,
+        phase:     snap.phase,
+    })
+}
+
+/// Drives the per-pool decomposed sleep cycle.  Called inline by the
+/// foreground branch and via tokio::spawn by the background branch.
+async fn run_decomposed_sleep(
+    s:          AppState,
+    req:        SleepRequest,
+    pool_ids:   Vec<PoolId>,
+    _tick_start: u64,
+) {
+    // AHashSet matches the Brain API's sleep_pool_phase2 signature.
+    let mut all_pruned: ahash::AHashSet<w1z4rd_brain::NeuronRef> =
+        ahash::AHashSet::new();
+
+    // PHASE 1 — per-pool prune.  Brain mutex released between iterations.
+    for pid in &pool_ids {
+        let pruned = {
+            let brain = s.brain.lock().await;
+            brain.sleep_pool_phase1(*pid, req.min_use_count, req.stale_ticks)
+        };
+        // brain mutex released — /stats can interleave here.
+        {
+            let mut slot = s.sleep_status.lock().unwrap();
+            if let Some(j) = slot.as_mut() {
+                j.pruned_so_far += pruned.len();
+                j.pools_phase1_done += 1;
+            }
+        }
+        all_pruned.extend(pruned.into_iter());
+        tokio::task::yield_now().await;
+    }
+
+    // PHASE 2 — per-pool cross-pool inbound cleanup.
+    if !all_pruned.is_empty() {
+        for pid in &pool_ids {
+            {
+                let brain = s.brain.lock().await;
+                brain.sleep_pool_phase2(*pid, &all_pruned);
+            }
+            {
+                let mut slot = s.sleep_status.lock().unwrap();
+                if let Some(j) = slot.as_mut() {
+                    j.pools_phase2_done += 1;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    } else {
+        // Skip phase 2 cleanly; mark all pools done so status is consistent.
+        let mut slot = s.sleep_status.lock().unwrap();
+        if let Some(j) = slot.as_mut() {
+            j.pools_phase2_done = pool_ids.len();
+        }
+    }
+
+    // PHASE 3 — per-pool housekeeping (decay + sub-floor prune).
+    for pid in &pool_ids {
+        {
+            let brain = s.brain.lock().await;
+            brain.sleep_pool_housekeeping(*pid);
+        }
+        {
+            let mut slot = s.sleep_status.lock().unwrap();
+            if let Some(j) = slot.as_mut() {
+                j.pools_phase3_done += 1;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+
+    // REPLAY — CLS consolidation.  Brief brain-mutex hold; replay is
+    // bounded by `count` so it's not the unbounded scan that phases 1-3
+    // could be.
     let replayed = if req.replay_count > 0 {
+        let mut brain = s.brain.lock().await;
         brain.replay_recent_moments(req.replay_count, req.replay_strength)
     } else { 0 };
-    let tick_now = brain.fabric_mut().current_tick();
-    Json(SleepResponse { pruned, replayed, tick_now })
+
+    let tick_end = {
+        let brain = s.brain.lock().await;
+        brain.fabric().current_tick()
+    };
+    let finished_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64).unwrap_or(0);
+    let mut slot = s.sleep_status.lock().unwrap();
+    if let Some(j) = slot.as_mut() {
+        j.phase = "complete".into();
+        j.replayed = replayed;
+        j.tick_end = tick_end;
+        j.finished_at_ms = finished_at_ms;
+    }
+}
+
+/// `GET /sleep/status` — per [`ARCHITECTURE.md`] §17.4 — returns the
+/// current (or most recent) sleep job's progress.  Useful when /sleep
+/// was invoked with `background: true` and the caller wants to know
+/// when consolidation has finished.  Returns 404 if no sleep has ever
+/// been requested on this brain instance.
+async fn sleep_status(
+    State(s): State<AppState>,
+) -> Result<Json<SleepJobStatus>, (axum::http::StatusCode, String)> {
+    let slot = s.sleep_status.lock().unwrap();
+    match slot.as_ref() {
+        Some(j) => Ok(Json(j.clone())),
+        None    => Err((axum::http::StatusCode::NOT_FOUND,
+                        "no sleep job has been requested".into())),
+    }
 }
 
 // -----------------------------------------------------------------
@@ -1111,6 +1344,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         brain:           Arc::new(Mutex::new(brain)),
         checkpoint_path: checkpoint_path.clone(),
+        sleep_status:    Arc::new(std::sync::Mutex::new(None)),
     };
 
     let app = Router::new()
@@ -1125,6 +1359,7 @@ async fn main() -> Result<()> {
         .route("/checkpoint",            post(checkpoint))
         .route("/flush",                 post(flush))
         .route("/sleep",                 post(sleep_cycle))
+        .route("/sleep/status",          get(sleep_status))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))

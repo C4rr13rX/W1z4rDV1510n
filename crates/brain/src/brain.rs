@@ -2916,43 +2916,88 @@ impl Brain {
     /// is more than `stale_ticks` in the past.
     ///
     /// Returns the total number of concepts pruned.
-    pub fn sleep(&mut self, min_use_count: u64, stale_ticks: u64) -> usize {
-        let current_tick = self.fabric.current_tick();
+    ///
+    /// This is the **single-shot** form, retained for tests and tools that
+    /// don't need to yield to other HTTP traffic.  Per [`ARCHITECTURE.md`]
+    /// §17.4, the production sleep path is the decomposed
+    /// [`Brain::sleep_pool_phase1`] / [`Brain::sleep_pool_phase2`] /
+    /// [`Brain::sleep_pool_housekeeping`] trio invoked by the
+    /// [`crate::store`]-aware HTTP handler so other endpoints can interleave.
+    /// Note this is `&self` — all the actual mutation happens through
+    /// `pool.write()` on per-pool RwLocks.
+    pub fn sleep(&self, min_use_count: u64, stale_ticks: u64) -> usize {
         let mut total_pruned = 0usize;
         let mut pruned_refs: ahash::AHashSet<NeuronRef> = ahash::AHashSet::new();
+        let pool_ids = self.fabric.pool_ids();
 
         // Phase 1: per-pool prune; collect (pool, neuron) refs.
-        for pid in self.fabric.pool_ids() {
-            if let Some(pool) = self.fabric.pool(pid) {
-                let pruned_ids = pool.write()
-                    .prune_weak_concepts(min_use_count, stale_ticks, current_tick);
-                total_pruned += pruned_ids.len();
-                for nid in pruned_ids {
-                    pruned_refs.insert(NeuronRef::new(pid, nid));
-                }
-            }
+        for pid in &pool_ids {
+            let pruned = self.sleep_pool_phase1(*pid, min_use_count, stale_ticks);
+            total_pruned += pruned.len();
+            pruned_refs.extend(pruned.into_iter());
         }
 
-        // Phase 2: clean cross-pool inbound terminals targeting
-        // anything pruned.
+        // Phase 2: clean cross-pool inbound terminals targeting anything
+        // pruned in phase 1.
         if !pruned_refs.is_empty() {
-            for pid in self.fabric.pool_ids() {
-                if let Some(pool) = self.fabric.pool(pid) {
-                    pool.write().prune_inbound_to(&pruned_refs);
-                }
+            for pid in &pool_ids {
+                self.sleep_pool_phase2(*pid, &pruned_refs);
             }
         }
 
         // Phase 3: extra housekeeping so any zero-weight residuals
         // drop below the prune floor.
-        let now = self.fabric.current_tick();
-        for pid in self.fabric.pool_ids() {
-            if let Some(pool) = self.fabric.pool(pid) {
-                pool.write().tick_housekeeping(now);
-            }
+        for pid in &pool_ids {
+            self.sleep_pool_housekeeping(*pid);
         }
 
         total_pruned
+    }
+
+    /// Phase 1 of [`ARCHITECTURE.md`] §17.4 sleep decomposition — prune one
+    /// pool's weak concepts.  Returns the cross-pool refs of pruned
+    /// neurons so callers can drive the cross-pool cleanup pass (phase 2)
+    /// later, interleaved with other HTTP work.  Brief per-pool write
+    /// lock only — other pools stay readable during this call.
+    pub fn sleep_pool_phase1(
+        &self,
+        pool_id:       PoolId,
+        min_use_count: u64,
+        stale_ticks:   u64,
+    ) -> ahash::AHashSet<NeuronRef> {
+        let current_tick = self.fabric.current_tick();
+        let Some(pool) = self.fabric.pool(pool_id) else {
+            return ahash::AHashSet::new();
+        };
+        let pruned_ids = pool.write()
+            .prune_weak_concepts(min_use_count, stale_ticks, current_tick);
+        let mut out = ahash::AHashSet::with_capacity(pruned_ids.len());
+        for nid in pruned_ids {
+            out.insert(NeuronRef::new(pool_id, nid));
+        }
+        out
+    }
+
+    /// Phase 2 of [`ARCHITECTURE.md`] §17.4 sleep decomposition — clean
+    /// inbound cross-pool terminals targeting any of `pruned_refs` from
+    /// `pool_id`.  Brief per-pool write lock only.
+    pub fn sleep_pool_phase2(
+        &self,
+        pool_id:       PoolId,
+        pruned_refs:   &ahash::AHashSet<NeuronRef>,
+    ) {
+        if pruned_refs.is_empty() { return; }
+        let Some(pool) = self.fabric.pool(pool_id) else { return; };
+        pool.write().prune_inbound_to(pruned_refs);
+    }
+
+    /// Phase 3 of [`ARCHITECTURE.md`] §17.4 sleep decomposition — final
+    /// per-pool housekeeping (decay + sub-floor prune).  Brief per-pool
+    /// write lock only.
+    pub fn sleep_pool_housekeeping(&self, pool_id: PoolId) {
+        let now = self.fabric.current_tick();
+        let Some(pool) = self.fabric.pool(pool_id) else { return; };
+        pool.write().tick_housekeeping(now);
     }
 
     /// P4 sleep-cycle REPLAY (Wilson & McNaughton 1994; McClelland,
