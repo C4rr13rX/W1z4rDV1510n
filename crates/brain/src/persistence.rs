@@ -29,7 +29,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 use crate::action::{ActionEvent, ActionId};
@@ -147,18 +147,54 @@ pub struct BrainSnapshot {
 
 fn default_tentative_threshold_for_restore() -> u32 { 1 }
 
-/// Write a [`BrainSnapshot`] to `path` using bincode.  Returns an
-/// `io::Error` for filesystem failures or `InvalidData` for
-/// serialization failures (the latter would indicate a programmer
-/// error — every field above derives `Serialize`).
+/// Write a [`BrainSnapshot`] to `path` using bincode.
+///
+/// Streams the snapshot directly into a buffered file writer via
+/// [`bincode::serialize_into`].  Critically, this does *not* allocate the
+/// entire serialised blob in RAM first — that approach OOMs the process on
+/// any brain whose serialised size exceeds free physical memory (we hit this
+/// empirically at ~8 GB blob / 463M terminals).  Peak heap during this call
+/// is bounded by the buffered-writer capacity (~256 KB), not the brain size.
+///
+/// Per [`ARCHITECTURE.md`] §17.1, this is the *interim* path — content-
+/// addressed per-neuron storage in [`crate::store`] is the long-term
+/// substitute.  Until that ships in full, this implementation gives the
+/// existing snapshot API the property it should have had from the start:
+/// **memory cost is O(write-buffer), not O(brain)**.
+///
+/// Returns `io::Error` for filesystem failures or `InvalidData` for
+/// serialisation failures (every field above derives `Serialize`).
 pub fn save_snapshot<P: AsRef<Path>>(snap: &BrainSnapshot, path: P) -> io::Result<()> {
-    let bytes = bincode::serialize(snap)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(path, bytes)
+    use std::io::BufWriter;
+    // Write to a sibling temp path then rename — atomic-replace guarantees
+    // that a partially-written file never displaces a good one.  Crash
+    // recovery sees either the previous good snapshot or the new good one,
+    // never a torn intermediate.
+    let final_path = path.as_ref();
+    let tmp_path = final_path.with_extension("bin.tmp");
+
+    {
+        let file = fs::File::create(&tmp_path)?;
+        let mut w = BufWriter::with_capacity(256 * 1024, file);
+        bincode::serialize_into(&mut w, snap)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        w.flush()?;
+        w.get_ref().sync_all()?;
+    }
+
+    // Atomic-replace.  Windows rename is atomic-replace for files on the
+    // same volume since NTFS journals the operation.
+    fs::rename(&tmp_path, final_path)?;
+    Ok(())
 }
 
 pub fn load_snapshot<P: AsRef<Path>>(path: P) -> io::Result<BrainSnapshot> {
-    let bytes = fs::read(path)?;
-    bincode::deserialize(&bytes)
+    use std::io::BufReader;
+    // Symmetric streaming read — never allocates a Vec<u8> the size of the
+    // whole file.  Bincode's deserialise reads only as much as the next
+    // primitive demands.
+    let file = fs::File::open(path)?;
+    let mut r = BufReader::with_capacity(256 * 1024, file);
+    bincode::deserialize_from(&mut r)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
