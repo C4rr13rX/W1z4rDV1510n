@@ -1530,9 +1530,36 @@ impl Brain {
                     // Same tier — higher score wins.
                     else if score > *prev_score { true }
                     else if score < *prev_score { false }
-                    // Tie on score — prefer SMALLER target member count
-                    // (cleaner binding, less decoder residual).
-                    else { target_count < *prev_target_count }
+                    // Tie on score AND on use_count (freq weight) —
+                    // tiebreak by target_count.  Direction controlled
+                    // by BRAIN_TARGET_TIEBREAK env var as ControlMode
+                    // / scalar.  Value > 0.5 = prefer LARGER target
+                    // (helps K-12 sad->emotion vs das->animal when
+                    // they tie on score and use_count: emotion=7 bytes
+                    // > animal=6 bytes).  Default 0.0 = SMALLER target
+                    // (legacy behaviour, cleaner toddler decodes).
+                    else {
+                        let tiebreak_pref: f32 = {
+                            let raw = std::env::var("BRAIN_TARGET_TIEBREAK").ok();
+                            let st = self.fabric.pool(query_pool)
+                                .map(|p| p.read().control_state());
+                            match (raw, st) {
+                                (Some(s), Some(state)) => {
+                                    let s = s.trim();
+                                    if let Ok(v) = s.parse::<f32>() { v.clamp(0.0, 1.0) }
+                                    else if let Ok(mode) = serde_json::from_str::<crate::ControlMode>(s) {
+                                        mode.evaluate(&state).clamp(0.0, 1.0)
+                                    } else { 0.0 }
+                                }
+                                _ => 0.0,
+                            }
+                        };
+                        if tiebreak_pref >= 0.5 {
+                            target_count > *prev_target_count
+                        } else {
+                            target_count < *prev_target_count
+                        }
+                    }
                 }
             };
             if consider {

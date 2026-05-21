@@ -113,6 +113,13 @@ KNOB_SPECS = {
     # reinforced even slightly more than competitors.
     "BRAIN_FREQ_WEIGHT":         {"default_const": 1.0, "min": 0.0, "max": 8.0,
                                   "scale_range": (-3.0, 3.0), "offset_range": (0.0, 4.0)},
+    # Target-size tiebreak direction.  When two bindings tie on
+    # precision*recall*freq_weight, this picks between them by their
+    # target-pool member count.  >= 0.5 = prefer LARGER target
+    # (helps K-12 sad->emotion=7 over das->animal=6); < 0.5 = prefer
+    # SMALLER target (legacy, helps toddler decode cleanliness).
+    "BRAIN_TARGET_TIEBREAK":     {"default_const": 0.0, "min": 0.0, "max": 1.0,
+                                  "scale_range": (-0.5, 0.5), "offset_range": (0.0, 1.0)},
 }
 
 POP_SIZE     = 12
