@@ -26,6 +26,7 @@ pub mod recovery;
 pub mod bloom;
 pub mod merkle;
 pub mod control;
+pub mod cold;
 
 pub use event::{TerminalDelta, WalEvent};
 pub use wal::{MmapWalStore, NoopStore, Store};
@@ -33,3 +34,4 @@ pub use recovery::{RecoveryStats, replay_into_brain};
 pub use bloom::CountingBloom;
 pub use merkle::{PoolRoot, compute_pool_root};
 pub use control::{StorageConfig, StorageControlState};
+pub use cold::ColdTier;

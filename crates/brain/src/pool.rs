@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
-use crate::store::{CountingBloom, NoopStore, Store, WalEvent};
+use crate::store::{ColdTier, CountingBloom, NoopStore, Store, WalEvent};
 
 /// Encode/decode contract per spec §3.1.  Each pool ships with one of these
 /// declaring how raw sensor frames decompose into atom labels and how an
@@ -312,6 +312,24 @@ pub struct Pool {
     /// maybe on disk?" without seeking, short-circuiting cold misses.
     bloom: CountingBloom,
 
+    /// Cold-tier file for evicted neurons per [`ARCHITECTURE.md`] §17.4.
+    /// `None` means eviction is disabled — the pool keeps every neuron
+    /// in RAM (the legacy mode that all small-scale tests use).  Attach
+    /// via [`Pool::set_cold_tier`].
+    cold_tier:     Option<Arc<ColdTier>>,
+
+    /// Disk offsets for currently-evicted neurons.  An ID in this map
+    /// is one whose in-RAM slot has been zeroed out (terminals + members
+    /// cleared) and whose authoritative state lives at this byte offset
+    /// in `cold_tier`'s file.  Empty if eviction is disabled.
+    cold_offsets:  AHashMap<NeuronId, u64>,
+
+    /// Set of neuron IDs currently in the evicted state.  Maintained
+    /// alongside `cold_offsets` (membership is identical); kept as a
+    /// separate set for O(1) "is this evicted?" probes from iteration
+    /// + decode paths.
+    evicted:       AHashSet<NeuronId>,
+
     /// External signal — set by Brain::decode_best_trained_binding
     /// when this pool is the query_pool of a decode.  Rolling avg
     /// of the winning binding's atom_score (the precision×recall
@@ -344,7 +362,154 @@ impl Pool {
             // when load crosses threshold (TODO Stage 17.4 full).  At this
             // scale the filter is ~175 KB per pool — negligible.
             bloom: CountingBloom::with_expected_capacity(100_000),
+            cold_tier:    None,
+            cold_offsets: AHashMap::new(),
+            evicted:      AHashSet::new(),
         }
+    }
+
+    /// Stage 17.4 — attach a cold-tier backing file so neurons can be
+    /// evicted to disk and paged back in.  When `None` (the default),
+    /// eviction is disabled and every neuron stays in RAM.
+    pub fn set_cold_tier(&mut self, tier: Arc<ColdTier>) {
+        self.cold_tier = Some(tier);
+    }
+
+    /// Stage 17.4 — true if neuron `id` is currently evicted to disk.
+    /// O(1) lookup.  Iteration paths use this to skip placeholder
+    /// entries in `neurons` for IDs that have been paged out.
+    pub fn is_evicted(&self, id: NeuronId) -> bool {
+        self.evicted.contains(&id)
+    }
+
+    /// Stage 17.4 — number of currently-evicted neurons.  Diagnostic +
+    /// `StorageControlState::working_set_pressure` signal source.
+    pub fn evicted_count(&self) -> usize { self.evicted.len() }
+
+    /// Stage 17.4 — count of neurons currently held in RAM (live).
+    /// Equals `neuron_count() - evicted_count()`.
+    pub fn live_count(&self) -> usize {
+        self.neurons.len().saturating_sub(self.evicted.len())
+    }
+
+    /// Stage 17.4 — evict one neuron to the cold tier.  Serialises its
+    /// full state to disk, then zeroes the in-memory slot's terminals
+    /// and members (which are the dominant memory consumers per spec
+    /// §17.1).  Label + id + kind stay in the slot so `label_to_id` +
+    /// `iter_neurons` semantics around tombstones stay sane.
+    ///
+    /// Returns `Ok(true)` if the neuron was evicted; `Ok(false)` if it
+    /// was already evicted (idempotent) or doesn't exist; `Err` if the
+    /// cold tier is unattached or the I/O failed.
+    pub fn evict_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
+        if self.evicted.contains(&id) { return Ok(false); }
+        let Some(tier) = self.cold_tier.clone() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no cold tier attached to this pool",
+            ));
+        };
+        let Some(n) = self.neurons.get_mut(id as usize) else {
+            return Ok(false);
+        };
+        // Refuse to evict atoms — they are the substrate's smallest,
+        // most fundamental unit; their RAM cost is minimal (no terminals
+        // typically) and the cost of paging them back in on every byte
+        // is unbearable.  Bindings (members empty + concept) also stay.
+        if n.is_atom() { return Ok(false); }
+
+        // Serialise the full neuron (including terminals + members)
+        // before zeroing.
+        let offset = tier.append_neuron(n)?;
+
+        // Zero the memory-heavy bits in place; preserve id, label,
+        // kind, born_tick, MEMBERS, salience, use_count.  Members must
+        // stay (clearing them would flip is_atom() to true and corrupt
+        // sleep_prune / decode semantics).  Members are typically a
+        // handful of NeuronRefs per concept — cheap.  The big memory
+        // consumer is `terminals`, which we shed entirely; on page-in
+        // those come back from disk.
+        n.terminals.clear();
+        n.terminals.shrink_to_fit();
+        n.prediction_error_ema = 0.0;
+        // Salience/EMA stay in RAM — they're the signal eviction policy
+        // uses to choose what to evict, so they remain readable post-evict.
+
+        self.cold_offsets.insert(id, offset);
+        self.evicted.insert(id);
+
+        // Per ARCHITECTURE §17.9: log the eviction.
+        let event = WalEvent::NeuronEvicted {
+            pool_id:   self.config.id,
+            neuron_id: id,
+        };
+        if let Err(e) = self.store.append(&event) {
+            tracing::warn!("WAL append failed for evict({}): {}", id, e);
+        }
+        Ok(true)
+    }
+
+    /// Stage 17.4 — page a previously-evicted neuron back into RAM.
+    /// Reads its serialised form from the cold tier at the stored
+    /// offset, restores `terminals` + `members` in the in-memory slot,
+    /// and removes the eviction markers.
+    ///
+    /// Returns `Ok(true)` if the neuron was paged in; `Ok(false)` if
+    /// it wasn't evicted to begin with (caller can ignore); `Err` if
+    /// the cold tier is missing or the read failed.
+    pub fn page_in_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
+        if !self.evicted.contains(&id) { return Ok(false); }
+        let Some(tier) = self.cold_tier.clone() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no cold tier attached to this pool",
+            ));
+        };
+        let Some(&offset) = self.cold_offsets.get(&id) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no cold offset recorded for neuron id {}", id),
+            ));
+        };
+        let restored = tier.read_neuron(offset)?;
+        // Sanity check: restored id must match.
+        if restored.id != id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cold-tier id mismatch: expected {}, got {}",
+                    id, restored.id),
+            ));
+        }
+        let Some(slot) = self.neurons.get_mut(id as usize) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("neuron slot {} no longer exists", id),
+            ));
+        };
+        slot.terminals = restored.terminals;
+        slot.members   = restored.members;
+        slot.prediction_error_ema = restored.prediction_error_ema;
+        // Use the more-current salience: in-RAM may have decayed below
+        // the cold copy's value, or vice versa.  Eviction freezes
+        // salience at evict-time; choose the cold copy as authoritative.
+        slot.salience      = restored.salience;
+        slot.salience_ema  = restored.salience_ema;
+        slot.use_count     = restored.use_count.max(slot.use_count);
+        slot.last_fired_tick = restored.last_fired_tick.max(slot.last_fired_tick);
+
+        self.cold_offsets.remove(&id);
+        self.evicted.remove(&id);
+        Ok(true)
+    }
+
+    /// Stage 17.4 — convenience: page `id` in if it's evicted, no-op
+    /// otherwise.  Used by callers that don't care which state the
+    /// neuron is in, just that it's accessible.
+    pub fn ensure_loaded(&mut self, id: NeuronId) -> std::io::Result<()> {
+        if self.evicted.contains(&id) {
+            self.page_in_neuron(id)?;
+        }
+        Ok(())
     }
 
     /// Stage 17.3 — probabilistic existence pre-check over the label
@@ -626,6 +791,14 @@ impl Pool {
             // so events from subsequent observations flow to the right log.
             store: Arc::new(NoopStore),
             bloom,
+            // Stage 17.4 — snapshot format doesn't yet track cold-tier
+            // state.  Restored pools start with no cold tier (caller
+            // must set_cold_tier explicitly) and no eviction history.
+            // Compaction follow-up will fold cold-tier into the
+            // snapshot format.
+            cold_tier:    None,
+            cold_offsets: AHashMap::new(),
+            evicted:      AHashSet::new(),
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
