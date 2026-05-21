@@ -516,17 +516,28 @@ async fn integrate(
     Json(req): Json<IntegrateRequest>,
 ) -> Json<IntegrateResponse> {
     let brain = s.brain.lock().await;
-    let ans = brain.integrate(req.query_pool, req.target_pool);
+    // Keep confidence / grounding from the legacy integrate() — those
+    // signals still reflect the substrate's atom-level binding-pool
+    // routing and OOV gate.  But OVERRIDE the answer bytes with the
+    // authoritative decoder used by /chat.  Per user direction the
+    // integrate path's recall must hit 100% on trained input — that
+    // requires the same Hebbian-frequency-weighted + min_atom_score
+    // floor that lifts /chat to 32/32.  Without this, /integrate's
+    // older atom-coverage routing picks wrong-category bindings or
+    // truncates decodes (e.g. fish->'anim', hand->'aturena').
+    let legacy = brain.integrate(req.query_pool, req.target_pool);
+    let authoritative = brain.decode_best_trained_binding(req.query_pool, req.target_pool);
+    let answer_bytes = authoritative.or(legacy.answer);
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     Json(IntegrateResponse {
-        answer:                ans.answer.as_ref().map(|b| engine.encode(b)),
-        confidence_tier:       format!("{:?}", ans.confidence_tier),
-        fabric_confidence:     ans.grounding.fabric_confidence,
-        eem_confidence:        ans.grounding.eem_confidence,
-        annealer_confidence:   ans.grounding.annealer_confidence,
-        integrated_confidence: ans.grounding.integrated_confidence,
-        outside_grounding:     ans.grounding.outside_grounding,
-        speculation_flag:      ans.grounding.speculation_flag,
+        answer:                answer_bytes.as_ref().map(|b| engine.encode(b)),
+        confidence_tier:       format!("{:?}", legacy.confidence_tier),
+        fabric_confidence:     legacy.grounding.fabric_confidence,
+        eem_confidence:        legacy.grounding.eem_confidence,
+        annealer_confidence:   legacy.grounding.annealer_confidence,
+        integrated_confidence: legacy.grounding.integrated_confidence,
+        outside_grounding:     legacy.grounding.outside_grounding,
+        speculation_flag:      legacy.grounding.speculation_flag,
     })
 }
 
