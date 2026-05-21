@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
-use crate::store::{NoopStore, Store, WalEvent};
+use crate::store::{CountingBloom, NoopStore, Store, WalEvent};
 
 /// Encode/decode contract per spec §3.1.  Each pool ships with one of these
 /// declaring how raw sensor frames decompose into atom labels and how an
@@ -304,6 +304,14 @@ pub struct Pool {
     /// `Arc<dyn Store>` so it can be cheaply shared across all pools.
     store: Arc<dyn Store>,
 
+    /// Counting Bloom filter over `label_to_id` keys per
+    /// [`ARCHITECTURE.md`] §17.3.  Maintained alongside the HashMap.
+    /// Stage 17.3: used as a fast probabilistic existence pre-check;
+    /// the HashMap is still authoritative.  When Stage 17.4 full ships
+    /// the demand-paged loader, this filter answers "is this label
+    /// maybe on disk?" without seeking, short-circuiting cold misses.
+    bloom: CountingBloom,
+
     /// External signal — set by Brain::decode_best_trained_binding
     /// when this pool is the query_pool of a decode.  Rolling avg
     /// of the winning binding's atom_score (the precision×recall
@@ -332,8 +340,29 @@ impl Pool {
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
             store: Arc::new(NoopStore),
+            // Bloom sized for 100K initial capacity — resizes by doubling
+            // when load crosses threshold (TODO Stage 17.4 full).  At this
+            // scale the filter is ~175 KB per pool — negligible.
+            bloom: CountingBloom::with_expected_capacity(100_000),
         }
     }
+
+    /// Stage 17.3 — probabilistic existence pre-check over the label
+    /// index.  Returns `false` only when the label is definitively
+    /// absent; `true` indicates "maybe present" (false-positive rate
+    /// is ~1e-4 at default Bloom capacity).  Callers needing exact
+    /// answers fall through to [`Pool::label_to_id`].
+    pub fn label_might_exist(&self, label: &str) -> bool {
+        self.bloom.might_contain(label)
+    }
+
+    /// Stage 17.3 — diagnostic: number of byte slots the Bloom filter
+    /// occupies.  Used by `/stats` to surface filter size.
+    pub fn bloom_byte_size(&self) -> usize { self.bloom.byte_size() }
+
+    /// Stage 17.3 — diagnostic: number of distinct keys inserted into
+    /// the Bloom filter (approximate; counts transitions from 0).
+    pub fn bloom_inserted_keys(&self) -> usize { self.bloom.inserted_keys() }
 
     /// Plug a persistence backend in per [`ARCHITECTURE.md`] §17.9.  After
     /// this call every neurogenesis / concept-emergence event in this pool
@@ -439,6 +468,7 @@ impl Pool {
             tracing::warn!("WAL append failed for append_neuron(id={}): {}", id, e);
         }
         self.neurons.push(neuron);
+        self.bloom.insert(&label);
         self.label_to_id.insert(label, id);
         id
     }
@@ -538,6 +568,18 @@ impl Pool {
         for (k, v) in snap.label_to_id { label_to_id.insert(k, v); }
         let mut sequences = AHashMap::new();
         for (k, v) in snap.sequences { sequences.insert(k, v); }
+        // Stage 17.3 — rebuild the Bloom side-car from the restored
+        // label index.  Bloom is not part of the snapshot format (it's a
+        // probabilistic structure that's cheap to rebuild and avoids a
+        // breaking format change).  Rebuild before constructing Self so
+        // we don't have to mutate after the move.
+        let mut bloom = CountingBloom::with_expected_capacity(
+            label_to_id.len().max(100_000),
+        );
+        for k in label_to_id.keys() {
+            bloom.insert(k);
+        }
+
         let mut pool = Self {
             config:           snap.config,
             encoding,
@@ -558,6 +600,7 @@ impl Pool {
             // re-attaches the live WAL backend via set_store after restore
             // so events from subsequent observations flow to the right log.
             store: Arc::new(NoopStore),
+            bloom,
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
@@ -898,11 +941,14 @@ impl Pool {
 
         // Zero outgoing terminals of pruned concepts and remove their
         // entries from label_to_id (so they can't collapse again).
+        // Also decrement the Bloom side-car (Stage 17.3) so a later
+        // `label_might_exist` query for the same label correctly says no.
         for &cid in &to_prune {
             if let Some(n) = self.neurons.get_mut(cid as usize) {
                 n.terminals.clear();
                 let label = n.label.clone();
                 self.label_to_id.remove(&label);
+                self.bloom.remove(&label);
             }
         }
 
@@ -967,6 +1013,7 @@ impl Pool {
             tracing::warn!("WAL append failed for ensure_atom({:?}): {}", label, e);
         }
         self.neurons.push(neuron);
+        self.bloom.insert(&label);
         self.label_to_id.insert(label, id);
         id
     }
@@ -1116,6 +1163,7 @@ impl Pool {
             );
         }
         self.neurons.push(concept);
+        self.bloom.insert(&composite_label);
         self.label_to_id.insert(composite_label, id);
         self.concept_multiset_to_id.insert(leaves_seq, id);
     }
