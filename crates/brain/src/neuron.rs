@@ -84,6 +84,24 @@ impl Terminal {
 /// `prediction_error_ema` enables per-region adaptive plasticity per spec
 /// §2.5: a neuron whose recent firings have been poorly predicted gets
 /// higher local plasticity, while a stable neuron's plasticity is low.
+///
+/// `salience` is the brain-emitted retention signal per [`ARCHITECTURE.md`]
+/// §17.5.  The substrate's *own* training rule writes to it; the storage
+/// tier's eviction policy reads from it.  Range \[0.0, 1.0\] where 1.0
+/// means "must retain" and 0.0 means "forgettable."  Salience is updated
+/// by two coupled signals (cf. Schultz 2007 dopaminergic gating, Frémaux
+/// & Gerstner 2016 three-factor plasticity, McClelland et al. 1995 CLS,
+/// Tononi & Cirelli 2014 SHY):
+/// 1. Reward / precision-modulated co-firing — neurons that participate
+///    in a successful decode get a salience boost in lockstep with their
+///    terminal-weight strengthening.
+/// 2. Compression utility under replay (deferred to Stage 17.7) — a
+///    neuron whose absence would substantially raise free-energy on
+///    replayed moments has its salience boosted.
+///
+/// `salience_ema` is the smoothed long-horizon trace used by the
+/// eviction policy in Stage 17.4 full.  EMA (vs. raw salience) prevents
+/// transient high-confidence decodes from gaming the retention policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neuron {
     pub id:                   NeuronId,
@@ -99,6 +117,15 @@ pub struct Neuron {
     pub last_fired_tick:      u64,
     pub use_count:            u64,
     pub prediction_error_ema: f32,
+    /// Stage 17.5: brain-emitted retention signal.  Defaults to 0.0 on
+    /// creation; updated by reward-modulated training paths (see
+    /// `Neuron::bump_salience`).  `#[serde(default)]` so older
+    /// brain.bin files without this field deserialize cleanly.
+    #[serde(default)]
+    pub salience:             f32,
+    /// Long-horizon EMA of `salience`.  Used by eviction policy.
+    #[serde(default)]
+    pub salience_ema:         f32,
 }
 
 impl Neuron {
@@ -113,6 +140,8 @@ impl Neuron {
             last_fired_tick: tick,
             use_count: 0,
             prediction_error_ema: 0.0,
+            salience: 0.0,
+            salience_ema: 0.0,
         }
     }
 
@@ -133,7 +162,40 @@ impl Neuron {
             last_fired_tick: tick,
             use_count: 0,
             prediction_error_ema: 0.0,
+            // Concepts start with a tiny baseline salience so they're not
+            // evicted before they accumulate any reward signal at all.
+            // 0.01 keeps them above noise but well below atoms in active use.
+            salience: 0.01,
+            salience_ema: 0.01,
         }
+    }
+
+    /// Stage 17.5: bump this neuron's salience by `delta`, then update its
+    /// EMA.  Called by the brain when this neuron participates in a
+    /// successful decode (reward signal).  `delta` is typically the
+    /// decode's `atom_score` — a high-precision recall maps to a large
+    /// bump; a marginal recall to a small one.  Saturates at 1.0.
+    ///
+    /// Frémaux & Gerstner (2016) — three-factor (pre × post × reward)
+    /// plasticity governs which synapses + which post-synaptic neurons
+    /// get long-term tags.  We track salience on the neuron (post),
+    /// while terminal weight is updated separately on the synapse.
+    pub fn bump_salience(&mut self, delta: f32) {
+        const ALPHA: f32 = 0.15;  // EMA: ~recent-10 weighting
+        self.salience = (self.salience + delta.max(0.0)).min(1.0);
+        self.salience_ema =
+            self.salience_ema * (1.0 - ALPHA) + self.salience * ALPHA;
+    }
+
+    /// Stage 17.5: decay this neuron's salience by `gamma` (multiplicative).
+    /// Called during sleep on neurons that did NOT participate in the
+    /// recent replay — captures the "use it or lose it" half of the
+    /// systems-consolidation hypothesis (Frankland & Bontempi 2005).
+    /// Floor at 0 to avoid negative salience.
+    pub fn decay_salience(&mut self, gamma: f32) {
+        let g = gamma.clamp(0.0, 1.0);
+        self.salience = (self.salience * (1.0 - g)).max(0.0);
+        // EMA naturally follows the per-bump update, no extra step here.
     }
 
     /// True for atoms (no members), false for concepts of any kind.

@@ -1605,6 +1605,11 @@ impl Brain {
             .collect();
         if target_members.is_empty() { return None; }
         let bytes = t.decode_concept_members(&target_members);
+        // Stage 17.5: collect ALL members of the winning binding (across
+        // every pool, not just target).  These are the neurons that
+        // participated in this successful decode and should receive the
+        // reward-modulated salience bump.
+        let all_winner_members: Vec<NeuronRef> = bnode.members.clone();
         drop(t);
         drop(bp_read);
 
@@ -1615,13 +1620,53 @@ impl Brain {
         // when decodes are confident, lower it when struggling.
         // Divide winning_score by the freq_weight to recover the raw
         // precision×recall (which is what we want as a [0,1] signal).
+        let raw_score = if winning_score > 1.0 {
+            // Has concept-tier bonus (+1.0).  Recover the freq-weighted
+            // concept portion, then clamp to [0,1].
+            (winning_score - 1.0).min(1.0)
+        } else { winning_score.min(1.0) };
         if let Some(qp) = self.fabric.pool(query_pool) {
-            let raw_score = if winning_score > 1.0 {
-                // Has concept-tier bonus (+1.0).  Recover the freq-weighted
-                // concept portion, then clamp to [0,1].
-                (winning_score - 1.0).min(1.0)
-            } else { winning_score.min(1.0) };
             qp.write().record_decode_precision(raw_score);
+        }
+
+        // Stage 17.5: brain-emitted salience update.  The winning binding
+        // AND each of its members get a salience bump proportional to
+        // the decode precision.  Frémaux & Gerstner (2016) three-factor
+        // plasticity: pre × post × reward → tag the post-synaptic neurons
+        // (here: binding + members) for long-term retention.
+        // Frankland & Bontempi (2005): salience-tagged engrams resist
+        // consolidation-driven loss.  This is the substrate's own answer
+        // to "which of my own neurons matter for my future self?".
+        //
+        // Bump magnitude: `raw_score * 0.10`.  A perfect decode (score=1.0)
+        // contributes 0.10 to salience; salience saturates at 1.0 in
+        // Neuron::bump_salience.  Empirically chosen — fast enough that
+        // hot bindings reach high salience within a few thousand decodes,
+        // slow enough that one lucky decode doesn't dominate.
+        let salience_delta = raw_score * 0.10;
+        if salience_delta > 0.0 {
+            // Bump the binding concept itself.
+            if let Some(bp) = self.fabric.pool(bpid) {
+                if let Some(n) = bp.write().get_mut(bnid) {
+                    n.bump_salience(salience_delta);
+                }
+            }
+            // Group members by their pool, then take one write lock per pool.
+            let mut by_pool: std::collections::HashMap<PoolId, Vec<NeuronId>> =
+                std::collections::HashMap::new();
+            for nref in &all_winner_members {
+                by_pool.entry(nref.pool).or_default().push(nref.neuron);
+            }
+            for (pid, nids) in by_pool {
+                if let Some(p) = self.fabric.pool(pid) {
+                    let mut w = p.write();
+                    for nid in nids {
+                        if let Some(n) = w.get_mut(nid) {
+                            n.bump_salience(salience_delta);
+                        }
+                    }
+                }
+            }
         }
 
         if bytes.is_empty() { None } else { Some(bytes) }
