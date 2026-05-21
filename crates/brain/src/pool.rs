@@ -509,8 +509,10 @@ impl Pool {
                 .filter(|m| m.pool == pool.config.id)
                 .map(|m| m.neuron)
                 .collect();
-            let mut leaves = pool.expand_to_atom_leaves(&member_ids);
-            leaves.sort();
+            let leaves = pool.expand_to_atom_leaves(&member_ids);
+            // ORDERED-sequence dedup (was: sorted multiset).  Each
+            // unique atom-leaf order gets its own canonical concept,
+            // so anagrams like sad/das remain distinct.
             pool.concept_multiset_to_id.entry(leaves).or_insert(cid);
         }
         pool
@@ -956,25 +958,26 @@ impl Pool {
             return;
         }
 
-        // Stage 13 — atom-multiset dedup.  Two sequences with the same
-        // atom-leaf multiset (e.g. [f,o,o,d] and [o,o,d,f], or
-        // [a, pp-concept, l, e] and [a, p, p, l, e]) represent the
-        // SAME word; round-robin training under destructive collapse
-        // can spawn many such variant orderings.  Keep only the FIRST
-        // (canonical) one — subsequent variants are dropped.
+        // Stage 13 — atom-leaf SEQUENCE dedup (was: multiset).
+        // Originally we dedup'd by SORTED atom-leaf set so fragments
+        // like [f,o,o,d] and [o,o,d,f] (artifacts of destructive
+        // collapse) wouldn't multiply.  But anagram-pair prompts
+        // ('sad'/'das', 'rose'/'eros', 'cat'/'act') ALSO have
+        // identical multisets and the multiset rule collapsed them
+        // into one concept — losing the substrate's ability to
+        // distinguish.  K-12 'sad' lost to 'das->animal' for this
+        // reason.
         //
-        // The decoded byte sequence of the first-promoted concept
-        // tends to be the linguistically correct one because it
-        // emerged from a clean atom run before fragment collapse
-        // disrupted the sequence.
-        // Atom-leaf sequence in original order (used for the
-        // periodicity check below).
+        // Switch to ORDERED-sequence dedup: only dedup when the
+        // atom-leaf sequence is IDENTICAL in order.  Anagrams now
+        // emerge as distinct concepts.  Fragment variants from
+        // collapse remain a theoretical concern but k-WTA sparsity
+        // + heterosynaptic LTD + Hebbian freq weighting in decode
+        // now dominate that risk: the canonical fragment gets the
+        // highest use_count and outscores noise variants.
         let leaves_seq: Vec<NeuronId> = self.expand_to_atom_leaves(&members);
-        // Sorted copy used as the multiset key.
-        let mut leaves: Vec<NeuronId> = leaves_seq.clone();
-        leaves.sort();
-        if self.concept_multiset_to_id.contains_key(&leaves) {
-            return; // canonical concept already exists for this multiset
+        if self.concept_multiset_to_id.contains_key(&leaves_seq) {
+            return; // canonical concept already exists for this ordered sequence
         }
 
         // Stage 13.1 — runaway-emergence guard part 1: refuse to
@@ -1022,6 +1025,6 @@ impl Pool {
         }
         self.neurons.push(concept);
         self.label_to_id.insert(composite_label, id);
-        self.concept_multiset_to_id.insert(leaves, id);
+        self.concept_multiset_to_id.insert(leaves_seq, id);
     }
 }
