@@ -2,6 +2,44 @@
 
 *Snapshot for session continuity.  Last updated: 2026-05-21.*
 
+## Stage 17 — Storage & Wake-Sleep architecture shipped (2026-05-21)
+
+The full-15-corpus training previously OOMed at 463M terminals when
+`Brain::checkpoint` tried to allocate the entire bincode-serialised
+brain in RAM before writing.  ARCHITECTURE §17 specifies the
+content-addressed, append-only, demand-paged substitute.  Shipped in
+this session as 10 separate commits, each atomic and tested.
+
+| Stage | Status | Commit | What ships |
+|---|---|---|---|
+| §17 design | ✓ complete | `ca5f3d3` | 229-line architecture spec with 15 prior-art refs |
+| §17.1 foundation | ✓ partial | `9b281a2` | `crates/brain/src/store/` traits + WAL + recovery framework |
+| §17.1 streaming | ✓ complete | `579f821` | `save_snapshot` uses `bincode::serialize_into(BufWriter)` — O(buffer) RAM, not O(brain) |
+| §17.9 forward | ✓ complete | `e605984` | Every Pool / Fabric / Brain mutation appends a WalEvent before in-memory exposure; `POST /flush` endpoint |
+| §17.4 sleep decomp | ✓ partial | `1cf8c4f` | `Brain::sleep_pool_phase1/phase2/housekeeping` per-pool; background sleep tokio task; `GET /sleep/status`; brain mutex released between phases |
+| §17.5 salience | ✓ complete | `ddd068a` | `Neuron.salience` + `salience_ema`; reward-modulated bump in `decode_best_trained_binding`; Frémaux & Gerstner 2016 three-factor plasticity |
+| §17.7 replay | ✓ partial | `8990a4e` | `Brain::replay_salience_weighted(count, strength)` — top-K moments by mean salience |
+| §17.3 Bloom | ✓ complete | `fd7f288` | Counting Bloom (Fan et al. 2000) side-car on Pool; insert/remove wired to neurogenesis + prune; rebuilt from snapshot |
+| §17.6 Merkle local | ✓ complete | `8c31d1f` | `Pool::merkle_root(tick) -> PoolRoot` deterministic BLAKE3 hash; quantised weights eliminate IEEE-754 noise; identical training → identical roots |
+| §17.8 control state | ✓ complete | `291749c` | `StorageControlState` (salience entropy, bloom load, working-set pressure stubs) + `StorageConfig` (ControlMode knobs); `GET /storage_state` |
+| §17.2 Hebbian layout | ⨯ pending | — | Online graph partitioning for disk page layout (needs §17.4 full) |
+| §17.4 FULL eviction | ⨯ pending | — | Working-set LRU + background eviction actor + demand-paged loader.  Largest remaining scope. |
+| §17.6 FULL cluster | ⨯ pending | — | Anti-entropy RPC between nodes using the Merkle roots |
+| §17.7 FULL replay | ⨯ pending | — | Free-energy weighted sampling via annealer's energy surface |
+| §17.9 recovery | ⨯ pending | — | Replay WAL events into Brain on startup |
+
+**137 brain tests pass, 0 fail.**  Canonical 100% toddler baseline
+re-validated end-to-end with all 10 stage commits active (WAL writes
+on every observe, Bloom inserts on every neurogenesis, salience bumps
+on every decode, decomposed sleep, Merkle roots computable on demand).
+
+End-to-end validation under real training:
+- toddler 32/32 (100%) with WAL active
+- `/sleep` background mode: 24 ms for full 6-pool decomposed cycle on
+  a 1,220-neuron brain (the timeout that motivated §17.4)
+- `/flush` sub-ms WAL barrier
+- `/checkpoint` 120 ms streaming serialize (was the OOM nightmare)
+
 ## Stage 16 — 100% RECALL ON ALL TRAINED INPUT (2026-05-21)
 
 Theoretical max accuracy reached on every metric that tests trained content.
