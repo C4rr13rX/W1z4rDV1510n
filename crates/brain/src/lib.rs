@@ -39,6 +39,7 @@ pub mod annealer;
 pub mod persistence;
 pub mod identity;
 pub mod network;
+pub mod store;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig};
@@ -68,4 +69,8 @@ pub use identity::{
 pub use network::{
     BrainId, GossipEquation, GossipMotif, NetworkState, PeerAccuracy,
     PeerContribution,
+};
+pub use store::{
+    MmapWalStore, NoopStore, RecoveryStats, Store, TerminalDelta, WalEvent,
+    replay_into_brain,
 };
