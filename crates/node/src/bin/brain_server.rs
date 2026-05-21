@@ -1034,6 +1034,39 @@ async fn storage_state(
     Json(brain.storage_control_state())
 }
 
+/// `POST /eviction` — per [`ARCHITECTURE.md`] §17.4 — runs one pass of
+/// the eviction actor.  Body is the `EvictionParams` (`max_salience_ema`,
+/// `min_stale_ticks`, `target_per_pool`); all default if omitted.
+/// Returns `EvictionStats`.  Called between training phases when memory
+/// pressure rises; future Stage 17.8 dynamical wiring will drive this
+/// from `working_set_pressure` automatically.
+#[derive(Deserialize, Default)]
+struct EvictionRequest {
+    #[serde(default = "default_evict_max_salience")]
+    max_salience_ema: f32,
+    #[serde(default = "default_evict_stale_ticks")]
+    min_stale_ticks:  u64,
+    #[serde(default = "default_evict_target")]
+    target_per_pool:  usize,
+}
+fn default_evict_max_salience() -> f32   { 0.1 }
+fn default_evict_stale_ticks()  -> u64   { 1000 }
+fn default_evict_target()       -> usize { 1024 }
+
+async fn eviction(
+    State(s): State<AppState>,
+    Json(req): Json<EvictionRequest>,
+) -> Json<w1z4rd_brain::EvictionStats> {
+    let params = w1z4rd_brain::EvictionParams {
+        max_salience_ema: req.max_salience_ema,
+        min_stale_ticks:  req.min_stale_ticks,
+        target_per_pool:  req.target_per_pool,
+    };
+    let brain = s.brain.lock().await;
+    let stats = brain.run_eviction_pass(params);
+    Json(stats)
+}
+
 // -----------------------------------------------------------------
 // Handlers — multimodal
 // -----------------------------------------------------------------
@@ -1347,6 +1380,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Stage 17.4 full: attach cold tiers to every pool so /eviction
+    // has somewhere to write evicted neurons.  Best-effort; pools that
+    // fail to attach run in non-evictable mode.
+    let attached = brain.attach_cold_tiers(&data);
+    info!("cold tiers attached on {} pool(s)", attached);
+
     let bs = brain.stats();
     info!("brain ready  tick={}  pools={}  neurons={}  terminals={}",
         bs.tick, bs.pool_count, bs.total_neurons, bs.total_terminals);
@@ -1371,6 +1410,7 @@ async fn main() -> Result<()> {
         .route("/sleep",                 post(sleep_cycle))
         .route("/sleep/status",          get(sleep_status))
         .route("/storage_state",         get(storage_state))
+        .route("/eviction",              post(eviction))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))

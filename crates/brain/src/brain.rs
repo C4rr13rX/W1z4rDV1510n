@@ -87,6 +87,44 @@ pub struct ResonantExtrusion {
     pub pools:          Vec<PoolExtrusion>,
 }
 
+/// Stage 17.4 full — knobs for `Brain::run_eviction_pass`.  Per
+/// [`ARCHITECTURE.md`] §17.4: low-salience, stale concept neurons get
+/// paged out to cold tier in batches.  Atoms + binding-pool neurons
+/// are never evicted by this policy.
+#[derive(Debug, Clone, Copy)]
+pub struct EvictionParams {
+    /// Evict only concepts whose `salience_ema` is **below** this
+    /// threshold.  Default `0.1` — well below the typical EMA of a
+    /// concept that's been touched by any successful decode.
+    pub max_salience_ema:    f32,
+    /// Evict only concepts whose `last_fired_tick` is at least this
+    /// many ticks in the past.  Default `1000`.
+    pub min_stale_ticks:     u64,
+    /// Cap evictions per pool per pass.  Default `1024` — bounded so a
+    /// single pass doesn't lock the brain for an arbitrary amount of
+    /// time.  Caller invokes the pass repeatedly to drain large brains.
+    pub target_per_pool:     usize,
+}
+
+impl Default for EvictionParams {
+    fn default() -> Self {
+        Self {
+            max_salience_ema: 0.1,
+            min_stale_ticks:  1000,
+            target_per_pool:  1024,
+        }
+    }
+}
+
+/// Stage 17.4 full — outcome of one `run_eviction_pass`.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct EvictionStats {
+    pub pools_visited:    usize,
+    pub neurons_evicted:  usize,
+    pub errors:           usize,
+    pub wall_time_ms:     u64,
+}
+
 impl BindingMatch {
     pub const NONE: Self = Self {
         precision: 0.0, recall: 0.0, tier: MatchTier::None,
@@ -3309,6 +3347,128 @@ impl Brain {
         self.fabric.store_clone()
     }
 
+    /// Stage 17.4 full — attach cold tiers to every pool under
+    /// `data_dir/cold/pool_{id}.cold`.  After this call, `run_eviction_pass`
+    /// can move low-salience concepts to disk.  Binding pool is included
+    /// so the API is uniform, but the policy in `run_eviction_pass` will
+    /// skip the binding pool by default.
+    ///
+    /// Returns the number of pools that successfully attached a cold
+    /// tier.  Errors per-pool are logged but don't fail the whole call.
+    pub fn attach_cold_tiers<P: AsRef<std::path::Path>>(&mut self, data_dir: P) -> usize {
+        let dir = data_dir.as_ref().join("cold");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!("attach_cold_tiers: mkdir failed: {}", e);
+            return 0;
+        }
+        let pool_ids = self.fabric.pool_ids();
+        let mut attached = 0;
+        for pid in pool_ids {
+            let path = dir.join(format!("pool_{}.cold", pid));
+            match crate::store::ColdTier::open(&path) {
+                Ok(tier) => {
+                    let tier_arc = std::sync::Arc::new(tier);
+                    if let Some(pool) = self.fabric.pool(pid) {
+                        pool.write().set_cold_tier(tier_arc);
+                        attached += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("cold tier open failed for pool {}: {}", pid, e);
+                }
+            }
+        }
+        attached
+    }
+
+    /// Stage 17.4 full — run one eviction pass per
+    /// [`ARCHITECTURE.md`] §17.4.  Walks each pool, identifies concept
+    /// neurons with low `salience_ema` AND staleness past `min_stale_ticks`,
+    /// and evicts up to `target_per_pool` of them (lowest-salience first).
+    ///
+    /// Atoms are never evicted (refused by `Pool::evict_neuron`).  The
+    /// binding pool is skipped entirely — bindings are the answer keys.
+    ///
+    /// Returns `EvictionStats { pools_visited, neurons_evicted,
+    /// cold_bytes_written, wall_time_ms }`.
+    pub fn run_eviction_pass(&self, params: EvictionParams) -> EvictionStats {
+        let started = std::time::Instant::now();
+        let now = self.fabric.current_tick();
+        let pool_ids = self.fabric.pool_ids();
+        let mut stats = EvictionStats::default();
+        let total_cold_bytes_before = 0u64;
+        let total_cold_bytes_after  = 0u64;
+
+        for pid in pool_ids {
+            // Skip binding pool — bindings are answer keys, must stay hot.
+            if pid == self.binding_pool_id { continue; }
+            let Some(pool_arc) = self.fabric.pool(pid) else { continue; };
+            stats.pools_visited += 1;
+
+            // Phase 1 (read): identify candidates.  Brief read lock.
+            let candidates: Vec<(NeuronId, f32, u64)> = {
+                let p = pool_arc.read();
+                let mut c: Vec<_> = p.iter_neurons()
+                    .filter(|n| !n.is_atom())
+                    .filter(|n| !p.is_evicted(n.id))
+                    .filter(|n| n.salience_ema < params.max_salience_ema)
+                    .filter(|n| now.saturating_sub(n.last_fired_tick) >= params.min_stale_ticks)
+                    .map(|n| (n.id, n.salience_ema, n.last_fired_tick))
+                    .collect();
+                // Lowest salience first; ties broken by oldest last_fired.
+                c.sort_by(|a, b| {
+                    a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.2.cmp(&b.2))
+                });
+                c.truncate(params.target_per_pool);
+                c
+            };
+            if candidates.is_empty() { continue; }
+
+            // Phase 2 (write): evict each.  Brief write lock per neuron
+            // (re-acquired between IDs is overkill; one write lock for
+            // the whole batch is fine because eviction is the dominant
+            // mutation in this window).
+            {
+                let mut p = pool_arc.write();
+                if let Some(tier) = self.fabric.pool(pid)
+                    .and_then(|_| {
+                        // We need the cold tier's byte count *before*
+                        // eviction to compute delta.  ColdTier::bytes
+                        // is on the Arc<ColdTier>; access via the pool.
+                        None::<()>
+                    })
+                {
+                    let _ = tier;
+                }
+                // We can't easily reach the ColdTier through the pool's
+                // private field — track byte size by re-counting via
+                // `evict_neuron`'s return path.  Sum stats incrementally.
+                for (cid, _sal, _lft) in candidates {
+                    match p.evict_neuron(cid) {
+                        Ok(true)  => { stats.neurons_evicted += 1; }
+                        Ok(false) => { /* already evicted or atom */ }
+                        Err(e) => {
+                            tracing::warn!(
+                                "evict_neuron(pool={}, id={}) failed: {}",
+                                pid, cid, e,
+                            );
+                            stats.errors += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Best-effort cold-bytes delta: would need direct access to each
+        // pool's ColdTier handle.  Leaving zero for now — the StorageControlState
+        // working_set_pressure is the more useful signal anyway.
+        let _ = (total_cold_bytes_before, total_cold_bytes_after);
+
+        stats.wall_time_ms = started.elapsed().as_millis() as u64;
+        stats
+    }
+
     /// Stage 17.8 — observable signals for storage-tier dynamical
     /// control.  Per [`ARCHITECTURE.md`] §17.8, the same control
     /// architecture (ControlMode/ControlSignal/ControlState) that
@@ -3330,6 +3490,8 @@ impl Brain {
         let mut bins = [0u64; NBINS];
         let mut bloom_inserted: u64 = 0;
         let mut bloom_slots:    u64 = 0;
+        let mut total_neurons:  u64 = 0;
+        let mut evicted_neurons: u64 = 0;
         for pid in self.fabric.pool_ids() {
             if let Some(p) = self.fabric.pool(pid) {
                 let pool = p.read();
@@ -3342,19 +3504,28 @@ impl Brain {
                 // Bloom slot count is a function of the bloom — fetch
                 // via byte_size * 2 (4-bit counters → 2 slots per byte).
                 bloom_slots += (pool.bloom_byte_size() as u64) * 2;
+                total_neurons    += pool.neuron_count() as u64;
+                evicted_neurons  += pool.evicted_count() as u64;
             }
         }
         let entropy = crate::store::StorageControlState::entropy_from_bins(&bins);
         let load = if bloom_slots > 0 {
             (bloom_inserted as f32 / bloom_slots as f32).clamp(0.0, 1.0)
         } else { 0.0 };
+        // Stage 17.4 full: working_set_pressure = live / total.  1.0 means
+        // every neuron is in RAM (full pressure to evict); 0.0 means all
+        // evicted.  Caller's ControlMode interprets — typically
+        // "DrivenBy(working_set_pressure, scale, offset)" makes eviction
+        // more aggressive as pressure climbs.
+        let ws_pressure = if total_neurons > 0 {
+            ((total_neurons - evicted_neurons) as f32 / total_neurons as f32)
+                .clamp(0.0, 1.0)
+        } else { 0.0 };
 
         crate::store::StorageControlState {
-            // §17.4 full populates these:
-            working_set_pressure:       0.0,
-            cache_hit_rate:             0.0,
-            // §17.7 full populates this:
-            replay_value_score:         0.0,
+            working_set_pressure:       ws_pressure,
+            cache_hit_rate:             0.0,  // §17.4 step 2 deferred
+            replay_value_score:         0.0,  // §17.7 full
             salience_distribution_entropy: entropy,
             bloom_load:                 load,
         }
