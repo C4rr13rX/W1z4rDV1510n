@@ -571,6 +571,235 @@ Phases 1–3 are load-bearing for everything else. Phases 4–7 produce the thre
 
 ---
 
+## 17. Storage & Wake-Sleep (Supersedes §6)
+
+The substrate is not a monolithic in-memory data structure that occasionally serializes itself. That model caps brain size at "fits in RAM" and breaks any "infinite brain" claim before it starts. The substrate is a **content-addressed, append-only, demand-paged neuron store**. RAM holds only the working set. Disk is the substrate of record. The brain *is its own database*.
+
+The §6 three-tier model (`hot`/`warm`/`cold` with bincode-snapshot checkpoints) is superseded by this section. A monolithic `save_snapshot()` of a brain of arbitrary size cannot fit in physical RAM during serialization; this has been demonstrated empirically.
+
+This section is **non-negotiable** for any brain that must scale beyond physical-RAM capacity.
+
+### 17.1 Terminals Are the Content-Addressed Primitive
+
+Terminals outnumber neurons by 100–500×. They dominate the substrate. The storage primitive is the terminal, not the neuron.
+
+```rust
+pub struct TerminalRecord {
+    pub src_id:   NeuronId,          // 16 bytes, content-hash
+    pub dst_id:   NeuronId,          // 16 bytes, content-hash
+    pub strength: u8,                // 8-bit quantized; Hebbian noise floor is above ±1/256
+    pub use_count_log2: u8,          // log2(use_count) clipped to [0, 255]
+    pub last_fired_tick_delta: u32,  // delta from pool's current_tick; reset on overflow
+    pub flags:    u8,                // {top_k, in_sketch, dirty, evicted}
+}
+// Total: 38 bytes per terminal (was 24 bytes uncompressed for live + ~8 GB for the live blob serialize)
+```
+
+A terminal's identity:
+```
+terminal_id = blake3(src_id || dst_id || pool_pair) [first 16 bytes]
+```
+
+Identity-from-content means: identical sensor history on two machines produces identical terminal IDs at identical disk offsets. This is the precondition for the cluster shape in §17.6.
+
+**Tiered representation per neuron.** Each source neuron retains the top-K terminals (default K=32) as explicit `TerminalRecord`s. The long tail goes into a **count-min sketch** (Cormode & Muthukrishnan, 2005) sized per neuron based on its `freq_weight`. Strong recall stays deterministic; weak co-occurrence statistics survive lossily — which is what they already are in the substrate's noise floor.
+
+**Adjacency channel.** Per-pool-pair existence (does src→dst exist at all, ignoring strength) is stored as a **roaring bitmap** (Lemire et al., 2016) over `(src_id, dst_id)` pairs. ~1 bit per terminal for the presence channel. Decouples "does this connection exist" from "how strong is it."
+
+### 17.2 Storage Layout Follows Hebbian Co-Occurrence
+
+Neurons that fire together must be stored together. Disk pages are organized so that **co-fired neurons land on adjacent pages**, making the OS prefetcher pull in their neighbors for free.
+
+This is not a heuristic. It is the literal organizing principle of cortical columns (Mountcastle, 1997): physical proximity in cortex *is* feature proximity. The substrate's storage layout must match its computational invariant.
+
+**Mechanism.** During the eviction sleep (§17.4), an online graph partitioner (Karypis & Kumar, 1998 — online METIS variant) reshuffles cold-tier pages to pack co-fired neurons into the same disk page. The partitioner's input is the live co-activation matrix from the moment buffer; no separate index. Runs at most once per sleep epoch, bounded by available CPU.
+
+**For the cluster.** The same algorithm at larger granularity. Co-firing neurons land on the **same shard**. Data placement is a continuously-learned graph partition driven by the brain's own Hebbian statistics. Cluster shape emerges from training, not from config. This is the live-substrate equivalent of learned index structures (Kraska et al., 2018).
+
+### 17.3 Bloom-Gated Neurogenesis
+
+Before neurogenesis creates a new atom or concept neuron, the candidate `neuron_id` (which is already a content hash per §1.1) is checked against a per-pool **counting Bloom filter** (Bloom, 1970; Fan et al., 2000) covering all known neuron_ids.
+
+- Bloom returns **"maybe present"** → page-in attempt against the on-disk index. On miss, fall through to neurogenesis.
+- Bloom returns **"definitely absent"** → neurogenesis fires immediately. No scan, no read.
+
+Bloom parameters: target false-positive rate 1e-4 at 100M neuron capacity. ~14 bits/key. Per-pool bloom fits in ~175 MB at the 100M scale — kept fully in RAM. Resized via doubling when load factor exceeds threshold.
+
+**Why this matters.** Existing neurogenesis code performs an O(N) scan over `label_to_id` to check for duplicates. At 2.4M neurons, that's already milliseconds per observe; at 100M it's hundreds of ms. The Bloom check is O(k) where k is the hash count (~7) — constant in brain size.
+
+### 17.4 Eviction Sleep = Background Actor, Not a Mutex-Held Phase
+
+The legacy `sleep_prune` holds a write lock over every terminal in every pool while scanning the full graph. At 463M terminals this exceeds 30 s reliably. Replaced by two **background actors**:
+
+**Eviction sleep.** Drains a `cold_candidate: Channel<NeuronRef>` populated lazily by the hot path. For each candidate:
+1. Read its current state (under brief per-neuron lock, not pool-wide).
+2. Append a consolidated `NeuronRecord + TerminalRecord[]` to the pool's append log.
+3. Update the offset index (atomic CAS on a memory-mapped table).
+4. Drop from the working-set cache.
+5. Bloom slot stays — only changes from "present in RAM" to "present on disk."
+
+Wall-time bound: O(working_set_eviction_count), not O(total_terminals). The 30 s timeout on 463M terminals becomes <100 ms on a 100K-neuron working-set sweep.
+
+**Replay sleep.** Independent actor. Samples moments from the moment buffer by **energy-minimizing weighting** (§17.7), pages-in the participating neurons (which may trigger evictions of less-salient ones), and re-fires them at low rate. Reuses the existing annealer crate (Friston, 2010-grounded annealing energy).
+
+Both actors run cooperatively scheduled, yielding between per-record steps so HTTP handlers stay responsive. `/stats`, `/observe`, `/chat` never block on sleep.
+
+### 17.5 Brain-Emitted Salience — The Brain Learns What to Forget
+
+Each `Neuron` gains a learned `salience: f32` field. The substrate's own training rule writes to it. The eviction policy reads from it.
+
+```rust
+pub struct Neuron {
+    // ... existing fields ...
+    pub salience:       f32,    // 0.0 (forgettable) ... 1.0 (must retain)
+    pub salience_ema:   f32,    // EMA of recent salience updates
+}
+```
+
+**How salience is learned.** Two coupled signals:
+1. **Reward/precision-modulated co-firing** (cf. Schultz, 2007 dopaminergic gating; Frémaux & Gerstner, 2016 three-factor plasticity). When the brain's output matches reality (high precision on `/integrate`), terminal weights AND each participating neuron's salience are incremented in lockstep. Salience tracks "this neuron contributed to a correct prediction."
+2. **Compression utility under replay** (cf. McClelland et al., 1995 CLS; Tononi & Cirelli, 2014 synaptic homeostasis hypothesis). During replay sleep, a neuron whose absence would substantially raise free-energy across replayed moments has its salience boosted. Salience tracks "this neuron is structurally necessary for what I've learned."
+
+The combined signal is the substrate's own answer to *"which of my own neurons matter for my future self?"* — the cognitive prerequisite for tiered retention.
+
+**Why this is the load-bearing innovation.** Modern ML systems retain everything (expensive) or use externally-imposed heuristics (LRU, LFU, age). Biological brains use salience-tagged consolidation (Frankland & Bontempi, 2005). No published runtime, to our knowledge, lets the *substrate itself* dictate its own retention policy. This section is the closest computational analogue to systems consolidation in the mammalian hippocampal-cortical circuit.
+
+**Eviction reads salience as one signal among several.** The actual policy is dynamical (§17.8); salience alone does not determine eviction. It biases the priority queue.
+
+### 17.6 Cluster Shape — Anti-Entropy via Merkle Diff
+
+Because every `NeuronId` and `TerminalId` is a content hash, every pool has a deterministic Merkle root over its append log:
+```
+pool_root = merkle(neurons || terminals || sequences || salience_index)
+```
+
+Cluster sync between nodes is **anti-entropy**, not RPC log replay (Lakshman & Malik, 2010 Cassandra; Demers et al., 1987 epidemic algorithms):
+1. Compare root hashes → identify divergent subtrees.
+2. Recurse into mismatched subtrees → identify divergent records.
+3. Exchange only the divergent records.
+
+A node offline for one hour catches up in **O(diff)** bandwidth, not O(events). A node that has never seen another's training catches up in **O(unique-records)**.
+
+**Sharding.** Neurons are assigned to nodes by **co-activation graph partitioning** (§17.2), not by `neuron_id` range hashing. The partition is reshuffled during sleep epochs based on observed co-firing. The shard map is itself part of the Merkle-rooted state, so all nodes converge on the same map without consensus protocol.
+
+**Read path across nodes:** `GET /neuron/{id}` from the shard-owner. The brain becomes a distributed content store with Hebbian learning bolted onto the read/write path.
+
+**Provenance.** Signed `(pool_root, timestamp)` tuples are cryptographic snapshots — anyone can prove a brain was in state X at time T by showing the root, signature, and a path through the Merkle tree. Reproducible-research-grade snapshot provenance.
+
+### 17.7 Replay = Energy Minimization on a Learned Landscape
+
+Replay sleep does not uniformly re-fire hot moments. It samples moments weighted by their predicted **reduction in free energy** under the substrate's current state (Friston, 2010 active inference; Hinton et al., 1995 Helmholtz wake-sleep).
+
+Concretely, for moment `m` in the buffer:
+```
+replay_weight(m) ∝ exp( -β · free_energy_delta(m) )
+free_energy_delta(m) = predicted_free_energy_after_replay(m) - current_free_energy
+```
+
+where `free_energy` is computed by the existing annealer crate (no new mechanism; it already implements simulated-annealing energy estimation over moment configurations). Replay preferentially picks moments that **resolve current prediction error**.
+
+This is the wake-sleep algorithm (Hinton et al., 1995) implemented as the persistence loop:
+- **Wake** = observe + propagate + write append log.
+- **Sleep** = generate from substrate + measure divergence from observed + replay the high-divergence moments + adjust salience.
+
+The brain's storage tier is also its consolidation loop. They are not separate processes.
+
+### 17.8 Self-Tuning Eviction (Dynamical-System Principle Extended)
+
+The same `ControlMode / ControlSignal / ControlState` architecture from the substrate's existing control loops governs the storage tier:
+
+```rust
+pub struct StorageControlState {
+    pub working_set_pressure:        f32,   // current_ws_bytes / ws_budget_bytes
+    pub cache_hit_rate:              f32,   // EMA of working-set hits per /observe
+    pub replay_value_score:          f32,   // EMA of free-energy reduction per replay tick
+    pub salience_distribution_entropy: f32, // H(salience) over working set
+}
+
+pub struct StorageConfig {
+    pub eviction_mode:  ControlMode,   // gates eviction aggressiveness
+    pub replay_rate:    ControlMode,   // gates replay throughput
+    pub shard_rebalance_threshold: ControlMode,  // when to re-partition
+    pub bloom_resize_pressure: ControlMode,
+}
+```
+
+**Policy emerges from signals, not from knobs.** Examples:
+- High pressure + low entropy of salience (brain is focused on few items) → evict aggressively from the long tail.
+- High pressure + high entropy (brain is exploring) → evict more cautiously; bias replay to consolidate first.
+- Low hit rate + low replay_value → working set is thrashing; shrink it.
+- High hit rate + high replay_value → working set is productive; let it grow up to budget.
+
+The storage policy is a dynamical system driven by the same control architecture that governs everything else. No retention knobs.
+
+### 17.9 Crash Safety — The Training Loop Is the WAL
+
+Every `observe` that mutates state appends to its pool's log before the in-memory mutation is exposed. There is no separate "checkpoint" — persistence is continuous.
+
+```
+observe(frame):
+    parse_atoms(frame) -> atom_ids
+    for each atom_id:
+        if bloom.maybe_present(atom_id):
+            try wake_neuron(atom_id) -> neuron
+            else: neuron = neurogenesis(atom_id); append_log(neuron); bloom.insert(atom_id)
+        else:
+            neuron = neurogenesis(atom_id); append_log(neuron); bloom.insert(atom_id)
+        update_terminals(neuron); append_log(terminals_delta)
+        // in-memory state is now updated; durable
+    advance_tick()
+```
+
+Crash recovery is rolling forward the WAL since last checkpoint marker (Mohan et al., 1992 ARIES; Rosenblum & Ousterhout, 1991 log-structured filesystems). Worst-case data loss is the last buffered append (≤4 KB / ≤1 ms at typical training rates).
+
+**The legacy `Brain::checkpoint()` becomes a flush + barrier**, not a serialize. O(buffer) cost, sub-millisecond. Hold no Mutex. `POST /checkpoint` is a no-op acknowledgment in steady state.
+
+### 17.10 Implementation Sequence — Each Stage Ships Independently
+
+Every stage compiles, passes existing tests, and preserves the canonical 100% baseline (toddler 32/32 + greetings 7/7 + K-12 16/16 + multi_fact 5/5 + integrate 32/32 + OOV 3/3). Regression on any of these blocks promotion to the next stage.
+
+1. **§17.1 + §17.9 first:** `crates/brain/src/store/` module. Traits `TerminalStore`, `NeuronStore`, `PoolIndex`. Default impl: mmap'd append log + offset index + per-pool Bloom. Brain's existing API unchanged; storage is plumbed underneath. New tests: crash-replay round-trip, deterministic content addressing across runs.
+
+2. **§17.3:** Bloom-gated neurogenesis. Replaces the O(N) label scan. Test: `neurogenesis_throughput_bench` shows constant-time insert past 10M neurons.
+
+3. **§17.4 (eviction half):** Working-set LRU around `Pool`. Cold-candidate channel. Background actor evicts. `sleep_prune` decomposed into `evict_actor` + `replay_actor`. Test: `/observe`, `/stats`, `/chat` stay responsive (<10 ms 99p) under continuous eviction.
+
+4. **§17.5:** Add `salience` field; wire reward/precision-modulated update path. Initial GA-tuned weighting. Test: ablation — turning salience-driven eviction off must regress on multi-corpus brains but not on the canonical baseline (which fits entirely in working set).
+
+5. **§17.7:** Replay-actor uses annealer for energy-minimization weighting. Test: replay reduces measured free-energy on held-out moments vs. uniform replay.
+
+6. **§17.6:** Merkle root per pool; `RemoteNeuronStore` shard impl; anti-entropy sync protocol. Test: two-node cluster reproduces canonical 100% baseline; one-node-offline catch-up via Merkle diff.
+
+7. **§17.8:** `StorageControlState` + `StorageConfig` wired through the existing ControlMode plumbing. Removes static thresholds.
+
+Each stage is independently committable. The brain never goes offline. **The full-15-corpus training that previously killed the brain mid-checkpoint runs end-to-end after stage 1 alone.**
+
+### 17.11 Prior Art — What This Stands On, What It Extends
+
+| Mechanism | Prior art | Extension here |
+|---|---|---|
+| Content-addressed object store | Merkle (1987); Git (Torvalds, 2005); IPFS (Benet, 2014) | Applied to neurons + terminals; identity = sensor content |
+| Counting Bloom filter | Bloom (1970); Fan et al. (2000) | Gates a *learning rule* (neurogenesis), not just lookup |
+| LSM / mmap kv store | Rosenblum & Ousterhout (1991); LMDB (Chu, 2011); RocksDB (Facebook, 2013) | Payload is a learning neuron; eviction policy is biological |
+| Wake-sleep / Helmholtz | Hinton et al. (1995) | Wake-sleep *is* the persistence loop, not a separate algorithm |
+| Free-energy active inference | Friston (2005, 2010) | Replay sampling weighted by free-energy delta |
+| Complementary learning systems | McClelland, McNaughton & O'Reilly (1995); Kumaran et al. (2016) | CLS as a literal tiered storage architecture |
+| Synaptic homeostasis | Tononi & Cirelli (2014) | SHY-driven downscaling as eviction signal |
+| Hippocampal replay | Wilson & McNaughton (1994); Foster & Wilson (2007) | Replay queue = sleep actor; pages neurons by replay priority |
+| Salience-tagged consolidation | Frankland & Bontempi (2005); O'Reilly & Frank (2006) | Salience as a runtime-readable eviction signal — *brain dictates retention* |
+| Online graph partitioning | Karypis & Kumar (1998) METIS | Online + driven by Hebbian co-activation matrix |
+| Learned data placement | Kraska et al. (2018) learned indexes | Placement learned continuously from substrate firing |
+| WAL / ARIES | Mohan et al. (1992) | Training observe = WAL write; crash recovery = WAL replay |
+| Anti-entropy / Merkle sync | Demers et al. (1987); Cassandra (Lakshman & Malik, 2010) | Cluster brain sync by Merkle diff over pool roots |
+| Roaring bitmap | Lemire et al. (2016) | Per-pool-pair adjacency channel |
+| Count-min sketch | Cormode & Muthukrishnan (2005) | Long-tail terminal compression below top-K |
+
+**Novel as a combination:** a learning substrate where (a) the unit of storage is the synapse with quantize+sketch tiering, (b) physical layout follows Hebbian co-occurrence, (c) the brain emits its own retention signal, (d) wake-sleep is the persistence algorithm, (e) cluster sync is Merkle anti-entropy over the same content-addressed objects, and (f) all storage policy is the same dynamical system as the substrate.
+
+No published system has these together. The systems contributions (terminal-as-CAS-object + Hebbian-driven page layout + salience-gated retention + Helmholtz-as-WAL) and the computational-neuroscience contributions (CLS-as-runtime + SHY-as-eviction + free-energy-weighted replay) are independently publishable.
+
+---
+
 ## 12. Closing
 
 This document supersedes ad-hoc design decisions in the codebase. Code that contradicts it is drift. The architecture is committed to:
