@@ -14,15 +14,15 @@ The repository ships **two parallel substrates** — see the [Architecture overv
 
 The legacy fabric implements the current neuroscience canon in software:
 
-- **SDR / k-Winners-Take-All (kWTA)** — After each propagation hop, only the top 2% of activated neurons survive. This enforces cortical sparsity (1–5%) in real neural tissue, eliminates saturation, and gives each pattern a unique sparse code. Without this, Hebbian accumulation drives all neurons toward uniform activation and the fabric loses discriminative power.
-- **STDP with asymmetric long-term potentiation/depression** — `hebbian_pair(a, b)` is direction-aware. `a` (pre-synaptic, fires first) → `b` (post-synaptic) gets LTP (×1.0). `b` → `a` gets LTD (×−0.3). The result: the fabric encodes causal order. "photosynthesis→glucose" is a stronger edge than "glucose→photosynthesis."
-- **Homeostatic synaptic scaling** — Every 500 steps, each neuron's outgoing weights are multiplicatively scaled toward a target mean activation of 0.10, correcting at 4% per pass. Preserves relative weight ratios while preventing runaway Hebbian growth. This is the computational equivalent of Turrigiano homeostatic plasticity.
-- **Per-neuron EMA activation tracking** — Each neuron maintains a slow exponential moving average of its own activation (`τ ≈ 2000 steps`), the input signal that drives homeostatic scaling — the same mechanism as sliding threshold models of intrinsic excitability.
-- **Neuromodulator system (DA / NE / ACh / serotonin)** — Four neuromodulator concentrations per pool, each with distinct decay dynamics. Acetylcholine gates plasticity multiplicatively. Norepinephrine boosts effective learning rate up to 3×. Dopamine enables retrograde potentiation. All decay toward tonic baseline each step.
-- **Three-factor Hebbian / dopamine retrograde potentiation** — Neurons with high activation trace are tagged at dopamine release. `flush_dopamine_potentiation()` applies `Δw = lr × dopamine_tag × weight` to their outgoing synapses. This is the computational correlate of reward-modulated STDP — the reward signal (dopamine) potentiates the connections that led to the outcome.
-- **Predictive coding** — `propagate_predictive()` implements a first-order hierarchical predictive coding loop. Hop 0 propagates full activation. Subsequent hops propagate only the residual `(actual − prediction).max(0.0)`. Neurons that activate exactly as predicted pass zero signal upstream — only surprise propagates. Prediction EMAs update online each training pass (`α = 0.10`).
+- **SDR / k-Winners-Take-All (kWTA)** (Vinje & Gallant, 2000; Olshausen & Field, 1996; Maass, 2000) — After each propagation hop, only the top 2% of activated neurons survive. This enforces cortical sparsity (1–5%) in real neural tissue, eliminates saturation, and gives each pattern a unique sparse code. Without this, Hebbian accumulation drives all neurons toward uniform activation and the fabric loses discriminative power.
+- **STDP with asymmetric long-term potentiation/depression** (Bi & Poo, 1998; Markram et al., 1997) — `hebbian_pair(a, b)` is direction-aware. `a` (pre-synaptic, fires first) → `b` (post-synaptic) gets LTP (×1.0). `b` → `a` gets LTD (×−0.3). The result: the fabric encodes causal order. "photosynthesis→glucose" is a stronger edge than "glucose→photosynthesis."
+- **Homeostatic synaptic scaling** (Turrigiano, 2008) — Every 500 steps, each neuron's outgoing weights are multiplicatively scaled toward a target mean activation of 0.10, correcting at 4% per pass. Preserves relative weight ratios while preventing runaway Hebbian growth.
+- **Per-neuron EMA activation tracking** — Each neuron maintains a slow exponential moving average of its own activation (`τ ≈ 2000 steps`), the input signal that drives homeostatic scaling — the same mechanism as sliding-threshold models of intrinsic excitability (Bienenstock, Cooper, & Munro, 1982 — the BCM rule).
+- **Neuromodulator system (DA / NE / ACh / serotonin)** (Hasselmo & McGaughy, 2004 for ACh; Aston-Jones & Cohen, 2005 for NE; Schultz, 2007 for DA) — Four neuromodulator concentrations per pool, each with distinct decay dynamics. Acetylcholine gates plasticity multiplicatively. Norepinephrine boosts effective learning rate up to 3×. Dopamine enables retrograde potentiation. All decay toward tonic baseline each step.
+- **Three-factor Hebbian / dopamine retrograde potentiation** (Frémaux & Gerstner, 2016; Izhikevich, 2007) — Neurons with high activation trace are tagged at dopamine release. `flush_dopamine_potentiation()` applies `Δw = lr × dopamine_tag × weight` to their outgoing synapses. This is the computational correlate of reward-modulated STDP — the reward signal (dopamine) potentiates the connections that led to the outcome.
+- **Predictive coding** (Rao & Ballard, 1999; Friston, 2005, 2010) — `propagate_predictive()` implements a first-order hierarchical predictive coding loop. Hop 0 propagates full activation. Subsequent hops propagate only the residual `(actual − prediction).max(0.0)`. Neurons that activate exactly as predicted pass zero signal upstream — only surprise propagates. Prediction EMAs update online each training pass (`α = 0.10`).
 - **Neuromodulator-gated learning rate** — In `train_weighted_with_meta()`: `effective_lr = lr_scale × ACh × (1 + NE × 2.0)`. When the hypothesis queue fires a NE spike (failed QA gate), the next training run runs at elevated learning rate — attention sharpens on surprising inputs.
-- **Dual memory systems (CLS theory)** — The N-pool associative fabric is the hippocampus: fast bidirectional paired-association retrieval across an arbitrary number of named pools (in/out/emo/equation/motion/…). The slow NeuronPool is the neocortex: distributed statistical learning. They interact — an N-pool hit seeds a specific pool activation pattern, combining the precision of episodic recall with the generalization of distributed representations. CLS-style replay periodically consolidates N-pool concept neurons back into the slow pool.
+- **Dual memory systems (CLS theory)** (McClelland et al., 1995; Kumaran et al., 2016) — The N-pool associative fabric is the hippocampus: fast bidirectional paired-association retrieval across an arbitrary number of named pools (in/out/emo/equation/motion/…). The slow NeuronPool is the neocortex: distributed statistical learning. They interact — an N-pool hit seeds a specific pool activation pattern, combining the precision of episodic recall with the generalization of distributed representations. CLS-style replay periodically consolidates N-pool concept neurons back into the slow pool.
 - **Multi-pool convergence inference** — A single input fired into one pool causes every connected pool to produce its own decoded prediction in parallel. Cross-modal training (e.g., one query input mapped simultaneously to an answer pool, an emotion pool, and an equation pool) means all those substrates fire from one query.
 - **Hypothesis → research feedback loop** — Questions for which the multi-pool fabric returns no answer are queued in the hypothesis queue. `research_agent.py` polls the queue, fetches Wikipedia and ArXiv answers, ingests them via `/multi_pool/train_pair` + `/media/train`, and resolves them via `/hypothesis/resolve`, which triggers a DA flush — reward signal for correct prediction resolution.
 
@@ -30,12 +30,12 @@ The legacy fabric implements the current neuroscience canon in software:
 
 Stage 11-16 added a distinct set of biologically-motivated primitives to the brain crate, each wired so that **the substrate's own observable signals drive its knobs** — no static hyperparameter tuning.  See [Biological primitives](#biological-primitives-substrate-internal-all-dynamical-system-knobs) below for full detail.  Headline mechanisms:
 
-- **k-WTA sparsity per pool** (`Pool::sparsity_mode`) — Vinje & Gallant 2000 — runs at end of `observe_frame` BEFORE moment fingerprint capture so it actually bounds binding size
-- **Heterosynaptic LTD** (`Pool::heterosynaptic_ltd_mode`) — Royer & Paré 2003 — synapse-competition on each tick
-- **Predictive-coding gate on concept emergence** (`Pool::predict_gate_mode`) — Rao & Ballard 1999 — `recent_surprise` EMA gates new concept crystallisation
-- **Sleep / replay consolidation** (`Brain::replay_recent_moments`) — McClelland/McNaughton/O'Reilly 1995 CLS — `POST /sleep` prunes weak concepts then re-fires recent fingerprints
-- **Hebbian frequency weighting in decode** (`BRAIN_FREQ_WEIGHT`) — `freq_weight = 1 + strength × ln(use_count)` — frequently-trained bindings dominate competitors
-- **Sequence-match preempt** (`Pool::last_observed_sequence`) — the load-bearing fix that distinguishes anagram queries (`sad` query → `sad→emotion`, NOT `das→animal`)
+- **k-WTA sparsity per pool** (`Pool::sparsity_mode`) — (Vinje & Gallant, 2000; Olshausen & Field, 1996; Maass, 2000) — runs at end of `observe_frame` BEFORE moment fingerprint capture so it actually bounds binding size
+- **Heterosynaptic LTD** (`Pool::heterosynaptic_ltd_mode`) — (Royer & Paré, 2003; Turrigiano, 2008) — synapse-competition on each tick
+- **Predictive-coding gate on concept emergence** (`Pool::predict_gate_mode`) — (Rao & Ballard, 1999; Friston, 2005, 2010) — `recent_surprise` EMA gates new concept crystallisation
+- **Sleep / replay consolidation** (`Brain::replay_recent_moments`) — (Wilson & McNaughton, 1994; McClelland et al., 1995; Tononi & Cirelli, 2014) — `POST /sleep` prunes weak concepts then re-fires recent fingerprints
+- **Hebbian frequency weighting in decode** (`BRAIN_FREQ_WEIGHT`) — (Hebb, 1949; Bi & Poo, 1998; Markram et al., 1997) — `freq_weight = 1 + strength × ln(use_count)` — frequently-trained bindings dominate competitors
+- **Sequence-match preempt** (`Pool::last_observed_sequence`) — distinguishes anagram queries (`sad` query → `sad→emotion`, NOT `das→animal`).  Inspired by sequence-cell observations in CA3 (Skaggs & McNaughton, 1996; Foster & Wilson, 2007)
 
 Five knobs are GA-tunable as `ControlMode` enums — either `Constant(value)` (legacy hyperparameter) or `DrivenBy(signal, scale, offset, min, max)` against the substrate's `ControlState` (a snapshot of normalised observable signals updated every tick).  This makes the GA search **how the substrate self-regulates**, not which static numbers work best.
 
@@ -412,12 +412,12 @@ Every primitive's strength is a `ControlMode` field on `PoolConfig`.  At default
 
 | Primitive | Field | Default | Biology reference | Implementation site |
 |-----------|-------|---------|------------------|---------------------|
-| **k-WTA sparsity** | `sparsity_mode` | `Constant(1.0)` (off) | Vinje & Gallant 2000 (V1 firing 2-5%); Olshausen & Field 1996; Maass 2000 | `Pool::apply_kwta_sparsity()` — runs at END of `observe_frame`, BEFORE Fabric captures moment fingerprint.  Sort `currently_firing` by activation, keep top `frac × n_firing` rounded up |
-| **Heterosynaptic LTD** | `heterosynaptic_ltd_mode` | `Constant(0.0)` (off) | Royer & Paré 2003; Turrigiano 2008 — homeostatic synaptic scaling | `Pool::apply_heterosynaptic_ltd(current_tick)` — for each neuron whose terminal fired this tick, weaken all OTHER terminals by `weight *= 1 − ratio` |
-| **Predictive-coding gate** | `predict_gate_mode` | `Constant(0.0)` (off) | Rao & Ballard 1999; Friston 2005 — error-driven cortical updates | `Pool::check_concept_emergence` — only run promotion when `recent_surprise ≥ gate`.  `recent_surprise` is an EMA of `|observed − predicted| / |observed|` per tick |
-| **Sleep / replay cycle** | `Brain::replay_recent_moments(count, strength)` | unbound (called via API) | Wilson & McNaughton 1994 hippocampal replay; McClelland/McNaughton/O'Reilly 1995 CLS | `POST /sleep {min_use_count, stale_ticks, replay_count, replay_strength}` — prune weak concepts then re-fire recent moment fingerprints to consolidate surviving patterns |
-| **Hebbian freq weight in decode** | `BRAIN_FREQ_WEIGHT` env var as `ControlMode` | `Constant(1.0)` (canonical) | Spike-timing dependent reinforcement (Bi & Poo 1998) | `decode_best_trained_binding` — `freq_weight = 1 + strength × ln(use_count)`; `register_fingerprint` bumps existing binding's `use_count` on each recurrence |
-| **Sequence-match preempt** | `Pool::last_observed_sequence` (read by decoder) | always on | Sequence binding via ordered firing — a behavioural correlate of CA3 sequence cells | `decode_best_trained_binding` — when binding's text-side `Vec<NeuronId>` matches the query's `last_observed_sequence` exactly, it preempts even concept-tier matches.  This is what distinguishes anagrams (`sad` query → `sad→emotion` binding, NOT `das→animal`) |
+| **k-WTA sparsity** | `sparsity_mode` | `Constant(1.0)` (off) | (Vinje & Gallant, 2000) — V1 firing rates 2–5%; (Olshausen & Field, 1996) — sparse coding; (Maass, 2000) — k-WTA computational power | `Pool::apply_kwta_sparsity()` — runs at END of `observe_frame`, BEFORE Fabric captures moment fingerprint.  Sort `currently_firing` by activation, keep top `frac × n_firing` rounded up |
+| **Heterosynaptic LTD** | `heterosynaptic_ltd_mode` | `Constant(0.0)` (off) | (Royer & Paré, 2003) — total-weight conservation; (Turrigiano, 2008) — synaptic scaling | `Pool::apply_heterosynaptic_ltd(current_tick)` — for each neuron whose terminal fired this tick, weaken all OTHER terminals by `weight *= 1 − ratio` |
+| **Predictive-coding gate** | `predict_gate_mode` | `Constant(0.0)` (off) | (Rao & Ballard, 1999) — predictive coding in V1; (Friston, 2005, 2010) — free-energy principle | `Pool::check_concept_emergence` — only run promotion when `recent_surprise ≥ gate`.  `recent_surprise` is an EMA of `|observed − predicted| / |observed|` per tick |
+| **Sleep / replay cycle** | `Brain::replay_recent_moments(count, strength)` | unbound (called via API) | (Wilson & McNaughton, 1994) — hippocampal replay; (McClelland et al., 1995) — Complementary Learning Systems; (Tononi & Cirelli, 2014) — Synaptic Homeostasis Hypothesis | `POST /sleep {min_use_count, stale_ticks, replay_count, replay_strength}` — prune weak concepts then re-fire recent moment fingerprints to consolidate surviving patterns |
+| **Hebbian freq weight in decode** | `BRAIN_FREQ_WEIGHT` env var as `ControlMode` | `Constant(1.0)` (canonical) | (Hebb, 1949) — neurons that fire together wire together; (Bi & Poo, 1998; Markram et al., 1997) — spike-timing dependent reinforcement | `decode_best_trained_binding` — `freq_weight = 1 + strength × ln(use_count)`; `register_fingerprint` bumps existing binding's `use_count` on each recurrence |
+| **Sequence-match preempt** | `Pool::last_observed_sequence` (read by decoder) | always on | (Skaggs & McNaughton, 1996; Foster & Wilson, 2007) — CA3 sequence replay; (Buzsáki & Tingley, 2018) — sequence-cell ordering as a memory primitive | `decode_best_trained_binding` — when binding's text-side `Vec<NeuronId>` matches the query's `last_observed_sequence` exactly, it preempts even concept-tier matches.  This is what distinguishes anagrams (`sad` query → `sad→emotion` binding, NOT `das→animal`) |
 
 ### Dynamical-system control architecture
 
@@ -1295,7 +1295,7 @@ A physics-grounded multi-dimensional health model applying to any entity — hum
 HSV color encoding: Value = overall scalar (0=dead/black, 1=optimal/white); Hue = weighted circular mean of dimension anchors; Saturation = deviation from rolling baseline.
 
 #### Spatial threat field and intent inference
-- Sparse 2D grid proxemics zones (Hall 1966): Intimate / Personal / Social / Public
+- Sparse 2D grid proxemics zones (Hall, 1966): Intimate / Personal / Social / Public
 - Bayesian-style softmax over 9 intent classes: Normal → Survey → Approach → Conceal → ControlEnvironment → ApproachDemand → Flee → DirectThreat → ArmedThreat
 - Signal decay prevents stale locks; `build_health_impacts()` projects forward health deltas with time horizon
 
@@ -1976,3 +1976,80 @@ Designed to run on modest desktops and scale across many nodes. The system measu
 - Motif window caps enforce on constrained hardware
 - Annealing uses lock-free `AtomicU64` counters
 - All limits are derived from measurement, never hard-coded
+
+---
+
+## References & credits
+
+The brain and legacy substrates implement primitives that map onto the published neuroscience literature.  Citations in the body of this README use `(Last & Last, Year)` / `(Last et al., Year)` shorthand; full bibliographic entries follow.  This is the work the architecture is built on — credit is theirs.
+
+### Plasticity, Hebbian learning, and STDP
+
+- **Hebb, D. O.** (1949). *The Organization of Behavior: A Neuropsychological Theory.* Wiley.  *(The original "neurons that fire together wire together" formulation that the entire fabric is built on.)*
+- **Bi, G.-Q. & Poo, M.-M.** (1998). "Synaptic modifications in cultured hippocampal neurons: dependence on spike timing, synaptic strength, and postsynaptic cell type." *Journal of Neuroscience* 18(24): 10464–10472.  *(Empirical STDP window — the asymmetric LTP/LTD curve that `hebbian_pair(a, b)` models.)*
+- **Markram, H., Lübke, J., Frotscher, M., & Sakmann, B.** (1997). "Regulation of synaptic efficacy by coincidence of postsynaptic APs and EPSPs." *Science* 275(5297): 213–215.  *(Foundational STDP observation in cortex.)*
+- **Bienenstock, E. L., Cooper, L. N., & Munro, P. W.** (1982). "Theory for the development of neuron selectivity: orientation specificity and binocular interaction in visual cortex." *Journal of Neuroscience* 2(1): 32–48.  *(BCM rule — the sliding-threshold homeostatic mechanism behind per-neuron EMA activation tracking.)*
+
+### Sparsity and population coding
+
+- **Vinje, W. E. & Gallant, J. L.** (2000). "Sparse coding and decorrelation in primary visual cortex during natural vision." *Science* 287(5456): 1273–1276.  *(The 2–5% firing rate evidence that motivates kWTA / `sparsity_mode` defaults.)*
+- **Olshausen, B. A. & Field, D. J.** (1996). "Emergence of simple-cell receptive field properties by learning a sparse code for natural images." *Nature* 381: 607–609.  *(Why sparse codes form naturally from natural-image statistics — the principled defence of pre-set sparsity priors.)*
+- **Maass, W.** (2000). "On the computational power of winner-take-all." *Neural Computation* 12(11): 2519–2535.  *(Theoretical capacity result for k-WTA networks.)*
+
+### Homeostasis and synaptic competition
+
+- **Turrigiano, G. G.** (2008). "The self-tuning neuron: synaptic scaling of excitatory synapses." *Cell* 135(3): 422–435.  *(Homeostatic synaptic scaling that the legacy 500-step rebalance pass and the brain crate's `heterosynaptic_ltd_mode` both model.)*
+- **Royer, S. & Paré, D.** (2003). "Conservation of total synaptic weight through balanced synaptic depression and potentiation." *Nature* 422: 518–522.  *(Direct evidence for heterosynaptic LTD — strengthening one synapse weakens neighbours on the same neuron.)*
+
+### Predictive coding and the free-energy principle
+
+- **Rao, R. P. N. & Ballard, D. H.** (1999). "Predictive coding in the visual cortex: a functional interpretation of some extra-classical receptive-field effects." *Nature Neuroscience* 2(1): 79–87.  *(The hierarchical-prediction architecture `propagate_predictive()` and `predict_gate_mode` both implement.)*
+- **Friston, K.** (2005). "A theory of cortical responses." *Philosophical Transactions of the Royal Society B* 360(1456): 815–836.  *(Original free-energy formulation.)*
+- **Friston, K.** (2010). "The free-energy principle: a unified brain theory?" *Nature Reviews Neuroscience* 11(2): 127–138.  *(Unified statement — `recent_surprise` EMA approximates variational free energy locally.)*
+
+### Sleep, replay, and complementary learning systems
+
+- **McClelland, J. L., McNaughton, B. L., & O'Reilly, R. C.** (1995). "Why there are complementary learning systems in the hippocampus and neocortex: insights from the successes and failures of connectionist models of learning and memory." *Psychological Review* 102(3): 419–457.  *(CLS theory.  The brain crate's two-tier emergent binding + `/sleep` replay loop is a direct port of the hippocampus-fast + cortex-slow division.)*
+- **Wilson, M. A. & McNaughton, B. L.** (1994). "Reactivation of hippocampal ensemble memories during sleep." *Science* 265(5172): 676–679.  *(First empirical demonstration of replay — `Brain::replay_recent_moments` is the computational form.)*
+- **Tononi, G. & Cirelli, C.** (2014). "Sleep and the price of plasticity." *Neuron* 81(1): 12–34.  *(Synaptic Homeostasis Hypothesis (SHY) — `Brain::sleep`'s prune-weak-concepts pass implements the downscaling SHY predicts.)*
+- **Kumaran, D., Hassabis, D., & McClelland, J. L.** (2016). "What learning systems do intelligent agents need? Complementary learning systems theory updated." *Trends in Cognitive Sciences* 20(7): 512–534.  *(Modern CLS restatement that motivated the tentative + consolidated tier split in Stage 10.)*
+
+### Sequence binding and hippocampal ordering
+
+- **Skaggs, W. E. & McNaughton, B. L.** (1996). "Replay of neuronal firing sequences in rat hippocampus during sleep following spatial experience." *Science* 271(5257): 1870–1873.  *(CA3 fires sequences, not just sets — the empirical motivation for the Stage-16 sequence-match preempt that distinguishes anagram queries.)*
+- **Foster, D. J. & Wilson, M. A.** (2007). "Hippocampal theta sequences." *Hippocampus* 17(11): 1093–1099.  *(Within-theta-cycle order preservation in place-cell ensembles.)*
+- **Buzsáki, G. & Tingley, D.** (2018). "Space and time: the hippocampus as a sequence generator." *Trends in Cognitive Sciences* 22(10): 853–869.  *(Sequence-cell ordering as a fundamental memory primitive — `Pool::last_observed_sequence` mirrors this property.)*
+
+### Neuromodulators and reward-modulated plasticity
+
+- **Schultz, W.** (2007). "Behavioral dopamine signals." *Trends in Neurosciences* 30(5): 203–210.  *(Reward-prediction-error semantics for the dopamine spikes the legacy `release_neuromodulator(kind, amount)` API emits.)*
+- **Aston-Jones, G. & Cohen, J. D.** (2005). "An integrative theory of locus coeruleus-norepinephrine function: adaptive gain and optimal performance." *Annual Review of Neuroscience* 28: 403–450.  *(NE-as-gain-modulator — the legacy `effective_lr = lr_scale × ACh × (1 + NE × 2.0)` formula's biological basis.)*
+- **Hasselmo, M. E. & McGaughy, J.** (2004). "High acetylcholine levels set circuit dynamics for attention and encoding and low acetylcholine levels set dynamics for consolidation." *Progress in Brain Research* 145: 207–231.  *(ACh as a plasticity gate.)*
+- **Frémaux, N. & Gerstner, W.** (2016). "Neuromodulated spike-timing-dependent plasticity, and theory of three-factor learning rules." *Frontiers in Neural Circuits* 9: 85.  *(Theory of dopamine-tagged retrograde potentiation — what `flush_dopamine_potentiation()` implements.)*
+- **Izhikevich, E. M.** (2007). "Solving the distal reward problem through linkage of STDP and dopamine signalling." *Cerebral Cortex* 17(10): 2443–2452.  *(Eligibility-trace × dopamine mechanism that closes the temporal-credit-assignment gap.)*
+
+### Cortical columns and the thousand-brains conjecture
+
+- **Mountcastle, V. B.** (1997). "The columnar organization of the neocortex." *Brain* 120(4): 701–722.  *(Cortical column as the canonical computational unit — `Pool::collapse_tail_to_concept` is the column-promotion analog.)*
+- **Hawkins, J., Lewis, M., Klukas, M., Purdy, S., & Ahmad, S.** (2019). "A framework for intelligence and cortical function based on grid cells in the neocortex." *Frontiers in Neural Circuits* 12: 121.  *(Thousand-brains theory — every cortical column has its own model of every object; voting across columns yields stable percepts.  The legacy multi-pool fabric's parallel pool predictions implement the voting principle.)*
+
+### Behavioural and environmental theory
+
+- **Hall, E. T.** (1966). *The Hidden Dimension.* Doubleday.  *(Proxemic zones — Intimate / Personal / Social / Public — used by the threat overlay's spatial fields.)*
+
+### Tooling and infrastructure cited as primary sources
+
+- **Maass, W., Natschläger, T., & Markram, H.** (2002). "Real-time computing without stable states: a new framework for neural computation based on perturbations." *Neural Computation* 14(11): 2531–2560.  *(Liquid-state-machine intuition behind treating the substrate as a recurrent feature reservoir.)*
+
+---
+
+### Software credits
+
+- **Wikipedia REST API + ArXiv Atom API** — sources the `research_agent.py` autonomous learning loop ingests to resolve hypothesis gaps.
+- **NLTK + WordNet 3.0** — Princeton WordNet powers `compile_categorical_unified.py` and the K-12 corpus compilers.  WordNet is © Princeton University 2006; used under the WordNet license.
+- **NCBI / PubMed Central** — `scripts/fetch_ncbi_corpus.py` ingests public-domain biomedical articles for the GA training corpus.
+- **OpenStax / LibreTexts** — Creative-Commons textbooks used by the K-12 stage-2 training pipeline.
+- **Rust crates**: `serde`, `serde_json`, `bincode`, `ahash`, `parking_lot`, `dashmap`, `rayon`, `thiserror`, `tokio`, `axum`, `tracing`, `clap`, `psutil`, `evalexpr`, `toml`, `base64`.  Full Cargo.toml dependency list available in `crates/*/Cargo.toml`.
+- **Python**: `httpx`, `aiohttp`, `urllib3`, `pillow`, `nltk`, `requests`, `yt-dlp`, `playwright`, `psutil`.
+
+If a citation here misrepresents prior work, or attributes a mechanism this code does not actually implement, please open an issue — the goal is empirical honesty about what the substrate is and what it is *modelled after*, not appropriation of credit.
