@@ -1024,6 +1024,16 @@ async fn sleep_status(
     }
 }
 
+/// `GET /storage_state` — per [`ARCHITECTURE.md`] §17.8 — returns the
+/// brain's current storage-tier observables.  Used by tooling, GA
+/// search, and Wizard frontend to inspect the dynamical-system state.
+async fn storage_state(
+    State(s): State<AppState>,
+) -> Json<w1z4rd_brain::store::StorageControlState> {
+    let brain = s.brain.lock().await;
+    Json(brain.storage_control_state())
+}
+
 // -----------------------------------------------------------------
 // Handlers — multimodal
 // -----------------------------------------------------------------
@@ -1360,6 +1370,7 @@ async fn main() -> Result<()> {
         .route("/flush",                 post(flush))
         .route("/sleep",                 post(sleep_cycle))
         .route("/sleep/status",          get(sleep_status))
+        .route("/storage_state",         get(storage_state))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))

@@ -3309,6 +3309,57 @@ impl Brain {
         self.fabric.store_clone()
     }
 
+    /// Stage 17.8 — observable signals for storage-tier dynamical
+    /// control.  Per [`ARCHITECTURE.md`] §17.8, the same control
+    /// architecture (ControlMode/ControlSignal/ControlState) that
+    /// governs the substrate's plasticity knobs also governs the
+    /// storage tier; this method computes the storage-tier
+    /// observables that future knobs (eviction, replay rate, bloom
+    /// resize) read from.
+    ///
+    /// Today (Stage 17.8): the salience-distribution-entropy and
+    /// bloom-load signals are populated from real state; working-set-
+    /// pressure / cache-hit-rate / replay-value remain 0.0 until
+    /// Stage 17.4 full (eviction actor) and Stage 17.7 full
+    /// (free-energy replay) ship.
+    pub fn storage_control_state(&self) -> crate::store::StorageControlState {
+        // Histogram the salience distribution across all neurons in all
+        // pools.  10 bins from 0.0 to 1.0 → 0.1 wide each.  Shannon
+        // entropy in bits over this histogram is the diversity signal.
+        const NBINS: usize = 10;
+        let mut bins = [0u64; NBINS];
+        let mut bloom_inserted: u64 = 0;
+        let mut bloom_slots:    u64 = 0;
+        for pid in self.fabric.pool_ids() {
+            if let Some(p) = self.fabric.pool(pid) {
+                let pool = p.read();
+                for n in pool.iter_neurons() {
+                    let s = n.salience.clamp(0.0, 1.0);
+                    let idx = ((s * NBINS as f32) as usize).min(NBINS - 1);
+                    bins[idx] += 1;
+                }
+                bloom_inserted += pool.bloom_inserted_keys() as u64;
+                // Bloom slot count is a function of the bloom — fetch
+                // via byte_size * 2 (4-bit counters → 2 slots per byte).
+                bloom_slots += (pool.bloom_byte_size() as u64) * 2;
+            }
+        }
+        let entropy = crate::store::StorageControlState::entropy_from_bins(&bins);
+        let load = if bloom_slots > 0 {
+            (bloom_inserted as f32 / bloom_slots as f32).clamp(0.0, 1.0)
+        } else { 0.0 };
+
+        crate::store::StorageControlState {
+            // §17.4 full populates these:
+            working_set_pressure:       0.0,
+            cache_hit_rate:             0.0,
+            // §17.7 full populates this:
+            replay_value_score:         0.0,
+            salience_distribution_entropy: entropy,
+            bloom_load:                 load,
+        }
+    }
+
     /// Rebuild a brain from a snapshot, supplying fresh encodings
     /// for every pool id in the snapshot.  The binding pool is
     /// included in `encodings`; pass a `BytePassthroughEncoding`
