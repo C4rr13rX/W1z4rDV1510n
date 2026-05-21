@@ -364,6 +364,31 @@ impl Pool {
     /// the Bloom filter (approximate; counts transitions from 0).
     pub fn bloom_inserted_keys(&self) -> usize { self.bloom.inserted_keys() }
 
+    /// Stage 17.6 — compute the deterministic Merkle root for this
+    /// pool's current learned state.  Two pools with identical training
+    /// history produce identical roots; cluster anti-entropy diff
+    /// (follow-up commit, needs the cluster transport) operates on
+    /// these roots.  Per [`ARCHITECTURE.md`] §17.6.
+    ///
+    /// `fabric_tick` is supplied by the caller (usually `Fabric::current_tick`)
+    /// because the pool doesn't own the global tick — and per-pool roots
+    /// should reflect the tick at which they're computed for cluster
+    /// timestamp-ordering of diff exchanges.
+    pub fn merkle_root(&self, fabric_tick: u64) -> crate::store::PoolRoot {
+        let seqs: Vec<(Vec<NeuronId>, u32)> = self
+            .sequences
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        crate::store::compute_pool_root(
+            &self.config,
+            &self.neurons,
+            &seqs,
+            &self.bloom,
+            fabric_tick,
+        )
+    }
+
     /// Plug a persistence backend in per [`ARCHITECTURE.md`] §17.9.  After
     /// this call every neurogenesis / concept-emergence event in this pool
     /// is appended to the store's WAL.  Returns `self` for chaining.
