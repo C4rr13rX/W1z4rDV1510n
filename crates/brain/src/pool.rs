@@ -10,8 +10,10 @@
 use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
+use crate::store::{NoopStore, Store, WalEvent};
 
 /// Encode/decode contract per spec §3.1.  Each pool ships with one of these
 /// declaring how raw sensor frames decompose into atom labels and how an
@@ -293,6 +295,15 @@ pub struct Pool {
     /// = dense connectivity (high-LTD candidate).
     terminal_count_ema: f32,
 
+    /// Persistence backend per [`ARCHITECTURE.md`] §17.9.  Default is a
+    /// [`NoopStore`] — pools constructed without an explicit store stay
+    /// purely in-memory.  When the brain plugs in an [`crate::store::MmapWalStore`]
+    /// via [`Pool::set_store`], every mutation that affects durable
+    /// state (atom creation, concept emergence, terminal pruning) is
+    /// appended to the WAL before the in-memory mutation is exposed.
+    /// `Arc<dyn Store>` so it can be cheaply shared across all pools.
+    store: Arc<dyn Store>,
+
     /// External signal — set by Brain::decode_best_trained_binding
     /// when this pool is the query_pool of a decode.  Rolling avg
     /// of the winning binding's atom_score (the precision×recall
@@ -320,11 +331,20 @@ impl Pool {
             terminal_count_ema: 0.0,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
+            store: Arc::new(NoopStore),
         }
+    }
+
+    /// Plug a persistence backend in per [`ARCHITECTURE.md`] §17.9.  After
+    /// this call every neurogenesis / concept-emergence event in this pool
+    /// is appended to the store's WAL.  Returns `self` for chaining.
+    pub fn set_store(&mut self, store: Arc<dyn Store>) {
+        self.store = store;
     }
 
     pub fn id(&self) -> PoolId        { self.config.id }
     pub fn name(&self) -> &str        { &self.config.name }
+    pub fn encoding_name(&self) -> &'static str { self.encoding.name() }
     pub fn neuron_count(&self) -> usize { self.neurons.len() }
     pub fn concept_count(&self) -> usize {
         self.neurons.iter().filter(|n| !n.is_atom()).count()
@@ -393,6 +413,31 @@ impl Pool {
     pub fn append_neuron(&mut self, mut neuron: Neuron, label: String) -> NeuronId {
         let id = self.neurons.len() as NeuronId;
         neuron.id = id;
+        // Per ARCHITECTURE §17.9: WAL append BEFORE in-memory mutation
+        // is considered durable.  If neuron has members it's a concept
+        // (binding concepts have cross-pool members); otherwise it's an
+        // atom path (rare here — atoms usually come through ensure_atom).
+        let event = if neuron.members.is_empty() {
+            WalEvent::AtomCreated {
+                pool_id:   self.config.id,
+                id,
+                label:     label.clone(),
+                kind:      neuron.kind,
+                born_tick: neuron.born_tick,
+            }
+        } else {
+            WalEvent::ConceptEmerged {
+                pool_id:   self.config.id,
+                id,
+                label:     label.clone(),
+                kind:      neuron.kind,
+                members:   neuron.members.clone(),
+                born_tick: neuron.born_tick,
+            }
+        };
+        if let Err(e) = self.store.append(&event) {
+            tracing::warn!("WAL append failed for append_neuron(id={}): {}", id, e);
+        }
         self.neurons.push(neuron);
         self.label_to_id.insert(label, id);
         id
@@ -509,6 +554,10 @@ impl Pool {
             terminal_count_ema: 0.0,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
+            // Restored-from-snapshot pools start with NoopStore; caller
+            // re-attaches the live WAL backend via set_store after restore
+            // so events from subsequent observations flow to the right log.
+            store: Arc::new(NoopStore),
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
@@ -906,6 +955,17 @@ impl Pool {
         }
         let id = self.neurons.len() as NeuronId;
         let neuron = Neuron::new_atom(id, label.clone(), NeuronKind::Excitatory, tick);
+        // Per ARCHITECTURE §17.9: append BEFORE in-memory exposure.
+        let event = WalEvent::AtomCreated {
+            pool_id:   self.config.id,
+            id,
+            label:     label.clone(),
+            kind:      neuron.kind,
+            born_tick: tick,
+        };
+        if let Err(e) = self.store.append(&event) {
+            tracing::warn!("WAL append failed for ensure_atom({:?}): {}", label, e);
+        }
         self.neurons.push(neuron);
         self.label_to_id.insert(label, id);
         id
@@ -1026,6 +1086,19 @@ impl Pool {
         let member_refs: Vec<NeuronRef> = members.iter()
             .map(|m| NeuronRef::new(self.config.id, *m))
             .collect();
+        // Per ARCHITECTURE §17.9: append the ConceptEmerged event before
+        // the in-memory neuron is exposed.
+        let event = WalEvent::ConceptEmerged {
+            pool_id:   self.config.id,
+            id,
+            label:     composite_label.clone(),
+            kind:      NeuronKind::Excitatory,
+            members:   member_refs.clone(),
+            born_tick: tick,
+        };
+        if let Err(e) = self.store.append(&event) {
+            tracing::warn!("WAL append failed for promote_to_concept(id={}): {}", id, e);
+        }
         let mut concept = Neuron::new_concept(
             id, composite_label.clone(), NeuronKind::Excitatory, member_refs, tick,
         );

@@ -3071,8 +3071,53 @@ impl Brain {
 
     /// Write this brain's state to `path`.  Convenience wrapper over
     /// `snapshot()` + `persistence::save_snapshot()`.
+    ///
+    /// Per [`ARCHITECTURE.md`] §17.9, when a WAL store is attached this
+    /// also flushes the WAL and emits a `SnapshotMarker` so crash recovery
+    /// can fast-forward past replayed events that the bincode snapshot
+    /// already covers.  The bincode path is interim until the content-
+    /// addressed terminal store ships in full (Stage 17.4+).
     pub fn checkpoint<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
-        crate::persistence::save_snapshot(&self.snapshot(), path)
+        // 1. Streaming-serialize the snapshot to disk (the §17.1 interim
+        //    path with peak-RAM = write-buffer, not brain-size).
+        crate::persistence::save_snapshot(&self.snapshot(), path)?;
+
+        // 2. Flush the WAL and emit a snapshot marker.  When a NoopStore
+        //    is attached (the default, no W1Z4RDV1510N_DATA_DIR set) both
+        //    calls are inert.
+        let store = self.fabric.store_clone();
+        if let Err(e) = store.flush() {
+            tracing::warn!("WAL flush failed during checkpoint: {}", e);
+        }
+        let wall_time_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let marker = crate::store::WalEvent::SnapshotMarker {
+            tick: self.fabric.current_tick(),
+            wall_time_ms,
+        };
+        if let Err(e) = store.append(&marker) {
+            tracing::warn!("WAL marker append failed during checkpoint: {}", e);
+        }
+        if let Err(e) = store.flush() {
+            tracing::warn!("WAL flush after marker failed: {}", e);
+        }
+        Ok(())
+    }
+
+    /// Attach a persistence backend per [`ARCHITECTURE.md`] §17.9.
+    /// Fans out through the fabric to every pool.  Idempotent — safe to
+    /// call multiple times with the same store.
+    pub fn set_store(&mut self, store: std::sync::Arc<dyn crate::store::Store>) {
+        self.fabric.set_store(store);
+    }
+
+    /// Clone the persistence handle.  Exposes the `Store` to brain_server
+    /// for the `/flush` endpoint and any tooling that needs to inspect
+    /// the WAL size / force a barrier without going through `checkpoint`.
+    pub fn store_clone(&self) -> std::sync::Arc<dyn crate::store::Store> {
+        self.fabric.store_clone()
     }
 
     /// Rebuild a brain from a snapshot, supplying fresh encodings

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::neuron::{NeuronId, NeuronRef, PoolId};
 use crate::pool::Pool;
+use crate::store::{NoopStore, Store, WalEvent};
 
 /// What fired in every pool at a given tick.  Used by cross-pool wiring:
 /// pairs of neurons firing within the same tick get an axon terminal
@@ -81,6 +82,10 @@ pub struct Fabric {
     /// in the same pool — the within-pool temporal "what follows
     /// what" wiring.  Transient state; not persisted in snapshots.
     prev_tick_concepts: AHashMap<PoolId, Vec<NeuronId>>,
+    /// Persistence backend per [`ARCHITECTURE.md`] §17.9.  Cloned into
+    /// each pool on registration via [`Fabric::set_store`] so neurogenesis
+    /// events flow to the same WAL.  Default is [`NoopStore`].
+    store: Arc<dyn Store>,
 }
 
 impl Fabric {
@@ -91,8 +96,24 @@ impl Fabric {
             current:            Moment::new(0),
             tick:               0,
             prev_tick_concepts: AHashMap::new(),
+            store:              Arc::new(NoopStore),
         }
     }
+
+    /// Attach a persistence backend per [`ARCHITECTURE.md`] §17.9.  Fans
+    /// out to every already-registered pool; pools registered after this
+    /// call inherit the same backend.  Idempotent — calling with the
+    /// same `Arc<dyn Store>` is a no-op apart from the fan-out re-set.
+    pub fn set_store(&mut self, store: Arc<dyn Store>) {
+        self.store = store.clone();
+        for (_pid, pool) in self.pools.iter() {
+            pool.write().set_store(store.clone());
+        }
+    }
+
+    /// Clone the persistence handle.  Used by [`crate::Brain::checkpoint`]
+    /// to flush the WAL and emit a snapshot marker.
+    pub fn store_clone(&self) -> Arc<dyn Store> { self.store.clone() }
 
     pub fn current_tick(&self) -> u64 { self.tick }
 
@@ -128,6 +149,10 @@ impl Fabric {
             current:            Moment::new(snap.tick),
             tick:               snap.tick,
             prev_tick_concepts: AHashMap::new(),
+            // Snapshot-restored fabric defaults to NoopStore; caller plugs
+            // in the live backend via set_store after restore so subsequent
+            // observations get logged.
+            store:              Arc::new(NoopStore),
         };
         let mut missing = Vec::new();
         for pid in snap.pool_order {
@@ -150,8 +175,23 @@ impl Fabric {
     /// emergence before `advance_tick` clears it.
     pub fn current_moment(&self) -> &Moment { &self.current }
 
-    pub fn register_pool(&mut self, pool: Pool) -> PoolId {
+    pub fn register_pool(&mut self, mut pool: Pool) -> PoolId {
         let id = pool.id();
+        // Per ARCHITECTURE §17.9: a newly-registered pool inherits the
+        // fabric's current persistence backend so its neurogenesis events
+        // flow to the same WAL.  Logs the PoolRegistered baseline first
+        // so recovery can recreate pools with the right config.
+        let config = pool.config.clone();
+        let encoding_name = pool.encoding_name().to_string();
+        let event = WalEvent::PoolRegistered {
+            pool_id: id,
+            config,
+            encoding_name,
+        };
+        if let Err(e) = self.store.append(&event) {
+            tracing::warn!("WAL append failed for register_pool({}): {}", id, e);
+        }
+        pool.set_store(self.store.clone());
         self.pools.insert(id, Arc::new(RwLock::new(pool)));
         id
     }
@@ -341,6 +381,14 @@ impl Fabric {
 
         self.tick += 1;
         self.current = Moment::new(self.tick);
+
+        // Per ARCHITECTURE §17.9: TickAdvanced is the per-tick boundary
+        // marker.  Lets crash-recovery rebuild the fabric's tick counter
+        // and order events temporally.
+        let event = WalEvent::TickAdvanced { new_tick: self.tick };
+        if let Err(e) = self.store.append(&event) {
+            tracing::warn!("WAL append failed for TickAdvanced({}): {}", self.tick, e);
+        }
     }
 
     /// Observe a sensor frame into the named pool.  Records what fired

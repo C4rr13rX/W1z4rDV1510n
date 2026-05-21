@@ -731,6 +731,27 @@ async fn checkpoint(
     }))
 }
 
+/// `POST /flush` — per [`ARCHITECTURE.md`] §17.9, force-flush the WAL to
+/// disk.  Cheap O(buffer) operation.  Use between training phases for a
+/// quick durability barrier without paying the bincode-snapshot cost.
+/// On a NoopStore brain (no WAL attached) this is a no-op acknowledgment.
+#[derive(Serialize)]
+struct FlushResponse {
+    wal_bytes: u64,
+}
+
+async fn flush(
+    State(s): State<AppState>,
+) -> Result<Json<FlushResponse>, (axum::http::StatusCode, String)> {
+    let brain = s.brain.lock().await;
+    let store = brain.store_clone();
+    store.flush().map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+         format!("WAL flush failed: {}", e))
+    })?;
+    Ok(Json(FlushResponse { wal_bytes: store.log_size_bytes() }))
+}
+
 #[derive(Deserialize, Default)]
 struct SleepRequest {
     #[serde(default = "default_sleep_min_use_count")]
@@ -1061,7 +1082,28 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data).with_context(|| format!("mkdir {}", data.display()))?;
     let checkpoint_path = data.join("brain.bin");
 
-    let brain = load_or_build_brain(&checkpoint_path)?;
+    let mut brain = load_or_build_brain(&checkpoint_path)?;
+
+    // Per ARCHITECTURE §17.9: when W1Z4RDV1510N_DATA_DIR is set (i.e. we have
+    // a data dir, which we always do at this point), instantiate the
+    // MmapWalStore at <data_dir>/brain.wal and attach it to the brain.
+    // Every neurogenesis / concept-emergence / tick-advance event from this
+    // point on appends to that WAL.  Crash recovery in a future commit will
+    // replay it.  Opening the WAL is best-effort — if it fails (disk full,
+    // permissions, format-version mismatch), the brain falls back to
+    // NoopStore + bincode-checkpoint only, with a logged warning.
+    match w1z4rd_brain::MmapWalStore::open(&data) {
+        Ok(wal) => {
+            let store: Arc<dyn w1z4rd_brain::Store> = Arc::new(wal);
+            brain.set_store(store);
+            info!("WAL attached at {}/brain.wal", data.display());
+        }
+        Err(e) => {
+            warn!("WAL open failed at {}: {} — running in NoopStore mode",
+                data.display(), e);
+        }
+    }
+
     let bs = brain.stats();
     info!("brain ready  tick={}  pools={}  neurons={}  terminals={}",
         bs.tick, bs.pool_count, bs.total_neurons, bs.total_terminals);
@@ -1081,6 +1123,7 @@ async fn main() -> Result<()> {
         .route("/integrate_resonant",    post(integrate_resonant))
         .route("/pool/concepts",         post(pool_concepts))
         .route("/checkpoint",            post(checkpoint))
+        .route("/flush",                 post(flush))
         .route("/sleep",                 post(sleep_cycle))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
