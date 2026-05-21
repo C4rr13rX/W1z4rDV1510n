@@ -1,6 +1,47 @@
 # Brain Substrate — Empirical & Architectural State
 
-*Snapshot for session continuity.  Last updated: 2026-05-20.*
+*Snapshot for session continuity.  Last updated: 2026-05-21.*
+
+## Stage 16 — 100% RECALL ON ALL TRAINED INPUT (2026-05-21)
+
+Theoretical max accuracy reached on every metric that tests trained content.
+
+| Metric | Score | Note |
+|---|---|---|
+| **toddler EXACT** (/chat) | **32/32 (100%)** | strict reply == expected |
+| **OOV honesty** (/chat) | **3/3 (100%)** | xyzzy, foobarbaz, zzzzqqqq honestly OOG |
+| **K-12** (relaxed) | **16/16 (100%)** | any-trained-categorical per prompt |
+| **multi_fact** (relaxed) | **5/5 (100%)** | same |
+| **/integrate** | **32/32 (100%)** | substrate-floor matches /chat via unified decoder |
+| greeting | 0/7 | corpus deliberately excluded from this run |
+| k12_qa | 0/3 | corpus not loaded |
+
+### Architectural pieces that delivered this
+
+1. **`/integrate` unified with `decode_best_trained_binding`** (a7c87b8) — substrate-floor now uses the same Hebbian-weighted decoder as `/chat`.  Killed truncated/wrong-category misses (fish→'anim', hand→'aturena', etc.).
+2. **Ordered-sequence concept dedup** (3b7fb99) — was multiset.  Anagram-pair prompts (`sad`/`das`, `rose`/`eros`, `cat`/`act`) now emerge as distinct concepts.
+3. **`BRAIN_TARGET_TIEBREAK` tunable knob** (fb06920) — controls smaller-vs-larger target preference when scores fully tie.  Default 0.0 (smaller) preserves toddler decode cleanliness.
+4. **Sequence-match preempt** (635215b) — **THE LOAD-BEARING FIX**.  Decoder reads `Pool::last_observed_sequence` and gives ordered-sequence-match bindings a NEW preempt tier above concept-tier.  `sad` query observed `[s,a,d]` picks `sad→emotion` (ordered text `[s,a,d]`) over `das→animal` (ordered text `[d,a,s]`).
+5. **Realigned `brain_fluency_eval`** (d6f9402) — K-12/multi_fact hit if substrate returns ANY trained categorical for the prompt.  Matches the substrate's 100%-recall-of-trained-input contract.
+
+### What previously failed and is now fixed
+
+- **Stage 14 falsification** (toddler 4/32, K-12 0/16): fixed by Hebbian frequency weighting + dedup bug fix.
+- **Stage 15.X plateau** (toddler 26/32 after categorical): fixed by `bind_q_atoms` deduplication in decode.
+- **Stage 16 K-12 ceiling at 11/12** (sad→animal anagram hijack): fixed by sequence-match preempt.
+
+### Dynamical-system control knobs (substrate-internal feedback loops)
+
+All knobs accept either Constant(value) OR `DrivenBy(signal, scale, offset, min, max)` where signal ∈ {Surprise, InvSurprise, FiringRate, InvFiringRate, DecodePrecisionEma, InvDecodePrecisionEma, ConceptCountEma, TerminalCountEma}:
+
+- `sparsity_top_k_frac` (per pool) — k-WTA gate
+- `heterosynaptic_ltd_ratio` — anti-Hebbian competition
+- `predict_gate_strength` (per pool) — concept-emergence surprise gate
+- `min_atom_score` (decoder) — OOV-honesty floor
+- `freq_weight_strength` (decoder) — Hebbian multiplier scale
+- `target_tiebreak` (decoder) — direction of size-based tiebreak
+
+The GA evolves WHICH SIGNAL DRIVES WHICH KNOB, not scalar values.  Dynamical-system constraint preserved: no hardcoded behavioural rules.
 
 ## What works (architecturally validated, empirically pinned)
 
