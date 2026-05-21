@@ -50,6 +50,14 @@ pub struct PoolSnapshot {
     /// Map serialized as parallel vecs because HashMap<Vec<NeuronId>, u32>
     /// can hit serde corner cases when the key is itself a sequence.
     pub sequences:    Vec<(Vec<NeuronId>, u32)>,
+    /// Stage 17.4 step 5: cold-tier neuron offsets per
+    /// [`ARCHITECTURE.md`] §17.4.  Maps `NeuronId → byte offset` into
+    /// the pool's cold-tier file (`<data_dir>/cold/pool_{id}.cold`).
+    /// On restore, every neuron with an entry here is marked evicted
+    /// and the brain knows where to fetch it.  `#[serde(default)]` for
+    /// forward-compat with pre-17.4 snapshots.
+    #[serde(default)]
+    pub cold_offsets: Vec<(NeuronId, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

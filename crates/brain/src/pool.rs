@@ -735,12 +735,23 @@ impl Pool {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
+        // Stage 17.4 step 5: snapshot the cold-tier offset index so a
+        // process restart preserves what's-on-disk vs in-RAM.  The
+        // cold-tier file itself is data on disk — its name is derived
+        // from pool id (see brain_server's attach_cold_tiers call), so
+        // restoring the index is sufficient to re-link to it.
+        let cold_offsets: Vec<(NeuronId, u64)> = self
+            .cold_offsets
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         crate::persistence::PoolSnapshot {
             config:       self.config.clone(),
             neurons:      self.neurons.clone(),
             label_to_id,
             recent_atoms: self.recent_atoms.clone(),
             sequences,
+            cold_offsets,
         }
     }
 
@@ -791,14 +802,14 @@ impl Pool {
             // so events from subsequent observations flow to the right log.
             store: Arc::new(NoopStore),
             bloom,
-            // Stage 17.4 — snapshot format doesn't yet track cold-tier
-            // state.  Restored pools start with no cold tier (caller
-            // must set_cold_tier explicitly) and no eviction history.
-            // Compaction follow-up will fold cold-tier into the
-            // snapshot format.
+            // Stage 17.4 step 5: restore cold-tier offset index AND
+            // the evicted set from the snapshot.  The actual cold-tier
+            // file handle (`cold_tier`) is set separately by the brain
+            // via attach_cold_tiers after fabric registration, because
+            // the data_dir isn't known at Pool construction time.
             cold_tier:    None,
-            cold_offsets: AHashMap::new(),
-            evicted:      AHashSet::new(),
+            cold_offsets: snap.cold_offsets.iter().copied().collect(),
+            evicted:      snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
