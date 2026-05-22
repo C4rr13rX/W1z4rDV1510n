@@ -28,6 +28,15 @@
 //! Data dir is `W1Z4RDV1510N_DATA_DIR` (or ./brain-data).  Brain
 //! persists to `<data_dir>/brain.bin` on shutdown.
 
+// Stage 18.12 step 3: HTTP-backed RemoteTransport for §18 distributed
+// substrate.  The cluster module is included here (rather than as a
+// dependency module) because brain_server is a single-binary build.
+#[path = "brain_server_cluster.rs"]
+mod cluster;
+// Re-export so it can be used from elsewhere if needed; unused here yet.
+#[allow(unused_imports)]
+use cluster::{HttpRemoteTransport, arc_transport};
+
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -1209,6 +1218,81 @@ struct PullFromResponse {
     errors:              Vec<String>,
 }
 
+// -----------------------------------------------------------------
+// Stage 18.12 step 3 — per-neuron shard RPC endpoints
+//
+// These are the fine-grained transports used by RemoteNodeStore in the
+// node crate.  GET fetches one neuron's full state by (pool, id); POST
+// inserts/overwrites one neuron.  Bincode-bodied for size and speed.
+// -----------------------------------------------------------------
+
+/// `GET /shard/neuron/{pool_id}/{neuron_id}` — return the bincode-encoded
+/// `Neuron` at the given coordinates.  404 if absent (id out of range
+/// or no such pool).  Per [`ARCHITECTURE.md`] §18.5 (operation routing).
+async fn shard_get_neuron(
+    State(s): State<AppState>,
+    axum::extract::Path((pool_id, neuron_id)):
+        axum::extract::Path<(PoolId, w1z4rd_brain::NeuronId)>,
+) -> Result<axum::response::Response<axum::body::Body>,
+            (axum::http::StatusCode, String)>
+{
+    let brain = s.brain.lock().await;
+    let pool = brain.fabric().pool(pool_id).ok_or((
+        axum::http::StatusCode::NOT_FOUND,
+        format!("no pool with id {}", pool_id),
+    ))?;
+    let neuron = {
+        let p = pool.read();
+        p.get(neuron_id).cloned()
+    };
+    let neuron = neuron.ok_or((
+        axum::http::StatusCode::NOT_FOUND,
+        format!("no neuron with id {} in pool {}", neuron_id, pool_id),
+    ))?;
+    let body = bincode::serialize(&neuron).map_err(|e| (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        format!("bincode serialize: {}", e),
+    ))?;
+    Ok(axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .body(axum::body::Body::from(body))
+        .unwrap())
+}
+
+/// `POST /shard/put_neuron` — insert or overwrite the neuron at
+/// `(pool_id, neuron.id)`.  Body is base64-encoded bincode of a struct
+/// `{ pool_id: PoolId, neuron_b64: String }`; we use base64 so the JSON
+/// envelope works through standard HTTP middleware without needing
+/// raw-binary handling.  Refuses if the pool doesn't exist.
+#[derive(Deserialize)]
+struct ShardPutRequest {
+    pool_id:    PoolId,
+    neuron_b64: String,
+}
+
+#[derive(Serialize)]
+struct ShardPutResponse {
+    inserted: bool,
+}
+
+async fn shard_put_neuron(
+    State(s): State<AppState>,
+    Json(req): Json<ShardPutRequest>,
+) -> Result<Json<ShardPutResponse>, (axum::http::StatusCode, String)> {
+    let bytes = decode_base64_flexible(&req.neuron_b64).map_err(|e| (
+        axum::http::StatusCode::BAD_REQUEST,
+        format!("neuron_b64 decode: {}", e),
+    ))?;
+    let neuron: w1z4rd_brain::Neuron = bincode::deserialize(&bytes).map_err(|e| (
+        axum::http::StatusCode::BAD_REQUEST,
+        format!("neuron bincode: {}", e),
+    ))?;
+    let brain = s.brain.lock().await;
+    let inserted = brain.cluster_merge_pool(req.pool_id, vec![neuron]) > 0;
+    Ok(Json(ShardPutResponse { inserted }))
+}
+
 async fn cluster_pull_from(
     State(s): State<AppState>,
     Json(req): Json<PullFromRequest>,
@@ -1679,6 +1763,8 @@ async fn main() -> Result<()> {
         .route("/cluster/pool_neurons/:pool_id", get(cluster_pool_neurons))
         .route("/cluster/merge_pool",    post(cluster_merge_pool))
         .route("/cluster/pull_from",     post(cluster_pull_from))
+        .route("/shard/neuron/:pool_id/:neuron_id", get(shard_get_neuron))
+        .route("/shard/put_neuron",      post(shard_put_neuron))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))

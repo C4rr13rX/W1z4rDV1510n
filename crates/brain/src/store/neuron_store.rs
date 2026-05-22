@@ -359,6 +359,158 @@ impl NeuronStore for ColdDiskStore {
     }
 }
 
+// ============================================================================
+// RemoteTransport + RemoteNodeStore — §18.12 step 3: NeuronStore that
+// fetches/puts via RPC to a peer brain.  The actual transport
+// (HTTP via reqwest, gRPC, or anything else) is supplied by the
+// node-crate impl so the brain crate doesn't drag in an HTTP client.
+// ============================================================================
+
+use crate::neuron::PoolId;
+
+/// Synchronous RPC primitive for the §18 distributed substrate.
+/// Implemented by the node crate (e.g. `HttpRemoteTransport` over
+/// reqwest); brain crate stays HTTP-client-free.
+///
+/// All methods are sync — the caller's runtime decides whether to wrap
+/// them in `spawn_blocking` or call them from a blocking context.
+pub trait RemoteTransport: Send + Sync {
+    /// Fetch a neuron by (pool, id).  Returns None on 404 or any
+    /// non-200 status.
+    fn fetch_neuron(&self, pool: PoolId, id: NeuronId) -> Option<Neuron>;
+
+    /// Insert or overwrite a neuron at the peer.  Returns true if the
+    /// peer reports successful insert.
+    fn put_neuron(&self, pool: PoolId, neuron: Neuron) -> bool;
+}
+
+/// NeuronStore impl that proxies operations to a peer node via the
+/// `RemoteTransport`.  One instance per (peer_node, pool) — the store
+/// is scoped to a single pool because that's the granularity at which
+/// placement decisions are made.
+///
+/// `iter_ids()` and `len()` are stubbed because a remote store cannot
+/// cheaply enumerate without a dedicated endpoint; later stages can
+/// add `/shard/list_ids` if iteration becomes load-bearing.  For now
+/// the iter is empty + len is 0 — RemoteNodeStore is intended for
+/// use as a *tier* under TieredStore, not as a standalone enumerable.
+pub struct RemoteNodeStore {
+    transport:  Arc<dyn RemoteTransport>,
+    pool_id:    PoolId,
+    peer_node:  NodeId,
+}
+
+impl RemoteNodeStore {
+    pub fn new(transport: Arc<dyn RemoteTransport>, pool_id: PoolId, peer_node: NodeId) -> Self {
+        Self { transport, pool_id, peer_node }
+    }
+}
+
+impl NeuronStore for RemoteNodeStore {
+    fn get(&self, id: NeuronId) -> Option<Neuron> {
+        self.transport.fetch_neuron(self.pool_id, id)
+    }
+
+    fn put(&self, id: NeuronId, mut n: Neuron) {
+        if n.id != id { n.id = id; }
+        let ok = self.transport.put_neuron(self.pool_id, n);
+        if !ok {
+            tracing::warn!(
+                "RemoteNodeStore::put(pool={}, id={}, peer=node{}) failed",
+                self.pool_id, id, self.peer_node.0,
+            );
+        }
+    }
+
+    fn delete(&self, _id: NeuronId) {
+        // Stage 18.12 step 3: delete RPC not yet exposed by brain_server
+        // shard endpoints (current behaviour is LSM-style append-only).
+        // Future commit adds /shard/delete_neuron if a tombstone path
+        // is needed.
+        tracing::debug!(
+            "RemoteNodeStore::delete is currently a no-op (LSM-append semantics)"
+        );
+    }
+
+    fn iter_ids<'a>(&'a self) -> Box<dyn Iterator<Item = NeuronId> + 'a> {
+        // RemoteNodeStore doesn't enumerate — see struct docs.
+        Box::new(std::iter::empty())
+    }
+
+    fn len(&self) -> usize { 0 }
+
+    fn home_for(&self, _id: NeuronId) -> NodeId { self.peer_node }
+}
+
+#[cfg(test)]
+mod remote_node_tests {
+    use super::*;
+    use crate::neuron::NeuronKind;
+    use std::sync::Mutex;
+
+    /// Test-only transport that holds an in-memory neuron map.  Lets
+    /// us exercise RemoteNodeStore's logic without spinning up an HTTP
+    /// server.
+    struct MockTransport {
+        inner: Mutex<AHashMap<(PoolId, NeuronId), Neuron>>,
+    }
+
+    impl MockTransport {
+        fn new() -> Self {
+            Self { inner: Mutex::new(AHashMap::new()) }
+        }
+    }
+
+    impl RemoteTransport for MockTransport {
+        fn fetch_neuron(&self, pool: PoolId, id: NeuronId) -> Option<Neuron> {
+            self.inner.lock().unwrap().get(&(pool, id)).cloned()
+        }
+        fn put_neuron(&self, pool: PoolId, neuron: Neuron) -> bool {
+            self.inner.lock().unwrap().insert((pool, neuron.id), neuron);
+            true
+        }
+    }
+
+    fn n(id: u32, label: &str) -> Neuron {
+        Neuron::new_atom(id, label.to_string(), NeuronKind::Excitatory, 0)
+    }
+
+    #[test]
+    fn put_then_get_round_trips_through_transport() {
+        let t = Arc::new(MockTransport::new()) as Arc<dyn RemoteTransport>;
+        let store = RemoteNodeStore::new(t, /*pool*/ 1, NodeId(2));
+        store.put(7, n(7, "remote"));
+        let r = store.get(7).unwrap();
+        assert_eq!(r.id, 7);
+        assert_eq!(r.label, "remote");
+    }
+
+    #[test]
+    fn get_unknown_returns_none() {
+        let t = Arc::new(MockTransport::new()) as Arc<dyn RemoteTransport>;
+        let store = RemoteNodeStore::new(t, 1, NodeId(2));
+        assert!(store.get(999).is_none());
+    }
+
+    #[test]
+    fn home_for_returns_peer_node() {
+        let t = Arc::new(MockTransport::new()) as Arc<dyn RemoteTransport>;
+        let store = RemoteNodeStore::new(t, 1, NodeId(42));
+        assert_eq!(store.home_for(0), NodeId(42));
+    }
+
+    #[test]
+    fn iter_ids_is_empty_by_design() {
+        let t = Arc::new(MockTransport::new()) as Arc<dyn RemoteTransport>;
+        let store = RemoteNodeStore::new(t, 1, NodeId(2));
+        store.put(7, n(7, "x"));
+        // Even after put, iter is empty — remote store isn't enumerable
+        // in the current protocol.  Documented in struct docs.
+        assert_eq!(store.iter_ids().count(), 0);
+        assert_eq!(store.len(), 0);
+    }
+}
+
 #[cfg(test)]
 mod cold_disk_tests {
     use super::*;
