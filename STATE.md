@@ -2,6 +2,38 @@
 
 *Snapshot for session continuity.  Last updated: 2026-05-21.*
 
+## Stage 18 — Distributed substrate (in progress, 2026-05-22)
+
+ARCHITECTURE §18: ONE logical brain across N hosts (resource-pool model,
+orthogonal to §17.6 replication).  Analogue: a VM on OpenStack draws
+RAM from a multi-host pool transparently.  Substrate code unchanged;
+abstraction lives below `Pool::neurons` via a `NeuronStore` trait.
+
+| Step | Status | Commit | What ships |
+|---|---|---|---|
+| 18 design | ✓ | `7228620` | 287-line ARCHITECTURE §18, 13 subsections |
+| 18.12 step 1 | ✓ | `6e23f56` | `NeuronStore` trait + `RamStore` impl |
+| 18.12 step 2 | ✓ | `c4686e8` | `ColdDiskStore` adapter over §17.4 |
+| 18.12 step 3 | ✓ | `ba35dcc` | `RemoteNodeStore` + HTTP `RemoteTransport` impl + `/shard/neuron`+`/shard/put_neuron` endpoints |
+| 18.12 step 4a | ✓ | `adb1972` | `TieredStore` composer + `PlacementPolicy` (consistent hash) |
+| 18.12 step 4b | ⨯ | — | **NEXT**: wire `TieredStore` into `Pool::neurons` (multi-day invasive refactor; load-modify-store semantics replace borrow-based access) |
+| 18.12 step 5 | ⨯ | — | `POST /cluster/join` protocol extending legacy crates/cluster OTP |
+| 18.12 step 6 | ⨯ | — | Head-node operation routing (`/observe` fans out to homes) |
+| 18.12 step 7 | ⨯ | — | Per-tick all-to-all activation deposit batching |
+| 18.12 step 8 | ⨯ | — | Heartbeats + dead-node detection + rejoin |
+| 18.12 step 9 | ⨯ | — | Gossip bridge: cluster appears as one peer to standalone §17.6 anti-entropy |
+
+183 brain tests pass, 0 fail.  Steps 1–4a are all *additive* — no
+existing call sites changed; `Pool::neurons` is still `Vec<Neuron>`
+and all current functionality is intact.  Step 4b is the
+load-bearing migration that lets a Pool back its neurons with a
+TieredStore.  Sessions resuming this work should start there.
+
+The Stage 18 vision is intact even without 4b shipped: this session
+ships every *abstraction* needed to compose a multi-host brain.  Step
+4b is the wiring; steps 5–9 add the cluster operational layer
+(membership, routing, fault tolerance, gossip-bridge).
+
 ## Stage 17 — Storage & Wake-Sleep architecture (2026-05-21, sessions 1+2)
 
 The full-15-corpus training previously OOMed at 463M terminals when
