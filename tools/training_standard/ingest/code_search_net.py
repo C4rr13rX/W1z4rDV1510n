@@ -99,11 +99,87 @@ _PY_DOCSTRING = re.compile(
 
 
 def _iter_csn_files(src_dir: Path) -> Iterator[Path]:
-    """Yield .jsonl.gz files under src_dir, recursively.  CSN ships
-    one .gz per shard."""
+    """Yield CSN shard paths.  Two on-disk formats supported:
+
+    1. Original CSN release: `*.jsonl.gz` (gzip-compressed JSONL).
+    2. HuggingFace re-host:  `*.parquet` (one file per partition,
+       partition encoded in the filename e.g. `train.parquet`,
+       `validation.parquet`, `test.parquet`).
+    """
     if not src_dir.exists():
         raise FileNotFoundError(f"CSN source dir does not exist: {src_dir}")
     yield from sorted(src_dir.rglob("*.jsonl.gz"))
+    yield from sorted(src_dir.rglob("*.parquet"))
+
+
+def _iter_records(shard: Path, default_lang: str | None) -> Iterator[dict]:
+    """Stream records out of one shard, whatever the format.  Yields
+    dicts in the CSN JSONL shape (code, docstring, repo, path,
+    func_name, partition, language)."""
+    if shard.suffix == ".gz":
+        with gzip.open(shard, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        return
+    if shard.suffix == ".parquet":
+        # Stream in row groups to keep memory bounded — CSN parquets
+        # are hundreds of MB.
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "parquet shard found but pyarrow is not installed; "
+                "pip install pyarrow"
+            ) from exc
+        # Partition is implicit in HF parquet filenames.  CSN's HF
+        # repo lays them out as <lang>/<split>-NNNNN-of-MMMMM.parquet.
+        stem = shard.stem.lower()
+        if stem.startswith("train") or "-train-" in stem:
+            partition = "train"
+        elif stem.startswith("test") or "-test-" in stem:
+            partition = "test"
+        elif stem.startswith("valid") or "-valid" in stem:
+            partition = "valid"
+        else:
+            partition = "train"  # safe default — we'd rather train on
+                                   # a shard than skip it for unknown name
+        # HF CSN parquet uses long column names; original JSONL uses
+        # the short ones.  Pick whichever exists per row.
+        pf = pq.ParquetFile(shard)
+
+        def _pick(cols: dict, *names: str):
+            """First column present in `names`, or None."""
+            for n in names:
+                if n in cols:
+                    return cols[n]
+            return None
+
+        for batch in pf.iter_batches(batch_size=2048):
+            cols = {c: batch.column(c) for c in batch.schema.names}
+            code_col = _pick(cols, "code", "func_code_string", "whole_func_string")
+            doc_col  = _pick(cols, "docstring", "func_documentation_string")
+            repo_col = _pick(cols, "repo", "repository_name")
+            path_col = _pick(cols, "path", "func_path_in_repository")
+            name_col = _pick(cols, "func_name")
+            lang_col = _pick(cols, "language")
+            part_col = _pick(cols, "partition", "split_name")
+            n = len(batch)
+            for i in range(n):
+                rec = {
+                    "code":      code_col[i].as_py() if code_col is not None else "",
+                    "docstring": doc_col[i].as_py()  if doc_col  is not None else "",
+                    "repo":      repo_col[i].as_py() if repo_col is not None else "?",
+                    "path":      path_col[i].as_py() if path_col is not None else "?",
+                    "func_name": name_col[i].as_py() if name_col is not None else "f",
+                    "partition": (part_col[i].as_py() if part_col is not None else partition),
+                    "language":  (lang_col[i].as_py() if lang_col is not None else (default_lang or "")),
+                }
+                yield rec
+        return
+    raise ValueError(f"unsupported CSN shard format: {shard}")
 
 
 def _first_paragraph(text: str) -> str:
@@ -186,69 +262,55 @@ def ingest(
                    script_id=script_id,
                    source=f"codesearchnet:{lang}") as writer:
         for shard in _iter_csn_files(src_dir):
-            with gzip.open(shard, "rt", encoding="utf-8") as fh:
-                for line in fh:
-                    counters["seen"] += 1
-                    if limit is not None and counters["written"] >= limit:
-                        break
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
+            for rec in _iter_records(shard, default_lang=lang):
+                counters["seen"] += 1
+                if limit is not None and counters["written"] >= limit:
+                    break
+
+                if rec.get("partition") == "test":
+                    counters["rejected_test_partition"] += 1
+                    continue
+                if rec.get("language", "").lower() != lang:
+                    continue
+
+                docstring = rec.get("docstring") or ""
+                code = rec.get("code") or ""
+                if lang == "python":
+                    code_stripped = _strip_python_docstring(code)
+                else:
+                    code_stripped = code
+
+                func_name = (rec.get("func_name") or "f").split(".")[-1]
+                prompt = _build_prompt(docstring, lang, func_name)
+                ok, _reason = _accept(prompt, code_stripped, docstring)
+                if not ok:
+                    counters["rejected_filter"] += 1
+                    continue
+
+                if do_sandbox:
+                    result = sb.check(sandbox_lang, code_stripped, timeout_s=10.0)
+                    if not result.ok:
+                        counters["rejected_sandbox"] += 1
                         continue
 
-                    if rec.get("partition") == "test":
-                        counters["rejected_test_partition"] += 1
-                        continue
-                    if rec.get("language", "").lower() != lang:
-                        continue
-
-                    docstring = rec.get("docstring") or ""
-                    code = rec.get("code") or ""
-                    if lang == "python":
-                        code_stripped = _strip_python_docstring(code)
-                    else:
-                        # Best-effort: for non-Python langs CSN's
-                        # docstring is already a separate field, so the
-                        # code field doesn't repeat it.  Use as-is.
-                        code_stripped = code
-
-                    func_name = rec.get("func_name") or "f"
-                    # CSN's func_name often includes the class path
-                    # like "ClassName.method" — keep only the leaf.
-                    func_name = func_name.split(".")[-1]
-
-                    prompt = _build_prompt(docstring, lang, func_name)
-                    ok, reason = _accept(prompt, code_stripped, docstring)
-                    if not ok:
-                        counters["rejected_filter"] += 1
-                        continue
-
-                    if do_sandbox:
-                        result = sb.check(sandbox_lang, code_stripped, timeout_s=10.0)
-                        if not result.ok:
-                            counters["rejected_sandbox"] += 1
-                            continue
-
-                    row = Row(
-                        prompt=prompt,
-                        response=code_stripped,
-                        ctx=render_ctx(lang=lang, intent="implement", source="csn"),
-                        license="MIT",   # CSN guarantees permissive; default
-                                          # to MIT label since the dump doesn't
-                                          # carry per-row license metadata.
-                        source=f"codesearchnet:{lang}:{rec.get('repo','?')}:{rec.get('path','?')}#{func_name}",
-                        source_hash=hash_source(code_stripped),
-                        script_id=script_id,
-                    )
-                    try:
-                        accepted = writer.write(row)
-                    except RowRejected:
-                        counters["rejected_row_writer"] += 1
-                        continue
-                    if accepted:
-                        counters["written"] += 1
-                    else:
-                        counters["dedup_skipped"] += 1
+                row = Row(
+                    prompt=prompt,
+                    response=code_stripped,
+                    ctx=render_ctx(lang=lang, intent="implement", source="csn"),
+                    license="MIT",
+                    source=f"codesearchnet:{lang}:{rec.get('repo','?')}:{rec.get('path','?')}#{func_name}",
+                    source_hash=hash_source(code_stripped),
+                    script_id=script_id,
+                )
+                try:
+                    accepted = writer.write(row)
+                except RowRejected:
+                    counters["rejected_row_writer"] += 1
+                    continue
+                if accepted:
+                    counters["written"] += 1
+                else:
+                    counters["dedup_skipped"] += 1
 
                 if limit is not None and counters["written"] >= limit:
                     break
