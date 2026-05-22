@@ -89,6 +89,65 @@ struct AppState {
     /// the `/sleep` handler; readable by `/sleep/status`.  `None` means
     /// no sleep has ever been requested on this brain instance.
     sleep_status: Arc<std::sync::Mutex<Option<SleepJobStatus>>>,
+    /// Stage 18.12 step 5: cluster membership state.  Tracks the
+    /// ring of NodeIds + their HTTP base URLs.  Mutated by /cluster/join
+    /// (peer adds itself) and /cluster/leave; read by /cluster/members
+    /// and consumed by the head node's routing logic.
+    cluster: Arc<std::sync::Mutex<ClusterMembership>>,
+}
+
+/// Stage 18.12 step 5: per-node cluster membership table.  Per
+/// [`ARCHITECTURE.md`] §18.4.  Every brain_server instance owns one;
+/// nodes update each other's tables through the /cluster/join +
+/// /cluster/heartbeat protocol.
+///
+/// The legacy `crates/cluster` already implements OTP-key membership
+/// for the node-level ring (port 51611); §18.4 extends that pattern
+/// to the *brain-shard* layer (port 8095 HTTP) with these structures.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClusterMembership {
+    /// This node's id within the ring.  0 = solo / unjoined.
+    pub local_node:   w1z4rd_brain::store::NodeId,
+    /// This node's externally-reachable base URL, e.g.
+    /// `http://192.168.1.43:8095`.  Empty if not configured.
+    pub local_addr:   String,
+    /// Ring members (including self), ordered by NodeId.
+    pub members:      Vec<MemberInfo>,
+    /// Monotonically increasing counter used to allocate fresh NodeIds.
+    pub next_node_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberInfo {
+    pub node_id:   w1z4rd_brain::store::NodeId,
+    pub addr:      String,
+    /// Wall-time of last successful heartbeat (ms since UNIX epoch).
+    /// 0 == never; set by heartbeat handler.
+    pub last_heartbeat_ms: i64,
+    /// Optional capacity advertisement — how many neurons this node
+    /// can host.  Used by Stage 18.6 placement policy.  None = unknown.
+    pub capacity_neurons:  Option<u64>,
+}
+
+impl ClusterMembership {
+    pub fn solo(local_addr: impl Into<String>) -> Self {
+        let local_node = w1z4rd_brain::store::NodeId(0);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64).unwrap_or(0);
+        let addr = local_addr.into();
+        Self {
+            local_node,
+            local_addr: addr.clone(),
+            members: vec![MemberInfo {
+                node_id:   local_node,
+                addr,
+                last_heartbeat_ms: now_ms,
+                capacity_neurons:  None,
+            }],
+            next_node_id: 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1219,6 +1278,90 @@ struct PullFromResponse {
 }
 
 // -----------------------------------------------------------------
+// Stage 18.12 step 5 — cluster membership endpoints per
+// [`ARCHITECTURE.md`] §18.4.  The seed-driven join protocol that
+// extends legacy crates/cluster OTP membership to the brain-shard
+// layer.
+// -----------------------------------------------------------------
+
+/// `GET /cluster/members` — return current membership snapshot.
+async fn cluster_members(
+    State(s): State<AppState>,
+) -> Json<ClusterMembership> {
+    Json(s.cluster.lock().unwrap().clone())
+}
+
+/// `POST /cluster/join` — a peer requests to join this node's ring.
+/// Caller body: `{ addr, capacity_neurons? }`.  Response: the
+/// post-join membership snapshot (joiner copies the ring into its
+/// own state).
+///
+/// The seed-side (this endpoint) allocates a NodeId, adds the peer,
+/// and returns the updated ring.  When the joiner has further peers
+/// to inform, it propagates by calling join on each — or relies on
+/// the heartbeat layer (Stage 18.12 step 8) to spread updates.
+#[derive(Deserialize)]
+struct JoinRequest {
+    addr: String,
+    #[serde(default)]
+    capacity_neurons: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct JoinResponse {
+    /// NodeId the seed allocated for the joiner.
+    assigned_node_id: w1z4rd_brain::store::NodeId,
+    /// Full membership snapshot post-join.  Joiner overwrites its
+    /// local state with this.
+    membership: ClusterMembership,
+}
+
+async fn cluster_join(
+    State(s): State<AppState>,
+    Json(req): Json<JoinRequest>,
+) -> Result<Json<JoinResponse>, (axum::http::StatusCode, String)> {
+    let mut m = s.cluster.lock().unwrap();
+    // Reject duplicates by addr — idempotent on retries.
+    if let Some(existing) = m.members.iter().find(|mi| mi.addr == req.addr) {
+        let id = existing.node_id;
+        return Ok(Json(JoinResponse {
+            assigned_node_id: id,
+            membership: m.clone(),
+        }));
+    }
+    let assigned = w1z4rd_brain::store::NodeId(m.next_node_id);
+    m.next_node_id = m.next_node_id.saturating_add(1);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64).unwrap_or(0);
+    m.members.push(MemberInfo {
+        node_id: assigned,
+        addr:    req.addr.clone(),
+        last_heartbeat_ms: now_ms,
+        capacity_neurons:  req.capacity_neurons,
+    });
+    m.members.sort_by_key(|mi| mi.node_id.0);
+    let snapshot = m.clone();
+    Ok(Json(JoinResponse { assigned_node_id: assigned, membership: snapshot }))
+}
+
+/// `POST /cluster/leave` — peer is leaving gracefully.  Body:
+/// `{ node_id }`.  Returns the post-leave membership.
+#[derive(Deserialize)]
+struct LeaveRequest {
+    node_id: w1z4rd_brain::store::NodeId,
+}
+
+async fn cluster_leave(
+    State(s): State<AppState>,
+    Json(req): Json<LeaveRequest>,
+) -> Json<ClusterMembership> {
+    let mut m = s.cluster.lock().unwrap();
+    m.members.retain(|mi| mi.node_id != req.node_id);
+    Json(m.clone())
+}
+
+// -----------------------------------------------------------------
 // Stage 18.12 step 3 — per-neuron shard RPC endpoints
 //
 // These are the fine-grained transports used by RemoteNodeStore in the
@@ -1738,10 +1881,17 @@ async fn main() -> Result<()> {
     info!("brain ready  tick={}  pools={}  neurons={}  terminals={}",
         bs.tick, bs.pool_count, bs.total_neurons, bs.total_terminals);
 
+    // Stage 18.12 step 5: bootstrap solo cluster membership.  The
+    // local_addr advertisement is finalised below once port + bind_ip
+    // are known; here we use an empty placeholder that the post-bind
+    // code patches.
+    let cluster_state = ClusterMembership::solo(String::new());
+
     let state = AppState {
         brain:           Arc::new(Mutex::new(brain)),
         checkpoint_path: checkpoint_path.clone(),
         sleep_status:    Arc::new(std::sync::Mutex::new(None)),
+        cluster:         Arc::new(std::sync::Mutex::new(cluster_state)),
     };
 
     let app = Router::new()
@@ -1763,6 +1913,9 @@ async fn main() -> Result<()> {
         .route("/cluster/pool_neurons/:pool_id", get(cluster_pool_neurons))
         .route("/cluster/merge_pool",    post(cluster_merge_pool))
         .route("/cluster/pull_from",     post(cluster_pull_from))
+        .route("/cluster/members",       get(cluster_members))
+        .route("/cluster/join",          post(cluster_join))
+        .route("/cluster/leave",         post(cluster_leave))
         .route("/shard/neuron/:pool_id/:neuron_id", get(shard_get_neuron))
         .route("/shard/put_neuron",      post(shard_put_neuron))
         .route("/sensor/observe",        post(sensor_observe))
@@ -1785,6 +1938,70 @@ async fn main() -> Result<()> {
     info!("brain server listening on http://{}", addr);
     if bind_ip.is_unspecified() {
         info!("(0.0.0.0 bind — accepts connections from peer nodes; firewall accordingly)");
+    }
+
+    // Stage 18.12 step 5: finalise the cluster membership's
+    // advertised address now that port + bind_ip are known.  Use
+    // W1Z4RD_BRAIN_ADVERTISE_URL to override (e.g. when the node is
+    // behind NAT or wants to be reached via a hostname).
+    {
+        let advertise = std::env::var("W1Z4RD_BRAIN_ADVERTISE_URL")
+            .unwrap_or_else(|_| format!("http://{}:{}",
+                if bind_ip.is_unspecified() { "127.0.0.1".to_string() }
+                else { bind_ip.to_string() },
+                port,
+            ));
+        let mut m = state.cluster.lock().unwrap();
+        m.local_addr = advertise.clone();
+        let local = m.local_node;
+        if let Some(self_member) = m.members.iter_mut().find(|mi| mi.node_id == local) {
+            self_member.addr = advertise;
+        }
+    }
+
+    // Stage 18.12 step 5: optional join-on-startup.  When the env var
+    // W1Z4RD_CLUSTER_SEED is set (e.g. "http://192.168.1.84:8095"), the
+    // node POSTs /cluster/join to that seed and adopts the returned
+    // membership.  Mistakes here are non-fatal: log + continue as solo.
+    if let Ok(seed_url) = std::env::var("W1Z4RD_CLUSTER_SEED") {
+        let seed = seed_url.trim_end_matches('/').to_string();
+        let my_addr = state.cluster.lock().unwrap().local_addr.clone();
+        info!("Stage 18.12: joining cluster via seed {}", seed);
+        let client = reqwest::Client::new();
+        let req_body = serde_json::json!({
+            "addr": my_addr,
+            "capacity_neurons": null,
+        });
+        match client.post(format!("{}/cluster/join", seed))
+            .json(&req_body).send().await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                #[derive(Deserialize)]
+                struct R {
+                    assigned_node_id: w1z4rd_brain::store::NodeId,
+                    membership: ClusterMembership,
+                }
+                match resp.json::<R>().await {
+                    Ok(r) => {
+                        let mut m = state.cluster.lock().unwrap();
+                        // Preserve our own local_addr — the seed
+                        // returns ITS OWN membership snapshot which
+                        // has the seed's local_addr; the joiner keeps
+                        // its own.
+                        let our_addr = m.local_addr.clone();
+                        *m = r.membership;
+                        m.local_node = r.assigned_node_id;
+                        m.local_addr = our_addr;
+                        info!("Stage 18.12: joined cluster as node {} \
+                              with {} members",
+                            r.assigned_node_id.0, m.members.len());
+                    }
+                    Err(e) => warn!("seed-join parse: {}", e),
+                }
+            }
+            Ok(resp) => warn!("seed-join status {}", resp.status()),
+            Err(e)   => warn!("seed-join network: {}", e),
+        }
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await
