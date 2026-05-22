@@ -12,10 +12,8 @@ across two sessions; 159 brain tests pass; canonical 100% toddler
 baseline preserved end-to-end including under aggressive eviction
 (92% of non-binding concepts paged to disk).**
 
-7 of 8 §17 stages are now fully shipped.  Single-node operation is
-genuinely up to spec.  Only remaining: §17.2 Hebbian disk layout
-(optimization, low priority) and §17.6 FULL cluster anti-entropy RPC
-(needs cluster transport — multi-node work).
+**All 8 §17 sections now fully shipped.**  Single-node and two-node
+operation are genuinely up to spec.
 
 ### Session 2 additions (Stage 17.4 full + 17.7 full + 17.9 recovery)
 
