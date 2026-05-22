@@ -40,6 +40,24 @@ Stage 17.9 recovery in brain_server startup:
 3. `load_events_after_marker` + `apply_wal_events` replays events past
    the last `SnapshotMarker` — topology preserved after crash-without-checkpoint
 
+### Cluster anti-entropy validation (2026-05-22, §17.6)
+
+Same-machine two-brain pull-sync test:
+- Brain A (port 8095) trained on toddler 32-pair → 807 neurons, 32 bindings
+- Brain B (port 8096) fresh, untrained
+- All 6 pool Merkle roots differ
+- `POST /cluster/pull_from {peer_url: A}` to B
+- Response: `{peer_tick:256, local_tick:0, pools_compared:6, pools_diverged:6,
+  pools_synced:6, neurons_inserted:807, errors:[]}`
+- **Toddler eval against B post-sync: 32/32 (100%)**
+
+The pull-sync transfers neuron *structure* (atoms, concepts, bindings).
+Terminal weights are not yet transferred — a §17.6 deeper follow-up.
+The canonical decode path is structural (binding → members → atoms →
+encoding.reassemble) and produces correct answers from inherited
+structure even without weight transfer, so the receiver brain
+inherits the substrate's trained ability for trained queries.
+
 ### End-to-end §17 validation (2026-05-22)
 
 A controlled brain restart test exercised the full §17 chain:
