@@ -27,6 +27,7 @@ pub mod bloom;
 pub mod merkle;
 pub mod control;
 pub mod cold;
+pub mod neuron_store;
 
 pub use event::{TerminalDelta, WalEvent};
 pub use wal::{MmapWalStore, NoopStore, Store};
@@ -35,3 +36,4 @@ pub use bloom::CountingBloom;
 pub use merkle::{PoolRoot, compute_pool_root};
 pub use control::{StorageConfig, StorageControlState};
 pub use cold::ColdTier;
+pub use neuron_store::{NeuronStore, NodeId, RamStore};
