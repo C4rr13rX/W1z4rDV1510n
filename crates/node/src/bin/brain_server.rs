@@ -1320,28 +1320,35 @@ async fn cluster_join(
     State(s): State<AppState>,
     Json(req): Json<JoinRequest>,
 ) -> Result<Json<JoinResponse>, (axum::http::StatusCode, String)> {
-    let mut m = s.cluster.lock().unwrap();
-    // Reject duplicates by addr — idempotent on retries.
-    if let Some(existing) = m.members.iter().find(|mi| mi.addr == req.addr) {
-        let id = existing.node_id;
-        return Ok(Json(JoinResponse {
-            assigned_node_id: id,
-            membership: m.clone(),
-        }));
-    }
-    let assigned = w1z4rd_brain::store::NodeId(m.next_node_id);
-    m.next_node_id = m.next_node_id.saturating_add(1);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64).unwrap_or(0);
-    m.members.push(MemberInfo {
-        node_id: assigned,
-        addr:    req.addr.clone(),
-        last_heartbeat_ms: now_ms,
-        capacity_neurons:  req.capacity_neurons,
-    });
-    m.members.sort_by_key(|mi| mi.node_id.0);
-    let snapshot = m.clone();
+    let (assigned, snapshot, local_node) = {
+        let mut m = s.cluster.lock().unwrap();
+        // Reject duplicates by addr — idempotent on retries.
+        if let Some(existing) = m.members.iter().find(|mi| mi.addr == req.addr) {
+            let id = existing.node_id;
+            return Ok(Json(JoinResponse {
+                assigned_node_id: id,
+                membership: m.clone(),
+            }));
+        }
+        let assigned = w1z4rd_brain::store::NodeId(m.next_node_id);
+        m.next_node_id = m.next_node_id.saturating_add(1);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64).unwrap_or(0);
+        m.members.push(MemberInfo {
+            node_id: assigned,
+            addr:    req.addr.clone(),
+            last_heartbeat_ms: now_ms,
+            capacity_neurons:  req.capacity_neurons,
+        });
+        m.members.sort_by_key(|mi| mi.node_id.0);
+        let snapshot = m.clone();
+        let local_node = m.local_node;
+        (assigned, snapshot, local_node)
+    };
+    // Stage 18.12 step 6: peer joined — re-wire local topology so the
+    // placement policy now considers the new ring member.
+    wire_cluster_topology(&s, &snapshot, local_node).await;
     Ok(Json(JoinResponse { assigned_node_id: assigned, membership: snapshot }))
 }
 
@@ -1356,9 +1363,79 @@ async fn cluster_leave(
     State(s): State<AppState>,
     Json(req): Json<LeaveRequest>,
 ) -> Json<ClusterMembership> {
-    let mut m = s.cluster.lock().unwrap();
-    m.members.retain(|mi| mi.node_id != req.node_id);
-    Json(m.clone())
+    let snapshot;
+    let local_node;
+    {
+        let mut m = s.cluster.lock().unwrap();
+        m.members.retain(|mi| mi.node_id != req.node_id);
+        local_node = m.local_node;
+        snapshot = m.clone();
+    }
+    // Stage 18.12 step 6: re-wire topology on departure too.
+    wire_cluster_topology(&s, &snapshot, local_node).await;
+    Json(snapshot)
+}
+
+/// Stage 18.12 step 6 — propagate the current `ClusterMembership` to
+/// every Pool's `TieredStore` so the placement policy operates on the
+/// up-to-date ring.  Called after seed-join, after every successful
+/// /cluster/join (seed side), and after /cluster/leave.
+///
+/// For each pool:
+/// 1. Build a `RamStore` mirroring the local node's storage of that pool.
+/// 2. Build one `RemoteNodeStore` per non-local member, each backed by
+///    an `HttpRemoteTransport` at the member's advertised addr.
+/// 3. Build a `TieredStore::solo(local_node, ram).set_remote(...)` and
+///    `set_ring(...)` with the full ring.
+/// 4. Attach it via `pool.set_tiered_store(arc)`.
+///
+/// Subsequent evict_neuron / page_in_neuron calls then route through
+/// the TieredStore: local-home goes to RamStore (no functional change
+/// from §17.4); remote-home goes over the wire to the peer's
+/// /shard/put_neuron and /shard/neuron endpoints.
+async fn wire_cluster_topology(
+    state: &AppState,
+    membership: &ClusterMembership,
+    local_node: w1z4rd_brain::store::NodeId,
+) {
+    use std::sync::Arc as StdArc;
+    use w1z4rd_brain::store::{
+        NodeId, RamStore, RemoteNodeStore, TieredStore,
+    };
+    let brain = state.brain.lock().await;
+    let pool_ids = brain.fabric().pool_ids();
+    let mut pools_wired = 0usize;
+    for pid in pool_ids {
+        let Some(pool_arc) = brain.fabric().pool(pid) else { continue; };
+        // Build a fresh RamStore — empty here.  The §18.4b thin hook
+        // intercepts evict/page_in; this RamStore is the "remote-tier
+        // miss / local-home destination" target.  It does NOT mirror
+        // the pool's existing Vec<Neuron> (the step 4b-full refactor
+        // would migrate Pool::neurons into RamStore wholesale; for
+        // now they coexist).
+        let ram = StdArc::new(RamStore::with_node_id(local_node));
+        let tiered = StdArc::new(TieredStore::solo(local_node, ram));
+
+        // Add a RemoteNodeStore for each non-self member.
+        for m in &membership.members {
+            if m.node_id == local_node { continue; }
+            let transport = cluster::arc_transport(&m.addr);
+            let remote = StdArc::new(RemoteNodeStore::new(
+                transport, pid, m.node_id,
+            ));
+            tiered.set_remote(m.node_id, remote);
+        }
+        // Apply the full ring so placement spans all members.
+        let ring: Vec<NodeId> = membership.members.iter().map(|m| m.node_id).collect();
+        tiered.set_ring(ring);
+
+        pool_arc.write().set_tiered_store(tiered);
+        pools_wired += 1;
+    }
+    info!(
+        "Stage 18.12 step 6: wired cluster topology into {} pool(s); local_node={} ring_size={}",
+        pools_wired, local_node.0, membership.members.len(),
+    );
 }
 
 // -----------------------------------------------------------------
@@ -1983,18 +2060,30 @@ async fn main() -> Result<()> {
                 }
                 match resp.json::<R>().await {
                     Ok(r) => {
-                        let mut m = state.cluster.lock().unwrap();
-                        // Preserve our own local_addr — the seed
-                        // returns ITS OWN membership snapshot which
-                        // has the seed's local_addr; the joiner keeps
-                        // its own.
-                        let our_addr = m.local_addr.clone();
-                        *m = r.membership;
-                        m.local_node = r.assigned_node_id;
-                        m.local_addr = our_addr;
+                        let local_node;
+                        let member_count;
+                        let membership_snapshot;
+                        {
+                            let mut m = state.cluster.lock().unwrap();
+                            // Preserve our own local_addr — the seed
+                            // returns ITS OWN membership snapshot which
+                            // has the seed's local_addr; the joiner keeps
+                            // its own.
+                            let our_addr = m.local_addr.clone();
+                            *m = r.membership;
+                            m.local_node = r.assigned_node_id;
+                            m.local_addr = our_addr;
+                            local_node = m.local_node;
+                            member_count = m.members.len();
+                            membership_snapshot = m.clone();
+                        }
                         info!("Stage 18.12: joined cluster as node {} \
                               with {} members",
-                            r.assigned_node_id.0, m.members.len());
+                            r.assigned_node_id.0, member_count);
+                        // Stage 18.12 step 6: wire the cluster topology
+                        // into every Pool's TieredStore so the placement
+                        // policy actually routes operations to ring peers.
+                        wire_cluster_topology(&state, &membership_snapshot, local_node).await;
                     }
                     Err(e) => warn!("seed-join parse: {}", e),
                 }
