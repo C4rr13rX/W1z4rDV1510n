@@ -3445,6 +3445,72 @@ impl Brain {
         self.fabric.store_clone()
     }
 
+    /// Stage 17.6 — map of every pool's Merkle root, keyed by pool id.
+    /// First half of the cluster anti-entropy protocol per
+    /// [`ARCHITECTURE.md`] §17.6: peers compare these maps to identify
+    /// pools whose state has diverged.  The local-only Merkle work
+    /// (`Pool::merkle_root`) is from `8c31d1f`; this method just collects
+    /// roots across the brain's pools at the brain's current tick.
+    pub fn cluster_pool_roots(&self) -> std::collections::HashMap<PoolId, crate::store::PoolRoot> {
+        let tick = self.fabric.current_tick();
+        let mut out = std::collections::HashMap::new();
+        for pid in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pid) {
+                let root = pool.read().merkle_root(tick);
+                out.insert(pid, root);
+            }
+        }
+        out
+    }
+
+    /// Stage 17.6 — merge a batch of neurons received from a peer into
+    /// `pool_id`.  Per [`ARCHITECTURE.md`] §17.6 cluster anti-entropy:
+    /// when the local Merkle root for `pool_id` disagrees with a peer's,
+    /// the peer ships its neurons here and we apply the ones we don't
+    /// have yet (idempotent on overlapping ids).
+    ///
+    /// Conservative semantics for first cut: only inserts NEW neurons
+    /// (id >= our current neuron_count), never overwrites existing ones.
+    /// Salience + terminal merging is the §17.6 deeper follow-up — for
+    /// now we keep local state authoritative on conflicts.  Bloom +
+    /// label_to_id get updated for every newly-inserted neuron.
+    ///
+    /// Returns the count of newly-inserted neurons.
+    pub fn cluster_merge_pool(&self, pool_id: PoolId, incoming: Vec<crate::Neuron>) -> usize {
+        let Some(pool_arc) = self.fabric.pool(pool_id) else { return 0; };
+        let mut pool = pool_arc.write();
+        let mut inserted = 0usize;
+        for n in incoming {
+            // First-cut policy: only accept neurons whose id is exactly
+            // our next slot.  This preserves the sequential-id invariant
+            // and prevents id-space conflicts.  Future: relax to allow
+            // peer ids that don't yet exist locally by mapping them
+            // through a translation table.
+            let next = pool.neuron_count() as crate::NeuronId;
+            if n.id != next { continue; }
+            if n.members.is_empty() {
+                pool.replay_atom_create(n.id, n.label, n.kind, n.born_tick);
+            } else {
+                pool.replay_concept_create(n.id, n.label, n.kind, n.members, n.born_tick);
+            }
+            inserted += 1;
+        }
+        inserted
+    }
+
+    /// Stage 17.6 — return a snapshot of a single pool's neurons for
+    /// cluster sync.  Per [`ARCHITECTURE.md`] §17.6, this is the
+    /// "give me your authoritative state for this pool" RPC payload —
+    /// a peer fetches this when its Merkle root for `pool_id` disagrees.
+    /// Returns the pool's `Vec<Neuron>` cloned at the call moment under
+    /// a brief read lock.  For very large pools, a paginated variant is
+    /// the follow-up; this first cut is bounded by pool size in RAM.
+    pub fn cluster_pool_neurons(&self, pool_id: PoolId) -> Option<Vec<crate::Neuron>> {
+        let pool_arc = self.fabric.pool(pool_id)?;
+        let pool = pool_arc.read();
+        Some(pool.iter_neurons().cloned().collect())
+    }
+
     /// Stage 17.9 — replay a slice of WAL events into this brain to
     /// bring it forward from a snapshot-restored state to its true last-
     /// known state.  Typically the slice comes from

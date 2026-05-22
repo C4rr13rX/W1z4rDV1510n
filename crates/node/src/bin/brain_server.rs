@@ -1089,6 +1089,97 @@ async fn eviction(
 }
 
 // -----------------------------------------------------------------
+// Stage 17.6 — cluster anti-entropy HTTP endpoints
+// -----------------------------------------------------------------
+
+/// `GET /cluster/pool_roots` — per [`ARCHITECTURE.md`] §17.6 — returns
+/// each pool's deterministic Merkle root hex.  A peer compares its
+/// map against ours to identify divergent pools.
+#[derive(Serialize)]
+struct PoolRootsResponse {
+    /// pool_id → hex Merkle root (64 chars, BLAKE3)
+    roots: HashMap<PoolId, String>,
+    /// Brain's current tick at the moment roots were computed.  Cluster
+    /// sync protocols use this to age-order conflicting states.
+    tick:  u64,
+}
+
+async fn cluster_pool_roots(
+    State(s): State<AppState>,
+) -> Json<PoolRootsResponse> {
+    let brain = s.brain.lock().await;
+    let roots_raw = brain.cluster_pool_roots();
+    let mut roots = HashMap::new();
+    for (pid, r) in roots_raw {
+        roots.insert(pid, r.to_hex());
+    }
+    Json(PoolRootsResponse {
+        roots,
+        tick: brain.fabric().current_tick(),
+    })
+}
+
+/// `GET /cluster/pool_neurons/{pool_id}` — per [`ARCHITECTURE.md`] §17.6 —
+/// returns the authoritative neuron list for `pool_id`.  Used by a peer
+/// to fetch state it doesn't have (after detecting divergence via
+/// `/cluster/pool_roots`).  Response is bincode-encoded for size.
+async fn cluster_pool_neurons(
+    State(s): State<AppState>,
+    axum::extract::Path(pool_id): axum::extract::Path<PoolId>,
+) -> Result<axum::response::Response<axum::body::Body>, (axum::http::StatusCode, String)> {
+    let brain = s.brain.lock().await;
+    let neurons = brain.cluster_pool_neurons(pool_id).ok_or((
+        axum::http::StatusCode::NOT_FOUND,
+        format!("no pool with id {}", pool_id),
+    ))?;
+    let bytes = bincode::serialize(&neurons).map_err(|e| (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        format!("serialize failed: {}", e),
+    ))?;
+    Ok(axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .body(axum::body::Body::from(bytes))
+        .unwrap())
+}
+
+/// `POST /cluster/merge_pool` — per [`ARCHITECTURE.md`] §17.6 — accepts
+/// neurons from a peer and merges them into the named pool.  Only
+/// neurons whose id is the next sequential slot in the local pool are
+/// inserted (preserves the sequential-id contract); incoming neurons
+/// for already-filled slots are silently skipped.  Returns the count
+/// of newly-inserted neurons.
+#[derive(Deserialize)]
+struct MergePoolRequest {
+    pool_id: PoolId,
+    /// base64-encoded bincode of `Vec<Neuron>`.  Same wire format as
+    /// `GET /cluster/pool_neurons/{pool_id}` ⇒ symmetrical pull/push.
+    neurons_b64: String,
+}
+
+#[derive(Serialize)]
+struct MergePoolResponse {
+    inserted: usize,
+}
+
+async fn cluster_merge_pool(
+    State(s): State<AppState>,
+    Json(req): Json<MergePoolRequest>,
+) -> Result<Json<MergePoolResponse>, (axum::http::StatusCode, String)> {
+    let bytes = decode_base64_flexible(&req.neurons_b64).map_err(|e| (
+        axum::http::StatusCode::BAD_REQUEST,
+        format!("neurons_b64 decode: {}", e),
+    ))?;
+    let neurons: Vec<w1z4rd_brain::Neuron> = bincode::deserialize(&bytes).map_err(|e| (
+        axum::http::StatusCode::BAD_REQUEST,
+        format!("neurons bincode: {}", e),
+    ))?;
+    let brain = s.brain.lock().await;
+    let inserted = brain.cluster_merge_pool(req.pool_id, neurons);
+    Ok(Json(MergePoolResponse { inserted }))
+}
+
+// -----------------------------------------------------------------
 // Handlers — multimodal
 // -----------------------------------------------------------------
 
@@ -1457,6 +1548,9 @@ async fn main() -> Result<()> {
         .route("/sleep/status",          get(sleep_status))
         .route("/storage_state",         get(storage_state))
         .route("/eviction",              post(eviction))
+        .route("/cluster/pool_roots",    get(cluster_pool_roots))
+        .route("/cluster/pool_neurons/:pool_id", get(cluster_pool_neurons))
+        .route("/cluster/merge_pool",    post(cluster_merge_pool))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))
