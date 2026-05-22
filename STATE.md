@@ -2,13 +2,51 @@
 
 *Snapshot for session continuity.  Last updated: 2026-05-21.*
 
-## Stage 17 — Storage & Wake-Sleep architecture shipped (2026-05-21)
+## Stage 17 — Storage & Wake-Sleep architecture (2026-05-21, sessions 1+2)
 
 The full-15-corpus training previously OOMed at 463M terminals when
 `Brain::checkpoint` tried to allocate the entire bincode-serialised
 brain in RAM before writing.  ARCHITECTURE §17 specifies the
-content-addressed, append-only, demand-paged substitute.  Shipped in
-this session as 10 separate commits, each atomic and tested.
+content-addressed, append-only, demand-paged substitute.  **16 commits
+across two sessions; 159 brain tests pass; canonical 100% toddler
+baseline preserved end-to-end including under aggressive eviction
+(92% of non-binding concepts paged to disk).**
+
+7 of 8 §17 stages are now fully shipped.  Single-node operation is
+genuinely up to spec.  Only remaining: §17.2 Hebbian disk layout
+(optimization, low priority) and §17.6 FULL cluster anti-entropy RPC
+(needs cluster transport — multi-node work).
+
+### Session 2 additions (Stage 17.4 full + 17.7 full + 17.9 recovery)
+
+| Commit | What ships |
+|---|---|
+| `9d965ee` | §17.4 step 1: cold-tier primitive — `ColdTier` append-only file, `Pool::evict_neuron` / `page_in_neuron` / `ensure_loaded` |
+| `f5d8007` | §17.4 steps 3+4: `Brain::run_eviction_pass` policy + `EvictionParams/Stats`; `POST /eviction` endpoint; `working_set_pressure` signal populated |
+| `dfd30d5` | §17.4 step 5: `cold_offsets` persisted into `PoolSnapshot` — eviction survives process restart |
+| `938fc3e` | §17.7 full: `Brain::replay_free_energy_weighted(count, strength, beta, seed)` — Boltzmann sampling over salience scores; `/sleep` `replay_beta` flag |
+| `f8b0103` | §17.9 recovery: `store::load_events_after_marker` + `Brain::apply_wal_events`; brain_server replays post-snapshot WAL events on startup |
+
+Stage 17.4 end-to-end validation under real training:
+- Pre-eviction: working_set_pressure=1.0, 807 neurons live
+- `POST /eviction` aggressive params: 736 neurons evicted in 1.6s
+- Post-eviction: working_set_pressure=0.088 (92% on cold tier)
+- Cold tier files: pool_1=142 KB, pool_4=170 KB, binding pool=0 (correctly skipped)
+- **toddler eval re-run: STILL 32/32 (100%)** — demand-paged storage doesn't regress canonical baseline
+
+Stage 17.9 recovery in brain_server startup:
+1. `load_or_build_brain` reads `brain.bin`
+2. `attach_cold_tiers` re-opens `<data_dir>/cold/pool_{id}.cold` files
+3. `load_events_after_marker` + `apply_wal_events` replays events past
+   the last `SnapshotMarker` — topology preserved after crash-without-checkpoint
+
+## Stage 17 — Session 1 (initial architecture)
+
+The full-15-corpus training previously OOMed at 463M terminals when
+`Brain::checkpoint` tried to allocate the entire bincode-serialised
+brain in RAM before writing.  ARCHITECTURE §17 specifies the
+content-addressed, append-only, demand-paged substitute.  Shipped as
+11 separate commits, each atomic and tested.
 
 | Stage | Status | Commit | What ships |
 |---|---|---|---|
