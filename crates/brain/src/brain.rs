@@ -3469,11 +3469,12 @@ impl Brain {
     /// the peer ships its neurons here and we apply the ones we don't
     /// have yet (idempotent on overlapping ids).
     ///
-    /// Conservative semantics for first cut: only inserts NEW neurons
-    /// (id >= our current neuron_count), never overwrites existing ones.
-    /// Salience + terminal merging is the §17.6 deeper follow-up — for
-    /// now we keep local state authoritative on conflicts.  Bloom +
-    /// label_to_id get updated for every newly-inserted neuron.
+    /// Conservative semantics: only inserts NEW neurons (id >= local
+    /// count), never overwrites existing ones.  When inserting, the
+    /// **whole peer neuron** is taken — including its terminals,
+    /// salience, use_count, and last_fired_tick.  That's the §17.6
+    /// "deeper" form: terminal weights propagate across the cluster,
+    /// not just topology.
     ///
     /// Returns the count of newly-inserted neurons.
     pub fn cluster_merge_pool(&self, pool_id: PoolId, incoming: Vec<crate::Neuron>) -> usize {
@@ -3481,19 +3482,16 @@ impl Brain {
         let mut pool = pool_arc.write();
         let mut inserted = 0usize;
         for n in incoming {
-            // First-cut policy: only accept neurons whose id is exactly
-            // our next slot.  This preserves the sequential-id invariant
-            // and prevents id-space conflicts.  Future: relax to allow
-            // peer ids that don't yet exist locally by mapping them
-            // through a translation table.
+            // Sequential-id contract: only accept neurons whose id is
+            // exactly our next slot.  Prevents id-space conflicts; the
+            // peer was presumably trained on the same input order, so
+            // ids line up naturally.  Future: a translation table for
+            // peers with divergent id-space.
             let next = pool.neuron_count() as crate::NeuronId;
             if n.id != next { continue; }
-            if n.members.is_empty() {
-                pool.replay_atom_create(n.id, n.label, n.kind, n.born_tick);
-            } else {
-                pool.replay_concept_create(n.id, n.label, n.kind, n.members, n.born_tick);
+            if pool.replay_full_neuron(n) {
+                inserted += 1;
             }
-            inserted += 1;
         }
         inserted
     }

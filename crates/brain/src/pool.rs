@@ -574,6 +574,31 @@ impl Pool {
         true
     }
 
+    /// Stage 17.6 deeper — insert a fully-constructed peer neuron at
+    /// the next free id slot, preserving terminals + members + salience
+    /// + use_count.  Mirror of `replay_atom_create` / `replay_concept_create`
+    /// but accepts the WHOLE neuron struct so cluster sync transfers
+    /// terminal weights too, not just topology.
+    ///
+    /// Refuses if `neuron.id != self.neurons.len()` (sequential-id
+    /// contract) or if the id slot is already filled.  Returns `true`
+    /// on successful insertion.
+    pub fn replay_full_neuron(&mut self, neuron: Neuron) -> bool {
+        let next = self.neurons.len() as NeuronId;
+        if neuron.id != next {
+            tracing::warn!(
+                "replay_full_neuron: id={} but next slot is {}; refusing",
+                neuron.id, next,
+            );
+            return false;
+        }
+        let label = neuron.label.clone();
+        self.bloom.insert(&label);
+        self.label_to_id.insert(label, neuron.id);
+        self.neurons.push(neuron);
+        true
+    }
+
     /// Stage 17.9 — recovery-time eviction mark.  Adds an entry to the
     /// `evicted` set + `cold_offsets` index without actually writing
     /// to the cold tier (the cold-tier file's record already exists on

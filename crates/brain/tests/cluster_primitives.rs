@@ -101,3 +101,27 @@ fn cluster_merge_pool_inserts_only_new_neurons() {
     assert_eq!(count_a_after, count_a_before + inserted,
         "post-merge count matches pre-merge + inserted");
 }
+
+#[test]
+fn cluster_merge_pool_transfers_terminal_weights() {
+    // Train brain a so it has terminals, then transfer to b (fresh).
+    let mut a = make_brain_one_text_pool();
+    for _ in 0..4 { a.observe(1, b"ab"); a.advance_tick(); }
+
+    let a_terminals: usize = a.fabric().pool(1).unwrap().read()
+        .iter_neurons()
+        .map(|n| n.terminals.len())
+        .sum();
+    assert!(a_terminals > 0, "a should have terminals after training");
+
+    let b = make_brain_one_text_pool();
+    let a_neurons = a.cluster_pool_neurons(1).expect("a has pool 1");
+    let _ = b.cluster_merge_pool(1, a_neurons);
+
+    let b_terminals: usize = b.fabric().pool(1).unwrap().read()
+        .iter_neurons()
+        .map(|n| n.terminals.len())
+        .sum();
+    assert_eq!(b_terminals, a_terminals,
+        "cluster merge must transfer terminal weights, not just topology");
+}
