@@ -18,6 +18,7 @@ abstraction lives below `Pool::neurons` via a `NeuronStore` trait.
 | 18.12 step 4a | ✓ | `adb1972` | `TieredStore` composer + `PlacementPolicy` (consistent hash) |
 | 18.12 step 4b | ✓ thin | `43e4b28` | `Pool.tiered_store` hook intercepts evict + page-in; 3 integration tests (full Pool::neurons → store migration deferred — invasive load-modify-store refactor remains for later) |
 | 18.12 step 5 | ✓ | `88e0b8a` | `/cluster/join` + `/cluster/members` + `/cluster/leave` HTTP endpoints; `ClusterMembership` state in `AppState`; `W1Z4RD_CLUSTER_SEED` env var triggers seed-join on startup |
+| 18.12 step 6 | ✓ | `d5e8d8b`, `36e9875`, `6c0309c` | `wire_cluster_topology` constructs per-pool TieredStore with one RemoteNodeStore per peer; HTTP transport timeouts tightened to 1s/3s; `Pool::accept_shard_insert` handles arbitrary ids (§18 sharded semantics replace §17.6 sequential-id contract for shard puts) |
 | 18.12 step 6 | ⨯ | — | Head-node operation routing (`/observe` fans out to homes) |
 | 18.12 step 7 | ⨯ | — | Per-tick all-to-all activation deposit batching |
 | 18.12 step 8 | ⨯ | — | Heartbeats + dead-node detection + rejoin |
@@ -34,10 +35,39 @@ Empirical validation of step 5 over real LAN:
 - Both nodes' `/cluster/members`: identical 2-element ring
   [{node_id:0, addr:192.168.1.84:8095}, {node_id:1, addr:192.168.1.43:8095}]
 
-The "cluster" the user asked for (nodes JOINING) is live and tested
-over real LAN.  Steps 6-7 wire ClusterMembership into TieredStore so
-placement actually routes hot/put operations to ring peers (i.e. the
-RAM/CPU/disk pooling becomes operational, not just structural).
+**Empirical validation of step 6 — resource-pool routing — over real LAN (2026-05-22):**
+
+- Both machines bind `0.0.0.0:8095`, Windows firewall allows inbound
+  TCP 8095 (Private profile) on both — symmetric LAN.
+- Seed trains toddler 32/32 (100%): 807 neurons, 12065 terminals.
+- Node 2 joins via `W1Z4RD_CLUSTER_SEED`: ring forms, both nodes wire
+  TieredStore with one RemoteNodeStore per non-self peer.
+- `POST /eviction {target_per_pool: 100}` on seed:
+  - Response: `{pools_visited:5, neurons_evicted:200, errors:0, wall_time_ms:1104}`
+  - Elapsed wall (curl): 1291 ms — sub-second average per remote put.
+- Seed post-eviction: 807 neurons (placeholders preserved), 9597 terminals
+  (200 evicted concepts shed their terminals locally).
+- **Node 2 post-eviction: 264 neurons, 1192 terminals** — i.e. 200 full
+  neurons + 64 padding placeholders.  This is the §18 resource-pool
+  state: Node 2 now physically holds the data for ~25% of the brain's
+  concepts.
+- 0 transport failures.
+
+The "one logical brain across N hosts" goal is structurally + empirically
+delivered:
+- Topology: cluster join puts both nodes in the same ring.
+- Routing: TieredStore consults consistent-hash placement on every
+  put/get — neurons whose home is a peer route over the LAN.
+- Migration: eviction physically moves Hebbian-trained neurons + their
+  terminal weights between machines via HTTP /shard endpoints.
+- Crash safety: each peer has its own WAL + cold tier; migrating in
+  fresh state respects the §18-aware accept_shard_insert semantics.
+
+Steps 7-9 (per-tick all-to-all activation deposits, heartbeats,
+gossip bridge) complete the cluster operational layer.  The brain's
+core API (observe/decode/integrate) still runs on whichever node
+receives the request; step 7 is what makes cross-shard activation
+propagation efficient at training scale.
 
 ## Stage 17 — Storage & Wake-Sleep architecture (2026-05-21, sessions 1+2)
 
