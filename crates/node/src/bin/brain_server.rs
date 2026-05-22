@@ -1376,6 +1376,110 @@ async fn cluster_leave(
     Json(snapshot)
 }
 
+/// `GET /cluster/aggregate_pool_neurons/{pool_id}` — per
+/// [`ARCHITECTURE.md`] §18.8 gossip bridge.  Returns the unified view
+/// of `pool_id` across the entire cluster: for each ring member, fetch
+/// its /cluster/pool_neurons/{pool_id}, dedupe by id preferring the
+/// copy with non-empty terminals (so post-eviction shipments win over
+/// stale local placeholders).
+///
+/// This is the endpoint a standalone §17.6 anti-entropy peer should
+/// call against a cluster head when it wants to see the cluster's full
+/// state for a pool, treating the cluster as one logical brain.
+async fn cluster_aggregate_pool_neurons(
+    State(s): State<AppState>,
+    axum::extract::Path(pool_id): axum::extract::Path<PoolId>,
+) -> Result<axum::response::Response<axum::body::Body>, (axum::http::StatusCode, String)> {
+    // Snapshot ring.
+    let (local_node, members) = {
+        let m = s.cluster.lock().unwrap();
+        (m.local_node, m.members.clone())
+    };
+
+    // Collect contributions: (member_node_id, Vec<Neuron>).
+    let mut contributions: Vec<(w1z4rd_brain::store::NodeId, Vec<w1z4rd_brain::Neuron>)> = Vec::new();
+
+    // 1. Local contribution.
+    {
+        let brain = s.brain.lock().await;
+        let local = brain.cluster_pool_neurons(pool_id).unwrap_or_default();
+        contributions.push((local_node, local));
+    }
+
+    // 2. Remote contributions.  Best-effort: failures are warnings,
+    // not fatal.
+    let client = reqwest::Client::new();
+    for peer in &members {
+        if peer.node_id == local_node { continue; }
+        let url = format!(
+            "{}/cluster/pool_neurons/{}",
+            peer.addr.trim_end_matches('/'),
+            pool_id,
+        );
+        match client.get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send().await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(body) => match bincode::deserialize::<Vec<w1z4rd_brain::Neuron>>(&body) {
+                        Ok(ns) => contributions.push((peer.node_id, ns)),
+                        Err(e) => warn!(
+                            "aggregate: peer {} bincode parse failed: {}",
+                            peer.node_id.0, e,
+                        ),
+                    },
+                    Err(e) => warn!(
+                        "aggregate: peer {} body read failed: {}",
+                        peer.node_id.0, e,
+                    ),
+                }
+            }
+            Ok(resp) => warn!(
+                "aggregate: peer {} status {}",
+                peer.node_id.0, resp.status(),
+            ),
+            Err(e) => warn!(
+                "aggregate: peer {} network: {}",
+                peer.node_id.0, e,
+            ),
+        }
+    }
+
+    // 3. Dedupe by id, preferring the contribution with non-empty
+    // terminals.  Sequential-id contract: ids are stable across the
+    // ring (consistent-hash placement uses the same id space).
+    use std::collections::HashMap as StdHashMap;
+    let mut by_id: StdHashMap<w1z4rd_brain::NeuronId, w1z4rd_brain::Neuron> = StdHashMap::new();
+    for (_node, ns) in contributions {
+        for n in ns {
+            let existing_has_terms = by_id.get(&n.id)
+                .map(|e| !e.terminals.is_empty())
+                .unwrap_or(false);
+            let new_has_terms = !n.terminals.is_empty();
+            if !existing_has_terms || new_has_terms {
+                by_id.insert(n.id, n);
+            }
+        }
+    }
+    // Reassemble ordered by id for determinism.
+    let mut merged: Vec<_> = by_id.into_iter().collect();
+    merged.sort_by_key(|(id, _)| *id);
+    let merged_neurons: Vec<w1z4rd_brain::Neuron> = merged.into_iter()
+        .map(|(_, n)| n).collect();
+
+    let body = bincode::serialize(&merged_neurons).map_err(|e| (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        format!("aggregate serialize: {}", e),
+    ))?;
+    Ok(axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("x-cluster-members", format!("{}", members.len()))
+        .body(axum::body::Body::from(body))
+        .unwrap())
+}
+
 /// `POST /cluster/heartbeat { from_node_id }` — peer announces it's alive.
 /// Updates that member's `last_heartbeat_ms`.  Per [`ARCHITECTURE.md`]
 /// §18.11.
@@ -2090,6 +2194,7 @@ async fn main() -> Result<()> {
         .route("/cluster/join",          post(cluster_join))
         .route("/cluster/leave",         post(cluster_leave))
         .route("/cluster/heartbeat",     post(cluster_heartbeat))
+        .route("/cluster/aggregate_pool_neurons/:pool_id", get(cluster_aggregate_pool_neurons))
         .route("/shard/neuron/:pool_id/:neuron_id", get(shard_get_neuron))
         .route("/shard/put_neuron",      post(shard_put_neuron))
         .route("/sensor/observe",        post(sensor_observe))
