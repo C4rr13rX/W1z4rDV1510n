@@ -512,6 +512,94 @@ impl Pool {
         Ok(())
     }
 
+    /// Stage 17.9 — recovery-time atom creation.  Inserts a neuron at
+    /// an explicit `NeuronId` (asserts the id == neurons.len() so the
+    /// natural append ordering of the original training timeline is
+    /// preserved).  Skips the WAL append (recovery doesn't re-emit
+    /// events) and the Bloom + label_to_id updates ARE applied so the
+    /// pool is consistent post-recovery.  Returns `true` if the
+    /// insertion proceeded; `false` if the slot was already taken
+    /// (idempotent on replays).
+    pub fn replay_atom_create(
+        &mut self,
+        id:        NeuronId,
+        label:     String,
+        kind:      NeuronKind,
+        born_tick: u64,
+    ) -> bool {
+        if (id as usize) < self.neurons.len() {
+            // Slot already filled — recovery already replayed this event,
+            // or brain.bin already restored this neuron.  Idempotent skip.
+            return false;
+        }
+        // Strict invariant: id must equal next slot.  Otherwise the
+        // sequential-id contract is broken and downstream code that
+        // indexes by id would corrupt.  Refuse rather than fudge.
+        if (id as usize) != self.neurons.len() {
+            tracing::warn!(
+                "replay_atom_create: id={} but next slot is {}; refusing",
+                id, self.neurons.len(),
+            );
+            return false;
+        }
+        let n = Neuron::new_atom(id, label.clone(), kind, born_tick);
+        self.neurons.push(n);
+        self.bloom.insert(&label);
+        self.label_to_id.insert(label, id);
+        true
+    }
+
+    /// Stage 17.9 — recovery-time concept creation.  Mirror of
+    /// [`replay_atom_create`] for concept neurons (non-empty members).
+    pub fn replay_concept_create(
+        &mut self,
+        id:        NeuronId,
+        label:     String,
+        kind:      NeuronKind,
+        members:   Vec<NeuronRef>,
+        born_tick: u64,
+    ) -> bool {
+        if (id as usize) < self.neurons.len() { return false; }
+        if (id as usize) != self.neurons.len() {
+            tracing::warn!(
+                "replay_concept_create: id={} but next slot is {}; refusing",
+                id, self.neurons.len(),
+            );
+            return false;
+        }
+        let n = Neuron::new_concept(id, label.clone(), kind, members, born_tick);
+        self.neurons.push(n);
+        self.bloom.insert(&label);
+        self.label_to_id.insert(label, id);
+        true
+    }
+
+    /// Stage 17.9 — recovery-time eviction mark.  Adds an entry to the
+    /// `evicted` set + `cold_offsets` index without actually writing
+    /// to the cold tier (the cold-tier file's record already exists on
+    /// disk from the original training run; replaying the
+    /// `NeuronEvicted` event just rebuilds the in-memory index for it).
+    /// Caller must have already replayed the corresponding
+    /// AtomCreated/ConceptEmerged event so the slot exists.
+    ///
+    /// Note: the current `NeuronEvicted` event variant doesn't carry
+    /// the cold-tier offset.  Until the event format is extended, this
+    /// method records the offset as 0 (a poison value) and emits a
+    /// tracing::warn — callers using recovery to rebuild eviction
+    /// state should rely on the PoolSnapshot's `cold_offsets` (Stage
+    /// 17.4 step 5) which IS persisted in brain.bin.
+    pub fn replay_neuron_evicted(&mut self, id: NeuronId) {
+        if !self.cold_offsets.contains_key(&id) {
+            tracing::warn!(
+                "replay_neuron_evicted: id={} has no cold offset \
+                in snapshot; eviction tag set without paging info",
+                id,
+            );
+            self.cold_offsets.insert(id, 0);
+        }
+        self.evicted.insert(id);
+    }
+
     /// Stage 17.3 — probabilistic existence pre-check over the label
     /// index.  Returns `false` only when the label is definitively
     /// absent; `true` indicates "maybe present" (false-positive rate

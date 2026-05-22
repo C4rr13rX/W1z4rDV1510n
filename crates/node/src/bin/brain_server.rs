@@ -1407,6 +1407,31 @@ async fn main() -> Result<()> {
     let attached = brain.attach_cold_tiers(&data);
     info!("cold tiers attached on {} pool(s)", attached);
 
+    // Stage 17.9 recovery: replay any WAL events past the last
+    // SnapshotMarker so the brain reflects everything observed between
+    // the last checkpoint and the previous shutdown / crash.  Best-
+    // effort: if the WAL read fails, we log and continue with brain.bin
+    // state only.
+    match w1z4rd_brain::store::load_events_after_marker(&data) {
+        Ok(events) if !events.is_empty() => {
+            info!("WAL recovery: applying {} event(s) past last snapshot...",
+                events.len());
+            let stats = brain.apply_wal_events(&events);
+            info!(
+                "WAL recovery: total={} ticks_advanced_to={} since_last_snapshot={}",
+                stats.events_total,
+                stats.last_tick,
+                stats.events_since_snapshot,
+            );
+        }
+        Ok(_) => {
+            info!("WAL recovery: no events past the last snapshot");
+        }
+        Err(e) => {
+            warn!("WAL recovery failed: {} — continuing with brain.bin state only", e);
+        }
+    }
+
     let bs = brain.stats();
     info!("brain ready  tick={}  pools={}  neurons={}  terminals={}",
         bs.tick, bs.pool_count, bs.total_neurons, bs.total_terminals);

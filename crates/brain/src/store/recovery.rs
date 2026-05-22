@@ -57,8 +57,10 @@ impl RecoveryStats {
 }
 
 /// Replay the WAL at `data_dir/brain.wal`.  Stage 17.1: returns the event
-/// summary.  Subsequent stages will plug in a `BrainBuilder` callback for
-/// each event variant.
+/// summary.  Stage 17.9: per-event apply path lives on the Brain
+/// (`Brain::apply_wal_event`); use [`load_events_after_marker`] to read
+/// the slice of events past the most recent `SnapshotMarker` and feed
+/// them to the brain.
 ///
 /// Returns `Ok(None)` if no WAL exists yet (fresh brain on first run).
 pub fn replay_into_brain<P: AsRef<Path>>(data_dir: P)
@@ -79,6 +81,35 @@ pub fn replay_into_brain<P: AsRef<Path>>(data_dir: P)
     }
     stats.bytes_read = counting_reader.read;
     Ok(Some(stats))
+}
+
+/// Stage 17.9 — read the WAL and return the events that come *after*
+/// the most recent `SnapshotMarker`.  Used at startup: the brain.bin
+/// snapshot reconstructs state up through the snapshot marker; this
+/// function returns the tail of events that have to be replayed to
+/// bring the brain forward to its true last-known state.
+///
+/// If the WAL doesn't exist, returns `Ok(vec![])`.  If no marker has
+/// been written yet (a fresh WAL or a process that crashed before its
+/// first checkpoint), returns ALL events — because there's no snapshot
+/// to rely on.
+pub fn load_events_after_marker<P: AsRef<Path>>(data_dir: P)
+    -> io::Result<Vec<WalEvent>>
+{
+    let path = data_dir.as_ref().join("brain.wal");
+    if !path.exists() { return Ok(Vec::new()); }
+    let f = MmapWalStore::open_replay_only(&data_dir)?;
+    let mut all_events: Vec<WalEvent> = Vec::new();
+    let mut last_marker_idx: Option<usize> = None;
+    for (i, ev) in WalReader::new(f).enumerate() {
+        let ev = ev?;
+        if matches!(ev, WalEvent::SnapshotMarker { .. }) {
+            last_marker_idx = Some(i);
+        }
+        all_events.push(ev);
+    }
+    let start = last_marker_idx.map(|i| i + 1).unwrap_or(0);
+    Ok(all_events.split_off(start))
 }
 
 /// Wraps a `Read` to track total bytes consumed.  Used to populate

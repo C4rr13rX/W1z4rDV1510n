@@ -117,6 +117,18 @@ impl Fabric {
 
     pub fn current_tick(&self) -> u64 { self.tick }
 
+    /// Stage 17.9 — explicit tick set, used only by WAL recovery.
+    /// Normal training advances the tick via [`Fabric::advance_tick`],
+    /// which also runs housekeeping; this method does NOT run
+    /// housekeeping and is intended purely to fast-forward the fabric
+    /// past replayed events.  Refuses to set the tick backwards.
+    pub fn set_tick(&mut self, new_tick: u64) {
+        if new_tick > self.tick {
+            self.tick = new_tick;
+            self.current = Moment::new(new_tick);
+        }
+    }
+
     /// Snapshot the fabric (configs + all pool states + tick).  The
     /// current in-flight moment is intentionally not captured — see
     /// [`crate::persistence`] for the rationale.

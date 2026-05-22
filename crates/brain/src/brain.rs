@@ -3445,6 +3445,71 @@ impl Brain {
         self.fabric.store_clone()
     }
 
+    /// Stage 17.9 — replay a slice of WAL events into this brain to
+    /// bring it forward from a snapshot-restored state to its true last-
+    /// known state.  Typically the slice comes from
+    /// `crate::store::load_events_after_marker`.
+    ///
+    /// Applies each event:
+    /// - `PoolRegistered`: skipped (pools already registered from
+    ///   brain.bin or from explicit setup).
+    /// - `AtomCreated` / `ConceptEmerged`: insert into the pool at the
+    ///   recorded id slot.  Idempotent — if the slot is already filled
+    ///   (snapshot already restored), the call returns false and we
+    ///   advance.
+    /// - `TerminalReinforced` / `NeuronTerminalsPruned`: deferred —
+    ///   weight-level updates aren't currently logged at hot-path rate.
+    ///   Brain re-learns weights on the next training pass.
+    /// - `NeuronEvicted`: marks the neuron as evicted (cold offset
+    ///   comes from the PoolSnapshot per Stage 17.4 step 5).
+    /// - `TickAdvanced`: advances the fabric's tick counter.
+    /// - `SnapshotMarker`: skipped (just a checkpoint barrier).
+    ///
+    /// Returns a `RecoveryStats` describing how many of each variant
+    /// were applied.
+    pub fn apply_wal_events(
+        &mut self,
+        events: &[crate::store::WalEvent],
+    ) -> crate::store::RecoveryStats {
+        use crate::store::WalEvent as E;
+        let mut stats = crate::store::RecoveryStats::default();
+        for ev in events {
+            stats.observe(ev);
+            match ev {
+                E::PoolRegistered { .. } => { /* skip: already registered */ }
+                E::AtomCreated { pool_id, id, label, kind, born_tick } => {
+                    if let Some(pool) = self.fabric.pool(*pool_id) {
+                        pool.write().replay_atom_create(
+                            *id, label.clone(), *kind, *born_tick,
+                        );
+                    }
+                }
+                E::ConceptEmerged { pool_id, id, label, kind, members, born_tick } => {
+                    if let Some(pool) = self.fabric.pool(*pool_id) {
+                        pool.write().replay_concept_create(
+                            *id, label.clone(), *kind,
+                            members.clone(), *born_tick,
+                        );
+                    }
+                }
+                E::NeuronEvicted { pool_id, neuron_id } => {
+                    if let Some(pool) = self.fabric.pool(*pool_id) {
+                        pool.write().replay_neuron_evicted(*neuron_id);
+                    }
+                }
+                E::TickAdvanced { new_tick } => {
+                    self.fabric.set_tick(*new_tick);
+                }
+                E::TerminalReinforced(_) | E::NeuronTerminalsPruned { .. } => {
+                    // Weight-level updates aren't logged at hot path rate
+                    // yet; weights re-learned on next training pass.
+                }
+                E::SnapshotMarker { .. } => { /* barrier only */ }
+            }
+        }
+        stats
+    }
+
     /// Stage 17.4 full — attach cold tiers to every pool under
     /// `data_dir/cold/pool_{id}.cold`.  After this call, `run_eviction_pass`
     /// can move low-salience concepts to disk.  Binding pool is included
