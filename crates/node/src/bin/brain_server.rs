@@ -1376,6 +1376,95 @@ async fn cluster_leave(
     Json(snapshot)
 }
 
+/// `POST /cluster/heartbeat { from_node_id }` — peer announces it's alive.
+/// Updates that member's `last_heartbeat_ms`.  Per [`ARCHITECTURE.md`]
+/// §18.11.
+#[derive(Deserialize)]
+struct HeartbeatRequest {
+    from_node_id: w1z4rd_brain::store::NodeId,
+}
+#[derive(Serialize)]
+struct HeartbeatResponse {
+    acknowledged: bool,
+    member_count: usize,
+}
+
+async fn cluster_heartbeat(
+    State(s): State<AppState>,
+    Json(req): Json<HeartbeatRequest>,
+) -> Json<HeartbeatResponse> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64).unwrap_or(0);
+    let mut m = s.cluster.lock().unwrap();
+    let acked = m.members.iter_mut()
+        .find(|x| x.node_id == req.from_node_id)
+        .map(|x| { x.last_heartbeat_ms = now_ms; true })
+        .unwrap_or(false);
+    Json(HeartbeatResponse {
+        acknowledged: acked,
+        member_count: m.members.len(),
+    })
+}
+
+/// Stage 18.12 step 8 — background heartbeat + stale-detection loop.
+/// Per [`ARCHITECTURE.md`] §18.11.
+///
+/// Runs continuously after startup.  Every 5 seconds:
+/// 1. POST /cluster/heartbeat to every non-self ring member.
+/// 2. Sweep our own ring; any member whose last_heartbeat_ms is more
+///    than 30s old is considered dead and removed.  Self never expires.
+/// 3. If membership changed, re-wire the topology so the TieredStore
+///    no longer routes to the dead peer.
+async fn heartbeat_loop(state: AppState) {
+    use std::time::Duration as StdDuration;
+    let interval = StdDuration::from_secs(5);
+    let dead_threshold_ms: i64 = 30_000;
+    let client = reqwest::Client::new();
+    loop {
+        tokio::time::sleep(interval).await;
+        // Snapshot membership.
+        let (local_node, members) = {
+            let m = state.cluster.lock().unwrap();
+            (m.local_node, m.members.clone())
+        };
+        // 1. Send heartbeats.
+        for peer in &members {
+            if peer.node_id == local_node { continue; }
+            let url = format!("{}/cluster/heartbeat",
+                peer.addr.trim_end_matches('/'));
+            let body = serde_json::json!({ "from_node_id": local_node });
+            // Fire-and-forget — failures get caught by the sweep.
+            let _ = client.post(&url)
+                .json(&body)
+                .timeout(StdDuration::from_secs(3))
+                .send()
+                .await;
+        }
+        // 2. Sweep stale.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64).unwrap_or(0);
+        let (removed, snapshot) = {
+            let mut m = state.cluster.lock().unwrap();
+            let before = m.members.len();
+            m.members.retain(|p|
+                p.node_id == local_node
+                || (now_ms - p.last_heartbeat_ms) < dead_threshold_ms);
+            let removed = before - m.members.len();
+            (removed, m.clone())
+        };
+        if removed > 0 {
+            warn!(
+                "Stage 18.12 step 8: removed {} stale member(s); re-wiring topology",
+                removed,
+            );
+            // 3. Re-wire so the dead peer drops out of TieredStore routing.
+            wire_cluster_topology(&state, &snapshot, local_node).await;
+        }
+    }
+}
+
 /// Stage 18.12 step 6 — propagate the current `ClusterMembership` to
 /// every Pool's `TieredStore` so the placement policy operates on the
 /// up-to-date ring.  Called after seed-join, after every successful
@@ -2000,6 +2089,7 @@ async fn main() -> Result<()> {
         .route("/cluster/members",       get(cluster_members))
         .route("/cluster/join",          post(cluster_join))
         .route("/cluster/leave",         post(cluster_leave))
+        .route("/cluster/heartbeat",     post(cluster_heartbeat))
         .route("/shard/neuron/:pool_id/:neuron_id", get(shard_get_neuron))
         .route("/shard/put_neuron",      post(shard_put_neuron))
         .route("/sensor/observe",        post(sensor_observe))
@@ -2098,6 +2188,15 @@ async fn main() -> Result<()> {
             Ok(resp) => warn!("seed-join status {}", resp.status()),
             Err(e)   => warn!("seed-join network: {}", e),
         }
+    }
+
+    // Stage 18.12 step 8: spawn the heartbeat + stale-detection
+    // background task.  Inert in solo mode (single-member ring) — the
+    // loop iterates immediately and sweeps nothing.  Comes alive once a
+    // peer joins.
+    {
+        let hb_state = state.clone();
+        tokio::spawn(async move { heartbeat_loop(hb_state).await; });
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await
