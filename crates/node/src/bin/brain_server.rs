@@ -1179,6 +1179,133 @@ async fn cluster_merge_pool(
     Ok(Json(MergePoolResponse { inserted }))
 }
 
+/// `POST /cluster/pull_from` — per [`ARCHITECTURE.md`] §17.6 — the
+/// active anti-entropy sync client.  Hits the peer's /cluster/pool_roots
+/// endpoint, identifies pools whose roots differ from ours, fetches the
+/// peer's neuron list for each diverged pool, and merges into local
+/// state via cluster_merge_pool.
+///
+/// This is "pull" (we ask the peer for state) rather than "push" (we
+/// send state to the peer) — pull is safer because the local merge
+/// policy stays in our control.
+///
+/// Request: `{ "peer_url": "http://192.168.1.43:8095" }`.  Optional
+/// `pool_ids` whitelist restricts sync to specific pools.
+#[derive(Deserialize)]
+struct PullFromRequest {
+    peer_url: String,
+    #[serde(default)]
+    pool_ids: Option<Vec<PoolId>>,
+}
+
+#[derive(Serialize, Default)]
+struct PullFromResponse {
+    peer_tick:           u64,
+    local_tick:          u64,
+    pools_compared:      usize,
+    pools_diverged:      usize,
+    pools_synced:        usize,
+    neurons_inserted:    usize,
+    errors:              Vec<String>,
+}
+
+async fn cluster_pull_from(
+    State(s): State<AppState>,
+    Json(req): Json<PullFromRequest>,
+) -> Result<Json<PullFromResponse>, (axum::http::StatusCode, String)> {
+    use std::collections::HashMap as StdHashMap;
+    let peer = req.peer_url.trim_end_matches('/').to_string();
+    let client = reqwest::Client::new();
+
+    // 1. Fetch peer's pool roots.
+    let peer_roots_url = format!("{}/cluster/pool_roots", peer);
+    let peer_resp = client.get(&peer_roots_url).send().await.map_err(|e| (
+        axum::http::StatusCode::BAD_GATEWAY,
+        format!("peer /cluster/pool_roots: {}", e),
+    ))?;
+    if !peer_resp.status().is_success() {
+        return Err((axum::http::StatusCode::BAD_GATEWAY,
+            format!("peer /cluster/pool_roots status: {}", peer_resp.status())));
+    }
+    #[derive(Deserialize)]
+    struct PeerRootsResponse {
+        roots: StdHashMap<PoolId, String>,
+        tick:  u64,
+    }
+    let peer_roots: PeerRootsResponse = peer_resp.json().await.map_err(|e| (
+        axum::http::StatusCode::BAD_GATEWAY,
+        format!("peer pool_roots parse: {}", e),
+    ))?;
+
+    // 2. Local roots.
+    let (local_roots_hex, local_tick) = {
+        let brain = s.brain.lock().await;
+        let raw = brain.cluster_pool_roots();
+        let tick = brain.fabric().current_tick();
+        let mut h = StdHashMap::new();
+        for (pid, r) in raw { h.insert(pid, r.to_hex()); }
+        (h, tick)
+    };
+
+    let mut out = PullFromResponse {
+        peer_tick:  peer_roots.tick,
+        local_tick,
+        ..Default::default()
+    };
+
+    // 3. Identify diverged pools.
+    let candidates: Vec<PoolId> = match &req.pool_ids {
+        Some(ids) => ids.clone(),
+        None      => peer_roots.roots.keys().copied().collect(),
+    };
+    for pid in candidates {
+        out.pools_compared += 1;
+        let peer_root  = peer_roots.roots.get(&pid);
+        let local_root = local_roots_hex.get(&pid);
+        if peer_root == local_root { continue; }
+        if peer_root.is_none() { continue; }  // peer doesn't have this pool
+        out.pools_diverged += 1;
+
+        // 4. Fetch peer's neuron list for this pool.
+        let pn_url = format!("{}/cluster/pool_neurons/{}", peer, pid);
+        let pn_resp = match client.get(&pn_url).send().await {
+            Ok(r)  => r,
+            Err(e) => {
+                out.errors.push(format!("pool {}: GET failed: {}", pid, e));
+                continue;
+            }
+        };
+        if !pn_resp.status().is_success() {
+            out.errors.push(format!("pool {}: GET status {}", pid, pn_resp.status()));
+            continue;
+        }
+        let body = match pn_resp.bytes().await {
+            Ok(b)  => b,
+            Err(e) => {
+                out.errors.push(format!("pool {}: body read: {}", pid, e));
+                continue;
+            }
+        };
+        let neurons: Vec<w1z4rd_brain::Neuron> = match bincode::deserialize(&body) {
+            Ok(n)  => n,
+            Err(e) => {
+                out.errors.push(format!("pool {}: bincode deserialize: {}", pid, e));
+                continue;
+            }
+        };
+
+        // 5. Merge into local.
+        let inserted = {
+            let brain = s.brain.lock().await;
+            brain.cluster_merge_pool(pid, neurons)
+        };
+        out.neurons_inserted += inserted;
+        out.pools_synced += 1;
+    }
+
+    Ok(Json(out))
+}
+
 // -----------------------------------------------------------------
 // Handlers — multimodal
 // -----------------------------------------------------------------
@@ -1551,6 +1678,7 @@ async fn main() -> Result<()> {
         .route("/cluster/pool_roots",    get(cluster_pool_roots))
         .route("/cluster/pool_neurons/:pool_id", get(cluster_pool_neurons))
         .route("/cluster/merge_pool",    post(cluster_merge_pool))
+        .route("/cluster/pull_from",     post(cluster_pull_from))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))
