@@ -3616,15 +3616,22 @@ impl Brain {
     /// Atoms are never evicted (refused by `Pool::evict_neuron`).  The
     /// binding pool is skipped entirely — bindings are the answer keys.
     ///
+    /// **Stage 17.2 — Hebbian disk layout:** after the salience-sort
+    /// pre-filter, candidates are *reordered* by a co-firing proxy
+    /// (shared terminal targets) so neurons that fire together land at
+    /// adjacent byte offsets in the cold-tier file.  The OS read-ahead
+    /// prefetcher then pulls in their neighbors for free when one is
+    /// paged back in.  This is Mountcastle's (1997) cortical-column
+    /// principle applied to disk layout: physical proximity matches
+    /// feature proximity.
+    ///
     /// Returns `EvictionStats { pools_visited, neurons_evicted,
-    /// cold_bytes_written, wall_time_ms }`.
+    /// errors, wall_time_ms }`.
     pub fn run_eviction_pass(&self, params: EvictionParams) -> EvictionStats {
         let started = std::time::Instant::now();
         let now = self.fabric.current_tick();
         let pool_ids = self.fabric.pool_ids();
         let mut stats = EvictionStats::default();
-        let total_cold_bytes_before = 0u64;
-        let total_cold_bytes_after  = 0u64;
 
         for pid in pool_ids {
             // Skip binding pool — bindings are answer keys, must stay hot.
@@ -3632,46 +3639,88 @@ impl Brain {
             let Some(pool_arc) = self.fabric.pool(pid) else { continue; };
             stats.pools_visited += 1;
 
-            // Phase 1 (read): identify candidates.  Brief read lock.
-            let candidates: Vec<(NeuronId, f32, u64)> = {
+            // Phase 1 (read): identify candidates + collect their terminal
+            // target sets for the §17.2 co-firing reorder.  Brief read lock.
+            let candidates_ordered: Vec<NeuronId> = {
                 let p = pool_arc.read();
-                let mut c: Vec<_> = p.iter_neurons()
+                // First filter by salience + staleness.
+                let mut filtered: Vec<(NeuronId, f32, u64, Vec<NeuronRef>)> = p.iter_neurons()
                     .filter(|n| !n.is_atom())
                     .filter(|n| !p.is_evicted(n.id))
                     .filter(|n| n.salience_ema < params.max_salience_ema)
                     .filter(|n| now.saturating_sub(n.last_fired_tick) >= params.min_stale_ticks)
-                    .map(|n| (n.id, n.salience_ema, n.last_fired_tick))
+                    .map(|n| {
+                        let tgts: Vec<NeuronRef> = n.terminals.iter()
+                            .map(|t| t.target)
+                            .collect();
+                        (n.id, n.salience_ema, n.last_fired_tick, tgts)
+                    })
                     .collect();
-                // Lowest salience first; ties broken by oldest last_fired.
-                c.sort_by(|a, b| {
+                // Pre-sort: lowest salience first, ties by oldest last_fired.
+                filtered.sort_by(|a, b| {
                     a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a.2.cmp(&b.2))
                 });
-                c.truncate(params.target_per_pool);
-                c
+                filtered.truncate(params.target_per_pool);
+                if filtered.is_empty() { Vec::new() }
+                else {
+                    // §17.2 reorder: greedy nearest-neighbour by Jaccard
+                    // similarity of terminal target sets.  Start from the
+                    // lowest-salience candidate; each subsequent step
+                    // picks the remaining candidate that shares the most
+                    // terminal targets with the previous.  Co-fired
+                    // neurons (high target overlap) cluster adjacently
+                    // in the output order, which determines their disk
+                    // offset on append to cold tier.
+                    use std::collections::HashSet;
+                    let n = filtered.len();
+                    let target_sets: Vec<HashSet<NeuronRef>> = filtered.iter()
+                        .map(|(_, _, _, tgts)| tgts.iter().copied().collect())
+                        .collect();
+                    let mut chosen: Vec<bool> = vec![false; n];
+                    let mut order: Vec<NeuronId> = Vec::with_capacity(n);
+                    // Seed: lowest-salience (= filtered[0]).
+                    order.push(filtered[0].0);
+                    chosen[0] = true;
+                    for _ in 1..n {
+                        // Find the previous chosen candidate's target set.
+                        let last_idx = order.last()
+                            .and_then(|nid| filtered.iter().position(|(i, _, _, _)| i == nid))
+                            .unwrap_or(0);
+                        let prev_set = &target_sets[last_idx];
+                        let mut best: Option<(usize, f32)> = None;
+                        for i in 0..n {
+                            if chosen[i] { continue; }
+                            let ts = &target_sets[i];
+                            // Jaccard: |A∩B| / |A∪B|; constant when both
+                            // are empty, but we don't reorder isolated
+                            // neurons by anything other than salience tiebreak.
+                            let inter = prev_set.intersection(ts).count() as f32;
+                            let union = prev_set.union(ts).count() as f32;
+                            let j = if union == 0.0 { 0.0 } else { inter / union };
+                            match best {
+                                None => best = Some((i, j)),
+                                Some((_, bj)) if j > bj => best = Some((i, j)),
+                                _ => {}
+                            }
+                        }
+                        if let Some((idx, _)) = best {
+                            order.push(filtered[idx].0);
+                            chosen[idx] = true;
+                        } else { break; }
+                    }
+                    order
+                }
             };
-            if candidates.is_empty() { continue; }
+            if candidates_ordered.is_empty() { continue; }
 
-            // Phase 2 (write): evict each.  Brief write lock per neuron
-            // (re-acquired between IDs is overkill; one write lock for
-            // the whole batch is fine because eviction is the dominant
-            // mutation in this window).
+            // Phase 2 (write): evict each in the Hebbian-locality order.
+            // Cold-tier file appends in this exact order → co-fired
+            // neurons share disk pages → OS prefetcher pulls neighbours
+            // for free on subsequent page-in.
             {
                 let mut p = pool_arc.write();
-                if let Some(tier) = self.fabric.pool(pid)
-                    .and_then(|_| {
-                        // We need the cold tier's byte count *before*
-                        // eviction to compute delta.  ColdTier::bytes
-                        // is on the Arc<ColdTier>; access via the pool.
-                        None::<()>
-                    })
-                {
-                    let _ = tier;
-                }
-                // We can't easily reach the ColdTier through the pool's
-                // private field — track byte size by re-counting via
-                // `evict_neuron`'s return path.  Sum stats incrementally.
-                for (cid, _sal, _lft) in candidates {
+                for cid in candidates_ordered {
                     match p.evict_neuron(cid) {
                         Ok(true)  => { stats.neurons_evicted += 1; }
                         Ok(false) => { /* already evicted or atom */ }
@@ -3686,11 +3735,6 @@ impl Brain {
                 }
             }
         }
-
-        // Best-effort cold-bytes delta: would need direct access to each
-        // pool's ColdTier handle.  Leaving zero for now — the StorageControlState
-        // working_set_pressure is the more useful signal anyway.
-        let _ = (total_cold_bytes_before, total_cold_bytes_after);
 
         stats.wall_time_ms = started.elapsed().as_millis() as u64;
         stats
