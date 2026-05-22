@@ -37,6 +37,6 @@ pub use merkle::{PoolRoot, compute_pool_root};
 pub use control::{StorageConfig, StorageControlState};
 pub use cold::ColdTier;
 pub use neuron_store::{
-    ColdDiskStore, ConsistentHashPlacement, NeuronStore, NodeId, PlacementPolicy,
-    RamStore, RemoteNodeStore, RemoteTransport, TieredStore,
+    CapacityWeightedPlacement, ColdDiskStore, ConsistentHashPlacement, NeuronStore,
+    NodeId, PlacementPolicy, RamStore, RemoteNodeStore, RemoteTransport, TieredStore,
 };

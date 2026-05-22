@@ -376,6 +376,65 @@ pub trait PlacementPolicy: Send + Sync {
     fn home_for(&self, id: NeuronId, ring: &[NodeId]) -> NodeId;
 }
 
+/// Capacity-weighted placement — places more neurons on nodes that
+/// advertise higher `capacity_neurons` per [`ARCHITECTURE.md`] §18.3
+/// "Inputs: Node capacities (the OpenStack 'where to schedule'
+/// decision)."  Falls back to uniform consistent hash when no
+/// capacities are configured.
+///
+/// Use case: heterogeneous cluster where some hosts have more RAM than
+/// others.  The smaller boxes should hold fewer neurons.
+///
+/// **Stage 18.3 strategy 3 (co-firing-clustered sharding) is the deeper
+/// follow-up.**  It requires either tracking a co-firing matrix online
+/// (memory-expensive) or extending `PlacementPolicy::home_for` to
+/// accept the neuron's context (members + recent firing partners).
+/// Both are real work; this `CapacityWeightedPlacement` is the
+/// intermediate practical strategy that matches the §18.3 capacity
+/// input without that deeper restructure.
+pub struct CapacityWeightedPlacement {
+    /// `node_id -> relative_weight`.  A node's share of the ring is
+    /// `weight / sum(weights)`.  When a node id isn't in the map, it
+    /// defaults to weight 1.
+    weights: parking_lot::RwLock<AHashMap<NodeId, u32>>,
+}
+
+impl CapacityWeightedPlacement {
+    pub fn new() -> Self {
+        Self { weights: parking_lot::RwLock::new(AHashMap::new()) }
+    }
+
+    /// Set the relative weight for a node.  Higher = more neurons.
+    pub fn set_weight(&self, node: NodeId, weight: u32) {
+        self.weights.write().insert(node, weight.max(1));
+    }
+}
+
+impl Default for CapacityWeightedPlacement {
+    fn default() -> Self { Self::new() }
+}
+
+impl PlacementPolicy for CapacityWeightedPlacement {
+    fn home_for(&self, id: NeuronId, ring: &[NodeId]) -> NodeId {
+        if ring.is_empty() { return NodeId(0); }
+        // Compute the slot count = sum of weights (default 1 per node).
+        let weights = self.weights.read();
+        let total: u64 = ring.iter()
+            .map(|n| *weights.get(n).unwrap_or(&1) as u64)
+            .sum();
+        if total == 0 { return ring[0]; }
+        // Hash the id into the weighted-slot space.
+        let mixed = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mut slot = mixed % total;
+        for n in ring {
+            let w = *weights.get(n).unwrap_or(&1) as u64;
+            if slot < w { return *n; }
+            slot -= w;
+        }
+        ring[0]  // unreachable; defensive
+    }
+}
+
 /// Default: consistent-hash placement.  Each neuron lands on
 /// `ring[(id as usize) % ring.len()]`.  Minimal rebalancing on node
 /// join/leave (Karger et al. 1997).  No co-firing awareness — strategy
@@ -820,6 +879,30 @@ mod tiered_tests {
         // through to the mock transport).
         let got = store.get(remote_id).expect("should fetch from remote");
         assert_eq!(got.label, "remote_payload");
+    }
+
+    #[test]
+    fn capacity_weighted_respects_advertised_weights() {
+        let policy = CapacityWeightedPlacement::new();
+        // Node 1 has 4x the capacity of Node 0.
+        policy.set_weight(NodeId(0), 1);
+        policy.set_weight(NodeId(1), 4);
+        let ring = vec![NodeId(0), NodeId(1)];
+        let mut on_0 = 0;
+        let mut on_1 = 0;
+        for id in 0..5000u32 {
+            match policy.home_for(id, &ring) {
+                NodeId(0) => on_0 += 1,
+                NodeId(1) => on_1 += 1,
+                _ => panic!("unexpected node"),
+            }
+        }
+        // Expect roughly 1:4 distribution (20% on 0, 80% on 1).  Allow
+        // some statistical slack.
+        assert!(on_0 > 800 && on_0 < 1200,
+            "node 0 share {} not in expected 800..1200 range", on_0);
+        assert!(on_1 > 3800 && on_1 < 4200,
+            "node 1 share {} not in expected 3800..4200 range", on_1);
     }
 
     #[test]
