@@ -1686,8 +1686,20 @@ async fn main() -> Result<()> {
 
     let port: u16 = std::env::var("W1Z4RD_BRAIN_PORT")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(8095);
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    // Stage 17.6 cluster mode: bind to the IP given by W1Z4RD_BRAIN_BIND
+    // (defaults to 127.0.0.1 for backward compat).  Set to "0.0.0.0" to
+    // accept LAN connections from peer nodes; production cluster
+    // deployments should set this to a specific interface or use a
+    // firewall to restrict access.
+    let bind_ip_str = std::env::var("W1Z4RD_BRAIN_BIND")
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let bind_ip: std::net::IpAddr = bind_ip_str.parse()
+        .with_context(|| format!("invalid W1Z4RD_BRAIN_BIND: {}", bind_ip_str))?;
+    let addr = SocketAddr::new(bind_ip, port);
     info!("brain server listening on http://{}", addr);
+    if bind_ip.is_unspecified() {
+        info!("(0.0.0.0 bind — accepts connections from peer nodes; firewall accordingly)");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await
         .with_context(|| format!("bind {}", addr))?;
