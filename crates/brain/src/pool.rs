@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
-use crate::store::{ColdTier, CountingBloom, NoopStore, Store, WalEvent};
+use crate::store::{ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore, WalEvent};
 
 /// Encode/decode contract per spec §3.1.  Each pool ships with one of these
 /// declaring how raw sensor frames decompose into atom labels and how an
@@ -318,6 +318,19 @@ pub struct Pool {
     /// via [`Pool::set_cold_tier`].
     cold_tier:     Option<Arc<ColdTier>>,
 
+    /// Stage 18.12 step 4b: §18 distributed storage hook.  When set,
+    /// the eviction/page-in path routes through this `NeuronStore`
+    /// instead of the legacy `cold_tier`.  Typically a `TieredStore`
+    /// composing local RAM + local cold disk + zero-or-more remote
+    /// peer stores.  When `None` (the default), the pool falls back
+    /// to legacy `cold_tier` semantics — zero behavioural change for
+    /// existing callers.
+    ///
+    /// Attached via [`Pool::set_tiered_store`].  Per [`ARCHITECTURE.md`]
+    /// §18.2 this is the abstraction below `Pool::neurons` that lets
+    /// the brain transparently use storage from multiple hosts.
+    tiered_store:  Option<Arc<TieredStore>>,
+
     /// Disk offsets for currently-evicted neurons.  An ID in this map
     /// is one whose in-RAM slot has been zeroed out (terminals + members
     /// cleared) and whose authoritative state lives at this byte offset
@@ -363,6 +376,7 @@ impl Pool {
             // scale the filter is ~175 KB per pool — negligible.
             bloom: CountingBloom::with_expected_capacity(100_000),
             cold_tier:    None,
+            tiered_store: None,
             cold_offsets: AHashMap::new(),
             evicted:      AHashSet::new(),
         }
@@ -374,6 +388,24 @@ impl Pool {
     pub fn set_cold_tier(&mut self, tier: Arc<ColdTier>) {
         self.cold_tier = Some(tier);
     }
+
+    /// Stage 18.12 step 4b — attach a `TieredStore` so eviction/page-in
+    /// route through the distributed-substrate abstraction instead of
+    /// (or in addition to) the legacy local-only `cold_tier`.  Per
+    /// [`ARCHITECTURE.md`] §18.2.
+    ///
+    /// Composition: when both `cold_tier` and `tiered_store` are set,
+    /// the tiered_store takes precedence.  Pool's evict path writes
+    /// through `tiered_store.put(id, n)` which internally dispatches
+    /// to RAM / cold disk / remote node based on the placement policy.
+    /// Page-in reads via `tiered_store.get(id)`.
+    pub fn set_tiered_store(&mut self, store: Arc<TieredStore>) {
+        self.tiered_store = Some(store);
+    }
+
+    /// Stage 18.12 step 4b — diagnostic: true when this pool has a
+    /// `TieredStore` attached (i.e. is running in distributed mode).
+    pub fn has_tiered_store(&self) -> bool { self.tiered_store.is_some() }
 
     /// Stage 17.4 — true if neuron `id` is currently evicted to disk.
     /// O(1) lookup.  Iteration paths use this to skip placeholder
@@ -403,13 +435,17 @@ impl Pool {
     /// cold tier is unattached or the I/O failed.
     pub fn evict_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
         if self.evicted.contains(&id) { return Ok(false); }
-        let Some(tier) = self.cold_tier.clone() else {
+
+        // Stage 18.12 step 4b: prefer the tiered store when both are
+        // present (the §18 distributed path).  Fall back to the
+        // §17.4 cold-tier path when only that's attached.
+        if self.tiered_store.is_none() && self.cold_tier.is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "no cold tier attached to this pool",
+                "no tiered_store or cold_tier attached to this pool",
             ));
-        };
-        let Some(n) = self.neurons.get_mut(id as usize) else {
+        }
+        let Some(n) = self.neurons.get(id as usize) else {
             return Ok(false);
         };
         // Refuse to evict atoms — they are the substrate's smallest,
@@ -418,9 +454,17 @@ impl Pool {
         // is unbearable.  Bindings (members empty + concept) also stay.
         if n.is_atom() { return Ok(false); }
 
-        // Serialise the full neuron (including terminals + members)
-        // before zeroing.
-        let offset = tier.append_neuron(n)?;
+        // Choose backend: tiered_store wins when both are attached.
+        let used_tiered = if let Some(store) = self.tiered_store.clone() {
+            store.put(id, n.clone());
+            true
+        } else {
+            // Legacy §17.4 cold-tier path.
+            let tier = self.cold_tier.clone().unwrap();
+            let offset = tier.append_neuron(n)?;
+            self.cold_offsets.insert(id, offset);
+            false
+        };
 
         // Zero the memory-heavy bits in place; preserve id, label,
         // kind, born_tick, MEMBERS, salience, use_count.  Members must
@@ -428,14 +472,14 @@ impl Pool {
         // sleep_prune / decode semantics).  Members are typically a
         // handful of NeuronRefs per concept — cheap.  The big memory
         // consumer is `terminals`, which we shed entirely; on page-in
-        // those come back from disk.
+        // those come back from disk OR from a remote peer.
+        let n = self.neurons.get_mut(id as usize).unwrap();
         n.terminals.clear();
         n.terminals.shrink_to_fit();
         n.prediction_error_ema = 0.0;
         // Salience/EMA stay in RAM — they're the signal eviction policy
         // uses to choose what to evict, so they remain readable post-evict.
 
-        self.cold_offsets.insert(id, offset);
         self.evicted.insert(id);
 
         // Per ARCHITECTURE §17.9: log the eviction.
@@ -445,6 +489,12 @@ impl Pool {
         };
         if let Err(e) = self.store.append(&event) {
             tracing::warn!("WAL append failed for evict({}): {}", id, e);
+        }
+        if used_tiered {
+            tracing::debug!(
+                "evicted neuron pool={} id={} via tiered_store (§18)",
+                self.config.id, id,
+            );
         }
         Ok(true)
     }
@@ -459,19 +509,34 @@ impl Pool {
     /// the cold tier is missing or the read failed.
     pub fn page_in_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
         if !self.evicted.contains(&id) { return Ok(false); }
-        let Some(tier) = self.cold_tier.clone() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "no cold tier attached to this pool",
-            ));
+
+        // Stage 18.12 step 4b: prefer the tiered store when attached.
+        // It routes through local cold disk OR a remote peer depending
+        // on the placement policy.  When absent, fall back to the
+        // §17.4 cold-tier + cold_offsets path.
+        let restored: Neuron = if let Some(store) = self.tiered_store.clone() {
+            match store.get(id) {
+                Some(n) => n,
+                None => return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("tiered_store has no neuron id {} (home check?)", id),
+                )),
+            }
+        } else {
+            let Some(tier) = self.cold_tier.clone() else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no tiered_store or cold_tier attached to this pool",
+                ));
+            };
+            let Some(&offset) = self.cold_offsets.get(&id) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no cold offset recorded for neuron id {}", id),
+                ));
+            };
+            tier.read_neuron(offset)?
         };
-        let Some(&offset) = self.cold_offsets.get(&id) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("no cold offset recorded for neuron id {}", id),
-            ));
-        };
-        let restored = tier.read_neuron(offset)?;
         // Sanity check: restored id must match.
         if restored.id != id {
             return Err(std::io::Error::new(
@@ -921,6 +986,7 @@ impl Pool {
             // via attach_cold_tiers after fabric registration, because
             // the data_dir isn't known at Pool construction time.
             cold_tier:    None,
+            tiered_store: None,  // §18.12 step 4b
             cold_offsets: snap.cold_offsets.iter().copied().collect(),
             evicted:      snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
         };
