@@ -3445,6 +3445,74 @@ impl Brain {
         self.fabric.store_clone()
     }
 
+    /// Stage 18.12 step 7 — scan all pools for currently-firing neurons
+    /// whose outgoing terminals point to neurons whose home is a remote
+    /// cluster peer.  Returns a per-peer batch of deposits ready to be
+    /// shipped via `POST /shard/deposit`.
+    ///
+    /// Per [`ARCHITECTURE.md`] §18.7 — per-tick all-to-all cross-shard
+    /// activation deposit batching.  Each entry is
+    /// `(target_pool_id, target_neuron_id, deposit_strength)` where
+    /// strength = `terminal.effective_weight() * source_activation`.
+    ///
+    /// Solo mode: returns empty (no remote peers, nothing to ship).
+    /// Cluster mode: returns deposits grouped by destination NodeId.
+    /// Caller is responsible for actually sending them (the brain crate
+    /// doesn't have an HTTP client; brain_server owns transport).
+    pub fn scan_cross_shard_deposits(
+        &self,
+        local_node: crate::store::NodeId,
+    ) -> std::collections::HashMap<
+            crate::store::NodeId,
+            Vec<(PoolId, NeuronId, f32)>
+        >
+    {
+        use std::collections::HashMap as StdHashMap;
+        let mut out: StdHashMap<crate::store::NodeId, Vec<(PoolId, NeuronId, f32)>>
+            = StdHashMap::new();
+
+        for pid in self.fabric.pool_ids() {
+            let Some(pool_arc) = self.fabric.pool(pid) else { continue; };
+            let pool = pool_arc.read();
+            // Need access to tiered_store; not exposed directly, so we
+            // peek via has_tiered_store + a helper.  Until that's wired,
+            // we walk each pool's neurons individually.
+            if !pool.has_tiered_store() { continue; }
+
+            // For each firing neuron, walk its terminals.
+            for nid in pool.currently_firing() {
+                let Some(neuron) = pool.get(nid) else { continue; };
+                if neuron.terminals.is_empty() { continue; }
+                let src_activation = pool.activation(nid);
+                if src_activation <= 0.0 { continue; }
+
+                for term in &neuron.terminals {
+                    // Get the home of target.neuron.  We need the
+                    // TARGET pool's tiered_store for placement.
+                    let target_pool_arc = self.fabric.pool(term.target.pool);
+                    let target_home = match target_pool_arc {
+                        Some(p) => {
+                            let tp = p.read();
+                            // home_for through whichever store the
+                            // target pool has.  Solo pools return local
+                            // (so no deposit queued — correct).
+                            tp.tiered_home_for(term.target.neuron)
+                                .unwrap_or(local_node)
+                        }
+                        None => local_node,
+                    };
+                    if target_home == local_node { continue; }
+                    let deposit = term.effective_weight() * src_activation;
+                    if deposit <= 0.0 { continue; }
+                    out.entry(target_home)
+                       .or_insert_with(Vec::new)
+                       .push((term.target.pool, term.target.neuron, deposit));
+                }
+            }
+        }
+        out
+    }
+
     /// Stage 17.6 — map of every pool's Merkle root, keyed by pool id.
     /// First half of the cluster anti-entropy protocol per
     /// [`ARCHITECTURE.md`] §17.6: peers compare these maps to identify

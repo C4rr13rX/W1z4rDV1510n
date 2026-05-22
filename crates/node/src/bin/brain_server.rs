@@ -1376,6 +1376,114 @@ async fn cluster_leave(
     Json(snapshot)
 }
 
+/// `POST /shard/deposit` — receiver side of §18.7 cross-shard
+/// activation propagation.  Per [`ARCHITECTURE.md`] §18.7.
+/// Body: `{ deposits: [(pool_id, neuron_id, strength)] }`.  Each
+/// deposit calls `pool.inject_activation(neuron_id, strength, tick)`.
+#[derive(Deserialize)]
+struct DepositRequest {
+    deposits: Vec<DepositEntry>,
+}
+#[derive(Deserialize, Serialize)]
+struct DepositEntry {
+    pool_id:    PoolId,
+    neuron_id:  w1z4rd_brain::NeuronId,
+    strength:   f32,
+}
+#[derive(Serialize)]
+struct DepositResponse {
+    applied:    usize,
+    skipped:    usize,
+}
+
+async fn shard_deposit(
+    State(s): State<AppState>,
+    Json(req): Json<DepositRequest>,
+) -> Json<DepositResponse> {
+    let mut applied = 0usize;
+    let mut skipped = 0usize;
+    let brain = s.brain.lock().await;
+    let tick = brain.fabric().current_tick();
+    for d in &req.deposits {
+        if let Some(pool) = brain.fabric().pool(d.pool_id) {
+            pool.write().inject_activation(d.neuron_id, d.strength, tick);
+            applied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Json(DepositResponse { applied, skipped })
+}
+
+/// `POST /cluster/flush_deposits` — sender side of §18.7.  Per
+/// [`ARCHITECTURE.md`] §18.7.  Scans local firing neurons, identifies
+/// terminals pointing to remote-home targets, batches deposits per
+/// destination peer, ships them via /shard/deposit, returns totals.
+///
+/// Designed for explicit invocation between ticks.  Future work (deep
+/// step 7): auto-fire after every Brain::advance_tick when the brain
+/// is in cluster mode.
+#[derive(Serialize, Default)]
+struct FlushDepositsResponse {
+    peers_contacted:  usize,
+    total_deposits_sent: usize,
+    total_applied:    usize,
+    errors:           Vec<String>,
+}
+
+async fn cluster_flush_deposits(
+    State(s): State<AppState>,
+) -> Json<FlushDepositsResponse> {
+    let (local_node, members) = {
+        let m = s.cluster.lock().unwrap();
+        (m.local_node, m.members.clone())
+    };
+    // Snapshot deposits under brain lock.
+    let deposits = {
+        let brain = s.brain.lock().await;
+        brain.scan_cross_shard_deposits(local_node)
+    };
+
+    let mut out = FlushDepositsResponse::default();
+    if deposits.is_empty() { return Json(out); }
+    let client = reqwest::Client::new();
+    for (peer_node, batch) in deposits.iter() {
+        // Look up peer addr.
+        let Some(peer) = members.iter().find(|m| m.node_id == *peer_node) else {
+            out.errors.push(format!("unknown peer node {}", peer_node.0));
+            continue;
+        };
+        let url = format!(
+            "{}/shard/deposit",
+            peer.addr.trim_end_matches('/'),
+        );
+        let body = serde_json::json!({
+            "deposits": batch.iter().map(|(p, n, s)| serde_json::json!({
+                "pool_id": p, "neuron_id": n, "strength": s,
+            })).collect::<Vec<_>>(),
+        });
+        out.peers_contacted += 1;
+        out.total_deposits_sent += batch.len();
+        match client.post(&url)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(5))
+            .send().await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                #[derive(Deserialize)]
+                struct R { applied: usize }
+                match resp.json::<R>().await {
+                    Ok(r)  => { out.total_applied += r.applied; }
+                    Err(e) => { out.errors.push(format!("peer {} parse: {}", peer_node.0, e)); }
+                }
+            }
+            Ok(resp) => out.errors.push(format!("peer {} status {}", peer_node.0, resp.status())),
+            Err(e)   => out.errors.push(format!("peer {} network: {}", peer_node.0, e)),
+        }
+    }
+    Json(out)
+}
+
 /// `GET /cluster/aggregate_pool_neurons/{pool_id}` — per
 /// [`ARCHITECTURE.md`] §18.8 gossip bridge.  Returns the unified view
 /// of `pool_id` across the entire cluster: for each ring member, fetch
@@ -2197,6 +2305,8 @@ async fn main() -> Result<()> {
         .route("/cluster/aggregate_pool_neurons/:pool_id", get(cluster_aggregate_pool_neurons))
         .route("/shard/neuron/:pool_id/:neuron_id", get(shard_get_neuron))
         .route("/shard/put_neuron",      post(shard_put_neuron))
+        .route("/shard/deposit",         post(shard_deposit))
+        .route("/cluster/flush_deposits", post(cluster_flush_deposits))
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))

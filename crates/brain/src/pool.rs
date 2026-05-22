@@ -407,6 +407,18 @@ impl Pool {
     /// `TieredStore` attached (i.e. is running in distributed mode).
     pub fn has_tiered_store(&self) -> bool { self.tiered_store.is_some() }
 
+    /// Stage 18.12 step 7 — what NodeId is the home for neuron `id`,
+    /// according to this pool's TieredStore?  Returns None if the pool
+    /// has no tiered_store attached (solo mode — answer would always
+    /// be the local node anyway).  Used by `Brain::scan_cross_shard_deposits`
+    /// to decide which deposits belong to which peer.
+    pub fn tiered_home_for(&self, id: NeuronId) -> Option<crate::store::NodeId> {
+        self.tiered_store.as_ref().map(|s| {
+            use crate::store::NeuronStore;
+            s.home_for(id)
+        })
+    }
+
     /// Stage 17.4 — true if neuron `id` is currently evicted to disk.
     /// O(1) lookup.  Iteration paths use this to skip placeholder
     /// entries in `neurons` for IDs that have been paged out.
