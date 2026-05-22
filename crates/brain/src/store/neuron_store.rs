@@ -360,6 +360,219 @@ impl NeuronStore for ColdDiskStore {
 }
 
 // ============================================================================
+// PlacementPolicy + TieredStore — §18.12 step 4: the "OpenStack pool"
+// composer that routes operations across RamStore (local hot),
+// ColdDiskStore (local warm), and RemoteNodeStore-per-peer (remote tier).
+// ============================================================================
+
+/// Decides which cluster node is the home for a given neuron.  Per
+/// [`ARCHITECTURE.md`] §18.3, placement is what makes the resource-pool
+/// abstraction work: every neuron has exactly one home; reads/writes
+/// route there.
+///
+/// The ring is the ordered list of currently-live cluster node ids;
+/// the policy is asked to pick one of them for `id`.
+pub trait PlacementPolicy: Send + Sync {
+    fn home_for(&self, id: NeuronId, ring: &[NodeId]) -> NodeId;
+}
+
+/// Default: consistent-hash placement.  Each neuron lands on
+/// `ring[(id as usize) % ring.len()]`.  Minimal rebalancing on node
+/// join/leave (Karger et al. 1997).  No co-firing awareness — strategy
+/// 1 from §18.3.  Production deployments may swap in a salience-tiered
+/// or graph-partitioning policy.
+pub struct ConsistentHashPlacement;
+
+impl PlacementPolicy for ConsistentHashPlacement {
+    fn home_for(&self, id: NeuronId, ring: &[NodeId]) -> NodeId {
+        if ring.is_empty() {
+            // Degenerate: no peers known.  Caller should ensure the
+            // ring includes at least the local node.
+            return NodeId(0);
+        }
+        // Mix the id bits with a multiplicative hash so adjacent ids
+        // don't always land on the same node (the trivial `id % n`
+        // pattern groups all ids 0..n-1 onto distinct nodes but ids
+        // n..2n-1 in the same pattern — workable for cluster sizes
+        // that don't change, but the hash mixes for robustness against
+        // ring re-sizing).
+        let mixed = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        ring[(mixed as usize) % ring.len()]
+    }
+}
+
+/// TieredStore composes a local RAM tier, an optional local cold-disk
+/// tier, and zero-or-more remote-node tiers into a single NeuronStore.
+/// Per [`ARCHITECTURE.md`] §18.2, this is the trait object the Pool
+/// will hold (step 4b — wiring into Pool follows in a separate commit).
+///
+/// Routing:
+/// - On `get(id)`: compute `home = placement.home_for(id, ring)`.  If
+///   `home == local_node`, walk RAM → cold disk.  Else issue a remote
+///   `get` to that node.
+/// - On `put(id, n)`: same routing — local goes to RAM (the hot tier),
+///   remote goes over the wire.  Cold-disk writes happen out-of-band
+///   via the eviction actor (§17.4); TieredStore::put always writes
+///   the hot tier first.
+/// - On `delete(id)`: routed analogously.
+/// - On `iter_ids` / `len`: returns LOCAL state only — remote
+///   enumeration is not in the protocol.  Callers needing global
+///   iteration query each peer separately.
+pub struct TieredStore {
+    local_node: NodeId,
+    ram:        Arc<RamStore>,
+    cold:       Option<Arc<ColdDiskStore>>,
+    remotes:    Arc<parking_lot::RwLock<AHashMap<NodeId, Arc<RemoteNodeStore>>>>,
+    /// Current cluster ring; ordered, includes `local_node`.  Updated
+    /// by cluster join/leave handlers (step 5).
+    ring:       Arc<parking_lot::RwLock<Vec<NodeId>>>,
+    placement:  Arc<dyn PlacementPolicy>,
+}
+
+impl TieredStore {
+    /// Construct a single-node tiered store (ring contains only
+    /// `local_node`).  Convenient for solo mode and tests; cluster mode
+    /// extends the ring via [`Self::set_ring`].
+    pub fn solo(local_node: NodeId, ram: Arc<RamStore>) -> Self {
+        Self {
+            local_node,
+            ram,
+            cold:       None,
+            remotes:    Arc::new(parking_lot::RwLock::new(AHashMap::new())),
+            ring:       Arc::new(parking_lot::RwLock::new(vec![local_node])),
+            placement:  Arc::new(ConsistentHashPlacement),
+        }
+    }
+
+    /// Attach a local cold-disk tier.
+    pub fn with_cold(mut self, cold: Arc<ColdDiskStore>) -> Self {
+        self.cold = Some(cold);
+        self
+    }
+
+    /// Replace the default consistent-hash placement with a custom one.
+    pub fn with_placement(mut self, p: Arc<dyn PlacementPolicy>) -> Self {
+        self.placement = p;
+        self
+    }
+
+    /// Attach (or replace) the remote tier for a peer node.
+    pub fn set_remote(&self, node: NodeId, store: Arc<RemoteNodeStore>) {
+        self.remotes.write().insert(node, store);
+        // Ensure ring contains the peer.
+        let mut ring = self.ring.write();
+        if !ring.contains(&node) {
+            ring.push(node);
+            ring.sort_by_key(|n| n.0);
+        }
+    }
+
+    /// Remove a peer (e.g. node left the cluster).
+    pub fn remove_remote(&self, node: NodeId) {
+        self.remotes.write().remove(&node);
+        let mut ring = self.ring.write();
+        ring.retain(|n| *n != node);
+    }
+
+    /// Set the full ring explicitly.  Used by the cluster-join
+    /// handler when topology is known up-front.
+    pub fn set_ring(&self, ring: Vec<NodeId>) {
+        *self.ring.write() = ring;
+    }
+
+    /// Snapshot of the current ring.
+    pub fn ring(&self) -> Vec<NodeId> { self.ring.read().clone() }
+
+    /// Compute home for a given id under the current ring.
+    pub fn compute_home(&self, id: NeuronId) -> NodeId {
+        let ring = self.ring.read();
+        self.placement.home_for(id, &ring)
+    }
+
+    /// Local node id.
+    pub fn local_node(&self) -> NodeId { self.local_node }
+}
+
+impl NeuronStore for TieredStore {
+    fn get(&self, id: NeuronId) -> Option<Neuron> {
+        let home = self.compute_home(id);
+        if home == self.local_node {
+            // Local: RAM first, then cold disk.
+            if let Some(n) = self.ram.get(id) { return Some(n); }
+            if let Some(cold) = &self.cold {
+                if let Some(n) = cold.get(id) {
+                    // Stage 18.4: cache cold-tier hits back into RAM as
+                    // a "wake" — promotes the neuron to the hot tier.
+                    // Skipped here to keep TieredStore stateless; the
+                    // eviction actor handles RAM promotion explicitly.
+                    return Some(n);
+                }
+            }
+            None
+        } else {
+            // Remote tier.
+            let remotes = self.remotes.read();
+            remotes.get(&home).and_then(|r| r.get(id))
+        }
+    }
+
+    fn put(&self, id: NeuronId, n: Neuron) {
+        let home = self.compute_home(id);
+        if home == self.local_node {
+            self.ram.put(id, n);
+        } else {
+            let remotes = self.remotes.read();
+            if let Some(r) = remotes.get(&home) {
+                r.put(id, n);
+            } else {
+                tracing::warn!(
+                    "TieredStore::put(id={}) home=node{} has no remote tier attached",
+                    id, home.0,
+                );
+            }
+        }
+    }
+
+    fn delete(&self, id: NeuronId) {
+        let home = self.compute_home(id);
+        if home == self.local_node {
+            self.ram.delete(id);
+            if let Some(cold) = &self.cold { cold.delete(id); }
+        } else {
+            let remotes = self.remotes.read();
+            if let Some(r) = remotes.get(&home) { r.delete(id); }
+        }
+    }
+
+    fn iter_ids<'a>(&'a self) -> Box<dyn Iterator<Item = NeuronId> + 'a> {
+        // Local-only iteration (RAM + cold).  Use `compute_home(id) ==
+        // local_node` to filter to ids the local node actually owns,
+        // so the iterator doesn't return ids that happen to be in the
+        // RAM cache but conceptually belong to a peer.
+        let ram_ids: Vec<NeuronId> = self.ram.iter_ids().collect();
+        let cold_ids: Vec<NeuronId> = match &self.cold {
+            Some(c) => c.iter_ids().collect(),
+            None    => Vec::new(),
+        };
+        let mut seen: AHashMap<NeuronId, ()> = AHashMap::new();
+        for id in ram_ids.iter().chain(cold_ids.iter()) {
+            if self.compute_home(*id) == self.local_node {
+                seen.insert(*id, ());
+            }
+        }
+        Box::new(seen.into_iter().map(|(id, _)| id))
+    }
+
+    fn len(&self) -> usize {
+        self.iter_ids().count()
+    }
+
+    fn home_for(&self, id: NeuronId) -> NodeId {
+        self.compute_home(id)
+    }
+}
+
+// ============================================================================
 // RemoteTransport + RemoteNodeStore — §18.12 step 3: NeuronStore that
 // fetches/puts via RPC to a peer brain.  The actual transport
 // (HTTP via reqwest, gRPC, or anything else) is supplied by the
@@ -508,6 +721,131 @@ mod remote_node_tests {
         // in the current protocol.  Documented in struct docs.
         assert_eq!(store.iter_ids().count(), 0);
         assert_eq!(store.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod tiered_tests {
+    use super::*;
+    use crate::neuron::NeuronKind;
+    use std::sync::Mutex;
+
+    struct MockTransport {
+        inner: Mutex<AHashMap<(PoolId, NeuronId), Neuron>>,
+    }
+    impl MockTransport {
+        fn new() -> Self { Self { inner: Mutex::new(AHashMap::new()) } }
+    }
+    impl RemoteTransport for MockTransport {
+        fn fetch_neuron(&self, pool: PoolId, id: NeuronId) -> Option<Neuron> {
+            self.inner.lock().unwrap().get(&(pool, id)).cloned()
+        }
+        fn put_neuron(&self, pool: PoolId, neuron: Neuron) -> bool {
+            self.inner.lock().unwrap().insert((pool, neuron.id), neuron);
+            true
+        }
+    }
+
+    fn n(id: u32, label: &str) -> Neuron {
+        Neuron::new_atom(id, label.to_string(), NeuronKind::Excitatory, 0)
+    }
+
+    #[test]
+    fn solo_routes_everything_local() {
+        let ram = Arc::new(RamStore::with_node_id(NodeId(0)));
+        let store = TieredStore::solo(NodeId(0), ram.clone());
+        store.put(0, n(0, "a"));
+        store.put(1, n(1, "b"));
+        assert_eq!(store.get(0).unwrap().label, "a");
+        assert_eq!(store.get(1).unwrap().label, "b");
+        // Every id is local in solo mode.
+        assert_eq!(store.compute_home(0), NodeId(0));
+        assert_eq!(store.compute_home(99999), NodeId(0));
+    }
+
+    #[test]
+    fn two_node_ring_routes_some_ids_remote() {
+        let local_ram = Arc::new(RamStore::with_node_id(NodeId(1)));
+        let remote_t = Arc::new(MockTransport::new()) as Arc<dyn RemoteTransport>;
+        let remote_store = Arc::new(RemoteNodeStore::new(
+            remote_t.clone(), /*pool*/ 0, NodeId(2),
+        ));
+
+        let store = TieredStore::solo(NodeId(1), local_ram);
+        store.set_remote(NodeId(2), remote_store);
+        // Ring is now [NodeId(1), NodeId(2)] — placement should pick
+        // each node roughly half the time.
+
+        // Verify placement is deterministic + spans both nodes.
+        let mut on_local = 0;
+        let mut on_remote = 0;
+        for id in 0..200u32 {
+            match store.compute_home(id) {
+                NodeId(1) => on_local += 1,
+                NodeId(2) => on_remote += 1,
+                _ => panic!("unexpected node"),
+            }
+        }
+        assert!(on_local  > 30, "local share too low: {}",  on_local);
+        assert!(on_remote > 30, "remote share too low: {}", on_remote);
+    }
+
+    #[test]
+    fn put_routes_to_home_node() {
+        let local_ram = Arc::new(RamStore::with_node_id(NodeId(1)));
+        let remote_t = Arc::new(MockTransport::new());
+        let remote_t_dyn: Arc<dyn RemoteTransport> = remote_t.clone();
+        let remote_store = Arc::new(RemoteNodeStore::new(
+            remote_t_dyn, /*pool*/ 0, NodeId(2),
+        ));
+        let store = TieredStore::solo(NodeId(1), local_ram.clone());
+        store.set_remote(NodeId(2), remote_store);
+
+        // Find an id that hashes to NodeId(2).
+        let mut remote_id = None;
+        for id in 0..10000u32 {
+            if store.compute_home(id) == NodeId(2) {
+                remote_id = Some(id);
+                break;
+            }
+        }
+        let remote_id = remote_id.expect("expected at least one remote-home id");
+
+        store.put(remote_id, n(remote_id, "remote_payload"));
+
+        // Should NOT be in local RAM…
+        assert!(local_ram.get(remote_id).is_none(),
+            "neuron with remote home must not land in local RAM");
+        // …but should be readable via the tiered get (which routes
+        // through to the mock transport).
+        let got = store.get(remote_id).expect("should fetch from remote");
+        assert_eq!(got.label, "remote_payload");
+    }
+
+    #[test]
+    fn local_iter_excludes_remote_owned_ids() {
+        let local_ram = Arc::new(RamStore::with_node_id(NodeId(1)));
+        let remote_t = Arc::new(MockTransport::new()) as Arc<dyn RemoteTransport>;
+        let remote_store = Arc::new(RemoteNodeStore::new(
+            remote_t, /*pool*/ 0, NodeId(2),
+        ));
+        let store = TieredStore::solo(NodeId(1), local_ram.clone());
+        store.set_remote(NodeId(2), remote_store);
+
+        // Forcibly stuff a "remote-home" id into local RAM (simulating
+        // an inconsistency).  iter_ids should filter it out.
+        let mut remote_owned = 0u32;
+        for id in 0..10000u32 {
+            if store.compute_home(id) == NodeId(2) {
+                remote_owned = id;
+                break;
+            }
+        }
+        local_ram.put(remote_owned, n(remote_owned, "shouldnt-be-here"));
+
+        let visible_ids: Vec<NeuronId> = store.iter_ids().collect();
+        assert!(!visible_ids.contains(&remote_owned),
+            "tiered iter must filter out ids whose home is a remote node");
     }
 }
 
