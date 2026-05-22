@@ -37,11 +37,13 @@ impl HttpRemoteTransport {
         let mut url = base_url.into();
         while url.ends_with('/') { url.pop(); }
         let client = reqwest::blocking::Client::builder()
-            // Per §18.13 honest-tradeoffs: hot-path RPCs should be fast.
-            // 30s connect/read budget is a soft ceiling; the brain's
-            // operation timing is governed by the substrate-level
-            // /sleep/status mechanism rather than HTTP timeouts.
-            .timeout(Duration::from_secs(30))
+            // §18.13 honest-tradeoffs: hot-path RPCs need to fail fast,
+            // not hang for 30s when a peer is unreachable.  3s connect+read
+            // budget is generous for LAN (typical RTT is sub-ms) and
+            // surfaces real peer failures quickly so the eviction loop
+            // can drop a batch and move on rather than grinding.
+            .timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(1))
             .build()
             .expect("reqwest blocking client construction (no network)");
         Self { client, base_url: url }
