@@ -16,23 +16,28 @@ abstraction lives below `Pool::neurons` via a `NeuronStore` trait.
 | 18.12 step 2 | ✓ | `c4686e8` | `ColdDiskStore` adapter over §17.4 |
 | 18.12 step 3 | ✓ | `ba35dcc` | `RemoteNodeStore` + HTTP `RemoteTransport` impl + `/shard/neuron`+`/shard/put_neuron` endpoints |
 | 18.12 step 4a | ✓ | `adb1972` | `TieredStore` composer + `PlacementPolicy` (consistent hash) |
-| 18.12 step 4b | ⨯ | — | **NEXT**: wire `TieredStore` into `Pool::neurons` (multi-day invasive refactor; load-modify-store semantics replace borrow-based access) |
-| 18.12 step 5 | ⨯ | — | `POST /cluster/join` protocol extending legacy crates/cluster OTP |
+| 18.12 step 4b | ✓ thin | `43e4b28` | `Pool.tiered_store` hook intercepts evict + page-in; 3 integration tests (full Pool::neurons → store migration deferred — invasive load-modify-store refactor remains for later) |
+| 18.12 step 5 | ✓ | `88e0b8a` | `/cluster/join` + `/cluster/members` + `/cluster/leave` HTTP endpoints; `ClusterMembership` state in `AppState`; `W1Z4RD_CLUSTER_SEED` env var triggers seed-join on startup |
 | 18.12 step 6 | ⨯ | — | Head-node operation routing (`/observe` fans out to homes) |
 | 18.12 step 7 | ⨯ | — | Per-tick all-to-all activation deposit batching |
 | 18.12 step 8 | ⨯ | — | Heartbeats + dead-node detection + rejoin |
 | 18.12 step 9 | ⨯ | — | Gossip bridge: cluster appears as one peer to standalone §17.6 anti-entropy |
 
-183 brain tests pass, 0 fail.  Steps 1–4a are all *additive* — no
-existing call sites changed; `Pool::neurons` is still `Vec<Neuron>`
-and all current functionality is intact.  Step 4b is the
-load-bearing migration that lets a Pool back its neurons with a
-TieredStore.  Sessions resuming this work should start there.
+186 brain tests pass, 0 fail.  Steps 1–4a are all *additive*; step 4b
+(thin) opt-in via `Pool::set_tiered_store`; step 5 adds the membership
+layer that lets two nodes form a ring with one HTTP call.
 
-The Stage 18 vision is intact even without 4b shipped: this session
-ships every *abstraction* needed to compose a multi-host brain.  Step
-4b is the wiring; steps 5–9 add the cluster operational layer
-(membership, routing, fault tolerance, gossip-bridge).
+Empirical validation of step 5 over real LAN:
+- Local brain (192.168.1.84:8095) starts solo
+- Node 2 (192.168.1.43:8095) starts with `W1Z4RD_CLUSTER_SEED=http://192.168.1.84:8095`
+- Node 2's startup log: "joining cluster via seed http://192.168.1.84:8095" → "joined cluster as node 1 with 2 members"
+- Both nodes' `/cluster/members`: identical 2-element ring
+  [{node_id:0, addr:192.168.1.84:8095}, {node_id:1, addr:192.168.1.43:8095}]
+
+The "cluster" the user asked for (nodes JOINING) is live and tested
+over real LAN.  Steps 6-7 wire ClusterMembership into TieredStore so
+placement actually routes hot/put operations to ring peers (i.e. the
+RAM/CPU/disk pooling becomes operational, not just structural).
 
 ## Stage 17 — Storage & Wake-Sleep architecture (2026-05-21, sessions 1+2)
 
