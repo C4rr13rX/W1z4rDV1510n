@@ -800,6 +800,293 @@ No published system has these together. The systems contributions (terminal-as-C
 
 ---
 
+## 18. Distributed Substrate — One Brain Across N Hosts
+
+### 18.0 §17 vs §18 — replication vs resource pooling
+
+§17 specified a content-addressed, demand-paged, append-only neuron
+store on a single node, and added an anti-entropy *replication* path
+(§17.6) so two nodes can each hold a full brain and stay eventually
+consistent.  Replication is the right answer for fault tolerance and
+read-scaling, but it does **not** let a single brain grow beyond one
+host's RAM/CPU/disk.
+
+§18 specifies the orthogonal property: **one logical brain whose RAM,
+CPU, and disk are drawn transparently from N physical hosts**.  Adding
+a node to the cluster grows the brain's effective capacity by that
+node's contribution, exactly as adding a hypervisor host to an
+OpenStack cloud grows the pool of allocatable VM resources.
+
+The two models compose.  A standalone node can join a cluster as a
+worker (becomes part of the pool); a cluster can gossip with a
+standalone replica via §17.6 anti-entropy (the cluster appears as a
+single peer to the outside gossiper).
+
+### 18.1 Vision
+
+> A VM running on OpenStack draws its RAM from a memory pool that
+> spans multiple physical hosts.  The VM has no idea which host
+> provides which page; it just allocates and uses memory.  The brain
+> should be the same — a single logical instance that scales by adding
+> compute nodes.
+
+The substrate code (`Pool::observe_frame`, `Brain::decode_*`,
+`Brain::integrate`) does not change.  What changes is the layer below
+`Pool::neurons` — a `NeuronStore` trait that hides whether a neuron
+lives in local RAM, on local disk, or on a peer node's RAM/disk.
+
+This is **distributed shared memory** (Li & Hudak, 1989 "Memory
+Coherence in Shared Virtual Memory Systems"; Treadmarks 1994; mosix
+SSI 1999) applied to a Hebbian substrate.
+
+### 18.2 NeuronStore trait + tiered composition
+
+```rust
+pub trait NeuronStore: Send + Sync {
+    fn get(&self, id: NeuronId)   -> Option<Neuron>;
+    fn put(&self, id: NeuronId, n: Neuron);
+    fn delete(&self, id: NeuronId);
+    fn iter_ids(&self) -> Box<dyn Iterator<Item = NeuronId> + '_>;
+    fn home_for(&self, id: NeuronId) -> NodeId;  // placement decision
+}
+```
+
+Implementations (composable):
+
+- **`RamStore`** — local heap; the hot tier.
+- **`ColdDiskStore`** — §17.4 append-log on local disk (already shipping).
+- **`RemoteNodeStore { node_addr, http_client }`** — RPC to a peer
+  brain shard over the cluster transport.  Latency-tiered between
+  local RAM and local disk for hot data on a fast LAN.
+- **`TieredStore { ram, cold, remote_nodes }`** — composes the above by
+  placement policy.  A `get(id)` queries hot → local cold → remote
+  (the remote with the matching home).  Writes go to home.
+
+`Pool::neurons` becomes `Pool::store: Arc<dyn NeuronStore>`.  Every
+existing `pool.get(id)` / `pool.iter_neurons()` routes through the
+store.  Most callers are unchanged.
+
+### 18.3 Placement policy
+
+A neuron's *home* node is determined by `home_for(id) -> NodeId`.
+Strategies (composable, chosen at cluster config):
+
+1. **Consistent hash on `neuron_id`** — Karger et al. (1997).  Deterministic,
+   no co-firing awareness, but minimal rebalancing on node join/leave.
+   Default.
+2. **Salience-tiered** — top-K highest-salience neurons stay on the
+   head node; the long tail distributes by consistent hash.  Cheap
+   queries (touch top-salience) stay loop-back.
+3. **Co-firing-clustered** — online graph partition (METIS-variant,
+   Karypis & Kumar 1998) keeps co-fired neurons on the same shard.
+   This is §17.2 (Hebbian disk layout) extended to cluster placement.
+
+Replicas: optionally, each neuron is stored on `r` nodes (primary +
+`r−1` followers).  Reads serve from any replica; writes go primary
+first then async-replicate.  Trades durability for staleness window.
+
+### 18.4 Cluster membership + join protocol
+
+The legacy `crates/cluster` already implements:
+- OTP-key node identity
+- Ring membership with heartbeats
+- Coordinator election
+
+§18 extends this for *brain shards*:
+
+```
+Joining node bootstraps with one seed peer URL:
+  POST /cluster/join { seed_url }
+    → seed replies with current ring + hash range assignment
+    → joiner allocates its shard's neuron store
+    → joiner publishes its NodeId + addr + capacity to ring
+    → other nodes accept; head re-runs placement and emits
+      `Rebalance` events for affected neurons
+    → joiner pulls its assigned neurons via §17.6 pull-sync
+      (existing primitive, repurposed for shard migration)
+    → joiner sets `ready=true` after the pull finishes
+```
+
+Leave protocol (graceful or detected via heartbeat timeout):
+```
+Departing node's neuron range gets reassigned by placement.
+Surviving nodes pull what they're newly responsible for.
+The departing node's shard becomes unreachable; reads fall through
+to its replicas (if any) or the brain reports those neuron ids as
+temporarily-unavailable.
+```
+
+### 18.5 Operation routing
+
+A client (e.g. `drive_corpora_brain.py`) hits the **head** node's
+HTTP endpoint and sees a single brain.  Internally the head is just
+*one of the cluster nodes serving as the API endpoint*; any node can
+be the head, chosen by client preference or DNS round-robin.
+
+For each top-level operation:
+
+- **`POST /observe { pool_id, frame }`** — head atomizes locally, then
+  for each atom_id: `home = store.home_for(atom_id)`.  If home == self,
+  apply locally; else RPC `POST /shard/observe_atom { pool_id, atom_id, tick }`
+  to the home node.  Sub-ms over LAN for the RPC fan-out.
+- **`POST /tick`** — head broadcasts `POST /shard/advance_tick { tick }`
+  to every node.  Workers apply per-pool housekeeping at the broadcast
+  boundary.  No consensus — just barrier-style propagation; the
+  substrate is forgiving of one-tick skew.
+- **`POST /chat`, `POST /integrate`** — head walks the binding pool
+  (lives on head — typically small, all-RAM).  For each candidate
+  binding's members, members may be remote; head issues
+  `GET /shard/neuron/{pool_id}/{neuron_id}` RPCs to fetch state and
+  composes the answer.
+
+### 18.6 Tick coordination
+
+Head owns the canonical global `tick`.  On `/tick`:
+1. Head increments its tick.
+2. Head broadcasts `advance_tick(t)` to all workers.
+3. Workers apply housekeeping for tick `t` and ack.
+4. Head responds when quorum (default: all) acks, or after a soft
+   timeout.
+
+No Raft, no Paxos — the brain isn't a CP system.  Stale ticks on a
+slow node just mean its decay runs slightly later.  Hebbian
+plasticity is robust to small temporal jitter.
+
+### 18.7 Cross-shard activation propagation
+
+When neuron A on node X fires and has a terminal toward neuron B
+whose home is node Y, the activation needs to reach B.  Strategies:
+
+1. **Eager per-deposit RPC** — for each cross-shard terminal, immediate
+   RPC.  Simplest, highest network cost.  Use only when terminal count
+   per neuron is small.
+2. **Per-tick batched all-to-all** — at end of tick, each node
+   aggregates its outbound cross-shard deposits by destination node,
+   ships one RPC per destination per tick.  HPC-style collective; this
+   is the production-grade choice for dense substrates.
+3. **Locality-driven sharding** — co-fired neurons end up on the same
+   shard via §18.3 strategy 3, minimizing cross-shard fanout at the
+   placement layer.  Most effective in combination with (2).
+
+### 18.8 Gossip bridge — cluster ↔ standalone
+
+A cluster of N nodes appears as **one peer** to the outside §17.6
+anti-entropy world.  The head's `/cluster/pool_roots` aggregates per-pool
+Merkle roots across all worker shards.  When a standalone node syncs
+with the cluster:
+
+- Standalone hits cluster_head's `/cluster/pool_roots` — gets unified
+  roots (combined from worker shards).
+- Divergent pools: standalone hits cluster_head's `/cluster/pool_neurons/{pool_id}`,
+  which the head proxies (or streams from) the appropriate worker shards.
+- Standalone applies neurons via `cluster_merge_pool` locally.
+
+This is the unification the user asked for: a node in a cluster
+gossips with a node running standalone on a single computer.  Both
+see "the brain" — one with one host's compute, the other with the
+cluster's pool.
+
+### 18.9 Cold tier + working set in the distributed setup
+
+Each worker node retains a §17.4 `LocalDiskStore`.  The local
+hot-RAM tier of that worker overflows to its local cold-disk tier.
+The head's overall brain sees, for each neuron:
+
+- **L1 RAM hot** — head's local RAM if it's the home OR head's
+  remote-fetch cache.
+- **L2 RAM warm** — worker's local RAM (one network hop).
+- **L3 disk cold** — worker's local cold tier (one network hop + disk
+  read).
+
+The fetch path is transparent: `store.get(id)` walks L1 → L2 (RPC) →
+L3 (RPC against the worker's local Ram → Cold).  All three are still
+covered by §17.4 eviction policy — local to the worker that owns the
+neuron.
+
+### 18.10 Migration path from §17 to §18
+
+A brain can run in three modes, selected by config:
+
+- **Solo** (default, all current single-machine workflows) — one
+  `Brain`, no cluster.  §17 features apply.
+- **Replication cluster** (§17.6) — N nodes each hold a full copy,
+  sync via anti-entropy.  Same as today.
+- **Resource-pool cluster** (§18) — N nodes share one logical brain.
+  Head node serves the API; workers serve shards.  Standalone nodes
+  can still gossip with the head, treating the cluster as one peer.
+
+Switching modes is operational, not architectural: the same binary
+runs each mode based on env vars (`W1Z4RD_CLUSTER_MODE=solo|replica|pool`).
+
+### 18.11 Failure semantics + rebalancing
+
+- **Heartbeat** — every worker pings the head every 1 s.  3 missed
+  heartbeats → marked dead.
+- **Dead node's neurons** — if replicas exist (placement strategy
+  with `r > 1`), reads serve from a survivor; placement recomputes
+  and a healthy node takes ownership of the dead range.
+- **No replicas** — those neurons are temporarily inaccessible.  The
+  brain reports them as "outside-grounding" rather than silently
+  fabricating — same honest-grounding contract as the rest of the
+  substrate (spec §2).
+- **Rejoin** — a returning node hits `/cluster/join`, gets its
+  reassigned range (which may have shrunk), and pull-syncs.  Same
+  protocol as initial join.
+
+### 18.12 Implementation sequencing
+
+Each step ships independently; previous behaviour stays intact.
+
+1. **`NeuronStore` trait + `RamStore` adapter** — wrap current
+   `Pool::neurons: Vec<Neuron>` behind the trait.  No functional
+   change yet; established the abstraction.
+2. **`ColdDiskStore` adapter over §17.4** — same, for the existing
+   cold tier.
+3. **`RemoteNodeStore`** — HTTP/bincode client.  Endpoints already
+   exist (`/cluster/pool_neurons/{id}`, `/cluster/merge_pool` from
+   §17.6); add finer-grained `/shard/get_neuron/{pool}/{id}`,
+   `/shard/put_neuron`, `/shard/observe_atom` for the hot path.
+4. **`TieredStore` composing the three** — placement policy plug-in.
+5. **`/cluster/join` protocol** — extends legacy `crates/cluster`
+   OTP-key membership for brain shards.  Includes initial range
+   assignment + pull-sync of the assignee's shard.
+6. **Head node orchestration** — `Brain` API methods become
+   distributed: `observe` fan-outs, `decode` walks remote bindings,
+   `advance_tick` broadcasts.
+7. **Per-tick all-to-all deposit batching** — §18.7 strategy 2.
+8. **Heartbeat + dead-node detection + rejoin** — §18.11.
+9. **§17.6 anti-entropy at the cluster-head level** — §18.8 bridge.
+
+Stages 1–4 give a working single-machine prototype that proves the
+trait abstraction (no functional difference, but every neuron access
+now goes through `NeuronStore`).  Stages 5–7 give a working two-node
+resource-pool cluster.  Stages 8–9 give production hardening.
+
+### 18.13 Honest tradeoffs
+
+This is a substantial undertaking.  The §17 model already supports
+replication and worked across DESKTOP-6E34B18 in this session.  §18
+trades simplicity for scale: a brain that needs more RAM than any one
+host has, gets it by adding hosts.  But:
+
+- **Latency** — every cross-shard operation costs a LAN RTT (~0.1–1 ms).
+  Hot-path operations that touch many neurons get amplified.  Locality-
+  driven placement (§18.3 strategy 3) mitigates but doesn't eliminate.
+- **Operational complexity** — heartbeats, rejoin, rebalancing, split
+  brain.  These are solved problems in distributed-systems literature
+  but they add lines of code and runbook entries.
+- **Partial failure** — a dead worker means part of the brain is
+  unreachable.  The honest-grounding contract handles this (report
+  "outside grounding" not "fabricate") but operationally it's worse
+  than monolithic.
+
+The decision to run in pool mode should be driven by *actual scale*:
+when the brain genuinely exceeds one host's RAM and the user is
+willing to pay the latency + ops cost.  Until then, solo or
+replication-cluster mode is the right default.
+
+---
+
 ## 12. Closing
 
 This document supersedes ad-hoc design decisions in the codebase. Code that contradicts it is drift. The architecture is committed to:
