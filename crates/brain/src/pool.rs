@@ -664,6 +664,49 @@ impl Pool {
         true
     }
 
+    /// Stage 18.12 step 6+ — accept a neuron from a cluster peer's
+    /// /shard/put_neuron call.  Unlike `replay_full_neuron` (which
+    /// enforces sequential ids per the §17.6 cluster_pull contract),
+    /// this method accepts arbitrary ids and pads the Vec with empty
+    /// placeholder neurons to preserve dense indexing.
+    ///
+    /// Placeholders have empty labels and don't enter the label_to_id
+    /// index, so they're invisible to neurogenesis collision checks and
+    /// decode-path lookups.  They DO occupy a slot in `neurons` so that
+    /// `Pool::get(id)` still returns the correct neuron by index.
+    ///
+    /// Returns `true` if the incoming neuron was inserted (always, in
+    /// practice — overrides existing entries).  Per [`ARCHITECTURE.md`]
+    /// §18.5 shard-receive semantics.
+    pub fn accept_shard_insert(&mut self, neuron: Neuron) -> bool {
+        let id = neuron.id;
+        let label = neuron.label.clone();
+        let idx = id as usize;
+        // Pad with empty-label placeholders up to (but not including) idx.
+        while self.neurons.len() < idx {
+            let pid = self.neurons.len() as NeuronId;
+            // Placeholder: empty label, atom kind, no members/terminals.
+            // Not added to label_to_id (only labelled neurons enter it).
+            let placeholder = Neuron::new_atom(
+                pid, String::new(), NeuronKind::Excitatory, 0,
+            );
+            self.neurons.push(placeholder);
+        }
+        if idx == self.neurons.len() {
+            self.neurons.push(neuron);
+        } else {
+            // idx < neurons.len() — overwrite the existing slot.  Could
+            // be a stale placeholder or a previously-merged neuron;
+            // peer-provided state wins.
+            self.neurons[idx] = neuron;
+        }
+        if !label.is_empty() {
+            self.bloom.insert(&label);
+            self.label_to_id.insert(label, id);
+        }
+        true
+    }
+
     /// Stage 17.9 — recovery-time eviction mark.  Adds an entry to the
     /// `evicted` set + `cold_offsets` index without actually writing
     /// to the cold tier (the cold-tier file's record already exists on

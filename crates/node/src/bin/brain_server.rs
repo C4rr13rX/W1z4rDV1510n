@@ -1508,8 +1508,15 @@ async fn shard_put_neuron(
         axum::http::StatusCode::BAD_REQUEST,
         format!("neuron bincode: {}", e),
     ))?;
+    // Stage 18.12 step 6+ — use the §18-aware accept_shard_insert which
+    // handles arbitrary ids by padding with placeholders.  The legacy
+    // §17.6 cluster_merge_pool requires sequential ids and rejects
+    // shard puts whose ids don't match the receiver's next slot.
     let brain = s.brain.lock().await;
-    let inserted = brain.cluster_merge_pool(req.pool_id, vec![neuron]) > 0;
+    let inserted = match brain.fabric().pool(req.pool_id) {
+        Some(pool) => pool.write().accept_shard_insert(neuron),
+        None => false,
+    };
     Ok(Json(ShardPutResponse { inserted }))
 }
 
