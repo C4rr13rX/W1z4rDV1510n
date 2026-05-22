@@ -587,9 +587,57 @@ async fn observe(
 }
 
 async fn tick(State(s): State<AppState>) -> Json<u64> {
-    let mut brain = s.brain.lock().await;
-    brain.advance_tick();
-    Json(brain.stats().tick)
+    let new_tick;
+    let mut deposits_to_ship: Option<(
+        Vec<MemberInfo>,
+        std::collections::HashMap<w1z4rd_brain::store::NodeId,
+            Vec<(PoolId, w1z4rd_brain::NeuronId, f32)>>,
+    )> = None;
+    // Single brain-mutex critical section: advance tick + scan deposits.
+    {
+        let mut brain = s.brain.lock().await;
+        brain.advance_tick();
+        new_tick = brain.stats().tick;
+
+        // Stage 18.7 auto-flush per [`ARCHITECTURE.md`] §18.7.  When
+        // the ring has > 1 member, collect cross-shard deposits while
+        // we hold the brain lock.  Shipping the deposits happens
+        // afterwards in a spawned task so /tick returns fast — the
+        // training hot path was the design constraint.
+        let (ring_size, local_node, members) = {
+            let m = s.cluster.lock().unwrap();
+            (m.members.len(), m.local_node, m.members.clone())
+        };
+        if ring_size > 1 {
+            let deposits = brain.scan_cross_shard_deposits(local_node);
+            if !deposits.is_empty() {
+                deposits_to_ship = Some((members, deposits));
+            }
+        }
+    }
+    // Brain mutex released.  Ship deposits in a spawned task so the
+    // response to /tick doesn't wait on HTTP RTTs.
+    if let Some((members, dpp)) = deposits_to_ship {
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            for (peer_node, batch) in dpp {
+                let Some(peer) = members.iter().find(|m| m.node_id == peer_node) else {
+                    continue;
+                };
+                let url = format!("{}/shard/deposit",
+                    peer.addr.trim_end_matches('/'));
+                let body = serde_json::json!({
+                    "deposits": batch.iter().map(|(p, n, s)| serde_json::json!({
+                        "pool_id": p, "neuron_id": n, "strength": s,
+                    })).collect::<Vec<_>>(),
+                });
+                let _ = client.post(&url).json(&body)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .send().await;
+            }
+        });
+    }
+    Json(new_tick)
 }
 
 /// Concept-first integration — the user's "deepest layer wins"
