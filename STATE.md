@@ -40,6 +40,38 @@ Stage 17.9 recovery in brain_server startup:
 3. `load_events_after_marker` + `apply_wal_events` replays events past
    the last `SnapshotMarker` — topology preserved after crash-without-checkpoint
 
+### Two-machine LAN cluster sync validation (2026-05-22, §17.6 full)
+
+Real cross-machine sync between this rig (192.168.1.84) and Node 2
+(DESKTOP-6E34B18 @ 192.168.1.43) over the LAN:
+
+1. Node 2 pulled `d295dce`, rebuilt `w1z4rd_brain_server` (15.6 MB, 90s on i3-7100U)
+2. This machine: `W1Z4RD_BRAIN_BIND=0.0.0.0`, toddler-trained → 1220 neurons / 24711 terminals
+3. Windows firewall rule for inbound TCP 8095 on Private profile (one admin-PS command)
+4. Node 2: brain started with `W1Z4RD_BRAIN_BIND=0.0.0.0`, fresh data dir (0 neurons)
+5. Node 2: `POST /cluster/pull_from {peer_url: http://192.168.1.84:8095}`
+6. Response: `pools_synced:6, neurons_inserted:1220` (full topology + Hebbian weights)
+7. Node 2 post-sync: 1220 neurons, 24711 terminals (identical to donor)
+
+Pure-query validation against Node 2 (no local training, only LAN-replicated state):
+
+| Query | Answer | Decoder |
+|---|---|---|
+| dog   | animal | multi_pool |
+| cat   | animal | multi_pool |
+| apple | food   | multi_pool |
+| red   | color  | multi_pool |
+| ball  | toy    | multi_pool |
+| tree  | nature | multi_pool |
+| hand  | body   | multi_pool |
+| xyzzy | (OOG)  | char_chain (honest OOV refusal) |
+
+7/7 trained prompts answered correctly via the substrate's primary
+multi_pool decoder.  1/1 OOV honestly rejected.
+
+This is the empirical close on §17.6 cluster anti-entropy for single
+pull-sync.  Continuous gossip + push variants are follow-up.
+
 ### Cluster anti-entropy validation (2026-05-22, §17.6)
 
 Same-machine two-brain pull-sync test:
