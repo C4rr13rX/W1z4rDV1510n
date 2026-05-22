@@ -3118,6 +3118,104 @@ impl Brain {
         if n == 0 { 0.0 } else { sum / (n as f32) }
     }
 
+    /// Stage 17.7 full — free-energy weighted REPLAY per
+    /// [`ARCHITECTURE.md`] §17.7.  Samples `count` moments from
+    /// `moment_history` via softmax (Boltzmann) over their salience
+    /// scores at temperature `beta`, then re-fires the sampled set.
+    ///
+    /// Mathematical form: `P(replay m_i) ∝ exp(beta * salience(m_i))`.
+    /// - `beta = 0`     → uniform sampling (every moment equally likely)
+    /// - `beta → ∞`     → deterministic top-K (the prior partial form)
+    /// - `beta ≈ 1–5`   → soft preference; high-salience moments favoured
+    ///   but exploration still happens
+    ///
+    /// This is the canonical free-energy minimisation form (Friston
+    /// 2010 active inference, Hinton et al. 1995 wake-sleep) translated
+    /// to the moment-buffer scale: low-energy / high-utility moments
+    /// (here proxied by salience EMA) are sampled preferentially, but
+    /// the temperature parameter lets the brain spend some replay
+    /// budget on exploration of less-tagged moments.
+    ///
+    /// Sampling is **without replacement** — each moment is chosen at
+    /// most once per pass.  Reproducible: same `seed` + same brain
+    /// state produces the same sampled set.
+    pub fn replay_free_energy_weighted(
+        &mut self,
+        count:    usize,
+        strength: f32,
+        beta:     f32,
+        seed:     u64,
+    ) -> usize {
+        if count == 0 || strength <= 0.0 || self.moment_history.is_empty() {
+            return 0;
+        }
+        // 1. Score every moment.
+        let scored: Vec<(f32, MomentFingerprint)> = self.moment_history
+            .iter()
+            .map(|fp| (self.moment_salience_score(fp), fp.clone()))
+            .collect();
+        // 2. Numerically-stable softmax: subtract max before exp.
+        let max_score = scored.iter().map(|(s, _)| *s)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let safe_max = if max_score.is_finite() { max_score } else { 0.0 };
+        let mut weights: Vec<f32> = scored.iter()
+            .map(|(s, _)| ((s - safe_max) * beta).exp().max(1e-30))
+            .collect();
+        let mut remaining_total: f32 = weights.iter().sum();
+
+        // 3. Sample without replacement via the cumulative-distribution
+        //    inverse method.  Local xorshift64 — deterministic given seed.
+        let mut rng_state = if seed == 0 { 0xDEADBEEF_CAFEBABE_u64 } else { seed };
+        let next_f32_unit = |state: &mut u64| -> f32 {
+            let mut x = *state;
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            *state = x;
+            let mixed = x.wrapping_mul(0x2545F4914F6CDD1D);
+            ((mixed >> 40) as f32) / ((1u32 << 24) as f32)
+        };
+        let n_target = count.min(scored.len());
+        let mut chosen: Vec<MomentFingerprint> = Vec::with_capacity(n_target);
+        for _ in 0..n_target {
+            if remaining_total <= 0.0 { break; }
+            let u = next_f32_unit(&mut rng_state) * remaining_total;
+            let mut acc = 0.0f32;
+            let mut picked = 0usize;
+            for (i, w) in weights.iter().enumerate() {
+                acc += *w;
+                if acc >= u { picked = i; break; }
+            }
+            chosen.push(scored[picked].1.clone());
+            remaining_total -= weights[picked];
+            weights[picked] = 0.0;
+        }
+
+        // 4. Re-fire each chosen moment.  Same injection + tick pattern
+        //    as the uniform / top-K replay paths above.
+        let mut replayed = 0usize;
+        for fp in &chosen {
+            let now = self.fabric.current_tick();
+            if !fp.ordered_per_pool.is_empty() {
+                for (pid, ns) in &fp.ordered_per_pool {
+                    if let Some(pool) = self.fabric.pool(*pid) {
+                        let mut pp = pool.write();
+                        for &nid in ns {
+                            pp.inject_activation(nid, strength, now);
+                        }
+                    }
+                }
+            } else {
+                for &(pid, nid) in &fp.pairs {
+                    if let Some(pool) = self.fabric.pool(pid) {
+                        pool.write().inject_activation(nid, strength, now);
+                    }
+                }
+            }
+            self.fabric.advance_tick();
+            replayed += 1;
+        }
+        replayed
+    }
+
     /// Stage 17.7 partial — salience-weighted REPLAY per
     /// [`ARCHITECTURE.md`] §17.7.  Samples the top-`count` moments from
     /// `moment_history` by their salience score, then re-fires them

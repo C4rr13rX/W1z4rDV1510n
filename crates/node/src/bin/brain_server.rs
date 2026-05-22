@@ -827,6 +827,19 @@ struct SleepRequest {
     /// shape still works.
     #[serde(default)]
     background:       bool,
+    /// Stage 17.7 full: when > 0.0, replay uses Boltzmann sampling over
+    /// salience scores at this temperature (free-energy weighting).
+    /// Default 0.0 = legacy uniform-temporal-order replay.  Suggested
+    /// production value: 2.0 (soft preference for high-salience moments
+    /// with some exploration).
+    #[serde(default)]
+    replay_beta:      f32,
+    /// Stage 17.7 full: seed for the Boltzmann sampler.  Only used when
+    /// replay_beta > 0.  Default 0 → implementation falls back to a
+    /// process-specific constant; pass a non-zero value for reproducible
+    /// runs.
+    #[serde(default)]
+    replay_seed:      u64,
 }
 fn default_sleep_min_use_count()  -> u64 { 2 }
 fn default_sleep_stale_ticks()    -> u64 { 1000 }
@@ -986,10 +999,18 @@ async fn run_decomposed_sleep(
 
     // REPLAY — CLS consolidation.  Brief brain-mutex hold; replay is
     // bounded by `count` so it's not the unbounded scan that phases 1-3
-    // could be.
+    // could be.  Stage 17.7 full: route through the free-energy
+    // weighted sampler when `replay_beta > 0`.
     let replayed = if req.replay_count > 0 {
         let mut brain = s.brain.lock().await;
-        brain.replay_recent_moments(req.replay_count, req.replay_strength)
+        if req.replay_beta > 0.0 {
+            brain.replay_free_energy_weighted(
+                req.replay_count, req.replay_strength,
+                req.replay_beta, req.replay_seed,
+            )
+        } else {
+            brain.replay_recent_moments(req.replay_count, req.replay_strength)
+        }
     } else { 0 };
 
     let tick_end = {
