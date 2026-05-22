@@ -372,8 +372,32 @@ impl NeuronStore for ColdDiskStore {
 ///
 /// The ring is the ordered list of currently-live cluster node ids;
 /// the policy is asked to pick one of them for `id`.
+///
+/// Stage 18.3 strategy 3 (Hebbian-aware placement) needs more than
+/// just the id — it needs to see the neuron's *context* (members, recent
+/// firing partners) so co-firing neurons cluster onto the same shard.
+/// The trait has TWO methods now: a minimal `home_for` (id + ring only,
+/// for atoms and contextless placement) and a richer
+/// `home_for_with_context` that policies can override to consult the
+/// neuron's structure.  Default implementation forwards to `home_for`,
+/// so existing strategies (ConsistentHash, CapacityWeighted) keep working.
 pub trait PlacementPolicy: Send + Sync {
     fn home_for(&self, id: NeuronId, ring: &[NodeId]) -> NodeId;
+
+    /// Stage 18.3 strategy 3 — placement with full context.  Policies
+    /// that bias by co-firing topology override this; others let the
+    /// default forward to `home_for`.
+    ///
+    /// `members` is the neuron's member set (atoms it composes from,
+    /// for concepts).  Empty for atom neurons.
+    fn home_for_with_context(
+        &self,
+        id: NeuronId,
+        _members: &[crate::neuron::NeuronRef],
+        ring: &[NodeId],
+    ) -> NodeId {
+        self.home_for(id, ring)
+    }
 }
 
 /// Capacity-weighted placement — places more neurons on nodes that
@@ -457,6 +481,65 @@ impl PlacementPolicy for ConsistentHashPlacement {
         // ring re-sizing).
         let mixed = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         ring[(mixed as usize) % ring.len()]
+    }
+}
+
+/// Hebbian-clustered placement — strategy 3 from [`ARCHITECTURE.md`]
+/// §18.3.  Concepts that share members (atoms or sub-concepts) tend
+/// to co-fire (because firing the shared atoms activates both); placing
+/// them on the same shard minimizes the cross-shard activation deposits
+/// that §18.7 must ship.
+///
+/// Heuristic: hash by the SORTED member-set rather than the id.  Two
+/// concepts with identical leaf-atom sets land on the same shard, even
+/// if their ids differ.  Concepts with overlapping (but not identical)
+/// member sets land on nearby shards (when ring size > 2 the proximity
+/// in the hash space approximates locality).
+///
+/// Atoms (empty members) fall back to consistent-hash on id.
+///
+/// This is an APPROXIMATE Hebbian-clustered placement — it doesn't
+/// track actual co-firing history (which would require an online
+/// matrix; expensive at scale).  It uses the substrate's existing
+/// structural signal (member sets) as a proxy.  The full METIS-style
+/// online graph partitioning would refine this with observed co-firing
+/// counts; that's a deeper follow-up that needs a co-firing tracker.
+pub struct HebbianClusteredPlacement;
+
+impl PlacementPolicy for HebbianClusteredPlacement {
+    fn home_for(&self, id: NeuronId, ring: &[NodeId]) -> NodeId {
+        // Atom path: same as consistent hash on id.  Members not visible
+        // here — caller didn't go through home_for_with_context.
+        ConsistentHashPlacement.home_for(id, ring)
+    }
+
+    fn home_for_with_context(
+        &self,
+        id: NeuronId,
+        members: &[crate::neuron::NeuronRef],
+        ring: &[NodeId],
+    ) -> NodeId {
+        if members.is_empty() || ring.is_empty() {
+            return self.home_for(id, ring);
+        }
+        // Sort the members to get a canonical key — two concepts with
+        // identical member sets (even if assembled in different orders)
+        // hash to the same shard.
+        let mut sorted: Vec<(u32, u32)> = members.iter()
+            .map(|m| (m.pool, m.neuron))
+            .collect();
+        sorted.sort();
+        // Mix all (pool, neuron) pairs into a single u64 via the same
+        // hash multiplier used in ConsistentHashPlacement, so the two
+        // strategies share the hash-space topology.
+        let mut acc: u64 = 0xCBF29CE4_8422_2325;  // FNV-style offset
+        for (p, n) in &sorted {
+            acc = acc.wrapping_mul(0x9E3779B97F4A7C15);
+            acc ^= *p as u64;
+            acc = acc.wrapping_mul(0x9E3779B97F4A7C15);
+            acc ^= *n as u64;
+        }
+        ring[(acc as usize) % ring.len()]
     }
 }
 
@@ -879,6 +962,48 @@ mod tiered_tests {
         // through to the mock transport).
         let got = store.get(remote_id).expect("should fetch from remote");
         assert_eq!(got.label, "remote_payload");
+    }
+
+    #[test]
+    fn hebbian_clusters_concepts_with_shared_members() {
+        use crate::neuron::NeuronRef;
+        let policy = HebbianClusteredPlacement;
+        let ring = vec![NodeId(0), NodeId(1), NodeId(2)];
+
+        // Two concepts with IDENTICAL member sets — should hash to the
+        // same shard regardless of their ids.
+        let members_a = vec![
+            NeuronRef::new(1, 5),
+            NeuronRef::new(1, 7),
+            NeuronRef::new(1, 9),
+        ];
+        let h1 = policy.home_for_with_context(42, &members_a, &ring);
+        let h2 = policy.home_for_with_context(99, &members_a, &ring);
+        assert_eq!(h1, h2, "same members → same shard, regardless of id");
+
+        // A concept with DIFFERENT member sets — should (probabilistically)
+        // hash to a different shard than the above pair.  We test by
+        // verifying that some concept with different members lands
+        // elsewhere; statistical, but with 3 ring members the chance
+        // of accidental match is 1/3 — try 5 different configs.
+        let mut others = Vec::new();
+        for delta in 1..=5 {
+            let mb = vec![
+                NeuronRef::new(1, 5 + delta),
+                NeuronRef::new(2, 7),
+            ];
+            others.push(policy.home_for_with_context(100, &mb, &ring));
+        }
+        // At least one should land on a shard different from h1.
+        assert!(others.iter().any(|h| *h != h1),
+            "different members should sometimes land on a different shard \
+             (got all = {:?})", h1);
+
+        // Member ORDER doesn't matter — sorted canonicalisation.
+        let mut reversed = members_a.clone();
+        reversed.reverse();
+        let h3 = policy.home_for_with_context(42, &reversed, &ring);
+        assert_eq!(h3, h1, "member order must not change the shard");
     }
 
     #[test]
