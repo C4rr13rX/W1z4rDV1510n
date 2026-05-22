@@ -244,10 +244,64 @@ def post_checkpoint(timeout: float = 60.0) -> tuple[bool, dict | str]:
 # ── Per-script driver ──────────────────────────────────────────────────────
 
 
+def _midcheck(script, posted_so_far: int, project_root: Path,
+              verbose: bool = False) -> dict | None:
+    """Run the script's benchmarks + regression-protected benchmarks
+    mid-training and append a mid_train_benchmark event so the live
+    panel can chart progress without waiting for end-of-script.
+
+    Returns the summary dict (also logged), or None on import failure.
+    """
+    try:
+        from tools.training_standard import runner as runner_mod
+        from tools.training_standard.schema import load_registry
+    except Exception as exc:  # pragma: no cover — runner is in-repo
+        print(f"  [{script.id}] midcheck import failed: {exc}", flush=True)
+        return None
+
+    registry = load_registry(runner_mod.REGISTRY_DIR)
+    own = runner_mod.run_benchmarks(script)
+    own_pass = sum(1 for r in own if r.passed)
+    prot_summary: dict[str, tuple[int, int]] = {}
+    for rp in script.regression_protects:
+        if rp.script_id not in registry:
+            continue
+        prot = registry[rp.script_id]
+        prr = runner_mod.run_benchmarks(prot)
+        prot_summary[prot.id] = (sum(1 for r in prr if r.passed), len(prr))
+        for r in prr:
+            runner_mod._emit_benchmark_event(
+                prot.id, r, prot.category, prot.phase, "mid_train_regression",
+            )
+    for r in own:
+        runner_mod._emit_benchmark_event(
+            script.id, r, script.category, script.phase, "mid_train_self",
+        )
+    runner_mod.append_event({
+        "kind":          "mid_train_benchmark",
+        "script_id":     script.id,
+        "category":      script.category,
+        "phase":         script.phase,
+        "posted_ok":     posted_so_far,
+        "self_pass":     own_pass,
+        "self_total":    len(own),
+        "protected":     {pid: {"pass": p, "total": t}
+                          for pid, (p, t) in prot_summary.items()},
+    })
+    if verbose:
+        prot_str = ", ".join(f"{pid}={p}/{t}" for pid, (p, t) in prot_summary.items()) or "-"
+        print(f"  [{script.id}] midcheck @ {posted_so_far} rows: "
+              f"self={own_pass}/{len(own)}  protected={prot_str}",
+              flush=True)
+    return {"self_pass": own_pass, "self_total": len(own),
+            "protected": prot_summary}
+
+
 def drive_one(script, repeats: int, project_root: Path,
                 verbose: bool = False, smoke: bool = True,
                 inter_post_sleep: float = 0.05,
-                burst: bool = False) -> dict:
+                burst: bool = False,
+                midcheck_rows: int = 50_000) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -292,6 +346,8 @@ def drive_one(script, repeats: int, project_root: Path,
         smoke_ran = False
         t0 = time.time()
 
+        next_midcheck = midcheck_rows if midcheck_rows > 0 else None
+
         if burst:
             # Dense-burst: pair outer, reps inner.
             for row in rows:
@@ -309,6 +365,9 @@ def drive_one(script, repeats: int, project_root: Path,
                             print(f"  [{script.id}] post fail: {err}", flush=True)
                     if inter_post_sleep > 0:
                         time.sleep(inter_post_sleep)
+                    if next_midcheck is not None and summary["posted_ok"] >= next_midcheck:
+                        _midcheck(script, summary["posted_ok"], project_root, verbose)
+                        next_midcheck += midcheck_rows
             if verbose:
                 print(f"  [{script.id}] burst done ({len(rows)} pairs x "
                         f"{repeats} reps in {time.time()-t0:.1f}s)", flush=True)
@@ -330,6 +389,9 @@ def drive_one(script, repeats: int, project_root: Path,
                             print(f"  [{script.id}] post fail: {err}", flush=True)
                     if inter_post_sleep > 0:
                         time.sleep(inter_post_sleep)
+                    if next_midcheck is not None and summary["posted_ok"] >= next_midcheck:
+                        _midcheck(script, summary["posted_ok"], project_root, verbose)
+                        next_midcheck += midcheck_rows
                 if verbose:
                     print(f"  [{script.id}] rep {r+1}/{repeats} "
                             f"({len(rows)} pairs in {time.time()-t_rep:.1f}s)",
@@ -377,6 +439,11 @@ def main(argv: list[str] | None = None) -> int:
                      help="skip the inline post-first-repeat smoke test")
     p.add_argument("--phase-max", type=int, default=None,
                      help="run only scripts with phase <= this value")
+    p.add_argument("--midcheck-rows", type=int, default=50_000,
+                     help="re-run the script's own + protected benchmarks "
+                          "every N successful POSTs (default 50,000; set to 0 "
+                          "to disable mid-training checks).  Events logged "
+                          "as kind=mid_train_benchmark in training_events.jsonl.")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -433,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
                             verbose=args.verbose,
                             smoke=not args.no_smoke,
                             inter_post_sleep=args.inter_post_sleep,
-                            burst=args.burst)
+                            burst=args.burst,
+                            midcheck_rows=args.midcheck_rows)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
