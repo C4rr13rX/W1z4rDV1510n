@@ -20,6 +20,8 @@
 //! - Stage 18.12 step 4: `TieredStore` composing the three with a
 //!   placement policy (consistent hash, salience-tiered, co-firing).
 
+use std::sync::Arc;
+
 use crate::neuron::{Neuron, NeuronId};
 
 /// Logical cluster-node identifier.  In Solo mode the brain has a
@@ -249,5 +251,183 @@ mod tests {
         let s = RamStore::with_node_id(NodeId(7));
         assert_eq!(s.home_for(0), NodeId(7));
         assert_eq!(s.home_for(999_999), NodeId(7));
+    }
+}
+
+// ============================================================================
+// ColdDiskStore — §18.12 step 2: wraps the §17.4 ColdTier through the
+// NeuronStore trait so a tiered store can route puts to disk uniformly.
+// ============================================================================
+
+use ahash::AHashMap;
+
+use crate::store::cold::ColdTier;
+
+/// NeuronStore impl backed by a §17.4 ColdTier append-only file.
+/// Maintains an in-RAM offset index (`NeuronId → byte offset`) since
+/// the cold tier file itself is purely append-only — random reads need
+/// the offset to seek.
+///
+/// This is the §18.12 step 2 adapter: it surfaces the existing cold-
+/// tier substrate behind the unified NeuronStore trait.  Stage 18.12
+/// step 4 will compose this with RamStore + RemoteNodeStore in
+/// TieredStore.
+pub struct ColdDiskStore {
+    tier:    Arc<ColdTier>,
+    offsets: parking_lot::RwLock<AHashMap<NeuronId, u64>>,
+    node_id: NodeId,
+}
+
+impl ColdDiskStore {
+    /// Construct from an already-opened ColdTier (typically shared with
+    /// the Pool that previously owned it during the §17.4 eviction
+    /// phase).  Starts with an empty offset index; populate via `put`
+    /// or `seed_offsets` if restoring from a snapshot.
+    pub fn new(tier: Arc<ColdTier>) -> Self {
+        Self {
+            tier,
+            offsets: parking_lot::RwLock::new(AHashMap::new()),
+            node_id: NodeId(0),
+        }
+    }
+
+    /// Seed the offset index from a previously-persisted map (e.g. the
+    /// PoolSnapshot's `cold_offsets` per §17.4 step 5).
+    pub fn seed_offsets<I>(&self, iter: I)
+    where I: IntoIterator<Item = (NeuronId, u64)> {
+        let mut g = self.offsets.write();
+        for (id, off) in iter { g.insert(id, off); }
+    }
+
+    pub fn with_node_id(mut self, node_id: NodeId) -> Self {
+        self.node_id = node_id;
+        self
+    }
+}
+
+impl NeuronStore for ColdDiskStore {
+    fn get(&self, id: NeuronId) -> Option<Neuron> {
+        let offset = *self.offsets.read().get(&id)?;
+        match self.tier.read_neuron(offset) {
+            Ok(n)  => Some(n),
+            Err(e) => {
+                tracing::warn!(
+                    "ColdDiskStore::get(id={}) read failed at offset {}: {}",
+                    id, offset, e,
+                );
+                None
+            }
+        }
+    }
+
+    fn put(&self, id: NeuronId, n: Neuron) {
+        // §17.4 ColdTier is append-only — every put writes a new record.
+        // Old records become garbage; a future compaction pass reclaims
+        // them.  This matches LSM-tree semantics (Rosenblum & Ousterhout
+        // 1991; RocksDB).
+        let mut neuron = n;
+        if neuron.id != id { neuron.id = id; }
+        match self.tier.append_neuron(&neuron) {
+            Ok(offset) => {
+                self.offsets.write().insert(id, offset);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "ColdDiskStore::put(id={}) append failed: {}", id, e,
+                );
+            }
+        }
+    }
+
+    fn delete(&self, id: NeuronId) {
+        self.offsets.write().remove(&id);
+        // Cold-tier data left in place; compaction follow-up reclaims.
+    }
+
+    fn iter_ids<'a>(&'a self) -> Box<dyn Iterator<Item = NeuronId> + 'a> {
+        let g = self.offsets.read();
+        let ids: Vec<NeuronId> = g.keys().copied().collect();
+        Box::new(ids.into_iter())
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.read().len()
+    }
+
+    fn home_for(&self, _id: NeuronId) -> NodeId {
+        self.node_id
+    }
+}
+
+#[cfg(test)]
+mod cold_disk_tests {
+    use super::*;
+    use crate::neuron::NeuronKind;
+    use std::path::PathBuf;
+
+    fn tmpdir(test: &str) -> PathBuf {
+        let pid = std::process::id();
+        let nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let d = std::env::temp_dir()
+            .join(format!("w1z4rd_colddiskstore_{}_{}_{}", test, pid, nano));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn n(id: u32, label: &str) -> Neuron {
+        Neuron::new_atom(id, label.to_string(), NeuronKind::Excitatory, 0)
+    }
+
+    #[test]
+    fn put_then_get_round_trips() {
+        let dir = tmpdir("rt");
+        let tier = Arc::new(ColdTier::open(dir.join("pool.cold")).unwrap());
+        let s = ColdDiskStore::new(tier);
+        s.put(0, n(0, "x"));
+        s.put(1, n(1, "y"));
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.get(0).unwrap().label, "x");
+        assert_eq!(s.get(1).unwrap().label, "y");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_drops_from_index_but_data_stays_on_disk() {
+        let dir = tmpdir("delete");
+        let tier = Arc::new(ColdTier::open(dir.join("pool.cold")).unwrap());
+        let s = ColdDiskStore::new(tier);
+        s.put(0, n(0, "x"));
+        s.put(1, n(1, "y"));
+        let _bytes_before = std::fs::metadata(dir.join("pool.cold"))
+            .unwrap().len();
+        s.delete(0);
+        assert_eq!(s.len(), 1);
+        assert!(s.get(0).is_none());
+        let bytes_after = std::fs::metadata(dir.join("pool.cold"))
+            .unwrap().len();
+        // Disk size unchanged — append-only semantics; garbage stays
+        // for compaction.
+        assert!(bytes_after >= _bytes_before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn seed_offsets_restores_state_from_snapshot() {
+        let dir = tmpdir("seed");
+        let tier = Arc::new(ColdTier::open(dir.join("pool.cold")).unwrap());
+        let s1 = ColdDiskStore::new(tier.clone());
+        s1.put(7, n(7, "seven"));
+        // Capture id+offset (simulating what PoolSnapshot.cold_offsets does).
+        let snap: Vec<(NeuronId, u64)> = s1.offsets.read().iter()
+            .map(|(k, v)| (*k, *v)).collect();
+        drop(s1);
+
+        // Fresh store, seed the offset index, read should succeed.
+        let s2 = ColdDiskStore::new(tier);
+        s2.seed_offsets(snap);
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2.get(7).unwrap().label, "seven");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

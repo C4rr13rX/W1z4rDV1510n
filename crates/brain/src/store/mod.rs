@@ -36,4 +36,4 @@ pub use bloom::CountingBloom;
 pub use merkle::{PoolRoot, compute_pool_root};
 pub use control::{StorageConfig, StorageControlState};
 pub use cold::ColdTier;
-pub use neuron_store::{NeuronStore, NodeId, RamStore};
+pub use neuron_store::{ColdDiskStore, NeuronStore, NodeId, RamStore};
