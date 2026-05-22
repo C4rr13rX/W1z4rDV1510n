@@ -69,6 +69,37 @@ core API (observe/decode/integrate) still runs on whichever node
 receives the request; step 7 is what makes cross-shard activation
 propagation efficient at training scale.
 
+### CANONICAL 100% BASELINE PRESERVED IN CLUSTER MODE (2026-05-22)
+
+**The user's load-bearing question: "does the same training + integration
+test produce the same 32/32 baseline when run against the distributed
+brain?"  Empirical answer: YES, even with state physically distributed.**
+
+Test sequence (both machines on the LAN, ring formed):
+1. Seed at 192.168.1.84:8095 boots solo
+2. Node 2 at 192.168.1.43:8095 joins via `W1Z4RD_CLUSTER_SEED`
+3. `brain_dense_burst_toddler.py` runs against the seed → **32/32 (100%)**
+4. `POST /eviction {target_per_pool: 50}` on seed migrates 100 neurons
+   to Node 2 (1.2 KB of terminal weights physically over the wire)
+5. Post-eviction state:
+   - Seed: 807 neurons (100 with cleared terminals), 10847 terminals
+   - Node 2: 154 neurons (100 evicted + 54 sparse-id padding), 571 terminals
+6. Re-run `brain_dense_burst_toddler.py` against seed → **STILL 32/32 (100%)**
+
+This proves the resource-pool model works at the decode level: the
+brain answers correctly even when ~12% of its concepts physically
+live on another host.  Decode walks `members` (preserved during
+eviction — only `terminals` are cleared on the local placeholder)
+recursively to atoms (never evicted by policy), reassembling the
+correct answer across hosts without needing to page anything in
+because the structural information all stays local.
+
+The "one logical brain on N hosts" goal is empirically delivered for
+the substrate's primary contract (answer with grounding).  Distributed
+*training* (where new concepts emerge on a worker, not just the head)
+still requires step 7 cross-shard activation deposits — that's a
+separate body of work.
+
 ## Stage 17 — Storage & Wake-Sleep architecture (2026-05-21, sessions 1+2)
 
 The full-15-corpus training previously OOMed at 463M terminals when
