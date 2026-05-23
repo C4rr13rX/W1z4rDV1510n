@@ -645,7 +645,11 @@ async fn tick(State(s): State<AppState>) -> Json<u64> {
     {
         let mut brain = s.brain.lock().await;
         brain.advance_tick();
-        new_tick = brain.stats().tick;
+        // brain.stats() walks every neuron in every pool to count
+        // terminals — at 1.5M neurons / 170M terminals that's ~360ms
+        // of pure metadata work for a value we only use as .tick.
+        // Use fabric().current_tick() directly to skip the O(N) walk.
+        new_tick = brain.fabric().current_tick();
 
         // Stage 18.7 auto-flush per [`ARCHITECTURE.md`] §18.7.  When
         // the ring has > 1 member, collect cross-shard deposits while
