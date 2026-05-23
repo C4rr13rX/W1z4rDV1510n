@@ -1,0 +1,48 @@
+[script]
+id          = "domain_ai_ml_001"
+category    = "code_generation"
+phase       = 40
+description = """
+Deep-learning domain corpus from the d2l-ai/d2l-en textbook (Apache 2.0).
+722 rows of rigorous DL prose (gradients, attention, transformers,
+regularisation, optimisation) paired with PyTorch / TensorFlow / JAX
+implementations.
+
+Tests whether the brain can recall the canonical neural-net building
+blocks when given a textbook-style spec.
+"""
+depends_on  = ["domain_scientific_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/d2l_full.jsonl"
+
+[[benchmarks]]
+label         = "pytorch nn module"
+prompt        = "Define a PyTorch `nn.Module` subclass with a single linear layer that maps input dim to output dim."
+must_include  = ["nn.Module", "nn.Linear", "forward"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "cross-entropy loss"
+prompt        = "Compute cross-entropy loss between predictions and labels in PyTorch."
+must_include  = ["cross_entropy"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "training loop step"
+prompt        = "Write one step of a PyTorch training loop: forward pass, loss, backward, optimizer step."
+must_include  = ["backward", "step"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.3
+
+[[regression_protects]]
+script_id = "domain_scientific_python_001"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

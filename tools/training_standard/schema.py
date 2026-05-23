@@ -35,6 +35,11 @@ CATEGORIES = {
     # Cross-modal: text ↔ image/audio/pdf paired training so the multi-pool
     # fabric forms cross-pool synapses between modality pools.
     "multimodal_pairs",
+    # Math / scientific quantitative reasoning (gsm8k, MetaMathQA,
+    # MathInstruct, competition_math).  Prose problem → worked solution;
+    # distinct from code_generation because the response is an argument,
+    # not executable code.
+    "reasoning",
 }
 
 # Code languages the AST validator understands.  Anything else means

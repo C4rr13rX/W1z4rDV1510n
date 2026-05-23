@@ -1,0 +1,50 @@
+[script]
+id          = "programming_literacy_python_001"
+category    = "code_generation"
+phase       = 20
+description = """
+Foundational Python literacy.  The corpus is CodeSearchNet's 421K
+permissively-licensed Python functions paired with their docstrings,
+plus 5x paraphrased variants of the same pairs so the brain learns
+that different phrasings of the same intent map to the same code.
+
+This is the floor for every later code-generation script.  Failing
+its benchmarks means the brain hasn't yet learned that 'function +
+docstring' is the canonical paired-text shape.
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/csn_python_full.jsonl"
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/csn_python_full_para5.jsonl"
+
+[[benchmarks]]
+label         = "fibonacci recursive"
+prompt        = "Write a python function `fibonacci` that returns the nth Fibonacci number."
+must_include  = ["def fibonacci", "return"]
+forbidden     = ["TODO", "..."]
+must_be_valid = "python"
+min_score     = 0.6
+
+[[benchmarks]]
+label         = "is_prime check"
+prompt        = "Write a python function `is_prime` that returns True if n is prime."
+must_include  = ["def is_prime", "return", "True"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "merge_sort"
+prompt        = "Write a python function `merge_sort` that sorts a list."
+must_include  = ["def merge_sort", "return"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

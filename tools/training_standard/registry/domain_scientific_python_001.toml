@@ -1,0 +1,68 @@
+[script]
+id          = "domain_scientific_python_001"
+category    = "code_generation"
+phase       = 30
+description = """
+Scientific Python — numpy, scipy, pandas, sklearn, matplotlib, torch,
+tensorflow, jax, astropy, biopython, sympy, statsmodels, pymc, etc.
+
+Corpus: bigcode/jupyter-code-text-pairs filtered to rows whose code
+imports at least one scientific library (690K base) + 4x paraphrased
+variants (2.76M) + partial-context graceful-degradation variants
+(207K).  All permissive (per-row license filter).
+
+This is the heart of "extremely scientific work" — researchers'
+plain-English explanations paired with numpy/torch/jax code that
+implements them.
+"""
+depends_on  = ["programming_literacy_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/jupyter_scientific_full.jsonl"
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/jupyter_scientific_para4.jsonl"
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/jupyter_scientific_partial.jsonl"
+
+[[benchmarks]]
+label         = "numpy mean and std"
+prompt        = "Compute the mean and standard deviation of a numpy array `x`."
+must_include  = ["np.mean", "np.std"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "matplotlib histogram"
+prompt        = "Plot a histogram of an array `data` using matplotlib."
+must_include  = ["plt.hist", "data"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "sklearn linear regression"
+prompt        = "Fit a scikit-learn LinearRegression model to X and y."
+must_include  = ["LinearRegression", "fit"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "pandas read csv"
+prompt        = "Read a CSV file `data.csv` into a pandas DataFrame."
+must_include  = ["pd.read_csv", "data.csv"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[regression_protects]]
+script_id = "programming_literacy_python_001"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

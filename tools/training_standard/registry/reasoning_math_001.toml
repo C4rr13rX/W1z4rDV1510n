@@ -1,0 +1,62 @@
+[script]
+id          = "reasoning_math_001"
+category    = "reasoning"
+phase       = 45
+description = """
+Quantitative-reasoning corpus: three permissive math Q&A datasets
+unified through the math_reasoning ingest adapter.
+
+  gsm8k         (MIT)   7,473 grade-school arithmetic word problems
+  MetaMathQA    (MIT)   385,524 augmented algebra / geometry / calculus
+  MathInstruct  (MIT)   245,323 multi-source math instruction tuning
+
+Total ~638K rows.  Each pair is (English problem with embedded LaTeX,
+worked step-by-step solution ending in the answer).  Distinct from
+code corpora — the response is a chain of reasoning, not executable
+code.  Teaches the brain HOW TO DERIVE quantitative answers, which
+later code-generation can lean on when implementing scientific
+algorithms.
+
+Benchmarks deliberately use the simplest one-step problems so the
+brain's recall is being tested, not multi-step proof composition.
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/gsm8k.jsonl"
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/metamathqa.jsonl"
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/mathinstruct.jsonl"
+
+[[benchmarks]]
+label         = "arithmetic word problem"
+prompt        = "A train travels 60 miles per hour for 3 hours. How many miles does the train travel?"
+must_include  = ["180"]
+forbidden     = []
+min_score     = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label         = "linear equation"
+prompt        = "Solve for x: 2x + 5 = 11."
+must_include  = ["3"]
+forbidden     = []
+min_score     = 0.5
+expected_structure = "prose"
+
+[[benchmarks]]
+label         = "geometry area"
+prompt        = "What is the area of a rectangle with length 7 and width 4?"
+must_include  = ["28"]
+forbidden     = []
+min_score     = 0.5
+expected_structure = "prose"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

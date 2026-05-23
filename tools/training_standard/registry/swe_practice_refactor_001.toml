@@ -1,0 +1,53 @@
+[script]
+id          = "swe_practice_refactor_001"
+category    = "code_generation"
+phase       = 35
+description = """
+Software-engineering practice corpus — real commits where the message
+reads like an instruction and the diff is small enough to learn from.
+Corpus: bigcode/commitpackft (MIT) — each row is one commit, prompt
+is the commit subject + body, response is the new_contents.
+
+Intent atom inferred from the verb in the subject (fix/refactor/test/
+document/implement).  This trains the brain to recall not just code,
+but how a working engineer EDITS code in response to a one-line
+instruction.
+
+NOTE: currently using the 500-row smoke output; full CPFT ingest
+(~150K rows) is queued for a later pass.
+"""
+depends_on  = ["programming_literacy_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/cpft_python_smoke.jsonl"
+
+[[benchmarks]]
+label         = "fix off-by-one"
+prompt        = "Fix the off-by-one error in this loop: `for i in range(len(a)-1): print(a[i+1])`"
+must_include  = ["for", "range", "print"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "refactor list comprehension"
+prompt        = "Refactor this Python function to use a list comprehension instead of a for loop."
+must_include  = ["[", "for", "in", "]"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.3
+
+[[benchmarks]]
+label         = "add error handling"
+prompt        = "Add error handling to a function that reads a file and parses it as JSON."
+must_include  = ["try", "except"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.3
+
+[[regression_protects]]
+script_id = "programming_literacy_python_001"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

@@ -1,0 +1,41 @@
+[script]
+id          = "domain_scientific_numpy_001"
+category    = "code_generation"
+phase       = 41
+description = """
+NumPy-focused tutorial corpus from numpy/numpy-tutorials (BSD-3-Clause).
+Only 43 rows in the current ingest (the MyST fence regex misses some
+of the upstream code blocks; the TODO in markdown_book.py will lift
+this count significantly in a future pass).
+
+Even at 43 rows this script is useful as a *signal-quality* gate —
+its benchmarks are tight numpy idioms that should pass after the
+parent domain_scientific_python_001 script trains.
+"""
+depends_on  = ["domain_scientific_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/numpy_tutorials.jsonl"
+
+[[benchmarks]]
+label         = "numpy reshape"
+prompt        = "Reshape a 1D numpy array `a` of length 12 into a 3x4 2D array."
+must_include  = ["reshape", "3", "4"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "numpy einsum dot product"
+prompt        = "Compute the dot product of two numpy vectors `a` and `b` using np.dot."
+must_include  = ["np.dot", "a", "b"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[regression_protects]]
+script_id = "domain_scientific_python_001"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

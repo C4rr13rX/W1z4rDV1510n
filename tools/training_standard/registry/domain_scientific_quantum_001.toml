@@ -1,0 +1,41 @@
+[script]
+id          = "domain_scientific_quantum_001"
+category    = "code_generation"
+phase       = 42
+description = """
+Quantum-computing domain corpus from qiskit-community/qiskit-textbook
+(Apache 2.0).  1,586 rows of quantum-mechanics prose (superposition,
+entanglement, gates, algorithms — Deutsch-Jozsa, Grover, Shor, QFT,
+quantum teleportation) paired with Qiskit Python implementations.
+
+Distinct domain from classical ML so the brain forms a separate
+mini-column for quantum-state vocabulary (|0>, |1>, density matrices,
+Hadamard / CNOT / X / Y / Z gates).
+"""
+depends_on  = ["domain_scientific_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/qiskit_textbook.jsonl"
+
+[[benchmarks]]
+label         = "qiskit two-qubit circuit"
+prompt        = "Create a Qiskit QuantumCircuit with 2 qubits and apply a Hadamard gate to qubit 0."
+must_include  = ["QuantumCircuit", "h(0)"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "qiskit cnot bell pair"
+prompt        = "Use Qiskit to create a Bell pair on qubits 0 and 1."
+must_include  = ["QuantumCircuit", "h(0)", "cx(0"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.3
+
+[[regression_protects]]
+script_id = "domain_scientific_python_001"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"

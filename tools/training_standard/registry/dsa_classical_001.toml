@@ -1,0 +1,49 @@
+[script]
+id          = "dsa_classical_001"
+category    = "code_generation"
+phase       = 25
+description = """
+Classical data structures + algorithms.  Corpus: TheAlgorithms/Python
+(MIT) — 1,953 function-level rows where each row is one canonical
+algorithm with a clean descriptive docstring.
+
+Distinct from programming_literacy_python_001 because every row here
+is the *canonical reference* implementation rather than one random
+public function.  Benchmarks therefore demand specific algorithm
+names + structural correctness.
+"""
+depends_on  = ["programming_literacy_python_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "D:/w1z4rdv1510n-data/training/the_algorithms_full.jsonl"
+
+[[benchmarks]]
+label         = "binary_search"
+prompt        = "Implement binary search in Python."
+must_include  = ["def", "return", "mid"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "bubble_sort"
+prompt        = "Implement bubble sort in Python."
+must_include  = ["def", "for", "return"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "dijkstra shortest path"
+prompt        = "Implement Dijkstra's shortest-path algorithm in Python."
+must_include  = ["def", "return"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[regression_protects]]
+script_id = "programming_literacy_python_001"
+
+[[regression_protects]]
+script_id = "conversation_basics_001"
