@@ -119,6 +119,43 @@ def _clean_prose(s: str) -> str:
     return "\n".join(out).strip()
 
 
+def _split_ipynb(text: str) -> Iterator[tuple[str, str, str]]:
+    """Yield (prose_before, lang, code) for each code cell in a .ipynb
+    JSON file.  Notebook-level metadata.language_info.name is used as
+    the lang when individual cells don't carry one (which they usually
+    don't — Jupyter notebooks have one kernel language)."""
+    try:
+        nb = json.loads(text)
+    except Exception:
+        return
+    cells = nb.get("cells") or []
+    nb_lang = (
+        ((nb.get("metadata") or {}).get("language_info") or {}).get("name")
+        or ((nb.get("metadata") or {}).get("kernelspec") or {}).get("language")
+        or "python"
+    ).lower()
+    if nb_lang in ("python3", "ipython3", "ipython"):
+        nb_lang = "python"
+
+    prose_buf: list[str] = []
+    for cell in cells:
+        ct = cell.get("cell_type")
+        src = cell.get("source")
+        if isinstance(src, list):
+            src = "".join(src)
+        elif not isinstance(src, str):
+            continue
+        if ct == "markdown":
+            prose_buf.append(src)
+        elif ct == "code":
+            prose_raw = "\n\n".join(prose_buf).strip()
+            paragraphs = re.split(r"\n\s*\n", prose_raw)
+            prose = _clean_prose("\n\n".join(paragraphs[-3:]))
+            yield prose, nb_lang, src
+            prose_buf = []
+        # raw / other cells: ignored
+
+
 def _split_md(text: str) -> Iterator[tuple[str, str, str]]:
     """Yield (prose_before, lang, code) for each fenced code block in
     order.  prose_before is the markdown content since the previous
@@ -184,7 +221,7 @@ def ingest(
     }
 
     md_paths: list[Path] = []
-    for ext in ("*.md", "*.myst", "*.qmd"):
+    for ext in ("*.md", "*.myst", "*.qmd", "*.ipynb"):
         md_paths.extend(src_dir.rglob(ext))
     md_paths.sort()
 
@@ -199,7 +236,8 @@ def ingest(
             except OSError:
                 continue
             rel = path.relative_to(src_dir).as_posix()
-            for prose, lang, code in _split_md(text):
+            splitter = _split_ipynb if path.suffix == ".ipynb" else _split_md
+            for prose, lang, code in splitter(text):
                 counters["blocks_seen"] += 1
                 if limit is not None and counters["written"] >= limit:
                     break
