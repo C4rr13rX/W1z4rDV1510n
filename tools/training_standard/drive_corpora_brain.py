@@ -301,7 +301,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 verbose: bool = False, smoke: bool = True,
                 inter_post_sleep: float = 0.05,
                 burst: bool = False,
-                midcheck_rows: int = 50_000) -> dict:
+                midcheck_rows: int = 50_000,
+                limit_rows: int | None = None) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -342,6 +343,11 @@ def drive_one(script, repeats: int, project_root: Path,
             print(f"  [{script.id}] corpus missing or empty: {corpus_path}",
                     flush=True)
             continue
+        if limit_rows is not None and len(rows) > limit_rows:
+            rows = rows[:limit_rows]
+            if verbose:
+                print(f"  [{script.id}] corpus limited to {limit_rows} rows "
+                      f"(--limit-rows)", flush=True)
         summary["pairs"] += len(rows)
         smoke_ran = False
         t0 = time.time()
@@ -444,6 +450,11 @@ def main(argv: list[str] | None = None) -> int:
                           "every N successful POSTs (default 50,000; set to 0 "
                           "to disable mid-training checks).  Events logged "
                           "as kind=mid_train_benchmark in training_events.jsonl.")
+    p.add_argument("--limit-rows", type=int, default=None,
+                     help="cap rows ingested per script per input to N "
+                          "(useful for smoke tests on large corpora).  "
+                          "Applies BEFORE repeats — N rows are observed "
+                          "`repeats` times.")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -501,7 +512,8 @@ def main(argv: list[str] | None = None) -> int:
                             smoke=not args.no_smoke,
                             inter_post_sleep=args.inter_post_sleep,
                             burst=args.burst,
-                            midcheck_rows=args.midcheck_rows)
+                            midcheck_rows=args.midcheck_rows,
+                            limit_rows=args.limit_rows)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
