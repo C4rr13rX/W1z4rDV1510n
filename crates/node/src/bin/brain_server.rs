@@ -2318,6 +2318,7 @@ async fn chat(
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    eprintln!("[brain_server] starting (build with tick-prof eprintln + total_terminals counter)");
 
     let data = data_dir();
     std::fs::create_dir_all(&data).with_context(|| format!("mkdir {}", data.display()))?;

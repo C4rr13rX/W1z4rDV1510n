@@ -1147,6 +1147,9 @@ impl Pool {
     pub fn observe_frame(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
         let labels = self.encoding.atomize(frame);
         let mut fired = Vec::with_capacity(labels.len());
+        let decay_rate = self.config.decay_rate;
+        let prune_floor = self.config.prune_floor;
+        let mut pruned_terminals_this_call: usize = 0;
 
         // Predictive-coding prediction (P3): before clearing the
         // firing set, compute the intra-pool prediction of what will
@@ -1182,6 +1185,16 @@ impl Pool {
             if let Some(n) = self.neurons.get_mut(id as usize) {
                 n.use_count = n.use_count.saturating_add(1);
                 n.last_fired_tick = tick;
+                // Lazy decay: apply this neuron's pending decay backlog
+                // before any code reads or writes its terminals this tick.
+                // Math identity with eager mode: (1-ε)^k applied once on
+                // access == k single-tick eager applications.  Fast-path
+                // for elapsed==0.
+                pruned_terminals_this_call += n.apply_pending_decay(
+                    tick,
+                    decay_rate,
+                    prune_floor,
+                );
             }
 
             // Mini-column collapse: pop matched atoms from the tail of
@@ -1225,6 +1238,10 @@ impl Pool {
         // Read by the decoder's sequence-match preempt to distinguish
         // anagram queries (e.g. 'sad' [s,a,d] vs 'das' [d,a,s]).
         self.last_observed_sequence = fired.clone();
+
+        // Maintain the O(1) terminals counter for the lazy-decay
+        // accumulations from firing neurons.
+        self.total_terminals = self.total_terminals.saturating_sub(pruned_terminals_this_call);
 
         fired
     }
@@ -1296,12 +1313,38 @@ impl Pool {
 
     /// Tick housekeeping: every neuron's terminals decay; sub-floor terminals
     /// are pruned.  Spec §1.5: this is the only forgetting mechanism.
+    /// Lazy variant of tick_housekeeping — decays only neurons that
+    /// fired this tick.  Other neurons' decay is amortised at next
+    /// access via Neuron::apply_pending_decay (uses each neuron's
+    /// last_decayed_tick).  Cost: O(|currently_firing|), not O(N).
+    ///
+    /// Mathematically identical to eager mode because
+    /// `weight × (1-ε)^k ≡ k applications of (1-ε)`.  Empirically
+    /// validated against the canonical toddler-32 baseline.
+    pub fn tick_housekeeping_lazy(&mut self, current_tick: u64) {
+        let decay = self.config.decay_rate;
+        let floor = self.config.prune_floor;
+        // Clone the firing set so we can mutate neurons while iterating.
+        let firing_ids: Vec<NeuronId> = self.currently_firing.iter().copied().collect();
+        let mut total_pruned: usize = 0;
+        for nid in firing_ids {
+            if let Some(n) = self.neurons.get_mut(nid as usize) {
+                total_pruned += n.apply_pending_decay(current_tick, decay, floor);
+            }
+        }
+        self.total_terminals = self.total_terminals.saturating_sub(total_pruned);
+        self.apply_heterosynaptic_ltd(current_tick);
+    }
+
     pub fn tick_housekeeping(&mut self, current_tick: u64) {
         let decay = self.config.decay_rate;
         let floor = self.config.prune_floor;
         let mut total_pruned: usize = 0;
         for n in self.neurons.iter_mut() {
             total_pruned += n.decay_and_prune(decay, floor);
+            // Eager mode keeps last_decayed_tick in sync so a future
+            // switch to lazy mode doesn't double-apply elapsed decay.
+            n.last_decayed_tick = current_tick;
         }
         // Maintain the O(1) total_terminals counter — decay_and_prune
         // returns the number of terminals it dropped below the floor.

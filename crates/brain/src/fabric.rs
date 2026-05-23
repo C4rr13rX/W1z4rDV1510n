@@ -464,27 +464,40 @@ impl Fabric {
         // Per-pool housekeeping: decay every terminal, prune sub-floor,
         // apply heterosynaptic LTD, apply k-WTA sparsity.
         //
-        // BENCHMARK GATE (2026-05-22): /tick_profile showed 99.994% of
-        // empty-tick time goes here (decay sweep over 170M terminals).
-        // To A/B test the lazy-decay shortcut hypothesis without
-        // implementing per-terminal last_touched_tick first, this loop
-        // can be skipped entirely via W1Z4RD_TICK_HOUSEKEEPING=skip.
-        //
-        // Math impact when skipped: terminal weights don't decay between
-        // accesses.  Over a short ingest window (minutes), the
-        // accumulated error is small because (1-ε)^k ≈ 1 - kε for small kε.
-        // Recall behaviour should be ~identical for short runs —
-        // empirically validated against the canonical toddler-32 baseline
-        // before the shortcut is made the default.
-        //
-        // Values: "eager" (default, current behaviour) | "skip"
-        // (no-op for benchmark) | "lazy" (future: on-access decay)
+        // Mode is W1Z4RD_TICK_HOUSEKEEPING:
+        //   eager  (default): walk every neuron in every pool, apply
+        //          (1-ε) to every terminal.  O(total_terminals) per tick.
+        //          Was the dominant cost — 99.994 % of empty-tick time
+        //          per /tick_profile diagnostics in commit c5f5642.
+        //   lazy:  decay only neurons that fired THIS tick.  All other
+        //          neurons' decay is applied lazily on next access via
+        //          Neuron::apply_pending_decay, using last_decayed_tick.
+        //          Mathematically identical to eager because
+        //          weight × (1-ε)^k applied once == k eager applications.
+        //          Cost is O(|firing_set|), not O(total_terminals).
+        //   skip:  no-op.  For benchmarking only — terminal weights never
+        //          decay; over long runs the fabric bloats with dead
+        //          terminals.  Use lazy for production.
         let phase_t0 = std::time::Instant::now();
         let mode = std::env::var("W1Z4RD_TICK_HOUSEKEEPING")
             .unwrap_or_else(|_| "eager".to_string());
-        if mode != "skip" {
-            for (_, pool) in self.pools.iter() {
-                pool.write().tick_housekeeping(self.tick);
+        match mode.as_str() {
+            "skip" => { /* nothing */ }
+            "lazy" => {
+                // Decay only what fired this tick.  Cross-pool wiring
+                // sites also call apply_pending_decay on the neuron
+                // they're about to reinforce, so any neuron involved
+                // in cross-pool growth gets accurate decay applied
+                // before its weights are touched.
+                let tick = self.tick;
+                for (_, pool) in self.pools.iter() {
+                    pool.write().tick_housekeeping_lazy(tick);
+                }
+            }
+            _ /* eager */ => {
+                for (_, pool) in self.pools.iter() {
+                    pool.write().tick_housekeeping(self.tick);
+                }
             }
         }
         self.profile.housekeeping_ns

@@ -126,6 +126,18 @@ pub struct Neuron {
     /// Long-horizon EMA of `salience`.  Used by eviction policy.
     #[serde(default)]
     pub salience_ema:         f32,
+    /// Tick at which this neuron's terminals were last decayed.
+    /// Enables lazy decay — on access, we compute (1 - ε)^(now -
+    /// last_decayed_tick) and apply it in one shot rather than walking
+    /// every terminal on every tick.  Mathematically identical to the
+    /// eager per-tick sweep, modulo terminals on neurons that never
+    /// get accessed (those leak until a sleep-cycle full sweep
+    /// reclaims them).  `#[serde(default)]` so older brain.bin files
+    /// without this field load cleanly — they'll get `last_decayed_tick
+    /// = 0`, which means the next access will apply the entire elapsed
+    /// decay backlog (correct, just expensive that one time).
+    #[serde(default)]
+    pub last_decayed_tick:    u64,
 }
 
 impl Neuron {
@@ -142,6 +154,7 @@ impl Neuron {
             prediction_error_ema: 0.0,
             salience: 0.0,
             salience_ema: 0.0,
+            last_decayed_tick: tick,
         }
     }
 
@@ -167,6 +180,7 @@ impl Neuron {
             // 0.01 keeps them above noise but well below atoms in active use.
             salience: 0.01,
             salience_ema: 0.01,
+            last_decayed_tick: tick,
         }
     }
 
@@ -241,6 +255,40 @@ impl Neuron {
             self.terminals.push(Terminal::new(target, delta.min(max_weight), tick));
             true
         }
+    }
+
+    /// Lazy decay: apply (1 - epsilon)^(now - last_decayed_tick) to every
+    /// terminal in one shot, prune any that fell below `floor`, then
+    /// update `last_decayed_tick = now`.  Mathematically identical to the
+    /// eager per-tick sweep — `weight × (1-ε) × (1-ε) × … (k times)` ≡
+    /// `weight × (1-ε)^k` — so the brain's recall behaviour is unchanged.
+    ///
+    /// Returns the number of terminals pruned.  Caller must subtract
+    /// that count from the owning Pool's `total_terminals` to keep the
+    /// O(1) counter consistent.
+    ///
+    /// Cheap when `now == last_decayed_tick` (no elapsed → fast path:
+    /// no walk).  At elapsed=k, cost is O(|terminals|) — same as the
+    /// eager sweep but only when the neuron is actually accessed.
+    pub fn apply_pending_decay(&mut self, now: u64, epsilon: f32, floor: f32) -> usize {
+        let elapsed = now.saturating_sub(self.last_decayed_tick);
+        if elapsed == 0 || epsilon <= 0.0 {
+            self.last_decayed_tick = now;
+            return 0;
+        }
+        let factor = (1.0 - epsilon).powi(elapsed.min(i32::MAX as u64) as i32);
+        let mut pruned = 0;
+        self.terminals.retain_mut(|t| {
+            t.weight *= factor;
+            if t.weight < floor {
+                pruned += 1;
+                false
+            } else {
+                true
+            }
+        });
+        self.last_decayed_tick = now;
+        pruned
     }
 
     /// Decay every terminal toward zero by `(1 - epsilon)` and remove any
