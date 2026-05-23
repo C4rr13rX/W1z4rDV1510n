@@ -43,7 +43,7 @@ pub mod store;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig};
-pub use fabric::{Fabric, FabricConfig, Moment, SettleResult};
+pub use fabric::{Fabric, FabricConfig, Moment, SettleResult, TickProfile, TickProfileSnapshot};
 pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,
 };

@@ -586,6 +586,54 @@ async fn observe(
     Ok(Json(ObserveResponse { fired_neurons: fired.len() }))
 }
 
+/// Per-phase advance_tick timing.  Read-only — does NOT require the
+/// brain mutex (the underlying counters are atomics).  Lets us watch
+/// where the wall-time goes without instrumenting via printf or a
+/// full Rust profiler.  Returns cumulative nanoseconds since process
+/// start plus convenience per-tick averages.
+async fn tick_profile(State(s): State<AppState>) -> Json<serde_json::Value> {
+    // We need a snapshot of the fabric's profile.  The brain mutex is
+    // only held briefly to grab the Arc<TickProfile> pointer — the
+    // actual reads are lock-free atomics.
+    let snap = {
+        let brain = s.brain.lock().await;
+        brain.fabric().tick_profile()
+    };
+    let ticks = snap.ticks.max(1);
+    let mean_total_us = (snap.total_ns / ticks) / 1_000;
+    let mean_cross_atom_us = (snap.cross_pool_atom_wiring_ns / ticks) / 1_000;
+    let mean_cross_concept_us = (snap.cross_pool_concept_wiring_ns / ticks) / 1_000;
+    let mean_within_temporal_us = (snap.within_pool_temporal_ns / ticks) / 1_000;
+    let mean_housekeeping_us = (snap.housekeeping_ns / ticks) / 1_000;
+    Json(serde_json::json!({
+        "ticks": snap.ticks,
+        "cumulative_ns": {
+            "cross_pool_atom_wiring":    snap.cross_pool_atom_wiring_ns,
+            "cross_pool_concept_wiring": snap.cross_pool_concept_wiring_ns,
+            "within_pool_temporal":      snap.within_pool_temporal_ns,
+            "housekeeping":              snap.housekeeping_ns,
+            "total":                     snap.total_ns,
+        },
+        "mean_per_tick_us": {
+            "cross_pool_atom_wiring":    mean_cross_atom_us,
+            "cross_pool_concept_wiring": mean_cross_concept_us,
+            "within_pool_temporal":      mean_within_temporal_us,
+            "housekeeping":              mean_housekeeping_us,
+            "total":                     mean_total_us,
+        },
+        "phase_pct_of_total": {
+            "cross_pool_atom_wiring":    pct(snap.cross_pool_atom_wiring_ns,    snap.total_ns),
+            "cross_pool_concept_wiring": pct(snap.cross_pool_concept_wiring_ns, snap.total_ns),
+            "within_pool_temporal":      pct(snap.within_pool_temporal_ns,      snap.total_ns),
+            "housekeeping":              pct(snap.housekeeping_ns,              snap.total_ns),
+        },
+    }))
+}
+
+fn pct(num: u64, denom: u64) -> f64 {
+    if denom == 0 { 0.0 } else { (num as f64) * 100.0 / (denom as f64) }
+}
+
 async fn tick(State(s): State<AppState>) -> Json<u64> {
     let new_tick;
     let mut deposits_to_ship: Option<(
@@ -2332,6 +2380,7 @@ async fn main() -> Result<()> {
         .route("/stats",                 get(stats))
         .route("/observe",               post(observe))
         .route("/tick",                  post(tick))
+        .route("/tick_profile",          get(tick_profile))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))
         .route("/integrate_resonant",    post(integrate_resonant))

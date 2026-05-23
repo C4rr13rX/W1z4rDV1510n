@@ -13,10 +13,49 @@
 use ahash::AHashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::neuron::{NeuronId, NeuronRef, PoolId};
 use crate::pool::Pool;
 use crate::store::{NoopStore, Store, WalEvent};
+
+/// Per-phase nanosecond counters for advance_tick.  Cumulative since
+/// fabric construction; the brain server exposes them via /tick_profile
+/// so we can find the dominant cost without spinning up a Rust
+/// profiler.  Atomics so reads from the HTTP layer don't need the
+/// brain mutex.
+#[derive(Debug, Default)]
+pub struct TickProfile {
+    pub ticks:                          AtomicU64,
+    pub cross_pool_atom_wiring_ns:      AtomicU64,
+    pub cross_pool_concept_wiring_ns:   AtomicU64,
+    pub within_pool_temporal_ns:        AtomicU64,
+    pub housekeeping_ns:                AtomicU64,
+    pub total_ns:                       AtomicU64,
+}
+
+impl TickProfile {
+    pub fn snapshot(&self) -> TickProfileSnapshot {
+        TickProfileSnapshot {
+            ticks:                        self.ticks.load(Ordering::Relaxed),
+            cross_pool_atom_wiring_ns:    self.cross_pool_atom_wiring_ns.load(Ordering::Relaxed),
+            cross_pool_concept_wiring_ns: self.cross_pool_concept_wiring_ns.load(Ordering::Relaxed),
+            within_pool_temporal_ns:      self.within_pool_temporal_ns.load(Ordering::Relaxed),
+            housekeeping_ns:              self.housekeeping_ns.load(Ordering::Relaxed),
+            total_ns:                     self.total_ns.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TickProfileSnapshot {
+    pub ticks:                        u64,
+    pub cross_pool_atom_wiring_ns:    u64,
+    pub cross_pool_concept_wiring_ns: u64,
+    pub within_pool_temporal_ns:      u64,
+    pub housekeeping_ns:              u64,
+    pub total_ns:                     u64,
+}
 
 /// What fired in every pool at a given tick.  Used by cross-pool wiring:
 /// pairs of neurons firing within the same tick get an axon terminal
@@ -86,6 +125,9 @@ pub struct Fabric {
     /// each pool on registration via [`Fabric::set_store`] so neurogenesis
     /// events flow to the same WAL.  Default is [`NoopStore`].
     store: Arc<dyn Store>,
+    /// Per-phase advance_tick timing.  Atomic so /tick_profile reads
+    /// don't need the brain mutex.  Initialised to zero.
+    pub profile: Arc<TickProfile>,
 }
 
 impl Fabric {
@@ -97,7 +139,14 @@ impl Fabric {
             tick:               0,
             prev_tick_concepts: AHashMap::new(),
             store:              Arc::new(NoopStore),
+            profile:            Arc::new(TickProfile::default()),
         }
+    }
+
+    /// Snapshot of the per-phase tick timing.  Cumulative counters; for
+    /// per-tick mean divide by snapshot.ticks.
+    pub fn tick_profile(&self) -> TickProfileSnapshot {
+        self.profile.snapshot()
     }
 
     /// Attach a persistence backend per [`ARCHITECTURE.md`] §17.9.  Fans
@@ -165,6 +214,9 @@ impl Fabric {
             // in the live backend via set_store after restore so subsequent
             // observations get logged.
             store:              Arc::new(NoopStore),
+            // Fresh profile on restore — pre-snapshot ticks aren't
+            // attributed here, only ticks after this point.
+            profile:            Arc::new(TickProfile::default()),
         };
         let mut missing = Vec::new();
         for pid in snap.pool_order {
@@ -223,12 +275,15 @@ impl Fabric {
     /// fresh moment for the new tick.  Also runs per-pool housekeeping
     /// (decay + prune).
     pub fn advance_tick(&mut self) {
+        let tick_t0 = std::time::Instant::now();
+
         // Close the prior moment: any pair of neurons in different pools
         // that both fired this tick gets a cross-pool axon terminal
         // grown / strengthened.  Same-pool co-firing isn't wired here
         // because within-pool concept emergence (the Pool's job) is the
         // proper mechanism for that — wiring atom→atom here would just
         // duplicate the atom-pair Hebbian effect.
+        let phase_t0 = std::time::Instant::now();
         let lr = self.config.cross_pool_lr;
         let pool_ids: Vec<PoolId> = self.current.fired.keys().copied().collect();
 
@@ -273,6 +328,9 @@ impl Fabric {
             }
         }
 
+        self.profile.cross_pool_atom_wiring_ns
+            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
         // Stage 3 (position-aware binding): cross-pool concept→concept
         // wiring.  Concepts encode positional sequences in their
         // member-vec; co-firing concepts across pools represent
@@ -280,6 +338,7 @@ impl Fabric {
         // distinguish "P000" from "P010" because their firing-sets
         // are identical.  Concept-level wiring CAN, because the
         // emerged P000-concept and P010-concept are distinct neurons.
+        let phase_t0 = std::time::Instant::now();
         let concept_lr = self.config.cross_pool_concept_lr;
         if concept_lr > 0.0 {
             // Snapshot per-pool concept firings from currently_firing.
@@ -338,6 +397,9 @@ impl Fabric {
             }
         }
 
+        self.profile.cross_pool_concept_wiring_ns
+            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
         // Stage 2b: within-pool concept→concept temporal wiring.
         // For each pool, identify the CONCEPT neurons currently firing
         // (atoms excluded — they're handled by within-pool emergence
@@ -346,6 +408,7 @@ impl Fabric {
         // now.  This is what gives the substrate "what follows what"
         // structure above the atom layer — needed for coherent
         // sequential generation (Stage 2's `Brain::generate`).
+        let phase_t0 = std::time::Instant::now();
         let all_pool_ids: Vec<PoolId> = self.pools.keys().copied().collect();
         for pid in all_pool_ids {
             let pool = match self.pools.get(&pid) {
@@ -385,11 +448,21 @@ impl Fabric {
             self.prev_tick_concepts.insert(pid, current_concepts);
         }
 
+        self.profile.within_pool_temporal_ns
+            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
         // Per-pool housekeeping: decay every terminal, prune sub-floor,
         // apply heterosynaptic LTD, apply k-WTA sparsity.
+        let phase_t0 = std::time::Instant::now();
         for (_, pool) in self.pools.iter() {
             pool.write().tick_housekeeping(self.tick);
         }
+        self.profile.housekeeping_ns
+            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        self.profile.ticks.fetch_add(1, Ordering::Relaxed);
+        self.profile.total_ns
+            .fetch_add(tick_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         self.tick += 1;
         self.current = Moment::new(self.tick);
