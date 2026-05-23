@@ -453,9 +453,29 @@ impl Fabric {
 
         // Per-pool housekeeping: decay every terminal, prune sub-floor,
         // apply heterosynaptic LTD, apply k-WTA sparsity.
+        //
+        // BENCHMARK GATE (2026-05-22): /tick_profile showed 99.994% of
+        // empty-tick time goes here (decay sweep over 170M terminals).
+        // To A/B test the lazy-decay shortcut hypothesis without
+        // implementing per-terminal last_touched_tick first, this loop
+        // can be skipped entirely via W1Z4RD_TICK_HOUSEKEEPING=skip.
+        //
+        // Math impact when skipped: terminal weights don't decay between
+        // accesses.  Over a short ingest window (minutes), the
+        // accumulated error is small because (1-ε)^k ≈ 1 - kε for small kε.
+        // Recall behaviour should be ~identical for short runs —
+        // empirically validated against the canonical toddler-32 baseline
+        // before the shortcut is made the default.
+        //
+        // Values: "eager" (default, current behaviour) | "skip"
+        // (no-op for benchmark) | "lazy" (future: on-access decay)
         let phase_t0 = std::time::Instant::now();
-        for (_, pool) in self.pools.iter() {
-            pool.write().tick_housekeeping(self.tick);
+        let mode = std::env::var("W1Z4RD_TICK_HOUSEKEEPING")
+            .unwrap_or_else(|_| "eager".to_string());
+        if mode != "skip" {
+            for (_, pool) in self.pools.iter() {
+                pool.write().tick_housekeeping(self.tick);
+            }
         }
         self.profile.housekeeping_ns
             .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
