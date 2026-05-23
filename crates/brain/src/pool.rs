@@ -1037,14 +1037,23 @@ impl Pool {
             bloom.insert(k);
         }
 
+        // Sort every neuron's terminals by target so reinforce_terminal's
+        // binary_search invariant holds.  One-time O(total_terminals ×
+        // log(avg_fanout)) cost on load (~30s at 170M terminals on this
+        // host).  Pre-existing snapshots have unsorted terminals; new
+        // ones maintain the invariant via insert-at-position.
+        let mut neurons = snap.neurons;
+        for n in neurons.iter_mut() {
+            n.sort_terminals_by_target();
+        }
         // Compute exact count once before moving neurons into the
         // struct.  Subsequent mutations maintain it incrementally.
         let total_terminals_init: usize =
-            snap.neurons.iter().map(|n| n.terminals.len()).sum();
+            neurons.iter().map(|n| n.terminals.len()).sum();
         let mut pool = Self {
             config:           snap.config,
             encoding,
-            neurons:          snap.neurons,
+            neurons,
             label_to_id,
             concept_multiset_to_id: AHashMap::new(),
             recent_atoms:     snap.recent_atoms,

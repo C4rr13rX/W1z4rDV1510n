@@ -20,7 +20,7 @@ pub type NeuronId = u32;
 /// Cross-pool-capable neuron reference.  Used in [`Neuron::members`] and
 /// [`Terminal::target`] so binding concepts and cross-pool axons are
 /// expressed by the same primitive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NeuronRef {
     pub pool: PoolId,
     pub neuron: NeuronId,
@@ -245,21 +245,42 @@ impl Neuron {
         tick:       u64,
         max_weight: f32,
     ) -> bool {
-        // Linear search is fine for typical fan-outs (terminal counts are
-        // bounded by survival pruning; a healthy neuron carries dozens to
-        // low hundreds).  When this becomes a bottleneck, swap for a
-        // sorted-Vec binary search keyed by target.
-        if let Some(t) = self.terminals.iter_mut().find(|t| t.target == target) {
-            t.weight = (t.weight + delta).min(max_weight);
-            if t.last_fired_tick != tick {
-                t.consolidation = t.consolidation.saturating_add(1);
-                t.last_fired_tick = tick;
+        // Binary search on terminals sorted by `target`.  Hot-path
+        // optimization: at 100-300 firing concepts per pool per tick and
+        // 100+ terminals per neuron, the previous linear search was the
+        // single dominant cost (~60% of advance_tick on real corpora,
+        // per /tick_profile in commit c5f5642).
+        //
+        // Maintains invariant: `terminals` is sorted by `target`.  The
+        // invariant is established by Pool::from_snapshot on load, and
+        // by this function for fresh neurons (sorted by construction
+        // since first insert is at position 0).
+        match self.terminals.binary_search_by_key(&target, |t| t.target) {
+            Ok(idx) => {
+                let t = &mut self.terminals[idx];
+                t.weight = (t.weight + delta).min(max_weight);
+                if t.last_fired_tick != tick {
+                    t.consolidation = t.consolidation.saturating_add(1);
+                    t.last_fired_tick = tick;
+                }
+                false
             }
-            false
-        } else {
-            self.terminals.push(Terminal::new(target, delta.min(max_weight), tick));
-            true
+            Err(idx) => {
+                self.terminals.insert(idx, Terminal::new(
+                    target, delta.min(max_weight), tick,
+                ));
+                true
+            }
         }
+    }
+
+    /// Sort terminals by target — call once on snapshot restore to
+    /// establish the invariant required by `reinforce_terminal`'s
+    /// binary search.  For freshly-constructed neurons the invariant
+    /// holds by construction (insertions go through reinforce_terminal
+    /// which inserts at the binary-search position).
+    pub fn sort_terminals_by_target(&mut self) {
+        self.terminals.sort_by_key(|t| t.target);
     }
 
     /// Lazy decay: apply (1 - epsilon)^(now - last_decayed_tick) to every
