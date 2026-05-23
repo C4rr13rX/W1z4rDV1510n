@@ -113,6 +113,23 @@ pub struct Neuron {
     /// order in this Vec, NEVER by mangling atom identity.
     pub members:              Vec<NeuronRef>,
     pub terminals:            Vec<Terminal>,
+    /// Address-by-name index over `terminals`: `target → position in
+    /// the Vec`.  Maintained alongside every terminal mutation so
+    /// reinforce_terminal becomes O(1): "ask the named connection if
+    /// it exists, on miss the error path triggers neurogenesis."
+    ///
+    /// Rebuilt on snapshot restore (#[serde(skip)]) — the index is a
+    /// cache over the persistent `terminals` Vec, not part of the
+    /// canonical state.  Cost: ~16 B per entry × 170 M terminals at
+    /// fabric peak = ~3 GB extra working set, acceptable for the
+    /// O(N) → O(1) speedup on the cross-pool wiring hot path.
+    ///
+    /// INVARIANT: for every i ∈ 0..terminals.len(),
+    ///   terminal_idx[terminals[i].target] == i
+    /// Any prune/retain over `terminals` must also rebuild this map
+    /// (cheap — O(|terminals|), called via Neuron::rebuild_terminal_idx).
+    #[serde(skip)]
+    pub terminal_idx:         ahash::AHashMap<NeuronRef, usize>,
     pub born_tick:            u64,
     pub last_fired_tick:      u64,
     pub use_count:            u64,
@@ -160,6 +177,7 @@ impl Neuron {
             salience: 0.0,
             salience_ema: 0.0,
             last_decayed_tick: tick,
+            terminal_idx: ahash::AHashMap::new(),
         }
     }
 
@@ -186,6 +204,7 @@ impl Neuron {
             salience: 0.01,
             salience_ema: 0.01,
             last_decayed_tick: tick,
+            terminal_idx: ahash::AHashMap::new(),
         }
     }
 
@@ -245,42 +264,45 @@ impl Neuron {
         tick:       u64,
         max_weight: f32,
     ) -> bool {
-        // Binary search on terminals sorted by `target`.  Hot-path
-        // optimization: at 100-300 firing concepts per pool per tick and
-        // 100+ terminals per neuron, the previous linear search was the
-        // single dominant cost (~60% of advance_tick on real corpora,
-        // per /tick_profile in commit c5f5642).
+        // Address-by-name semantics: the caller already knows which
+        // target it wants.  `terminal_idx.get(&target)` answers "does
+        // the dendrite at `target` exist?" in O(1).  Two paths:
         //
-        // Maintains invariant: `terminals` is sorted by `target`.  The
-        // invariant is established by Pool::from_snapshot on load, and
-        // by this function for fresh neurons (sorted by construction
-        // since first insert is at position 0).
-        match self.terminals.binary_search_by_key(&target, |t| t.target) {
-            Ok(idx) => {
-                let t = &mut self.terminals[idx];
-                t.weight = (t.weight + delta).min(max_weight);
-                if t.last_fired_tick != tick {
-                    t.consolidation = t.consolidation.saturating_add(1);
-                    t.last_fired_tick = tick;
-                }
-                false
+        //   Some(idx) → the connection exists; strengthen it in place.
+        //   None      → no connection yet; neurogenesis: append a new
+        //               Terminal and register its index.
+        //
+        // INVARIANT preserved: index entry stays consistent with the
+        // Vec because we only ever `push` (which is O(1) and doesn't
+        // shift existing positions).  Any caller that prunes terminals
+        // MUST call rebuild_terminal_idx — handled by decay_and_prune
+        // and apply_pending_decay below.
+        if let Some(&idx) = self.terminal_idx.get(&target) {
+            let t = &mut self.terminals[idx];
+            t.weight = (t.weight + delta).min(max_weight);
+            if t.last_fired_tick != tick {
+                t.consolidation = t.consolidation.saturating_add(1);
+                t.last_fired_tick = tick;
             }
-            Err(idx) => {
-                self.terminals.insert(idx, Terminal::new(
-                    target, delta.min(max_weight), tick,
-                ));
-                true
-            }
+            false
+        } else {
+            let idx = self.terminals.len();
+            self.terminals.push(Terminal::new(target, delta.min(max_weight), tick));
+            self.terminal_idx.insert(target, idx);
+            true
         }
     }
 
-    /// Sort terminals by target — call once on snapshot restore to
-    /// establish the invariant required by `reinforce_terminal`'s
-    /// binary search.  For freshly-constructed neurons the invariant
-    /// holds by construction (insertions go through reinforce_terminal
-    /// which inserts at the binary-search position).
-    pub fn sort_terminals_by_target(&mut self) {
-        self.terminals.sort_by_key(|t| t.target);
+    /// Rebuild the `terminal_idx` cache from `terminals`.  O(|terminals|).
+    /// Call after any operation that removes entries from `terminals`
+    /// (retain, drain, clear, pop) — append-only operations preserve
+    /// the invariant and do NOT need a rebuild.
+    pub fn rebuild_terminal_idx(&mut self) {
+        self.terminal_idx.clear();
+        self.terminal_idx.reserve(self.terminals.len());
+        for (i, t) in self.terminals.iter().enumerate() {
+            self.terminal_idx.insert(t.target, i);
+        }
     }
 
     /// Lazy decay: apply (1 - epsilon)^(now - last_decayed_tick) to every
@@ -326,6 +348,9 @@ impl Neuron {
                 true
             }
         });
+        if pruned > 0 {
+            self.rebuild_terminal_idx();
+        }
         self.last_decayed_tick = now;
         pruned
     }
@@ -345,6 +370,9 @@ impl Neuron {
                 true
             }
         });
+        if pruned > 0 {
+            self.rebuild_terminal_idx();
+        }
         pruned
     }
 }

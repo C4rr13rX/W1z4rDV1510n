@@ -502,6 +502,8 @@ impl Pool {
         let dropped = n.terminals.len();
         n.terminals.clear();
         n.terminals.shrink_to_fit();
+        n.terminal_idx.clear();
+        n.terminal_idx.shrink_to_fit();
         n.prediction_error_ema = 0.0;
         self.total_terminals = self.total_terminals.saturating_sub(dropped);
         // Salience/EMA stay in RAM — they're the signal eviction policy
@@ -1037,14 +1039,16 @@ impl Pool {
             bloom.insert(k);
         }
 
-        // Sort every neuron's terminals by target so reinforce_terminal's
-        // binary_search invariant holds.  One-time O(total_terminals ×
-        // log(avg_fanout)) cost on load (~30s at 170M terminals on this
-        // host).  Pre-existing snapshots have unsorted terminals; new
-        // ones maintain the invariant via insert-at-position.
+        // Rebuild every neuron's terminal_idx — it's #[serde(skip)] so
+        // restored snapshots load with an empty index, which would make
+        // reinforce_terminal think every connection is new (catastrophic:
+        // it would push duplicate terminals and double neurogenesis).
+        // The rebuild restores the address-by-name invariant before any
+        // training-path code can touch a neuron.  One-time O(total_terminals)
+        // cost on load — ~5-10s at 170M terminals on this host.
         let mut neurons = snap.neurons;
         for n in neurons.iter_mut() {
-            n.sort_terminals_by_target();
+            n.rebuild_terminal_idx();
         }
         // Compute exact count once before moving neurons into the
         // struct.  Subsequent mutations maintain it incrementally.
@@ -1475,6 +1479,7 @@ impl Pool {
             if let Some(n) = self.neurons.get_mut(cid as usize) {
                 dropped += n.terminals.len();
                 n.terminals.clear();
+                n.terminal_idx.clear();
                 let label = n.label.clone();
                 self.label_to_id.remove(&label);
                 self.bloom.remove(&label);
@@ -1484,14 +1489,18 @@ impl Pool {
         // Remove inbound terminals targeting pruned concepts from EVERY
         // other neuron in this pool.  Cross-pool terminals targeting
         // these concepts from other pools must be cleaned up by the
-        // caller (Fabric::sleep does this).
+        // caller (Fabric::sleep does this).  Every neuron whose
+        // terminals get retained must have its terminal_idx rebuilt.
         let pool_id = self.config.id;
         for n in self.neurons.iter_mut() {
             let before = n.terminals.len();
             n.terminals.retain(|t| {
                 !(t.target.pool == pool_id && to_prune.contains(&t.target.neuron))
             });
-            dropped += before - n.terminals.len();
+            if n.terminals.len() != before {
+                n.rebuild_terminal_idx();
+                dropped += before - n.terminals.len();
+            }
         }
         self.total_terminals = self.total_terminals.saturating_sub(dropped);
 
@@ -1522,7 +1531,10 @@ impl Pool {
         for n in self.neurons.iter_mut() {
             let before = n.terminals.len();
             n.terminals.retain(|t| !targets.contains(&t.target));
-            removed += before - n.terminals.len();
+            if n.terminals.len() != before {
+                n.rebuild_terminal_idx();
+                removed += before - n.terminals.len();
+            }
         }
         self.total_terminals = self.total_terminals.saturating_sub(removed);
         removed
