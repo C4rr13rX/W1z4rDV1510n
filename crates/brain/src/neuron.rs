@@ -214,13 +214,18 @@ impl Neuron {
     /// Insert or strengthen a terminal toward `target`.  Idempotent on
     /// repeated calls: the weight saturates against `max_weight` and the
     /// consolidation counter increments once per distinct tick.
+    /// Reinforce a terminal toward `target`.  Returns `true` iff this
+    /// call added a brand-new terminal (so callers that hold the owning
+    /// Pool can keep an O(1) `total_terminals` counter accurate without
+    /// re-scanning every neuron).  Returns `false` when an existing
+    /// terminal was strengthened in place.
     pub fn reinforce_terminal(
         &mut self,
         target:     NeuronRef,
         delta:      f32,
         tick:       u64,
         max_weight: f32,
-    ) {
+    ) -> bool {
         // Linear search is fine for typical fan-outs (terminal counts are
         // bounded by survival pruning; a healthy neuron carries dozens to
         // low hundreds).  When this becomes a bottleneck, swap for a
@@ -231,8 +236,10 @@ impl Neuron {
                 t.consolidation = t.consolidation.saturating_add(1);
                 t.last_fired_tick = tick;
             }
+            false
         } else {
             self.terminals.push(Terminal::new(target, delta.min(max_weight), tick));
+            true
         }
     }
 

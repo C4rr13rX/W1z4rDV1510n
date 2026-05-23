@@ -706,9 +706,14 @@ impl Brain {
         );
         // Wire concept → member terminals top-down so activating the
         // binding fires its constituent neurons in all pools.
+        let mut added: usize = 0;
         for m in &members {
-            neuron.reinforce_terminal(*m, 0.5, now, max_w);
+            if neuron.reinforce_terminal(*m, 0.5, now, max_w) { added += 1; }
         }
+        // append_neuron pushes the new concept (with its `added` terminals
+        // already attached) onto the binding pool, so the counter grows
+        // by exactly `added`.
+        binding.total_terminals += added;
         binding.append_neuron(neuron, label.clone());
         drop(binding);
 
@@ -719,9 +724,10 @@ impl Brain {
             if let Some(p) = self.fabric.pool(m.pool) {
                 let mut pp = p.write();
                 let mxw = pp.config.max_weight;
-                if let Some(n) = pp.get_mut(m.neuron) {
-                    n.reinforce_terminal(binding_ref, 0.5, now, mxw);
-                }
+                let was_added = if let Some(n) = pp.get_mut(m.neuron) {
+                    n.reinforce_terminal(binding_ref, 0.5, now, mxw)
+                } else { false };
+                if was_added { pp.total_terminals += 1; }
             }
         }
         Some(id)
@@ -2689,13 +2695,16 @@ impl Brain {
             };
             let mut sp = src_pool.write();
             let max_w = sp.config.max_weight;
+            let mut delta_terminals: usize = 0;
             if let Some(n) = sp.get_mut(src.neuron) {
                 // Positive: strengthen via the same idempotent
                 // reinforce path.  Negative: directly subtract from
                 // the existing terminal's weight (clamped at 0; prune
                 // happens on the next housekeeping pass).
                 if score >= 0.0 {
-                    n.reinforce_terminal(event.action_neuron, score, now, max_w);
+                    if n.reinforce_terminal(event.action_neuron, score, now, max_w) {
+                        delta_terminals = 1;
+                    }
                 } else {
                     if let Some(t) = n.terminals.iter_mut()
                         .find(|t| t.target == event.action_neuron)
@@ -2705,6 +2714,7 @@ impl Brain {
                     }
                 }
             }
+            sp.total_terminals += delta_terminals;
         }
         true
     }
@@ -3984,8 +3994,9 @@ impl Brain {
                 stats.total_neurons += nc;
                 let cc = pool.concept_count();
                 stats.total_concepts += cc;
-                stats.total_terminals += pool.iter_neurons()
-                    .map(|n| n.terminals.len()).sum::<usize>();
+                // O(1) — maintained terminal counter (was O(N) walk
+                // before pool.total_terminals was introduced).
+                stats.total_terminals += pool.total_terminals();
                 if pid == self.binding_pool_id {
                     stats.total_binding += cc;
                 }

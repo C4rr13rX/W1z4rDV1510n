@@ -635,16 +635,23 @@ fn pct(num: u64, denom: u64) -> f64 {
 }
 
 async fn tick(State(s): State<AppState>) -> Json<u64> {
+    let _t_handler = std::time::Instant::now();
     let new_tick;
     let mut deposits_to_ship: Option<(
         Vec<MemberInfo>,
         std::collections::HashMap<w1z4rd_brain::store::NodeId,
             Vec<(PoolId, w1z4rd_brain::NeuronId, f32)>>,
     )> = None;
+    let t_pre_lock = std::time::Instant::now();
+    let lock_acq_us: u128;
+    let adv_us: u128;
     // Single brain-mutex critical section: advance tick + scan deposits.
     {
         let mut brain = s.brain.lock().await;
+        lock_acq_us = t_pre_lock.elapsed().as_micros();
+        let t_inner = std::time::Instant::now();
         brain.advance_tick();
+        adv_us = t_inner.elapsed().as_micros();
         // brain.stats() walks every neuron in every pool to count
         // terminals — at 1.5M neurons / 170M terminals that's ~360ms
         // of pure metadata work for a value we only use as .tick.
@@ -688,6 +695,13 @@ async fn tick(State(s): State<AppState>) -> Json<u64> {
                     .send().await;
             }
         });
+    }
+    let total_us = _t_handler.elapsed().as_micros();
+    if total_us > 50_000 {
+        eprintln!(
+            "[tick-prof] total={}us lock_acq={}us advance={}us",
+            total_us, lock_acq_us, adv_us
+        );
     }
     Json(new_tick)
 }

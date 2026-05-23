@@ -295,6 +295,18 @@ pub struct Pool {
     /// = dense connectivity (high-LTD candidate).
     terminal_count_ema: f32,
 
+    /// EXACT total terminal count across all neurons in this pool.
+    /// Maintained incrementally on every terminal mutation:
+    ///   + Neuron::reinforce_terminal returning true (new terminal added)
+    ///   - Neuron::decay_and_prune returning N pruned
+    ///   - prune_weak_concepts zeroing terminals
+    ///   - terminals.clear() during concept emergence
+    /// Reading this is O(1) — replaces the O(N) `iter().map(|n|
+    /// n.terminals.len()).sum()` that used to live in brain.stats() and
+    /// in pool.update_emas() and that turned every /stats call into a
+    /// full-fabric scan.
+    pub(crate) total_terminals: usize,
+
     /// Persistence backend per [`ARCHITECTURE.md`] §17.9.  Default is a
     /// [`NoopStore`] — pools constructed without an explicit store stay
     /// purely in-memory.  When the brain plugs in an [`crate::store::MmapWalStore`]
@@ -368,6 +380,7 @@ impl Pool {
             firing_rate_ema:  0.0,
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
+            total_terminals: 0,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
             store: Arc::new(NoopStore),
@@ -486,9 +499,11 @@ impl Pool {
         // consumer is `terminals`, which we shed entirely; on page-in
         // those come back from disk OR from a remote peer.
         let n = self.neurons.get_mut(id as usize).unwrap();
+        let dropped = n.terminals.len();
         n.terminals.clear();
         n.terminals.shrink_to_fit();
         n.prediction_error_ema = 0.0;
+        self.total_terminals = self.total_terminals.saturating_sub(dropped);
         // Salience/EMA stay in RAM — they're the signal eviction policy
         // uses to choose what to evict, so they remain readable post-evict.
 
@@ -798,6 +813,12 @@ impl Pool {
     pub fn name(&self) -> &str        { &self.config.name }
     pub fn encoding_name(&self) -> &'static str { self.encoding.name() }
     pub fn neuron_count(&self) -> usize { self.neurons.len() }
+
+    /// O(1) read of the maintained total-terminal counter.  Replaces
+    /// the formerly O(N) `iter_neurons().map(|n| n.terminals.len()).sum()`
+    /// pattern that turned every brain.stats() call into a fabric-wide
+    /// scan.
+    pub fn total_terminals(&self) -> usize { self.total_terminals }
     pub fn concept_count(&self) -> usize {
         self.neurons.iter().filter(|n| !n.is_atom()).count()
     }
@@ -829,8 +850,10 @@ impl Pool {
         self.firing_rate_ema = self.firing_rate_ema * (1.0 - ALPHA) + firing * ALPHA;
         let n_concepts = self.neurons.iter().filter(|n| !n.is_atom()).count() as f32;
         self.concept_count_ema = self.concept_count_ema * (1.0 - ALPHA) + n_concepts * ALPHA;
-        let n_terms: usize = self.neurons.iter().map(|n| n.terminals.len()).sum();
-        self.terminal_count_ema = self.terminal_count_ema * (1.0 - ALPHA) + (n_terms as f32) * ALPHA;
+        // O(1) — formerly an O(N) walk; total_terminals is maintained
+        // incrementally on every terminal mutation.
+        let n_terms = self.total_terminals as f32;
+        self.terminal_count_ema = self.terminal_count_ema * (1.0 - ALPHA) + n_terms * ALPHA;
     }
 
     /// Record one decode-time precision sample (winning binding's
@@ -1014,6 +1037,10 @@ impl Pool {
             bloom.insert(k);
         }
 
+        // Compute exact count once before moving neurons into the
+        // struct.  Subsequent mutations maintain it incrementally.
+        let total_terminals_init: usize =
+            snap.neurons.iter().map(|n| n.terminals.len()).sum();
         let mut pool = Self {
             config:           snap.config,
             encoding,
@@ -1028,6 +1055,7 @@ impl Pool {
             firing_rate_ema:  0.0,
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
+            total_terminals: total_terminals_init,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
             // Restored-from-snapshot pools start with NoopStore; caller
@@ -1271,9 +1299,13 @@ impl Pool {
     pub fn tick_housekeeping(&mut self, current_tick: u64) {
         let decay = self.config.decay_rate;
         let floor = self.config.prune_floor;
+        let mut total_pruned: usize = 0;
         for n in self.neurons.iter_mut() {
-            n.decay_and_prune(decay, floor);
+            total_pruned += n.decay_and_prune(decay, floor);
         }
+        // Maintain the O(1) total_terminals counter — decay_and_prune
+        // returns the number of terminals it dropped below the floor.
+        self.total_terminals = self.total_terminals.saturating_sub(total_pruned);
         self.apply_heterosynaptic_ltd(current_tick);
         // Note: k-WTA sparsity gate moved to observe_frame() so it
         // runs BEFORE the Fabric captures the moment fingerprint.
@@ -1386,8 +1418,10 @@ impl Pool {
         // entries from label_to_id (so they can't collapse again).
         // Also decrement the Bloom side-car (Stage 17.3) so a later
         // `label_might_exist` query for the same label correctly says no.
+        let mut dropped: usize = 0;
         for &cid in &to_prune {
             if let Some(n) = self.neurons.get_mut(cid as usize) {
+                dropped += n.terminals.len();
                 n.terminals.clear();
                 let label = n.label.clone();
                 self.label_to_id.remove(&label);
@@ -1401,10 +1435,13 @@ impl Pool {
         // caller (Fabric::sleep does this).
         let pool_id = self.config.id;
         for n in self.neurons.iter_mut() {
+            let before = n.terminals.len();
             n.terminals.retain(|t| {
                 !(t.target.pool == pool_id && to_prune.contains(&t.target.neuron))
             });
+            dropped += before - n.terminals.len();
         }
+        self.total_terminals = self.total_terminals.saturating_sub(dropped);
 
         // Clear currently_firing / activation entries for pruned ids.
         for cid in &to_prune {
@@ -1435,6 +1472,7 @@ impl Pool {
             n.terminals.retain(|t| !targets.contains(&t.target));
             removed += before - n.terminals.len();
         }
+        self.total_terminals = self.total_terminals.saturating_sub(removed);
         removed
     }
 
@@ -1595,16 +1633,22 @@ impl Pool {
         // Wire member→concept terminals (atom→concept bottom-up) and
         // concept→member (concept→atom top-down).  Both Hebbian-strengthen
         // on subsequent activations.
+        let mut added_terminals: usize = 0;
         for &mid in &members {
             let target = NeuronRef::new(self.config.id, id);
             if let Some(member_neuron) = self.neurons.get_mut(mid as usize) {
-                member_neuron.reinforce_terminal(target, 0.5, tick, self.config.max_weight);
+                if member_neuron.reinforce_terminal(target, 0.5, tick, self.config.max_weight) {
+                    added_terminals += 1;
+                }
             }
-            concept.reinforce_terminal(
+            if concept.reinforce_terminal(
                 NeuronRef::new(self.config.id, mid),
                 0.5, tick, self.config.max_weight,
-            );
+            ) {
+                added_terminals += 1;
+            }
         }
+        self.total_terminals += added_terminals;
         self.neurons.push(concept);
         self.bloom.insert(&composite_label);
         self.label_to_id.insert(composite_label, id);

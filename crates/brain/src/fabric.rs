@@ -300,30 +300,34 @@ impl Fabric {
                 {
                     let mut pa = pool_a.write();
                     let max_w = pa.config.max_weight;
+                    let mut added: usize = 0;
                     for &na in &fired_a {
                         if let Some(neuron) = pa.get_mut(na) {
                             for &nb in &fired_b {
-                                neuron.reinforce_terminal(
+                                if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_b, nb),
                                     lr, self.tick, max_w,
-                                );
+                                ) { added += 1; }
                             }
                         }
                     }
+                    pa.total_terminals += added;
                 }
                 {
                     let mut pb = pool_b.write();
                     let max_w = pb.config.max_weight;
+                    let mut added: usize = 0;
                     for &nb in &fired_b {
                         if let Some(neuron) = pb.get_mut(nb) {
                             for &na in &fired_a {
-                                neuron.reinforce_terminal(
+                                if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_a, na),
                                     lr, self.tick, max_w,
-                                );
+                                ) { added += 1; }
                             }
                         }
                     }
+                    pb.total_terminals += added;
                 }
             }
         }
@@ -368,30 +372,34 @@ impl Fabric {
                     {
                         let mut pa = pool_a.write();
                         let max_w = pa.config.max_weight;
+                        let mut added: usize = 0;
                         for &na in &concepts_a {
                             if let Some(n) = pa.get_mut(na) {
                                 for &nb in &concepts_b {
-                                    n.reinforce_terminal(
+                                    if n.reinforce_terminal(
                                         NeuronRef::new(pid_b, nb),
                                         concept_lr, self.tick, max_w,
-                                    );
+                                    ) { added += 1; }
                                 }
                             }
                         }
+                        pa.total_terminals += added;
                     }
                     {
                         let mut pb = pool_b.write();
                         let max_w = pb.config.max_weight;
+                        let mut added: usize = 0;
                         for &nb in &concepts_b {
                             if let Some(n) = pb.get_mut(nb) {
                                 for &na in &concepts_a {
-                                    n.reinforce_terminal(
+                                    if n.reinforce_terminal(
                                         NeuronRef::new(pid_a, na),
                                         concept_lr, self.tick, max_w,
-                                    );
+                                    ) { added += 1; }
                                 }
                             }
                         }
+                        pb.total_terminals += added;
                     }
                 }
             }
@@ -428,21 +436,23 @@ impl Fabric {
                 if !prev.is_empty() && !current_concepts.is_empty() {
                     let mut pw = pool.write();
                     let max_w = pw.config.max_weight;
+                    let mut added: usize = 0;
                     for &src in &prev {
                         // Skip if source no longer exists (pruned).
                         if pw.get(src).is_none() { continue; }
                         for &dst in &current_concepts {
                             if src == dst { continue; }
                             if let Some(n) = pw.get_mut(src) {
-                                n.reinforce_terminal(
+                                if n.reinforce_terminal(
                                     NeuronRef::new(pid, dst),
                                     0.3,
                                     self.tick,
                                     max_w,
-                                );
+                                ) { added += 1; }
                             }
                         }
                     }
+                    pw.total_terminals += added;
                 }
             }
             self.prev_tick_concepts.insert(pid, current_concepts);
