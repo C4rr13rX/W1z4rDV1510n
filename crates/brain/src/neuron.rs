@@ -132,11 +132,16 @@ pub struct Neuron {
     /// every terminal on every tick.  Mathematically identical to the
     /// eager per-tick sweep, modulo terminals on neurons that never
     /// get accessed (those leak until a sleep-cycle full sweep
-    /// reclaims them).  `#[serde(default)]` so older brain.bin files
-    /// without this field load cleanly — they'll get `last_decayed_tick
-    /// = 0`, which means the next access will apply the entire elapsed
-    /// decay backlog (correct, just expensive that one time).
-    #[serde(default)]
+    /// reclaims them).
+    ///
+    /// `#[serde(skip)]` because the snapshot format is bincode, which
+    /// is positional — adding a serialized field would break existing
+    /// brain.bin files.  On load this field defaults to 0; the next
+    /// access applies the entire elapsed-since-tick-0 backlog at once.
+    /// For freshly-loaded brains the fabric's current tick may be
+    /// arbitrary, so we initialise lazy-decay state on the first
+    /// access path rather than at restore time.
+    #[serde(skip)]
     pub last_decayed_tick:    u64,
 }
 
@@ -271,6 +276,19 @@ impl Neuron {
     /// no walk).  At elapsed=k, cost is O(|terminals|) — same as the
     /// eager sweep but only when the neuron is actually accessed.
     pub fn apply_pending_decay(&mut self, now: u64, epsilon: f32, floor: f32) -> usize {
+        // Snapshot-loaded neurons have last_decayed_tick == 0 because
+        // the field is #[serde(skip)] (the snapshot format is positional
+        // bincode and a serialized field would break older brain.bin
+        // files).  Bootstrap to `now` without applying any backlog —
+        // the brain's pre-restore decay is already baked into the
+        // terminal weights as they were when serialised.  Trying to
+        // apply (1-ε)^(now) on top would multiply weights by ~1e-16
+        // at typical post-restore tick counts and instantly nuke
+        // every terminal in the fabric.
+        if self.last_decayed_tick == 0 {
+            self.last_decayed_tick = now;
+            return 0;
+        }
         let elapsed = now.saturating_sub(self.last_decayed_tick);
         if elapsed == 0 || epsilon <= 0.0 {
             self.last_decayed_tick = now;
