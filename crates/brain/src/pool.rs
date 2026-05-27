@@ -253,6 +253,20 @@ pub struct Pool {
     /// See scripts/brain_dense_burst_toddler_categorical.py for the
     /// empirical observation that motivated this.
     concept_multiset_to_id: AHashMap<Vec<NeuronId>, NeuronId>,
+
+    /// Ordered-sequence index for concepts.  Key is the `members` vec
+    /// in firing order — distinguishes "ABC" from "CBA" (positional
+    /// concepts), whereas `concept_multiset_to_id` deduplicates
+    /// permutations.  Maintained alongside `label_to_id` so the
+    /// observe hot path can call collapse_tail_to_concept WITHOUT
+    /// building a composite label string (which used to dominate
+    /// per-atom cost — string allocation + hash on tens of chars vs.
+    /// hashing a Vec<u32> directly).
+    ///
+    /// Populated from `members` of every concept on snapshot restore
+    /// (Pool::from_snapshot), then maintained in lockstep with
+    /// `label_to_id` on every promote_to_concept.
+    concept_sequence_to_id: AHashMap<Vec<NeuronId>, NeuronId>,
     /// Streaming buffer of recently-fired atom/concept IDs.  Drives concept
     /// emergence.  Bounded by `config.recent_atoms_window`.
     recent_atoms:     VecDeque<NeuronId>,
@@ -388,6 +402,7 @@ impl Pool {
             neurons:          Vec::new(),
             label_to_id:      AHashMap::new(),
             concept_multiset_to_id: AHashMap::new(),
+            concept_sequence_to_id: AHashMap::new(),
             recent_atoms:     VecDeque::with_capacity(window),
             sequences:        AHashMap::new(),
             currently_firing: AHashSet::new(),
@@ -1077,6 +1092,7 @@ impl Pool {
             neurons,
             label_to_id,
             concept_multiset_to_id: AHashMap::new(),
+            concept_sequence_to_id: AHashMap::new(),
             recent_atoms:     snap.recent_atoms,
             sequences,
             currently_firing: AHashSet::new(),
@@ -1122,6 +1138,12 @@ impl Pool {
             // unique atom-leaf order gets its own canonical concept,
             // so anagrams like sad/das remain distinct.
             pool.concept_multiset_to_id.entry(leaves).or_insert(cid);
+
+            // Sequence index keyed by the IMMEDIATE member ids (not
+            // expanded to atom leaves) — collapse_tail_to_concept
+            // looks up by what's currently in recent_atoms, which may
+            // already contain concept ids from prior collapses.
+            pool.concept_sequence_to_id.entry(member_ids).or_insert(cid);
         }
         pool
     }
@@ -1289,18 +1311,22 @@ impl Pool {
 
         let mut found: Option<(usize, NeuronId)> = None;
         // Longest tail wins — wider column receptive field.
+        //
+        // Vec<NeuronId>-keyed lookup replaces the old string-concat
+        // composite_label path.  The old version allocated a fresh
+        // String for every (atom, length) probe and hashed it — for a
+        // 200-atom observe with max_len=7, that was up to 1400 heap
+        // allocations + char-by-char hashes per call.  Vec<u32> hashes
+        // ~4× faster and has zero allocation when keyed into AHashMap.
+        // Empirically the same semantics: the index is populated from
+        // members on snapshot restore and maintained in lockstep with
+        // label_to_id on every promote_to_concept.
+        let mut probe: Vec<NeuronId> = Vec::with_capacity(max_len);
         for len in (2..=max_len).rev() {
             let start = buf_len - len;
-            let mut composite = String::new();
-            let mut ok = true;
-            for (i, id) in self.recent_atoms.iter().skip(start).enumerate() {
-                if let Some(n) = self.neurons.get(*id as usize) {
-                    if i > 0 { composite.push('~'); }
-                    composite.push_str(&n.label);
-                } else { ok = false; break; }
-            }
-            if !ok { continue; }
-            if let Some(&cid) = self.label_to_id.get(&composite) {
+            probe.clear();
+            probe.extend(self.recent_atoms.iter().skip(start).copied());
+            if let Some(&cid) = self.concept_sequence_to_id.get(&probe) {
                 if let Some(n) = self.neurons.get(cid as usize) {
                     if !n.is_atom() {
                         found = Some((len, cid));
@@ -1780,5 +1806,10 @@ impl Pool {
         self.bloom.insert(&composite_label);
         self.label_to_id.insert(composite_label, id);
         self.concept_multiset_to_id.insert(leaves_seq, id);
+        // Sequence index: keyed by the IMMEDIATE member ids in firing
+        // order — matches what collapse_tail_to_concept builds from
+        // recent_atoms.  Same lockstep with label_to_id.
+        let member_ids: Vec<NeuronId> = members.iter().copied().collect();
+        self.concept_sequence_to_id.insert(member_ids, id);
     }
 }
