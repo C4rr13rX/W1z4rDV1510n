@@ -3093,6 +3093,31 @@ impl Brain {
         pool.write().tick_housekeeping(now);
     }
 
+    /// Drain queued deferred-promotion candidates per pool.  Called
+    /// during sleep — crystallises every concept that crossed the
+    /// emergence threshold during observe while W1Z4RD_DEFER_PROMOTION
+    /// was set.  Brief per-pool write lock.  Returns total promotions
+    /// applied across all pools.
+    pub fn sleep_drain_promotions(&self) -> usize {
+        let now = self.fabric.current_tick();
+        let mut total = 0;
+        for pid in self.fabric.pool_ids() {
+            let Some(pool) = self.fabric.pool(pid) else { continue; };
+            total += pool.write().drain_pending_promotions(now);
+        }
+        total
+    }
+
+    /// Aggregated pending-promotion queue depth across all pools.
+    /// Surfaced via /sleep_pressure so the operator can see when the
+    /// brain is overdue for a sleep cycle under deferred mode.
+    pub fn pending_promotion_count(&self) -> usize {
+        self.fabric.pool_ids().into_iter()
+            .filter_map(|pid| self.fabric.pool(pid))
+            .map(|p| p.read().pending_promotion_count())
+            .sum()
+    }
+
     /// Score a moment fingerprint by the mean salience of its participating
     /// neurons.  Stage 17.7 uses this to weight replay sampling toward
     /// moments whose neurons the brain has tagged as important.  Cheap to

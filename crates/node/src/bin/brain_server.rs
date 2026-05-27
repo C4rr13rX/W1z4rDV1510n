@@ -579,10 +579,22 @@ async fn observe(
     State(s): State<AppState>,
     Json(req): Json<ObserveRequest>,
 ) -> Result<Json<ObserveResponse>, (axum::http::StatusCode, String)> {
+    let t_total = std::time::Instant::now();
     let frame = decode_base64_flexible(&req.frame)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("invalid base64: {}", e)))?;
+    let t_lock = std::time::Instant::now();
     let mut brain = s.brain.lock().await;
+    let lock_us = t_lock.elapsed().as_micros();
+    let t_obs = std::time::Instant::now();
     let fired = brain.observe(req.pool_id, &frame);
+    let obs_us = t_obs.elapsed().as_micros();
+    let total_us = t_total.elapsed().as_micros();
+    if total_us > 200_000 {
+        eprintln!(
+            "[slow-observe] pool={} bytes={} fired={} total={}us lock={}us obs={}us",
+            req.pool_id, frame.len(), fired.len(), total_us, lock_us, obs_us,
+        );
+    }
     Ok(Json(ObserveResponse { fired_neurons: fired.len() }))
 }
 
@@ -632,6 +644,26 @@ async fn tick_profile(State(s): State<AppState>) -> Json<serde_json::Value> {
 
 fn pct(num: u64, denom: u64) -> f64 {
     if denom == 0 { 0.0 } else { (num as f64) * 100.0 / (denom as f64) }
+}
+
+/// Operator visibility into how much structure work is queued for the
+/// next sleep cycle under deferred-promotion mode.  A queue depth of 0
+/// means observe was either running in inline mode or saw no novel
+/// patterns.  Growing depth means the brain is learning new structure
+/// faster than sleep is consolidating it — operator should fire /sleep
+/// before the queue gets huge (memory cost grows linearly).
+async fn sleep_pressure(State(s): State<AppState>) -> Json<serde_json::Value> {
+    let count = {
+        let brain = s.brain.lock().await;
+        brain.pending_promotion_count()
+    };
+    let deferred = std::env::var("W1Z4RD_DEFER_PROMOTION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Json(serde_json::json!({
+        "deferred_promotion_enabled": deferred,
+        "pending_promotions":         count,
+    }))
 }
 
 async fn tick(State(s): State<AppState>) -> Json<u64> {
@@ -1122,6 +1154,21 @@ async fn run_decomposed_sleep(
     // AHashSet matches the Brain API's sleep_pool_phase2 signature.
     let mut all_pruned: ahash::AHashSet<w1z4rd_brain::NeuronRef> =
         ahash::AHashSet::new();
+
+    // PHASE 0 — drain deferred concept-emergence promotions queued
+    // during observe under W1Z4RD_DEFER_PROMOTION.  This is the
+    // structure-growth half of CLS (cortical consolidation); the
+    // observe path only ran the fast hippocampal-side count + threshold
+    // detection.  Crystallises new concepts + wires member↔concept
+    // terminals here, off the training hot path.
+    {
+        let brain = s.brain.lock().await;
+        let promoted = brain.sleep_drain_promotions();
+        if promoted > 0 {
+            eprintln!("[sleep] drained {} deferred promotions", promoted);
+        }
+    }
+    tokio::task::yield_now().await;
 
     // PHASE 1 — per-pool prune.  Brain mutex released between iterations.
     for pid in &pool_ids {
@@ -2400,6 +2447,7 @@ async fn main() -> Result<()> {
         .route("/observe",               post(observe))
         .route("/tick",                  post(tick))
         .route("/tick_profile",          get(tick_profile))
+        .route("/sleep_pressure",        get(sleep_pressure))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))
         .route("/integrate_resonant",    post(integrate_resonant))

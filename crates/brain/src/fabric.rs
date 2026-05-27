@@ -276,6 +276,10 @@ impl Fabric {
     /// (decay + prune).
     pub fn advance_tick(&mut self) {
         let tick_t0 = std::time::Instant::now();
+        // Per-tick (not cumulative) phase nanoseconds so we can log the
+        // breakdown for individual slow ticks.  The Arc<TickProfile>
+        // atomics still accumulate as before; these are local deltas.
+        let mut per_tick = [0u64; 4];   // atom, concept, temporal, housekeeping
 
         // Close the prior moment: any pair of neurons in different pools
         // that both fired this tick gets a cross-pool axon terminal
@@ -332,8 +336,9 @@ impl Fabric {
             }
         }
 
-        self.profile.cross_pool_atom_wiring_ns
-            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let dt = phase_t0.elapsed().as_nanos() as u64;
+        per_tick[0] = dt;
+        self.profile.cross_pool_atom_wiring_ns.fetch_add(dt, Ordering::Relaxed);
 
         // Stage 3 (position-aware binding): cross-pool concept→concept
         // wiring.  Concepts encode positional sequences in their
@@ -405,8 +410,9 @@ impl Fabric {
             }
         }
 
-        self.profile.cross_pool_concept_wiring_ns
-            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let dt = phase_t0.elapsed().as_nanos() as u64;
+        per_tick[1] = dt;
+        self.profile.cross_pool_concept_wiring_ns.fetch_add(dt, Ordering::Relaxed);
 
         // Stage 2b: within-pool concept→concept temporal wiring.
         // For each pool, identify the CONCEPT neurons currently firing
@@ -458,8 +464,9 @@ impl Fabric {
             self.prev_tick_concepts.insert(pid, current_concepts);
         }
 
-        self.profile.within_pool_temporal_ns
-            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let dt = phase_t0.elapsed().as_nanos() as u64;
+        per_tick[2] = dt;
+        self.profile.within_pool_temporal_ns.fetch_add(dt, Ordering::Relaxed);
 
         // Per-pool housekeeping: decay every terminal, prune sub-floor,
         // apply heterosynaptic LTD, apply k-WTA sparsity.
@@ -500,12 +507,35 @@ impl Fabric {
                 }
             }
         }
-        self.profile.housekeeping_ns
-            .fetch_add(phase_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let dt = phase_t0.elapsed().as_nanos() as u64;
+        per_tick[3] = dt;
+        self.profile.housekeeping_ns.fetch_add(dt, Ordering::Relaxed);
 
+        let tick_total = tick_t0.elapsed().as_nanos() as u64;
         self.profile.ticks.fetch_add(1, Ordering::Relaxed);
-        self.profile.total_ns
-            .fetch_add(tick_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.profile.total_ns.fetch_add(tick_total, Ordering::Relaxed);
+
+        // Outlier-tick diagnostic: when a single tick crosses the
+        // configurable threshold (default 5000 ms), log its breakdown
+        // so we can see which phase blew up.  Most ticks are <<1 s; an
+        // occasional outlier above 5 s is the symptom we're hunting.
+        let threshold_ms = std::env::var("W1Z4RD_SLOW_TICK_MS")
+            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(5_000);
+        if tick_total > threshold_ms * 1_000_000 {
+            let total_ms = tick_total / 1_000_000;
+            let atom_ms = per_tick[0] / 1_000_000;
+            let concept_ms = per_tick[1] / 1_000_000;
+            let temporal_ms = per_tick[2] / 1_000_000;
+            let hk_ms = per_tick[3] / 1_000_000;
+            let accounted = atom_ms + concept_ms + temporal_ms + hk_ms;
+            // tick_total - accounted = time spent in observe/store/etc
+            // outside the four phases we instrument.
+            let unaccounted_ms = total_ms.saturating_sub(accounted);
+            eprintln!(
+                "[slow-tick] tick={} total={}ms  atom={}ms concept={}ms temporal={}ms hk={}ms unaccounted={}ms",
+                self.tick, total_ms, atom_ms, concept_ms, temporal_ms, hk_ms, unaccounted_ms,
+            );
+        }
 
         self.tick += 1;
         self.current = Moment::new(self.tick);

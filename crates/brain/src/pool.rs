@@ -307,6 +307,22 @@ pub struct Pool {
     /// full-fabric scan.
     pub(crate) total_terminals: usize,
 
+    /// Pending concept-emergence promotions deferred from observe_frame
+    /// to the next sleep cycle.  When W1Z4RD_DEFER_PROMOTION=1 (default
+    /// in current builds), check_concept_emergence enqueues sequence
+    /// fingerprints here instead of calling promote_to_concept inline.
+    /// This makes /observe a pure write path — atom firing + terminal
+    /// reinforcement only — and moves structure growth (neuron
+    /// allocation, member↔concept terminal wiring, label/bloom/multiset
+    /// registration) to /sleep, matching the CLS biological model
+    /// (Kumaran 2016, McClelland-McNaughton-O'Reilly 1995).
+    ///
+    /// Pool isn't serde-derived (PoolSnapshot is the persisted form),
+    /// so this field is naturally transient — every fresh load starts
+    /// with an empty queue.  A pending promotion in flight at snapshot
+    /// time will simply re-accumulate its threshold count on next pass.
+    pub(crate) pending_promotions: Vec<SequenceFingerprint>,
+
     /// Persistence backend per [`ARCHITECTURE.md`] §17.9.  Default is a
     /// [`NoopStore`] — pools constructed without an explicit store stay
     /// purely in-memory.  When the brain plugs in an [`crate::store::MmapWalStore`]
@@ -380,6 +396,7 @@ impl Pool {
             firing_rate_ema:  0.0,
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
+            pending_promotions: Vec::new(),
             total_terminals: 0,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
@@ -1068,6 +1085,7 @@ impl Pool {
             firing_rate_ema:  0.0,
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
+            pending_promotions: Vec::new(),
             total_terminals: total_terminals_init,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
@@ -1611,9 +1629,54 @@ impl Pool {
             }
         }
 
-        for run in to_promote {
+        // Deferred-promotion mode (option 3 in the optimisation discussion):
+        // when W1Z4RD_DEFER_PROMOTION is set, enqueue promotions instead
+        // of crystallising inline.  Observe path becomes pure
+        // address-by-name HashMap writes — no neuron allocation, no
+        // member↔concept terminal wiring, no WAL append for new
+        // neurogenesis.  Structure growth runs during /sleep via
+        // drain_pending_promotions.
+        //
+        // Matches the CLS biological model — hippocampal fast learning
+        // (sequence count + threshold detection) happens online; cortical
+        // structure consolidation (concept crystallisation, wiring)
+        // happens during replay.
+        let deferred = std::env::var("W1Z4RD_DEFER_PROMOTION")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if deferred {
+            self.pending_promotions.extend(to_promote);
+        } else {
+            for run in to_promote {
+                self.promote_to_concept(run, tick);
+            }
+        }
+    }
+
+    /// Crystallise every deferred promotion that has accumulated since
+    /// the last drain.  Called by Brain::sleep on each pool.  Returns
+    /// the number of promotions actually applied (some may dedupe
+    /// against newly-existing concepts).  The pool's
+    /// `pending_promotions` Vec is drained empty.
+    ///
+    /// Safe to call repeatedly — empty Vec is a no-op.
+    pub fn drain_pending_promotions(&mut self, tick: u64) -> usize {
+        let pending = std::mem::take(&mut self.pending_promotions);
+        let n = pending.len();
+        for run in pending {
             self.promote_to_concept(run, tick);
         }
+        n
+    }
+
+    /// Snapshot of the pending-promotion queue depth.  Surfaced via the
+    /// /sleep_pressure HTTP endpoint so the operator can see when the
+    /// brain is overdue for a sleep cycle.  Sleep is the only mechanism
+    /// that crystallises deferred concepts, so a growing queue means
+    /// the corpus is novel relative to the trained fabric.
+    pub fn pending_promotion_count(&self) -> usize {
+        self.pending_promotions.len()
     }
 
     fn promote_to_concept(&mut self, members: SequenceFingerprint, tick: u64) {
