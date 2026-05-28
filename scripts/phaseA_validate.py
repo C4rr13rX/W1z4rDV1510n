@@ -53,9 +53,12 @@ def tick():
 
 
 def train_pair(prompt, response, reps):
+    # CRITICAL: observe BOTH pools in the SAME tick so cross-pool
+    # firing co-occurs and binding concepts can emerge.  Observing in
+    # separate ticks means pool A's firing is wiped before pool B
+    # fires → moment fingerprint has only one pool → no binding.
     for _ in range(reps):
         observe(POOL_TEXT, prompt.encode())
-        tick()
         observe(POOL_ACTION, response.encode())
         tick()
 

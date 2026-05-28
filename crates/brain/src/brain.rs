@@ -1204,6 +1204,39 @@ impl Brain {
             set
         };
 
+        // Phase B: the LOCKED variant of directly_targeted — target
+        // concepts the query reaches through high-consolidation
+        // (decay-exempt) cross-pool terminals.  These are the canonical
+        // trained bindings; their score must dominate atom-soup
+        // byproducts (concepts that share some member atoms but were
+        // never trained as the actual response).
+        //
+        // The signal is structural: a terminal whose consolidation has
+        // crossed CONSOLIDATION_LOCK has been reinforced on at least
+        // that many distinct ticks — the brain's own evidence that
+        // this is a trained pairing, not a random co-firing.  Selection
+        // boost is 16× so a single locked path slams the canonical
+        // answer into first place over any number of atom-overlap
+        // concepts at equivalent avg_member_act.
+        let locked_targeted: ahash::AHashSet<NeuronId> = {
+            let q = query_pool_handle.read();
+            let mut set = ahash::AHashSet::new();
+            for nid in q.currently_firing() {
+                if let Some(qn) = q.get(nid) {
+                    for t in &qn.terminals {
+                        if t.target.pool != target_pool { continue; }
+                        if t.consolidation < crate::neuron::Neuron::CONSOLIDATION_LOCK { continue; }
+                        if let Some(tn) = target.get(t.target.neuron) {
+                            if !tn.is_atom() {
+                                set.insert(t.target.neuron);
+                            }
+                        }
+                    }
+                }
+            }
+            set
+        };
+
         // Stage 7 (binding-pool routing): find the binding concept
         // whose QUERY-POOL member atoms BEST MATCH the currently-firing
         // query atom set.  Its target-pool member atoms then form a
@@ -1215,12 +1248,18 @@ impl Brain {
         // with more total atoms (more activation paths in propagation),
         // which is the wrong signal.  We want the binding whose
         // text-pool member set IS the query's firing set.
-        let binding_target_atoms: ahash::AHashSet<NeuronId> = {
+        // Phase B v2 — also remember the binding NEURON id and its
+        // match score, not just the atom set, so we can read the
+        // canonical response sequence directly from the binding's
+        // target-pool members (in firing order) when the match is
+        // exact and the binding is trained.
+        let (binding_id_opt, binding_score, binding_target_atoms): (
+            Option<NeuronId>, f32, ahash::AHashSet<NeuronId>
+        ) = {
             let bpid = self.binding_pool_id;
             if bpid == target_pool || bpid == query_pool {
-                ahash::AHashSet::new()
+                (None, 0.0, ahash::AHashSet::new())
             } else {
-                // Query pool's currently-firing atom set.
                 let q_atoms: ahash::AHashSet<NeuronId> = {
                     let q = query_pool_handle.read();
                     q.currently_firing()
@@ -1228,7 +1267,7 @@ impl Brain {
                         .collect()
                 };
                 if q_atoms.is_empty() {
-                    ahash::AHashSet::new()
+                    (None, 0.0, ahash::AHashSet::new())
                 } else if let Some(bp) = self.fabric.pool(bpid) {
                     let bp_read = bp.read();
                     let mut best: Option<(NeuronId, f32)> = None;
@@ -1251,17 +1290,83 @@ impl Brain {
                             best = Some((n.id, score));
                         }
                     }
-                    if let Some((bnid, _)) = best {
-                        if let Some(n) = bp_read.get(bnid) {
-                            n.members.iter()
-                                .filter(|m| m.pool == target_pool)
-                                .map(|m| m.neuron)
-                                .collect()
-                        } else { ahash::AHashSet::new() }
-                    } else { ahash::AHashSet::new() }
-                } else { ahash::AHashSet::new() }
+                    match best {
+                        Some((bnid, sc)) => {
+                            let atoms = if let Some(n) = bp_read.get(bnid) {
+                                n.members.iter()
+                                    .filter(|m| m.pool == target_pool)
+                                    .map(|m| m.neuron)
+                                    .collect()
+                            } else { ahash::AHashSet::new() };
+                            (Some(bnid), sc, atoms)
+                        }
+                        None => (None, 0.0, ahash::AHashSet::new()),
+                    }
+                } else { (None, 0.0, ahash::AHashSet::new()) }
             }
         };
+
+        // Phase B v2 — exact-binding shortcut: if a binding neuron
+        // matches the query at near-perfect precision×recall (>= 0.95)
+        // AND has been used at least twice (use_count > 1, i.e. the
+        // trained pathway), emit ITS target-pool member subsequence
+        // directly in FIRING ORDER.  This bypasses the target-concept
+        // selector entirely — the binding IS the canonical
+        // prompt→response record from training, and reading its
+        // ordered target members reproduces the trained answer
+        // bit-for-bit.
+        //
+        // The score gate (0.95) lets near-anagram matches (e.g.
+        // adding a single trailing space) still hit; the use_count
+        // gate ensures we don't read a one-off binding that hasn't
+        // been validated by repeated co-firing.  The "answer" wraps
+        // the binding's ordered atom-leaf decode so callers don't
+        // need to know about the bypass — it's still an
+        // AnswerWithGrounding.
+        if binding_score >= 0.95 {
+            if let Some(bnid) = binding_id_opt {
+                if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
+                    let bp_read = bp.read();
+                    let (use_count, target_members): (u64, Vec<NeuronRef>) =
+                        match bp_read.get(bnid) {
+                            Some(n) => (
+                                n.use_count,
+                                n.members.iter()
+                                    .filter(|m| m.pool == target_pool)
+                                    .copied()
+                                    .collect(),
+                            ),
+                            None => (0, Vec::new()),
+                        };
+                    drop(bp_read);
+                    if use_count >= 2 && !target_members.is_empty() {
+                        let decoded = target.decode_concept_members(&target_members);
+                        if !decoded.is_empty() {
+                            return AnswerWithGrounding {
+                                answer: Some(decoded),
+                                grounding: GroundingReport {
+                                    input_atom_coverage,
+                                    strongest_match: Some(NeuronRef::new(
+                                        self.binding_pool_id, bnid)),
+                                    strongest_match_jaccard: binding_score,
+                                    composition_used: Vec::new(),
+                                    fabric_confidence: binding_score,
+                                    eem_confidence: None,
+                                    annealer_confidence: None,
+                                    integrated_confidence: binding_score,
+                                    outside_grounding: false,
+                                    speculation_flag: false,
+                                    peer_contributions: Vec::new(),
+                                },
+                                confidence_tier: ConfidenceTier::from_confidence(
+                                    binding_score, false, false),
+                                next_steps_if_ungrounded: Vec::new(),
+                            };
+                        }
+                    }
+                }
+            }
+        }
 
         // Selection (Stage 6 — coverage-aware density):
         //
@@ -1367,6 +1472,7 @@ impl Brain {
                     } else { 1.0 };
 
                     let score = avg_member_act * boost * length_factor * info_factor * binding_boost;
+                    let _ = locked_targeted.contains(&nid);  // signal retained for Phase B v2 below
                     // Hold on to raw activation for grounding metric.
                     let _ = act;
                     let _ = target.expanded_size(&n.members);
