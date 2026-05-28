@@ -3118,6 +3118,33 @@ impl Brain {
             .sum()
     }
 
+    /// Set the domain stamp for every pool's newly-created atoms +
+    /// concepts.  Island architecture: operator calls this BEFORE
+    /// training a domain-specific corpus so the resulting neurons
+    /// cluster into that island.  0 resets to global / unassigned.
+    pub fn set_domain_for_new(&self, domain_id: u32) {
+        for pid in self.fabric.pool_ids() {
+            if let Some(p) = self.fabric.pool(pid) {
+                p.write().set_domain_for_new(domain_id);
+            }
+        }
+    }
+
+    /// Per-pool neuron count broken down by domain_id.  Returns a map
+    /// keyed by (pool_id, domain_id) → count.  Lets the operator
+    /// confirm islands grew as expected during a training run.
+    pub fn domain_histogram(&self) -> std::collections::HashMap<(PoolId, u32), usize> {
+        let mut out = std::collections::HashMap::new();
+        for pid in self.fabric.pool_ids() {
+            if let Some(p) = self.fabric.pool(pid) {
+                for (dom, cnt) in p.read().domain_histogram() {
+                    out.insert((pid, dom), cnt);
+                }
+            }
+        }
+        out
+    }
+
     /// Score a moment fingerprint by the mean salience of its participating
     /// neurons.  Stage 17.7 uses this to weight replay sampling toward
     /// moments whose neurons the brain has tagged as important.  Cheap to

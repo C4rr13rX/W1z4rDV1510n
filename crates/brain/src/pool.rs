@@ -337,6 +337,17 @@ pub struct Pool {
     /// time will simply re-accumulate its threshold count on next pass.
     pub(crate) pending_promotions: Vec<SequenceFingerprint>,
 
+    /// Domain id stamped onto every atom + concept created from now
+    /// on.  Default 0 means "global / unassigned domain" (current
+    /// behaviour).  Set by the operator via /set_domain before
+    /// training a specific corpus so the resulting concepts cluster
+    /// into the island that corpus represents.
+    ///
+    /// Transient — not part of the snapshot, defaults back to 0 on
+    /// restart so the brain doesn't accidentally keep tagging new
+    /// material with a stale domain.
+    pub(crate) domain_for_new:    u32,
+
     /// Persistence backend per [`ARCHITECTURE.md`] §17.9.  Default is a
     /// [`NoopStore`] — pools constructed without an explicit store stay
     /// purely in-memory.  When the brain plugs in an [`crate::store::MmapWalStore`]
@@ -412,6 +423,7 @@ impl Pool {
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
             pending_promotions: Vec::new(),
+            domain_for_new: 0,
             total_terminals: 0,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
@@ -848,6 +860,25 @@ impl Pool {
     pub fn encoding_name(&self) -> &'static str { self.encoding.name() }
     pub fn neuron_count(&self) -> usize { self.neurons.len() }
 
+    /// Set the domain id stamped onto every atom + concept created
+    /// from now on (island architecture).  Doesn't retroactively
+    /// re-tag existing neurons.  0 = unassigned / global (default).
+    pub fn set_domain_for_new(&mut self, domain_id: u32) {
+        self.domain_for_new = domain_id;
+    }
+
+    pub fn domain_for_new(&self) -> u32 { self.domain_for_new }
+
+    /// Count neurons per domain.  For operator visibility into how
+    /// the island clustering is going.
+    pub fn domain_histogram(&self) -> std::collections::HashMap<u32, usize> {
+        let mut h = std::collections::HashMap::new();
+        for n in &self.neurons {
+            *h.entry(n.domain_id).or_insert(0) += 1;
+        }
+        h
+    }
+
     /// O(1) read of the maintained total-terminal counter.  Replaces
     /// the formerly O(N) `iter_neurons().map(|n| n.terminals.len()).sum()`
     /// pattern that turned every brain.stats() call into a fabric-wide
@@ -1102,6 +1133,7 @@ impl Pool {
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
             pending_promotions: Vec::new(),
+            domain_for_new: 0,
             total_terminals: total_terminals_init,
             decode_precision_ema: 0.0,
             last_observed_sequence: Vec::new(),
@@ -1589,7 +1621,13 @@ impl Pool {
             return id;
         }
         let id = self.neurons.len() as NeuronId;
-        let neuron = Neuron::new_atom(id, label.clone(), NeuronKind::Excitatory, tick);
+        let mut neuron = Neuron::new_atom(id, label.clone(), NeuronKind::Excitatory, tick);
+        // Island architecture: stamp every newly-created atom with the
+        // pool's current `domain_for_new`.  Operator sets this via
+        // /set_domain before training a corpus so the resulting atoms
+        // cluster into that island.  Default 0 = global / unassigned,
+        // which makes the gate a no-op (current behaviour).
+        neuron.domain_id = self.domain_for_new;
         // Per ARCHITECTURE §17.9: append BEFORE in-memory exposure.
         let event = WalEvent::AtomCreated {
             pool_id:   self.config.id,
@@ -1783,6 +1821,26 @@ impl Pool {
         let mut concept = Neuron::new_concept(
             id, composite_label.clone(), NeuronKind::Excitatory, member_refs, tick,
         );
+        // Island architecture: stamp the new concept with the pool's
+        // current `domain_for_new` so it joins the active island.
+        // When a concept emerges from members that are themselves in a
+        // domain, we honour the member's domain if domain_for_new is 0
+        // (so emergent higher-order concepts stay in their members'
+        // island even if the operator forgot to set domain_for_new).
+        concept.domain_id = if self.domain_for_new != 0 {
+            self.domain_for_new
+        } else {
+            // Inherit the dominant domain of members.  Look up each
+            // member's domain_id; if any non-zero majority, use it.
+            let dom_votes: std::collections::HashMap<u32, u32> = members.iter()
+                .filter_map(|&m| self.neurons.get(m as usize).map(|n| n.domain_id))
+                .filter(|&d| d != 0)
+                .fold(std::collections::HashMap::new(), |mut acc, d| {
+                    *acc.entry(d).or_insert(0) += 1;
+                    acc
+                });
+            dom_votes.into_iter().max_by_key(|&(_, c)| c).map(|(d, _)| d).unwrap_or(0)
+        };
         // Wire member→concept terminals (atom→concept bottom-up) and
         // concept→member (concept→atom top-down).  Both Hebbian-strengthen
         // on subsequent activations.

@@ -652,6 +652,40 @@ fn pct(num: u64, denom: u64) -> f64 {
 /// patterns.  Growing depth means the brain is learning new structure
 /// faster than sleep is consolidating it — operator should fire /sleep
 /// before the queue gets huge (memory cost grows linearly).
+/// Island architecture: set the domain stamp for every pool's
+/// newly-created atoms + concepts.  Operator calls before each
+/// domain-specific corpus so the new neurons cluster into that
+/// island.  POST { "domain_id": N }.  0 resets to unassigned.
+async fn set_domain(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let domain_id = req.get("domain_id")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(0);
+    {
+        let brain = s.brain.lock().await;
+        brain.set_domain_for_new(domain_id);
+    }
+    Json(serde_json::json!({ "domain_for_new": domain_id }))
+}
+
+/// Per-(pool, domain) neuron count.  Lets the operator confirm
+/// island growth during training.
+async fn domain_stats(State(s): State<AppState>) -> Json<serde_json::Value> {
+    let hist = {
+        let brain = s.brain.lock().await;
+        brain.domain_histogram()
+    };
+    let entries: Vec<serde_json::Value> = hist.into_iter()
+        .map(|((pool, domain), count)| serde_json::json!({
+            "pool": pool, "domain": domain, "count": count,
+        }))
+        .collect();
+    Json(serde_json::json!({ "histogram": entries }))
+}
+
 async fn sleep_pressure(State(s): State<AppState>) -> Json<serde_json::Value> {
     let count = {
         let brain = s.brain.lock().await;
@@ -2448,6 +2482,8 @@ async fn main() -> Result<()> {
         .route("/tick",                  post(tick))
         .route("/tick_profile",          get(tick_profile))
         .route("/sleep_pressure",        get(sleep_pressure))
+        .route("/set_domain",            post(set_domain))
+        .route("/domain_stats",          get(domain_stats))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))
         .route("/integrate_resonant",    post(integrate_resonant))

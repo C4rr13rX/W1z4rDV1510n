@@ -281,6 +281,17 @@ impl Fabric {
         // atomics still accumulate as before; these are local deltas.
         let mut per_tick = [0u64; 4];   // atom, concept, temporal, housekeeping
 
+        // Island-architecture gate: when enabled, the hot cross-pool
+        // wiring path only fires for neurons sharing a domain_id (or
+        // when either side is unassigned, domain_id=0).  Cross-domain
+        // wiring becomes "bridge candidate" work, deferred to the
+        // integration cycle (Brain::integrate).  Read once per tick to
+        // keep the inner loop branch-cheap.
+        let domain_mode = std::env::var("W1Z4RD_DOMAIN_MODE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // Close the prior moment: any pair of neurons in different pools
         // that both fired this tick gets a cross-pool axon terminal
         // grown / strengthened.  Same-pool co-firing isn't wired here
@@ -301,13 +312,32 @@ impl Fabric {
 
                 let pool_a = self.pools.get(&pid_a).unwrap().clone();
                 let pool_b = self.pools.get(&pid_b).unwrap().clone();
+                // Resolve domain_id for each firing neuron once per
+                // tick rather than per (a,b) pair.  When domain_mode is
+                // off, we skip the lookup entirely and the wiring loop
+                // behaves identically to the pre-island code path.
+                let fired_a_dom: Vec<u32> = if domain_mode {
+                    let pa = pool_a.read();
+                    fired_a.iter().map(|&id| pa.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
+                } else { Vec::new() };
+                let fired_b_dom: Vec<u32> = if domain_mode {
+                    let pb = pool_b.read();
+                    fired_b.iter().map(|&id| pb.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
+                } else { Vec::new() };
+                let cross_domain = |i: usize, j: usize| -> bool {
+                    if !domain_mode { return false; }
+                    let da = fired_a_dom[i];
+                    let db = fired_b_dom[j];
+                    da != 0 && db != 0 && da != db
+                };
                 {
                     let mut pa = pool_a.write();
                     let max_w = pa.config.max_weight;
                     let mut added: usize = 0;
-                    for &na in &fired_a {
+                    for (i, &na) in fired_a.iter().enumerate() {
                         if let Some(neuron) = pa.get_mut(na) {
-                            for &nb in &fired_b {
+                            for (j, &nb) in fired_b.iter().enumerate() {
+                                if cross_domain(i, j) { continue; }
                                 if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_b, nb),
                                     lr, self.tick, max_w,
@@ -321,9 +351,10 @@ impl Fabric {
                     let mut pb = pool_b.write();
                     let max_w = pb.config.max_weight;
                     let mut added: usize = 0;
-                    for &nb in &fired_b {
+                    for (j, &nb) in fired_b.iter().enumerate() {
                         if let Some(neuron) = pb.get_mut(nb) {
-                            for &na in &fired_a {
+                            for (i, &na) in fired_a.iter().enumerate() {
+                                if cross_domain(i, j) { continue; }
                                 if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_a, na),
                                     lr, self.tick, max_w,
@@ -374,13 +405,29 @@ impl Fabric {
 
                     let pool_a = self.pools.get(&pid_a).unwrap().clone();
                     let pool_b = self.pools.get(&pid_b).unwrap().clone();
+                    // Same domain gating as cross-pool atom wiring,
+                    // applied at concept granularity.
+                    let dom_a: Vec<u32> = if domain_mode {
+                        let pa = pool_a.read();
+                        concepts_a.iter().map(|&id| pa.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
+                    } else { Vec::new() };
+                    let dom_b: Vec<u32> = if domain_mode {
+                        let pb = pool_b.read();
+                        concepts_b.iter().map(|&id| pb.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
+                    } else { Vec::new() };
+                    let cross_dom = |i: usize, j: usize| -> bool {
+                        if !domain_mode { return false; }
+                        let da = dom_a[i]; let db = dom_b[j];
+                        da != 0 && db != 0 && da != db
+                    };
                     {
                         let mut pa = pool_a.write();
                         let max_w = pa.config.max_weight;
                         let mut added: usize = 0;
-                        for &na in &concepts_a {
+                        for (i, &na) in concepts_a.iter().enumerate() {
                             if let Some(n) = pa.get_mut(na) {
-                                for &nb in &concepts_b {
+                                for (j, &nb) in concepts_b.iter().enumerate() {
+                                    if cross_dom(i, j) { continue; }
                                     if n.reinforce_terminal(
                                         NeuronRef::new(pid_b, nb),
                                         concept_lr, self.tick, max_w,
@@ -394,9 +441,10 @@ impl Fabric {
                         let mut pb = pool_b.write();
                         let max_w = pb.config.max_weight;
                         let mut added: usize = 0;
-                        for &nb in &concepts_b {
+                        for (j, &nb) in concepts_b.iter().enumerate() {
                             if let Some(n) = pb.get_mut(nb) {
-                                for &na in &concepts_a {
+                                for (i, &na) in concepts_a.iter().enumerate() {
+                                    if cross_dom(i, j) { continue; }
                                     if n.reinforce_terminal(
                                         NeuronRef::new(pid_a, na),
                                         concept_lr, self.tick, max_w,
@@ -442,12 +490,27 @@ impl Fabric {
                 if !prev.is_empty() && !current_concepts.is_empty() {
                     let mut pw = pool.write();
                     let max_w = pw.config.max_weight;
+                    // Domain gate at within-pool granularity: prevent
+                    // sequence-temporal wiring across islands (a code
+                    // concept "follows" a chemistry concept only as a
+                    // coincidence — let the integration cycle decide
+                    // if that's structurally meaningful).
+                    let dom_src: Vec<u32> = if domain_mode {
+                        prev.iter().map(|&id| pw.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
+                    } else { Vec::new() };
+                    let dom_dst: Vec<u32> = if domain_mode {
+                        current_concepts.iter().map(|&id| pw.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
+                    } else { Vec::new() };
                     let mut added: usize = 0;
-                    for &src in &prev {
+                    for (i, &src) in prev.iter().enumerate() {
                         // Skip if source no longer exists (pruned).
                         if pw.get(src).is_none() { continue; }
-                        for &dst in &current_concepts {
+                        for (j, &dst) in current_concepts.iter().enumerate() {
                             if src == dst { continue; }
+                            if domain_mode {
+                                let da = dom_src[i]; let db = dom_dst[j];
+                                if da != 0 && db != 0 && da != db { continue; }
+                            }
                             if let Some(n) = pw.get_mut(src) {
                                 if n.reinforce_terminal(
                                     NeuronRef::new(pid, dst),

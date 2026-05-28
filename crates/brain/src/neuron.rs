@@ -160,6 +160,36 @@ pub struct Neuron {
     /// access path rather than at restore time.
     #[serde(skip)]
     pub last_decayed_tick:    u64,
+
+    /// Domain tag — the cluster of co-firing concepts this neuron
+    /// belongs to.  Default 0 means "unassigned / global domain"
+    /// (current behaviour: all neurons share one global domain).
+    ///
+    /// Assigned by the integration cycle (Brain::integrate, future)
+    /// via co-firing-graph community detection.  Concepts in the same
+    /// domain co-fire together strongly; concepts across domains
+    /// have weak direct co-firing but may share `bridges`.
+    ///
+    /// Within-domain wiring runs on the hot observe path (fast common
+    /// case).  Cross-domain wiring is deferred to the integration
+    /// cycle and surfaces as `bridges`, not regular `terminals`.
+    /// Together they preserve cross-domain reasoning ("X is like Y")
+    /// without paying the O(N²) cost on every tick.
+    #[serde(skip)]
+    pub domain_id:            u32,
+
+    /// Cross-domain bridges — analogical connections to concepts in
+    /// other domains.  Maintained by the integration cycle, NOT by
+    /// the observe hot path.  Bridges decay slower than terminals
+    /// (configurable; default ~10x slower) so structural analogies
+    /// learned during integration stay stable across normal training.
+    ///
+    /// `#[serde(skip)]` for the same reason as `last_decayed_tick`:
+    /// bincode is positional and adding serialized fields breaks
+    /// existing brain.bin files.  Bridges rebuild from co-firing
+    /// patterns during the next integration cycle.
+    #[serde(skip)]
+    pub bridges:              Vec<Terminal>,
 }
 
 impl Neuron {
@@ -178,6 +208,8 @@ impl Neuron {
             salience_ema: 0.0,
             last_decayed_tick: tick,
             terminal_idx: ahash::AHashMap::new(),
+            domain_id: 0,
+            bridges: Vec::new(),
         }
     }
 
@@ -205,6 +237,8 @@ impl Neuron {
             salience_ema: 0.01,
             last_decayed_tick: tick,
             terminal_idx: ahash::AHashMap::new(),
+            domain_id: 0,
+            bridges: Vec::new(),
         }
     }
 
