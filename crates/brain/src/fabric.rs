@@ -292,6 +292,18 @@ impl Fabric {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        // Soft-gate scale: cross-domain wiring still forms, but at a
+        // fraction of the within-domain learning rate.  Bridges grow
+        // continuously during normal training; sustained cross-domain
+        // co-firing strengthens them to the lock threshold over time
+        // and gives the substrate "X is like Y" reasoning without an
+        // explicit integration cycle.  Defaults to 0.1; tunable via
+        // W1Z4RD_CROSS_DOMAIN_SCALE for Phase B self-tuning.
+        let cross_domain_scale: f32 = std::env::var("W1Z4RD_CROSS_DOMAIN_SCALE")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.1);
+
         // Close the prior moment: any pair of neurons in different pools
         // that both fired this tick gets a cross-pool axon terminal
         // grown / strengthened.  Same-pool co-firing isn't wired here
@@ -337,10 +349,10 @@ impl Fabric {
                     for (i, &na) in fired_a.iter().enumerate() {
                         if let Some(neuron) = pa.get_mut(na) {
                             for (j, &nb) in fired_b.iter().enumerate() {
-                                if cross_domain(i, j) { continue; }
+                                let eff_lr = if cross_domain(i, j) { lr * cross_domain_scale } else { lr };
                                 if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_b, nb),
-                                    lr, self.tick, max_w,
+                                    eff_lr, self.tick, max_w,
                                 ) { added += 1; }
                             }
                         }
@@ -354,10 +366,10 @@ impl Fabric {
                     for (j, &nb) in fired_b.iter().enumerate() {
                         if let Some(neuron) = pb.get_mut(nb) {
                             for (i, &na) in fired_a.iter().enumerate() {
-                                if cross_domain(i, j) { continue; }
+                                let eff_lr = if cross_domain(i, j) { lr * cross_domain_scale } else { lr };
                                 if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_a, na),
-                                    lr, self.tick, max_w,
+                                    eff_lr, self.tick, max_w,
                                 ) { added += 1; }
                             }
                         }
@@ -427,10 +439,10 @@ impl Fabric {
                         for (i, &na) in concepts_a.iter().enumerate() {
                             if let Some(n) = pa.get_mut(na) {
                                 for (j, &nb) in concepts_b.iter().enumerate() {
-                                    if cross_dom(i, j) { continue; }
+                                    let eff_lr = if cross_dom(i, j) { concept_lr * cross_domain_scale } else { concept_lr };
                                     if n.reinforce_terminal(
                                         NeuronRef::new(pid_b, nb),
-                                        concept_lr, self.tick, max_w,
+                                        eff_lr, self.tick, max_w,
                                     ) { added += 1; }
                                 }
                             }
@@ -444,10 +456,10 @@ impl Fabric {
                         for (j, &nb) in concepts_b.iter().enumerate() {
                             if let Some(n) = pb.get_mut(nb) {
                                 for (i, &na) in concepts_a.iter().enumerate() {
-                                    if cross_dom(i, j) { continue; }
+                                    let eff_lr = if cross_dom(i, j) { concept_lr * cross_domain_scale } else { concept_lr };
                                     if n.reinforce_terminal(
                                         NeuronRef::new(pid_a, na),
-                                        concept_lr, self.tick, max_w,
+                                        eff_lr, self.tick, max_w,
                                     ) { added += 1; }
                                 }
                             }
@@ -507,14 +519,16 @@ impl Fabric {
                         if pw.get(src).is_none() { continue; }
                         for (j, &dst) in current_concepts.iter().enumerate() {
                             if src == dst { continue; }
-                            if domain_mode {
+                            let eff_lr = if domain_mode {
                                 let da = dom_src[i]; let db = dom_dst[j];
-                                if da != 0 && db != 0 && da != db { continue; }
-                            }
+                                if da != 0 && db != 0 && da != db {
+                                    0.3 * cross_domain_scale
+                                } else { 0.3 }
+                            } else { 0.3 };
                             if let Some(n) = pw.get_mut(src) {
                                 if n.reinforce_terminal(
                                     NeuronRef::new(pid, dst),
-                                    0.3,
+                                    eff_lr,
                                     self.tick,
                                     max_w,
                                 ) { added += 1; }

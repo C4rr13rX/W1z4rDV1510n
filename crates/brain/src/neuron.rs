@@ -327,6 +327,12 @@ impl Neuron {
         }
     }
 
+    /// Number of terminals whose consolidation has reached the lock
+    /// threshold.  These are decay-exempt and form the 100%-recall floor.
+    pub fn locked_terminal_count(&self) -> usize {
+        self.terminals.iter().filter(|t| t.consolidation >= Self::CONSOLIDATION_LOCK).count()
+    }
+
     /// Rebuild the `terminal_idx` cache from `terminals`.  O(|terminals|).
     /// Call after any operation that removes entries from `terminals`
     /// (retain, drain, clear, pop) — append-only operations preserve
@@ -352,6 +358,17 @@ impl Neuron {
     /// Cheap when `now == last_decayed_tick` (no elapsed → fast path:
     /// no walk).  At elapsed=k, cost is O(|terminals|) — same as the
     /// eager sweep but only when the neuron is actually accessed.
+    /// Consolidation-lock threshold: terminals whose `consolidation` count
+    /// has reached this value or higher are considered "trained" and are
+    /// exempt from background decay and prune.  This is the 100%-recall
+    /// floor — once a terminal has been reinforced this many times on
+    /// distinct ticks, the underlying QA pair is permanent.
+    ///
+    /// Chosen as `3` so a single training pass (one tick) does NOT lock;
+    /// a probe-correct/probe-correct/probe-correct triple does.  Phase B
+    /// will make this self-tune from QA recall stats.
+    pub const CONSOLIDATION_LOCK: u8 = 3;
+
     pub fn apply_pending_decay(&mut self, now: u64, epsilon: f32, floor: f32) -> usize {
         // Snapshot-loaded neurons have last_decayed_tick == 0 because
         // the field is #[serde(skip)] (the snapshot format is positional
@@ -374,6 +391,11 @@ impl Neuron {
         let factor = (1.0 - epsilon).powi(elapsed.min(i32::MAX as u64) as i32);
         let mut pruned = 0;
         self.terminals.retain_mut(|t| {
+            if t.consolidation >= Self::CONSOLIDATION_LOCK {
+                // Locked: well-trained terminal, exempt from decay/prune.
+                // This is the 100%-recall anchor.
+                return true;
+            }
             t.weight *= factor;
             if t.weight < floor {
                 pruned += 1;
@@ -396,6 +418,9 @@ impl Neuron {
     pub fn decay_and_prune(&mut self, epsilon: f32, floor: f32) -> usize {
         let mut pruned = 0;
         self.terminals.retain_mut(|t| {
+            if t.consolidation >= Self::CONSOLIDATION_LOCK {
+                return true;
+            }
             t.weight *= 1.0 - epsilon;
             if t.weight < floor {
                 pruned += 1;

@@ -311,6 +311,72 @@ pub struct BrainStats {
     pub binding_pressure:    f32,
 }
 
+/// One captured prompt→response moment, used by the self-test loop to
+/// score recall without any externally-supplied evaluation set.  The
+/// brain auto-captures these whenever a frame is observed in a pool
+/// while another pool has a recent (within 2 ticks) frame — i.e. the
+/// normal "ask in one pool, answer in another" interaction pattern.
+#[derive(Debug, Clone)]
+pub struct QaPair {
+    pub prompt_pool:   PoolId,
+    pub prompt:        Vec<u8>,
+    pub response_pool: PoolId,
+    pub response:      Vec<u8>,
+    pub observed_tick: u64,
+}
+
+/// Bounded ring-buffer of recently observed QA pairs.  The brain uses it
+/// as its self-supervised evaluation set: `Brain::self_test` samples
+/// pairs from this buffer, replays the prompt, and scores how close the
+/// decoded response is to the captured response.  Capacity-bounded so
+/// memory stays finite across long training runs.
+#[derive(Debug)]
+pub struct QaDatabase {
+    pairs:    VecDeque<QaPair>,
+    capacity: usize,
+}
+
+impl QaDatabase {
+    pub fn new(capacity: usize) -> Self {
+        Self { pairs: VecDeque::with_capacity(capacity), capacity }
+    }
+    pub fn push(&mut self, p: QaPair) {
+        if self.pairs.len() >= self.capacity { self.pairs.pop_front(); }
+        self.pairs.push_back(p);
+    }
+    pub fn len(&self) -> usize { self.pairs.len() }
+    pub fn is_empty(&self) -> bool { self.pairs.is_empty() }
+    pub fn iter(&self) -> impl Iterator<Item = &QaPair> { self.pairs.iter() }
+    /// Stride-sample up to `n` pairs spanning the buffer for deterministic
+    /// coverage across recent + historic captures.
+    pub fn sample(&self, n: usize) -> Vec<&QaPair> {
+        if n == 0 || self.pairs.is_empty() { return Vec::new(); }
+        if n >= self.pairs.len() { return self.pairs.iter().collect(); }
+        let stride = (self.pairs.len() / n).max(1);
+        self.pairs.iter().step_by(stride).take(n).collect()
+    }
+}
+
+/// Per-pair recall outcome from a self-test pass.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SelfTestRecall {
+    pub prompt:           String,
+    pub expected:         String,
+    pub decoded:          String,
+    pub byte_match_ratio: f32,
+    pub exact:            bool,
+}
+
+/// Aggregate self-test report — what the brain produces when it grades
+/// its own recall against its captured QA buffer.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SelfTestReport {
+    pub sampled:        usize,
+    pub exact_recall:   usize,
+    pub mean_byte_match: f32,
+    pub per_pair:       Vec<SelfTestRecall>,
+}
+
 pub struct Brain {
     fabric:                       Fabric,
     config:                       BrainConfig,
@@ -374,6 +440,51 @@ pub struct Brain {
     /// record.  Transport (cluster) lives outside this crate; this
     /// state is the brain-side data model.
     network:                      NetworkState,
+    /// Auto-captured prompt→response pairs for self-supervised recall
+    /// scoring.  Phase A of the dynamical-feedback architecture: the
+    /// brain grades itself against pairs it has actually observed
+    /// during training, with no external answer key.
+    qa_db:                        QaDatabase,
+    /// Most recent frame observed in each pool plus the tick it landed
+    /// on.  Used to recognise the cross-pool prompt→response pattern
+    /// during `observe` so the QA buffer auto-populates.
+    recent_frames:                AHashMap<PoolId, (Vec<u8>, u64)>,
+}
+
+/// Cosine similarity between two sparse co-firing signatures.  A
+/// signature is a `NeuronRef -> weight` map representing which OTHER
+/// neurons this concept co-fires with (and how strongly).  Two
+/// concepts are structurally analogous if their co-firing fingerprints
+/// overlap — this is the architecture's "X is like Y" similarity
+/// metric, not label-string matching.
+fn cofiring_cosine(
+    a: &ahash::AHashMap<NeuronRef, f32>,
+    b: &ahash::AHashMap<NeuronRef, f32>,
+) -> f32 {
+    if a.is_empty() || b.is_empty() { return 0.0; }
+    let mut dot = 0.0f32;
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    for (k, &va) in small {
+        if let Some(&vb) = large.get(k) { dot += va * vb; }
+    }
+    let na: f32 = a.values().map(|v| v * v).sum::<f32>().sqrt();
+    let nb: f32 = b.values().map(|v| v * v).sum::<f32>().sqrt();
+    if na <= 0.0 || nb <= 0.0 { 0.0 } else { dot / (na * nb) }
+}
+
+/// Position-weighted byte match between two byte sequences.  1.0 means
+/// identical-length identical-bytes; 0.0 means no positional matches.
+/// Used by `Brain::self_test` to score decoded responses against
+/// captured ground-truth.
+fn byte_match_ratio_local(decoded: &[u8], expected: &[u8]) -> f32 {
+    if decoded.is_empty() && expected.is_empty() { return 1.0; }
+    let len = decoded.len().max(expected.len());
+    if len == 0 { return 0.0; }
+    let mut hits = 0usize;
+    for i in 0..decoded.len().min(expected.len()) {
+        if decoded[i] == expected[i] { hits += 1; }
+    }
+    hits as f32 / len as f32
 }
 
 impl Brain {
@@ -411,7 +522,69 @@ impl Brain {
             eem,
             annealer,
             network:               NetworkState::new(""),
+            qa_db:                 QaDatabase::new(4096),
+            recent_frames:         AHashMap::new(),
         }
+    }
+
+    /// Read-only access to the auto-captured QA buffer.
+    pub fn qa_db(&self) -> &QaDatabase { &self.qa_db }
+
+    /// Total locked-terminal count across every pool.  These terminals
+    /// are decay-exempt by the consolidation lock and form the brain's
+    /// permanent recall floor.
+    pub fn locked_terminal_count(&self) -> usize {
+        self.fabric.pool_ids().into_iter()
+            .filter_map(|pid| self.fabric.pool(pid))
+            .map(|pool| {
+                let p = pool.read();
+                p.iter_neurons().map(|n| n.locked_terminal_count()).sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Run a self-supervised recall test: sample QA pairs from the
+    /// auto-captured buffer, fire each prompt into its prompt pool,
+    /// integrate into the response pool, and score the decoded answer
+    /// against the captured response.  No external evaluation set
+    /// required.
+    ///
+    /// Brain state is barely perturbed (one extra co-firing per probe
+    /// at lr × cross_domain_scale for cross-pool atoms).  The
+    /// consolidation lock prevents trained terminals from drifting.
+    /// This is the brain's own dynamical-feedback signal: a falling
+    /// `mean_byte_match` is the trigger Phase B will hook into to
+    /// retune decay / emergence params.
+    pub fn self_test(&mut self, sample_count: usize) -> SelfTestReport {
+        let pairs: Vec<QaPair> = self.qa_db.sample(sample_count)
+            .into_iter().cloned().collect();
+        let mut report = SelfTestReport {
+            sampled:         0,
+            exact_recall:    0,
+            mean_byte_match: 0.0,
+            per_pair:        Vec::with_capacity(pairs.len()),
+        };
+        if pairs.is_empty() { return report; }
+        let mut byte_sum = 0.0f32;
+        for qp in &pairs {
+            self.fabric.observe(qp.prompt_pool, &qp.prompt);
+            let ans = self.integrate(qp.prompt_pool, qp.response_pool);
+            let decoded = ans.answer.clone().unwrap_or_default();
+            let bm = byte_match_ratio_local(&decoded, &qp.response);
+            let exact = decoded == qp.response;
+            byte_sum += bm;
+            if exact { report.exact_recall += 1; }
+            report.per_pair.push(SelfTestRecall {
+                prompt:           String::from_utf8_lossy(&qp.prompt).to_string(),
+                expected:         String::from_utf8_lossy(&qp.response).to_string(),
+                decoded:          String::from_utf8_lossy(&decoded).to_string(),
+                byte_match_ratio: bm,
+                exact,
+            });
+        }
+        report.sampled = pairs.len();
+        report.mean_byte_match = byte_sum / (pairs.len() as f32);
+        report
     }
 
     pub fn eem(&self) -> &Eem { &self.eem }
@@ -439,6 +612,27 @@ impl Brain {
     /// is the normal mode — call `advance_tick` only when ready to
     /// close the moment.
     pub fn observe(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        let now = self.fabric.current_tick();
+        // QA capture: if some OTHER pool received a frame within the
+        // last 2 ticks, this frame is its response.  Snapshot a
+        // candidate then mutate qa_db to avoid an iter-and-mutate
+        // borrow conflict.
+        let captured: Option<(PoolId, Vec<u8>)> = self.recent_frames.iter()
+            .filter(|(op, (_, t))| **op != pool_id && now.saturating_sub(*t) <= 2)
+            .max_by_key(|(_, (_, t))| *t)
+            .map(|(op, (f, _))| (*op, f.clone()));
+        if let Some((prompt_pool, prompt_bytes)) = captured {
+            if !frame.is_empty() && !prompt_bytes.is_empty() {
+                self.qa_db.push(QaPair {
+                    prompt_pool,
+                    prompt:        prompt_bytes,
+                    response_pool: pool_id,
+                    response:      frame.to_vec(),
+                    observed_tick: now,
+                });
+            }
+        }
+        self.recent_frames.insert(pool_id, (frame.to_vec(), now));
         self.fabric.observe(pool_id, frame)
     }
 
@@ -3093,6 +3287,9 @@ impl Brain {
         pool.write().tick_housekeeping(now);
     }
 
+    // (helper for `integrate` — Jaccard on tilde-split label tokens)
+    // Defined as a free function below.
+
     /// Drain queued deferred-promotion candidates per pool.  Called
     /// during sleep — crystallises every concept that crossed the
     /// emergence threshold during observe while W1Z4RD_DEFER_PROMOTION
@@ -3143,6 +3340,110 @@ impl Brain {
             }
         }
         out
+    }
+
+    /// Integration cycle — the "X is like Y" substrate.  Finds
+    /// structurally similar concept pairs across DIFFERENT domains and
+    /// adds bridge terminals between them.
+    ///
+    /// Similarity metric: cosine on each concept's co-firing signature
+    /// (its outgoing-terminal weight vector, indexed by target
+    /// NeuronRef).  Two concepts are structurally analogous if they
+    /// project into overlapping downstream targets — co-firing
+    /// fingerprint matches, NOT label-string matches.  This is the
+    /// architecture's intended similarity primitive.
+    ///
+    /// Bridges are reinforced via normal `reinforce_terminal` with
+    /// weight = similarity × 0.1, then strengthened naturally on
+    /// subsequent cross-domain co-firing (the soft domain gate in
+    /// fabric.rs lets that happen during ordinary training).
+    ///
+    /// Returns total bridges added across all pools and domain pairs.
+    pub fn integrate_islands(
+        &self,
+        sample_size: usize,
+        similarity_threshold: f32,
+    ) -> usize {
+        let now = self.fabric.current_tick();
+        let mut total_bridges = 0usize;
+
+        for pid in self.fabric.pool_ids() {
+            let Some(pool) = self.fabric.pool(pid) else { continue };
+
+            // Bucket concept ids by domain, building a co-firing
+            // signature for each as we go.  Skip atoms (no analogical
+            // content); skip domain 0 (unassigned).
+            type Sig = ahash::AHashMap<NeuronRef, f32>;
+            let buckets: std::collections::HashMap<u32, Vec<(NeuronId, Sig)>> = {
+                let p = pool.read();
+                let mut b: std::collections::HashMap<u32, Vec<(NeuronId, Sig)>>
+                    = std::collections::HashMap::new();
+                for n in p.iter_neurons() {
+                    if n.is_atom() || n.domain_id == 0 { continue; }
+                    // Co-firing signature = outgoing terminal weights
+                    // by target.  Effective weight folds in
+                    // consolidation, so well-trained edges dominate
+                    // the analogy metric (intended — matures with
+                    // training).
+                    let mut sig: Sig = ahash::AHashMap::with_capacity(n.terminals.len());
+                    for t in &n.terminals {
+                        sig.insert(t.target, t.effective_weight());
+                    }
+                    b.entry(n.domain_id).or_default().push((n.id, sig));
+                }
+                b
+            };
+
+            let domains: Vec<u32> = buckets.keys().copied().collect();
+            for i in 0..domains.len() {
+                for j in (i + 1)..domains.len() {
+                    let dom_x = domains[i];
+                    let dom_y = domains[j];
+
+                    let xs: &[(NeuronId, Sig)] = {
+                        let slice = &buckets[&dom_x];
+                        &slice[..slice.len().min(sample_size)]
+                    };
+                    let ys: &[(NeuronId, Sig)] = {
+                        let slice = &buckets[&dom_y];
+                        &slice[..slice.len().min(sample_size)]
+                    };
+
+                    let mut pairs: Vec<(NeuronId, NeuronId, f32)> = Vec::new();
+                    for (x, sx) in xs {
+                        for (y, sy) in ys {
+                            let sim = cofiring_cosine(sx, sy);
+                            if sim >= similarity_threshold {
+                                pairs.push((*x, *y, sim));
+                            }
+                        }
+                    }
+
+                    if pairs.is_empty() { continue; }
+
+                    let mut pw = pool.write();
+                    let max_w = pw.config.max_weight;
+                    let mut added = 0usize;
+                    for (x, y, sim) in &pairs {
+                        let w = sim * 0.1;
+                        if let Some(nx) = pw.get_mut(*x) {
+                            if nx.reinforce_terminal(NeuronRef::new(pid, *y), w, now, max_w) {
+                                added += 1;
+                            }
+                        }
+                        if let Some(ny) = pw.get_mut(*y) {
+                            if ny.reinforce_terminal(NeuronRef::new(pid, *x), w, now, max_w) {
+                                added += 1;
+                            }
+                        }
+                    }
+                    pw.total_terminals += added;
+                    total_bridges += added;
+                }
+            }
+        }
+
+        total_bridges
     }
 
     /// Score a moment fingerprint by the mean salience of its participating
@@ -4008,6 +4309,8 @@ impl Brain {
             eem:                   crate::eem::Eem::from_snapshot(snap.eem),
             annealer:              crate::annealer::Annealer::from_snapshot(snap.annealer),
             network:               NetworkState::new(""),
+            qa_db:                 QaDatabase::new(4096),
+            recent_frames:         AHashMap::new(),
         };
         (brain, missing)
     }

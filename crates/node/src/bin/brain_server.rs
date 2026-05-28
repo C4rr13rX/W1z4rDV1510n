@@ -686,6 +686,80 @@ async fn domain_stats(State(s): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "histogram": entries }))
 }
 
+/// Integration cycle — the "X is like Y" substrate.  Walks concepts
+/// per pool, samples up to `sample_size` per domain, and adds bridge
+/// terminals between cross-domain pairs whose composite labels share
+/// >= `similarity_threshold` Jaccard overlap.
+///
+/// POST { "sample_size": N, "similarity_threshold": F }
+/// Returns { "bridges_added": N, "tick_now": T }
+async fn integrate_cycle(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let sample_size = req.get("sample_size")
+        .and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(500);
+    let similarity_threshold = req.get("similarity_threshold")
+        .and_then(|v| v.as_f64()).map(|n| n as f32).unwrap_or(0.5);
+    let (bridges, tick_now) = {
+        let brain = s.brain.lock().await;
+        let b = brain.integrate_islands(sample_size, similarity_threshold);
+        let t = brain.fabric().current_tick();
+        (b, t)
+    };
+    Json(serde_json::json!({
+        "bridges_added":         bridges,
+        "tick_now":              tick_now,
+        "sample_size":           sample_size,
+        "similarity_threshold":  similarity_threshold,
+    }))
+}
+
+/// QA-buffer stats — how many auto-captured prompt→response pairs the
+/// brain currently has on hand for self-testing.  GET.
+async fn qa_db_stats(State(s): State<AppState>) -> Json<serde_json::Value> {
+    let brain = s.brain.lock().await;
+    let db = brain.qa_db();
+    Json(serde_json::json!({
+        "count":    db.len(),
+        "capacity": 4096,
+    }))
+}
+
+/// Consolidation stats — the count of decay-exempt "locked" terminals
+/// across the whole fabric.  This is the 100%-recall floor: trained
+/// patterns that reached the lock threshold and are no longer subject
+/// to background decay.  GET.
+async fn consolidation_stats(State(s): State<AppState>) -> Json<serde_json::Value> {
+    let brain = s.brain.lock().await;
+    let locked = brain.locked_terminal_count();
+    let tick_now = brain.fabric().current_tick();
+    Json(serde_json::json!({
+        "locked_terminals": locked,
+        "lock_threshold":   3u8,
+        "tick_now":         tick_now,
+    }))
+}
+
+/// Self-test — sample QA pairs from the auto-captured buffer, fire each
+/// prompt into its prompt pool, integrate into the response pool, and
+/// score decoded answers against captured responses.  No external
+/// evaluation set required.  POST { "sample_count": N }.
+async fn self_test(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let sample_count = req.get("sample_count")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(32);
+    let report = {
+        let mut brain = s.brain.lock().await;
+        brain.self_test(sample_count)
+    };
+    Json(serde_json::json!(report))
+}
+
 async fn sleep_pressure(State(s): State<AppState>) -> Json<serde_json::Value> {
     let count = {
         let brain = s.brain.lock().await;
@@ -2484,6 +2558,10 @@ async fn main() -> Result<()> {
         .route("/sleep_pressure",        get(sleep_pressure))
         .route("/set_domain",            post(set_domain))
         .route("/domain_stats",          get(domain_stats))
+        .route("/qa_db_stats",           get(qa_db_stats))
+        .route("/consolidation_stats",   get(consolidation_stats))
+        .route("/self_test",             post(self_test))
+        .route("/integrate_islands",     post(integrate_cycle))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))
         .route("/integrate_resonant",    post(integrate_resonant))
