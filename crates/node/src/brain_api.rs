@@ -511,23 +511,44 @@ pub async fn run_thinking_loop(state: BrainApiState) {
 // Router builder
 // ---------------------------------------------------------------------
 
-/// Build the brain endpoint router with state baked in.  Caller mounts
-/// it under `/brain` (or any other prefix) on its main router.
+/// Build the FULL brain endpoint router with state baked in.  Mounts
+/// every Phase A–E handler INCLUDING the baseline `/observe`,
+/// `/tick`, `/stats`, `/health`, `/integrate`, `/pool/concepts` ones.
+/// Used by the main node binary under `/brain/*` where nothing else
+/// is on that prefix.
 pub fn brain_routes(state: BrainApiState) -> Router {
     Router::new()
         .route("/health",                 get(h_health))
         .route("/stats",                  get(h_stats))
         .route("/observe",                post(h_observe))
         .route("/tick",                   post(h_tick))
+        .route("/integrate",              post(h_integrate))
+        .route("/pool/concepts",          post(h_pool_concepts))
+        .with_state(state.clone())
+        .merge(brain_phase_routes(state))
+}
+
+/// Build a router with ONLY the new Phase A–E routes that didn't
+/// exist before — `/qa_db_stats`, `/consolidation_stats`,
+/// `/self_test`, `/integrate_chain`, `/integrate_islands`, `/retune`,
+/// `/tuning_state`, `/force_decay`, `/idle_ticks`, `/thinking/*`,
+/// `/set_domain`, `/domain_stats`, `/sleep_pressure`.
+///
+/// Used by the standalone `brain_server` binary which already has its
+/// own elaborated `/observe`, `/tick`, `/stats`, `/health`,
+/// `/integrate`, `/pool/concepts` handlers (with timing logs, cluster
+/// shipping, extra Stage-10 fields, etc.).  Merging this router into
+/// brain_server's main router avoids the duplicate definitions
+/// without losing brain_server's diagnostic surface.
+pub fn brain_phase_routes(state: BrainApiState) -> Router {
+    Router::new()
         .route("/set_domain",             post(h_set_domain))
         .route("/domain_stats",           get(h_domain_stats))
         .route("/qa_db_stats",            get(h_qa_db_stats))
         .route("/consolidation_stats",    get(h_consolidation_stats))
         .route("/self_test",              post(h_self_test))
-        .route("/integrate",              post(h_integrate))
         .route("/integrate_chain",        post(h_integrate_chain))
         .route("/integrate_islands",      post(h_integrate_islands))
-        .route("/pool/concepts",          post(h_pool_concepts))
         .route("/retune",                 post(h_retune))
         .route("/tuning_state",           get(h_tuning_state))
         .route("/force_decay",            post(h_force_decay))

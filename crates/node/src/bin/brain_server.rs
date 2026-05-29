@@ -37,6 +37,17 @@ mod cluster;
 #[allow(unused_imports)]
 use cluster::{HttpRemoteTransport, arc_transport};
 
+// Shared brain HTTP surface used by BOTH this standalone binary AND
+// the main node binary's /brain/* mount.  Pulled in via #[path]
+// because brain_server is a [[bin]] target and crates/node has no
+// [lib], so the conventional `crate::` namespace isn't available
+// here.  The module owns the Phase A–E handlers + ThinkingState +
+// the background thinking-loop task; this file mounts them via
+// `brain_api::brain_phase_routes` to avoid duplicate definitions.
+#[path = "../brain_api.rs"]
+mod brain_api;
+use brain_api::{BrainApiState, ThinkingState as ApiThinkingState};
+
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -80,47 +91,16 @@ fn pool_name(id: PoolId) -> &'static str {
     }
 }
 
-/// Phase E — continuous-thought controller state.  Shared between the
-/// background thinking task and the HTTP handlers so the loop can be
-/// started, stopped, or queried from the outside.  The brain lock is
-/// always released between hops so /observe and /integrate preempt
-/// cleanly — inference and training take priority over thinking.
-#[derive(Debug)]
-struct ThinkingState {
-    /// Global on/off switch.  Background task polls every ~50ms when
-    /// disabled, runs one hop per ~50ms when enabled.
-    enabled:        std::sync::atomic::AtomicBool,
-    /// Source pool the loop reads its prompt from (typically POOL_TEXT).
-    query_pool:     std::sync::atomic::AtomicU32,
-    /// Pool the loop reads its answer from (typically POOL_ACTION).
-    target_pool:    std::sync::atomic::AtomicU32,
-    /// Cumulative hops taken since process start — diagnostic.
-    hops_taken:     std::sync::atomic::AtomicU64,
-    /// Last seed the loop fed in (for /thinking/status).
-    last_seed:      std::sync::Mutex<Option<Vec<u8>>>,
-    /// Last answer the loop produced.
-    last_answer:    std::sync::Mutex<Option<Vec<u8>>>,
-}
-
-impl Default for ThinkingState {
-    fn default() -> Self {
-        use std::sync::atomic::AtomicU32;
-        Self {
-            enabled:     std::sync::atomic::AtomicBool::new(false),
-            query_pool:  AtomicU32::new(1),
-            target_pool: AtomicU32::new(4),
-            hops_taken:  std::sync::atomic::AtomicU64::new(0),
-            last_seed:   std::sync::Mutex::new(None),
-            last_answer: std::sync::Mutex::new(None),
-        }
-    }
-}
+// Phase E ThinkingState now lives in `brain_api::ThinkingState` —
+// imported above as `ApiThinkingState`.  AppState holds an Arc to that
+// same type so the BrainApiState we build from these fields is bitwise
+// identical to the one the main node binary owns.
 
 #[derive(Clone)]
 struct AppState {
     brain: Arc<Mutex<Brain>>,
     checkpoint_path: PathBuf,
-    thinking: Arc<ThinkingState>,
+    thinking: Arc<ApiThinkingState>,
     /// Per [`ARCHITECTURE.md`] §17.4: the current (or last completed) sleep
     /// job's progress.  Updated by the background tokio task spawned from
     /// the `/sleep` handler; readable by `/sleep/status`.  `None` means
@@ -683,356 +663,15 @@ fn pct(num: u64, denom: u64) -> f64 {
     if denom == 0 { 0.0 } else { (num as f64) * 100.0 / (denom as f64) }
 }
 
-/// Operator visibility into how much structure work is queued for the
-/// next sleep cycle under deferred-promotion mode.  A queue depth of 0
-/// means observe was either running in inline mode or saw no novel
-/// patterns.  Growing depth means the brain is learning new structure
-/// faster than sleep is consolidating it — operator should fire /sleep
-/// before the queue gets huge (memory cost grows linearly).
-/// Island architecture: set the domain stamp for every pool's
-/// newly-created atoms + concepts.  Operator calls before each
-/// domain-specific corpus so the new neurons cluster into that
-/// island.  POST { "domain_id": N }.  0 resets to unassigned.
-async fn set_domain(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let domain_id = req.get("domain_id")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32)
-        .unwrap_or(0);
-    {
-        let brain = s.brain.lock().await;
-        brain.set_domain_for_new(domain_id);
-    }
-    Json(serde_json::json!({ "domain_for_new": domain_id }))
-}
-
-/// Per-(pool, domain) neuron count.  Lets the operator confirm
-/// island growth during training.
-async fn domain_stats(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let hist = {
-        let brain = s.brain.lock().await;
-        brain.domain_histogram()
-    };
-    let entries: Vec<serde_json::Value> = hist.into_iter()
-        .map(|((pool, domain), count)| serde_json::json!({
-            "pool": pool, "domain": domain, "count": count,
-        }))
-        .collect();
-    Json(serde_json::json!({ "histogram": entries }))
-}
-
-/// Integration cycle — the "X is like Y" substrate.  Walks concepts
-/// per pool, samples up to `sample_size` per domain, and adds bridge
-/// terminals between cross-domain pairs whose composite labels share
-/// >= `similarity_threshold` Jaccard overlap.
-///
-/// POST { "sample_size": N, "similarity_threshold": F }
-/// Returns { "bridges_added": N, "tick_now": T }
-async fn integrate_cycle(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let sample_size = req.get("sample_size")
-        .and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(500);
-    let similarity_threshold = req.get("similarity_threshold")
-        .and_then(|v| v.as_f64()).map(|n| n as f32).unwrap_or(0.5);
-    let (bridges, tick_now) = {
-        let brain = s.brain.lock().await;
-        let b = brain.integrate_islands(sample_size, similarity_threshold);
-        let t = brain.fabric().current_tick();
-        (b, t)
-    };
-    Json(serde_json::json!({
-        "bridges_added":         bridges,
-        "tick_now":              tick_now,
-        "sample_size":           sample_size,
-        "similarity_threshold":  similarity_threshold,
-    }))
-}
-
-/// QA-buffer stats — how many auto-captured prompt→response pairs the
-/// brain currently has on hand for self-testing.  GET.
-async fn qa_db_stats(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let brain = s.brain.lock().await;
-    let db = brain.qa_db();
-    Json(serde_json::json!({
-        "count":    db.len(),
-        "capacity": 4096,
-    }))
-}
-
-/// Consolidation stats — the count of decay-exempt "locked" terminals
-/// across the whole fabric.  This is the 100%-recall floor: trained
-/// patterns that reached the lock threshold and are no longer subject
-/// to background decay.  GET.
-async fn consolidation_stats(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let brain = s.brain.lock().await;
-    let locked = brain.locked_terminal_count();
-    let tick_now = brain.fabric().current_tick();
-    Json(serde_json::json!({
-        "locked_terminals": locked,
-        "lock_threshold":   3u8,
-        "tick_now":         tick_now,
-    }))
-}
-
-/// Phase E — the autonomous thinking loop.  Idles until
-/// `state.thinking.enabled` is set, then runs ONE integrate hop per
-/// iteration, releasing the brain lock between hops so inference
-/// (/integrate, /chat) and training (/observe) preempt cleanly.
-///
-/// Each hop:
-///  - Pick a seed: prefer last_answer if present and non-empty and
-///    differs from last_seed; otherwise rotate through the QA db.
-///  - Observe seed into query_pool.
-///  - Integrate query_pool → target_pool.
-///  - Record the answer; if no answer (fixed point), invalidate
-///    last_answer so the next hop picks a fresh QA-db seed.
-///
-/// The loop is the "continuous thought" substrate: the brain
-/// autonomously walks its own knowledge graph.  Observers can read
-/// last_seed/last_answer via /thinking/status.
-async fn thinking_loop(state: AppState) {
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-
-    let mut qa_cursor: usize = 0;
-    loop {
-        if !state.thinking.enabled.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            continue;
-        }
-        let qp = state.thinking.query_pool.load(Ordering::Acquire);
-        let tp = state.thinking.target_pool.load(Ordering::Acquire);
-
-        // Pick the next seed before locking the brain so we minimise
-        // hold time.  Snapshot last_answer (lock std mutex briefly,
-        // immediately drop).
-        let last_answer_snap: Option<Vec<u8>> =
-            state.thinking.last_answer.lock().unwrap().clone();
-        let last_seed_snap: Option<Vec<u8>> =
-            state.thinking.last_seed.lock().unwrap().clone();
-
-        let seed: Option<Vec<u8>> = match last_answer_snap {
-            Some(ans) if !ans.is_empty() && Some(&ans) != last_seed_snap.as_ref() => {
-                Some(ans)
-            }
-            _ => {
-                // Cycled or empty — rotate to next QA-db prompt for novelty.
-                let brain = state.brain.lock().await;
-                let len = brain.qa_db().len();
-                if len == 0 { None } else {
-                    let idx = qa_cursor % len;
-                    qa_cursor = qa_cursor.wrapping_add(1);
-                    brain.qa_db().iter().nth(idx)
-                        .map(|qp| qp.prompt.clone())
-                }
-            }
-        };
-
-        let Some(seed) = seed else {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            continue;
-        };
-
-        // Acquire the brain lock briefly: one observe + one integrate.
-        let answer: Option<Vec<u8>> = {
-            let mut brain = state.brain.lock().await;
-            brain.fabric_mut().observe(qp, &seed);
-            let ans = brain.integrate(qp, tp);
-            ans.answer
-        };
-
-        // Update shared state (no brain lock held).
-        *state.thinking.last_seed.lock().unwrap() = Some(seed);
-        *state.thinking.last_answer.lock().unwrap() = answer;
-        state.thinking.hops_taken.fetch_add(1, Ordering::AcqRel);
-
-        // Yield so other handlers run.  Tokio mutex is FIFO, so a
-        // pending /observe acquired while we held the brain lock will
-        // run before us next iteration — inference and training stay
-        // responsive.  50ms ≈ 20 hops/sec of background thinking.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Phase E — enable the autonomous thinking loop.
-/// POST { query_pool?, target_pool?, seed? }.  Optional seed seeds the
-/// chain at start (defaults to QA-db rotation).
-async fn thinking_start(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    use std::sync::atomic::Ordering;
-    if let Some(q) = req.get("query_pool").and_then(|v| v.as_u64()) {
-        s.thinking.query_pool.store(q as u32, Ordering::Release);
-    }
-    if let Some(t) = req.get("target_pool").and_then(|v| v.as_u64()) {
-        s.thinking.target_pool.store(t as u32, Ordering::Release);
-    }
-    if let Some(seed_b64) = req.get("seed").and_then(|v| v.as_str()) {
-        if let Ok(b) = decode_base64_flexible(seed_b64) {
-            *s.thinking.last_answer.lock().unwrap() = Some(b);
-            *s.thinking.last_seed.lock().unwrap() = None;
-        }
-    }
-    s.thinking.enabled.store(true, Ordering::Release);
-    Json(serde_json::json!({ "enabled": true }))
-}
-
-/// Phase E — disable the autonomous thinking loop.  Idempotent.
-async fn thinking_stop(State(s): State<AppState>) -> Json<serde_json::Value> {
-    use std::sync::atomic::Ordering;
-    s.thinking.enabled.store(false, Ordering::Release);
-    Json(serde_json::json!({ "enabled": false }))
-}
-
-/// Phase E — current thinking-loop state.  No brain lock taken.
-async fn thinking_status(State(s): State<AppState>) -> Json<serde_json::Value> {
-    use std::sync::atomic::Ordering;
-    let seed = s.thinking.last_seed.lock().unwrap().clone();
-    let answer = s.thinking.last_answer.lock().unwrap().clone();
-    Json(serde_json::json!({
-        "enabled":      s.thinking.enabled.load(Ordering::Acquire),
-        "query_pool":   s.thinking.query_pool.load(Ordering::Acquire),
-        "target_pool":  s.thinking.target_pool.load(Ordering::Acquire),
-        "hops_taken":   s.thinking.hops_taken.load(Ordering::Acquire),
-        "last_seed":    seed.as_deref().map(base64_url_no_pad),
-        "last_answer":  answer.as_deref().map(base64_url_no_pad),
-    }))
-}
-
-/// Debug — force every pool's decay_rate to a given value.  Used to
-/// perturb the substrate so the self-tuner has a real gradient to
-/// climb.  POST { decay_rate: f32 }.
-async fn force_decay(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let v = req.get("decay_rate").and_then(|v| v.as_f64()).unwrap_or(2e-5) as f32;
-    let v = v.clamp(1e-7, 0.5);
-    let count = {
-        let brain = s.brain.lock().await;
-        let pids = brain.fabric().pool_ids();
-        for pid in &pids {
-            if let Some(p) = brain.fabric().pool(*pid) {
-                let mut pw = p.write();
-                pw.config.decay_rate = v;
-            }
-        }
-        pids.len()
-    };
-    Json(serde_json::json!({ "decay_rate": v, "pools_updated": count }))
-}
-
-/// Debug — advance the fabric tick N times without observing anything.
-/// Lets decay actually do damage to non-locked terminals so the
-/// self-tuner has something to recover from.  POST { n: u32 }.
-async fn idle_ticks(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let n = req.get("n").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
-    let mut brain = s.brain.lock().await;
-    for _ in 0..n { brain.advance_tick(); }
-    Json(serde_json::json!({ "ticks_advanced": n, "current_tick": brain.fabric().current_tick() }))
-}
-
-/// Self-tuning step — run a self_test, hill-climb the global
-/// decay_rate using recall as the gradient.  POST { sample_count }.
-async fn retune(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let sample_count = req.get("sample_count")
-        .and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(16);
-    let report = {
-        let mut brain = s.brain.lock().await;
-        brain.retune(sample_count)
-    };
-    Json(serde_json::json!(report))
-}
-
-/// Current self-tuning controller state — GET.
-async fn tuning_state(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let brain = s.brain.lock().await;
-    Json(serde_json::json!(brain.tuning_state()))
-}
-
-/// Chain-integration probe — feed the answer of integrate() back as a
-/// new query, recursively, up to `max_hops` times.  Tests the
-/// "conclusions through cross-domain knowledge" path: when A→B and
-/// B→C are trained, this should hop from A through B to C.
-/// POST { "query_pool": N, "target_pool": M, "seed": base64url, "max_hops": K }.
-async fn integrate_chain(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let query_pool = req.get("query_pool")
-        .and_then(|v| v.as_u64()).map(|n| n as PoolId).unwrap_or(1);
-    let target_pool = req.get("target_pool")
-        .and_then(|v| v.as_u64()).map(|n| n as PoolId).unwrap_or(4);
-    let max_hops = req.get("max_hops")
-        .and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(4);
-    let seed_b64 = req.get("seed").and_then(|v| v.as_str()).unwrap_or("");
-    let seed = match decode_base64_flexible(seed_b64) {
-        Ok(b) => b,
-        Err(e) => return Json(serde_json::json!({"error": format!("bad seed: {}", e)})),
-    };
-    let trail = {
-        let mut brain = s.brain.lock().await;
-        brain.integrate_chain(query_pool, target_pool, &seed, max_hops)
-    };
-    // Each step: { "query": base64url, "answer": base64url | null }
-    let steps: Vec<serde_json::Value> = trail.into_iter()
-        .map(|(q, a)| {
-            let q_b64 = base64_url_no_pad(&q);
-            let a_b64 = a.map(|bytes| base64_url_no_pad(&bytes));
-            serde_json::json!({ "query": q_b64, "answer": a_b64 })
-        })
-        .collect();
-    Json(serde_json::json!({ "steps": steps }))
-}
-
-fn base64_url_no_pad(b: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
-}
-
-/// Self-test — sample QA pairs from the auto-captured buffer, fire each
-/// prompt into its prompt pool, integrate into the response pool, and
-/// score decoded answers against captured responses.  No external
-/// evaluation set required.  POST { "sample_count": N }.
-async fn self_test(
-    State(s): State<AppState>,
-    Json(req): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let sample_count = req.get("sample_count")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(32);
-    let report = {
-        let mut brain = s.brain.lock().await;
-        brain.self_test(sample_count)
-    };
-    Json(serde_json::json!(report))
-}
-
-async fn sleep_pressure(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let count = {
-        let brain = s.brain.lock().await;
-        brain.pending_promotion_count()
-    };
-    let deferred = std::env::var("W1Z4RD_DEFER_PROMOTION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    Json(serde_json::json!({
-        "deferred_promotion_enabled": deferred,
-        "pending_promotions":         count,
-    }))
-}
+// The Phase A–E handlers (set_domain, domain_stats, integrate_cycle,
+// qa_db_stats, consolidation_stats, thinking_loop, thinking_start,
+// thinking_stop, thinking_status, force_decay, idle_ticks, retune,
+// tuning_state, integrate_chain, self_test, sleep_pressure) now live
+// in `crates/node/src/brain_api.rs` and are mounted into this
+// binary's router via `brain_api::brain_phase_routes(...)`.  See the
+// `main()` function below.  The shared implementations are the same
+// source the main node binary uses for its `/brain/*` namespace, so
+// behaviour stays in lockstep across both surfaces.
 
 async fn tick(State(s): State<AppState>) -> Json<u64> {
     let _t_handler = std::time::Instant::now();
@@ -2805,20 +2444,42 @@ async fn main() -> Result<()> {
     let state = AppState {
         brain:           Arc::new(Mutex::new(brain)),
         checkpoint_path: checkpoint_path.clone(),
-        thinking:        Arc::new(ThinkingState::default()),
+        thinking:        Arc::new(ApiThinkingState::default()),
         sleep_status:    Arc::new(std::sync::Mutex::new(None)),
         cluster:         Arc::new(std::sync::Mutex::new(cluster_state)),
     };
 
-    // Spawn the Phase E thinking loop.  Idle until enabled via
+    // Build the BrainApiState shared with the main node binary so the
+    // background thinking loop AND the Phase A–E HTTP handlers (all in
+    // crates/node/src/brain_api.rs) operate on the same Brain instance
+    // we just constructed.  Cloning these Arcs is cheap and keeps both
+    // routers operating on a single Brain Mutex.
+    let brain_api_state = brain_api::BrainApiState {
+        brain:    state.brain.clone(),
+        thinking: state.thinking.clone(),
+    };
+
+    // Spawn the Phase E thinking loop from brain_api so both binaries
+    // share one implementation.  Idle until enabled via
     // POST /thinking/start.  Each iteration acquires the brain lock,
     // runs ONE integrate hop, releases the lock, sleeps briefly.
     // Inference (/integrate, /chat) and training (/observe) preempt
     // cleanly because they take the same lock and tokio mutex is fair.
     {
-        let state_for_loop = state.clone();
-        tokio::spawn(async move { thinking_loop(state_for_loop).await });
+        let state_for_loop = brain_api_state.clone();
+        tokio::spawn(async move { brain_api::run_thinking_loop(state_for_loop).await });
     }
+
+    // Phase A–E route surface (qa_db_stats / consolidation_stats /
+    // self_test / integrate_chain / integrate_islands / retune /
+    // tuning_state / force_decay / idle_ticks / thinking/* /
+    // set_domain / domain_stats / sleep_pressure) is sourced from
+    // brain_api so the standalone server and the main node binary's
+    // /brain/* mount share one implementation.  brain_server keeps
+    // its elaborated /observe, /tick, /stats, /integrate,
+    // /pool/concepts handlers (with timing logs and cluster shipping)
+    // by mounting them AFTER the merge.
+    let phase_routes = brain_api::brain_phase_routes(brain_api_state);
 
     let app = Router::new()
         .route("/health",                get(health))
@@ -2826,21 +2487,6 @@ async fn main() -> Result<()> {
         .route("/observe",               post(observe))
         .route("/tick",                  post(tick))
         .route("/tick_profile",          get(tick_profile))
-        .route("/sleep_pressure",        get(sleep_pressure))
-        .route("/set_domain",            post(set_domain))
-        .route("/domain_stats",          get(domain_stats))
-        .route("/qa_db_stats",           get(qa_db_stats))
-        .route("/consolidation_stats",   get(consolidation_stats))
-        .route("/self_test",             post(self_test))
-        .route("/integrate_chain",       post(integrate_chain))
-        .route("/retune",                post(retune))
-        .route("/tuning_state",          get(tuning_state))
-        .route("/force_decay",           post(force_decay))
-        .route("/idle_ticks",            post(idle_ticks))
-        .route("/thinking/start",        post(thinking_start))
-        .route("/thinking/stop",         post(thinking_stop))
-        .route("/thinking/status",       get(thinking_status))
-        .route("/integrate_islands",     post(integrate_cycle))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))
         .route("/integrate_resonant",    post(integrate_resonant))
@@ -2867,7 +2513,8 @@ async fn main() -> Result<()> {
         .route("/sensor/observe",        post(sensor_observe))
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .merge(phase_routes);
 
     let port: u16 = std::env::var("W1Z4RD_BRAIN_PORT")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(8095);
