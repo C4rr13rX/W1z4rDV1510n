@@ -159,6 +159,14 @@ struct ApiState {
     prediction_experiment: Arc<Mutex<PredictionExperimentRuntime>>,
     /// Hierarchical structural decomposition: layers inside entities from experience.
     layered_physiology: Arc<Mutex<LayeredPhysiologyRuntime>>,
+    /// The brain (`/brain/*`) shares its underlying `Arc<Mutex<Brain>>`
+    /// with this ApiState so node-level handlers — including
+    /// `/brain/ask` and the background `hypothesis_research_loop` —
+    /// can orchestrate the brain's substrate alongside the
+    /// hypothesis queue, equation matrix, and the rest of the
+    /// node-architecture services.  The brain IS one of many
+    /// consumers of the node architecture; this Arc is the seam.
+    brain: Arc<tokio::sync::Mutex<w1z4rd_brain::Brain>>,
     /// Most recent EnvironmentSnapshot received via /neuro/train.
     /// Served by GET /neuro/symbols/live for real-time world viewer animation.
     live_snapshot: Arc<Mutex<Option<EnvironmentSnapshot>>>,
@@ -170,6 +178,11 @@ const ANSWER_THRESHOLD: f32 = 0.08;
 
 /// An unresolved question that the node cannot answer from current memory.
 /// Persists in `hypothesis_queue` until resolved via research or training.
+///
+/// Provenance fields explain *how* the answer was found when one comes
+/// back — substrate retraining, brain-EEM equation chain, external
+/// fetch, or human escalation — so callers see the brain's chain of
+/// reasoning, not just the final byte string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HypothesisEntry {
     id: String,
@@ -180,6 +193,38 @@ struct HypothesisEntry {
     resolved: bool,
     answer: Option<String>,
     confidence: Option<f32>,
+    /// Which subsystem produced the answer.  None until resolved.
+    #[serde(default)]
+    resolution_path: Option<ResolutionPath>,
+    /// Names of EEM facts / equations the resolver walked, if any.
+    /// Empty when the answer didn't come through equation chaining.
+    #[serde(default)]
+    chain_of_facts: Vec<String>,
+    /// External URL if the resolution came from research_agent.py.
+    #[serde(default)]
+    source_url: Option<String>,
+    /// Which pool the question was observed into.  Defaults to the
+    /// text pool (`POOL_TEXT`).  Lets the research loop re-fire the
+    /// question into the right substrate.
+    #[serde(default)]
+    query_pool: Option<u32>,
+}
+
+/// Where a resolved hypothesis's answer came from.  Audit trail value
+/// — surfaced in `/hypothesis/queue` responses so a caller can see
+/// "this was resolved by the substrate alone" vs "this required
+/// equation chaining" vs "a human handed us the answer."
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ResolutionPath {
+    /// `integrate()` succeeded once new training brought it above threshold.
+    BrainSubstrate,
+    /// `integrate_autonomous_tuned()` succeeded via EEM `chain_explore`.
+    BrainEemChain,
+    /// External `research_agent.py` resolved via `/hypothesis/resolve`.
+    ExternalResearch,
+    /// A human manually resolved via `/hypothesis/resolve`.
+    Human,
 }
 
 #[derive(Clone)]
@@ -768,6 +813,28 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     } else {
         "disabled".to_string()
     };
+
+    // ── Embedded brain (Phase A–E substrate) ──────────────────────────────
+    // Built BEFORE ApiState so the same Arc<Mutex<Brain>> is shared by
+    // both the brain's own /brain/* router (via BrainApiState) AND
+    // node-level handlers that orchestrate the brain alongside other
+    // node services — /brain/ask routes through here so the OOV gate
+    // can enqueue onto the node's hypothesis queue, and the background
+    // hypothesis_research_loop can call brain.integrate_autonomous_tuned
+    // for the EEM chain-explore "thought experiment" pass.
+    let brain_data_dir = crate::brain_api::default_node_brain_dir();
+    let _ = std::fs::create_dir_all(&brain_data_dir);
+    let embedded_brain = crate::brain_api::load_or_build_brain(&brain_data_dir)
+        .context("failed to load or build embedded brain")?;
+    let brain_arc: Arc<tokio::sync::Mutex<w1z4rd_brain::Brain>> =
+        Arc::new(tokio::sync::Mutex::new(embedded_brain));
+    let brain_api_state = crate::brain_api::BrainApiState {
+        brain:    brain_arc.clone(),
+        thinking: Arc::new(crate::brain_api::ThinkingState::default()),
+    };
+    let brain_router = crate::brain_api::brain_routes(brain_api_state.clone());
+    let brain_state_for_loop = brain_api_state.clone();
+
     let state = ApiState {
         node_id: config.node_id.clone(),
         ledger_backend,
@@ -832,6 +899,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         chaos_model:          Arc::new(Mutex::new(ChaosWorldModel::new(ChaosWorldConfig::default()))),
         prediction_experiment: Arc::new(Mutex::new(PredictionExperimentRuntime::new(PredictionExperimentConfig::default()))),
         layered_physiology:   Arc::new(Mutex::new(LayeredPhysiologyRuntime::new(LayeredPhysiologyConfig::default()))),
+        brain:                brain_arc.clone(),
         live_snapshot:        Arc::new(Mutex::new(None)),
     };
     let data_limit = if config.data.enabled {
@@ -857,22 +925,21 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let label_neuro = Arc::clone(&state.neuro);
     let app_hypothesis_queue = Arc::clone(&state.hypothesis_queue);
     let app_neuro = Arc::clone(&state.neuro);
+    // Pre-clone the brain Arc for the hypothesis_research_loop so it
+    // can call brain.integrate_autonomous_tuned to try EEM-chain
+    // resolution on queued questions.
+    let brain_arc_for_loop = state.brain.clone();
     // Pre-clone for the background peer-refresh task (state is consumed by with_state below).
     let bg_cluster = state.cluster.clone();
     let bg_dist    = state.distributed.clone();
 
-    // ── Embedded brain (Phase A–E substrate) ──────────────────────────────
-    // The main node owns a Brain instance and mounts its endpoints under
-    // /brain/* alongside the legacy /neuro, /two_pool, /multi_pool layers.
-    // This is the additive merge: legacy paths stay intact for callers
-    // still on them; /brain/* is the canonical substrate for new work.
-    let brain_data_dir = crate::brain_api::default_node_brain_dir();
-    let _ = std::fs::create_dir_all(&brain_data_dir);
-    let embedded_brain = crate::brain_api::load_or_build_brain(&brain_data_dir)
-        .context("failed to load or build embedded brain")?;
-    let brain_api_state = crate::brain_api::build_brain_api_state(embedded_brain);
-    let brain_router = crate::brain_api::brain_routes(brain_api_state.clone());
-    let brain_state_for_loop = brain_api_state.clone();
+    // Brain construction has already happened above (before ApiState
+    // was built) so the same Arc<Mutex<Brain>> lives in both
+    // ApiState.brain and brain_api_state.brain — see line ~825.  The
+    // brain is now a node-architecture-aware service, not just an
+    // embedded substrate: /brain/ask routes through ApiState handlers
+    // so the OOV gate can enqueue onto hypothesis_queue, and the
+    // research loop reaches the brain to attempt EEM chain resolution.
 
     let app = Router::new()
         .route("/health", get(get_health))
@@ -1115,6 +1182,15 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/overlay/layers",               post(overlay_layers))
         .route("/overlay/layers/calibrate",     post(overlay_layers_calibrate))
         .route("/overlay/layers/:entity_id",    get(overlay_layers_entity))
+        // ── /brain/ask — orchestrated honest-answer endpoint ─────────────
+        // Uses ApiState (not BrainApiState) because it touches the node's
+        // hypothesis_queue.  This is the seam between the brain (one
+        // consumer) and the node architecture (hypothesis queue + EEM
+        // + research loop): if the brain can't answer, the question is
+        // enqueued for the node's orchestration loop to retry via
+        // multiple substrate strategies before falling back to external
+        // research or human escalation.
+        .route("/brain/ask",                    post(brain_ask))
         .with_state(state)
         .nest("/brain", brain_router)
         .layer(DefaultBodyLimit::max(max_body))
@@ -1151,15 +1227,26 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             });
         }
         // ── Background hypothesis research loop ───────────────────────────────
-        // Every 30 seconds, pick the oldest unresolved hypothesis, POST it to
-        // /neuro/ask internally, and if activation has risen above threshold,
-        // mark it resolved.  External research agents (research_agent.py) poll
-        // GET /hypothesis/queue and POST /hypothesis/resolve.
+        // Every 30 seconds, picks the oldest unresolved hypothesis and tries
+        // multiple substrate strategies in order:
+        //   1. Brain `integrate_autonomous_tuned` — uses EEM chain_explore +
+        //      annealer ranking + multi-fact assembly.  This is the
+        //      "unbounded thought experiment" pass: the brain walks its
+        //      grounded-fact graph through cross-domain equation chains
+        //      before giving up.
+        //   2. Legacy NeuroRuntime 1-hop Hebbian re-check — kept for
+        //      backward compatibility with corpora trained on the legacy
+        //      fabric.
+        //   3. If neither resolves, the entry stays queued for the
+        //      external research agent (research_agent.py polling
+        //      /hypothesis/queue) or human escalation via
+        //      POST /hypothesis/resolve.
         {
             let hq = app_hypothesis_queue.clone();
             let neuro = app_neuro.clone();
+            let brain = brain_arc_for_loop.clone();
             tokio::spawn(async move {
-                hypothesis_research_loop(hq, neuro).await;
+                hypothesis_research_loop(hq, neuro, brain).await;
             });
         }
         // ── Background peer-list refresh ──────────────────────────────────────
@@ -6328,6 +6415,10 @@ async fn neuro_ask(
                         resolved: false,
                         answer: None,
                         confidence: None,
+                        resolution_path: None,
+                        chain_of_facts: Vec::new(),
+                        source_url: None,
+                        query_pool: None,
                     });
                 }
             }
@@ -7586,6 +7677,10 @@ async fn neuro_pipeline(
                         queued_at_unix: now_timestamp().unix,
                         attempts: 0, max_attempts: 5,
                         resolved: false, answer: None, confidence: None,
+                        resolution_path: None,
+                        chain_of_facts: Vec::new(),
+                        source_url: None,
+                        query_pool: None,
                     });
                 }
             }
@@ -7660,6 +7755,17 @@ struct HypothesisResolveReq {
     answer: String,
     #[serde(default)]
     confidence: Option<f32>,
+    /// "external_research" when posted by research_agent.py;
+    /// "human" when posted by a human reviewer; omitted defaults to "human".
+    #[serde(default)]
+    resolution_path: Option<String>,
+    /// Optional source URL if the answer came from external research.
+    #[serde(default)]
+    source_url: Option<String>,
+    /// Optional list of fact/equation names that led to the answer
+    /// (typically supplied by an equation-chain resolver, not a human).
+    #[serde(default)]
+    chain_of_facts: Vec<String>,
 }
 
 /// POST /hypothesis/resolve
@@ -7679,6 +7785,14 @@ async fn hypothesis_resolve(
             entry.answer     = Some(req.answer);
             let conf         = req.confidence.unwrap_or(0.7);
             entry.confidence = Some(conf);
+            entry.resolution_path = Some(match req.resolution_path.as_deref() {
+                Some("external_research") => ResolutionPath::ExternalResearch,
+                Some("brain_substrate")   => ResolutionPath::BrainSubstrate,
+                Some("brain_eem_chain")   => ResolutionPath::BrainEemChain,
+                _                         => ResolutionPath::Human,
+            });
+            entry.source_url    = req.source_url;
+            entry.chain_of_facts = req.chain_of_facts;
             // Dopamine signal: reward the network for having queued the right question.
             // Retrograde potentiation strengthens recently-active paths proportionally
             // to how confident the resolved answer is.
@@ -7689,6 +7803,111 @@ async fn hypothesis_resolve(
         None => (StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "hypothesis not found", "id": req.id }))),
     }
+}
+
+#[derive(Deserialize)]
+struct BrainAskRequest {
+    /// The question / prompt bytes.
+    text: String,
+    /// Override the brain's query pool (defaults to text pool = 1).
+    #[serde(default)]
+    query_pool: Option<u32>,
+    /// Override the target pool (defaults to action pool = 4).
+    #[serde(default)]
+    target_pool: Option<u32>,
+}
+
+/// POST /brain/ask
+///
+/// The honest-answer endpoint that orchestrates the brain against the
+/// node architecture.  Flow:
+///
+///   1. Observe the prompt into the query pool.
+///   2. Call `brain.integrate` — the canonical Phase B v2 substrate
+///      retrieval (binding-shortcut + decode_best_trained_binding).
+///   3. If the answer is grounded (NOT `outside_grounding`), return
+///      it immediately with the grounding report.
+///   4. If the brain says "I don't know" (outside_grounding=true),
+///      push the question onto the node's `hypothesis_queue` and
+///      return HTTP 202 Accepted with the hypothesis id so the
+///      caller can poll `/hypothesis/queue` or
+///      `/hypothesis/{id}` for the eventual resolution.
+///
+/// The background `hypothesis_research_loop` (spawned at startup)
+/// then tries to resolve queued entries via the brain's
+/// `integrate_autonomous_tuned` (EEM chain explorer) → legacy Hebbian
+/// re-check → external research_agent → human escalation, in that
+/// order.  This is the "I don't know → research → equation chain →
+/// human" pipeline the architecture was designed for.
+async fn brain_ask(
+    State(state): State<ApiState>,
+    Json(req): Json<BrainAskRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use w1z4rd_brain::neuron::PoolId;
+    const POOL_TEXT_ID:   PoolId = 1;
+    const POOL_ACTION_ID: PoolId = 4;
+    let qp = req.query_pool.unwrap_or(POOL_TEXT_ID);
+    let tp = req.target_pool.unwrap_or(POOL_ACTION_ID);
+
+    let (answer_bytes, outside_grounding, conf, tier) = {
+        let mut brain = state.brain.lock().await;
+        brain.fabric_mut().observe(qp, req.text.as_bytes());
+        let legacy = brain.integrate(qp, tp);
+        let authoritative = brain.decode_best_trained_binding(qp, tp);
+        let answer = authoritative.or(legacy.answer);
+        (answer,
+         legacy.grounding.outside_grounding,
+         legacy.grounding.integrated_confidence,
+         format!("{:?}", legacy.confidence_tier))
+    };
+
+    if !outside_grounding && answer_bytes.is_some() {
+        // Grounded — return immediately.
+        let answer = String::from_utf8_lossy(&answer_bytes.unwrap()).into_owned();
+        return (StatusCode::OK, Json(serde_json::json!({
+            "answer":            answer,
+            "confidence":        conf,
+            "confidence_tier":   tier,
+            "outside_grounding": false,
+            "hypothesis_id":     serde_json::Value::Null,
+        })));
+    }
+
+    // Brain said "I don't know" — enqueue onto the node's
+    // hypothesis queue for orchestrated resolution.
+    let id = {
+        let mut h = 0u64;
+        for b in req.text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+        format!("ask_{h:x}")
+    };
+    let queued_at = now_timestamp().unix;
+    {
+        let mut hq = state.hypothesis_queue.lock().expect("hypothesis mutex");
+        if !hq.iter().any(|e| e.question == req.text) {
+            hq.push(HypothesisEntry {
+                id: id.clone(),
+                question: req.text.clone(),
+                queued_at_unix: queued_at,
+                attempts: 0,
+                max_attempts: 5,
+                resolved: false,
+                answer: None,
+                confidence: Some(conf),
+                resolution_path: None,
+                chain_of_facts: Vec::new(),
+                source_url: None,
+                query_pool: Some(qp),
+            });
+        }
+    }
+    (StatusCode::ACCEPTED, Json(serde_json::json!({
+        "answer":            serde_json::Value::Null,
+        "confidence":        conf,
+        "confidence_tier":   tier,
+        "outside_grounding": true,
+        "hypothesis_id":     id,
+        "message":           "honestly: I don't know yet. Queued as a hypothesis for the research loop + external agents + human review.",
+    })))
 }
 
 // ── Background hypothesis research loop ──────────────────────────────────────
@@ -7702,28 +7921,88 @@ async fn hypothesis_resolve(
 async fn hypothesis_research_loop(
     hq: Arc<Mutex<Vec<HypothesisEntry>>>,
     neuro: NeuroRuntimeHandle,
+    brain: Arc<tokio::sync::Mutex<w1z4rd_brain::Brain>>,
 ) {
+    use w1z4rd_brain::neuron::PoolId;
+    const POOL_TEXT_ID:   PoolId = 1;
+    const POOL_ACTION_ID: PoolId = 4;
+
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         // Grab the oldest unresolved question (hold the lock only briefly)
-        let question: Option<String> = {
+        let (question, query_pool) = {
             let guard = hq.lock().expect("hypothesis mutex");
-            guard.iter()
+            let Some(entry) = guard.iter()
                 .filter(|e| !e.resolved && e.attempts < e.max_attempts)
-                .min_by_key(|e| e.queued_at_unix)
-                .map(|e| e.question.clone())
+                .min_by_key(|e| e.queued_at_unix) else { continue };
+            (entry.question.clone(),
+             entry.query_pool.unwrap_or(POOL_TEXT_ID))
         };
-        let Some(question) = question else { continue };
 
-        // Re-evaluate: has new training raised activation above threshold?
+        // ── Strategy 1: brain integrate_autonomous_tuned ─────────────
+        // Walks the EEM grounded-fact graph (ivy chain), ranks with
+        // the annealer, assembles multi-fact answers.  This is the
+        // "unbounded thought experiment via the math of the substrate"
+        // pass the user's original vision called for.  Bounded to
+        // depth 6 / 64 visits per attempt; subsequent attempts can
+        // widen the search.
+        let brain_attempt: Option<(String, Vec<String>, f32)> = {
+            // Observe the question into the query pool so the
+            // currently_firing set seeds the autonomous integrator.
+            let mut b = brain.lock().await;
+            b.fabric_mut().observe(query_pool, question.as_bytes());
+            let res = b.integrate_autonomous_tuned(
+                query_pool, POOL_ACTION_ID,
+                0.10,    // fabric_confidence_threshold — anything > random
+                6,       // chain_max_depth
+                64,      // chain_max_visit
+                0.70,    // binding_match_threshold (OOV gate)
+            );
+            let answer = res.answer.as_ref().and_then(|b|
+                String::from_utf8(b.clone()).ok()
+            );
+            let conf = res.grounding.integrated_confidence;
+            // composition_used carries NeuronRefs the answer
+            // propagated through — surface their labels as the
+            // chain-of-facts provenance.
+            let chain_labels: Vec<String> = res.grounding.composition_used.iter()
+                .filter_map(|nref| {
+                    b.fabric().pool(nref.pool).and_then(|p| {
+                        p.read().get(nref.neuron).map(|n| n.label.clone())
+                    })
+                })
+                .collect();
+            drop(b);
+            answer.map(|a| (a, chain_labels, conf))
+        };
+
+        if let Some((answer, chain, conf)) = brain_attempt {
+            if conf >= 0.10 && !answer.is_empty() {
+                let mut guard = hq.lock().expect("hypothesis mutex");
+                if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
+                    entry.attempts += 1;
+                    entry.resolved        = true;
+                    entry.answer          = Some(answer);
+                    entry.confidence      = Some(conf);
+                    entry.resolution_path = Some(ResolutionPath::BrainEemChain);
+                    entry.chain_of_facts  = chain;
+                }
+                continue;
+            }
+        }
+
+        // ── Strategy 2: legacy NeuroRuntime 1-hop Hebbian re-check ───
+        // Kept for backward compatibility with corpora trained on the
+        // legacy fabric.  Hopes that new training has raised the
+        // word-level activation above ANSWER_THRESHOLD since the
+        // question was queued.
         let outcome = tokio::task::spawn_blocking({
             let neuro = neuro.clone();
             let q     = question.clone();
             move || -> (f32, Option<String>) {
                 let enc = TextBitsEncoder::new(TextBitsConfig::default());
                 let qlabels: Vec<String> = enc.encode_plain(&q).labels;
-                // Pure Hebbian 1-hop discriminative check
                 let combined_1h = neuro.propagate_combined(
                     &[(qlabels.as_slice(), 1.0_f32)],
                     1,
@@ -7744,9 +8023,10 @@ async fn hypothesis_research_loop(
             entry.attempts += 1;
             if let Ok((peak, answer)) = outcome {
                 if peak >= ANSWER_THRESHOLD {
-                    entry.resolved   = true;
-                    entry.answer     = answer;
-                    entry.confidence = Some(peak);
+                    entry.resolved        = true;
+                    entry.answer          = answer;
+                    entry.confidence      = Some(peak);
+                    entry.resolution_path = Some(ResolutionPath::BrainSubstrate);
                 }
             }
         }
@@ -8385,6 +8665,10 @@ async fn neuro_generate(
                         queued_at_unix: now_timestamp().unix,
                         attempts: 0, max_attempts: 5,
                         resolved: false, answer: None, confidence: None,
+                        resolution_path: None,
+                        chain_of_facts: Vec::new(),
+                        source_url: None,
+                        query_pool: None,
                     });
                 }
             }
