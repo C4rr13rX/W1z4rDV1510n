@@ -80,10 +80,47 @@ fn pool_name(id: PoolId) -> &'static str {
     }
 }
 
+/// Phase E — continuous-thought controller state.  Shared between the
+/// background thinking task and the HTTP handlers so the loop can be
+/// started, stopped, or queried from the outside.  The brain lock is
+/// always released between hops so /observe and /integrate preempt
+/// cleanly — inference and training take priority over thinking.
+#[derive(Debug)]
+struct ThinkingState {
+    /// Global on/off switch.  Background task polls every ~50ms when
+    /// disabled, runs one hop per ~50ms when enabled.
+    enabled:        std::sync::atomic::AtomicBool,
+    /// Source pool the loop reads its prompt from (typically POOL_TEXT).
+    query_pool:     std::sync::atomic::AtomicU32,
+    /// Pool the loop reads its answer from (typically POOL_ACTION).
+    target_pool:    std::sync::atomic::AtomicU32,
+    /// Cumulative hops taken since process start — diagnostic.
+    hops_taken:     std::sync::atomic::AtomicU64,
+    /// Last seed the loop fed in (for /thinking/status).
+    last_seed:      std::sync::Mutex<Option<Vec<u8>>>,
+    /// Last answer the loop produced.
+    last_answer:    std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl Default for ThinkingState {
+    fn default() -> Self {
+        use std::sync::atomic::AtomicU32;
+        Self {
+            enabled:     std::sync::atomic::AtomicBool::new(false),
+            query_pool:  AtomicU32::new(1),
+            target_pool: AtomicU32::new(4),
+            hops_taken:  std::sync::atomic::AtomicU64::new(0),
+            last_seed:   std::sync::Mutex::new(None),
+            last_answer: std::sync::Mutex::new(None),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     brain: Arc<Mutex<Brain>>,
     checkpoint_path: PathBuf,
+    thinking: Arc<ThinkingState>,
     /// Per [`ARCHITECTURE.md`] §17.4: the current (or last completed) sleep
     /// job's progress.  Updated by the background tokio task spawned from
     /// the `/sleep` handler; readable by `/sleep/status`.  `None` means
@@ -738,6 +775,132 @@ async fn consolidation_stats(State(s): State<AppState>) -> Json<serde_json::Valu
         "locked_terminals": locked,
         "lock_threshold":   3u8,
         "tick_now":         tick_now,
+    }))
+}
+
+/// Phase E — the autonomous thinking loop.  Idles until
+/// `state.thinking.enabled` is set, then runs ONE integrate hop per
+/// iteration, releasing the brain lock between hops so inference
+/// (/integrate, /chat) and training (/observe) preempt cleanly.
+///
+/// Each hop:
+///  - Pick a seed: prefer last_answer if present and non-empty and
+///    differs from last_seed; otherwise rotate through the QA db.
+///  - Observe seed into query_pool.
+///  - Integrate query_pool → target_pool.
+///  - Record the answer; if no answer (fixed point), invalidate
+///    last_answer so the next hop picks a fresh QA-db seed.
+///
+/// The loop is the "continuous thought" substrate: the brain
+/// autonomously walks its own knowledge graph.  Observers can read
+/// last_seed/last_answer via /thinking/status.
+async fn thinking_loop(state: AppState) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let mut qa_cursor: usize = 0;
+    loop {
+        if !state.thinking.enabled.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        let qp = state.thinking.query_pool.load(Ordering::Acquire);
+        let tp = state.thinking.target_pool.load(Ordering::Acquire);
+
+        // Pick the next seed before locking the brain so we minimise
+        // hold time.  Snapshot last_answer (lock std mutex briefly,
+        // immediately drop).
+        let last_answer_snap: Option<Vec<u8>> =
+            state.thinking.last_answer.lock().unwrap().clone();
+        let last_seed_snap: Option<Vec<u8>> =
+            state.thinking.last_seed.lock().unwrap().clone();
+
+        let seed: Option<Vec<u8>> = match last_answer_snap {
+            Some(ans) if !ans.is_empty() && Some(&ans) != last_seed_snap.as_ref() => {
+                Some(ans)
+            }
+            _ => {
+                // Cycled or empty — rotate to next QA-db prompt for novelty.
+                let brain = state.brain.lock().await;
+                let len = brain.qa_db().len();
+                if len == 0 { None } else {
+                    let idx = qa_cursor % len;
+                    qa_cursor = qa_cursor.wrapping_add(1);
+                    brain.qa_db().iter().nth(idx)
+                        .map(|qp| qp.prompt.clone())
+                }
+            }
+        };
+
+        let Some(seed) = seed else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
+
+        // Acquire the brain lock briefly: one observe + one integrate.
+        let answer: Option<Vec<u8>> = {
+            let mut brain = state.brain.lock().await;
+            brain.fabric_mut().observe(qp, &seed);
+            let ans = brain.integrate(qp, tp);
+            ans.answer
+        };
+
+        // Update shared state (no brain lock held).
+        *state.thinking.last_seed.lock().unwrap() = Some(seed);
+        *state.thinking.last_answer.lock().unwrap() = answer;
+        state.thinking.hops_taken.fetch_add(1, Ordering::AcqRel);
+
+        // Yield so other handlers run.  Tokio mutex is FIFO, so a
+        // pending /observe acquired while we held the brain lock will
+        // run before us next iteration — inference and training stay
+        // responsive.  50ms ≈ 20 hops/sec of background thinking.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Phase E — enable the autonomous thinking loop.
+/// POST { query_pool?, target_pool?, seed? }.  Optional seed seeds the
+/// chain at start (defaults to QA-db rotation).
+async fn thinking_start(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    use std::sync::atomic::Ordering;
+    if let Some(q) = req.get("query_pool").and_then(|v| v.as_u64()) {
+        s.thinking.query_pool.store(q as u32, Ordering::Release);
+    }
+    if let Some(t) = req.get("target_pool").and_then(|v| v.as_u64()) {
+        s.thinking.target_pool.store(t as u32, Ordering::Release);
+    }
+    if let Some(seed_b64) = req.get("seed").and_then(|v| v.as_str()) {
+        if let Ok(b) = decode_base64_flexible(seed_b64) {
+            *s.thinking.last_answer.lock().unwrap() = Some(b);
+            *s.thinking.last_seed.lock().unwrap() = None;
+        }
+    }
+    s.thinking.enabled.store(true, Ordering::Release);
+    Json(serde_json::json!({ "enabled": true }))
+}
+
+/// Phase E — disable the autonomous thinking loop.  Idempotent.
+async fn thinking_stop(State(s): State<AppState>) -> Json<serde_json::Value> {
+    use std::sync::atomic::Ordering;
+    s.thinking.enabled.store(false, Ordering::Release);
+    Json(serde_json::json!({ "enabled": false }))
+}
+
+/// Phase E — current thinking-loop state.  No brain lock taken.
+async fn thinking_status(State(s): State<AppState>) -> Json<serde_json::Value> {
+    use std::sync::atomic::Ordering;
+    let seed = s.thinking.last_seed.lock().unwrap().clone();
+    let answer = s.thinking.last_answer.lock().unwrap().clone();
+    Json(serde_json::json!({
+        "enabled":      s.thinking.enabled.load(Ordering::Acquire),
+        "query_pool":   s.thinking.query_pool.load(Ordering::Acquire),
+        "target_pool":  s.thinking.target_pool.load(Ordering::Acquire),
+        "hops_taken":   s.thinking.hops_taken.load(Ordering::Acquire),
+        "last_seed":    seed.as_deref().map(base64_url_no_pad),
+        "last_answer":  answer.as_deref().map(base64_url_no_pad),
     }))
 }
 
@@ -2642,9 +2805,20 @@ async fn main() -> Result<()> {
     let state = AppState {
         brain:           Arc::new(Mutex::new(brain)),
         checkpoint_path: checkpoint_path.clone(),
+        thinking:        Arc::new(ThinkingState::default()),
         sleep_status:    Arc::new(std::sync::Mutex::new(None)),
         cluster:         Arc::new(std::sync::Mutex::new(cluster_state)),
     };
+
+    // Spawn the Phase E thinking loop.  Idle until enabled via
+    // POST /thinking/start.  Each iteration acquires the brain lock,
+    // runs ONE integrate hop, releases the lock, sleeps briefly.
+    // Inference (/integrate, /chat) and training (/observe) preempt
+    // cleanly because they take the same lock and tokio mutex is fair.
+    {
+        let state_for_loop = state.clone();
+        tokio::spawn(async move { thinking_loop(state_for_loop).await });
+    }
 
     let app = Router::new()
         .route("/health",                get(health))
@@ -2663,6 +2837,9 @@ async fn main() -> Result<()> {
         .route("/tuning_state",          get(tuning_state))
         .route("/force_decay",           post(force_decay))
         .route("/idle_ticks",            post(idle_ticks))
+        .route("/thinking/start",        post(thinking_start))
+        .route("/thinking/stop",         post(thinking_stop))
+        .route("/thinking/status",       get(thinking_status))
         .route("/integrate_islands",     post(integrate_cycle))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))
