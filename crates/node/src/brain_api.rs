@@ -307,6 +307,106 @@ async fn h_integrate(
     }))
 }
 
+/// POST /brain/chat — canonical chat endpoint on the merged node.
+/// Mirrors brain_server's /chat behaviour so existing Django /
+/// wizard_session callers can switch from `:8095/chat` to
+/// `:8090/brain/chat` without code changes to the response shape.
+///
+/// Pipeline:
+///   1. Observe the prompt into POOL_TEXT (same prompt-unwrap as
+///      brain_server applies for Wizard-chat context boilerplate).
+///   2. PRIMARY: decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+///      — authoritative trained-pair recall via the Phase B v2
+///      binding shortcut.
+///   3. SECONDARY: integrate_autonomous(POOL_TEXT, POOL_ACTION) —
+///      engages EEM chain_explore + annealer ranking + multi-fact
+///      assembly for cross-domain composition.
+///   4. Response shape: { reply, answer, decoder, predictions,
+///      grounding, activated_concepts, word_activations } —
+///      identical to brain_server.
+async fn h_brain_chat(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let prompt = unwrap_wizard_prompt(text);
+
+    let mut brain = s.brain.lock().await;
+    brain.fabric_mut().observe(POOL_TEXT, prompt.as_bytes());
+
+    // Authoritative trained-binding decode — Phase B v2.
+    let trained_decode: Option<String> = brain
+        .decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+
+    // Autonomous fallback — EEM chain + annealer + multi-fact.
+    let xpool = brain.integrate_autonomous(
+        POOL_TEXT, POOL_ACTION,
+        /*fabric_threshold*/ 0.0,
+        /*chain_max_depth*/  4,
+        /*chain_max_visit*/  200);
+    let xpool_reply: Option<String> = if xpool.grounding.outside_grounding {
+        None
+    } else {
+        xpool.answer.as_ref().map(|b| String::from_utf8_lossy(b).into_owned())
+    };
+
+    let reply = if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
+        td.clone()
+    } else {
+        // No trained binding above MIN_ATOM_SCORE — be OOV-honest
+        // and return empty rather than fall through to the noisy
+        // xpool path.  Same policy brain_server applies.
+        String::new()
+    };
+
+    let outside_grounding = reply.is_empty() || xpool.grounding.outside_grounding;
+
+    let decoder = if xpool_reply.as_deref().map_or(false, |a| !a.is_empty()) {
+        if xpool.grounding.eem_confidence.is_some()
+            && xpool.grounding.fabric_confidence < 0.3 { "eem" }
+        else { "multi_pool" }
+    } else { "char_chain" }.to_string();
+
+    let activated: Vec<String> = xpool.grounding.composition_used.iter()
+        .filter_map(|nref| {
+            brain.fabric().pool(nref.pool).and_then(|p| {
+                p.read().get(nref.neuron).map(|n| n.label.clone())
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "reply":              reply,
+        "answer":             reply,
+        "decoder":            decoder,
+        "predictions":        serde_json::Map::new(),
+        "grounding": {
+            "fabric_confidence":     xpool.grounding.fabric_confidence,
+            "integrated_confidence": xpool.grounding.integrated_confidence,
+            "outside_grounding":     outside_grounding,
+            "speculation_flag":      xpool.grounding.speculation_flag,
+        },
+        "activated_concepts": activated,
+        "word_activations":   Vec::<serde_json::Value>::new(),
+    }))
+}
+
+/// Strip Wizard-chat context-wrapper boilerplate so the brain only
+/// observes the actual question.  The Django frontend prepends a
+/// rolling context blob + "[Now answer concisely]\n<question>" cue;
+/// without unwrapping we'd train against the boilerplate atoms more
+/// than the real question.  Mirrors `brain_server::unwrap_wizard_prompt`.
+fn unwrap_wizard_prompt(text: &str) -> &str {
+    if let Some(idx) = text.rfind("[Now answer concisely]") {
+        let after = &text[idx..];
+        if let Some(nl) = after.find('\n') {
+            return after[nl + 1..].trim();
+        }
+    }
+    text.trim()
+}
+
 async fn h_integrate_chain(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
@@ -523,6 +623,7 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/observe",                post(h_observe))
         .route("/tick",                   post(h_tick))
         .route("/integrate",              post(h_integrate))
+        .route("/chat",                   post(h_brain_chat))
         .route("/pool/concepts",          post(h_pool_concepts))
         .with_state(state.clone())
         .merge(brain_phase_routes(state))
