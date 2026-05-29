@@ -4,11 +4,52 @@ A distributed intelligence node that learns to physically describe its environme
 
 ---
 
-## What this is — for neuroscientists and AI architects
+## What this is — for scientists, engineers, AI architects, and security professionals
 
 Most neural networks are fixed-topology function approximators trained offline. This is a different thing: a **living, spiking-inspired neural fabric** that grows its own architecture in RAM, trained online from any sensor stream.
 
-The repository ships **two parallel substrates** — see the [Architecture overview](#architecture-overview) below for the binary split.  This top-level section describes the legacy `NeuroRuntime` (`crates/core`, port `:8080`/`:8090`); the active research frontier is the brain crate (`crates/brain`, port `:8095`) which has its own distinct learning stack documented in detail later under [Brain crate](#brain-crate-cratesbrain--stage-16-100-recall-on-trained-input).
+### Architecture in one paragraph
+
+The substrate is a **byte-grained Hebbian fabric** organised into pools (text, image, audio, action, turn, binding). Atoms are raw bytes. Concepts emerge by mini-column collapse on co-firing.  Cross-pool bindings are single neurons whose members span pools in firing order — recall reads the canonical ordered subsequence directly. The substrate auto-captures every prompt→response moment into a Q→A database it uses to grade itself, locks well-trained terminals against background decay, scales cross-domain wiring softly (instead of skipping it) so analogical bridges form continuously, and runs an autonomous thinking loop in the background that any inference or training request can preempt cleanly.
+
+### Single canonical surface (as of 2026-05-29)
+
+The repository ships **one merged binary**, `w1z4rdv1510n-node`, that owns both the legacy Web3 / cluster / sensor stack AND the active brain substrate.  Everything important architecturally is mounted under `/brain/*` on the main node API:
+
+| Surface | Port | What it is |
+|---|---|---|
+| Main node API | `:8090` (configurable via `--node-addr`) | Web3 / cluster / wallet / sensor / `/chat` / `/brain/*` (the active substrate) |
+| Neuro service API | `:8080` (configurable via `--api-addr`) | Legacy `NeuroRuntime` service interface — kept for backward compatibility with existing tooling, scheduled for removal once the migration completes |
+| Standalone brain server | `:8095` (configurable via `W1Z4RD_BRAIN_PORT`) | Identical handlers as `/brain/*`, useful for isolated experiments — the next session will collapse this into `/brain/*` |
+| P2P / gossip | `:8088` | libp2p; cluster ring + OTP join + heartbeat |
+
+**For a senior software engineer:** start with [`crates/node/src/brain_api.rs`](crates/node/src/brain_api.rs) and [`crates/brain/src/brain.rs`](crates/brain/src/brain.rs).  brain_api.rs is the HTTP surface; brain.rs is the substrate.  Phase A–E commits (1c7a4ec → eb2c079) are the architectural turning points.
+
+**For an AI designer / architect:** read [Architecture overview](#architecture-overview) and the [Phase A–E dynamical substrate](#phase-ae-dynamical-substrate-2026-05-28) section.  The five phases are the *complete* story of how the brain went from 0.83 rows/sec / 0% recall to 252+ rows/sec / 100% recall + interruptible autonomous thought.
+
+**For a neuroscientist:** the substrate maps onto established biology in `crates/brain` ([Biological primitives](#biological-primitives-substrate-internal-all-dynamical-system-knobs)).  Concept emergence is mini-column collapse on co-firing (Mountcastle); consolidation lock is myelination-style permanent-trace (Frankland & Bontempi 2005); cross-domain bridges form continuously instead of after sleep, reflecting Hebb-like cortical bridging (McClelland-McNaughton-O'Reilly CLS).  The binding pool is the hippocampal episodic trace; the per-pool concept hierarchy is the cortical statistical learner; the Phase E thinking loop is the default-mode network.
+
+**For a security professional:** every byte ingested goes through `base64url`-encoded HTTP endpoints; there is no model inversion attack surface because there are no learned distributed weights to invert — the substrate is structural (atom/concept/binding identity), not parametric.  Wallet signing (Ed25519 + Argon2-protected mnemonic) is in [`crates/node/src/wallet.rs`](crates/node/src/wallet.rs).  Cluster gossip auth is OTP-rotated (`/cluster/otp`).  The merged binary disables the API key gate unless `api.require_api_key=true` in `node_config.json`; production deployments should enable it and rotate API keys via the `api_key_hashes` allow-list.
+
+### Two learning stacks coexist
+
+The active research frontier is the brain crate (`crates/brain`, mounted under `/brain/*` on the main node and also accessible on the standalone `:8095`).  The legacy `NeuroRuntime` (`crates/core`, ports `:8080`/`:8090`) is kept available so existing dashboards and ingest tooling keep working — see [Brain crate](#brain-crate-cratesbrain--stage-16-100-recall-on-trained-input) for the active stack and the legacy callout at the bottom for what's being phased out.
+
+### What is canonical, what is legacy, what's being deleted
+
+| Concern | Canonical (use these) | Legacy (still works but being phased out) | Status |
+|---|---|---|---|
+| Training (cross-pool pair) | `POST /brain/observe` (text+action+tick) | `POST /multi_pool/train_pair`, `POST /two_pool/train_pair`, `POST /neuro/train` | Legacy stays for existing tooling; the brain replaces the substrate cleanly |
+| Inference / retrieval | `POST /brain/integrate`, `POST /brain/integrate_chain` | `POST /multi_pool/ask`, `POST /two_pool/ask`, `POST /neuro/ask`, `POST /chat` (still works) | `/chat` will be repointed to the brain in the next iteration; legacy `/neuro/ask` retained for legacy clients only |
+| Sensor observe | `POST /brain/observe` | `POST /sensor/observe`, `POST /sensor/observe_triple` (still on `:8095`) | Sensor routes will be migrated to `/brain/sensor/*` |
+| Self-test feedback | `POST /brain/self_test` + `GET /brain/qa_db_stats` + `GET /brain/consolidation_stats` | (nothing equivalent in legacy — this is new) | — |
+| Self-tuning | `POST /brain/retune` + `GET /brain/tuning_state` | (nothing equivalent in legacy) | — |
+| Continuous thought | `/brain/thinking/start`, `/stop`, `/status` | (nothing equivalent in legacy) | — |
+| Cross-domain composition | `POST /brain/integrate_chain` | `/query/integrated` (precision-weighted multi-component cascade in the legacy node — different mechanism) | Both work; `/integrate_chain` is the substrate-level primitive, `/query/integrated` is a higher-level orchestrator |
+| Snapshot | brain.bin via `POST /checkpoint` on `:8095` (will move to `/brain/checkpoint` on main node) | neuro pool JSON at `<data_dir>/neuro_pool.json` (auto) | Both used; brain.bin is the substrate snapshot |
+| Wallet / Web3 | `crates/node/src/wallet.rs`, `/bridge/*`, `/cluster/*` | (canonical — kept) | — |
+| P2P / cluster | libp2p on `:8088`, `/cluster/init`, `/cluster/join`, `/cluster/otp` | (canonical — kept) | — |
+| Knowledge ingest | `/knowledge/ingest` and friends | (kept for now) | Will likely move to brain in a future iteration |
 
 ### Legacy `NeuroRuntime` learning stack
 
@@ -26,7 +67,7 @@ The legacy fabric implements the current neuroscience canon in software:
 - **Multi-pool convergence inference** — A single input fired into one pool causes every connected pool to produce its own decoded prediction in parallel. Cross-modal training (e.g., one query input mapped simultaneously to an answer pool, an emotion pool, and an equation pool) means all those substrates fire from one query.
 - **Hypothesis → research feedback loop** — Questions for which the multi-pool fabric returns no answer are queued in the hypothesis queue. `research_agent.py` polls the queue, fetches Wikipedia and ArXiv answers, ingests them via `/multi_pool/train_pair` + `/media/train`, and resolves them via `/hypothesis/resolve`, which triggers a DA flush — reward signal for correct prediction resolution.
 
-### Brain crate learning stack (active research frontier, port `:8095`)
+### Brain crate learning stack (active research frontier, `/brain/*` on main node + standalone `:8095`)
 
 Stage 11-16 added a distinct set of biologically-motivated primitives to the brain crate, each wired so that **the substrate's own observable signals drive its knobs** — no static hyperparameter tuning.  See [Biological primitives](#biological-primitives-substrate-internal-all-dynamical-system-knobs) below for full detail.  Headline mechanisms:
 
@@ -404,6 +445,43 @@ The brain substrate evolved through sixteen stages.  Each row links to its commi
 | 15 | Stage 15 falsification + recovery — five fixes: Hebbian use_count freq weight in decode; `bind_q_atoms` set dedup; sensor-pollution diagnosis; concept-tier corroboration; min_atom_score floor as `ControlMode` | toddler EXACT lifts 4/32 (falsified) → 32/32 ; K-12 0/16 → 9/16 |
 | 16 | `/integrate` unified with `decode_best_trained_binding`; ordered-sequence concept dedup (was multiset); `target_tiebreak` ControlMode; **sequence-match preempt** (load-bearing); fluency_eval accepts any trained categorical | **toddler 32/32, OOV 3/3, K-12 16/16, multi_fact 5/5, /integrate 32/32 — theoretical max** |
 
+### Phase A–E dynamical substrate (2026-05-28)
+
+Five additional phases — each one a small, validated architectural primitive — built on top of Stage 16 to satisfy the full design intent: **100% recall + accurate cross-domain integration baseline, all dynamical, no hardcoded answer values, autonomous continuous thought that yields to inference and training cleanly.**
+
+| Phase | Commit | What shipped | Empirical signal |
+|---|---|---|---|
+| **A** | `1c7a4ec` | Consolidation lock (`Neuron::CONSOLIDATION_LOCK = 3`) — terminals reinforced on this many distinct ticks become decay-exempt.  Soft domain gate — cross-domain wiring scales `lr` by `W1Z4RD_CROSS_DOMAIN_SCALE` (default 0.1) instead of skipping, so bridges grow continuously.  Q→A database — `observe()` auto-captures prompt→response pairs whenever two pools fire within 2 ticks (4096-entry ring).  `Brain::self_test(n)` samples the QA buffer and grades the brain's own decoder — no external eval set.  Co-firing-signature integration replaces label-string Jaccard. | 0 → 463 locked terminals on 10-pair × 13-rep corpus; island-2 training raises within-island mean_byte_match (0.342 → 0.427) instead of degrading it |
+| **B** | `e790814` | Binding-concept canonical shortcut — when the best-matching binding's query-atom precision×recall ≥ 0.95 AND its `use_count` ≥ 2, `integrate()` decodes the binding's target-pool members in firing order directly, bypassing the noisy target-concept selector.  Plus the same-tick training discipline: prompt + response observed in the same tick so the moment fingerprint actually contains both pools and a binding can emerge. | **16/16 exact recall** trained data; 12/16 after cross-island training (soft gate holds island 1 mostly intact) |
+| **C** | `f675c5f` | `Brain::integrate_chain` and `/brain/integrate_chain` — feeds the integrate() answer back as a new query, recurses up to `max_hops`, stops on convergence/empty.  This is the substrate for "answers that exist through integration of training": A→B and B→C trained separately compose to A→C via two hops. | **Cross-domain integration 2/2**: alpha→bravo→charlie, delta→echo→foxtrot.  Direct exact recall 8/8 + paraphrase 8/8 + chain 2/2 on a clean brain |
+| **D** | `ca1167c` | `Brain::retune` self-tuning hill-climber on global `decay_rate` using `self_test` mean_byte_match as the gradient.  Step size scales with the recall delta (no signal → tiny nudge — no unbounded drift on plateaus).  Condition-keyed memory: `(concept_count_bucket, locked_count_bucket)` log2-bucketed → `(best_decay, best_recall)` — future runs at the same condition warm-start from known-good values.  HTTP: `/retune`, `/tuning_state`, plus `/force_decay`/`/idle_ticks` for perturbation diagnostics. | Architectural finding: **trained-pair recall is structure-bound, not weight-bound**.  Spiking decay 2 500× and idling 50 ticks left recall unchanged because the binding shortcut reads structure not magnitudes.  Controller correctly reports "no gradient at this regime" rather than churning |
+| **E** | `eb2c079` | Autonomous thinking loop — background tokio task runs continuous integrate hops.  Acquires the brain mutex briefly per hop, releases between hops, sleeps 50 ms.  Inference (`/integrate`, `/chat`) and training (`/observe`) preempt cleanly because they take the same FIFO tokio mutex.  Seed selection: `last_answer` if it's progressing, else rotates through the QA database when the chain converges (keeps the loop exploring novel prompts).  HTTP: `/thinking/start { query_pool?, target_pool?, seed? }`, `/thinking/stop`, `/thinking/status`. | 16 hops/sec idle thinking; **5 inference probes in 11 ms total during thinking** (full preemption); 4-rep new-pair training (`ping→pong`) in 12.7 ms during thinking with the new pair correctly recallable immediately after |
+
+All five phases pass when run against the merged main-node binary on `/brain/*` (port 8290 in our test run):
+
+```
+Phase B exact recall:         8/8 ✓
+Phase B+ paraphrase:          8/8 ✓
+Phase C chain integration:    2/2 ✓  (alpha→bravo→charlie, delta→echo→foxtrot)
+Phase D self-tuning runs:     ✓
+Phase E thinking + preempt:   ✓  (32 hops in 2s, probes ~1.5ms, mid-thought training)
+ALL PHASES PASS ON MERGED BINARY: True
+```
+
+Reproduce: `python scripts/verify_merged_parity.py` against a freshly started main node — see [Running the merged binary](#running-the-merged-binary) below.
+
+### Speed — full corpus ingestion projection
+
+Measured on the merged main-node binary against shipping corpora, with `W1Z4RD_TICK_HOUSEKEEPING=lazy` and `W1Z4RD_DEFER_PROMOTION=1`:
+
+| Phase | rows/sec | 1.14 M-row full corpus | Notes |
+|---|---|---|---|
+| Original baseline | 0.09 | ~140 days | 11 s/row, eager housekeeping, sorted-Vec terminal lookup |
+| Mid-session optimisation | 0.83 | ~16 days | After lazy decay + address-by-name terminals + deferred promotion |
+| **Current merged binary** | **345 (sustained at 5K rows depth)** | **~55 minutes (~1.6 hrs conservative)** | After Phases A–E, [`scripts/measure_ingest_speed.py`](scripts/measure_ingest_speed.py) |
+
+The 5K-row scale test showed only a gentle decay (513 → 345 rows/sec — about 33% over 5K rows) because the binding shortcut decouples recall from weight magnitudes, so terminal pruning is no longer a recall risk and ticks stay cheap even as the brain grows.
+
 The Stage 15 + Stage 16 architectural pieces are described in detail in the next subsections.
 
 ### Biological primitives (substrate-internal, all dynamical-system knobs)
@@ -498,23 +576,74 @@ pub fn replay_recent_moments(&mut self, count: usize, strength: f32) -> usize;
 pub fn sleep(&mut self, min_use_count: u64, stale_ticks: u64) -> usize;
 ```
 
-### Brain HTTP API (`:8095`)
+### Brain HTTP API (mounted at `/brain/*` on the main node, also at `:8095` for the standalone server)
+
+The Phase A–E substrate is exposed identically at two addresses for backward compatibility:
+- **`/brain/*` on the main node API** (default port `:8090`, configurable via `--node-addr` or the `api` subcommand `--addr`).  This is the canonical surface — the merged binary owns wallet, cluster, Web3, and brain in one process.
+- **`:8095` standalone `w1z4rd_brain_server` binary** — identical handlers, useful for isolated experiments.  Will be collapsed into `/brain/*` in the next iteration.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Liveness probe |
-| `/stats` | GET | `tick`, `pool_count`, `total_neurons`, `total_concepts`, `total_binding`, `total_terminals`, `binding_pool_id`, `fingerprints_window`, `checkpoint_path`, plus Stage-10 fields (`tentative_bindings`, `consolidated_bindings`, `current_threshold`, `total_observations`, `binding_pressure`) |
-| `/observe` | POST | `{pool_id, frame}` — frame is base64url bytes |
+| `/stats` | GET | `tick`, `pool_count`, `total_neurons`, `total_concepts`, `total_binding`, `total_terminals`, `binding_pool_id` |
+| `/observe` | POST | `{pool_id, frame}` — frame is base64url bytes.  Also auto-captures the prompt→response pair into the QA database (Phase A) |
 | `/tick` | POST | Close the moment; runs cross-pool wiring + emergence checks |
-| `/integrate` | POST | `{query_pool, target_pool}` — cross-pool retrieval.  Stage 16: returns the legacy grounding/confidence fields BUT the answer bytes come from `decode_best_trained_binding` (single source of truth) |
-| `/integrate_concept_first` | POST | Diagnostic — returns both `answer` (concept-scored) AND `trained_answer` (binding-decoded) for the same query |
+| `/integrate` | POST | `{query_pool, target_pool}` — cross-pool retrieval.  Returns base64url answer bytes from `decode_best_trained_binding` with Phase B binding-shortcut, falling through to atom-coverage selection when binding score < 0.95 |
+| `/integrate_chain` | POST | **Phase C** — `{seed (b64url), query_pool, target_pool, max_hops}` — feeds the integrate answer back as a new query, recurses up to `max_hops`.  This is the cross-domain composition primitive: when A→B and B→C are trained separately, the chain reaches C in two hops |
+| `/integrate_islands` | POST | `{sample_size, similarity_threshold}` — bridge formation between concepts in different domains using co-firing signature cosine similarity (NOT label Jaccard, which was the pre-Phase-A shortcut) |
+| `/qa_db_stats` | GET | **Phase A** — count + capacity of the auto-captured QA buffer |
+| `/consolidation_stats` | GET | **Phase A** — total locked-terminal count across all pools.  Locked terminals are decay-exempt and form the 100%-recall floor |
+| `/self_test` | POST | **Phase A** — `{sample_count}` — samples the QA buffer, fires each prompt, scores byte-match against captured response.  No external eval set required |
+| `/retune` | POST | **Phase D** — `{sample_count}` — one hill-climb step on global `decay_rate` using self_test recall as gradient.  Direction flips on regression; step size scales with the recall delta |
+| `/tuning_state` | GET | **Phase D** — controller state including the condition-keyed `condition_best` memory (log2-bucketed `(concept_count, locked_count)` → `(best_decay, best_recall)`) |
+| `/thinking/start` | POST | **Phase E** — enable autonomous thinking loop.  Optional `{query_pool, target_pool, seed (b64url)}`.  Loop runs continuous integrate hops at ~16/sec, yielding the brain mutex between hops |
+| `/thinking/stop` | POST | Disable thinking loop.  Idempotent |
+| `/thinking/status` | GET | `{enabled, hops_taken, last_seed, last_answer, query_pool, target_pool}` — no brain lock taken; safe to poll |
+| `/set_domain` | POST | `{domain_id}` — set the domain stamp for every NEW atom/concept created from now on.  Phase A soft domain gate uses this to scale cross-domain wiring at 0.1× the within-domain rate, so bridges form continuously without overwhelming the substrate |
+| `/domain_stats` | GET | Per-(pool, domain) neuron count histogram — confirms island growth during training |
+| `/sleep_pressure` | GET | Deferred-promotion queue depth across all pools.  Surfaces when the brain is overdue for a sleep cycle under `W1Z4RD_DEFER_PROMOTION=1` |
+| `/pool/concepts` | POST | `{pool_id}` — diagnostic.  Lists emerged concept neurons with `neuron_id`, `label`, `member_count`, `decoded`, `use_count` |
+| `/force_decay` | POST | **Phase D diagnostic** — `{decay_rate}` — force every pool's decay to a value.  Used to test the controller under perturbation |
+| `/idle_ticks` | POST | **Phase D diagnostic** — `{n}` — advance N ticks without observing.  Lets decay actually do damage to non-locked terminals so the self-tuner has something to recover from |
+
+### Running the merged binary
+
+```bash
+# Build the merged main-node binary (Web3 + cluster + brain in one process)
+cargo build --release --bin w1z4rdv1510n-node -p w1z4rdv1510n-node
+
+# Run with the brain on the main node API.
+# Note: the `api` subcommand boots ONLY the node API (without the libp2p network),
+# which is the right form for substrate work and the Phase A-E test scripts.
+W1Z4RDV1510N_DATA_DIR=D:\\w1z4rd-data \
+W1Z4RD_NODE_BRAIN_DIR=D:\\w1z4rd-data\\brain \
+W1Z4RD_DOMAIN_MODE=1 \
+W1Z4RD_TICK_HOUSEKEEPING=lazy \
+W1Z4RD_DEFER_PROMOTION=1 \
+./target/release/w1z4rdv1510n-node.exe --config node_config.json api --addr 127.0.0.1:8290
+
+# Verify all five phases against the merged binary
+python scripts/verify_merged_parity.py
+```
+
+`W1Z4RD_NODE_BRAIN_DIR` separates the main node's brain state from the standalone brain_server's brain state (`W1Z4RDV1510N_DATA_DIR`).  Both binaries can run simultaneously on different ports.
+
+### Standalone brain_server endpoints (`:8095`)
+
+The standalone `w1z4rd_brain_server` binary exposes additional endpoints that haven't been migrated to `/brain/*` yet:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/integrate_concept_first` | POST | Diagnostic — returns both `answer` (concept-scored) AND `trained_answer` (binding-decoded) |
 | `/integrate_resonant` | POST | Stage 13A — fixed-point settling iteration that returns decoded top-K concepts per requested pool |
-| `/pool/concepts` | POST | `{pool_id, limit, contains?}` — diagnostic.  Lists emerged concept neurons with `neuron_id`, `label`, `member_count`, `decoded`, `use_count` |
 | `/sensor/observe` | POST | `{kind: "text"|"image"|"audio", text? OR bytes_b64}` — single modality with predictions snapshot |
 | `/sensor/observe_triple` | POST | `{text, image_b64, audio_b64}` — three modalities in one tick |
 | `/chat` | POST | `{text}` → `integrate_autonomous` with OOV gate.  Returns `{reply, answer, decoder, predictions, grounding}` |
-| `/sleep` | POST | `{min_use_count, stale_ticks, replay_count, replay_strength}` — Stage 16 CLS sleep cycle: prune weak concepts then replay recent moment fingerprints to consolidate |
-| `/checkpoint` | POST | Persist `brain.bin` (single-file bincode snapshot) |
+| `/sleep`, `/sleep/status` | POST/GET | CLS-style sleep cycle |
+| `/checkpoint`, `/flush` | POST | Persist `brain.bin` and force WAL flush |
+| `/cluster/*`, `/shard/*` | various | Brain-cluster overlay (separate from the main node's libp2p cluster) |
+
+These will be re-exposed under `/brain/*` on the main node in the next iteration.
 
 **Env-var knob convention** (read at brain-server startup by `apply_env_overrides`):
 

@@ -6207,6 +6207,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "void",
  "w1z4rd-brain",
  "w1z4rdv1510n",
  "w1z4rdv1510n-cluster",

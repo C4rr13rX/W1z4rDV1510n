@@ -860,6 +860,20 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     // Pre-clone for the background peer-refresh task (state is consumed by with_state below).
     let bg_cluster = state.cluster.clone();
     let bg_dist    = state.distributed.clone();
+
+    // ── Embedded brain (Phase A–E substrate) ──────────────────────────────
+    // The main node owns a Brain instance and mounts its endpoints under
+    // /brain/* alongside the legacy /neuro, /two_pool, /multi_pool layers.
+    // This is the additive merge: legacy paths stay intact for callers
+    // still on them; /brain/* is the canonical substrate for new work.
+    let brain_data_dir = crate::brain_api::default_node_brain_dir();
+    let _ = std::fs::create_dir_all(&brain_data_dir);
+    let embedded_brain = crate::brain_api::load_or_build_brain(&brain_data_dir)
+        .context("failed to load or build embedded brain")?;
+    let brain_api_state = crate::brain_api::build_brain_api_state(embedded_brain);
+    let brain_router = crate::brain_api::brain_routes(brain_api_state.clone());
+    let brain_state_for_loop = brain_api_state.clone();
+
     let app = Router::new()
         .route("/health", get(get_health))
         .route("/ready", get(get_ready))
@@ -1102,6 +1116,7 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         .route("/overlay/layers/calibrate",     post(overlay_layers_calibrate))
         .route("/overlay/layers/:entity_id",    get(overlay_layers_entity))
         .with_state(state)
+        .nest("/brain", brain_router)
         .layer(DefaultBodyLimit::max(max_body))
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -1171,6 +1186,17 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
                         bg_dist.set_peers(addrs).await;
                     }
                 }
+            });
+        }
+        // ── Phase E thinking loop ─────────────────────────────────────────
+        // Background autonomous-thought task.  Idles until POST
+        // /brain/thinking/start enables it; then runs continuous
+        // integrate hops, yielding the brain mutex between each so
+        // /brain/observe and /brain/integrate preempt cleanly.
+        {
+            let state_for_thinking = brain_state_for_loop;
+            tokio::spawn(async move {
+                crate::brain_api::run_thinking_loop(state_for_thinking).await;
             });
         }
         let listener = tokio::net::TcpListener::bind(addr)
