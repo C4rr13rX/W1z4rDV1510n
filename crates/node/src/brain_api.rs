@@ -510,6 +510,58 @@ async fn h_idle_ticks(
     Json(json!({ "ticks_advanced": n, "current_tick": brain.fabric().current_tick() }))
 }
 
+async fn h_sleep(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let min_use_count = req.get("min_use_count").and_then(|v| v.as_u64()).unwrap_or(2);
+    let stale_ticks   = req.get("stale_ticks").and_then(|v| v.as_u64()).unwrap_or(1000);
+    let brain = s.brain.lock().await;
+    // Phase 0 — drain deferred promotions (when W1Z4RD_DEFER_PROMOTION
+    // mode is active, this is where structure work crystallises).
+    let promotions = brain.sleep_drain_promotions();
+    // Phase 1 — prune weak concepts across every pool, collect the
+    // pruned NeuronRefs so phase 2 can clean up inbound cross-pool
+    // terminals that pointed at them.
+    let mut pruned_set: ahash::AHashSet<w1z4rd_brain::NeuronRef> = ahash::AHashSet::new();
+    for pid in brain.fabric().pool_ids() {
+        let p = brain.sleep_pool_phase1(pid, min_use_count, stale_ticks);
+        pruned_set.extend(p);
+    }
+    let pruned = pruned_set.len();
+    // Phase 2 — for every pool, drop any inbound cross-pool terminals
+    // targeting the pruned refs we just removed.
+    for pid in brain.fabric().pool_ids() {
+        brain.sleep_pool_phase2(pid, &pruned_set);
+    }
+    // Phase 3 — per-pool housekeeping.
+    for pid in brain.fabric().pool_ids() {
+        brain.sleep_pool_housekeeping(pid);
+    }
+    Json(json!({
+        "promotions_drained": promotions,
+        "concepts_pruned":    pruned,
+        "tick_now":           brain.fabric().current_tick(),
+    }))
+}
+
+async fn h_checkpoint(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
+    let dir = default_node_brain_dir();
+    let path = dir.join("brain.bin");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Json(json!({ "ok": false, "error": format!("mkdir {}: {}", dir.display(), e) }));
+    }
+    let brain = s.brain.lock().await;
+    match brain.checkpoint(&path) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "path": path.display().to_string(),
+            "tick": brain.fabric().current_tick(),
+        })),
+        Err(e) => Json(json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
 async fn h_sleep_pressure(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let deferred = std::env::var("W1Z4RD_DEFER_PROMOTION")
@@ -655,6 +707,8 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
         .route("/force_decay",            post(h_force_decay))
         .route("/idle_ticks",             post(h_idle_ticks))
         .route("/sleep_pressure",         get(h_sleep_pressure))
+        .route("/sleep",                  post(h_sleep))
+        .route("/checkpoint",             post(h_checkpoint))
         .route("/thinking/start",         post(h_thinking_start))
         .route("/thinking/stop",          post(h_thinking_stop))
         .route("/thinking/status",        get(h_thinking_status))

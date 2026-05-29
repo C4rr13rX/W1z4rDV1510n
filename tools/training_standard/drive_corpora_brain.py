@@ -63,6 +63,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import http.client
+from urllib.parse import urlparse
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -74,7 +76,18 @@ from tools.training_standard.schema import load_registry  # noqa: E402
 from tools.training_standard import runner as runner_mod   # noqa: E402
 
 
-BRAIN_URL = os.environ.get("W1Z4RD_BRAIN_URL", "http://127.0.0.1:8095")
+BRAIN_URL = os.environ.get("W1Z4RD_BRAIN_URL", "http://127.0.0.1:8090")
+# When True (default), routes /observe/tick/chat/sleep/checkpoint
+# through the /brain/* prefix on the merged main node binary.  Set
+# WIZARD_USE_BRAIN_PREFIX=0 to fall back to the top-level paths the
+# standalone w1z4rd_brain_server binary exposes.  Same convention as
+# tools/wizard_session.py and web/wizard_chat/views.py.
+_BRAIN_PREFIX = "" if os.environ.get(
+    "WIZARD_USE_BRAIN_PREFIX", "1").strip().lower() in {"0","false","no"} else "/brain"
+
+def _path(suffix: str) -> str:
+    return f"{_BRAIN_PREFIX}{suffix}"
+
 POOL_TEXT   = 1
 POOL_ACTION = 4
 
@@ -86,24 +99,56 @@ def _b64url(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
 
 
+# Persistent HTTP connection — Windows pays a heavy per-connection
+# tax (TIME_WAIT + new socket setup); on a 1.5M-neuron brain that
+# inflated per-tick wall time from ~0.5 ms to ~2 s.  Keep one
+# connection open and reuse it for every observe / tick / chat call.
+_HTTP_CONN: http.client.HTTPConnection | None = None
+_HTTP_CONN_URL: str = ""
+
+def _get_conn() -> http.client.HTTPConnection:
+    global _HTTP_CONN, _HTTP_CONN_URL
+    if _HTTP_CONN is None or _HTTP_CONN_URL != BRAIN_URL:
+        if _HTTP_CONN is not None:
+            try: _HTTP_CONN.close()
+            except Exception: pass
+        u = urlparse(BRAIN_URL)
+        host = u.hostname or "localhost"
+        port = u.port or (443 if u.scheme == "https" else 80)
+        if u.scheme == "https":
+            _HTTP_CONN = http.client.HTTPSConnection(host, port, timeout=60)
+        else:
+            _HTTP_CONN = http.client.HTTPConnection(host, port, timeout=60)
+        _HTTP_CONN_URL = BRAIN_URL
+    return _HTTP_CONN
+
 def _post(path: str, body: dict, timeout: float = 60.0) -> tuple[bool, dict | str]:
+    """POST via persistent connection.  On any error closes + retries once
+    so a stale keep-alive doesn't kill a whole training run."""
     raw = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        f"{BRAIN_URL.rstrip('/')}{path}",
-        data=raw, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            payload = r.read()
+    for attempt in range(2):
+        conn = _get_conn()
+        conn.timeout = timeout
         try:
-            return True, json.loads(payload)
-        except json.JSONDecodeError:
-            return True, payload.decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}: {e.reason}"
-    except Exception as e:
-        return False, str(e)
+            conn.request("POST", path, body=raw,
+                         headers={"Content-Type": "application/json"})
+            r = conn.getresponse()
+            payload = r.read()
+            if r.status >= 400:
+                return False, f"HTTP {r.status}: {r.reason}"
+            try:
+                return True, json.loads(payload)
+            except json.JSONDecodeError:
+                return True, payload.decode("utf-8", "replace")
+        except (http.client.HTTPException, ConnectionError, OSError) as exc:
+            # Drop the dead conn and let the next iteration reopen it.
+            global _HTTP_CONN
+            try: conn.close()
+            except Exception: pass
+            _HTTP_CONN = None
+            if attempt == 1:
+                return False, str(exc)
+    return False, "unreachable"
 
 
 def post_xpool_pair(prompt: str, response: str) -> tuple[bool, str]:
@@ -111,19 +156,19 @@ def post_xpool_pair(prompt: str, response: str) -> tuple[bool, str]:
     pool, then advance_tick to crystallize the cross-pool binding."""
     if not prompt or not response:
         return False, "empty"
-    ok_t, err_t = _post("/observe", {
+    ok_t, err_t = _post(_path("/observe"), {
         "pool_id": POOL_TEXT,
         "frame":   _b64url(prompt.encode("utf-8")),
     })
     if not ok_t:
         return False, f"text-observe: {err_t}"
-    ok_a, err_a = _post("/observe", {
+    ok_a, err_a = _post(_path("/observe"), {
         "pool_id": POOL_ACTION,
         "frame":   _b64url(response.encode("utf-8")),
     })
     if not ok_a:
         return False, f"action-observe: {err_a}"
-    ok_k, err_k = _post("/tick", {})
+    ok_k, err_k = _post(_path("/tick"), {})
     if not ok_k:
         return False, f"tick: {err_k}"
     return True, ""
@@ -183,7 +228,7 @@ def smoke_test_recall(rows: list[dict], n: int = 3,
         prompt = (row.get("prompt") or row.get("question") or "").strip()
         if not prompt:
             continue
-        ok, resp = _post("/chat", {"text": prompt}, timeout=timeout)
+        ok, resp = _post(_path("/chat"), {"text": prompt}, timeout=timeout)
         if not ok or not isinstance(resp, dict):
             samples.append({"prompt": prompt, "error": str(resp)})
             continue
@@ -228,7 +273,7 @@ def post_sleep_cycle(min_use_count: int = 2,
     Called between scripts in the curriculum so each phase's bindings
     settle before the next phase introduces new patterns that could
     interfere via partial-atom overlap."""
-    return _post("/sleep", {
+    return _post(_path("/sleep"), {
         "min_use_count":   min_use_count,
         "stale_ticks":     stale_ticks,
         "replay_count":    replay_count,
@@ -238,7 +283,7 @@ def post_sleep_cycle(min_use_count: int = 2,
 
 def post_checkpoint(timeout: float = 60.0) -> tuple[bool, dict | str]:
     """Persist brain.bin to the configured data dir."""
-    return _post("/checkpoint", {}, timeout=timeout)
+    return _post(_path("/checkpoint"), {}, timeout=timeout)
 
 
 # ── Per-script driver ──────────────────────────────────────────────────────
