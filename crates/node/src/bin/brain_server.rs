@@ -741,6 +741,46 @@ async fn consolidation_stats(State(s): State<AppState>) -> Json<serde_json::Valu
     }))
 }
 
+/// Chain-integration probe — feed the answer of integrate() back as a
+/// new query, recursively, up to `max_hops` times.  Tests the
+/// "conclusions through cross-domain knowledge" path: when A→B and
+/// B→C are trained, this should hop from A through B to C.
+/// POST { "query_pool": N, "target_pool": M, "seed": base64url, "max_hops": K }.
+async fn integrate_chain(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let query_pool = req.get("query_pool")
+        .and_then(|v| v.as_u64()).map(|n| n as PoolId).unwrap_or(1);
+    let target_pool = req.get("target_pool")
+        .and_then(|v| v.as_u64()).map(|n| n as PoolId).unwrap_or(4);
+    let max_hops = req.get("max_hops")
+        .and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(4);
+    let seed_b64 = req.get("seed").and_then(|v| v.as_str()).unwrap_or("");
+    let seed = match decode_base64_flexible(seed_b64) {
+        Ok(b) => b,
+        Err(e) => return Json(serde_json::json!({"error": format!("bad seed: {}", e)})),
+    };
+    let trail = {
+        let mut brain = s.brain.lock().await;
+        brain.integrate_chain(query_pool, target_pool, &seed, max_hops)
+    };
+    // Each step: { "query": base64url, "answer": base64url | null }
+    let steps: Vec<serde_json::Value> = trail.into_iter()
+        .map(|(q, a)| {
+            let q_b64 = base64_url_no_pad(&q);
+            let a_b64 = a.map(|bytes| base64_url_no_pad(&bytes));
+            serde_json::json!({ "query": q_b64, "answer": a_b64 })
+        })
+        .collect();
+    Json(serde_json::json!({ "steps": steps }))
+}
+
+fn base64_url_no_pad(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
 /// Self-test — sample QA pairs from the auto-captured buffer, fire each
 /// prompt into its prompt pool, integrate into the response pool, and
 /// score decoded answers against captured responses.  No external
@@ -2561,6 +2601,7 @@ async fn main() -> Result<()> {
         .route("/qa_db_stats",           get(qa_db_stats))
         .route("/consolidation_stats",   get(consolidation_stats))
         .route("/self_test",             post(self_test))
+        .route("/integrate_chain",       post(integrate_chain))
         .route("/integrate_islands",     post(integrate_cycle))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))

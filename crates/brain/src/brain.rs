@@ -543,6 +543,49 @@ impl Brain {
             .sum()
     }
 
+    /// Chain integration — feed the integrate() answer back as a new
+    /// query, looping until the answer stops changing or `max_hops` is
+    /// reached.  Tests "answers that exist through the integration of
+    /// training" when A→B and B→C are trained but A→C never was.
+    ///
+    /// Returns the chain of (query_bytes, answer_bytes) pairs in
+    /// order so the caller can audit each hop's contribution.  The
+    /// final tuple's answer is the integrated result.
+    pub fn integrate_chain(
+        &mut self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        seed:       &[u8],
+        max_hops:   usize,
+    ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let mut trail: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::with_capacity(max_hops);
+        let mut current: Vec<u8> = seed.to_vec();
+        let mut seen: ahash::AHashSet<Vec<u8>> = ahash::AHashSet::new();
+        for _ in 0..max_hops {
+            if !seen.insert(current.clone()) {
+                // Already visited — converged onto a cycle.
+                break;
+            }
+            // Fire the current query into query_pool, then feed it
+            // ALSO into target_pool so the next hop can read it as a
+            // "B is the new query" context.  The architecture is
+            // pool-agnostic about chain direction: integrating from
+            // query→target with current bytes injected into both pools
+            // makes the next-hop binding match light up if it exists.
+            self.fabric.observe(query_pool, &current);
+            let ans = self.integrate(query_pool, target_pool);
+            let decoded = ans.answer.clone();
+            trail.push((current.clone(), decoded.clone()));
+            match decoded {
+                Some(bytes) if !bytes.is_empty() && bytes != current => {
+                    current = bytes;
+                }
+                _ => break,  // null answer or fixpoint → stop chain
+            }
+        }
+        trail
+    }
+
     /// Run a self-supervised recall test: sample QA pairs from the
     /// auto-captured buffer, fire each prompt into its prompt pool,
     /// integrate into the response pool, and score the decoded answer
