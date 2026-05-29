@@ -741,6 +741,63 @@ async fn consolidation_stats(State(s): State<AppState>) -> Json<serde_json::Valu
     }))
 }
 
+/// Debug — force every pool's decay_rate to a given value.  Used to
+/// perturb the substrate so the self-tuner has a real gradient to
+/// climb.  POST { decay_rate: f32 }.
+async fn force_decay(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let v = req.get("decay_rate").and_then(|v| v.as_f64()).unwrap_or(2e-5) as f32;
+    let v = v.clamp(1e-7, 0.5);
+    let count = {
+        let brain = s.brain.lock().await;
+        let pids = brain.fabric().pool_ids();
+        for pid in &pids {
+            if let Some(p) = brain.fabric().pool(*pid) {
+                let mut pw = p.write();
+                pw.config.decay_rate = v;
+            }
+        }
+        pids.len()
+    };
+    Json(serde_json::json!({ "decay_rate": v, "pools_updated": count }))
+}
+
+/// Debug — advance the fabric tick N times without observing anything.
+/// Lets decay actually do damage to non-locked terminals so the
+/// self-tuner has something to recover from.  POST { n: u32 }.
+async fn idle_ticks(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let n = req.get("n").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
+    let mut brain = s.brain.lock().await;
+    for _ in 0..n { brain.advance_tick(); }
+    Json(serde_json::json!({ "ticks_advanced": n, "current_tick": brain.fabric().current_tick() }))
+}
+
+/// Self-tuning step — run a self_test, hill-climb the global
+/// decay_rate using recall as the gradient.  POST { sample_count }.
+async fn retune(
+    State(s): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let sample_count = req.get("sample_count")
+        .and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(16);
+    let report = {
+        let mut brain = s.brain.lock().await;
+        brain.retune(sample_count)
+    };
+    Json(serde_json::json!(report))
+}
+
+/// Current self-tuning controller state — GET.
+async fn tuning_state(State(s): State<AppState>) -> Json<serde_json::Value> {
+    let brain = s.brain.lock().await;
+    Json(serde_json::json!(brain.tuning_state()))
+}
+
 /// Chain-integration probe — feed the answer of integrate() back as a
 /// new query, recursively, up to `max_hops` times.  Tests the
 /// "conclusions through cross-domain knowledge" path: when A→B and
@@ -2602,6 +2659,10 @@ async fn main() -> Result<()> {
         .route("/consolidation_stats",   get(consolidation_stats))
         .route("/self_test",             post(self_test))
         .route("/integrate_chain",       post(integrate_chain))
+        .route("/retune",                post(retune))
+        .route("/tuning_state",          get(tuning_state))
+        .route("/force_decay",           post(force_decay))
+        .route("/idle_ticks",            post(idle_ticks))
         .route("/integrate_islands",     post(integrate_cycle))
         .route("/integrate",             post(integrate))
         .route("/integrate_concept_first", post(integrate_concept_first))

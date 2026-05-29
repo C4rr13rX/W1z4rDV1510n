@@ -357,6 +357,83 @@ impl QaDatabase {
     }
 }
 
+/// Self-tuning controller state — Phase D.  Hill-climbs the global
+/// `decay_rate` knob using the self-test mean_byte_match as the
+/// gradient signal.  Direction flips when recall worsens; magnitude
+/// is multiplicative so the brain converges geometrically on a stable
+/// fixpoint without ever being told what "good" decay looks like.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TuningState {
+    /// Most recent `self_test` mean_byte_match used as the gradient.
+    pub last_recall:     f32,
+    /// Decay rate at the time `last_recall` was sampled.
+    pub last_decay_rate: f32,
+    /// Sign of the next nudge: +1.0 grows decay, -1.0 shrinks it.
+    /// Flips whenever a step yields lower recall than the previous.
+    pub direction:       f32,
+    /// Best recall observed since the controller started, and the
+    /// decay rate that produced it.  Surfaces in `/tuning_state` so
+    /// the operator can see the substrate's discovered optimum.
+    pub best_recall:     f32,
+    pub best_decay_rate: f32,
+    /// How many retune steps have run.
+    pub steps:           u32,
+    /// Condition-keyed memory: under what (concept_count_bucket,
+    /// locked_count_bucket) condition was the best decay rate
+    /// discovered.  The next retune at a similar condition uses this
+    /// as a starting hypothesis rather than re-discovering from
+    /// scratch.  Bucketed (log2 of counts) so similar-scale brains
+    /// share entries.
+    #[serde(serialize_with = "serialize_condition_best")]
+    pub condition_best:  std::collections::HashMap<(u8, u8), (f32, f32)>,
+}
+
+fn serialize_condition_best<S>(
+    map: &std::collections::HashMap<(u8, u8), (f32, f32)>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where S: serde::Serializer {
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (&(cbucket, lbucket), &(decay, recall)) in map {
+        seq.serialize_element(&serde_json::json!({
+            "concept_bucket": cbucket,
+            "locked_bucket":  lbucket,
+            "best_decay":     decay,
+            "best_recall":    recall,
+        }))?;
+    }
+    seq.end()
+}
+
+impl Default for TuningState {
+    fn default() -> Self {
+        Self {
+            last_recall:     0.0,
+            last_decay_rate: 2e-5,
+            direction:       -1.0,  // shrink first — defaults are usually too aggressive
+            best_recall:     0.0,
+            best_decay_rate: 2e-5,
+            steps:           0,
+            condition_best:  std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// What a single retune step did.  Reported back via `/retune`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TuningReport {
+    pub recall_before:    f32,
+    pub recall_after:     f32,
+    pub decay_before:     f32,
+    pub decay_after:      f32,
+    pub direction_after:  f32,
+    pub best_recall:      f32,
+    pub best_decay_rate:  f32,
+    pub concept_bucket:   u8,
+    pub locked_bucket:    u8,
+}
+
 /// Per-pair recall outcome from a self-test pass.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SelfTestRecall {
@@ -449,6 +526,9 @@ pub struct Brain {
     /// on.  Used to recognise the cross-pool prompt→response pattern
     /// during `observe` so the QA buffer auto-populates.
     recent_frames:                AHashMap<PoolId, (Vec<u8>, u64)>,
+    /// Self-tuning hill-climber state.  The brain feeds `self_test`
+    /// recall back into pool decay_rate via this controller — Phase D.
+    tuning:                       TuningState,
 }
 
 /// Cosine similarity between two sparse co-firing signatures.  A
@@ -524,11 +604,108 @@ impl Brain {
             network:               NetworkState::new(""),
             qa_db:                 QaDatabase::new(4096),
             recent_frames:         AHashMap::new(),
+            tuning:                TuningState::default(),
         }
     }
 
     /// Read-only access to the auto-captured QA buffer.
     pub fn qa_db(&self) -> &QaDatabase { &self.qa_db }
+
+    /// Read-only access to the self-tuning controller state.
+    pub fn tuning_state(&self) -> &TuningState { &self.tuning }
+
+    /// One self-tuning step: run a self_test, hill-climb on decay_rate
+    /// using the recall delta as the gradient signal.  Stores the
+    /// best-seen (decay_rate, recall) pair indexed by current condition
+    /// (concept_count_bucket, locked_count_bucket) so future runs in
+    /// the same substrate regime warm-start from known-good values.
+    ///
+    /// No setpoint — the brain discovers its own decay optimum.
+    pub fn retune(&mut self, sample_count: usize) -> TuningReport {
+        let decay_before = self.tuning.last_decay_rate;
+        let report = self.self_test(sample_count);
+        let recall_now = report.mean_byte_match;
+        let recall_before = self.tuning.last_recall;
+
+        // Update best-ever recall first — we want to capture the
+        // optimum even if the next nudge regresses.
+        if recall_now > self.tuning.best_recall {
+            self.tuning.best_recall = recall_now;
+            self.tuning.best_decay_rate = decay_before;
+        }
+
+        // Bucket the current condition for the condition→value memory.
+        // log2 floors give a coarse grid that handles brains spanning
+        // many orders of magnitude in size.
+        let total_concepts: usize = self.fabric.pool_ids().into_iter()
+            .filter_map(|pid| self.fabric.pool(pid))
+            .map(|p| {
+                let r = p.read();
+                r.iter_neurons().filter(|n| !n.is_atom()).count()
+            })
+            .sum();
+        let locked = self.locked_terminal_count();
+        let cbucket = (total_concepts as f64).max(1.0).log2().floor() as u8;
+        let lbucket = (locked as f64).max(1.0).log2().floor() as u8;
+        let cond = (cbucket, lbucket);
+
+        // Remember the best decay we've seen at this condition.
+        let cond_entry = self.tuning.condition_best.entry(cond)
+            .or_insert((decay_before, recall_now));
+        if recall_now > cond_entry.1 {
+            *cond_entry = (decay_before, recall_now);
+        }
+
+        // Hill-climb step: if recall improved, keep direction; if it
+        // worsened, reverse.
+        if self.tuning.steps > 0 {
+            if recall_now < recall_before { self.tuning.direction *= -1.0; }
+        }
+
+        // Step magnitude scales with the recall signal — strong
+        // gradient → big step, no signal → tiny step.  This stops the
+        // controller from drifting unboundedly when recall plateaus
+        // (e.g. when the consolidation lock has saturated and decay
+        // genuinely doesn't matter any more).
+        let delta_mag = (recall_now - recall_before).abs();
+        let step_pct = (0.01 + delta_mag * 0.5).clamp(0.005, 0.2);
+        let step_factor = 1.0 + step_pct * self.tuning.direction;
+        let mut decay_after = (decay_before * step_factor).clamp(1e-7, 0.01);
+
+        // Condition-memory bias: if we've seen a better decay at this
+        // condition before, blend toward it (20%).  Gives the brain a
+        // long-horizon attractor toward the best-known config for its
+        // current scale.
+        if let Some(&(known_decay, known_recall)) = self.tuning.condition_best.get(&cond) {
+            if known_recall > recall_now {
+                decay_after = decay_after * 0.8 + known_decay * 0.2;
+            }
+        }
+
+        // Apply to every pool's decay_rate.
+        for pid in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pid) {
+                let mut pw = pool.write();
+                pw.config.decay_rate = decay_after;
+            }
+        }
+
+        self.tuning.last_decay_rate = decay_after;
+        self.tuning.last_recall = recall_now;
+        self.tuning.steps += 1;
+
+        TuningReport {
+            recall_before,
+            recall_after:    recall_now,
+            decay_before,
+            decay_after,
+            direction_after: self.tuning.direction,
+            best_recall:     self.tuning.best_recall,
+            best_decay_rate: self.tuning.best_decay_rate,
+            concept_bucket:  cond.0,
+            locked_bucket:   cond.1,
+        }
+    }
 
     /// Total locked-terminal count across every pool.  These terminals
     /// are decay-exempt by the consolidation lock and form the brain's
@@ -4460,6 +4637,7 @@ impl Brain {
             network:               NetworkState::new(""),
             qa_db:                 QaDatabase::new(4096),
             recent_frames:         AHashMap::new(),
+            tuning:                TuningState::default(),
         };
         (brain, missing)
     }
