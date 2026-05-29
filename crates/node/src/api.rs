@@ -221,6 +221,14 @@ enum ResolutionPath {
     BrainSubstrate,
     /// `integrate_autonomous_tuned()` succeeded via EEM `chain_explore`.
     BrainEemChain,
+    /// `node.EquationMatrixRuntime.search()` returned a high-relevance
+    /// physical equation whose text answers the question.  This is the
+    /// "Einstein thought experiment" path — when the brain's own
+    /// fact graph couldn't reach it, the symbolic-math equation
+    /// matrix (registered scientific equations across disciplines)
+    /// is consulted to find a known physical law that explains the
+    /// question.
+    NodeEquationMatrix,
     /// External `research_agent.py` resolved via `/hypothesis/resolve`.
     ExternalResearch,
     /// A human manually resolved via `/hypothesis/resolve`.
@@ -891,7 +899,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             OntologyConfig::default(),
             w1z4rdv1510n::config::ConsistencyChunkingConfig::default(),
         ))),
-        hypothesis_queue: Arc::new(Mutex::new(Vec::new())),
+        hypothesis_queue: Arc::new(Mutex::new(
+            load_hypothesis_queue(&node_data_dir().join("hypothesis_queue.json"))
+        )),
         session_contexts: Arc::new(Mutex::new(HashMap::new())),
         entity_health:        Arc::new(Mutex::new(EntityHealthRuntime::new(EntityHealthConfig::default()))),
         delta_engine:         Arc::new(Mutex::new(DeltaEngine::new(DeltaEngineConfig::default()))),
@@ -929,6 +939,12 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     // can call brain.integrate_autonomous_tuned to try EEM-chain
     // resolution on queued questions.
     let brain_arc_for_loop = state.brain.clone();
+    // Pre-clone the equation matrix runtime so the research loop can
+    // search registered physical/scientific equations as the
+    // Einstein-thought-experiment resolution path.
+    let eem_arc_for_loop = state.equation_matrix.clone();
+    // Path where the hypothesis queue is persisted across restarts.
+    let hq_persist_path = node_data_dir().join("hypothesis_queue.json");
     // Pre-clone for the background peer-refresh task (state is consumed by with_state below).
     let bg_cluster = state.cluster.clone();
     let bg_dist    = state.distributed.clone();
@@ -1245,8 +1261,10 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             let hq = app_hypothesis_queue.clone();
             let neuro = app_neuro.clone();
             let brain = brain_arc_for_loop.clone();
+            let eem = eem_arc_for_loop.clone();
+            let persist = hq_persist_path.clone();
             tokio::spawn(async move {
-                hypothesis_research_loop(hq, neuro, brain).await;
+                hypothesis_research_loop(hq, neuro, brain, eem, persist).await;
             });
         }
         // ── Background peer-list refresh ──────────────────────────────────────
@@ -7786,19 +7804,22 @@ async fn hypothesis_resolve(
             let conf         = req.confidence.unwrap_or(0.7);
             entry.confidence = Some(conf);
             entry.resolution_path = Some(match req.resolution_path.as_deref() {
-                Some("external_research") => ResolutionPath::ExternalResearch,
-                Some("brain_substrate")   => ResolutionPath::BrainSubstrate,
-                Some("brain_eem_chain")   => ResolutionPath::BrainEemChain,
-                _                         => ResolutionPath::Human,
+                Some("external_research")    => ResolutionPath::ExternalResearch,
+                Some("brain_substrate")      => ResolutionPath::BrainSubstrate,
+                Some("brain_eem_chain")      => ResolutionPath::BrainEemChain,
+                Some("node_equation_matrix") => ResolutionPath::NodeEquationMatrix,
+                _                            => ResolutionPath::Human,
             });
             entry.source_url    = req.source_url;
             entry.chain_of_facts = req.chain_of_facts;
+            let resolved_id = entry.id.clone();
             // Dopamine signal: reward the network for having queued the right question.
             // Retrograde potentiation strengthens recently-active paths proportionally
             // to how confident the resolved answer is.
             state.neuro.release_neuromodulator(NeuromodulatorKind::Dopamine, conf);
             state.neuro.flush_dopamine();
-            (StatusCode::OK, Json(serde_json::json!({ "resolved": true, "id": entry.id })))
+            persist_hypothesis_queue(&hq, &node_data_dir().join("hypothesis_queue.json"));
+            (StatusCode::OK, Json(serde_json::json!({ "resolved": true, "id": resolved_id })))
         }
         None => (StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "hypothesis not found", "id": req.id }))),
@@ -7899,6 +7920,7 @@ async fn brain_ask(
                 query_pool: Some(qp),
             });
         }
+        persist_hypothesis_queue(&hq, &node_data_dir().join("hypothesis_queue.json"));
     }
     (StatusCode::ACCEPTED, Json(serde_json::json!({
         "answer":            serde_json::Value::Null,
@@ -7922,6 +7944,8 @@ async fn hypothesis_research_loop(
     hq: Arc<Mutex<Vec<HypothesisEntry>>>,
     neuro: NeuroRuntimeHandle,
     brain: Arc<tokio::sync::Mutex<w1z4rd_brain::Brain>>,
+    eem: Arc<EquationMatrixRuntime>,
+    persist_path: PathBuf,
 ) {
     use w1z4rd_brain::neuron::PoolId;
     const POOL_TEXT_ID:   PoolId = 1;
@@ -7977,22 +8001,95 @@ async fn hypothesis_research_loop(
             answer.map(|a| (a, chain_labels, conf))
         };
 
+        // Treat an answer as substantive only when:
+        //   (a) confidence >= 0.8
+        //   (b) at least 4 bytes long
+        //   (c) at least one "token" (split on ". ") has >= 3 chars
+        // The multi-fact assembly path produces ". "-separated
+        // segments; when every segment is a single character we have
+        // atom-soup ("l. m. n. i") that scored numerically high but
+        // is semantically meaningless.  This gate keeps such
+        // fragments from claiming resolution before Strategy 2
+        // (equation matrix) gets a turn.
+        let answer_is_substantive = |a: &str, c: f32| -> bool {
+            if c < 0.8 || a.len() < 4 { return false; }
+            a.split(". ").any(|tok| tok.trim().chars()
+                .filter(|ch| ch.is_alphanumeric()).count() >= 3)
+        };
+
         if let Some((answer, chain, conf)) = brain_attempt {
-            if conf >= 0.10 && !answer.is_empty() {
-                let mut guard = hq.lock().expect("hypothesis mutex");
-                if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
-                    entry.attempts += 1;
-                    entry.resolved        = true;
-                    entry.answer          = Some(answer);
-                    entry.confidence      = Some(conf);
-                    entry.resolution_path = Some(ResolutionPath::BrainEemChain);
-                    entry.chain_of_facts  = chain;
+            if answer_is_substantive(&answer, conf) {
+                {
+                    let mut guard = hq.lock().expect("hypothesis mutex");
+                    if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
+                        entry.attempts += 1;
+                        entry.resolved        = true;
+                        entry.answer          = Some(answer);
+                        entry.confidence      = Some(conf);
+                        entry.resolution_path = Some(ResolutionPath::BrainEemChain);
+                        entry.chain_of_facts  = chain;
+                    }
+                    persist_hypothesis_queue(&guard, &persist_path);
                 }
                 continue;
             }
         }
 
-        // ── Strategy 2: legacy NeuroRuntime 1-hop Hebbian re-check ───
+        // ── Strategy 2: node EquationMatrixRuntime search ────────────
+        // Einstein-thought-experiment path: the brain's own fact graph
+        // didn't reach an answer, so we consult the registered
+        // scientific/physical equations across disciplines.  If a
+        // high-relevance equation matches the question, its text
+        // becomes the answer and the equation IDs become the
+        // chain_of_facts provenance.  The brain reinforces the
+        // matched equation so future questions in the same domain
+        // hit it faster.
+        let eem_result: Option<(String, Vec<String>, f32)> = {
+            let results = eem.search(&question, Some(5));
+            if results.is_empty() { None } else {
+                // Top hit must be meaningfully relevant.
+                let top = &results[0];
+                if top.relevance < 0.5 { None } else {
+                    let mut chain: Vec<String> = Vec::new();
+                    chain.push(top.equation.id.clone());
+                    for rid in top.related_ids.iter().take(4) {
+                        chain.push(rid.clone());
+                    }
+                    let answer = format!(
+                        "{} — {} ({}). Variables: {}.",
+                        top.equation.text,
+                        top.equation.discipline.as_str(),
+                        top.equation.id,
+                        top.equation.variables.iter()
+                            .map(|v| format!("{}={}", v.symbol, v.name))
+                            .collect::<Vec<_>>().join(", "),
+                    );
+                    // Reinforce the matched equation so confidence
+                    // grows with use — the symbolic substrate also
+                    // learns from the question stream.
+                    eem.reinforce(&top.equation.id);
+                    // Normalise relevance into a confidence in [0,1].
+                    let conf = top.relevance.min(1.0);
+                    Some((answer, chain, conf))
+                }
+            }
+        };
+
+        if let Some((answer, chain, conf)) = eem_result {
+            let mut guard = hq.lock().expect("hypothesis mutex");
+            if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
+                entry.attempts += 1;
+                entry.resolved        = true;
+                entry.answer          = Some(answer);
+                entry.confidence      = Some(conf);
+                entry.resolution_path = Some(ResolutionPath::NodeEquationMatrix);
+                entry.chain_of_facts  = chain;
+            }
+            persist_hypothesis_queue(&guard, &persist_path);
+            continue;
+        }
+
+        // ── Strategy 3: legacy NeuroRuntime 1-hop Hebbian re-check ───
         // Kept for backward compatibility with corpora trained on the
         // legacy fabric.  Hopes that new training has raised the
         // word-level activation above ANSWER_THRESHOLD since the
@@ -8018,17 +8115,59 @@ async fn hypothesis_research_loop(
         }).await;
 
         // Update hypothesis state
-        let mut guard = hq.lock().expect("hypothesis mutex");
-        if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
-            entry.attempts += 1;
-            if let Ok((peak, answer)) = outcome {
-                if peak >= ANSWER_THRESHOLD {
-                    entry.resolved        = true;
-                    entry.answer          = answer;
-                    entry.confidence      = Some(peak);
-                    entry.resolution_path = Some(ResolutionPath::BrainSubstrate);
+        {
+            let mut guard = hq.lock().expect("hypothesis mutex");
+            if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
+                entry.attempts += 1;
+                if let Ok((peak, answer)) = outcome {
+                    if peak >= ANSWER_THRESHOLD {
+                        entry.resolved        = true;
+                        entry.answer          = answer;
+                        entry.confidence      = Some(peak);
+                        entry.resolution_path = Some(ResolutionPath::BrainSubstrate);
+                    }
                 }
             }
+            persist_hypothesis_queue(&guard, &persist_path);
+        }
+    }
+}
+
+/// Atomically write the hypothesis queue to disk so the running set of
+/// open questions (plus their resolution provenance) survives restarts.
+/// Best-effort: errors are logged but don't propagate, since the queue
+/// is not critical for serving requests.
+fn persist_hypothesis_queue(queue: &[HypothesisEntry], path: &std::path::Path) {
+    let json = match serde_json::to_string_pretty(queue) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("hypothesis_queue serialize failed: {}", e);
+            return;
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("hypothesis_queue mkdir {:?} failed: {}", parent, e);
+            return;
+        }
+    }
+    match std::fs::write(path, &json) {
+        Ok(()) => tracing::info!("hypothesis_queue persisted: {} entries -> {:?}",
+                                 queue.len(), path),
+        Err(e) => tracing::warn!("hypothesis_queue write {:?} failed: {}", path, e),
+    }
+}
+
+/// Load the persisted hypothesis queue if `path` exists.  Returns an
+/// empty vector on any failure — startup never panics over corrupted
+/// persistence.
+fn load_hypothesis_queue(path: &std::path::Path) -> Vec<HypothesisEntry> {
+    let Ok(json) = std::fs::read_to_string(path) else { return Vec::new() };
+    match serde_json::from_str::<Vec<HypothesisEntry>>(&json) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("hypothesis_queue parse {:?} failed: {} — starting fresh", path, e);
+            Vec::new()
         }
     }
 }
