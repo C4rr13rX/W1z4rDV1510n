@@ -79,20 +79,28 @@ fn two_facts_concatenated_with_period_separator() {
         /*threshold*/ 100.0,
         /*max_depth*/ 3,
         /*max_visit*/ 100);
-    let answer = ans.answer.as_ref().expect("must answer");
-    let s = String::from_utf8_lossy(answer);
-    // Either the multi-fact separator is present (two facts decoded)
-    // OR composition_used contains 2+ entries (multi-fact assembly
-    // attempted; decoder may have collapsed identical bytes).  The
-    // audit-7 contract is that the *mechanism* fires, not that the
-    // decoder produces a perfectly distinct string every time.
-    let multi_separator = s.contains(". ");
-    let multi_composition = ans.grounding.composition_used.len() >= 2;
-    assert!(multi_separator || multi_composition,
-        "two trained facts must trigger multi-fact assembly (separator \
-         present OR composition_used.len()>=2); got answer={:?} \
-         composition_used.len()={}",
-        s, ans.grounding.composition_used.len());
+    // The audit-7 contract is that the multi-fact *mechanism* fires:
+    // the chain explorer reaches 2+ target candidates and records
+    // them in composition_used.  The assembled BYTES are now honestly
+    // None when every decoded candidate is a single-byte atom (the
+    // substrate refuses to ship "a. l. p. h. a" as a confident
+    // answer — see the atom-soup defense in
+    // integrate_autonomous_tuned).  The mechanism is what this test
+    // verifies; the assembled string is now substrate-honest.
+    assert!(ans.grounding.composition_used.len() >= 2,
+        "two trained facts must trigger multi-fact assembly \
+         (composition_used.len() >= 2); got composition_used.len()={}, \
+         answer={:?}",
+        ans.grounding.composition_used.len(), ans.answer);
+    // When the substrate DOES produce an answer, it must be either
+    // separator-joined OR a >=2-byte single concept decode.  Never
+    // single-atom output (that's atom soup, gated above).
+    if let Some(answer) = ans.answer.as_ref() {
+        let s = String::from_utf8_lossy(answer);
+        assert!(s.contains(". ") || answer.len() >= 2,
+            "non-None answer must be either separator-joined or a \
+             substantive (>=2 byte) single decode; got {:?}", s);
+    }
 }
 
 #[test]

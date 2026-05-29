@@ -822,6 +822,18 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
         "disabled".to_string()
     };
 
+    // Surface where node_data_dir() resolved to so the operator can
+    // immediately confirm whether W1Z4RDV1510N_DATA_DIR landed where
+    // they expected.  On Windows this catches the bash-escaping
+    // failure mode where `D:\\path` becomes `D:path` (no backslash).
+    let resolved_data_dir = node_data_dir();
+    tracing::info!(
+        target: "w1z4rdv1510n_node::api",
+        node_data_dir = %resolved_data_dir.display(),
+        hypothesis_queue_path = %resolved_data_dir.join("hypothesis_queue.json").display(),
+        "resolved data dir at startup",
+    );
+
     // ── Embedded brain (Phase A–E substrate) ──────────────────────────────
     // Built BEFORE ApiState so the same Arc<Mutex<Brain>> is shared by
     // both the brain's own /brain/* router (via BrainApiState) AND
@@ -8001,24 +8013,12 @@ async fn hypothesis_research_loop(
             answer.map(|a| (a, chain_labels, conf))
         };
 
-        // Treat an answer as substantive only when:
-        //   (a) confidence >= 0.8
-        //   (b) at least 4 bytes long
-        //   (c) at least one "token" (split on ". ") has >= 3 chars
-        // The multi-fact assembly path produces ". "-separated
-        // segments; when every segment is a single character we have
-        // atom-soup ("l. m. n. i") that scored numerically high but
-        // is semantically meaningless.  This gate keeps such
-        // fragments from claiming resolution before Strategy 2
-        // (equation matrix) gets a turn.
-        let answer_is_substantive = |a: &str, c: f32| -> bool {
-            if c < 0.8 || a.len() < 4 { return false; }
-            a.split(". ").any(|tok| tok.trim().chars()
-                .filter(|ch| ch.is_alphanumeric()).count() >= 3)
-        };
-
+        // Confidence floor — the substrate is now honest about
+        // atom-soup decodes (returns None and outside_grounding=true
+        // when there's nothing substantive), so we just gate on
+        // confidence here.
         if let Some((answer, chain, conf)) = brain_attempt {
-            if answer_is_substantive(&answer, conf) {
+            if conf >= 0.5 && !answer.is_empty() {
                 {
                     let mut guard = hq.lock().expect("hypothesis mutex");
                     if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {

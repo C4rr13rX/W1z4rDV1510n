@@ -198,12 +198,14 @@ fn synapse_decay_prunes_unused_terminals() {
     let pool_b = Pool::new(cfg_b, Box::new(BytePassthroughEncoding { prefix: "aud" }));
     let pool_b_id = fabric.register_pool(pool_b);
 
-    // Reinforce several times so the terminal weight saturates well
-    // above prune_floor before we measure it.  Cross_pool_lr=0.15 per
-    // co-fire saturates to ~max_weight×0.5 after enough hits; at
-    // decay=0.5 we need pre-decay weight comfortably above 0.1 to see
-    // both states (grew, then pruned).
-    for _ in 0..10 {
+    // Reinforce just twice (below the Phase A consolidation lock
+    // threshold of 3) so the terminal stays decay-eligible.  Phase A
+    // intentionally makes terminals at consolidation >= 3 permanent
+    // — that's the 100%-recall floor for trained pairs — so this
+    // test exercises the OPPOSITE regime: lightly-reinforced
+    // terminals that the brain should still forget if they aren't
+    // touched again.
+    for _ in 0..2 {
         fabric.observe(pool_id, b"x");
         fabric.observe(pool_b_id, b"y");
         fabric.advance_tick();

@@ -2,6 +2,12 @@
   1. The /brain/ask -> hypothesis_queue -> EquationMatrixRuntime resolution path.
   2. Persistence: queue survives a binary restart.
 
+Path convention: ALWAYS use forward slashes for data dirs.  Bash + Windows
+env-var escaping eats backslashes inconsistently (D:\\path -> D:path silently),
+which then sends node_data_dir() to an unexpected location.  Rust + Windows
+accept either separator, so forward slashes are the safe choice for
+W1Z4RDV1510N_DATA_DIR and W1Z4RD_NODE_BRAIN_DIR everywhere.
+
 Flow:
   1. Start the node, train a tiny corpus on the brain.
   2. Ingest a physical equation into the EquationMatrixRuntime.

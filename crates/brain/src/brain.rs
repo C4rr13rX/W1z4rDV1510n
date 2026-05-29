@@ -1575,7 +1575,14 @@ impl Brain {
                                     annealer_confidence: None,
                                     integrated_confidence: binding_score,
                                     outside_grounding: false,
-                                    speculation_flag: false,
+                                    // Cross-pool composition is by
+                                    // definition speculative (spec
+                                    // §2.3): the answer came from a
+                                    // binding-pool concept whose
+                                    // members span more than one
+                                    // pool, not from a direct retrieve
+                                    // of a single trained pair.
+                                    speculation_flag: query_pool != target_pool,
                                     peer_contributions: Vec::new(),
                                 },
                                 confidence_tier: ConfidenceTier::from_confidence(
@@ -2752,10 +2759,13 @@ impl Brain {
 
         let answer_bytes: Option<Vec<u8>> = if !fire_multi_fact {
             // Single-fact preservation (audit-8).  Byte-identical to
-            // the Stage 8 path.
+            // the Stage 8 path: a single-atom trained pair (K->V)
+            // returns "V" exactly, no quality gate, because there's
+            // nothing to assemble.  The substrate is honest that it
+            // has only that one fact and reports it back.
             decode_one(best_ref.1)
         } else {
-            // Multi-fact assembly.  Decode each, drop empties, join.
+            // Multi-fact assembly.  Decode each candidate.
             let mut decoded_parts: Vec<Vec<u8>> = Vec::with_capacity(selected.len());
             for (nref, _conf) in selected.iter() {
                 if let Some(bytes) = decode_one(nref.1) {
@@ -2764,7 +2774,22 @@ impl Brain {
                     }
                 }
             }
-            if decoded_parts.is_empty() {
+            // Atom-soup defense: when the chain explorer walked a
+            // fanout of single-byte atoms (e.g. 'l', 'm', 'n', 'i'
+            // from an action pool that only ever saw brief words),
+            // joining them as "l. m. n. i" produces high-confidence
+            // gibberish.  Refuse the join entirely when EVERY
+            // decoded part is a single byte — the substrate then
+            // honestly reports outside_grounding and the caller
+            // (`/brain/ask`, the hypothesis research loop) gets a
+            // truthful "I don't know" instead of confident noise.
+            // When at least one part is multi-byte (a real concept
+            // decode like "alpha" or "beta"), assembly proceeds
+            // normally, preserving back-compat with the multi-fact
+            // regression pins.
+            let all_single_byte = !decoded_parts.is_empty()
+                && decoded_parts.iter().all(|p| p.len() == 1);
+            if all_single_byte || decoded_parts.is_empty() {
                 None
             } else if decoded_parts.len() == 1 {
                 Some(decoded_parts.into_iter().next().unwrap())
