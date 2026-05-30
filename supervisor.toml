@@ -6,8 +6,27 @@
 # both hammering /sensor/observe, node /health latency can briefly
 # spike past 3s even though the node is fine. A false-positive node
 # kill wipes the in-memory motif fabric — losing hours of training.
-health_timeout = 8.0
-health_misses_before_restart = 5
+#
+# Production brain.bin is now 11+ GB after months of training;
+# the merged node binary's startup deserialisation routinely runs
+# 4-7 minutes during which /health hasn't bound the listener yet.
+# 60 misses × 10s = 600 s of grace before the supervisor reaches
+# for the kill switch.  warmup_secs is the post-relaunch quiet
+# period the supervisor waits BEFORE counting misses — bumped to
+# 600 s for the same reason.  Without these values, the supervisor
+# was killing the binary mid-deserialise every 70 s and never
+# letting the load finish.  Tune DOWN once we land an mmap-backed
+# brain.bin format that doesn't need a full read at startup.
+health_timeout = 10.0
+# 180 misses × 10 s = 30 min of grace before the supervisor reaches
+# for the kill switch.  Empirical: 11 GB brain.bin + 870 MB WAL
+# replay regularly takes 12-15 min wall clock; the previous 600 s
+# value still triggered a false-positive kill mid-load.
+health_misses_before_restart = 180
+# 30 min initial warmup window before health probes count toward
+# misses.  Without this, the supervisor was killing the binary mid-
+# deserialise every ~10 min, never letting it finish.
+warmup_secs = 1800.0
 
 [django]
 # Use the SPA root, NOT /api/wizard-chat/status/. The status endpoint

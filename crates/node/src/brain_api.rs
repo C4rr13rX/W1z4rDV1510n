@@ -562,6 +562,39 @@ async fn h_checkpoint(State(s): State<BrainApiState>) -> Json<serde_json::Value>
     }
 }
 
+async fn h_tick_profile(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
+    let brain = s.brain.lock().await;
+    let snap = brain.fabric().profile.snapshot();
+    let ticks = snap.ticks.max(1) as f64;
+    let to_us = |ns: u64| (ns as f64 / 1_000.0) as u64;
+    let to_ms = |ns: u64| (ns as f64 / 1_000_000.0) as u64;
+    let mean_us = |ns: u64| ((ns as f64) / ticks / 1_000.0) as u64;
+    let pct = |ns: u64| if snap.total_ns == 0 { 0.0 }
+        else { (ns as f64) * 100.0 / (snap.total_ns as f64) };
+    Json(json!({
+        "ticks":                       snap.ticks,
+        "cross_pool_atom_wiring_us":   to_us(snap.cross_pool_atom_wiring_ns),
+        "cross_pool_concept_wiring_us":to_us(snap.cross_pool_concept_wiring_ns),
+        "within_pool_temporal_us":     to_us(snap.within_pool_temporal_ns),
+        "housekeeping_us":             to_us(snap.housekeeping_ns),
+        "total_us":                    to_us(snap.total_ns),
+        "total_ms":                    to_ms(snap.total_ns),
+        "mean_per_tick_us": {
+            "cross_pool_atom_wiring":    mean_us(snap.cross_pool_atom_wiring_ns),
+            "cross_pool_concept_wiring": mean_us(snap.cross_pool_concept_wiring_ns),
+            "within_pool_temporal":      mean_us(snap.within_pool_temporal_ns),
+            "housekeeping":              mean_us(snap.housekeeping_ns),
+            "total":                     mean_us(snap.total_ns),
+        },
+        "phase_pct_of_total": {
+            "cross_pool_atom_wiring":    pct(snap.cross_pool_atom_wiring_ns),
+            "cross_pool_concept_wiring": pct(snap.cross_pool_concept_wiring_ns),
+            "within_pool_temporal":      pct(snap.within_pool_temporal_ns),
+            "housekeeping":              pct(snap.housekeeping_ns),
+        },
+    }))
+}
+
 async fn h_sleep_pressure(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let deferred = std::env::var("W1Z4RD_DEFER_PROMOTION")
@@ -707,6 +740,7 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
         .route("/force_decay",            post(h_force_decay))
         .route("/idle_ticks",             post(h_idle_ticks))
         .route("/sleep_pressure",         get(h_sleep_pressure))
+        .route("/tick_profile",           get(h_tick_profile))
         .route("/sleep",                  post(h_sleep))
         .route("/checkpoint",             post(h_checkpoint))
         .route("/thinking/start",         post(h_thinking_start))
@@ -720,11 +754,22 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
 /// state separate from the standalone brain_server), falls back to
 /// `W1Z4RDV1510N_DATA_DIR/brain` and finally `brain-data`.
 pub fn default_node_brain_dir() -> PathBuf {
+    // Explicit override always wins.
     if let Ok(p) = std::env::var("W1Z4RD_NODE_BRAIN_DIR") {
         return PathBuf::from(p);
     }
+    // If W1Z4RDV1510N_DATA_DIR is set: prefer the data dir itself when
+    // a brain.bin already lives there directly (the supervisor's
+    // long-standing production layout: D:\w1z4rdv1510n-data\brain.bin
+    // alongside neuro_pool.json + equation_matrix.json + cold tiers).
+    // Fall back to <data_dir>/brain as a subdir for fresh installs that
+    // don't have brain.bin at the data-dir root yet.
     if let Ok(p) = std::env::var("W1Z4RDV1510N_DATA_DIR") {
-        return PathBuf::from(p).join("brain");
+        let base = PathBuf::from(p);
+        if base.join("brain.bin").exists() {
+            return base;
+        }
+        return base.join("brain");
     }
     PathBuf::from("brain-data")
 }

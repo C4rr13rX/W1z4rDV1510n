@@ -299,6 +299,27 @@ impl Fabric {
         // and gives the substrate "X is like Y" reasoning without an
         // explicit integration cycle.  Defaults to 0.1; tunable via
         // W1Z4RD_CROSS_DOMAIN_SCALE for Phase B self-tuning.
+        // Top-K cap on firing CONCEPTS per pool per tick.  Phase 2
+        // (cross-pool concept wiring) and Phase 3 (within-pool temporal
+        // concept wiring) are both O(|firing_a| × |firing_b|), so once
+        // the brain has millions of concepts and propagation can light
+        // up thousands of them per tick, tick time grows quadratically
+        // and observe / tick latency explodes (we measured 2-3 s at
+        // 7.2 M neurons before this cap).  Capping each pool's
+        // firing-concept set to its top-K by activation bounds tick
+        // time to O(K²) regardless of brain size, at the cost of only
+        // wiring the most-active concepts each tick — sparse / weak
+        // concepts still get wired the tick they fire above the cut.
+        //
+        // Atoms are NOT capped — phase 1's atom wiring is already
+        // bounded by the byte-alphabet (≤ 256 distinct atoms per
+        // pool).  Set W1Z4RD_TICK_CONCEPT_CAP=0 to disable the cap
+        // (legacy unbounded behaviour, fine for small brains).
+        let concept_cap: usize = std::env::var("W1Z4RD_TICK_CONCEPT_CAP")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(256);
+
         let cross_domain_scale: f32 = std::env::var("W1Z4RD_CROSS_DOMAIN_SCALE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
@@ -393,17 +414,28 @@ impl Fabric {
         let phase_t0 = std::time::Instant::now();
         let concept_lr = self.config.cross_pool_concept_lr;
         if concept_lr > 0.0 {
-            // Snapshot per-pool concept firings from currently_firing.
+            // Snapshot per-pool concept firings from currently_firing,
+            // capped at top-K by activation when W1Z4RD_TICK_CONCEPT_CAP
+            // is set.  This is the load-bearing fix that keeps Phase 2
+            // tick time O(K²) regardless of brain size.
             let mut concepts_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
             for (pid, pool) in self.pools.iter() {
                 let p = pool.read();
-                let firing: Vec<NeuronId> = p.currently_firing()
+                let mut firing: Vec<(NeuronId, f32)> = p.currently_firing()
                     .filter_map(|nid| p.get(nid).and_then(|n| {
-                        if n.is_atom() { None } else { Some(nid) }
+                        if n.is_atom() { None } else { Some((nid, p.activation(nid))) }
                     }))
                     .collect();
-                if !firing.is_empty() {
-                    concepts_by_pool.insert(*pid, firing);
+                if concept_cap > 0 && firing.len() > concept_cap {
+                    // Partial sort by activation descending, then truncate.
+                    firing.sort_by(|a, b| b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal));
+                    firing.truncate(concept_cap);
+                }
+                let firing_ids: Vec<NeuronId> = firing.into_iter()
+                    .map(|(id, _)| id).collect();
+                if !firing_ids.is_empty() {
+                    concepts_by_pool.insert(*pid, firing_ids);
                 }
             }
 
@@ -491,14 +523,33 @@ impl Fabric {
             };
             let current_concepts: Vec<NeuronId> = {
                 let p = pool.read();
-                p.currently_firing()
+                let mut firing: Vec<(NeuronId, f32)> = p.currently_firing()
                     .filter_map(|nid| p.get(nid).and_then(|n| {
-                        if n.is_atom() { None } else { Some(nid) }
+                        if n.is_atom() { None } else { Some((nid, p.activation(nid))) }
                     }))
-                    .collect()
+                    .collect();
+                // Phase 3 cap by activation — same rationale as Phase 2.
+                if concept_cap > 0 && firing.len() > concept_cap {
+                    firing.sort_by(|a, b| b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal));
+                    firing.truncate(concept_cap);
+                }
+                firing.into_iter().map(|(id, _)| id).collect()
             };
 
-            if let Some(prev) = self.prev_tick_concepts.get(&pid).cloned() {
+            if let Some(prev_full) = self.prev_tick_concepts.get(&pid).cloned() {
+                // The PREVIOUS-tick concept set may have been recorded
+                // before the cap landed (or saved from a brain.bin
+                // checkpoint), so it may be far larger than `concept_cap`.
+                // Cap it on-read to bound the Phase 3 product
+                // |prev| × |current| at K².  Activation isn't available
+                // for the previous tick (we don't snapshot it), so we
+                // just truncate — the substrate's training signal is
+                // dominated by the most-recent firings anyway.
+                let prev: Vec<NeuronId> = if concept_cap > 0
+                    && prev_full.len() > concept_cap {
+                    prev_full.into_iter().take(concept_cap).collect()
+                } else { prev_full };
                 if !prev.is_empty() && !current_concepts.is_empty() {
                     let mut pw = pool.write();
                     let max_w = pw.config.max_weight;
