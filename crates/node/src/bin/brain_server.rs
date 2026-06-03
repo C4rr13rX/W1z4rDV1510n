@@ -2455,8 +2455,9 @@ async fn main() -> Result<()> {
     // we just constructed.  Cloning these Arcs is cheap and keeps both
     // routers operating on a single Brain Mutex.
     let brain_api_state = brain_api::BrainApiState {
-        brain:    state.brain.clone(),
-        thinking: state.thinking.clone(),
+        brain:        state.brain.clone(),
+        thinking:     state.thinking.clone(),
+        http_profile: std::sync::Arc::new(brain_api::HttpProfile::default()),
     };
 
     // Spawn the Phase E thinking loop from brain_api so both binaries

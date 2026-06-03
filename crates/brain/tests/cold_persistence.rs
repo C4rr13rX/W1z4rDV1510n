@@ -48,7 +48,7 @@ fn cold_offsets_round_trip_through_snapshot() {
     {
         let mut pool = make_pool();
         pool.set_cold_tier(Arc::new(ColdTier::open(&cold_path).unwrap()));
-        for _ in 0..4 { pool.observe_frame(b"ab", 0); }
+        for _ in 0..4 { pool.observe_frame(b"ab", 0, None); }
 
         evicted_id = pool.iter_neurons()
             .find(|n| !n.is_atom())

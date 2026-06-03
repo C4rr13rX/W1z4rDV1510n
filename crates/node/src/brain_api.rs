@@ -65,12 +65,29 @@ impl Default for ThinkingState {
     }
 }
 
+/// HTTP-layer cumulative timing for the two hot endpoints.  Lock-wait is
+/// the time the handler spends `await`ing `brain.lock()` — the smoking
+/// gun for the "background loops hold the mutex while the foreground
+/// request piles up" hypothesis.  Handler-total is wall-clock from
+/// entering the handler to returning.  Subtracting per-observe fabric
+/// work from handler-total reveals serde/HTTP framing cost.
+#[derive(Debug, Default)]
+pub struct HttpProfile {
+    pub observe_calls:         AtomicU64,
+    pub observe_lock_wait_ns:  AtomicU64,
+    pub observe_handler_ns:    AtomicU64,
+    pub tick_calls:            AtomicU64,
+    pub tick_lock_wait_ns:     AtomicU64,
+    pub tick_handler_ns:       AtomicU64,
+}
+
 /// Router state passed to every brain handler.  Clone-friendly because
 /// every field is Arc-backed.
 #[derive(Clone)]
 pub struct BrainApiState {
-    pub brain:    Arc<Mutex<Brain>>,
-    pub thinking: Arc<ThinkingState>,
+    pub brain:        Arc<Mutex<Brain>>,
+    pub thinking:     Arc<ThinkingState>,
+    pub http_profile: Arc<HttpProfile>,
 }
 
 // ---------------------------------------------------------------------
@@ -167,8 +184,9 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
 /// `Brain` so the state can be sent across tasks (router clone, etc.).
 pub fn build_brain_api_state(brain: Brain) -> BrainApiState {
     BrainApiState {
-        brain:    Arc::new(Mutex::new(brain)),
-        thinking: Arc::new(ThinkingState::default()),
+        brain:        Arc::new(Mutex::new(brain)),
+        thinking:     Arc::new(ThinkingState::default()),
+        http_profile: Arc::new(HttpProfile::default()),
     }
 }
 
@@ -218,21 +236,68 @@ async fn h_observe(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
+    let handler_t0 = std::time::Instant::now();
     let pool_id = req.get("pool_id").and_then(|v| v.as_u64()).unwrap_or(0) as PoolId;
     let frame_b64 = req.get("frame").and_then(|v| v.as_str()).unwrap_or("");
     let frame = match b64_url_decode(frame_b64) {
         Ok(b) => b,
         Err(e) => return Json(json!({"error": format!("bad frame base64: {}", e)})),
     };
+    let lock_t0 = std::time::Instant::now();
     let mut brain = s.brain.lock().await;
+    let lock_ns = lock_t0.elapsed().as_nanos() as u64;
     let fired = brain.observe(pool_id, &frame);
+    drop(brain);
+    let handler_ns = handler_t0.elapsed().as_nanos() as u64;
+    s.http_profile.observe_calls.fetch_add(1, Ordering::Relaxed);
+    s.http_profile.observe_lock_wait_ns.fetch_add(lock_ns, Ordering::Relaxed);
+    s.http_profile.observe_handler_ns.fetch_add(handler_ns, Ordering::Relaxed);
     Json(json!({ "fired_count": fired.len() }))
 }
 
 async fn h_tick(State(s): State<BrainApiState>) -> Json<u64> {
+    let handler_t0 = std::time::Instant::now();
+    let lock_t0 = std::time::Instant::now();
     let mut brain = s.brain.lock().await;
+    let lock_ns = lock_t0.elapsed().as_nanos() as u64;
     brain.advance_tick();
-    Json(brain.fabric().current_tick())
+    let tick = brain.fabric().current_tick();
+    drop(brain);
+    let handler_ns = handler_t0.elapsed().as_nanos() as u64;
+    s.http_profile.tick_calls.fetch_add(1, Ordering::Relaxed);
+    s.http_profile.tick_lock_wait_ns.fetch_add(lock_ns, Ordering::Relaxed);
+    s.http_profile.tick_handler_ns.fetch_add(handler_ns, Ordering::Relaxed);
+    Json(tick)
+}
+
+async fn h_http_profile(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
+    let obs_calls = s.http_profile.observe_calls.load(Ordering::Relaxed);
+    let obs_lock  = s.http_profile.observe_lock_wait_ns.load(Ordering::Relaxed);
+    let obs_hand  = s.http_profile.observe_handler_ns.load(Ordering::Relaxed);
+    let tick_calls = s.http_profile.tick_calls.load(Ordering::Relaxed);
+    let tick_lock  = s.http_profile.tick_lock_wait_ns.load(Ordering::Relaxed);
+    let tick_hand  = s.http_profile.tick_handler_ns.load(Ordering::Relaxed);
+    let mean = |ns: u64, n: u64| if n == 0 { 0 } else { (ns / n / 1_000) };
+    Json(json!({
+        "observe": {
+            "calls":              obs_calls,
+            "lock_wait_us_total": obs_lock / 1_000,
+            "handler_us_total":   obs_hand / 1_000,
+            "mean_lock_wait_us":  mean(obs_lock, obs_calls),
+            "mean_handler_us":    mean(obs_hand, obs_calls),
+            "lock_pct_of_handler": if obs_hand == 0 { 0.0 }
+                else { (obs_lock as f64) * 100.0 / (obs_hand as f64) },
+        },
+        "tick": {
+            "calls":              tick_calls,
+            "lock_wait_us_total": tick_lock / 1_000,
+            "handler_us_total":   tick_hand / 1_000,
+            "mean_lock_wait_us":  mean(tick_lock, tick_calls),
+            "mean_handler_us":    mean(tick_hand, tick_calls),
+            "lock_pct_of_handler": if tick_hand == 0 { 0.0 }
+                else { (tick_lock as f64) * 100.0 / (tick_hand as f64) },
+        },
+    }))
 }
 
 async fn h_set_domain(
@@ -562,6 +627,51 @@ async fn h_checkpoint(State(s): State<BrainApiState>) -> Json<serde_json::Value>
     }
 }
 
+async fn h_observe_profile(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
+    let brain = s.brain.lock().await;
+    let snap = brain.fabric().observe_profile();
+    let observes = snap.observes.max(1) as f64;
+    let to_us = |ns: u64| (ns as f64 / 1_000.0) as u64;
+    let mean_us = |ns: u64| ((ns as f64) / observes / 1_000.0) as u64;
+    let pct = |ns: u64| if snap.total_ns == 0 { 0.0 }
+        else { (ns as f64) * 100.0 / (snap.total_ns as f64) };
+    Json(json!({
+        "observes":             snap.observes,
+        "atomize_us":           to_us(snap.atomize_ns),
+        "atom_fire_us":         to_us(snap.atom_fire_ns),
+        "lazy_decay_us":        to_us(snap.lazy_decay_ns),
+        "collapse_us":          to_us(snap.collapse_ns),
+        "concept_emergence_us": to_us(snap.concept_emergence_ns),
+        "end_of_frame_us":      to_us(snap.end_of_frame_ns),
+        "qa_capture_us":        to_us(snap.qa_capture_ns),
+        "wal_events":           snap.wal_events,
+        "wal_append_us":        to_us(snap.wal_append_ns),
+        "total_us":             to_us(snap.total_ns),
+        "total_ms":             (snap.total_ns as f64 / 1_000_000.0) as u64,
+        "mean_per_observe_us": {
+            "atomize":           mean_us(snap.atomize_ns),
+            "atom_fire":         mean_us(snap.atom_fire_ns),
+            "lazy_decay":        mean_us(snap.lazy_decay_ns),
+            "collapse":          mean_us(snap.collapse_ns),
+            "concept_emergence": mean_us(snap.concept_emergence_ns),
+            "end_of_frame":      mean_us(snap.end_of_frame_ns),
+            "qa_capture":        mean_us(snap.qa_capture_ns),
+            "wal_append":        mean_us(snap.wal_append_ns),
+            "total":             mean_us(snap.total_ns),
+        },
+        "phase_pct_of_total": {
+            "atomize":           pct(snap.atomize_ns),
+            "atom_fire":         pct(snap.atom_fire_ns),
+            "lazy_decay":        pct(snap.lazy_decay_ns),
+            "collapse":          pct(snap.collapse_ns),
+            "concept_emergence": pct(snap.concept_emergence_ns),
+            "end_of_frame":      pct(snap.end_of_frame_ns),
+            "qa_capture":        pct(snap.qa_capture_ns),
+            "wal_append":        pct(snap.wal_append_ns),
+        },
+    }))
+}
+
 async fn h_tick_profile(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let snap = brain.fabric().profile.snapshot();
@@ -741,6 +851,8 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
         .route("/idle_ticks",             post(h_idle_ticks))
         .route("/sleep_pressure",         get(h_sleep_pressure))
         .route("/tick_profile",           get(h_tick_profile))
+        .route("/observe_profile",        get(h_observe_profile))
+        .route("/http_profile",           get(h_http_profile))
         .route("/sleep",                  post(h_sleep))
         .route("/checkpoint",             post(h_checkpoint))
         .route("/thinking/start",         post(h_thinking_start))

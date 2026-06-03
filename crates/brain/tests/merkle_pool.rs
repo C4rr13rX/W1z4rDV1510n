@@ -26,8 +26,8 @@ fn identical_training_produces_identical_roots() {
     let mut p1 = make_pool();
     let mut p2 = make_pool();
     for _ in 0..3 {
-        p1.observe_frame(b"ab", 0);
-        p2.observe_frame(b"ab", 0);
+        p1.observe_frame(b"ab", 0, None);
+        p2.observe_frame(b"ab", 0, None);
     }
     let r1 = p1.merkle_root(/*fabric_tick*/ 3);
     let r2 = p2.merkle_root(3);
@@ -39,9 +39,9 @@ fn identical_training_produces_identical_roots() {
 fn extra_atom_changes_the_root() {
     let mut p1 = make_pool();
     let mut p2 = make_pool();
-    for _ in 0..3 { p1.observe_frame(b"ab", 0); }
-    for _ in 0..3 { p2.observe_frame(b"ab", 0); }
-    p2.observe_frame(b"c", 0);  // one extra atom in p2
+    for _ in 0..3 { p1.observe_frame(b"ab", 0, None); }
+    for _ in 0..3 { p2.observe_frame(b"ab", 0, None); }
+    p2.observe_frame(b"c", 0, None);  // one extra atom in p2
     let r1 = p1.merkle_root(3);
     let r2 = p2.merkle_root(3);
     assert_ne!(r1, r2,
@@ -51,7 +51,7 @@ fn extra_atom_changes_the_root() {
 #[test]
 fn root_is_stable_across_snapshot_restore() {
     let mut p1 = make_pool();
-    for _ in 0..3 { p1.observe_frame(b"xy", 0); }
+    for _ in 0..3 { p1.observe_frame(b"xy", 0, None); }
     let r_before = p1.merkle_root(3);
 
     let snap: PoolSnapshot = p1.snapshot();

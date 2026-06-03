@@ -1229,12 +1229,29 @@ impl Pool {
     /// The returned `fired` list is **atom-only** — concept firings do
     /// NOT enter the moment buffer.  Cross-pool wiring stays
     /// atom-level so fan-out remains bounded.
-    pub fn observe_frame(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
+    pub fn observe_frame(
+        &mut self,
+        frame: &[u8],
+        tick: u64,
+        profile: Option<&crate::fabric::ObserveProfile>,
+    ) -> Vec<NeuronId> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let atomize_t0 = std::time::Instant::now();
         let labels = self.encoding.atomize(frame);
+        if let Some(p) = profile {
+            p.atomize_ns.fetch_add(atomize_t0.elapsed().as_nanos() as u64, Relaxed);
+        }
         let mut fired = Vec::with_capacity(labels.len());
         let decay_rate = self.config.decay_rate;
         let prune_floor = self.config.prune_floor;
         let mut pruned_terminals_this_call: usize = 0;
+        // Per-phase accumulators for the per-atom loop below.  Folded
+        // into the Arc<ObserveProfile> once at the bottom so we don't
+        // hit the atomic on every iteration.
+        let mut atom_fire_ns:         u64 = 0;
+        let mut lazy_decay_ns:        u64 = 0;
+        let mut collapse_ns:          u64 = 0;
+        let mut concept_emergence_ns: u64 = 0;
 
         // Predictive-coding prediction (P3): before clearing the
         // firing set, compute the intra-pool prediction of what will
@@ -1261,12 +1278,15 @@ impl Pool {
         self.currently_firing.clear();
 
         for label in labels {
+            let atom_t0 = std::time::Instant::now();
             let id = self.ensure_atom(label, tick);
             self.activation.insert(id, 1.0);
             self.currently_firing.insert(id);
             fired.push(id);
             self.push_recent(id);
+            atom_fire_ns += atom_t0.elapsed().as_nanos() as u64;
 
+            let decay_t0 = std::time::Instant::now();
             if let Some(n) = self.neurons.get_mut(id as usize) {
                 n.use_count = n.use_count.saturating_add(1);
                 n.last_fired_tick = tick;
@@ -1281,18 +1301,24 @@ impl Pool {
                     prune_floor,
                 );
             }
+            lazy_decay_ns += decay_t0.elapsed().as_nanos() as u64;
 
             // Mini-column collapse: pop matched atoms from the tail of
             // recent_atoms and push the concept id in their place.
             // Loop so level-2 columns also collapse in one pass.
+            let collapse_t0 = std::time::Instant::now();
             while self.collapse_tail_to_concept(tick) {}
+            collapse_ns += collapse_t0.elapsed().as_nanos() as u64;
 
             // Per-atom emergence counting.  Patterns ending at the
             // current tail entry (which may be a concept after
             // collapse) get their counts bumped.
+            let emergence_t0 = std::time::Instant::now();
             self.check_concept_emergence(tick);
+            concept_emergence_ns += emergence_t0.elapsed().as_nanos() as u64;
         }
 
+        let end_t0 = std::time::Instant::now();
         // Predictive-coding surprise update (P3).  Always update
         // (cheap) so the EMA can serve as a ControlSignal for any
         // ControlMode that reads it.  Gate decisions downstream
@@ -1327,6 +1353,17 @@ impl Pool {
         // Maintain the O(1) terminals counter for the lazy-decay
         // accumulations from firing neurons.
         self.total_terminals = self.total_terminals.saturating_sub(pruned_terminals_this_call);
+        let end_of_frame_ns = end_t0.elapsed().as_nanos() as u64;
+
+        // Fold per-atom accumulators into the shared Arc<ObserveProfile>
+        // with a single atomic add per phase (rather than per atom).
+        if let Some(p) = profile {
+            p.atom_fire_ns        .fetch_add(atom_fire_ns,         Relaxed);
+            p.lazy_decay_ns       .fetch_add(lazy_decay_ns,        Relaxed);
+            p.collapse_ns         .fetch_add(collapse_ns,          Relaxed);
+            p.concept_emergence_ns.fetch_add(concept_emergence_ns, Relaxed);
+            p.end_of_frame_ns     .fetch_add(end_of_frame_ns,      Relaxed);
+        }
 
         fired
     }

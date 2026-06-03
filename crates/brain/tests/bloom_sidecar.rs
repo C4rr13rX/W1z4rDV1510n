@@ -27,7 +27,7 @@ fn make_pool() -> Pool {
 fn every_inserted_label_is_in_bloom() {
     let mut pool = make_pool();
     // Drive enough observes to create some atoms AND a concept.
-    for _ in 0..3 { pool.observe_frame(b"ab", 0); }
+    for _ in 0..3 { pool.observe_frame(b"ab", 0, None); }
     // Every label that's in label_to_id MUST be might_contain in bloom
     // — Bloom may have false positives but never false negatives.
     // (Iterate raw labels via the public read API.)
@@ -48,7 +48,7 @@ fn every_inserted_label_is_in_bloom() {
 #[test]
 fn bloom_rejects_definitively_absent_labels() {
     let mut pool = make_pool();
-    for _ in 0..3 { pool.observe_frame(b"xy", 0); }
+    for _ in 0..3 { pool.observe_frame(b"xy", 0, None); }
     // Probe 100 distinctly-named labels that were NOT inserted.
     let mut false_positives = 0;
     for i in 0..100 {
@@ -79,7 +79,7 @@ fn bloom_byte_size_and_inserted_keys_are_reasonable() {
 #[test]
 fn snapshot_roundtrip_rebuilds_bloom() {
     let mut pool = make_pool();
-    for _ in 0..3 { pool.observe_frame(b"cd", 0); }
+    for _ in 0..3 { pool.observe_frame(b"cd", 0, None); }
     // Capture the labels we expect to be present after restore.
     let expected_labels: Vec<String> =
         pool.iter_neurons().map(|n| n.label.clone()).collect();

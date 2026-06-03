@@ -45,7 +45,7 @@ fn evict_then_page_in_round_trips_concept() {
     let dir = tmpdir("rt_concept");
     let mut pool = make_pool_with_cold(&dir);
     // Train enough to emerge at least one concept.
-    for _ in 0..4 { pool.observe_frame(b"ab", 0); }
+    for _ in 0..4 { pool.observe_frame(b"ab", 0, None); }
 
     // Find a concept ID.
     let concept_id = pool.iter_neurons()
@@ -96,7 +96,7 @@ fn evict_then_page_in_round_trips_concept() {
 fn evict_atom_is_refused() {
     let dir = tmpdir("no_atom");
     let mut pool = make_pool_with_cold(&dir);
-    for _ in 0..2 { pool.observe_frame(b"a", 0); }
+    for _ in 0..2 { pool.observe_frame(b"a", 0, None); }
     let atom_id = pool.iter_neurons()
         .find(|n| n.is_atom())
         .map(|n| n.id)
@@ -113,7 +113,7 @@ fn evict_atom_is_refused() {
 fn double_evict_is_idempotent() {
     let dir = tmpdir("double_evict");
     let mut pool = make_pool_with_cold(&dir);
-    for _ in 0..4 { pool.observe_frame(b"xy", 0); }
+    for _ in 0..4 { pool.observe_frame(b"xy", 0, None); }
     let concept_id = pool.iter_neurons()
         .find(|n| !n.is_atom())
         .map(|n| n.id)
@@ -132,7 +132,7 @@ fn double_evict_is_idempotent() {
 fn page_in_on_never_evicted_neuron_is_idempotent() {
     let dir = tmpdir("noevict_pagein");
     let mut pool = make_pool_with_cold(&dir);
-    for _ in 0..3 { pool.observe_frame(b"ab", 0); }
+    for _ in 0..3 { pool.observe_frame(b"ab", 0, None); }
     let any_id = pool.iter_neurons().map(|n| n.id).next().expect("at least one");
 
     let r = pool.page_in_neuron(any_id).expect("page_in");
@@ -150,7 +150,7 @@ fn evict_without_cold_tier_errors() {
     let enc: Box<dyn AtomEncoding> =
         Box::new(BytePassthroughEncoding { prefix: "t" });
     let mut pool = Pool::new(pc, enc);
-    for _ in 0..4 { pool.observe_frame(b"ab", 0); }
+    for _ in 0..4 { pool.observe_frame(b"ab", 0, None); }
     let concept_id = pool.iter_neurons()
         .find(|n| !n.is_atom())
         .map(|n| n.id)
@@ -166,7 +166,7 @@ fn evict_without_cold_tier_errors() {
 fn live_count_tracks_evictions() {
     let dir = tmpdir("live_count");
     let mut pool = make_pool_with_cold(&dir);
-    for _ in 0..4 { pool.observe_frame(b"ab", 0); }
+    for _ in 0..4 { pool.observe_frame(b"ab", 0, None); }
     let total_before = pool.neuron_count();
     let live_before  = pool.live_count();
     assert_eq!(live_before, total_before);

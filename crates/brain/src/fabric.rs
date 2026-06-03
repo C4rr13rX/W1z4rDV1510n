@@ -57,6 +57,75 @@ pub struct TickProfileSnapshot {
     pub total_ns:                     u64,
 }
 
+/// Per-phase nanosecond counters for `Pool::observe_frame` + the brain
+/// orchestration around it.  Same Arc<…> + AtomicU64 pattern as
+/// [`TickProfile`] so the HTTP layer reads counters without taking the
+/// brain mutex.  Exposed as `/brain/observe_profile` for the same
+/// "find the dominant cost without a sampling profiler" workflow.
+#[derive(Debug, Default)]
+pub struct ObserveProfile {
+    pub observes:               AtomicU64,
+    /// `encoding.atomize(frame)` — turning bytes into atom labels.
+    pub atomize_ns:             AtomicU64,
+    /// `ensure_atom` + `push_recent` + activation/firing inserts for
+    /// every atom in the frame.
+    pub atom_fire_ns:           AtomicU64,
+    /// `apply_pending_decay` on each fired atom neuron — walks its
+    /// terminals, top suspect for big-brain slowness.
+    pub lazy_decay_ns:          AtomicU64,
+    /// `collapse_tail_to_concept` loop (one pass per atom, may loop
+    /// for multi-level collapses).
+    pub collapse_ns:            AtomicU64,
+    /// `check_concept_emergence` — sequence count bumps + threshold
+    /// detection (or deferred enqueue under W1Z4RD_DEFER_PROMOTION).
+    pub concept_emergence_ns:   AtomicU64,
+    /// k-WTA sparsity, predictive-coding surprise update, EMA refresh
+    /// at end of observe_frame.
+    pub end_of_frame_ns:        AtomicU64,
+    /// QA-capture path: scan `recent_frames` + push to `qa_db`.  Pure
+    /// Brain::observe overhead on top of `fabric.observe`.
+    pub qa_capture_ns:          AtomicU64,
+    /// WAL events appended during this observe (atom births, fires,
+    /// concept promotions).  Includes mmap append cost.
+    pub wal_events:             AtomicU64,
+    pub wal_append_ns:          AtomicU64,
+    pub total_ns:               AtomicU64,
+}
+
+impl ObserveProfile {
+    pub fn snapshot(&self) -> ObserveProfileSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        ObserveProfileSnapshot {
+            observes:             self.observes.load(Relaxed),
+            atomize_ns:           self.atomize_ns.load(Relaxed),
+            atom_fire_ns:         self.atom_fire_ns.load(Relaxed),
+            lazy_decay_ns:        self.lazy_decay_ns.load(Relaxed),
+            collapse_ns:          self.collapse_ns.load(Relaxed),
+            concept_emergence_ns: self.concept_emergence_ns.load(Relaxed),
+            end_of_frame_ns:      self.end_of_frame_ns.load(Relaxed),
+            qa_capture_ns:        self.qa_capture_ns.load(Relaxed),
+            wal_events:           self.wal_events.load(Relaxed),
+            wal_append_ns:        self.wal_append_ns.load(Relaxed),
+            total_ns:             self.total_ns.load(Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ObserveProfileSnapshot {
+    pub observes:             u64,
+    pub atomize_ns:           u64,
+    pub atom_fire_ns:         u64,
+    pub lazy_decay_ns:        u64,
+    pub collapse_ns:          u64,
+    pub concept_emergence_ns: u64,
+    pub end_of_frame_ns:      u64,
+    pub qa_capture_ns:        u64,
+    pub wal_events:           u64,
+    pub wal_append_ns:        u64,
+    pub total_ns:             u64,
+}
+
 /// What fired in every pool at a given tick.  Used by cross-pool wiring:
 /// pairs of neurons firing within the same tick get an axon terminal
 /// grown between them, Hebbian-strengthened on repeat co-firing.
@@ -128,6 +197,10 @@ pub struct Fabric {
     /// Per-phase advance_tick timing.  Atomic so /tick_profile reads
     /// don't need the brain mutex.  Initialised to zero.
     pub profile: Arc<TickProfile>,
+    /// Per-phase observe-path timing.  Sibling to `profile` but covers
+    /// `Pool::observe_frame` + the Brain orchestration around it (QA
+    /// capture, WAL append).  Exposed as `/brain/observe_profile`.
+    pub observe_profile: Arc<ObserveProfile>,
 }
 
 impl Fabric {
@@ -140,6 +213,7 @@ impl Fabric {
             prev_tick_concepts: AHashMap::new(),
             store:              Arc::new(NoopStore),
             profile:            Arc::new(TickProfile::default()),
+            observe_profile:    Arc::new(ObserveProfile::default()),
         }
     }
 
@@ -147,6 +221,12 @@ impl Fabric {
     /// per-tick mean divide by snapshot.ticks.
     pub fn tick_profile(&self) -> TickProfileSnapshot {
         self.profile.snapshot()
+    }
+
+    /// Snapshot of the per-phase observe-path timing.  Cumulative
+    /// counters; for per-observe mean divide by snapshot.observes.
+    pub fn observe_profile(&self) -> ObserveProfileSnapshot {
+        self.observe_profile.snapshot()
     }
 
     /// Attach a persistence backend per [`ARCHITECTURE.md`] §17.9.  Fans
@@ -217,6 +297,7 @@ impl Fabric {
             // Fresh profile on restore — pre-snapshot ticks aren't
             // attributed here, only ticks after this point.
             profile:            Arc::new(TickProfile::default()),
+            observe_profile:    Arc::new(ObserveProfile::default()),
         };
         let mut missing = Vec::new();
         for pid in snap.pool_order {
@@ -683,9 +764,14 @@ impl Fabric {
     /// `advance_tick`, allowing multiple pools to be observed in the same
     /// tick window (which is exactly when cross-pool wiring should happen).
     pub fn observe(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        let total_t0 = std::time::Instant::now();
         let pool = self.pools.get(&pool_id).expect("unknown pool").clone();
-        let fired = pool.write().observe_frame(frame, self.tick);
+        let prof = self.observe_profile.clone();
+        let fired = pool.write().observe_frame(frame, self.tick, Some(&prof));
         self.current.fired.entry(pool_id).or_default().extend(fired.iter().copied());
+        let total_ns = total_t0.elapsed().as_nanos() as u64;
+        prof.observes.fetch_add(1, Ordering::Relaxed);
+        prof.total_ns.fetch_add(total_ns, Ordering::Relaxed);
         fired
     }
 

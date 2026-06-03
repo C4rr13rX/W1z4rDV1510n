@@ -31,7 +31,7 @@ fn make_pool() -> Pool {
 fn evict_routes_through_tiered_store_when_attached() {
     let mut pool = make_pool();
     // Train enough to emerge at least one concept with terminals.
-    for _ in 0..4 { pool.observe_frame(b"ab", 0); }
+    for _ in 0..4 { pool.observe_frame(b"ab", 0, None); }
     let concept_id = pool.iter_neurons()
         .find(|n| !n.is_atom() && !n.terminals.is_empty())
         .map(|n| n.id)
@@ -75,7 +75,7 @@ fn evict_routes_through_tiered_store_when_attached() {
 #[test]
 fn evict_without_any_store_attached_errors() {
     let mut pool = make_pool();
-    for _ in 0..4 { pool.observe_frame(b"xy", 0); }
+    for _ in 0..4 { pool.observe_frame(b"xy", 0, None); }
     let concept_id = pool.iter_neurons()
         .find(|n| !n.is_atom())
         .map(|n| n.id)
@@ -97,7 +97,7 @@ fn tiered_store_takes_precedence_over_cold_tier() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mut pool = make_pool();
-    for _ in 0..4 { pool.observe_frame(b"cd", 0); }
+    for _ in 0..4 { pool.observe_frame(b"cd", 0, None); }
     let concept_id = pool.iter_neurons()
         .find(|n| !n.is_atom() && !n.terminals.is_empty())
         .map(|n| n.id)

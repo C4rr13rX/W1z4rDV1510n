@@ -832,6 +832,7 @@ impl Brain {
     /// is the normal mode — call `advance_tick` only when ready to
     /// close the moment.
     pub fn observe(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        let qa_t0 = std::time::Instant::now();
         let now = self.fabric.current_tick();
         // QA capture: if some OTHER pool received a frame within the
         // last 2 ticks, this frame is its response.  Snapshot a
@@ -853,6 +854,9 @@ impl Brain {
             }
         }
         self.recent_frames.insert(pool_id, (frame.to_vec(), now));
+        let qa_capture_ns = qa_t0.elapsed().as_nanos() as u64;
+        self.fabric.observe_profile.qa_capture_ns
+            .fetch_add(qa_capture_ns, std::sync::atomic::Ordering::Relaxed);
         self.fabric.observe(pool_id, frame)
     }
 

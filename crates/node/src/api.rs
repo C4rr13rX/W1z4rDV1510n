@@ -849,8 +849,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let brain_arc: Arc<tokio::sync::Mutex<w1z4rd_brain::Brain>> =
         Arc::new(tokio::sync::Mutex::new(embedded_brain));
     let brain_api_state = crate::brain_api::BrainApiState {
-        brain:    brain_arc.clone(),
-        thinking: Arc::new(crate::brain_api::ThinkingState::default()),
+        brain:        brain_arc.clone(),
+        thinking:     Arc::new(crate::brain_api::ThinkingState::default()),
+        http_profile: Arc::new(crate::brain_api::HttpProfile::default()),
     };
     let brain_router = crate::brain_api::brain_routes(brain_api_state.clone());
     let brain_state_for_loop = brain_api_state.clone();
