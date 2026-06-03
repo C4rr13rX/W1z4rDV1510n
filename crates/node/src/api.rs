@@ -1276,8 +1276,9 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
             let brain = brain_arc_for_loop.clone();
             let eem = eem_arc_for_loop.clone();
             let persist = hq_persist_path.clone();
+            let http_profile = brain_api_state.http_profile.clone();
             tokio::spawn(async move {
-                hypothesis_research_loop(hq, neuro, brain, eem, persist).await;
+                hypothesis_research_loop(hq, neuro, brain, eem, persist, http_profile).await;
             });
         }
         // ── Background peer-list refresh ──────────────────────────────────────
@@ -7959,13 +7960,40 @@ async fn hypothesis_research_loop(
     brain: Arc<tokio::sync::Mutex<w1z4rd_brain::Brain>>,
     eem: Arc<EquationMatrixRuntime>,
     persist_path: PathBuf,
+    http_profile: Arc<crate::brain_api::HttpProfile>,
 ) {
     use w1z4rd_brain::neuron::PoolId;
     const POOL_TEXT_ID:   PoolId = 1;
     const POOL_ACTION_ID: PoolId = 4;
 
+    // Foreground-load backoff state.  When /brain/observe is active
+    // (i.e. drive_corpora_brain is training), Strategy 1 holds the
+    // brain mutex through `observe + integrate_autonomous_tuned` —
+    // depth-6 chain-explore over the grounded-fact graph routinely
+    // costs seconds on a fat brain, blocking every foreground
+    // observe.  We skip Strategy 1 whenever the foreground pushed
+    // observes in the last cycle; Strategies 2 (EEM) and 3 (legacy
+    // neuro) don't touch the brain lock and still run.
+    let mut last_observe_count: u64 = http_profile.observe_calls
+        .load(std::sync::atomic::Ordering::Relaxed);
+    // Per-attempt bounds.  Reduced from 6/64 — same coverage spread
+    // across more attempts, but each lock-hold drops from seconds to
+    // tens of ms on a fat brain.
+    let chain_depth = std::env::var("W1Z4RD_HQ_CHAIN_DEPTH")
+        .ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(3);
+    let chain_visit = std::env::var("W1Z4RD_HQ_CHAIN_VISIT")
+        .ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(16);
+
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
+
+        // Foreground-busy check: if /brain/observe was called since
+        // last cycle, skip Strategy 1 (the only path that holds the
+        // brain mutex for non-trivial time).
+        let now_observe_count = http_profile.observe_calls
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let foreground_busy = now_observe_count > last_observe_count;
+        last_observe_count = now_observe_count;
 
         // Grab the oldest unresolved question (hold the lock only briefly)
         let (question, query_pool) = {
@@ -7979,22 +8007,22 @@ async fn hypothesis_research_loop(
 
         // ── Strategy 1: brain integrate_autonomous_tuned ─────────────
         // Walks the EEM grounded-fact graph (ivy chain), ranks with
-        // the annealer, assembles multi-fact answers.  This is the
-        // "unbounded thought experiment via the math of the substrate"
-        // pass the user's original vision called for.  Bounded to
-        // depth 6 / 64 visits per attempt; subsequent attempts can
-        // widen the search.
-        let brain_attempt: Option<(String, Vec<String>, f32)> = {
+        // the annealer, assembles multi-fact answers.  Skipped when
+        // the foreground is actively training to keep /brain/observe
+        // latency bounded; Strategies 2 + 3 still run below.
+        let brain_attempt: Option<(String, Vec<String>, f32)> = if foreground_busy {
+            None
+        } else {
             // Observe the question into the query pool so the
             // currently_firing set seeds the autonomous integrator.
             let mut b = brain.lock().await;
             b.fabric_mut().observe(query_pool, question.as_bytes());
             let res = b.integrate_autonomous_tuned(
                 query_pool, POOL_ACTION_ID,
-                0.10,    // fabric_confidence_threshold — anything > random
-                6,       // chain_max_depth
-                64,      // chain_max_visit
-                0.70,    // binding_match_threshold (OOV gate)
+                0.10,        // fabric_confidence_threshold — anything > random
+                chain_depth, // chain_max_depth (env: W1Z4RD_HQ_CHAIN_DEPTH, default 3)
+                chain_visit, // chain_max_visit (env: W1Z4RD_HQ_CHAIN_VISIT, default 16)
+                0.70,        // binding_match_threshold (OOV gate)
             );
             let answer = res.answer.as_ref().and_then(|b|
                 String::from_utf8(b.clone()).ok()
