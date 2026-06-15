@@ -158,7 +158,7 @@ fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
 /// responsibility.
 pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let checkpoint = data_dir.join("brain.bin");
-    if checkpoint.exists() {
+    let mut brain = if checkpoint.exists() {
         let mut prefixes = HashMap::new();
         prefixes.insert(POOL_BINDING, "bind".to_string());
         prefixes.insert(POOL_TEXT,    "t".to_string());
@@ -170,14 +170,25 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
             .map(|(pid, p)| (*pid, leaked_encoding(p)))
             .collect();
         match Brain::restore(&checkpoint, encs) {
-            Ok((brain, _missing)) => return Ok(brain),
+            Ok((brain, _missing)) => brain,
             Err(e) => {
                 tracing::warn!("brain restore failed at {}: {} — starting fresh",
                     checkpoint.display(), e);
+                build_default_brain()?
             }
         }
-    }
-    build_default_brain()
+    } else {
+        build_default_brain()?
+    };
+    // Attach cold-tier files to every pool so the continuous tier
+    // orchestrator can actually evict — without this, the orchestrator
+    // sees `has_storage_tier()==false` and skips every pass, which
+    // means RAM grows unbounded as neurons accumulate (the brain blew
+    // up to 19 GB on the last run because of this).
+    let n_attached = brain.attach_cold_tiers(data_dir);
+    tracing::info!("attached cold tiers to {} pools at {}",
+        n_attached, data_dir.display());
+    Ok(brain)
 }
 
 /// Create the shared state used by the brain router.  Caller wraps
