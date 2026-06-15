@@ -290,6 +290,14 @@ impl Fabric {
                 let p = pool_arc.read();
                 let n_total = p.neurons_len();
                 if n_total == 0 { continue; }
+                // No-cold-tier short-circuit: if the pool has neither
+                // a cold-tier file nor a distributed tiered store
+                // attached, eviction would always fail with
+                // ErrorKind::Unsupported and the orchestrator would
+                // spam evict_errors at thousands per second.  Just
+                // skip the scan entirely.  When the brain attaches
+                // cold tiers later, the next pass picks it up.
+                if !p.has_storage_tier() { continue; }
                 let pressure = TierOrchestrator::pressure_factor(
                     p.total_terminals, params.target_terminals_per_pool);
                 last_pressure_x1k = (pressure * 1000.0) as u64;

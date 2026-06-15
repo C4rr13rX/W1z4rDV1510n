@@ -483,6 +483,15 @@ impl Pool {
         self.evicted.contains(&id)
     }
 
+    /// True when this pool has either a cold-tier file or a
+    /// distributed tiered store attached — i.e., when eviction is
+    /// actually possible.  The tier orchestrator checks this before
+    /// scanning so it doesn't spam evict_errors when the brain spun
+    /// up without storage configured.
+    pub fn has_storage_tier(&self) -> bool {
+        self.cold_tier.is_some() || self.tiered_store.is_some()
+    }
+
     /// Stage 17.4 — number of currently-evicted neurons.  Diagnostic +
     /// `StorageControlState::working_set_pressure` signal source.
     pub fn evicted_count(&self) -> usize { self.evicted.len() }
