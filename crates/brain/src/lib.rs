@@ -40,6 +40,7 @@ pub mod persistence;
 pub mod identity;
 pub mod network;
 pub mod store;
+pub mod tier_orchestrator;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig};

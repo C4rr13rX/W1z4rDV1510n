@@ -672,6 +672,24 @@ async fn h_observe_profile(State(s): State<BrainApiState>) -> Json<serde_json::V
     }))
 }
 
+async fn h_tier_orchestrator(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
+    let brain = s.brain.lock().await;
+    let snap = brain.fabric().tier_orchestrator_stats();
+    let mean_per_pass_ns = if snap.passes == 0 { 0 } else { snap.total_ns / snap.passes };
+    Json(json!({
+        "passes":             snap.passes,
+        "neurons_scanned":    snap.neurons_scanned,
+        "neurons_evicted":    snap.neurons_evicted,
+        "neurons_paged_in":   snap.neurons_paged_in,
+        "evict_errors":       snap.evict_errors,
+        "page_in_errors":     snap.page_in_errors,
+        "last_pressure":      snap.last_pressure,
+        "total_us":           snap.total_ns / 1_000,
+        "total_ms":           snap.total_ns / 1_000_000,
+        "mean_per_pass_us":   mean_per_pass_ns / 1_000,
+    }))
+}
+
 async fn h_tick_profile(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let snap = brain.fabric().profile.snapshot();
@@ -853,6 +871,7 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
         .route("/tick_profile",           get(h_tick_profile))
         .route("/observe_profile",        get(h_observe_profile))
         .route("/http_profile",           get(h_http_profile))
+        .route("/tier_orchestrator",      get(h_tier_orchestrator))
         .route("/sleep",                  post(h_sleep))
         .route("/checkpoint",             post(h_checkpoint))
         .route("/thinking/start",         post(h_thinking_start))

@@ -887,6 +887,15 @@ impl Pool {
     pub fn concept_count(&self) -> usize {
         self.neurons.iter().filter(|n| !n.is_atom()).count()
     }
+    /// Number of neuron slots (including evicted ones whose terminals
+    /// have been shed).  Tier orchestrator uses this for round-robin
+    /// scan bounds.
+    pub fn neurons_len(&self) -> usize { self.neurons.len() }
+    /// Indexed read of a neuron slot — `None` past the end.  Used by
+    /// the tier orchestrator's bounded scan loop.
+    pub fn neuron_at(&self, idx: usize) -> Option<&Neuron> {
+        self.neurons.get(idx)
+    }
 
     /// Snapshot the pool's observable signals for ControlMode evaluation.
     /// Normalised so signals are roughly in [0, 1] and ControlModes can

@@ -201,6 +201,15 @@ pub struct Fabric {
     /// `Pool::observe_frame` + the Brain orchestration around it (QA
     /// capture, WAL append).  Exposed as `/brain/observe_profile`.
     pub observe_profile: Arc<ObserveProfile>,
+    /// Continuous cost-aware tier orchestrator state.  Runs in
+    /// `advance_tick` on a configurable cadence.  Default params come
+    /// from env (`W1Z4RD_TIER_*`) so production can iterate without
+    /// recompiling.  See [`crate::tier_orchestrator`].
+    pub(crate) orchestrator:       parking_lot::Mutex<crate::tier_orchestrator::TierOrchestrator>,
+    pub(crate) orchestrator_params: parking_lot::Mutex<crate::tier_orchestrator::OrchestratorParams>,
+    /// Cumulative orchestrator counters.  Atomic so `/tier_orchestrator_stats`
+    /// reads them without taking the brain mutex.
+    pub orchestrator_stats: Arc<crate::tier_orchestrator::OrchestratorStats>,
 }
 
 impl Fabric {
@@ -214,6 +223,9 @@ impl Fabric {
             store:              Arc::new(NoopStore),
             profile:            Arc::new(TickProfile::default()),
             observe_profile:    Arc::new(ObserveProfile::default()),
+            orchestrator:       parking_lot::Mutex::new(crate::tier_orchestrator::TierOrchestrator::new()),
+            orchestrator_params: parking_lot::Mutex::new(crate::tier_orchestrator::OrchestratorParams::from_env_or_disabled()),
+            orchestrator_stats: Arc::new(crate::tier_orchestrator::OrchestratorStats::default()),
         }
     }
 
@@ -227,6 +239,115 @@ impl Fabric {
     /// counters; for per-observe mean divide by snapshot.observes.
     pub fn observe_profile(&self) -> ObserveProfileSnapshot {
         self.observe_profile.snapshot()
+    }
+
+    /// Cumulative tier-orchestrator counters.  Exposed as
+    /// `/brain/tier_orchestrator_stats`.
+    pub fn tier_orchestrator_stats(&self) -> crate::tier_orchestrator::OrchestratorStatsSnapshot {
+        self.orchestrator_stats.snapshot()
+    }
+
+    /// Replace the active orchestrator params (used by tests + the
+    /// /brain/tier_orchestrator/params endpoint).
+    pub fn set_tier_orchestrator_params(&self, params: crate::tier_orchestrator::OrchestratorParams) {
+        *self.orchestrator_params.lock() = params;
+    }
+
+    /// One pass of the cost-aware tier orchestrator.  Invoked from
+    /// [`Fabric::advance_tick`] at the configured cadence; can also
+    /// be called manually (e.g. from a maintenance loop) for batch
+    /// drains.
+    ///
+    /// Returns the number of neurons evicted this pass (`0` when the
+    /// cadence gate skips the pass).
+    pub fn run_tier_orchestrator_pass(&mut self) -> usize {
+        use crate::tier_orchestrator::TierOrchestrator;
+        let t0 = std::time::Instant::now();
+        let params = *self.orchestrator_params.lock();
+        // Cadence gate.
+        if params.run_every_n_ticks == 0 || params.run_every_n_ticks == u64::MAX {
+            return 0;
+        }
+        if self.tick % params.run_every_n_ticks != 0 {
+            return 0;
+        }
+        let stats = &self.orchestrator_stats;
+        stats.passes.fetch_add(1, Ordering::Relaxed);
+        let current_tick = self.tick;
+        let pool_ids: Vec<PoolId> = self.pools.keys().copied().collect();
+        let mut total_evicted: usize = 0;
+        let mut last_pressure_x1k: u64 = 1000;
+        for pid in pool_ids {
+            let Some(pool_arc) = self.pools.get(&pid) else { continue };
+            // Phase A: read pool — gather candidates within budget,
+            // measure pressure, score, pick evict set.
+            let candidates: Vec<(NeuronId, f32)> = {
+                let p = pool_arc.read();
+                let n_total = p.neurons_len();
+                if n_total == 0 { continue; }
+                let pressure = TierOrchestrator::pressure_factor(
+                    p.total_terminals, params.target_terminals_per_pool);
+                last_pressure_x1k = (pressure * 1000.0) as u64;
+                let start = self.orchestrator.lock().advance_cursor(
+                    pid, params.scan_budget.min(n_total), n_total);
+                let mut chosen: Vec<(NeuronId, f32)> = Vec::new();
+                let budget = params.scan_budget.min(n_total);
+                let mut scanned: u64 = 0;
+                for k in 0..budget {
+                    let idx = (start + k) % n_total;
+                    let Some(n) = p.neuron_at(idx) else { continue };
+                    scanned += 1;
+                    // Filters (mirror Brain::run_eviction_pass policy):
+                    if n.is_atom() { continue; }
+                    if p.is_evicted(n.id) { continue; }
+                    // Newborn protection — give freshly created concepts
+                    // at least `min_age_ticks` to demonstrate their
+                    // salience.  Without this the orchestrator can throw
+                    // a concept away on the same tick it was born.
+                    if current_tick.saturating_sub(n.born_tick) < params.min_age_ticks {
+                        continue;
+                    }
+                    // Pin candidate: members.is_empty() && !is_atom() means
+                    // a concept that has decoded children referenced from
+                    // other pools — we conservatively don't pin here, but
+                    // the score function takes a `pinned` flag callers can
+                    // wire in later.
+                    let s = TierOrchestrator::score(
+                        &params,
+                        n.terminals.len(),
+                        n.last_fired_tick,
+                        current_tick,
+                        n.salience_ema,
+                        false,
+                    );
+                    if TierOrchestrator::should_evict(&params, s, pressure) {
+                        chosen.push((n.id, s));
+                        if chosen.len() >= params.max_evict_per_pass { break; }
+                    }
+                }
+                stats.neurons_scanned.fetch_add(scanned, Ordering::Relaxed);
+                chosen
+            };
+            // Phase B: write pool — actually evict.  Brief write lock.
+            if !candidates.is_empty() {
+                let mut p = pool_arc.write();
+                for (nid, _score) in candidates {
+                    match p.evict_neuron(nid) {
+                        Ok(true) => {
+                            stats.neurons_evicted.fetch_add(1, Ordering::Relaxed);
+                            total_evicted += 1;
+                        }
+                        Ok(false) => {} // skipped (atom / already evicted)
+                        Err(_) => {
+                            stats.evict_errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+        stats.last_pressure_x1k.store(last_pressure_x1k, Ordering::Relaxed);
+        stats.total_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        total_evicted
     }
 
     /// Attach a persistence backend per [`ARCHITECTURE.md`] §17.9.  Fans
@@ -298,6 +419,9 @@ impl Fabric {
             // attributed here, only ticks after this point.
             profile:            Arc::new(TickProfile::default()),
             observe_profile:    Arc::new(ObserveProfile::default()),
+            orchestrator:       parking_lot::Mutex::new(crate::tier_orchestrator::TierOrchestrator::new()),
+            orchestrator_params: parking_lot::Mutex::new(crate::tier_orchestrator::OrchestratorParams::from_env_or_disabled()),
+            orchestrator_stats: Arc::new(crate::tier_orchestrator::OrchestratorStats::default()),
         };
         let mut missing = Vec::new();
         for pid in snap.pool_order {
@@ -719,6 +843,11 @@ impl Fabric {
         let dt = phase_t0.elapsed().as_nanos() as u64;
         per_tick[3] = dt;
         self.profile.housekeeping_ns.fetch_add(dt, Ordering::Relaxed);
+
+        // Phase 5: continuous cost-aware tier orchestration.  Runs at
+        // the configured cadence (default every tick).  No-op when the
+        // pool has no cold tier attached.  See tier_orchestrator module.
+        let _ = self.run_tier_orchestrator_pass();
 
         let tick_total = tick_t0.elapsed().as_nanos() as u64;
         self.profile.ticks.fetch_add(1, Ordering::Relaxed);
