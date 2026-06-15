@@ -293,6 +293,17 @@ impl Fabric {
                 let pressure = TierOrchestrator::pressure_factor(
                     p.total_terminals, params.target_terminals_per_pool);
                 last_pressure_x1k = (pressure * 1000.0) as u64;
+                // Fast path: when pressure_factor is at its clamped
+                // max (way under budget), skip the per-neuron scan
+                // entirely.  Threshold would be evict_threshold * 4 =
+                // ~20 by default; almost no candidate can score that
+                // high, so the scan is pure overhead.  Saves the
+                // ~50µs/tick of round-robin work during normal
+                // training while leaving the orchestrator fully
+                // responsive once RAM actually fills up.
+                if pressure >= 4.0 && params.target_terminals_per_pool > 0 {
+                    continue;
+                }
                 let start = self.orchestrator.lock().advance_cursor(
                     pid, params.scan_budget.min(n_total), n_total);
                 let mut chosen: Vec<(NeuronId, f32)> = Vec::new();
