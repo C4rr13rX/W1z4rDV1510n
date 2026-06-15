@@ -690,6 +690,75 @@ async fn h_tier_orchestrator(State(s): State<BrainApiState>) -> Json<serde_json:
     }))
 }
 
+/// POST /brain/tier_orchestrator/params — adjust the live orchestrator
+/// params without restarting the node binary.  All fields optional;
+/// any omitted field keeps its current value.  Returns the resolved
+/// params after applying.
+///
+/// Example body: `{"target_terminals_per_pool": 5000000, "evict_threshold": 4.5}`
+///
+/// Special action keys:
+///   `"action": "disable"` → orchestrator stops running on next tick.
+///   `"action": "enable"`  → resets to env-driven defaults.
+async fn h_tier_orchestrator_params(
+    State(s): State<BrainApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    use w1z4rd_brain::tier_orchestrator::OrchestratorParams;
+    let brain = s.brain.lock().await;
+    // Quick action shortcut.
+    if let Some(action) = body.get("action").and_then(|v| v.as_str()) {
+        match action {
+            "disable" => {
+                brain.fabric().set_tier_orchestrator_params(OrchestratorParams::disabled());
+                return Json(json!({"status": "disabled"}));
+            }
+            "enable" => {
+                brain.fabric().set_tier_orchestrator_params(OrchestratorParams::from_env_or_disabled());
+                return Json(json!({"status": "enabled", "source": "env_or_default"}));
+            }
+            _ => {}
+        }
+    }
+    // Field-by-field override: start from current params and patch what's in body.
+    let mut p = brain.fabric().orchestrator_params_snapshot();
+    if let Some(v) = body.get("run_every_n_ticks").and_then(|x| x.as_u64()) { p.run_every_n_ticks = v; }
+    if let Some(v) = body.get("scan_budget").and_then(|x| x.as_u64()) { p.scan_budget = v as usize; }
+    if let Some(v) = body.get("max_evict_per_pass").and_then(|x| x.as_u64()) { p.max_evict_per_pass = v as usize; }
+    if let Some(v) = body.get("target_terminals_per_pool").and_then(|x| x.as_u64()) { p.target_terminals_per_pool = v as usize; }
+    if let Some(v) = body.get("evict_threshold").and_then(|x| x.as_f64()) { p.evict_threshold = v as f32; }
+    if let Some(v) = body.get("w_terminals").and_then(|x| x.as_f64()) { p.w_terminals = v as f32; }
+    if let Some(v) = body.get("w_staleness").and_then(|x| x.as_f64()) { p.w_staleness = v as f32; }
+    if let Some(v) = body.get("w_inverse_salience").and_then(|x| x.as_f64()) { p.w_inverse_salience = v as f32; }
+    if let Some(v) = body.get("w_pinned").and_then(|x| x.as_f64()) { p.w_pinned = v as f32; }
+    if let Some(v) = body.get("decay_horizon_ticks").and_then(|x| x.as_u64()) { p.decay_horizon_ticks = v; }
+    if let Some(v) = body.get("salience_eps").and_then(|x| x.as_f64()) { p.salience_eps = v as f32; }
+    if let Some(v) = body.get("page_in_salience_floor").and_then(|x| x.as_f64()) { p.page_in_salience_floor = v as f32; }
+    if let Some(v) = body.get("max_page_in_per_pass").and_then(|x| x.as_u64()) { p.max_page_in_per_pass = v as usize; }
+    if let Some(v) = body.get("min_age_ticks").and_then(|x| x.as_u64()) { p.min_age_ticks = v; }
+    brain.fabric().set_tier_orchestrator_params(p);
+    Json(json!({
+        "status": "params_set",
+        "params": {
+            "run_every_n_ticks":         p.run_every_n_ticks,
+            "scan_budget":               p.scan_budget,
+            "max_evict_per_pass":        p.max_evict_per_pass,
+            "target_terminals_per_pool": p.target_terminals_per_pool,
+            "evict_threshold":           p.evict_threshold,
+            "w_terminals":               p.w_terminals,
+            "w_staleness":               p.w_staleness,
+            "w_inverse_salience":        p.w_inverse_salience,
+            "w_pinned":                  p.w_pinned,
+            "decay_horizon_ticks":       p.decay_horizon_ticks,
+            "salience_eps":              p.salience_eps,
+            "page_in_salience_floor":    p.page_in_salience_floor,
+            "max_page_in_per_pass":      p.max_page_in_per_pass,
+            "min_age_ticks":             p.min_age_ticks,
+        },
+        "enabled": p.run_every_n_ticks != u64::MAX && p.run_every_n_ticks != 0,
+    }))
+}
+
 async fn h_tick_profile(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let snap = brain.fabric().profile.snapshot();
@@ -872,6 +941,7 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
         .route("/observe_profile",        get(h_observe_profile))
         .route("/http_profile",           get(h_http_profile))
         .route("/tier_orchestrator",      get(h_tier_orchestrator))
+        .route("/tier_orchestrator/params", post(h_tier_orchestrator_params))
         .route("/sleep",                  post(h_sleep))
         .route("/checkpoint",             post(h_checkpoint))
         .route("/thinking/start",         post(h_thinking_start))

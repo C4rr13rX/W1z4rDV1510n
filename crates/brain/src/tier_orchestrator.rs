@@ -127,18 +127,30 @@ impl Default for OrchestratorParams {
 }
 
 impl OrchestratorParams {
-    /// Default for `Fabric::new` and snapshot restore: orchestrator
-    /// is disabled unless either env var `W1Z4RD_TIER_ORCHESTRATOR=on`
-    /// flips it on or a caller sets non-disabled params explicitly via
-    /// `Fabric::set_tier_orchestrator_params`.  This keeps the
-    /// orchestrator off by default for tests and for legacy deploys
-    /// that already use the manual `Brain::run_eviction_pass` flow.
+    /// Default for `Fabric::new` and snapshot restore.
+    ///
+    /// The orchestrator runs continuously (the user's "human brain
+    /// always doing online tier management" vision) — so on the node
+    /// binary it should default ON with conservative params.  But the
+    /// manual `Brain::run_eviction_pass` test (and any caller that
+    /// relies on neurons NOT silently evicting during bare ticks)
+    /// needs a clean off-switch.
+    ///
+    /// Resolution:
+    ///   - `W1Z4RD_TIER_ORCHESTRATOR=off` → explicitly disabled.
+    ///   - Any other value, including unset → ENABLED with
+    ///     conservative defaults from [`Self::from_env`].
+    ///
+    /// Tests that need the orchestrator OFF set
+    /// `W1Z4RD_TIER_ORCHESTRATOR=off` in the env or call
+    /// `set_tier_orchestrator_params(OrchestratorParams::disabled())`
+    /// explicitly during setup.
     pub fn from_env_or_disabled() -> Self {
-        let on = std::env::var("W1Z4RD_TIER_ORCHESTRATOR")
+        let off = std::env::var("W1Z4RD_TIER_ORCHESTRATOR")
             .map(|v| matches!(v.to_lowercase().as_str(),
-                              "1" | "on" | "true" | "yes"))
+                              "0" | "off" | "false" | "no" | "disabled"))
             .unwrap_or(false);
-        if on { Self::from_env() } else { Self::disabled() }
+        if off { Self::disabled() } else { Self::from_env() }
     }
 
     /// Build a params bundle from env vars, falling back to defaults.

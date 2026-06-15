@@ -61,6 +61,13 @@ fn eviction_pass_evicts_only_low_salience_stale_concepts() {
     let dir = tmpdir("policy");
     let mut brain = make_brain_with_text_pool();
     brain.attach_cold_tiers(&dir);
+    // This test exercises the MANUAL Brain::run_eviction_pass API.
+    // Disable the continuous tier orchestrator (now on by default in
+    // the node binary) so it doesn't drain candidates before the
+    // manual pass gets to them.
+    brain.fabric_mut().set_tier_orchestrator_params(
+        w1z4rd_brain::tier_orchestrator::OrchestratorParams::disabled(),
+    );
 
     // Train so concepts emerge.  Advance fabric tick far enough that
     // even the most-recently-fired concept is "stale" by our threshold.
@@ -147,6 +154,9 @@ fn eviction_pass_is_idempotent_on_already_evicted() {
     let dir = tmpdir("idempotent");
     let mut brain = make_brain_with_text_pool();
     brain.attach_cold_tiers(&dir);
+    brain.fabric_mut().set_tier_orchestrator_params(
+        w1z4rd_brain::tier_orchestrator::OrchestratorParams::disabled(),
+    );
 
     for _ in 0..6 {
         brain.observe(1, b"ab");

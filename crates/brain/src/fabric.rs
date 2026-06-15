@@ -253,6 +253,11 @@ impl Fabric {
         *self.orchestrator_params.lock() = params;
     }
 
+    /// Snapshot of the current params (so callers can edit-and-set).
+    pub fn orchestrator_params_snapshot(&self) -> crate::tier_orchestrator::OrchestratorParams {
+        *self.orchestrator_params.lock()
+    }
+
     /// One pass of the cost-aware tier orchestrator.  Invoked from
     /// [`Fabric::advance_tick`] at the configured cadence; can also
     /// be called manually (e.g. from a maintenance loop) for batch
