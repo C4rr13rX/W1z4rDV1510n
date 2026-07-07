@@ -10,9 +10,52 @@ Most neural networks are fixed-topology function approximators trained offline. 
 
 ### Architecture in one paragraph
 
-The substrate is a **byte-grained Hebbian fabric** organised into pools (text, image, audio, action, turn, binding). Atoms are raw bytes. Concepts emerge by mini-column collapse on co-firing.  Cross-pool bindings are single neurons whose members span pools in firing order — recall reads the canonical ordered subsequence directly. The substrate auto-captures every prompt→response moment into a Q→A database it uses to grade itself, locks well-trained terminals against background decay, scales cross-domain wiring softly (instead of skipping it) so analogical bridges form continuously, and runs an autonomous thinking loop in the background that any inference or training request can preempt cleanly.
+The substrate is a **byte-grained Hebbian fabric** organised into configurable pools. Atoms are raw bytes. Concepts emerge by mini-column collapse on co-firing, and cross-pool bindings are single neurons whose members span pools in firing order. A `BrainIdentitySpec` defines pool topology; a `BrainDeploymentSpec` isolates instance state, resource budgets, and dynamically driven feedback loops. Prediction is read-only: query activation is transient and cannot create neurons, advance ticks, change terminals, or enter the Hebbian moment buffer. Learning occurs only when an externally observed outcome is submitted for consolidation. Confirmed typed relations can then compose through a transient logical workspace without teaching the brain its own predictions.
 
-### Single canonical surface (as of 2026-05-29)
+### Current architecture update (2026-07-07)
+
+The active brain architecture now has five explicit boundaries:
+
+1. **Brain construction** — identity and deployment files create independent coding, market, or other specialist brains from the same substrate. Shipped small-instance examples live in [`brains/`](brains/).
+2. **Read-only prediction** — `POST /brain/predict` and the canonical `/brain/chat` activate only existing pathways and clear query-local activation after readout. Repeated inference has zero delta in ticks, neurons, concepts, bindings, and terminals.
+3. **Outcome-driven learning** — `POST /brain/consolidate` co-activates an input with the subsequently observed outcome and closes exactly one Hebbian moment. The causal contract is `predict(t) → observe reality(t+h) → consolidate(input, reality)`.
+4. **Transient logical composition** — the EEM persists confirmed typed relations and rules. `POST /brain/logic/compose` performs deterministic typed unification and forward chaining in a disposable workspace. Conclusions inherit weakest-path confidence and complete provenance, but are not persisted unless later confirmed.
+5. **Semantic crystallisation** — `POST /brain/logic/crystallize` learns invariant relation structure and varying typed roles from confirmed frames. `POST /brain/logic/recognize` applies those templates to novel frames without learning. Snapshot format v3 serialises confirmed relations, rules, and templates—not transient conclusions.
+
+Structural genetic experiments evolve pool count, meta-pools, feedback wiring, dynamic control modes, readout routes, settling policy, and inference policy. Objective-specific archives preserve exact recall, paraphrase, composition, OOV honesty, and efficiency specialists instead of collapsing selection to one weighted score. The current clean coding baseline reaches 100% exact recall, 100% paraphrase recall, and 100% OOV honesty with zero prediction-state mutation. Free-text composition is still an active research target: typed structured composition passes the deterministic benchmark, while raw byte overlap is deliberately not treated as semantic typing.
+
+#### Isolated brain instances
+
+The merged node loads a brain identity and deployment independently of the Web3/node configuration:
+
+```powershell
+$env:W1Z4RD_BRAIN_IDENTITY = "brains/coding_small.identity.toml"
+$env:W1Z4RD_BRAIN_DEPLOYMENT = "brains/coding_small.deployment.toml"
+$env:W1Z4RDV1510N_DATA_DIR = "runtime/coding-node"
+target/debug/w1z4rdv1510n-node.exe --config node_config.json api --addr 127.0.0.1:8090
+```
+
+Each deployment has its own data directory, snapshot, WAL, and cold-store paths. The brain owns reconstruction of pool encoders during deserialisation and reapplies deployment feedback configuration after restore. This prevents coding, market, and experimental brains from sharing learned state accidentally.
+
+#### Prediction and consolidation API
+
+Frames use unpadded base64url, matching the low-level sensor interface:
+
+```bash
+# Read-only prediction: never enters the learning moment.
+curl -X POST http://127.0.0.1:8090/brain/predict \
+  -H "Content-Type: application/json" \
+  -d '{"query_pool":1,"target_pool":3,"frame":"cXVlcnk"}'
+
+# Learn only after the real outcome is available.
+curl -X POST http://127.0.0.1:8090/brain/consolidate \
+  -H "Content-Type: application/json" \
+  -d '{"input_pool":1,"input_frame":"cXVlcnk","outcome_pool":3,"outcome_frame":"cmVhbGl0eQ"}'
+```
+
+The deterministic composition study, falsification cases, and architectural mapping are documented in [`docs/TRANSIENT_COMPOSITION_EXPERIMENT.md`](docs/TRANSIENT_COMPOSITION_EXPERIMENT.md). Reproducible small-brain and structural-GA harnesses live under [`scripts/experiments/`](scripts/experiments/) and [`scripts/run_architecture_ga.py`](scripts/run_architecture_ga.py).
+
+### Single canonical surface (updated 2026-07-07)
 
 The repository ships **one merged binary**, `w1z4rdv1510n-node`, that owns both the legacy Web3 / cluster / sensor stack AND the active brain substrate.  Everything important architecturally is mounted under `/brain/*` on the main node API:
 
@@ -20,7 +63,7 @@ The repository ships **one merged binary**, `w1z4rdv1510n-node`, that owns both 
 |---|---|---|
 | Main node API | `:8090` (configurable via `--node-addr`) | Web3 / cluster / wallet / sensor / `/chat` / `/brain/*` (the active substrate) |
 | Neuro service API | `:8080` (configurable via `--api-addr`) | Legacy `NeuroRuntime` service interface — kept for backward compatibility with existing tooling, scheduled for removal once the migration completes |
-| Standalone brain server | `:8095` (configurable via `W1Z4RD_BRAIN_PORT`) | Identical handlers as `/brain/*`, useful for isolated experiments — the next session will collapse this into `/brain/*` |
+| Standalone brain server | `:8095` (configurable via `W1Z4RD_BRAIN_PORT`) | Legacy experimental binary; isolated experiments should prefer the merged node with a separate port and data directory |
 | P2P / gossip | `:8088` | libp2p; cluster ring + OTP join + heartbeat |
 
 **For a senior software engineer:** start with [`crates/node/src/brain_api.rs`](crates/node/src/brain_api.rs) and [`crates/brain/src/brain.rs`](crates/brain/src/brain.rs).  brain_api.rs is the HTTP surface; brain.rs is the substrate.  Phase A–E commits (1c7a4ec → eb2c079) are the architectural turning points.
@@ -39,14 +82,15 @@ The active research frontier is the brain crate (`crates/brain`, mounted under `
 
 | Concern | Canonical (use these) | Legacy (still works but being phased out) | Status |
 |---|---|---|---|
-| Training (cross-pool pair) | `POST /brain/observe` (text+action+tick) | `POST /multi_pool/train_pair`, `POST /two_pool/train_pair`, `POST /neuro/train` | Legacy stays for existing tooling; the brain replaces the substrate cleanly |
-| Inference / retrieval | `POST /brain/integrate`, `POST /brain/integrate_chain` | `POST /multi_pool/ask`, `POST /two_pool/ask`, `POST /neuro/ask`, `POST /chat` (still works) | `/chat` will be repointed to the brain in the next iteration; legacy `/neuro/ask` retained for legacy clients only |
+| Supervised learning | `POST /brain/consolidate` after an external outcome | `POST /brain/observe` + `/tick`, `/multi_pool/train_pair`, `/two_pool/train_pair`, `/neuro/train` | Direct observe/tick remains a low-level interface; application training should use outcome consolidation |
+| Inference / retrieval | `POST /brain/predict`, `POST /brain/chat`, `/brain/integrate_chain` | `POST /multi_pool/ask`, `POST /two_pool/ask`, `POST /neuro/ask` | Canonical prediction is non-learning; `/brain/integrate` is a lower-level readout primitive |
 | Sensor observe | `POST /brain/observe` | `POST /sensor/observe`, `POST /sensor/observe_triple` (still on `:8095`) | Sensor routes will be migrated to `/brain/sensor/*` |
 | Self-test feedback | `POST /brain/self_test` + `GET /brain/qa_db_stats` + `GET /brain/consolidation_stats` | (nothing equivalent in legacy — this is new) | — |
 | Self-tuning | `POST /brain/retune` + `GET /brain/tuning_state` | (nothing equivalent in legacy) | — |
 | Continuous thought | `/brain/thinking/start`, `/stop`, `/status` | (nothing equivalent in legacy) | — |
-| Cross-domain composition | `POST /brain/integrate_chain` | `/query/integrated` (precision-weighted multi-component cascade in the legacy node — different mechanism) | Both work; `/integrate_chain` is the substrate-level primitive, `/query/integrated` is a higher-level orchestrator |
-| Snapshot | brain.bin via `POST /checkpoint` on `:8095` (will move to `/brain/checkpoint` on main node) | neuro pool JSON at `<data_dir>/neuro_pool.json` (auto) | Both used; brain.bin is the substrate snapshot |
+| Cross-domain composition | `/brain/logic/compose`, `/brain/logic/recognize`, `/brain/integrate_chain` | `/query/integrated` | Typed workspace composition is deterministic and read-only; chain integration remains the neural-path primitive |
+| Semantic pathway learning | `/brain/logic/consolidate`, `/brain/logic/crystallize` with `outcome_confirmed=true` | (none) | Predictions cannot admit semantic relations or templates |
+| Snapshot | `POST /brain/checkpoint`; snapshot format v3 | neuro pool JSON at `<data_dir>/neuro_pool.json` | v3 includes EEM relations, rules, and crystallised role templates |
 | Wallet / Web3 | `crates/node/src/wallet.rs`, `/bridge/*`, `/cluster/*` | (canonical — kept) | — |
 | P2P / cluster | libp2p on `:8088`, `/cluster/init`, `/cluster/join`, `/cluster/otp` | (canonical — kept) | — |
 | Knowledge ingest | `/knowledge/ingest` and friends | (kept for now) | Will likely move to brain in a future iteration |
