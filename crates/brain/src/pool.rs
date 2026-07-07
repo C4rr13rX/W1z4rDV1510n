@@ -108,7 +108,7 @@ pub enum ControlSignal {
 /// How a knob's effective value is computed each tick.  Genome
 /// encodes one ControlMode per knob; the GA explores wirings
 /// (which signal × scale × offset).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum ControlMode {
     /// Static value — backward-compatible default.
     Constant(f32),
@@ -949,6 +949,29 @@ impl Pool {
     }
     pub fn currently_firing(&self) -> impl Iterator<Item = NeuronId> + '_ {
         self.currently_firing.iter().copied()
+    }
+    /// Activate only atoms that already exist, without neurogenesis,
+    /// recurrence accounting, decay, WAL writes, or Hebbian updates.
+    /// The caller must invoke `clear_prediction_activation` after readout.
+    pub fn activate_known_frame_for_prediction(&mut self, frame: &[u8]) -> Vec<NeuronId> {
+        self.clear_prediction_activation();
+        let fired: Vec<NeuronId> = self.encoding.atomize(frame).into_iter()
+            .filter_map(|label| self.label_to_id.get(&label).copied())
+            .collect();
+        for &id in &fired {
+            self.activation.insert(id, 1.0);
+            self.currently_firing.insert(id);
+        }
+        self.last_observed_sequence = fired.clone();
+        fired
+    }
+
+    /// Remove query-local activation while preserving all learned neurons,
+    /// terminals, weights, counters, and consolidation state.
+    pub fn clear_prediction_activation(&mut self) {
+        self.activation.clear();
+        self.currently_firing.clear();
+        self.last_observed_sequence.clear();
     }
     /// Atom sequence from the most recent observe_frame call.
     /// Used by the decoder for anagram disambiguation.

@@ -928,6 +928,19 @@ impl Fabric {
         fired
     }
 
+    /// Query-time activation that is deliberately excluded from the current
+    /// learning moment. Unknown atoms are ignored rather than created.
+    pub fn activate_for_prediction(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        self.pools.get(&pool_id).expect("unknown pool").write()
+            .activate_known_frame_for_prediction(frame)
+    }
+
+    pub fn clear_prediction_activation(&mut self) {
+        for pool in self.pools.values() {
+            pool.write().clear_prediction_activation();
+        }
+    }
+
     /// Register a neuron as having fired this tick without going through
     /// `observe_frame`.  Used by injected activations (e.g.
     /// [`crate::Brain::fire_action`] during supervised training) so the

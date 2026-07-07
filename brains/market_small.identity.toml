@@ -1,0 +1,28 @@
+name = "market_small"
+version = "0.1.0"
+binding_emergence_threshold = 3
+moment_history_window = 128
+
+[[pools]]
+name = "ohlcv"
+id = 1
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market"
+kind = "SensoryInput"
+frame_rate = 1
+
+[[pools]]
+name = "news"
+id = 2
+prototype = "byte-passthrough"
+atom_encoding_prefix = "news"
+kind = "SensoryInput"
+frame_rate = 1
+
+[[pools]]
+name = "outcome"
+id = 3
+prototype = "byte-passthrough"
+atom_encoding_prefix = "future"
+kind = "Action"
+frame_rate = 1

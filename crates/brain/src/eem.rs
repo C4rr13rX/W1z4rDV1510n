@@ -40,6 +40,8 @@ use evalexpr::{ContextWithMutableVariables, HashMapContext, Value, eval_with_con
 use serde::{Deserialize, Serialize};
 
 use crate::neuron::{NeuronId, PoolId};
+use crate::workspace::{CompositionRule, GroundedRelation, TransientWorkspace};
+use crate::crystallizer::{SemanticCrystallizer, SemanticFrame};
 
 pub type EquationId = u32;
 pub type VariableId = u32;
@@ -195,6 +197,11 @@ pub struct Eem {
     /// binding doesn't create duplicate facts; instead bumps
     /// observation_count).
     fact_by_source: AHashMap<NeuronId, FactId>,
+    /// Outcome-confirmed semantic pathways. The inference workspace clones
+    /// these, derives transient joins, and never writes results back here.
+    semantic_relations: Vec<GroundedRelation>,
+    composition_rules: Vec<CompositionRule>,
+    crystallizer: SemanticCrystallizer,
 }
 
 impl Eem {
@@ -213,6 +220,9 @@ impl Eem {
             motif_links:  AHashMap::new(),
             fact_by_member: AHashMap::new(),
             fact_by_source: AHashMap::new(),
+            semantic_relations: Vec::new(),
+            composition_rules: Vec::new(),
+            crystallizer: SemanticCrystallizer::default(),
         }
     }
 
@@ -221,11 +231,64 @@ impl Eem {
     pub fn discipline_count(&self) -> usize { self.disciplines.len() }
     pub fn motif_count(&self)      -> usize { self.motifs.len() }
     pub fn fact_count(&self)       -> usize { self.facts.len() }
+    pub fn semantic_relation_count(&self) -> usize { self.semantic_relations.len() }
+    pub fn composition_rule_count(&self) -> usize { self.composition_rules.len() }
+    pub fn semantic_template_count(&self) -> usize { self.crystallizer.template_count() }
     pub fn fact(&self, id: FactId) -> Option<&GroundedFact> {
         self.facts.get(id as usize)
     }
     pub fn iter_facts(&self) -> impl Iterator<Item = &GroundedFact> {
         self.facts.iter()
+    }
+
+    pub fn register_semantic_relation(&mut self, relation: GroundedRelation) {
+        if let Some(existing) = self.semantic_relations.iter_mut().find(|item|
+            item.predicate == relation.predicate && item.arguments == relation.arguments) {
+            existing.confidence = existing.confidence.max(relation.confidence);
+            existing.provenance.extend(relation.provenance);
+        } else {
+            self.semantic_relations.push(relation);
+        }
+    }
+
+    pub fn register_composition_rule(&mut self, rule: CompositionRule) {
+        if let Some(existing) = self.composition_rules.iter_mut().find(|item| item.name == rule.name) {
+            *existing = rule;
+        } else {
+            self.composition_rules.push(rule);
+        }
+    }
+
+    /// Construct and resolve a disposable workspace from consolidated EEM
+    /// pathways. Derived relations are never inserted into the EEM.
+    pub fn compose_transient(&self, max_rounds: usize) -> TransientWorkspace {
+        let mut workspace = TransientWorkspace::new(self.semantic_relations.clone());
+        workspace.resolve(&self.composition_rules, max_rounds);
+        workspace
+    }
+
+    /// Outcome-confirmed structural experience. Newly crystallized relation
+    /// instances become durable EEM pathways; templates learn only here.
+    pub fn consolidate_semantic_frame(&mut self, frame: SemanticFrame) -> Vec<GroundedRelation> {
+        let relations = self.crystallizer.observe(frame);
+        for relation in relations.iter().cloned() {
+            self.register_semantic_relation(relation);
+        }
+        relations
+    }
+
+    /// Query-time role recognition. Neither templates nor EEM relations change.
+    pub fn recognize_semantic_frame(&self, frame: &SemanticFrame) -> Vec<GroundedRelation> {
+        self.crystallizer.recognize(frame)
+    }
+
+    pub fn compose_with_transient(&self, relations: impl IntoIterator<Item = GroundedRelation>,
+                                  max_rounds: usize) -> TransientWorkspace {
+        let mut facts = self.semantic_relations.clone();
+        facts.extend(relations);
+        let mut workspace = TransientWorkspace::new(facts);
+        workspace.resolve(&self.composition_rules, max_rounds);
+        workspace
     }
 
     /// Register (or update) a grounded fact for a binding emergence
@@ -571,6 +634,9 @@ impl Eem {
             motifs:      self.motifs.clone(),
             motif_links,
             facts:       self.facts.clone(),
+            semantic_relations: self.semantic_relations.clone(),
+            composition_rules: self.composition_rules.clone(),
+            crystallizer: self.crystallizer.clone(),
         }
     }
 
@@ -605,6 +671,9 @@ impl Eem {
             disciplines:    snap.disciplines,
             motifs:         snap.motifs,
             facts:          snap.facts,
+            semantic_relations: snap.semantic_relations,
+            composition_rules: snap.composition_rules,
+            crystallizer: snap.crystallizer,
             eq_by_name,
             var_by_name,
             disc_by_name,

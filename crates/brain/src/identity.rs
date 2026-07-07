@@ -31,13 +31,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::annealer::AnnealerConfig;
 use crate::eem::EemConfig;
 use crate::fabric::FabricConfig;
 use crate::neuron::PoolId;
-use crate::pool::{AtomEncoding, BytePassthroughEncoding, PoolConfig};
+use crate::pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, PoolConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PoolKind {
@@ -80,6 +80,13 @@ pub struct PoolSpec {
     pub prune_floor:                 Option<f32>,
     #[serde(default)]
     pub plasticity_baseline:         Option<f32>,
+    /// Dynamical feedback wiring discovered manually or by the GA.
+    #[serde(default)]
+    pub sparsity_mode:               Option<ControlMode>,
+    #[serde(default)]
+    pub heterosynaptic_ltd_mode:     Option<ControlMode>,
+    #[serde(default)]
+    pub predict_gate_mode:           Option<ControlMode>,
 }
 
 impl PoolSpec {
@@ -109,6 +116,9 @@ impl PoolSpec {
             decay_rate:                  None,
             prune_floor:                 None,
             plasticity_baseline:         None,
+            sparsity_mode:               None,
+            heterosynaptic_ltd_mode:     None,
+            predict_gate_mode:           None,
         }
     }
 
@@ -124,6 +134,9 @@ impl PoolSpec {
         if let Some(v) = self.decay_rate                  { c.decay_rate                  = v; }
         if let Some(v) = self.prune_floor                 { c.prune_floor                 = v; }
         if let Some(v) = self.plasticity_baseline         { c.plasticity_baseline         = v; }
+        if let Some(v) = &self.sparsity_mode              { c.sparsity_mode               = v.clone(); }
+        if let Some(v) = &self.heterosynaptic_ltd_mode    { c.heterosynaptic_ltd_mode     = v.clone(); }
+        if let Some(v) = &self.predict_gate_mode          { c.predict_gate_mode           = v.clone(); }
         c
     }
 }
@@ -143,6 +156,95 @@ pub struct BrainIdentitySpec {
     pub eem:      EemConfig,
     #[serde(default)]
     pub annealer: AnnealerConfig,
+}
+
+/// Runtime placement and feedback wiring for one isolated brain instance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrainDeploymentSpec {
+    pub instance_id: String,
+    pub identity_path: PathBuf,
+    pub data_dir: PathBuf,
+    #[serde(default)]
+    pub resource_budget: ResourceBudget,
+    #[serde(default)]
+    pub feedback_loops: Vec<FeedbackLoopSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ResourceBudget {
+    pub max_resident_bytes: u64,
+    pub max_neurons: u64,
+    pub max_propagation_steps: u32,
+    /// Online learning remains active; this only bounds scheduling rate.
+    pub max_learning_steps_per_second: u32,
+}
+
+/// Domain-neutral feedback edge resolved against pool names in the identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackLoopSpec {
+    pub source_pool: String,
+    pub target_pool: String,
+    pub signal: String,
+    #[serde(default = "default_feedback_gain")]
+    pub gain: f32,
+    /// Optional dynamical controller. When present, the runtime evaluates it
+    /// against the source pool's live ControlState instead of using `gain`.
+    #[serde(default)]
+    pub gain_mode: Option<ControlMode>,
+    #[serde(default)]
+    pub delay_ticks: u32,
+}
+
+fn default_feedback_gain() -> f32 { 1.0 }
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum DeploymentValidationError {
+    #[error("instance_id must contain only ASCII letters, digits, '.', '_' or '-'")]
+    InvalidInstanceId,
+    #[error("data_dir must not be empty")]
+    EmptyDataDir,
+    #[error("feedback loop references unknown pool '{0}'")]
+    UnknownFeedbackPool(String),
+    #[error("feedback loop signal must not be empty")]
+    EmptyFeedbackSignal,
+    #[error("feedback loop gain must be finite")]
+    NonFiniteFeedbackGain,
+}
+
+impl BrainDeploymentSpec {
+    pub fn load_toml<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        let raw = std::fs::read_to_string(path)?;
+        toml::from_str(&raw)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    pub fn validate(&self, identity: &BrainIdentitySpec) -> Result<(), DeploymentValidationError> {
+        if self.instance_id.is_empty() || !self.instance_id.bytes().all(|b|
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) {
+            return Err(DeploymentValidationError::InvalidInstanceId);
+        }
+        if self.data_dir.as_os_str().is_empty() {
+            return Err(DeploymentValidationError::EmptyDataDir);
+        }
+        for edge in &self.feedback_loops {
+            for pool in [&edge.source_pool, &edge.target_pool] {
+                if !identity.pools.iter().any(|p| &p.name == pool) {
+                    return Err(DeploymentValidationError::UnknownFeedbackPool(pool.clone()));
+                }
+            }
+            if edge.signal.trim().is_empty() {
+                return Err(DeploymentValidationError::EmptyFeedbackSignal);
+            }
+            if !edge.gain.is_finite() {
+                return Err(DeploymentValidationError::NonFiniteFeedbackGain);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn snapshot_path(&self) -> PathBuf { self.data_dir.join("brain.bin") }
+    pub fn wal_dir(&self) -> PathBuf { self.data_dir.join("wal") }
+    pub fn cold_dir(&self) -> PathBuf { self.data_dir.join("cold") }
 }
 
 fn default_binding_threshold() -> u32  { 3 }

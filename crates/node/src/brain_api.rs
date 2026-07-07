@@ -20,7 +20,7 @@ use anyhow::Result;
 use axum::{Json, Router, extract::State, routing::{get, post}};
 use serde_json::json;
 use tokio::sync::Mutex;
-use w1z4rd_brain::{Brain, BrainConfig, PoolConfig};
+use w1z4rd_brain::{Brain, BrainConfig, BrainDeploymentSpec, BrainIdentitySpec, PoolConfig, PoolPrototypeRegistry};
 use w1z4rd_brain::neuron::PoolId;
 use w1z4rd_brain::pool::{AtomEncoding, BytePassthroughEncoding};
 
@@ -148,6 +148,45 @@ pub fn build_default_brain() -> Result<Brain> {
     Ok(brain)
 }
 
+fn configured_identity() -> Result<Option<BrainIdentitySpec>> {
+    let Some(path) = std::env::var_os("W1Z4RD_BRAIN_IDENTITY") else {
+        return Ok(None);
+    };
+    let path = Path::new(&path);
+    let identity = if path.extension().and_then(|v| v.to_str()) == Some("json") {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("read brain identity {}: {}", path.display(), e))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("parse brain identity {}: {}", path.display(), e))?
+    } else {
+        BrainIdentitySpec::load_toml(path)
+            .map_err(|e| anyhow::anyhow!("load brain identity {}: {}", path.display(), e))?
+    };
+    Ok(Some(identity))
+}
+
+fn configured_deployment() -> Result<Option<BrainDeploymentSpec>> {
+    let Some(path) = std::env::var_os("W1Z4RD_BRAIN_DEPLOYMENT") else {
+        return Ok(None);
+    };
+    let path = Path::new(&path);
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("read brain deployment {}: {}", path.display(), e))?;
+    let spec = if path.extension().and_then(|v| v.to_str()) == Some("json") {
+        serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("parse brain deployment {}: {}", path.display(), e))?
+    } else {
+        BrainDeploymentSpec::load_toml(path)
+            .map_err(|e| anyhow::anyhow!("parse brain deployment {}: {}", path.display(), e))?
+    };
+    Ok(Some(spec))
+}
+
+fn build_from_identity(identity: &BrainIdentitySpec) -> Result<Brain> {
+    Brain::from_identity(identity, &PoolPrototypeRegistry::with_defaults())
+        .map_err(|e| anyhow::anyhow!("build configured brain '{}': {}", identity.name, e))
+}
+
 fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
     let leaked: &'static str = Box::leak(prefix.to_string().into_boxed_str());
     Box::new(BytePassthroughEncoding { prefix: leaked })
@@ -158,14 +197,20 @@ fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
 /// responsibility.
 pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let checkpoint = data_dir.join("brain.bin");
+    let identity = configured_identity()?;
     let mut brain = if checkpoint.exists() {
         let mut prefixes = HashMap::new();
         prefixes.insert(POOL_BINDING, "bind".to_string());
-        prefixes.insert(POOL_TEXT,    "t".to_string());
-        prefixes.insert(POOL_IMAGE,   "i".to_string());
-        prefixes.insert(POOL_AUDIO,   "a".to_string());
-        prefixes.insert(POOL_ACTION,  "act".to_string());
-        prefixes.insert(POOL_TURN,    "turn".to_string());
+        if let Some(spec) = &identity {
+            prefixes.extend(spec.pools.iter()
+                .map(|pool| (pool.id, pool.atom_encoding_prefix.clone())));
+        } else {
+            prefixes.insert(POOL_TEXT,    "t".to_string());
+            prefixes.insert(POOL_IMAGE,   "i".to_string());
+            prefixes.insert(POOL_AUDIO,   "a".to_string());
+            prefixes.insert(POOL_ACTION,  "act".to_string());
+            prefixes.insert(POOL_TURN,    "turn".to_string());
+        }
         let encs: HashMap<PoolId, Box<dyn AtomEncoding>> = prefixes.iter()
             .map(|(pid, p)| (*pid, leaked_encoding(p)))
             .collect();
@@ -174,11 +219,17 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
             Err(e) => {
                 tracing::warn!("brain restore failed at {}: {} — starting fresh",
                     checkpoint.display(), e);
-                build_default_brain()?
+                match &identity {
+                    Some(spec) => build_from_identity(spec)?,
+                    None => build_default_brain()?,
+                }
             }
         }
     } else {
-        build_default_brain()?
+        match &identity {
+            Some(spec) => build_from_identity(spec)?,
+            None => build_default_brain()?,
+        }
     };
     // Attach cold-tier files to every pool so the continuous tier
     // orchestrator can actually evict — without this, the orchestrator
@@ -188,6 +239,11 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let n_attached = brain.attach_cold_tiers(data_dir);
     tracing::info!("attached cold tiers to {} pools at {}",
         n_attached, data_dir.display());
+    if let (Some(identity), Some(deployment)) = (&identity, configured_deployment()?) {
+        brain.configure_feedback_loops(identity, &deployment)
+            .map_err(|e| anyhow::anyhow!("configure feedback loops: {}", e))?;
+        tracing::info!("configured {} online feedback loops", brain.feedback_loop_count());
+    }
     Ok(brain)
 }
 
@@ -383,6 +439,144 @@ async fn h_integrate(
     }))
 }
 
+/// Read-only prediction. Query activation is never admitted to the learning
+/// moment and is cleared before releasing the brain lock.
+async fn h_predict(
+    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
+    let tp = req.get("target_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
+    let frame = match b64_url_decode(req.get("frame").and_then(|v| v.as_str()).unwrap_or("")) {
+        Ok(b) => b,
+        Err(e) => return Json(json!({"error": format!("bad frame base64: {}", e)})),
+    };
+    let mut brain = s.brain.lock().await;
+    let fired = brain.activate_for_prediction(qp, &frame);
+    let legacy = brain.integrate(qp, tp);
+    let authoritative = brain.decode_best_trained_binding(qp, tp);
+    let answer = authoritative.or(legacy.answer).map(|b| b64_url_no_pad(&b));
+    brain.clear_prediction_activation();
+    Json(json!({
+        "answer": answer, "known_atom_count": fired.len(),
+        "integrated_confidence": legacy.grounding.integrated_confidence,
+        "outside_grounding": legacy.grounding.outside_grounding || fired.is_empty(),
+        "speculation_flag": legacy.grounding.speculation_flag,
+        "learning": false,
+    }))
+}
+
+/// The only supervised hot-path operation that closes a Hebbian moment:
+/// an input and its subsequently observed outcome are consolidated together.
+async fn h_consolidate(
+    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let input_pool = req.get("input_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
+    let outcome_pool = req.get("outcome_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
+    let input = match b64_url_decode(req.get("input_frame").and_then(|v| v.as_str()).unwrap_or("")) {
+        Ok(b) => b, Err(e) => return Json(json!({"error": format!("bad input base64: {}", e)})),
+    };
+    let outcome = match b64_url_decode(req.get("outcome_frame").and_then(|v| v.as_str()).unwrap_or("")) {
+        Ok(b) => b, Err(e) => return Json(json!({"error": format!("bad outcome base64: {}", e)})),
+    };
+    let mut brain = s.brain.lock().await;
+    let input_fired = brain.observe(input_pool, &input).len();
+    let outcome_fired = brain.observe(outcome_pool, &outcome).len();
+    brain.advance_tick();
+    Json(json!({"consolidated": true, "input_fired": input_fired,
+                "outcome_fired": outcome_fired, "learning": true}))
+}
+
+/// Admit a semantic pathway only when the caller supplies an externally
+/// confirmed outcome. Predictions cannot call this successfully by default.
+async fn h_logic_consolidate(
+    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if req.get("outcome_confirmed").and_then(|v| v.as_bool()) != Some(true) {
+        return Json(json!({"consolidated": false,
+            "error": "outcome_confirmed=true is required"}));
+    }
+    let mut brain = s.brain.lock().await;
+    if let Some(value) = req.get("relation") {
+        match serde_json::from_value::<w1z4rd_brain::GroundedRelation>(value.clone()) {
+            Ok(relation) => {
+                brain.eem_mut().register_semantic_relation(relation);
+                return Json(json!({"consolidated": true, "kind": "relation"}));
+            }
+            Err(e) => return Json(json!({"consolidated": false, "error": e.to_string()})),
+        }
+    }
+    if let Some(value) = req.get("rule") {
+        match serde_json::from_value::<w1z4rd_brain::CompositionRule>(value.clone()) {
+            Ok(rule) => {
+                brain.eem_mut().register_composition_rule(rule);
+                return Json(json!({"consolidated": true, "kind": "rule"}));
+            }
+            Err(e) => return Json(json!({"consolidated": false, "error": e.to_string()})),
+        }
+    }
+    Json(json!({"consolidated": false, "error": "relation or rule is required"}))
+}
+
+/// Resolve confirmed logical pathways in a disposable, read-only workspace.
+async fn h_logic_compose(
+    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let rounds = req.get("max_rounds").and_then(|v| v.as_u64()).unwrap_or(8).min(64) as usize;
+    let predicate = req.get("predicate").and_then(|v| v.as_str());
+    let brain = s.brain.lock().await;
+    let workspace = brain.eem().compose_transient(rounds);
+    let facts: Vec<_> = workspace.facts().iter()
+        .filter(|fact| predicate.map_or(true, |p| fact.predicate == p))
+        .cloned().collect();
+    Json(json!({"learning": false, "facts": facts,
+                "semantic_relation_count": brain.eem().semantic_relation_count(),
+                "composition_rule_count": brain.eem().composition_rule_count()}))
+}
+
+/// Learn invariant structure and variable roles only from confirmed frames.
+async fn h_logic_crystallize(
+    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if req.get("outcome_confirmed").and_then(|v| v.as_bool()) != Some(true) {
+        return Json(json!({"consolidated": false,
+            "error": "outcome_confirmed=true is required"}));
+    }
+    let frame = match req.get("frame").cloned()
+        .map(serde_json::from_value::<w1z4rd_brain::SemanticFrame>) {
+        Some(Ok(frame)) => frame,
+        Some(Err(e)) => return Json(json!({"consolidated": false, "error": e.to_string()})),
+        None => return Json(json!({"consolidated": false, "error": "frame is required"})),
+    };
+    let mut brain = s.brain.lock().await;
+    let relations = brain.eem_mut().consolidate_semantic_frame(frame);
+    Json(json!({"consolidated": true, "relations": relations,
+                "template_count": brain.eem().semantic_template_count()}))
+}
+
+/// Recognize roles in novel frames and compose them against durable EEM
+/// pathways without changing either the crystallizer or the brain.
+async fn h_logic_recognize(
+    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let frames = match req.get("frames").cloned()
+        .map(serde_json::from_value::<Vec<w1z4rd_brain::SemanticFrame>>) {
+        Some(Ok(frames)) => frames,
+        Some(Err(e)) => return Json(json!({"learning": false, "error": e.to_string()})),
+        None => return Json(json!({"learning": false, "error": "frames are required"})),
+    };
+    let rounds = req.get("max_rounds").and_then(|v| v.as_u64()).unwrap_or(8).min(64) as usize;
+    let predicate = req.get("predicate").and_then(|v| v.as_str());
+    let brain = s.brain.lock().await;
+    let recognized: Vec<_> = frames.iter()
+        .flat_map(|frame| brain.eem().recognize_semantic_frame(frame)).collect();
+    let workspace = brain.eem().compose_with_transient(recognized, rounds);
+    let facts: Vec<_> = workspace.facts().iter()
+        .filter(|fact| predicate.map_or(true, |p| fact.predicate == p))
+        .cloned().collect();
+    Json(json!({"learning": false, "facts": facts,
+                "template_count": brain.eem().semantic_template_count()}))
+}
+
 /// POST /brain/chat — canonical chat endpoint on the merged node.
 /// Mirrors brain_server's /chat behaviour so existing Django /
 /// wizard_session callers can switch from `:8095/chat` to
@@ -408,7 +602,7 @@ async fn h_brain_chat(
     let prompt = unwrap_wizard_prompt(text);
 
     let mut brain = s.brain.lock().await;
-    brain.fabric_mut().observe(POOL_TEXT, prompt.as_bytes());
+    brain.activate_for_prediction(POOL_TEXT, prompt.as_bytes());
 
     // Authoritative trained-binding decode — Phase B v2.
     let trained_decode: Option<String> = brain
@@ -429,10 +623,17 @@ async fn h_brain_chat(
 
     let reply = if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
         td.clone()
+    } else if !xpool.grounding.outside_grounding
+        && !xpool.grounding.speculation_flag
+        && xpool.grounding.integrated_confidence >= 0.30
+        && xpool.grounding.composition_used.len() >= 2
+    {
+        // Novel prompts may compose an answer through multiple independently
+        // learned pathways. This activation is transient; it is not a new
+        // binding until an external outcome later confirms it.
+        xpool_reply.clone().unwrap_or_default()
     } else {
-        // No trained binding above MIN_ATOM_SCORE — be OOV-honest
-        // and return empty rather than fall through to the noisy
-        // xpool path.  Same policy brain_server applies.
+        // A single weak path is not sufficient evidence: remain OOV-honest.
         String::new()
     };
 
@@ -451,6 +652,7 @@ async fn h_brain_chat(
             })
         })
         .collect();
+    brain.clear_prediction_activation();
 
     Json(json!({
         "reply":              reply,
@@ -916,6 +1118,12 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/observe",                post(h_observe))
         .route("/tick",                   post(h_tick))
         .route("/integrate",              post(h_integrate))
+        .route("/predict",                post(h_predict))
+        .route("/consolidate",            post(h_consolidate))
+        .route("/logic/consolidate",      post(h_logic_consolidate))
+        .route("/logic/compose",          post(h_logic_compose))
+        .route("/logic/crystallize",      post(h_logic_crystallize))
+        .route("/logic/recognize",        post(h_logic_recognize))
         .route("/chat",                   post(h_brain_chat))
         .route("/pool/concepts",          post(h_pool_concepts))
         .with_state(state.clone())

@@ -1,0 +1,25 @@
+name = "coding_small"
+version = "0.1.0"
+binding_emergence_threshold = 3
+moment_history_window = 128
+
+[[pools]]
+name = "prompt"
+id = 1
+prototype = "byte-passthrough"
+atom_encoding_prefix = "prompt"
+kind = "SensoryInput"
+
+[[pools]]
+name = "context"
+id = 2
+prototype = "byte-passthrough"
+atom_encoding_prefix = "context"
+kind = "SensoryInput"
+
+[[pools]]
+name = "response"
+id = 3
+prototype = "byte-passthrough"
+atom_encoding_prefix = "response"
+kind = "Action"

@@ -1,0 +1,23 @@
+instance_id = "market-small-a"
+identity_path = "brains/market_small.identity.toml"
+data_dir = "runtime/brains/market-small-a"
+
+[resource_budget]
+max_resident_bytes = 268435456
+max_neurons = 500000
+max_propagation_steps = 64
+max_learning_steps_per_second = 1000
+
+[[feedback_loops]]
+source_pool = "outcome"
+target_pool = "ohlcv"
+signal = "prediction_error"
+gain = 1.0
+delay_ticks = 1
+
+[[feedback_loops]]
+source_pool = "outcome"
+target_pool = "news"
+signal = "prediction_error"
+gain = 0.5
+delay_ticks = 1

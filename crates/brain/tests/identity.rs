@@ -6,9 +6,113 @@
 //! designated, EEM and annealer ready for seeding.
 
 use w1z4rd_brain::{
-    Brain, BrainIdentitySpec, IdentityBuildError, PoolKind, PoolPrototypeRegistry,
-    PoolSpec,
+    Brain, BrainDeploymentSpec, BrainIdentitySpec, DeploymentValidationError,
+    ControlMode, ControlSignal, FeedbackLoopSpec, IdentityBuildError, PoolPrototypeRegistry, PoolSpec,
+    ResourceBudget,
 };
+use std::path::PathBuf;
+
+#[test]
+fn deployment_isolates_state_and_validates_feedback_pools() {
+    let identity = BrainIdentitySpec::default_general_observer();
+    let deployment = BrainDeploymentSpec {
+        instance_id: "coding-small-a".into(),
+        identity_path: "brains/general.toml".into(),
+        data_dir: "runtime/brains/coding-small-a".into(),
+        resource_budget: ResourceBudget {
+            max_resident_bytes: 64 * 1024 * 1024,
+            max_neurons: 100_000,
+            max_propagation_steps: 32,
+            max_learning_steps_per_second: 500,
+        },
+        feedback_loops: vec![FeedbackLoopSpec {
+            source_pool: "action".into(),
+            target_pool: "text".into(),
+            signal: "prediction_error".into(),
+            gain: 0.5,
+            gain_mode: Some(ControlMode::DrivenBy {
+                signal: ControlSignal::Surprise,
+                scale: 0.8,
+                offset: 0.1,
+                min: 0.0,
+                max: 1.0,
+            }),
+            delay_ticks: 1,
+        }],
+    };
+    deployment.validate(&identity).unwrap();
+    assert_eq!(deployment.snapshot_path(), PathBuf::from("runtime/brains/coding-small-a/brain.bin"));
+
+    let mut invalid = deployment.clone();
+    invalid.feedback_loops[0].target_pool = "missing".into();
+    assert_eq!(invalid.validate(&identity),
+        Err(DeploymentValidationError::UnknownFeedbackPool("missing".into())));
+}
+
+#[test]
+fn shipped_small_brain_specs_parse_and_validate() {
+    for (identity_text, deployment_text) in [
+        (include_str!("../../../brains/market_small.identity.toml"),
+         include_str!("../../../brains/market_small.deployment.toml")),
+        (include_str!("../../../brains/coding_small.identity.toml"),
+         include_str!("../../../brains/coding_small.deployment.toml")),
+    ] {
+        let identity: BrainIdentitySpec = toml::from_str(identity_text).unwrap();
+        let deployment: BrainDeploymentSpec = toml::from_str(deployment_text).unwrap();
+        deployment.validate(&identity).unwrap();
+        Brain::from_identity(&identity, &PoolPrototypeRegistry::with_defaults()).unwrap();
+    }
+}
+
+#[test]
+fn identity_carries_ga_discovered_dynamic_pool_wiring() {
+    let mut pool = PoolSpec::sensory_byte_passthrough("market", 7, "m");
+    pool.sparsity_mode = Some(ControlMode::DrivenBy {
+        signal: ControlSignal::InvSurprise,
+        scale: 0.8,
+        offset: 0.1,
+        min: 0.05,
+        max: 1.0,
+    });
+    pool.predict_gate_mode = Some(ControlMode::Constant(0.25));
+    let config = pool.to_pool_config();
+    assert_eq!(config.sparsity_mode, pool.sparsity_mode.unwrap());
+    assert_eq!(config.predict_gate_mode, pool.predict_gate_mode.unwrap());
+}
+
+#[test]
+fn online_feedback_executes_dynamic_gain_and_delay() {
+    let identity = BrainIdentitySpec::default_general_observer();
+    let mut brain = Brain::from_identity(&identity, &PoolPrototypeRegistry::with_defaults()).unwrap();
+    let deployment = BrainDeploymentSpec {
+        instance_id: "feedback-test".into(),
+        identity_path: "unused.toml".into(),
+        data_dir: "runtime/test-feedback".into(),
+        resource_budget: ResourceBudget::default(),
+        feedback_loops: vec![FeedbackLoopSpec {
+            source_pool: "text".into(),
+            target_pool: "action".into(),
+            signal: "activation_trace".into(),
+            gain: 1.0,
+            gain_mode: Some(ControlMode::Constant(0.5)),
+            delay_ticks: 1,
+        }],
+    };
+    brain.configure_feedback_loops(&identity, &deployment).unwrap();
+
+    brain.observe(1, b"alpha");
+    brain.advance_tick();
+    assert_eq!(brain.feedback_events_emitted(), 0, "half gain has not accumulated a spike");
+
+    brain.observe(1, b"alpha");
+    brain.advance_tick();
+    assert_eq!(brain.feedback_events_emitted(), 0, "spike is queued for the delayed tick");
+
+    brain.advance_tick();
+    assert_eq!(brain.feedback_events_emitted(), 1);
+    let action = brain.fabric().pool(2).unwrap();
+    assert!(action.read().iter_neurons().next().is_some(), "feedback trace reached target pool");
+}
 
 #[test]
 fn default_general_observer_builds_a_working_brain() {
@@ -39,6 +143,31 @@ fn default_general_observer_builds_a_working_brain() {
     assert!(final_stats.total_neurons >= 1,
         "observation must create atoms; got total_neurons={}",
         final_stats.total_neurons);
+}
+
+#[test]
+fn prediction_activation_is_transient_and_non_learning() {
+    let spec = BrainIdentitySpec::default_general_observer();
+    let mut brain = Brain::from_identity(&spec, &PoolPrototypeRegistry::with_defaults()).unwrap();
+    for _ in 0..3 {
+        brain.observe(1, b"known");
+        brain.observe(2, b"answer");
+        brain.advance_tick();
+    }
+    let before = brain.stats();
+    assert!(!brain.activate_for_prediction(1, b"known").is_empty());
+    let _ = brain.integrate(1, 2);
+    brain.clear_prediction_activation();
+    let after = brain.stats();
+    assert_eq!(after.tick, before.tick);
+    assert_eq!(after.total_neurons, before.total_neurons);
+    assert_eq!(after.total_terminals, before.total_terminals);
+    assert!(brain.fabric().current_moment().fired.is_empty());
+    assert_eq!(brain.fabric().pool(1).unwrap().read().currently_firing().count(), 0);
+    assert!(brain.activate_for_prediction(1, b"entirely unseen").len() < 15,
+            "unknown atoms must not be born during prediction");
+    brain.clear_prediction_activation();
+    assert_eq!(brain.stats().total_neurons, before.total_neurons);
 }
 
 #[test]

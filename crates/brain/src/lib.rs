@@ -41,6 +41,8 @@ pub mod identity;
 pub mod network;
 pub mod store;
 pub mod tier_orchestrator;
+pub mod workspace;
+pub mod crystallizer;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig};
@@ -64,13 +66,17 @@ pub use persistence::{
     SerializableFingerprint, load_snapshot, save_snapshot,
 };
 pub use identity::{
-    BrainIdentitySpec, EncodingFactory, IdentityBuildError, PoolKind,
-    PoolPrototypeRegistry, PoolSpec,
+    BrainDeploymentSpec, BrainIdentitySpec, DeploymentValidationError, EncodingFactory,
+    FeedbackLoopSpec, IdentityBuildError, PoolKind, PoolPrototypeRegistry, PoolSpec,
+    ResourceBudget,
 };
 pub use network::{
     BrainId, GossipEquation, GossipMotif, NetworkState, PeerAccuracy,
     PeerContribution,
 };
+pub use workspace::{CompositionRule, GroundedRelation, PatternValue, RelationPattern,
+                    TransientWorkspace, TypedValue};
+pub use crystallizer::{SemanticCrystallizer, SemanticFrame};
 pub use store::{
     MmapWalStore, NoopStore, RecoveryStats, Store, TerminalDelta, WalEvent,
     replay_into_brain,

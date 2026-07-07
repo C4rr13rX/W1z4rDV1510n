@@ -81,6 +81,12 @@ pub struct EemSnapshot {
     pub motif_links: Vec<(u32, Vec<u32>)>,
     #[serde(default)]
     pub facts:       Vec<GroundedFact>,
+    #[serde(default)]
+    pub semantic_relations: Vec<crate::workspace::GroundedRelation>,
+    #[serde(default)]
+    pub composition_rules: Vec<crate::workspace::CompositionRule>,
+    #[serde(default)]
+    pub crystallizer: crate::crystallizer::SemanticCrystallizer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +114,9 @@ pub struct SerializableFingerprint {
 /// * `2`  Stage 11 (concept-tier OOV reserved — no new persisted fields
 ///        in Stage 11A itself, but reserved here as the forward
 ///        contract so Stage 11B/C can layer on without further bumps)
-pub const CURRENT_SNAPSHOT_VERSION: u32 = 2;
+/// * `3`  EEM semantic relations, composition rules, and crystallized role
+///        templates used by transient logical inference.
+pub const CURRENT_SNAPSHOT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainSnapshot {

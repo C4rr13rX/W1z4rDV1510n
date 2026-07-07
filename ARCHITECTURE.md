@@ -360,6 +360,41 @@ the integration layer must traverse it correctly.
 
 **Outcome neurons:** external feedback enters its own pool. Outcome-vs-prediction error reinforces or weakens the synapses that led to the action. Functional dopamine.
 
+### 4.E Prediction/Consolidation Boundary
+
+Prediction is always non-learning. A query may transiently activate existing
+atoms and propagate through existing terminals, but it must not create atoms or
+concepts, update recurrence/use/decay counters, append WAL events, enter the
+Fabric moment buffer, advance a tick, or alter terminal weights. Transient query
+activation is cleared immediately after readout.
+
+Learning occurs only after an external outcome is observed. The atomic
+`/brain/consolidate` operation co-activates the original input and resolved
+outcome in their configured pools and then closes exactly one Hebbian moment.
+Predicted values, confidence scores, scheduler decisions, and ghost/live orders
+are never treated as outcomes. For time-series brains, the future candle that
+closes the prediction horizon is the outcome; for action brains, the measured
+reward or error after the action is the outcome.
+
+This boundary prevents self-training on guesses and makes online learning
+causal: `predict(t) -> observe reality(t+h) -> consolidate(input, reality)`.
+
+Novel-prompt inference uses a transient typed workspace. Confirmed EEM/fabric
+relations are copied into the workspace, where typed variables unify across
+independently learned pathways and rules forward-chain to candidate results.
+Derived relations carry weakest-path confidence and complete provenance. They
+are discarded after readout and cannot enter persistent EEM/fabric state until
+an external outcome explicitly consolidates them. Text equality alone never
+bridges pathways; the shared semantic role/type must agree.
+
+Typed roles need not be manually enumerated per domain. Across confirmed
+frames on the same sensor channel, invariant positions crystallize as relation
+structure and varying same-typed positions crystallize as roles. Completely
+variable coincidences and cross-type substitutions do not form templates.
+Recognition against a crystallized template is prediction and remains
+read-only; only confirmed frames increase template experience or persist their
+grounded relation instances.
+
 `RequestObservation` is a first-class action type — the brain's externally-visible request for more grounding.
 
 ---

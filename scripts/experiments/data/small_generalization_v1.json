@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "train": [
+    {"id":"py_mean","prompt":"Python 3.11: write a function mean(values) that returns the arithmetic mean.","answer":"def mean(values):\n    return sum(values) / len(values)","concepts":["def mean","sum(values)","len(values)"]},
+    {"id":"py_variance","prompt":"Python 3.11: write a function variance(values) using the population variance formula.","answer":"def variance(values):\n    m = sum(values) / len(values)\n    return sum((x - m) ** 2 for x in values) / len(values)","concepts":["def variance","** 2","len(values)"]},
+    {"id":"science_force","prompt":"State Newton's second law using force, mass, and acceleration.","answer":"Force equals mass times acceleration: F = m * a.","concepts":["force","mass","acceleration"]},
+    {"id":"science_density","prompt":"Define density using mass and volume.","answer":"Density is mass divided by volume: density = mass / volume.","concepts":["density","mass","volume"]}
+  ],
+  "test": [
+    {"kind":"exact","source":"py_mean","prompt":"Python 3.11: write a function mean(values) that returns the arithmetic mean.","concepts":["def mean","sum(values)","len(values)"]},
+    {"kind":"exact","source":"science_force","prompt":"State Newton's second law using force, mass, and acceleration.","concepts":["force","mass","acceleration"]},
+    {"kind":"paraphrase","source":"py_variance","prompt":"For Python 3.11, implement population variance for a sequence named values.","concepts":["def variance","** 2","len(values)"]},
+    {"kind":"paraphrase","source":"science_density","prompt":"How are an object's mass, volume, and density related?","concepts":["density","mass","volume"]},
+    {"kind":"composition","prompt":"Python 3.11: implement force(mass, acceleration) from Newton's second law.","concepts":["def force","mass","acceleration"]},
+    {"kind":"composition","prompt":"Python 3.11: implement density(mass, volume) from the scientific definition.","concepts":["def density","mass","volume"]},
+    {"kind":"oov","prompt":"What is the capital city of the fictional planet Zephyria?","expect_oov":true},
+    {"kind":"oov","prompt":"Give the private launch code for satellite XQ-991.","expect_oov":true}
+  ]
+}

@@ -18,7 +18,8 @@ use crate::eem::{Eem, EemConfig};
 use crate::fabric::{Fabric, FabricConfig};
 use crate::grounding::{AnswerWithGrounding, ConfidenceTier, GroundingReport};
 use crate::identity::{
-    BrainIdentitySpec, IdentityBuildError, PoolKind, PoolPrototypeRegistry,
+    BrainDeploymentSpec, BrainIdentitySpec, FeedbackLoopSpec, IdentityBuildError,
+    PoolKind, PoolPrototypeRegistry,
 };
 use crate::network::{
     BrainId, GossipEquation, GossipMotif, NetworkState, PeerAccuracy,
@@ -529,6 +530,29 @@ pub struct Brain {
     /// Self-tuning hill-climber state.  The brain feeds `self_test`
     /// recall back into pool decay_rate via this controller — Phase D.
     tuning:                       TuningState,
+    /// Deployment-defined online feedback wiring. This state is rebuilt from
+    /// the deployment spec after restore; delayed events are intentionally
+    /// ephemeral because their source activations are tick-local.
+    feedback_loops:               Vec<RuntimeFeedbackLoop>,
+    delayed_feedback:             Vec<ScheduledFeedback>,
+    feedback_events_emitted:      u64,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeFeedbackLoop {
+    source_pool: PoolId,
+    target_pool: PoolId,
+    spec: FeedbackLoopSpec,
+    /// Integrates fractional dynamic gain into biologically meaningful
+    /// firing frequency: gain 0.25 produces one feedback spike per four ticks.
+    phase: f32,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledFeedback {
+    due_tick: u64,
+    target_pool: PoolId,
+    frame: Vec<u8>,
 }
 
 /// Cosine similarity between two sparse co-firing signatures.  A
@@ -605,8 +629,33 @@ impl Brain {
             qa_db:                 QaDatabase::new(4096),
             recent_frames:         AHashMap::new(),
             tuning:                TuningState::default(),
+            feedback_loops:        Vec::new(),
+            delayed_feedback:      Vec::new(),
+            feedback_events_emitted: 0,
         }
     }
+
+    /// Resolve and install deployment feedback wiring for this brain.
+    pub fn configure_feedback_loops(
+        &mut self,
+        identity: &BrainIdentitySpec,
+        deployment: &BrainDeploymentSpec,
+    ) -> Result<(), crate::identity::DeploymentValidationError> {
+        deployment.validate(identity)?;
+        let ids: std::collections::HashMap<&str, PoolId> = identity.pools.iter()
+            .map(|pool| (pool.name.as_str(), pool.id)).collect();
+        self.feedback_loops = deployment.feedback_loops.iter().map(|spec| RuntimeFeedbackLoop {
+            source_pool: ids[spec.source_pool.as_str()],
+            target_pool: ids[spec.target_pool.as_str()],
+            spec: spec.clone(),
+            phase: 0.0,
+        }).collect();
+        self.delayed_feedback.clear();
+        Ok(())
+    }
+
+    pub fn feedback_loop_count(&self) -> usize { self.feedback_loops.len() }
+    pub fn feedback_events_emitted(&self) -> u64 { self.feedback_events_emitted }
 
     /// Read-only access to the auto-captured QA buffer.
     pub fn qa_db(&self) -> &QaDatabase { &self.qa_db }
@@ -860,6 +909,16 @@ impl Brain {
         self.fabric.observe(pool_id, frame)
     }
 
+    /// Install a transient, read-only query activation. This does not enter
+    /// recent_frames or the Fabric moment and therefore cannot be learned.
+    pub fn activate_for_prediction(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        self.fabric.activate_for_prediction(pool_id, frame)
+    }
+
+    pub fn clear_prediction_activation(&mut self) {
+        self.fabric.clear_prediction_activation();
+    }
+
     /// Close the current tick.  Performs:
     /// 1. Cross-pool axon wiring for any co-fired pairs (Fabric does this).
     /// 2. Binding-concept emergence: if the current moment's multi-pool
@@ -867,6 +926,7 @@ impl Brain {
     ///    history window, promote it.
     /// 3. Per-pool housekeeping (decay + prune).
     pub fn advance_tick(&mut self) {
+        self.execute_feedback_loops();
         // Snapshot the current moment's firing BEFORE the fabric
         // advances (which clears it).  Build a fingerprint from
         // multi-pool firing for binding-concept tracking.
@@ -899,6 +959,60 @@ impl Brain {
         if let Some(fp) = fingerprint {
             self.register_fingerprint(fp);
         }
+    }
+
+    fn execute_feedback_loops(&mut self) {
+        let now = self.fabric.current_tick();
+        let mut newly_scheduled = Vec::new();
+
+        for feedback in &mut self.feedback_loops {
+            let Some(source) = self.fabric.pool(feedback.source_pool) else { continue; };
+            let source = source.read();
+            let mut labels: Vec<String> = source.currently_firing()
+                .filter_map(|id| source.get(id).map(|n| n.label.clone()))
+                .collect();
+            if labels.is_empty() { continue; }
+            labels.sort();
+            labels.dedup();
+            let control = source.control_state();
+            let gain = feedback.spec.gain_mode.as_ref()
+                .map(|mode| mode.evaluate(&control))
+                .unwrap_or(feedback.spec.gain)
+                .max(0.0);
+            drop(source);
+
+            feedback.phase += gain;
+            let spikes = feedback.phase.floor() as usize;
+            feedback.phase -= spikes as f32;
+            if spikes == 0 { continue; }
+
+            // Meta-pools learn a stable pattern-of-patterns fingerprint, not a
+            // recursive copy of every lower-pool label.  This bounds feedback
+            // frame size while preserving exact equality for recurring firing
+            // sets and clean separation for different sets.
+            let joined = labels.join("|");
+            let digest = blake3::hash(joined.as_bytes());
+            let frame = format!("feedback:{}:{}", feedback.spec.signal, digest.to_hex()).into_bytes();
+            for _ in 0..spikes {
+                newly_scheduled.push(ScheduledFeedback {
+                    due_tick: now.saturating_add(feedback.spec.delay_ticks as u64),
+                    target_pool: feedback.target_pool,
+                    frame: frame.clone(),
+                });
+            }
+        }
+
+        self.delayed_feedback.extend(newly_scheduled);
+        let mut pending = Vec::with_capacity(self.delayed_feedback.len());
+        for event in self.delayed_feedback.drain(..) {
+            if event.due_tick <= now {
+                self.fabric.observe(event.target_pool, &event.frame);
+                self.feedback_events_emitted = self.feedback_events_emitted.saturating_add(1);
+            } else {
+                pending.push(event);
+            }
+        }
+        self.delayed_feedback = pending;
     }
 
     fn register_fingerprint(&mut self, fp: MomentFingerprint) {
@@ -4667,6 +4781,9 @@ impl Brain {
             qa_db:                 QaDatabase::new(4096),
             recent_frames:         AHashMap::new(),
             tuning:                TuningState::default(),
+            feedback_loops:        Vec::new(),
+            delayed_feedback:      Vec::new(),
+            feedback_events_emitted: 0,
         };
         (brain, missing)
     }

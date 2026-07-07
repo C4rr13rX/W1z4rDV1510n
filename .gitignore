@@ -1,5 +1,6 @@
 # ── Rust build output ─────────────────────────────────────────────────────────
 /target/
+/target-*/
 # Keep Cargo.lock for binary crates (predict_state, w1z4rd_api)
 # Cargo.lock is intentionally tracked
 
@@ -27,6 +28,8 @@
 # ── Runtime output and logs ───────────────────────────────────────────────────
 /runtime/
 /logs/
+/w1z4rd-test-*/
+/probe.json
 *.log
 *.tmp
 # Git Bash creates a file named 'null' in CWD when a Windows EXE is run as a
