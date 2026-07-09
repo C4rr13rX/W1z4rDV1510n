@@ -39,7 +39,7 @@
 # ── Data directories (large datasets, fetched at runtime) ─────────────────────
 /data/
 /.genomic_benchmarks/
-
+/brain-data*/
 # ── Playwright test captures and other image artifacts ───────────────────────
 /playwright_captures/
 *.png

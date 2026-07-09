@@ -6100,6 +6100,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "sysinfo",
  "thiserror 1.0.69",
  "toml",
  "tracing",

@@ -856,6 +856,47 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let brain_router = crate::brain_api::brain_routes(brain_api_state.clone());
     let brain_state_for_loop = brain_api_state.clone();
 
+    // Periodic auto-checkpoint: the fabric's learned atoms/concepts live
+    // in RAM; without this, any restart (upgrade, crash, lockup) loses
+    // everything accumulated since boot — atoms arranged over time are
+    // the whole substrate, so they must survive process death.  Writes
+    // go through the streaming bincode writer (O(write-buffer) RAM) to
+    // <brain_data_dir>/brain.bin, which load_or_build_brain restores on
+    // the next start.  Cadence via W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS
+    // (default 900 s; 0 disables).  The brain lock is held for the
+    // duration of a save — deliberate: the snapshot-then-write
+    // alternative doubles resident memory, which is exactly what the
+    // politeness work is trying to avoid.
+    {
+        let ckpt_state = brain_api_state.clone();
+        let ckpt_dir = brain_data_dir.clone();
+        let secs: u64 = std::env::var("W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+        if secs > 0 {
+            // Dedicated OS thread, not tokio::spawn: this constructor runs
+            // before the async runtime exists, and a plain thread with
+            // blocking_lock keeps the checkpoint cadence independent of
+            // runtime lifecycle entirely.
+            std::thread::Builder::new()
+                .name("brain-autocheckpoint".into())
+                .spawn(move || {
+                    let path = ckpt_dir.join("brain.bin");
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(secs));
+                        let brain = ckpt_state.brain.blocking_lock();
+                        match brain.checkpoint(&path) {
+                            Ok(()) => tracing::info!(
+                                "brain auto-checkpoint saved to {} (tick {})",
+                                path.display(), brain.fabric().current_tick()),
+                            Err(e) => tracing::warn!(
+                                "brain auto-checkpoint failed: {}", e),
+                        }
+                    }
+                })
+                .ok();
+        }
+    }
+
     let state = ApiState {
         node_id: config.node_id.clone(),
         ledger_backend,

@@ -282,6 +282,18 @@ impl Fabric {
         let pool_ids: Vec<PoolId> = self.pools.keys().copied().collect();
         let mut total_evicted: usize = 0;
         let mut last_pressure_x1k: u64 = 1000;
+        // Politeness gate: when the MACHINE is low on RAM, this factor
+        // drops below 1 and overrides the per-pool terminal budget —
+        // the brain yields memory to the rest of the system instead of
+        // locking it up. Probe is cached (~2 s) inside the helper.
+        let system_pressure = if params.min_system_available_mb > 0 {
+            TierOrchestrator::system_pressure_factor(
+                TierOrchestrator::system_available_mb(),
+                params.min_system_available_mb,
+            )
+        } else {
+            4.0
+        };
         for pid in pool_ids {
             let Some(pool_arc) = self.pools.get(&pid) else { continue };
             // Phase A: read pool — gather candidates within budget,
@@ -298,17 +310,20 @@ impl Fabric {
                 // skip the scan entirely.  When the brain attaches
                 // cold tiers later, the next pass picks it up.
                 if !p.has_storage_tier() { continue; }
+                // Whichever signal is more urgent wins: the pool's own
+                // terminal budget, or the machine running out of RAM.
                 let pressure = TierOrchestrator::pressure_factor(
-                    p.total_terminals, params.target_terminals_per_pool);
+                    p.total_terminals, params.target_terminals_per_pool)
+                    .min(system_pressure);
                 last_pressure_x1k = (pressure * 1000.0) as u64;
                 // Fast path: when pressure_factor is at its clamped
-                // max (way under budget), skip the per-neuron scan
-                // entirely.  Threshold would be evict_threshold * 4 =
-                // ~20 by default; almost no candidate can score that
-                // high, so the scan is pure overhead.  Saves the
-                // ~50µs/tick of round-robin work during normal
-                // training while leaving the orchestrator fully
-                // responsive once RAM actually fills up.
+                // max (way under budget AND the system has headroom),
+                // skip the per-neuron scan entirely.  Threshold would
+                // be evict_threshold * 4 = ~20 by default; almost no
+                // candidate can score that high, so the scan is pure
+                // overhead.  Saves the ~50µs/tick of round-robin work
+                // during normal training while leaving the orchestrator
+                // fully responsive once RAM actually fills up.
                 if pressure >= 4.0 && params.target_terminals_per_pool > 0 {
                     continue;
                 }
@@ -953,6 +968,128 @@ impl Fabric {
         }
     }
 
+    /// Expectation-based demand paging — the deserialize half of the
+    /// tier cost model (spec §17.4; "concepts arriving in the data
+    /// stream mean we will have to deserialize to run inference").
+    ///
+    /// BFS from the currently-firing set in `from_pool` through
+    /// terminals, up to `max_hops`.  Every EVICTED target discovered on
+    /// the walk is about to receive activation — that is the concrete
+    /// expectation of use — so it is paged back in (terminals restored
+    /// from the cold tier) before [`Fabric::propagate`]/[`Fabric::settle`]
+    /// walk it.  Without this, evicted knowledge is silently absent
+    /// from every prediction: activation reaches the neuron but stops
+    /// dead at its cleared terminal list.
+    ///
+    /// Cost bounds (all env-tunable via the orchestrator params):
+    ///   - `page_in_salience_floor` — frozen salience_ema must clear it;
+    ///   - `max_page_in_per_pass`   — per-pool page-in cap per call;
+    ///   - a fixed BFS visit budget keeps discovery O(bounded) even on
+    ///     dense fabrics.
+    ///
+    /// Lock discipline: one pool lock at a time — discovery under a
+    /// read lock per source pool, filtering under a read lock per
+    /// target pool, page-in under a short write lock per target pool.
+    pub fn hydrate_for_propagation(&self, from_pool: PoolId) -> usize {
+        use ahash::AHashSet;
+        let params = *self.orchestrator_params.lock();
+        if params.max_page_in_per_pass == 0 {
+            return 0;
+        }
+        const VISIT_BUDGET: usize = 4_096;
+
+        let mut frontier: Vec<(PoolId, NeuronId)> = {
+            let Some(p) = self.pools.get(&from_pool) else { return 0 };
+            let pool = p.read();
+            pool.currently_firing()
+                .into_iter()
+                .map(|nid| (from_pool, nid))
+                .collect()
+        };
+        let mut visited: AHashSet<(PoolId, NeuronId)> =
+            frontier.iter().copied().collect();
+        let mut paged_per_pool: AHashMap<PoolId, usize> = AHashMap::new();
+        let mut paged_total = 0usize;
+        let mut visits = 0usize;
+
+        for _hop in 0..self.config.max_hops.max(1) {
+            if frontier.is_empty() || visits >= VISIT_BUDGET {
+                break;
+            }
+            // Phase 1: discover targets, grouped by source pool so each
+            // source pool is read-locked exactly once per hop.
+            let mut targets: Vec<(PoolId, NeuronId)> = Vec::new();
+            let mut by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+            for (pid, nid) in frontier.drain(..) {
+                by_pool.entry(pid).or_default().push(nid);
+            }
+            for (pid, nids) in by_pool {
+                let Some(pa) = self.pools.get(&pid) else { continue };
+                let pool = pa.read();
+                for nid in nids {
+                    if visits >= VISIT_BUDGET { break; }
+                    visits += 1;
+                    let Some(n) = pool.get(nid) else { continue };
+                    for t in &n.terminals {
+                        let key = (t.target.pool, t.target.neuron);
+                        if visited.insert(key) {
+                            targets.push(key);
+                        }
+                    }
+                }
+            }
+            if targets.is_empty() {
+                break;
+            }
+            // Phase 2+3 per target pool: filter evicted candidates under
+            // a read lock, then page them in under a short write lock.
+            let mut by_target_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+            for (pid, nid) in &targets {
+                by_target_pool.entry(*pid).or_default().push(*nid);
+            }
+            for (pid, nids) in by_target_pool {
+                let Some(pa) = self.pools.get(&pid) else { continue };
+                let already = paged_per_pool.entry(pid).or_insert(0);
+                let mut to_page: Vec<NeuronId> = Vec::new();
+                {
+                    let pool = pa.read();
+                    if !pool.has_storage_tier() { continue; }
+                    for nid in nids {
+                        if *already + to_page.len() >= params.max_page_in_per_pass {
+                            break;
+                        }
+                        if !pool.is_evicted(nid) { continue; }
+                        let salience = pool.get(nid)
+                            .map(|n| n.salience_ema)
+                            .unwrap_or(0.0);
+                        if salience >= params.page_in_salience_floor {
+                            to_page.push(nid);
+                        }
+                    }
+                }
+                if to_page.is_empty() { continue; }
+                let mut pool = pa.write();
+                for nid in to_page {
+                    match pool.page_in_neuron(nid) {
+                        Ok(true) => {
+                            *already += 1;
+                            paged_total += 1;
+                            self.orchestrator_stats.neurons_paged_in
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(false) => {}
+                        Err(_) => {
+                            self.orchestrator_stats.page_in_errors
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            frontier = targets;
+        }
+        paged_total
+    }
+
     /// Uniform propagation per spec §4.A.  Walks the terminals of every
     /// currently-firing neuron in `from_pool`, depositing activation at
     /// each target (which may be in any pool).  Repeats for `max_hops`.
@@ -960,6 +1097,9 @@ impl Fabric {
     /// Returns the activation map per pool — caller reads this to see
     /// what the input atoms activated across the whole fabric.
     pub fn propagate(&self, from_pool: PoolId) -> AHashMap<PoolId, AHashMap<NeuronId, f32>> {
+        // Deserialize-on-expectation: restore any evicted neuron the
+        // activation wave is about to reach, before walking terminals.
+        let _ = self.hydrate_for_propagation(from_pool);
         let mut acts: AHashMap<PoolId, AHashMap<NeuronId, f32>> = AHashMap::new();
         let pool_arc = match self.pools.get(&from_pool) {
             Some(p) => p.clone(),
@@ -1041,6 +1181,9 @@ impl Fabric {
         top_k:     usize,
         eps:       f32,
     ) -> SettleResult {
+        // Deserialize-on-expectation, same as propagate(): the resonance
+        // walk must not hit cleared terminal lists on evicted neurons.
+        let _ = self.hydrate_for_propagation(from_pool);
         let pool_arc = match self.pools.get(&from_pool) {
             Some(p) => p.clone(),
             None    => return SettleResult::empty(),

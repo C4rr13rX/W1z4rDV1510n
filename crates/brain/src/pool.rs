@@ -633,7 +633,41 @@ impl Pool {
                 format!("neuron slot {} no longer exists", id),
             ));
         };
-        slot.terminals = restored.terminals;
+        // MERGE, don't overwrite: a concept can keep firing while evicted
+        // (other neurons' terminals still point at it), so cross-pool
+        // wiring may have grown fresh terminals on the cleared slot.
+        // Overwriting with the cold copy would silently erase everything
+        // learned since eviction.  Cold terminals are the base; any
+        // in-RAM terminal for a target the cold copy doesn't know wins a
+        // slot, and for shared targets the stronger weight survives.
+        // Terminals grown while evicted are already in the pool gauge;
+        // only the net growth from restoring the cold copy gets added.
+        let live_before = slot.terminals.len();
+        if slot.terminals.is_empty() {
+            slot.terminals = restored.terminals;
+        } else {
+            let mut merged = restored.terminals;
+            for live in slot.terminals.drain(..) {
+                match merged.iter_mut().find(|t| t.target == live.target) {
+                    Some(cold) => {
+                        if live.weight > cold.weight {
+                            cold.weight = live.weight;
+                        }
+                        cold.consolidation = cold.consolidation.max(live.consolidation);
+                    }
+                    None => merged.push(live),
+                }
+            }
+            slot.terminals = merged;
+        }
+        // Eviction cleared terminal_idx; without a rebuild here,
+        // add_or_strengthen would re-append duplicates for every target
+        // the index no longer knows about.
+        slot.rebuild_terminal_idx();
+        // Evict subtracted the cold copy's terminals from the pool gauge;
+        // without the symmetric add the pressure factor undercounts after
+        // every evict/page-in cycle and eviction gets lazier over time.
+        let restored_terms = slot.terminals.len().saturating_sub(live_before);
         slot.members   = restored.members;
         slot.prediction_error_ema = restored.prediction_error_ema;
         // Use the more-current salience: in-RAM may have decayed below
@@ -646,6 +680,7 @@ impl Pool {
 
         self.cold_offsets.remove(&id);
         self.evicted.remove(&id);
+        self.total_terminals += restored_terms;
         Ok(true)
     }
 

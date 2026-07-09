@@ -92,6 +92,13 @@ pub struct OrchestratorParams {
     /// they've had a chance to fire a second time and prove their
     /// salience.
     pub min_age_ticks: u64,
+    /// Politeness floor: minimum SYSTEM available RAM (MB) the node must
+    /// leave for everything else on the machine.  When available system
+    /// memory drops toward this floor, the system pressure factor
+    /// overrides the per-pool terminal budget and forces aggressive
+    /// eviction — the brain must never be the reason the computer locks
+    /// up.  0 disables the system-memory check.
+    pub min_system_available_mb: u64,
 }
 
 impl Default for OrchestratorParams {
@@ -120,8 +127,13 @@ impl Default for OrchestratorParams {
             decay_horizon_ticks: 1_000,
             salience_eps: 0.01,
             page_in_salience_floor: 0.0,
-            max_page_in_per_pass: 0,
+            // Demand paging is ON by default — an evicted neuron that
+            // activation is about to reach gets its terminals back from
+            // the cold tier before propagation walks it.  0 previously
+            // meant the page-in half of the cost model never ran at all.
+            max_page_in_per_pass: 128,
             min_age_ticks: 1_000,
+            min_system_available_mb: 4_096,
         }
     }
 }
@@ -188,6 +200,7 @@ impl OrchestratorParams {
         f ("W1Z4RD_TIER_PAGEIN_FLOOR", &mut p.page_in_salience_floor);
         us("W1Z4RD_TIER_MAX_PAGEIN",   &mut p.max_page_in_per_pass);
         u ("W1Z4RD_TIER_MIN_AGE_TICKS", &mut p.min_age_ticks);
+        u ("W1Z4RD_TIER_MIN_SYS_AVAIL_MB", &mut p.min_system_available_mb);
         p
     }
 
@@ -295,6 +308,59 @@ impl TierOrchestrator {
         inv.clamp(0.25, 4.0)
     }
 
+    /// System-memory pressure factor — the politeness gate.  Pure math
+    /// so it's testable; callers pass the current available system RAM.
+    ///
+    /// Mapping (min = `min_system_available_mb`):
+    ///   available >= 2*min → 4.0  (machine has headroom; no extra effort)
+    ///   available == min   → 1.0  (at the floor; normal aggression)
+    ///   available <= min/2 → 0.25 (starving the machine; max aggression)
+    /// Linear in between.  The caller combines this with the terminal
+    /// budget via `min()`, so whichever signal is more urgent wins.
+    pub fn system_pressure_factor(available_mb: u64, min_mb: u64) -> f32 {
+        if min_mb == 0 { return 4.0; }
+        let a = available_mb as f32;
+        let m = min_mb as f32;
+        if a >= 2.0 * m {
+            return 4.0;
+        }
+        if a >= m {
+            // [m, 2m) → [1.0, 4.0)
+            return 1.0 + 3.0 * ((a - m) / m);
+        }
+        // [m/2, m) → [0.25, 1.0); below m/2 clamps to 0.25
+        (0.25 + 0.75 * ((a - m / 2.0) / (m / 2.0)).max(0.0)).min(1.0)
+    }
+
+    /// Current available system memory in MB.  Uses a cached
+    /// [`sysinfo::System`] refreshed at most every ~2 s so calling this
+    /// every tick costs a mutex lock + timestamp compare, not a syscall
+    /// storm.  Returns `u64::MAX` if the probe fails (never force
+    /// eviction on bad data).
+    pub fn system_available_mb() -> u64 {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        static PROBE: Mutex<Option<(sysinfo::System, Instant)>> = Mutex::new(None);
+        let Ok(mut guard) = PROBE.lock() else { return u64::MAX };
+        let now = Instant::now();
+        let needs_refresh = match &*guard {
+            Some((_, at)) => now.duration_since(*at) > Duration::from_secs(2),
+            None => true,
+        };
+        if needs_refresh {
+            let mut sys = match guard.take() {
+                Some((sys, _)) => sys,
+                None => sysinfo::System::new(),
+            };
+            sys.refresh_memory();
+            *guard = Some((sys, now));
+        }
+        match &*guard {
+            Some((sys, _)) => sys.available_memory() / (1024 * 1024),
+            None => u64::MAX,
+        }
+    }
+
     /// Decide whether a candidate evicts.  Pure; used by tests.
     pub fn should_evict(
         params: &OrchestratorParams,
@@ -319,6 +385,27 @@ mod tests {
         // Exactly at budget → ~1
         let f = TierOrchestrator::pressure_factor(1_000_000, 1_000_000);
         assert!((f - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn system_pressure_factor_politeness_curve() {
+        // Plenty of headroom (>= 2x floor) → no extra effort
+        assert_eq!(TierOrchestrator::system_pressure_factor(16_384, 4_096), 4.0);
+        assert_eq!(TierOrchestrator::system_pressure_factor(8_192, 4_096), 4.0);
+        // At the floor → normal aggression
+        let at_floor = TierOrchestrator::system_pressure_factor(4_096, 4_096);
+        assert!((at_floor - 1.0).abs() < 0.01);
+        // Halfway between floor and 2x floor → between 1 and 4
+        let mid = TierOrchestrator::system_pressure_factor(6_144, 4_096);
+        assert!(mid > 1.0 && mid < 4.0);
+        // Below half the floor → maximum aggression
+        assert_eq!(TierOrchestrator::system_pressure_factor(1_000, 4_096), 0.25);
+        assert_eq!(TierOrchestrator::system_pressure_factor(0, 4_096), 0.25);
+        // Between half-floor and floor → between 0.25 and 1
+        let squeezed = TierOrchestrator::system_pressure_factor(3_072, 4_096);
+        assert!(squeezed > 0.25 && squeezed < 1.0);
+        // Disabled check never forces eviction
+        assert_eq!(TierOrchestrator::system_pressure_factor(0, 0), 4.0);
     }
 
     #[test]

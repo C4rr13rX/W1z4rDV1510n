@@ -1,0 +1,23 @@
+instance_id = "market-django-20260708-v3"
+identity_path = "D:/Projects/W1z4rDV1510n/brains/market_small.identity.toml"
+data_dir = "D:/Projects/W1z4rDV1510n/runtime/brains/market-django-20260708-v3"
+
+[resource_budget]
+max_resident_bytes = 536870912
+max_neurons = 1000000
+max_propagation_steps = 64
+max_learning_steps_per_second = 2000
+
+[[feedback_loops]]
+source_pool = "outcome"
+target_pool = "ohlcv"
+signal = "prediction_error"
+gain = 1.0
+delay_ticks = 1
+
+[[feedback_loops]]
+source_pool = "outcome"
+target_pool = "news"
+signal = "prediction_error"
+gain = 0.5
+delay_ticks = 1

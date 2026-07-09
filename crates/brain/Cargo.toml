@@ -22,6 +22,7 @@ evalexpr = "11"           # MIT — EEM equation evaluator per spec §8
 toml = "0.8"              # MIT — BrainIdentitySpec serializer per spec §3.3
 tracing = "0.1"           # MIT — WAL diagnostics per spec §17
 blake3 = "1"              # CC0/Apache-2.0 — per-pool Merkle root per spec §17.6
+sysinfo = "0.30"          # MIT — system-RAM politeness gate for the tier orchestrator
 
 [dev-dependencies]
 # nothing yet — built-in #[test] is enough for the integration test.

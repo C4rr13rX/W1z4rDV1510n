@@ -90,6 +90,7 @@ fn orchestrator_evicts_concepts_under_pressure_continuously() {
         page_in_salience_floor: 0.0,
         max_page_in_per_pass: 0,
         min_age_ticks: 0,           // test disables newborn protection
+        min_system_available_mb: 0, // hermetic: ignore live machine RAM
     };
     brain.fabric_mut().set_tier_orchestrator_params(aggressive);
 
@@ -195,6 +196,7 @@ fn orchestrator_never_evicts_atoms() {
         page_in_salience_floor: 0.0,
         max_page_in_per_pass: 0,
         min_age_ticks: 0,
+        min_system_available_mb: 0, // hermetic: ignore live machine RAM
     };
     brain.fabric_mut().set_tier_orchestrator_params(nuke);
     for _ in 0..15 {
@@ -207,6 +209,87 @@ fn orchestrator_never_evicts_atoms() {
         assert!(!p.is_evicted(atom_id),
             "atom {} was evicted by the orchestrator", atom_id);
     }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The full serialize→deserialize round trip the tier system exists
+/// for: knowledge evicted to the SSD must come back transparently the
+/// moment a prediction needs it.
+///
+///   1. Train until concepts with terminals exist; capture the baseline
+///      activation spread of a prediction.
+///   2. Force-evict every evictable concept (terminals shed to cold tier).
+///   3. Run the same prediction again with demand paging enabled —
+///      propagate() must hydrate the evicted neurons (paged_in > 0) and
+///      the activation spread must recover to at least the baseline.
+#[test]
+fn evicted_knowledge_pages_back_in_for_prediction() {
+    let dir = tmpdir("hydrate_round_trip");
+    let mut brain = make_brain_with_text_pool();
+    brain.attach_cold_tiers(&dir);
+
+    for _ in 0..14 {
+        brain.observe(1, b"alphabeta");
+        brain.advance_tick();
+    }
+
+    // Baseline: what does a prediction activate when everything is hot?
+    let fired = brain.activate_for_prediction(1, b"alphabeta");
+    assert!(!fired.is_empty(), "training must make the frame recognizable");
+    let baseline = brain.fabric().propagate(1);
+    let baseline_targets: usize = baseline.values().map(|m| m.len()).sum();
+    assert!(baseline_targets > 0, "baseline prediction must activate something");
+    brain.clear_prediction_activation();
+
+    // Force-evict every evictable concept (page-in off during the purge).
+    let nuke = OrchestratorParams {
+        run_every_n_ticks: 1,
+        scan_budget: 4096,
+        max_evict_per_pass: 4096,
+        target_terminals_per_pool: 0,
+        evict_threshold: -1_000_000.0,
+        w_terminals: 1.0,
+        w_staleness: 1.0,
+        w_inverse_salience: 0.0,
+        w_pinned: 0.0,
+        decay_horizon_ticks: 1,
+        salience_eps: 0.01,
+        page_in_salience_floor: 0.0,
+        max_page_in_per_pass: 0,
+        min_age_ticks: 0,
+        min_system_available_mb: 0,
+    };
+    brain.fabric_mut().set_tier_orchestrator_params(nuke);
+    for _ in 0..10 {
+        brain.advance_tick();
+    }
+    let evicted_now = brain.fabric().pool(1).unwrap().read().evicted_count();
+    assert!(evicted_now > 0, "purge phase must actually evict concepts");
+    let purged = brain.fabric().tier_orchestrator_stats();
+    assert!(purged.neurons_evicted > 0);
+
+    // Prediction with demand paging: disabled() stops further eviction
+    // (run_every_n_ticks = MAX) but keeps the default page-in budget.
+    brain.fabric_mut().set_tier_orchestrator_params(OrchestratorParams::disabled());
+    let fired2 = brain.activate_for_prediction(1, b"alphabeta");
+    assert!(!fired2.is_empty(), "atoms never evict, so the frame still fires");
+    let after = brain.fabric().propagate(1);
+    let after_targets: usize = after.values().map(|m| m.len()).sum();
+    let stats = brain.fabric().tier_orchestrator_stats();
+
+    assert!(stats.neurons_paged_in > 0,
+        "prediction must page evicted knowledge back in (paged_in={})",
+        stats.neurons_paged_in);
+    assert_eq!(stats.page_in_errors, 0,
+        "page-ins must not error (got {})", stats.page_in_errors);
+    assert!(after_targets >= baseline_targets,
+        "activation spread must recover after hydration: after={} baseline={}",
+        after_targets, baseline_targets);
+    let evicted_after = brain.fabric().pool(1).unwrap().read().evicted_count();
+    assert!(evicted_after < evicted_now,
+        "hydration must shrink the evicted set ({} -> {})",
+        evicted_now, evicted_after);
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -232,6 +315,7 @@ fn under_budget_means_no_eviction() {
         max_evict_per_pass: 4096,
         target_terminals_per_pool: 100_000_000_000,
         evict_threshold: 1.0,
+        min_system_available_mb: 0, // hermetic: ignore live machine RAM
         ..OrchestratorParams::default()
     };
     brain.fabric_mut().set_tier_orchestrator_params(lax);
