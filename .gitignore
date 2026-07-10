@@ -12,6 +12,10 @@
 # ── Brain persisted state (rebuildable from corpora + drive_corpora_brain.py) ─
 /brain-data-text/
 /brain-data/
+# Renamed brain-data snapshots kept aside during experiments (e.g.
+# brain-data.pre-exp07/, brain-data-text.bak). Large, machine-local, rebuildable.
+/brain-data.*
+/brain-data-text.*
 .supervisor_training_started
 
 # ── Machine-specific launcher scripts ─────────────────────────────────────────
