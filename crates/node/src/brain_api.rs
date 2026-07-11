@@ -243,6 +243,26 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
         brain.configure_feedback_loops(identity, &deployment)
             .map_err(|e| anyhow::anyhow!("configure feedback loops: {}", e))?;
         tracing::info!("configured {} online feedback loops", brain.feedback_loop_count());
+        // Enforce the deployment resource budget: translate max_resident_bytes
+        // into the tier orchestrator's per-pool terminal target.  ~1000 bytes
+        // per terminal is MEASURED, not theoretical: a 6.77M-terminal market
+        // fabric held 6.4 GB resident (terminals + neurons + terminal_idx +
+        // allocator slack + moment history).  Previously this field was
+        // validated but never enforced — the spec promised a RAM budget the
+        // brain ignored.  An explicit W1Z4RD_TIER_TARGET_TERMS env still wins.
+        if std::env::var_os("W1Z4RD_TIER_TARGET_TERMS").is_none() {
+            let budget = deployment.resource_budget.max_resident_bytes;
+            if budget > 0 {
+                let pools = identity.pools.len().max(1) as u64;
+                let mut params = brain.fabric().orchestrator_params_snapshot();
+                params.target_terminals_per_pool =
+                    ((budget / 1_000) / pools).max(10_000) as usize;
+                brain.fabric().set_tier_orchestrator_params(params);
+                tracing::info!(
+                    "deployment resource budget {} bytes → {} terminals/pool eviction target",
+                    budget, params.target_terminals_per_pool);
+            }
+        }
     }
     Ok(brain)
 }
@@ -465,11 +485,41 @@ async fn h_predict(
     }))
 }
 
+/// Politeness floor in MB (same env the tier orchestrator reads).
+fn politeness_floor_mb() -> u64 {
+    std::env::var("W1Z4RD_TIER_MIN_SYS_AVAIL_MB")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(4_096)
+}
+
+/// Ingest backpressure: when the machine's available RAM is below the
+/// politeness floor, training pushes must slow down — eviction cannot
+/// outrun an unthrottled firehose (measured: 12.5 GB resident against an
+/// 8 GB budget with the machine at 1.4 GB available).  Returns Some(reply)
+/// when the caller should back off and retry.
+fn ingest_backpressure() -> Option<Json<serde_json::Value>> {
+    let floor = politeness_floor_mb();
+    if floor == 0 { return None; }
+    let avail = w1z4rd_brain::tier_orchestrator::TierOrchestrator::system_available_mb();
+    if avail < floor {
+        return Some(Json(json!({
+            "consolidated": false,
+            "backpressure": true,
+            "available_mb": avail,
+            "floor_mb": floor,
+            "retry_after_ms": 2_000,
+        })));
+    }
+    None
+}
+
 /// The only supervised hot-path operation that closes a Hebbian moment:
 /// an input and its subsequently observed outcome are consolidated together.
 async fn h_consolidate(
     State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
+    if let Some(reply) = ingest_backpressure() {
+        return reply;
+    }
     let input_pool = req.get("input_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
     let outcome_pool = req.get("outcome_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
     let input = match b64_url_decode(req.get("input_frame").and_then(|v| v.as_str()).unwrap_or("")) {

@@ -1,7 +1,18 @@
 name = "market_small"
 version = "0.1.0"
 binding_emergence_threshold = 3
-moment_history_window = 128
+moment_history_window = 256
+
+# Pool tuning mirrors the proven build_default_brain() values — the bare
+# PoolConfig defaults are unusable for this workload and cost a full day of
+# debugging (2026-07-09):
+#   recent_atoms_window: default 32 truncates ~130-byte feature frames so
+#     bindings only captured the near-identical tail of every feature
+#     (train recall 19% vs 100%).
+#   max_concept_member_count: default 8 truncates concepts mid-sequence.
+#   decay_rate: default 0.0005 forgets 25x faster than the tuned 0.00002 —
+#     early training decayed away before evaluation.
+#   prune_floor: default 0.01 prunes 10x more aggressively than 0.001.
 
 [[pools]]
 name = "ohlcv"
@@ -10,6 +21,11 @@ prototype = "byte-passthrough"
 atom_encoding_prefix = "market"
 kind = "SensoryInput"
 frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 32
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
 
 [[pools]]
 name = "news"
@@ -18,6 +34,11 @@ prototype = "byte-passthrough"
 atom_encoding_prefix = "news"
 kind = "SensoryInput"
 frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 32
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
 
 [[pools]]
 name = "outcome"
@@ -26,3 +47,8 @@ prototype = "byte-passthrough"
 atom_encoding_prefix = "future"
 kind = "Action"
 frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 32
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001

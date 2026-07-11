@@ -294,6 +294,30 @@ impl Fabric {
         } else {
             4.0
         };
+        // EMERGENCY politeness: when pressure is at or near its clamp,
+        // normal knobs cannot keep up — during fast training almost every
+        // concept is younger than min_age_ticks, so newborn protection
+        // makes the entire fabric unevictable while ingest keeps adding
+        // terminals (measured twice: 12.5 GB against an 8 GB budget with
+        // the machine at 1.4 GB available; then 9.4 GB of pure newborns
+        // that the budget couldn't touch).  Emergency is decided per pool
+        // from the COMBINED pressure (terminal budget AND system RAM —
+        // whichever is worse), so the deployment budget is enforceable
+        // even while the machine still has headroom.  Under emergency:
+        // newborn protection is suspended and the per-pass eviction/scan
+        // caps are multiplied.  Learned knowledge still lands on the SSD,
+        // not the floor — it pages back in on demand.
+        let emergency_caps = |emergency: bool| -> (u64, usize, usize) {
+            if emergency {
+                (0,
+                 params.max_evict_per_pass.saturating_mul(8),
+                 params.scan_budget.saturating_mul(8))
+            } else {
+                (params.min_age_ticks,
+                 params.max_evict_per_pass,
+                 params.scan_budget)
+            }
+        };
         for pid in pool_ids {
             let Some(pool_arc) = self.pools.get(&pid) else { continue };
             // Phase A: read pool — gather candidates within budget,
@@ -316,6 +340,8 @@ impl Fabric {
                     p.total_terminals, params.target_terminals_per_pool)
                     .min(system_pressure);
                 last_pressure_x1k = (pressure * 1000.0) as u64;
+                let (effective_min_age, effective_max_evict, effective_scan) =
+                    emergency_caps(pressure <= 0.5);
                 // Fast path: when pressure_factor is at its clamped
                 // max (way under budget AND the system has headroom),
                 // skip the per-neuron scan entirely.  Threshold would
@@ -328,9 +354,9 @@ impl Fabric {
                     continue;
                 }
                 let start = self.orchestrator.lock().advance_cursor(
-                    pid, params.scan_budget.min(n_total), n_total);
+                    pid, effective_scan.min(n_total), n_total);
                 let mut chosen: Vec<(NeuronId, f32)> = Vec::new();
-                let budget = params.scan_budget.min(n_total);
+                let budget = effective_scan.min(n_total);
                 let mut scanned: u64 = 0;
                 for k in 0..budget {
                     let idx = (start + k) % n_total;
@@ -343,7 +369,7 @@ impl Fabric {
                     // at least `min_age_ticks` to demonstrate their
                     // salience.  Without this the orchestrator can throw
                     // a concept away on the same tick it was born.
-                    if current_tick.saturating_sub(n.born_tick) < params.min_age_ticks {
+                    if current_tick.saturating_sub(n.born_tick) < effective_min_age {
                         continue;
                     }
                     // Pin candidate: members.is_empty() && !is_atom() means
@@ -361,7 +387,7 @@ impl Fabric {
                     );
                     if TierOrchestrator::should_evict(&params, s, pressure) {
                         chosen.push((n.id, s));
-                        if chosen.len() >= params.max_evict_per_pass { break; }
+                        if chosen.len() >= effective_max_evict { break; }
                     }
                 }
                 stats.neurons_scanned.fetch_add(scanned, Ordering::Relaxed);

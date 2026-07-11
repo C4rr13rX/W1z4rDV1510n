@@ -3,21 +3,32 @@ identity_path = "D:/Projects/W1z4rDV1510n/brains/market_small.identity.toml"
 data_dir = "D:/Projects/W1z4rDV1510n/runtime/brains/market-django-20260708-v3"
 
 [resource_budget]
-max_resident_bytes = 536870912
+# 8 GB on the 32 GB production box — ~2.7M terminals/pool eviction target at
+# the measured ~1000 bytes/terminal. The node-level politeness gate
+# (W1Z4RD_TIER_MIN_SYS_AVAIL_MB) still overrides when the machine runs low.
+max_resident_bytes = 8589934592
 max_neurons = 1000000
 max_propagation_steps = 64
 max_learning_steps_per_second = 2000
 
-[[feedback_loops]]
-source_pool = "outcome"
-target_pool = "ohlcv"
-signal = "prediction_error"
-gain = 1.0
-delay_ticks = 1
-
-[[feedback_loops]]
-source_pool = "outcome"
-target_pool = "news"
-signal = "prediction_error"
-gain = 0.5
-delay_ticks = 1
+# Feedback loops DISABLED 2026-07-09: prediction_error loops at gain 1.0/0.5
+# corrupted supervised consolidation — train recall fell from 100% to 30%
+# with the loops active (measured, exp11 vs exp12; identical brain otherwise).
+# The mechanism injects error frames into the sensory pools during training
+# ticks, polluting the atom stream the bindings form over. Re-enable only
+# after the loop pathway is gated off supervised consolidation ticks (and
+# start from a far smaller gain).
+#
+# [[feedback_loops]]
+# source_pool = "outcome"
+# target_pool = "ohlcv"
+# signal = "prediction_error"
+# gain = 1.0
+# delay_ticks = 1
+#
+# [[feedback_loops]]
+# source_pool = "outcome"
+# target_pool = "news"
+# signal = "prediction_error"
+# gain = 0.5
+# delay_ticks = 1

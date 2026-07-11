@@ -883,11 +883,31 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
                     let path = ckpt_dir.join("brain.bin");
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(secs));
+                        // Defer when the machine is below the politeness
+                        // floor: a checkpoint holds the brain lock for the
+                        // whole save, starving the eviction passes exactly
+                        // when they're needed most.
+                        let floor: u64 = std::env::var("W1Z4RD_TIER_MIN_SYS_AVAIL_MB")
+                            .ok().and_then(|v| v.parse().ok()).unwrap_or(4_096);
+                        if floor > 0 {
+                            let avail = w1z4rd_brain::tier_orchestrator::
+                                TierOrchestrator::system_available_mb();
+                            if avail < floor {
+                                tracing::warn!(
+                                    "brain auto-checkpoint deferred: {} MB available < {} MB floor",
+                                    avail, floor);
+                                continue;
+                            }
+                        }
+                        let t0 = std::time::Instant::now();
                         let brain = ckpt_state.brain.blocking_lock();
+                        let lock_wait = t0.elapsed();
+                        let t1 = std::time::Instant::now();
                         match brain.checkpoint(&path) {
                             Ok(()) => tracing::info!(
-                                "brain auto-checkpoint saved to {} (tick {})",
-                                path.display(), brain.fabric().current_tick()),
+                                "brain auto-checkpoint saved to {} (tick {}, lock-wait {:.1}s, save {:.1}s)",
+                                path.display(), brain.fabric().current_tick(),
+                                lock_wait.as_secs_f32(), t1.elapsed().as_secs_f32()),
                             Err(e) => tracing::warn!(
                                 "brain auto-checkpoint failed: {}", e),
                         }
