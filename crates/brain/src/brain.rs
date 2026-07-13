@@ -179,17 +179,20 @@ impl MomentFingerprint {
     }
 }
 
-// Equality + Hash on MomentFingerprint only consider `pairs` so the
-// dedup index treats the same firing SET as one fingerprint
-// regardless of firing order.  `ordered_per_pool` is metadata used
-// only at promotion time.
+// A binding is a temporal episode, not merely a bag of fired neurons.
+// `pairs` keeps the canonical set/multiset signature while
+// `ordered_per_pool` distinguishes anagrams and reordered source/code
+// sequences that carry different meaning.
 impl std::cmp::PartialEq for MomentFingerprint {
-    fn eq(&self, other: &Self) -> bool { self.pairs == other.pairs }
+    fn eq(&self, other: &Self) -> bool {
+        self.pairs == other.pairs && self.ordered_per_pool == other.ordered_per_pool
+    }
 }
 impl std::cmp::Eq for MomentFingerprint {}
 impl std::hash::Hash for MomentFingerprint {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.pairs.hash(state);
+        self.ordered_per_pool.hash(state);
     }
 }
 
@@ -2135,6 +2138,14 @@ impl Brain {
             if bind_target_members.is_empty() { continue; }
             if bind_q_atoms.is_empty() && bind_q_concepts.is_empty() { continue; }
 
+            // Ordered equality is direct episodic evidence, not a fuzzy
+            // overlap score.  Compute it before the grounding floor: broad
+            // curricula can make an exact binding's set-based score share a
+            // band with OOV partial overlap, but an unseen query cannot equal
+            // a stored training sequence.  This is therefore both recall-
+            // preserving and OOV-honest.
+            let seq_match = !query_seq.is_empty() && bind_q_atoms == query_seq;
+
             // Compute score: prefer concept-tier when concept members
             // overlap firing concepts; else atom-tier.
             //
@@ -2181,7 +2192,7 @@ impl Brain {
             // preempt and breaks OOV honesty.
             let concept_ok = concept_score >= min_atom_score
                           && atom_score    >= 0.20;
-            let atom_ok    = atom_score    >= min_atom_score;
+            let atom_ok    = seq_match || atom_score >= min_atom_score;
             if !concept_ok && !atom_ok { continue; }
 
             // Concept-tier match preempts atom-tier ONLY when the
@@ -2231,8 +2242,6 @@ impl Brain {
             // signal than just atom-set match.  Distinguishes 'sad'
             // query from 'das' binding even though both have the same
             // multiset.  Empty query_seq disables this check.
-            let seq_match = !query_seq.is_empty() && bind_q_atoms == query_seq;
-
             let consider = match &best {
                 None => true,
                 Some((_, prev_score, prev_target_count, prev_has_concept, prev_seq_match)) => {

@@ -11,16 +11,8 @@ max_neurons = 10000000
 max_propagation_steps = 64
 max_learning_steps_per_second = 1000
 
-[[feedback_loops]]
-source_pool = "response"
-target_pool = "prompt"
-signal = "decode_precision"
-gain = 1.0
-delay_ticks = 0
-
-[[feedback_loops]]
-source_pool = "response"
-target_pool = "context"
-signal = "prediction_error"
-gain = 0.5
-delay_ticks = 1
+# Do not feed hashed internal traces into prompt/context sensory pools.
+# Feedback observations participate in Hebbian moments by design; targeting
+# these pools polluted supervised prompt -> response fingerprints and caused
+# a measured toddler collapse from 32/32 to 0/32.  A future recurrent coding
+# topology should use a dedicated meta/working-memory pool instead.

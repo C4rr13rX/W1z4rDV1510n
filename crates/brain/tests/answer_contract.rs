@@ -183,3 +183,72 @@ fn trained_binding_does_not_decode_collapsed_target_leaves_twice() {
         "trained readout must serialize ordered target atoms exactly once",
     );
 }
+
+#[test]
+fn trained_binding_survives_wide_window_multi_pair_curriculum() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let mut input = PoolConfig::defaults("prompt", 1);
+    input.recent_atoms_window = 65_536;
+    input.max_concept_member_count = 64;
+    input.decay_rate = 0.00002;
+    input.prune_floor = 0.001;
+    let mut output = PoolConfig::defaults("response", 4);
+    output.recent_atoms_window = 65_536;
+    output.max_concept_member_count = 64;
+    output.decay_rate = 0.00002;
+    output.prune_floor = 0.001;
+    brain.create_pool(input, Box::new(BytePassthroughEncoding { prefix: "prompt" }));
+    brain.create_pool(output, Box::new(BytePassthroughEncoding { prefix: "response" }));
+
+    let pairs: &[(&[u8], &[u8])] = &[
+        (b"dog", b"animal"), (b"cat", b"animal"), (b"cow", b"animal"),
+        (b"horse", b"animal"), (b"bird", b"animal"), (b"fish", b"animal"),
+        (b"apple", b"food"), (b"banana", b"food"), (b"bread", b"food"),
+        (b"cake", b"food"), (b"milk", b"food"),
+        (b"car", b"vehicle"), (b"truck", b"vehicle"), (b"bike", b"vehicle"),
+        (b"plane", b"vehicle"), (b"boat", b"vehicle"),
+        (b"red", b"color"), (b"blue", b"color"), (b"green", b"color"),
+        (b"yellow", b"color"),
+        (b"ball", b"toy"), (b"doll", b"toy"), (b"kite", b"toy"),
+        (b"drum", b"toy"),
+        (b"tree", b"nature"), (b"flower", b"nature"), (b"river", b"nature"),
+        (b"mountain", b"nature"),
+        (b"hand", b"body"), (b"foot", b"body"), (b"eye", b"body"),
+        (b"mouth", b"body"),
+    ];
+    for &(prompt, response) in pairs {
+        for _ in 0..8 {
+            brain.observe(1, prompt);
+            brain.observe(4, response);
+            brain.advance_tick();
+        }
+    }
+
+    brain.activate_for_prediction(1, b"dog");
+    assert_eq!(
+        brain.decode_best_trained_binding(1, 4),
+        Some(b"animal".to_vec()),
+        "a later curriculum must not make an exact earlier binding undecodable",
+    );
+}
+
+#[test]
+fn reordered_sequences_form_distinct_binding_episodes() {
+    let (mut brain, input, output) = build_two_pool_brain();
+    for _ in 0..3 {
+        brain.observe(input, b"abc");
+        brain.observe(output, b"first");
+        brain.advance_tick();
+    }
+    for _ in 0..3 {
+        brain.observe(input, b"cba");
+        brain.observe(output, b"second");
+        brain.advance_tick();
+    }
+
+    brain.activate_for_prediction(input, b"abc");
+    assert_eq!(brain.decode_best_trained_binding(input, output), Some(b"first".to_vec()));
+    brain.clear_prediction_activation();
+    brain.activate_for_prediction(input, b"cba");
+    assert_eq!(brain.decode_best_trained_binding(input, output), Some(b"second".to_vec()));
+}

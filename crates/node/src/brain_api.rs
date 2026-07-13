@@ -21,7 +21,7 @@ use axum::{Json, Router, extract::State, routing::{get, post}};
 use serde_json::json;
 use tokio::sync::Mutex;
 use w1z4rd_brain::{Brain, BrainConfig, BrainDeploymentSpec, BrainIdentitySpec, PoolConfig, PoolPrototypeRegistry};
-use w1z4rd_brain::neuron::PoolId;
+use w1z4rd_brain::neuron::{NeuronId, NeuronRef, PoolId};
 use w1z4rd_brain::pool::{AtomEncoding, BytePassthroughEncoding};
 
 // ---------------------------------------------------------------------
@@ -798,6 +798,55 @@ async fn h_pool_concepts(
     Json(json!({ "pool_id": pool_id, "concepts": concepts }))
 }
 
+/// Read-only inspection of exact ordered bindings for one query.
+async fn h_binding_diagnose(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
+    let tp = req.get("target_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
+    let mut brain = s.brain.lock().await;
+    let known = brain.activate_for_prediction(qp, text.as_bytes());
+    let query_seq = brain.fabric().pool(qp)
+        .map(|p| p.read().last_observed_sequence().to_vec())
+        .unwrap_or_default();
+    let mut exact = Vec::new();
+    if let (Some(qh), Some(th), Some(bh)) = (
+        brain.fabric().pool(qp), brain.fabric().pool(tp),
+        brain.fabric().pool(brain.binding_pool_id()),
+    ) {
+        let q = qh.read();
+        let t = th.read();
+        let bindings = bh.read();
+        for binding in bindings.iter_neurons().filter(|n| !n.is_atom()) {
+            let q_atoms: Vec<NeuronId> = binding.members.iter()
+                .filter(|m| m.pool == qp && q.get(m.neuron).is_some_and(|n| n.is_atom()))
+                .map(|m| m.neuron).collect();
+            if q_atoms != query_seq { continue; }
+            let target_atoms: Vec<NeuronRef> = binding.members.iter()
+                .filter(|m| m.pool == tp && t.get(m.neuron).is_some_and(|n| n.is_atom()))
+                .copied().collect();
+            exact.push(json!({
+                "binding_id": binding.id,
+                "use_count": binding.use_count,
+                "query_atom_count": q_atoms.len(),
+                "target_atom_count": target_atoms.len(),
+                "target": String::from_utf8_lossy(&t.decode_concept_members(&target_atoms)),
+            }));
+            if exact.len() >= 32 { break; }
+        }
+    }
+    brain.clear_prediction_activation();
+    Json(json!({
+        "learning": false,
+        "known_atom_count": known.len(),
+        "query_sequence_length": query_seq.len(),
+        "exact_binding_count": exact.len(),
+        "exact_bindings": exact,
+    }))
+}
+
 async fn h_retune(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
@@ -1176,6 +1225,7 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/logic/recognize",        post(h_logic_recognize))
         .route("/chat",                   post(h_brain_chat))
         .route("/pool/concepts",          post(h_pool_concepts))
+        .route("/binding/diagnose",        post(h_binding_diagnose))
         .with_state(state.clone())
         .merge(brain_phase_routes(state))
 }
