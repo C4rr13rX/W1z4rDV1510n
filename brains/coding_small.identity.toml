@@ -9,6 +9,12 @@ id = 1
 prototype = "byte-passthrough"
 atom_encoding_prefix = "prompt"
 kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 64
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
 
 [[pools]]
 name = "context"
@@ -16,10 +22,22 @@ id = 2
 prototype = "byte-passthrough"
 atom_encoding_prefix = "context"
 kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 64
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
 
 [[pools]]
 name = "response"
-id = 3
+id = 4
 prototype = "byte-passthrough"
 atom_encoding_prefix = "response"
 kind = "Action"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 64
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001

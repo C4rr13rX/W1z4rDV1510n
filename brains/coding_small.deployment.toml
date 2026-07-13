@@ -3,8 +3,11 @@ identity_path = "brains/coding_small.identity.toml"
 data_dir = "runtime/brains/coding-small-a"
 
 [resource_budget]
-max_resident_bytes = 268435456
-max_neurons = 500000
+# Keep the hot set bounded while allowing the curriculum to grow into the
+# attached SSD cold tier.  The prior 256 MiB / 500k-neuron ceiling is below
+# the observed size of the foundation curricula alone.
+max_resident_bytes = 2147483648
+max_neurons = 10000000
 max_propagation_steps = 64
 max_learning_steps_per_second = 1000
 

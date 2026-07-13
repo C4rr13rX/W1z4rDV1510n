@@ -2287,13 +2287,27 @@ impl Brain {
         // Decode the binding's target-pool members.
         let target_handle = self.fabric.pool(target_pool)?;
         let t = target_handle.read();
-        // Filter members to target pool only.
+        // A promoted binding can contain both the ordered target atoms and
+        // concepts that collapsed from those same atoms in the training
+        // moment.  Recursively decoding both serializes the leaves twice
+        // (for example `animal` + an `a` concept became `animala`).  The
+        // moment's ordered atoms are the lossless response representation;
+        // use concepts only for older/concept-only bindings that have no
+        // target atoms.
         let target_members: Vec<NeuronRef> = bnode.members.iter()
             .filter(|m| m.pool == target_pool)
             .copied()
             .collect();
         if target_members.is_empty() { return None; }
-        let bytes = t.decode_concept_members(&target_members);
+        let target_atoms: Vec<NeuronRef> = target_members.iter()
+            .filter(|m| t.get(m.neuron).is_some_and(|n| n.is_atom()))
+            .copied()
+            .collect();
+        let bytes = if target_atoms.is_empty() {
+            t.decode_concept_members(&target_members)
+        } else {
+            t.decode_concept_members(&target_atoms)
+        };
         // Stage 17.5: collect ALL members of the winning binding (across
         // every pool, not just target).  These are the neurons that
         // participated in this successful decode and should receive the

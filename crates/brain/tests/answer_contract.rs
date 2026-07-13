@@ -162,3 +162,24 @@ fn stats_track_developmental_progression() {
         "5 reps of the same X/Y multi-pool firing must promote a binding concept (threshold default 3); got total_binding={}",
         mature.total_binding);
 }
+
+#[test]
+fn trained_binding_does_not_decode_collapsed_target_leaves_twice() {
+    let (mut brain, pool_a, pool_b) = build_two_pool_brain();
+
+    // Repetition promotes both atom sequences and hierarchical concepts in
+    // the target pool.  The binding therefore carries atoms plus concepts
+    // derived from the same response leaves.
+    for _ in 0..8 {
+        brain.observe(pool_a, b"dog");
+        brain.observe(pool_b, b"animal");
+        brain.advance_tick();
+    }
+
+    brain.observe(pool_a, b"dog");
+    assert_eq!(
+        brain.decode_best_trained_binding(pool_a, pool_b),
+        Some(b"animal".to_vec()),
+        "trained readout must serialize ordered target atoms exactly once",
+    );
+}
