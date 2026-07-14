@@ -1049,6 +1049,11 @@ async fn h_pretrain_binding(
     }
     let mut brain = s.brain.lock().await;
     let binding_id = brain.pretrain_binding_episode(&frames);
+    if binding_id.is_some() {
+        if let Err(error) = brain.store_clone().flush() {
+            return Json(json!({"error": format!("WAL flush failed: {}", error)}));
+        }
+    }
     Json(json!({
         "ok": binding_id.is_some(),
         "binding_id": binding_id,
@@ -1097,6 +1102,11 @@ async fn h_pretrain_bindings(
         .map(|frames| brain.pretrain_binding_episode(frames))
         .collect();
     let accepted = binding_ids.iter().filter(|id| id.is_some()).count();
+    if accepted > 0 {
+        if let Err(error) = brain.store_clone().flush() {
+            return Json(json!({"error": format!("WAL flush failed: {}", error)}));
+        }
+    }
     Json(json!({
         "ok": accepted == binding_ids.len(),
         "accepted": accepted,
