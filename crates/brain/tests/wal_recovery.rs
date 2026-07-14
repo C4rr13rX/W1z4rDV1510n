@@ -183,3 +183,15 @@ fn post_checkpoint_direct_bindings_are_queryable_after_wal_replay() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn replay_does_not_poison_eviction_without_a_persisted_cold_offset() {
+    let mut pool = Pool::new(
+        PoolConfig::defaults("text", 1),
+        Box::new(BytePassthroughEncoding { prefix: "t" }),
+    );
+    let id = pool.observe_frame(b"a", 1, None)[0];
+    pool.replay_neuron_evicted(id);
+    assert!(!pool.is_evicted(id));
+    assert!(pool.get(id).is_some());
+}

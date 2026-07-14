@@ -1376,20 +1376,14 @@ impl Pool {
     /// Caller must have already replayed the corresponding
     /// AtomCreated/ConceptEmerged event so the slot exists.
     ///
-    /// Note: the current `NeuronEvicted` event variant doesn't carry
-    /// the cold-tier offset.  Until the event format is extended, this
-    /// method records the offset as 0 (a poison value) and emits a
-    /// tracing::warn — callers using recovery to rebuild eviction
-    /// state should rely on the PoolSnapshot's `cold_offsets` (Stage
-    /// 17.4 step 5) which IS persisted in brain.bin.
+    /// Note: the current `NeuronEvicted` event variant doesn't carry the
+    /// cold-tier offset. If an eviction happened after the checkpoint, the
+    /// restored snapshot still contains the complete resident neuron, so the
+    /// safe recovery is to keep it resident and let the orchestrator evict it
+    /// again. Installing a guessed/zero offset would make paging corrupt.
     pub fn replay_neuron_evicted(&mut self, id: NeuronId) {
         if !self.cold_offsets.contains_key(&id) {
-            tracing::warn!(
-                "replay_neuron_evicted: id={} has no cold offset \
-                in snapshot; eviction tag set without paging info",
-                id,
-            );
-            self.cold_offsets.insert(id, 0);
+            return;
         }
         self.evicted.insert(id);
     }
