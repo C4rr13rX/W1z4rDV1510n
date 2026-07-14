@@ -220,8 +220,10 @@ fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
 }
 
 /// Load a brain from `<data_dir>/brain.bin` if it exists, else build a
-/// fresh one with the default topology.  WAL replay is the caller's
-/// responsibility.
+/// fresh one with the default topology. Replays the WAL tail after the most
+/// recent snapshot marker, then attaches the same WAL for all future
+/// mutations. Keeping this in the shared loader makes brain-only, embedded,
+/// and merged-node modes obey the same durability contract.
 pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let checkpoint = data_dir.join("brain.bin");
     let identity = configured_identity()?;
@@ -275,6 +277,43 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
             None => build_default_brain()?,
         }
     };
+    // Recover mutations accepted after brain.bin's last SnapshotMarker
+    // before attaching the live writer. Applying through the initial
+    // NoopStore avoids echoing recovered events back into the WAL.
+    match w1z4rd_brain::store::load_events_after_marker(data_dir) {
+        Ok(events) if !events.is_empty() => {
+            let stats = brain.apply_wal_events(&events);
+            tracing::info!(
+                events = stats.events_total,
+                last_tick = stats.last_tick,
+                events_since_snapshot = stats.events_since_snapshot,
+                "replayed embedded-brain WAL tail"
+            );
+        }
+        Ok(_) => tracing::info!("embedded-brain WAL has no post-snapshot events"),
+        Err(error) => tracing::warn!(
+            %error,
+            data_dir = %data_dir.display(),
+            "embedded-brain WAL replay failed; continuing from brain.bin"
+        ),
+    }
+    match w1z4rd_brain::MmapWalStore::open(data_dir) {
+        Ok(wal) => {
+            let store: std::sync::Arc<dyn w1z4rd_brain::Store> =
+                std::sync::Arc::new(wal);
+            brain.set_store(store);
+            tracing::info!(
+                wal = %data_dir.join("brain.wal").display(),
+                "attached embedded-brain WAL"
+            );
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            data_dir = %data_dir.display(),
+            "embedded-brain WAL attach failed; checkpoint-only durability remains"
+        ),
+    }
+
     // Attach cold-tier files to every pool so the continuous tier
     // orchestrator can actually evict — without this, the orchestrator
     // sees `has_storage_tier()==false` and skips every pass, which
