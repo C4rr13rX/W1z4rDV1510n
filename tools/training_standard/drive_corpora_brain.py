@@ -233,6 +233,17 @@ def post_pretrain_batch(episodes: list[dict]) -> tuple[bool, str]:
     return True, ""
 
 
+def write_progress(path: Path, payload: dict) -> None:
+    """Atomically publish the last fully accepted logical corpus offset."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
 def read_corpus_jsonl(path: Path, *, skip_rows: int = 0,
                       limit_rows: int | None = None) -> list[dict]:
     """Read a bounded logical-row window from a JSONL corpus.
@@ -425,7 +436,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 start_row: int = 0,
                 direct_pretrain: bool = False,
                 input_path: str = "",
-                batch_size: int = 16) -> dict:
+                batch_size: int = 16,
+                progress_path: Path | None = None) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -484,31 +496,55 @@ def drive_one(script, repeats: int, project_root: Path,
 
         if direct_pretrain:
             episodes = []
-            for row in rows:
+            batch_next_row = start_row
+            for row_index, row in enumerate(rows):
+                logical_next_row = start_row + row_index + 1
                 prompt = (row.get("prompt") or row.get("question") or "").strip()
                 resp = (row.get("response") or row.get("answer") or "").strip()
                 if not prompt or not resp:
+                    batch_next_row = logical_next_row
                     continue
                 context = row.get("ctx") if isinstance(row.get("ctx"), dict) else None
                 for _ in range(repeats):
                     episodes.append(_pretrain_episode(prompt, resp, context))
+                batch_next_row = logical_next_row
                 if len(episodes) >= batch_size:
                     ok, err = post_pretrain_batch(episodes)
                     if ok:
                         summary["posted_ok"] += len(episodes)
+                        if progress_path is not None:
+                            write_progress(progress_path, {
+                                "script_id": script.id,
+                                "corpus": str(corpus_path),
+                                "next_row": batch_next_row,
+                                "accepted_episodes": summary["posted_ok"],
+                                "updated_unix": time.time(),
+                            })
                     else:
                         summary["posted_fail"] += len(episodes)
-                        if verbose:
-                            print(f"  [{script.id}] batch post fail: {err}", flush=True)
+                        raise RuntimeError(
+                            f"[{script.id}] batch rejected at logical row "
+                            f"{batch_next_row}: {err}"
+                        )
                     episodes = []
             if episodes:
                 ok, err = post_pretrain_batch(episodes)
                 if ok:
                     summary["posted_ok"] += len(episodes)
+                    if progress_path is not None:
+                        write_progress(progress_path, {
+                            "script_id": script.id,
+                            "corpus": str(corpus_path),
+                            "next_row": batch_next_row,
+                            "accepted_episodes": summary["posted_ok"],
+                            "updated_unix": time.time(),
+                        })
                 else:
                     summary["posted_fail"] += len(episodes)
-                    if verbose:
-                        print(f"  [{script.id}] batch post fail: {err}", flush=True)
+                    raise RuntimeError(
+                        f"[{script.id}] final batch rejected at logical row "
+                        f"{batch_next_row}: {err}"
+                    )
             if verbose:
                 print(f"  [{script.id}] direct pretrain done in {time.time()-t0:.1f}s",
                       flush=True)
@@ -629,6 +665,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-size", type=int, default=16,
                      help="direct-pretrain episodes per request (1..256); "
                           "smaller batches keep live inference responsive")
+    p.add_argument("--progress-path", type=Path,
+                     help="atomically record the next fully accepted logical "
+                          "row after every direct-pretrain batch")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -697,7 +736,8 @@ def main(argv: list[str] | None = None) -> int:
                             start_row=args.start_row,
                             direct_pretrain=args.direct_pretrain,
                             input_path=args.input_path,
-                            batch_size=args.batch_size)
+                            batch_size=args.batch_size,
+                            progress_path=args.progress_path)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
