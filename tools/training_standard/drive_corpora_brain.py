@@ -174,19 +174,34 @@ def post_xpool_pair(prompt: str, response: str) -> tuple[bool, str]:
     return True, ""
 
 
-def read_corpus_jsonl(path: Path) -> list[dict]:
+def read_corpus_jsonl(path: Path, *, skip_rows: int = 0,
+                      limit_rows: int | None = None) -> list[dict]:
+    """Read a bounded logical-row window from a JSONL corpus.
+
+    Blank or malformed physical lines do not count toward ``skip_rows``.
+    Keeping only the requested window in memory makes multi-gigabyte corpora
+    safe to train as independently benchmarked, resumable chunks.
+    """
     if not path.exists():
         return []
     out: list[dict] = []
     with path.open("r", encoding="utf-8") as fh:
+        valid_index = 0
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if valid_index < skip_rows:
+                valid_index += 1
+                continue
+            out.append(row)
+            valid_index += 1
+            if limit_rows is not None and len(out) >= limit_rows:
+                break
     return out
 
 
@@ -347,7 +362,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 inter_post_sleep: float = 0.05,
                 burst: bool = False,
                 midcheck_rows: int = 50_000,
-                limit_rows: int | None = None) -> dict:
+                limit_rows: int | None = None,
+                start_row: int = 0) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -378,21 +394,23 @@ def drive_one(script, repeats: int, project_root: Path,
         "burst":       burst,
         "smoke_ok":    None,
         "target":      "brain_server",
+        "start_row":   start_row,
     }
     for inp in script.inputs:
         if inp.kind != "corpus":
             continue
         corpus_path = project_root / inp.path
-        rows = read_corpus_jsonl(corpus_path)
+        rows = read_corpus_jsonl(
+            corpus_path, skip_rows=start_row, limit_rows=limit_rows
+        )
         if not rows:
             print(f"  [{script.id}] corpus missing or empty: {corpus_path}",
                     flush=True)
             continue
-        if limit_rows is not None and len(rows) > limit_rows:
-            rows = rows[:limit_rows]
-            if verbose:
-                print(f"  [{script.id}] corpus limited to {limit_rows} rows "
-                      f"(--limit-rows)", flush=True)
+        if verbose and (start_row or limit_rows is not None):
+            end_row = start_row + len(rows)
+            print(f"  [{script.id}] logical rows [{start_row}, {end_row})",
+                  flush=True)
         summary["pairs"] += len(rows)
         smoke_ran = False
         t0 = time.time()
@@ -500,6 +518,9 @@ def main(argv: list[str] | None = None) -> int:
                           "(useful for smoke tests on large corpora).  "
                           "Applies BEFORE repeats — N rows are observed "
                           "`repeats` times.")
+    p.add_argument("--start-row", type=int, default=0,
+                     help="skip this many valid JSONL rows before reading; "
+                          "combine with --limit-rows for resumable chunks")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -558,7 +579,8 @@ def main(argv: list[str] | None = None) -> int:
                             inter_post_sleep=args.inter_post_sleep,
                             burst=args.burst,
                             midcheck_rows=args.midcheck_rows,
-                            limit_rows=args.limit_rows)
+                            limit_rows=args.limit_rows,
+                            start_row=args.start_row)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",

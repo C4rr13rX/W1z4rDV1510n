@@ -1479,6 +1479,7 @@ async fn h_brain_chat(
     }
 
     // Authoritative trained-binding decode — Phase B v2.
+    let raw_is_exact = brain.has_exact_trained_binding(POOL_TEXT, action_pool);
     let raw_trained = brain.decode_best_trained_binding(POOL_TEXT, action_pool);
     let mut feature_candidates = composition_features
         .as_ref()
@@ -1543,6 +1544,11 @@ async fn h_brain_chat(
         exact_complete_manifest
     } else if composed.is_some() {
         composed
+    } else if raw_is_exact && raw_trained.is_some() {
+        // A directly observed ordered atom episode is stronger evidence than
+        // a broad diagnostic feature that happens to co-fire.  Novel
+        // paraphrases still flow through exact_feature below.
+        raw_trained.clone()
     } else if exact_feature.is_some() {
         exact_feature
     } else if raw_trained.is_some() {
@@ -1555,22 +1561,36 @@ async fn h_brain_chat(
     let trained_decode: Option<String> =
         trained_bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
 
-    // Autonomous fallback — EEM chain + annealer + multi-fact.
-    let xpool = brain.integrate_autonomous(
-        POOL_TEXT,
-        action_pool,
-        /*fabric_threshold*/ 0.0,
-        /*chain_max_depth*/ 4,
-        /*chain_max_visit*/ 200,
-    );
-    let xpool_reply: Option<String> = if xpool.grounding.outside_grounding {
+    // Autonomous propagation is a fallback, not a second mandatory decode.
+    // An exact trained binding is already atom-grounded evidence. Running a
+    // full-fabric propagation after finding it made every known prompt pay an
+    // O(total terminals) cost and rendered broad curricula unusable.
+    let has_compositional_evidence = chat_query_pools.len() > 1
+        || composition_features.is_some()
+        || !feature_candidates.is_empty();
+    let xpool = if trained_decode.as_ref().is_some_and(|s| !s.is_empty())
+        || !has_compositional_evidence
+    {
         None
     } else {
-        xpool
-            .answer
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).into_owned())
+        Some(brain.integrate_autonomous(
+            POOL_TEXT,
+            action_pool,
+            /*fabric_threshold*/ 0.0,
+            /*chain_max_depth*/ 4,
+            /*chain_max_visit*/ 200,
+        ))
     };
+    let xpool_reply: Option<String> = xpool.as_ref().and_then(|result| {
+        if result.grounding.outside_grounding {
+            None
+        } else {
+            result
+                .answer
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        }
+    });
 
     let reply = if directly_underspecified {
         // Explicit missing-information evidence inhibits every generative
@@ -1578,10 +1598,12 @@ async fn h_brain_chat(
         String::new()
     } else if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
         td.clone()
-    } else if !xpool.grounding.outside_grounding
-        && !xpool.grounding.speculation_flag
-        && xpool.grounding.integrated_confidence >= 0.30
-        && xpool.grounding.composition_used.len() >= 2
+    } else if xpool.as_ref().is_some_and(|result| {
+        !result.grounding.outside_grounding
+            && !result.grounding.speculation_flag
+            && result.grounding.integrated_confidence >= 0.30
+            && result.grounding.composition_used.len() >= 2
+    })
     {
         // Novel prompts may compose an answer through multiple independently
         // learned pathways. This activation is transient; it is not a new
@@ -1592,11 +1614,19 @@ async fn h_brain_chat(
         String::new()
     };
 
-    let outside_grounding =
-        reply.is_empty() || (trained_decode.is_none() && xpool.grounding.outside_grounding);
+    let outside_grounding = reply.is_empty()
+        || (trained_decode.is_none()
+            && xpool
+                .as_ref()
+                .is_none_or(|result| result.grounding.outside_grounding));
 
-    let decoder = if xpool_reply.as_deref().map_or(false, |a| !a.is_empty()) {
-        if xpool.grounding.eem_confidence.is_some() && xpool.grounding.fabric_confidence < 0.3 {
+    let decoder = if trained_decode.as_ref().is_some_and(|s| !s.is_empty()) {
+        "trained_binding"
+    } else if xpool_reply.as_deref().is_some_and(|a| !a.is_empty()) {
+        let result = xpool.as_ref().expect("xpool reply requires integration result");
+        if result.grounding.eem_confidence.is_some()
+            && result.grounding.fabric_confidence < 0.3
+        {
             "eem"
         } else {
             "multi_pool"
@@ -1607,16 +1637,34 @@ async fn h_brain_chat(
     .to_string();
 
     let activated: Vec<String> = xpool
-        .grounding
-        .composition_used
-        .iter()
-        .filter_map(|nref| {
-            brain
-                .fabric()
-                .pool(nref.pool)
-                .and_then(|p| p.read().get(nref.neuron).map(|n| n.label.clone()))
+        .as_ref()
+        .map(|result| {
+            result
+                .grounding
+                .composition_used
+                .iter()
+                .filter_map(|nref| {
+                    brain
+                        .fabric()
+                        .pool(nref.pool)
+                        .and_then(|p| p.read().get(nref.neuron).map(|n| n.label.clone()))
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
+    let fabric_confidence = xpool
+        .as_ref()
+        .map_or(if trained_decode.is_some() { 1.0 } else { 0.0 }, |result| {
+            result.grounding.fabric_confidence
+        });
+    let integrated_confidence = xpool
+        .as_ref()
+        .map_or(if trained_decode.is_some() { 1.0 } else { 0.0 }, |result| {
+            result.grounding.integrated_confidence
+        });
+    let speculation_flag = xpool
+        .as_ref()
+        .is_some_and(|result| result.grounding.speculation_flag);
     brain.clear_prediction_activation();
 
     Json(json!({
@@ -1625,10 +1673,10 @@ async fn h_brain_chat(
         "decoder":            decoder,
         "predictions":        serde_json::Map::new(),
         "grounding": {
-            "fabric_confidence":     xpool.grounding.fabric_confidence,
-            "integrated_confidence": xpool.grounding.integrated_confidence,
+            "fabric_confidence":     fabric_confidence,
+            "integrated_confidence": integrated_confidence,
             "outside_grounding":     outside_grounding,
-            "speculation_flag":      xpool.grounding.speculation_flag,
+            "speculation_flag":      speculation_flag,
         },
         "activated_concepts": activated,
         "word_activations":   Vec::<serde_json::Value>::new(),

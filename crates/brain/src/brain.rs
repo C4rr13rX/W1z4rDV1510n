@@ -566,6 +566,13 @@ pub struct Brain {
     /// "Consolidated" tier promotion — these have an EEM grounded
     /// fact and have been gossiped to peers.
     promoted_fingerprints: AHashMap<MomentFingerprint, NeuronId>,
+    /// Exact ordered-sequence retrieval index.  Trained prompt lookup used
+    /// to scan every binding and every member on each decode, making latency
+    /// grow linearly with the curriculum.  This derived (non-persisted) index
+    /// narrows exact episodic recall to bindings that contain the observed
+    /// query sequence and requested target pool.  It is rebuilt on restore.
+    binding_sequence_index:
+        AHashMap<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>,
     /// Count of advance_tick calls that produced a non-empty
     /// fingerprint.  Drives the pressure-feedback loop along with
     /// `len(tentative_promoted) + len(promoted_fingerprints)`.
@@ -716,6 +723,7 @@ impl Brain {
             lifetime_recurrences: AHashMap::new(),
             tentative_promoted: AHashMap::new(),
             promoted_fingerprints: AHashMap::new(),
+            binding_sequence_index: AHashMap::new(),
             total_observations: 0,
             current_threshold: initial_threshold,
             last_pressure_check_obs: 0,
@@ -1467,7 +1475,57 @@ impl Brain {
                 }
             }
         }
+        self.index_binding_members(id, &members);
         Some(id)
+    }
+
+    fn index_binding_members(&mut self, binding_id: NeuronId, members: &[NeuronRef]) {
+        let mut atom_sequences: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        for member in members {
+            let Some(pool) = self.fabric.pool(member.pool) else {
+                continue;
+            };
+            if pool.read().get(member.neuron).is_some_and(|n| n.is_atom()) {
+                atom_sequences
+                    .entry(member.pool)
+                    .or_default()
+                    .push(member.neuron);
+            }
+        }
+        let represented: Vec<PoolId> = atom_sequences.keys().copied().collect();
+        for (&query_pool, sequence) in &atom_sequences {
+            if sequence.is_empty() {
+                continue;
+            }
+            for &target_pool in &represented {
+                if target_pool == query_pool {
+                    continue;
+                }
+                let ids = self
+                    .binding_sequence_index
+                    .entry((query_pool, target_pool, sequence.clone()))
+                    .or_default();
+                if !ids.contains(&binding_id) {
+                    ids.push(binding_id);
+                }
+            }
+        }
+    }
+
+    fn rebuild_binding_sequence_index(&mut self) {
+        self.binding_sequence_index.clear();
+        let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) else {
+            return;
+        };
+        let bindings: Vec<(NeuronId, Vec<NeuronRef>)> = binding_pool
+            .read()
+            .iter_neurons()
+            .filter(|n| !n.is_atom())
+            .map(|n| (n.id, n.members.clone()))
+            .collect();
+        for (id, members) in bindings {
+            self.index_binding_members(id, &members);
+        }
     }
 
     /// Raw read of a pool's current activation map.  No interpretation,
@@ -2424,12 +2482,26 @@ impl Brain {
         // Walk binding-pool concepts, score each.
         let bp = self.fabric.pool(bpid)?;
         let bp_read = bp.read();
+        let exact_candidates = if query_seq.is_empty() {
+            None
+        } else {
+            self.binding_sequence_index
+                .get(&(query_pool, target_pool, query_seq.clone()))
+        };
+        let candidate_ids: Vec<NeuronId> = match exact_candidates {
+            Some(ids) => ids.clone(),
+            None => bp_read
+                .iter_neurons()
+                .filter(|n| !n.is_atom())
+                .map(|n| n.id)
+                .collect(),
+        };
         // (binding_id, score, target_member_count, has_concept_match, seq_match)
         let mut best: Option<(NeuronId, f32, usize, bool, bool)> = None;
-        for n in bp_read.iter_neurons() {
-            if n.is_atom() {
+        for binding_id in candidate_ids {
+            let Some(n) = bp_read.get(binding_id) else {
                 continue;
-            }
+            };
             // Partition this binding's members by pool.
             // bind_q_atoms is a Vec (preserves ORDER from the moment
             // fingerprint that promoted this binding).
@@ -2737,6 +2809,24 @@ impl Brain {
         }
 
         if bytes.is_empty() { None } else { Some(bytes) }
+    }
+
+    /// Whether the current ordered atom sequence has a directly observed
+    /// binding to `target_pool`.  This exposes evidence provenance to the API
+    /// router without decoding or scanning the binding pool.
+    pub fn has_exact_trained_binding(
+        &self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+    ) -> bool {
+        let Some(pool) = self.fabric.pool(query_pool) else {
+            return false;
+        };
+        let sequence = pool.read().last_observed_sequence().to_vec();
+        !sequence.is_empty()
+            && self
+                .binding_sequence_index
+                .contains_key(&(query_pool, target_pool, sequence))
     }
 
     /// Decode a target from the joint firing state of several evidence pools.
@@ -6097,7 +6187,7 @@ impl Brain {
         } else {
             snap.current_threshold
         };
-        let brain = Self {
+        let mut brain = Self {
             fabric,
             config,
             binding_pool_id: snap.binding_pool_id,
@@ -6106,6 +6196,7 @@ impl Brain {
             lifetime_recurrences,
             tentative_promoted,
             promoted_fingerprints,
+            binding_sequence_index: AHashMap::new(),
             total_observations: snap.total_observations,
             current_threshold: restored_threshold,
             last_pressure_check_obs: snap.total_observations,
@@ -6123,6 +6214,7 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
         };
+        brain.rebuild_binding_sequence_index();
         (brain, missing)
     }
 

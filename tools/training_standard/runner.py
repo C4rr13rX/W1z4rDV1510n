@@ -58,6 +58,9 @@ _DEFAULT_EVENTS = Path(
     )
 )
 NODE_URL = os.environ.get("W1Z4RD_NODE_URL", "http://127.0.0.1:8090")
+_BRAIN_PREFIX = "" if os.environ.get(
+    "WIZARD_USE_BRAIN_PREFIX", "1"
+).strip().lower() in {"0", "false", "no"} else "/brain"
 
 
 # ── Event log ──────────────────────────────────────────────────────────────
@@ -96,7 +99,7 @@ def read_events(path: Path = _DEFAULT_EVENTS) -> list[dict[str, Any]]:
 def _probe_node(prompt: str, timeout: float = 30.0) -> tuple[str, str]:
     """Send `prompt` to the node's /chat endpoint.  Returns (response, error).
     On HTTP failure response is '' and error is set."""
-    url = f"{NODE_URL.rstrip('/')}/chat"
+    url = f"{NODE_URL.rstrip('/')}{_BRAIN_PREFIX}/chat"
     body = json.dumps({"text": prompt}).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, method="POST",
