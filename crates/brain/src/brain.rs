@@ -573,6 +573,12 @@ pub struct Brain {
     /// query sequence and requested target pool.  It is rebuilt on restore.
     binding_sequence_index:
         AHashMap<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>,
+    /// Sparse associative access for novel character-stream similarity.
+    /// Motifs remain grounded in raw atom sequences; this only avoids
+    /// reconstructing and comparing every learned binding on every query.
+    /// Common-motif postings are bounded because they carry little
+    /// discriminative information and otherwise grow with corpus size.
+    binding_motif_index: AHashMap<(PoolId, [u8; 3]), Vec<NeuronId>>,
     /// Count of advance_tick calls that produced a non-empty
     /// fingerprint.  Drives the pressure-feedback loop along with
     /// `len(tentative_promoted) + len(promoted_fingerprints)`.
@@ -698,6 +704,27 @@ fn byte_match_ratio_local(decoded: &[u8], expected: &[u8]) -> f32 {
     hits as f32 / len as f32
 }
 
+fn normalized_char_motifs(bytes: &[u8]) -> ahash::AHashSet<[u8; 3]> {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut previous_space = true;
+    for byte in bytes.iter().map(|byte| byte.to_ascii_lowercase()) {
+        if byte.is_ascii_alphanumeric() {
+            normalized.push(byte);
+            previous_space = false;
+        } else if !previous_space {
+            normalized.push(b' ');
+            previous_space = true;
+        }
+    }
+    if normalized.last() == Some(&b' ') {
+        normalized.pop();
+    }
+    normalized
+        .windows(3)
+        .map(|window| [window[0], window[1], window[2]])
+        .collect()
+}
+
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
     /// pool is auto-created at pool_id = `binding_pool_config.id`.
@@ -724,6 +751,7 @@ impl Brain {
             tentative_promoted: AHashMap::new(),
             promoted_fingerprints: AHashMap::new(),
             binding_sequence_index: AHashMap::new(),
+            binding_motif_index: AHashMap::new(),
             total_observations: 0,
             current_threshold: initial_threshold,
             last_pressure_check_obs: 0,
@@ -1585,11 +1613,30 @@ impl Brain {
                     ids.push(binding_id);
                 }
             }
+            if let Some(pool) = self.fabric.pool(query_pool) {
+                let pool = pool.read();
+                let refs: Vec<NeuronRef> = sequence
+                    .iter()
+                    .map(|&neuron| NeuronRef { pool: query_pool, neuron })
+                    .collect();
+                let frame = pool.decode_concept_members(&refs);
+                for motif in normalized_char_motifs(&frame) {
+                    let ids = self
+                        .binding_motif_index
+                        .entry((query_pool, motif))
+                        .or_default();
+                    const MAX_MOTIF_POSTINGS: usize = 512;
+                    if ids.len() < MAX_MOTIF_POSTINGS && !ids.contains(&binding_id) {
+                        ids.push(binding_id);
+                    }
+                }
+            }
         }
     }
 
     fn rebuild_binding_sequence_index(&mut self) {
         self.binding_sequence_index.clear();
+        self.binding_motif_index.clear();
         let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) else {
             return;
         };
@@ -3466,27 +3513,7 @@ impl Brain {
         {
             return None;
         }
-        fn motifs(bytes: &[u8]) -> std::collections::HashSet<[u8; 3]> {
-            let mut normalized = Vec::with_capacity(bytes.len());
-            let mut previous_space = true;
-            for byte in bytes.iter().map(|byte| byte.to_ascii_lowercase()) {
-                if byte.is_ascii_alphanumeric() {
-                    normalized.push(byte);
-                    previous_space = false;
-                } else if !previous_space {
-                    normalized.push(b' ');
-                    previous_space = true;
-                }
-            }
-            if normalized.last() == Some(&b' ') {
-                normalized.pop();
-            }
-            normalized
-                .windows(3)
-                .map(|window| [window[0], window[1], window[2]])
-                .collect()
-        }
-        let query_motifs = motifs(query_frame);
+        let query_motifs = normalized_char_motifs(query_frame);
         if query_motifs.is_empty() {
             return None;
         }
@@ -3498,7 +3525,22 @@ impl Brain {
         let target = target_handle.read();
         let mut classes: std::collections::HashMap<Vec<u8>, (f32, u64)> =
             std::collections::HashMap::new();
-        for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
+        let mut posting_lists: Vec<&Vec<NeuronId>> = query_motifs
+            .iter()
+            .filter_map(|motif| self.binding_motif_index.get(&(query_pool, *motif)))
+            .collect();
+        posting_lists.sort_unstable_by_key(|ids| ids.len());
+        let mut candidate_ids = ahash::AHashSet::new();
+        for ids in posting_lists.into_iter().take(8) {
+            candidate_ids.extend(ids.iter().copied());
+        }
+        for binding_id in candidate_ids {
+            let Some(binding) = bindings.get(binding_id) else {
+                continue;
+            };
+            if binding.is_atom() {
+                continue;
+            }
             if !binding
                 .members
                 .iter()
@@ -3521,7 +3563,7 @@ impl Brain {
                 continue;
             }
             let learned_frame = query.decode_concept_members(&source_atoms);
-            let learned_motifs = motifs(&learned_frame);
+            let learned_motifs = normalized_char_motifs(&learned_frame);
             if learned_motifs.is_empty() {
                 continue;
             }
@@ -6273,6 +6315,7 @@ impl Brain {
             tentative_promoted,
             promoted_fingerprints,
             binding_sequence_index: AHashMap::new(),
+            binding_motif_index: AHashMap::new(),
             total_observations: snap.total_observations,
             current_threshold: restored_threshold,
             last_pressure_check_obs: snap.total_observations,
