@@ -2516,6 +2516,19 @@ impl Brain {
         query_pool: PoolId,
         target_pool: PoolId,
     ) -> Option<Vec<u8>> {
+        self.decode_best_trained_binding_with_context(query_pool, target_pool, &[], &[])
+    }
+
+    /// Context-aware raw binding retrieval. Exact ordered sensory evidence is
+    /// always eligible; fuzzy overlap cannot borrow an episode conditioned on
+    /// a pool that is absent from the current query moment.
+    pub fn decode_best_trained_binding_with_context(
+        &self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        active_context_pools: &[PoolId],
+        conditioned_pools: &[PoolId],
+    ) -> Option<Vec<u8>> {
         if query_pool == target_pool {
             return None;
         }
@@ -2664,6 +2677,14 @@ impl Brain {
             // a stored training sequence.  This is therefore both recall-
             // preserving and OOV-honest.
             let seq_match = !query_seq.is_empty() && bind_q_atoms == query_seq;
+            let missing_condition = !seq_match
+                && conditioned_pools.iter().any(|pool_id| {
+                    !active_context_pools.contains(pool_id)
+                        && n.members.iter().any(|member| member.pool == *pool_id)
+                });
+            if missing_condition {
+                continue;
+            }
 
             // Compute score: prefer concept-tier when concept members
             // overlap firing concepts; else atom-tier.

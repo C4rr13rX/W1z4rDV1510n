@@ -1574,7 +1574,14 @@ async fn h_brain_chat(
 
     // Authoritative trained-binding decode — Phase B v2.
     let raw_trained = exact_raw_trained
-        .or_else(|| brain.decode_best_trained_binding(POOL_TEXT, action_pool));
+        .or_else(|| {
+            brain.decode_best_trained_binding_with_context(
+                POOL_TEXT,
+                action_pool,
+                &chat_query_pools,
+                &[POOL_TURN],
+            )
+        });
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {

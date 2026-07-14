@@ -300,3 +300,33 @@ fn direct_pretrain_distinguishes_long_reorderings_with_the_same_atom_inventory()
         Some(b"second".to_vec())
     );
 }
+
+#[test]
+fn fuzzy_raw_recall_requires_context_but_exact_episode_does_not() {
+    let (mut brain, input, output) = build_two_pool_brain();
+    let context = brain.create_pool(
+        PoolConfig::defaults("environment", 5),
+        Box::new(BytePassthroughEncoding { prefix: "environment" }),
+    );
+    brain.designate_action_pool(output);
+    let trained = b"calculate the average and write a Python program".to_vec();
+    assert!(brain
+        .pretrain_binding_episode(&[
+            (input, trained.clone()),
+            (context, br#"{"kind":"math"}"#.to_vec()),
+            (output, b"print((1 + 11) / 2)".to_vec()),
+        ])
+        .is_some());
+
+    brain.activate_for_prediction(input, b"calculate an average using Python");
+    assert_eq!(
+        brain.decode_best_trained_binding_with_context(input, output, &[input], &[context]),
+        None
+    );
+    brain.clear_prediction_activation();
+    brain.activate_for_prediction(input, &trained);
+    assert_eq!(
+        brain.decode_best_trained_binding_with_context(input, output, &[input], &[context]),
+        Some(b"print((1 + 11) / 2)".to_vec())
+    );
+}
