@@ -2417,6 +2417,10 @@ impl Brain {
         query_ids.sort_unstable();
         query_ids.dedup();
         if query_ids.is_empty() { return None; }
+        let min_pool_score = std::env::var("BRAIN_MULTI_MIN_POOL_SCORE").ok()
+            .and_then(|value| value.parse::<f32>().ok()).unwrap_or(0.20).clamp(0.0, 1.0);
+        let min_joint_score = std::env::var("BRAIN_MULTI_MIN_JOINT_SCORE").ok()
+            .and_then(|value| value.parse::<f32>().ok()).unwrap_or(0.0).clamp(0.0, 1.0);
 
         struct QueryState {
             atoms: ahash::AHashSet<NeuronId>,
@@ -2486,7 +2490,7 @@ impl Brain {
                     else { (concept_hits / member_concepts.len() as f32)
                          * (concept_hits / state.concepts.len() as f32) };
                 let pool_score = if exact { 1.0 } else { atom_score.max(concept_score) };
-                if pool_score < 0.20 {
+                if pool_score < min_pool_score {
                     valid = false;
                     break;
                 }
@@ -2496,6 +2500,7 @@ impl Brain {
             }
             if !valid { continue; }
             joint_score = joint_score.powf(1.0 / query_ids.len() as f32);
+            if joint_score < min_joint_score { continue; }
             joint_score *= 1.0 + (binding.use_count.max(1) as f32).ln();
             let candidate = (binding.id, exact_count, joint_score, target_members.len());
             let replace = match best {

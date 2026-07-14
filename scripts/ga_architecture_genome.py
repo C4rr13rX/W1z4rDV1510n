@@ -42,6 +42,7 @@ class PoolGene:
     observes: list[str] = field(default_factory=list)
     sparsity_mode: dict | None = None
     predict_gate_mode: dict | None = None
+    prototype: str = "byte-passthrough"
 
 
 @dataclass
@@ -89,7 +90,7 @@ class ArchitectureGenome:
         identity_pools = []
         for idx, gene in enumerate(self.pools, start=1):
             item = {
-                "name": gene.name, "id": idx, "prototype": "byte-passthrough",
+                "name": gene.name, "id": idx, "prototype": gene.prototype,
                 "atom_encoding_prefix": gene.prefix, "kind": gene.kind,
             }
             if gene.sparsity_mode is not None:
@@ -241,7 +242,8 @@ def load_genome(run_dir: Path) -> ArchitectureGenome:
             explicit.append(EdgeGene(item["source_pool"], target, item["signal"], item["delay_ticks"],
                                      item.get("gain_mode") or {"Constant": item.get("gain", 1.0)}))
     pools = [PoolGene(p["name"], p["kind"], p["atom_encoding_prefix"], observed.get(p["name"], []),
-                      p.get("sparsity_mode"), p.get("predict_gate_mode")) for p in identity["pools"]]
+                      p.get("sparsity_mode"), p.get("predict_gate_mode"),
+                      p.get("prototype", "byte-passthrough")) for p in identity["pools"]]
     route = result["route"]
     genome = ArchitectureGenome(result["genome"], pools, explicit, result.get("generation", 0), [],
                                 route["query_pool"], route["settle_ticks"],
@@ -259,6 +261,9 @@ def fitness(metrics: dict) -> float:
         + 2.0 * metrics.get("oov_honesty", 0.0)
         + 4.0 * metrics.get("directional_edge_over_baseline", 0.0)
         + 2.0 * metrics.get("calibration", 0.0)
+        + 6.0 * metrics.get("execution_correctness", 0.0)
+        + 8.0 * metrics.get("structural_transfer", 0.0)
+        + 4.0 * metrics.get("retention", 0.0)
         - 0.5 * metrics.get("latency_cost", 0.0)
         - 0.5 * metrics.get("memory_cost", 0.0)
     )

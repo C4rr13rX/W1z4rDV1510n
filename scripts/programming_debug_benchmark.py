@@ -117,11 +117,18 @@ def evaluate_case(endpoint: str, case: Case, instruction: str | None = None,
 
 
 def main() -> int:
+    global CAUSAL_FIELDS
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:18310")
     parser.add_argument("--output", type=Path,
                         default=Path("runtime/benchmarks/debug_benchmark.json"))
+    parser.add_argument("--evidence-pools", default=",".join(map(str, CAUSAL_FIELDS)),
+                        help="comma-separated causal pool ids used at inference")
     args = parser.parse_args()
+    selected = {int(value) for value in args.evidence_pools.split(",") if value.strip()}
+    CAUSAL_FIELDS = {pool: field for pool, field in CAUSAL_FIELDS.items() if pool in selected}
+    if not CAUSAL_FIELDS:
+        parser.error("at least one known evidence pool is required")
     exact_cases = [Case(row["id"], row["instruction"], row["source_before"],
                         row["corrected_source"], case.function, case.args,
                         case.expected, case.repair_kind)
