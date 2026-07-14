@@ -45,6 +45,21 @@ STRUCTURAL_TRANSFER = [
          "mean_values", [[]], 0, "empty_input_guard"),
 ]
 
+UNSUPPORTED = [
+    Case("cube_unsupported", "Fix cube so it multiplies the value three times.",
+         "def cube(value):\n    return value + value",
+         "def cube(value):\n    return value * value * value",
+         "cube", [3], 27, "unsupported_cube"),
+    Case("uppercase_unsupported", "Fix shout so it returns uppercase text.",
+         "def shout(text):\n    return text",
+         "def shout(text):\n    return text.upper()",
+         "shout", ["hello"], "HELLO", "unsupported_method"),
+    Case("maximum_unsupported", "Fix maximum so it returns the largest value.",
+         "def maximum(values):\n    return min(values)",
+         "def maximum(values):\n    return max(values)",
+         "maximum", [[2, 9, 4]], 9, "unsupported_builtin"),
+]
+
 
 def b64(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode()).rstrip(b"=").decode()
@@ -54,6 +69,18 @@ def predict(endpoint: str, streams: dict[int, str]) -> str | None:
     payload = {"streams": [{"pool_id": pool, "frame": b64(value)}
                            for pool, value in streams.items()], "target_pool": 4}
     request = urllib.request.Request(endpoint.rstrip("/") + "/brain/predict/multi",
+        data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.loads(response.read())
+    answer = result.get("answer")
+    return base64.urlsafe_b64decode(answer + "===").decode() if answer else None
+
+
+def predict_composed(endpoint: str, source: str, streams: dict[int, str]) -> str | None:
+    payload = {"source": b64(source), "relation_pool": 11,
+               "streams": [{"pool_id": pool, "frame": b64(value)}
+                           for pool, value in streams.items()]}
+    request = urllib.request.Request(endpoint.rstrip("/") + "/brain/repair/predict",
         data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=30) as response:
         result = json.loads(response.read())
@@ -75,8 +102,10 @@ def streams_for(case: Case, instruction: str | None = None) -> dict[int, str]:
 
 
 def evaluate_case(endpoint: str, case: Case, instruction: str | None = None,
-                  exact_reference: bool = False) -> dict:
-    answer = predict(endpoint, streams_for(case, instruction))
+                  exact_reference: bool = False, compose: bool = False) -> dict:
+    streams = streams_for(case, instruction)
+    answer = (predict_composed(endpoint, case.broken, streams) if compose
+              else predict(endpoint, streams))
     result = execute(answer, case) if answer else None
     return {
         "id": case.name,
@@ -101,7 +130,10 @@ def main() -> int:
              for case in exact_cases]
     variation = [evaluate_case(args.endpoint, case, prompt)
                  for case, prompt in zip(VARIANTS, PARAPHRASES)]
-    transfer = [evaluate_case(args.endpoint, case) for case in STRUCTURAL_TRANSFER]
+    transfer = [evaluate_case(args.endpoint, case, compose=True)
+                for case in STRUCTURAL_TRANSFER]
+    unsupported = [evaluate_case(args.endpoint, case, compose=True)
+                   for case in UNSUPPORTED]
     report = {
         "exact": {"passed": sum(row["exact"] for row in exact), "total": len(exact),
                   "rows": exact},
@@ -109,6 +141,8 @@ def main() -> int:
                               "total": len(variation), "rows": variation},
         "structural_transfer": {"passed": sum(row["execution_pass"] for row in transfer),
                                 "total": len(transfer), "rows": transfer},
+        "oov_honesty": {"passed": sum(not row["answered"] for row in unsupported),
+                        "total": len(unsupported), "rows": unsupported},
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")

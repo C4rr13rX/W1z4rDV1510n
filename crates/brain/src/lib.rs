@@ -43,6 +43,7 @@ pub mod store;
 pub mod tier_orchestrator;
 pub mod workspace;
 pub mod crystallizer;
+pub mod code_repair;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, CodeStructureEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig, PretrainReport};
@@ -77,6 +78,7 @@ pub use network::{
 pub use workspace::{CompositionRule, GroundedRelation, PatternValue, RelationPattern,
                     TransientWorkspace, TypedValue};
 pub use crystallizer::{SemanticCrystallizer, SemanticFrame};
+pub use code_repair::{apply_code_repair_relation, apply_relation, CodeRepairError, CodeRepairRelation};
 pub use store::{
     MmapWalStore, NoopStore, RecoveryStats, Store, TerminalDelta, WalEvent,
     replay_into_brain,

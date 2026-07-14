@@ -453,6 +453,76 @@ async fn h_predict_multi(
     }))
 }
 
+/// Select an abstract repair relation from the integrated neural moment, then
+/// execute it against the current raw source. The neural fabric chooses the
+/// transformation; deterministic composition preserves unseen identifiers.
+async fn h_repair_predict(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let relation_pool = req.get("relation_pool").and_then(|v| v.as_u64()).unwrap_or(11) as PoolId;
+    let Some(source_b64) = req.get("source").and_then(|v| v.as_str()) else {
+        return Json(json!({"error": "source must be a base64url frame"}));
+    };
+    let source_bytes = match b64_url_decode(source_b64) {
+        Ok(value) => value,
+        Err(error) => return Json(json!({"error": format!("bad source base64: {}", error)})),
+    };
+    let source = match std::str::from_utf8(&source_bytes) {
+        Ok(value) => value,
+        Err(error) => return Json(json!({"error": format!("source is not UTF-8: {}", error)})),
+    };
+    let Some(streams) = req.get("streams").and_then(|v| v.as_array()) else {
+        return Json(json!({"error": "streams must be an array of {pool_id, frame}"}));
+    };
+    let mut decoded = Vec::new();
+    for stream in streams.iter().take(64) {
+        let Some(pool_id) = stream.get("pool_id").and_then(|v| v.as_u64()) else {
+            return Json(json!({"error": "each stream requires pool_id"}));
+        };
+        let Some(frame) = stream.get("frame").and_then(|v| v.as_str()) else {
+            return Json(json!({"error": "each stream requires a base64url frame"}));
+        };
+        match b64_url_decode(frame) {
+            Ok(bytes) => decoded.push((pool_id as PoolId, bytes)),
+            Err(error) => return Json(json!({"error": format!("bad frame base64: {}", error)})),
+        }
+    }
+    if decoded.is_empty() {
+        return Json(json!({"error": "at least one stream is required"}));
+    }
+
+    let mut brain = s.brain.lock().await;
+    brain.clear_prediction_activation();
+    let mut query_pools = Vec::new();
+    for (pool_id, frame) in &decoded {
+        if brain.fabric().pool(*pool_id).is_none() {
+            brain.clear_prediction_activation();
+            return Json(json!({"error": format!("unknown pool id {}", pool_id)}));
+        }
+        brain.activate_for_prediction(*pool_id, frame);
+        query_pools.push(*pool_id);
+    }
+    let relation = brain.decode_best_trained_binding_multi(&query_pools, relation_pool);
+    brain.clear_prediction_activation();
+    let Some(relation) = relation else {
+        return Json(json!({"integrated": true, "answer": null, "relation": null}));
+    };
+    match w1z4rd_brain::apply_code_repair_relation(source, &relation) {
+        Ok(answer) => Json(json!({
+            "integrated": true,
+            "relation": b64_url_no_pad(&relation),
+            "answer": b64_url_no_pad(answer.as_bytes()),
+        })),
+        Err(error) => Json(json!({
+            "integrated": true,
+            "relation": b64_url_no_pad(&relation),
+            "answer": null,
+            "composition_error": error.to_string(),
+        })),
+    }
+}
+
 async fn h_tick(State(s): State<BrainApiState>) -> Json<u64> {
     let handler_t0 = std::time::Instant::now();
     let lock_t0 = std::time::Instant::now();
@@ -1377,6 +1447,7 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/observe",                post(h_observe))
         .route("/pretrain",               post(h_pretrain))
         .route("/predict/multi",           post(h_predict_multi))
+        .route("/repair/predict",          post(h_repair_predict))
         .route("/tick",                   post(h_tick))
         .route("/integrate",              post(h_integrate))
         .route("/predict",                post(h_predict))

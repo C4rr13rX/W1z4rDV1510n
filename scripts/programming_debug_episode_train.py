@@ -25,6 +25,7 @@ POOL_FIELDS = {
     8: "console_after",
     9: "resolution",
     10: "source_before",
+    11: "repair_relation",
 }
 ACTION_POOL = 4
 
@@ -136,9 +137,25 @@ def generate() -> list[dict]:
             "resolution": json.dumps({"transition": "failure_to_success",
                                       "error_class": error_class,
                                       "repair_kind": case.repair_kind}, sort_keys=True),
+            "repair_relation": json.dumps(repair_relation(case), sort_keys=True,
+                                           separators=(",", ":")),
             "provenance": {"kind": "executed_fixture", "license": "project_native"},
         })
     return episodes
+
+
+def repair_relation(case: Case) -> dict:
+    if case.name == "square_operator":
+        return {"kind": "replace_operator", "from": "+", "to": "*"}
+    if case.name == "negative_comparison":
+        return {"kind": "replace_operator", "from": ">", "to": "<"}
+    if case.name == "average_empty":
+        return {"kind": "guard_empty", "fallback": "0"}
+    if case.name == "odd_parity":
+        return {"kind": "replace_text", "from": "% 2 == 0", "to": "% 2 == 1"}
+    if case.name == "word_frequency_increment":
+        return {"kind": "increment_stored_count", "amount": 1}
+    raise ValueError(f"no repair relation for {case.name}")
 
 
 def b64(value: str) -> str:
