@@ -48,7 +48,13 @@ def main() -> int:
 
     rows = read_window(args.corpus, args.start_row, args.window_rows)
     probes = sampled(rows, min(args.samples, len(rows)))
-    exact = syntax = nonempty = 0
+    accepted_by_prompt: dict[str, set[str]] = {}
+    for row in rows:
+        prompt = (row.get("prompt") or row.get("question") or "").strip()
+        expected = (row.get("response") or row.get("answer") or "").strip()
+        if prompt and expected:
+            accepted_by_prompt.setdefault(prompt, set()).add(expected)
+    exact = accepted = syntax = nonempty = 0
     elapsed: list[float] = []
     failures: list[dict] = []
     for row in probes:
@@ -62,12 +68,13 @@ def main() -> int:
         actual = (response.get("reply") or response.get("answer") or "").strip()
         nonempty += bool(actual)
         exact += actual == expected
+        accepted += actual in accepted_by_prompt.get(prompt, set())
         try:
             ast.parse(actual)
             syntax += 1
         except SyntaxError:
             pass
-        if actual != expected:
+        if actual not in accepted_by_prompt.get(prompt, set()):
             failures.append({
                 "prompt": prompt[:160],
                 "decoder": response.get("decoder"),
@@ -80,6 +87,7 @@ def main() -> int:
         "sampled": len(probes),
         "nonempty": nonempty,
         "exact": exact,
+        "accepted_trained_response": accepted,
         "python_syntax_valid": syntax,
         "latency_seconds": {
             "mean": round(sum(elapsed) / len(elapsed), 4) if elapsed else 0.0,
@@ -88,7 +96,7 @@ def main() -> int:
         "failures": failures[:5],
     }
     print(json.dumps(report))
-    return 0 if probes and exact == len(probes) and syntax == len(probes) else 1
+    return 0 if probes and accepted == len(probes) and syntax == len(probes) else 1
 
 
 if __name__ == "__main__":

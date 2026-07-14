@@ -551,6 +551,10 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     BRAIN_URL = args.brain.rstrip("/")
+    # Mid-training benchmarks share the selected brain endpoint.  The runner
+    # module captures its default at import time, so assigning here prevents
+    # valid training on a custom port from being graded against legacy 8090.
+    runner_mod.NODE_URL = BRAIN_URL
 
     registry = load_registry(runner_mod.REGISTRY_DIR)
     if args.script:

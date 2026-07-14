@@ -1434,6 +1434,26 @@ impl Brain {
             .collect();
         let max_w = binding.config.max_weight;
         let now = self.fabric.current_tick();
+        // Lossless action/code bytes remain members of the binding concept,
+        // but do not each need a second pair of propagation terminals.  A
+        // long source response can contain thousands of repeated byte atoms;
+        // wiring every occurrence bidirectionally caused terminal growth to
+        // dominate both RAM and novel-query propagation.  Exact retrieval
+        // decodes these atom-grounded members directly, while sensory and
+        // internal evidence members retain Hebbian propagation wiring.
+        let terminal_members: Vec<NeuronRef> = members
+            .iter()
+            .copied()
+            .filter(|member| {
+                if Some(member.pool) != self.action_pool_id {
+                    return true;
+                }
+                self.fabric
+                    .pool(member.pool)
+                    .and_then(|pool| pool.read().get(member.neuron).map(|n| !n.is_atom()))
+                    .unwrap_or(false)
+            })
+            .collect();
         // Create the binding concept directly with cross-pool members.
         let id = binding.neuron_count() as NeuronId;
         let mut neuron = Neuron::new_concept(
@@ -1446,7 +1466,7 @@ impl Brain {
         // Wire concept → member terminals top-down so activating the
         // binding fires its constituent neurons in all pools.
         let mut added: usize = 0;
-        for m in &members {
+        for m in &terminal_members {
             if neuron.reinforce_terminal(*m, 0.5, now, max_w) {
                 added += 1;
             }
@@ -1461,7 +1481,7 @@ impl Brain {
         // Wire member → binding terminals bottom-up so co-firing all
         // members activates the binding.
         let binding_ref = NeuronRef::new(self.binding_pool_id, id);
-        for m in &members {
+        for m in &terminal_members {
             if let Some(p) = self.fabric.pool(m.pool) {
                 let mut pp = p.write();
                 let mxw = pp.config.max_weight;

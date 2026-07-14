@@ -1540,15 +1540,15 @@ async fn h_brain_chat(
     let diagnostic_exact_manifest = exact_complete_manifest.is_some();
     let composed = merge_grounded_code_fragments(&feature_candidates)
         .or_else(|| merge_grounded_file_manifests(&feature_candidates));
-    let trained_bytes = if exact_complete_manifest.is_some() {
+    let trained_bytes = if raw_is_exact && raw_trained.is_some() {
+        // Direct sensory evidence is the strongest tier. Derived diagnostic
+        // pools may compose novel requests, but can never overwrite an
+        // ordered prompt episode the brain actually observed.
+        raw_trained.clone()
+    } else if exact_complete_manifest.is_some() {
         exact_complete_manifest
     } else if composed.is_some() {
         composed
-    } else if raw_is_exact && raw_trained.is_some() {
-        // A directly observed ordered atom episode is stronger evidence than
-        // a broad diagnostic feature that happens to co-fire.  Novel
-        // paraphrases still flow through exact_feature below.
-        raw_trained.clone()
     } else if exact_feature.is_some() {
         exact_feature
     } else if raw_trained.is_some() {
