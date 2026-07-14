@@ -3174,6 +3174,33 @@ impl Brain {
         success_pool: Option<PoolId>,
         failure_pool: Option<PoolId>,
     ) -> Vec<Vec<u8>> {
+        self.decode_ranked_feature_bindings_with_context(
+            feature_pool,
+            query_labels,
+            target_pool,
+            max_results,
+            success_pool,
+            failure_pool,
+            &[],
+            &[],
+        )
+    }
+
+    /// Context-aware feature readout. A binding conditioned on one of
+    /// `conditioned_pools` is eligible only when that pool is present among
+    /// `active_context_pools`. This prevents a domain-labelled corpus episode
+    /// from masquerading as a context-free semantic rule.
+    pub fn decode_ranked_feature_bindings_with_context(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+        max_results: usize,
+        success_pool: Option<PoolId>,
+        failure_pool: Option<PoolId>,
+        active_context_pools: &[PoolId],
+        conditioned_pools: &[PoolId],
+    ) -> Vec<Vec<u8>> {
         if max_results == 0
             || feature_pool == target_pool
             || feature_pool == self.binding_pool_id
@@ -3235,6 +3262,13 @@ impl Brain {
         let features = feature_handle.read();
         let mut ranked: Vec<(NeuronId, usize, u64, usize, i32)> = Vec::new();
         for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
+            let missing_condition = conditioned_pools.iter().any(|pool_id| {
+                !active_context_pools.contains(pool_id)
+                    && binding.members.iter().any(|member| member.pool == *pool_id)
+            });
+            if missing_condition {
+                continue;
+            }
             let direct_atoms: ahash::AHashSet<NeuronId> = binding
                 .members
                 .iter()

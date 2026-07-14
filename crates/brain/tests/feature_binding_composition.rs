@@ -218,3 +218,45 @@ fn confirmed_outcome_promotes_repair_and_inhibits_failed_action_frame() {
     assert_eq!(decoded.first().map(Vec::as_slice), Some(good.as_slice()));
     assert!(!decoded.iter().any(|frame| frame == bad));
 }
+
+#[test]
+fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding { prefix: "intent".into() }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let context_pool = brain.create_pool(
+        PoolConfig::defaults("environment", 5),
+        Box::new(BytePassthroughEncoding { prefix: "environment" }),
+    );
+    let intent = b"@intent:LANGUAGE:PYTHON\n@intent:MATH:AVERAGE\n@intent:GUARD:EMPTY_INPUT\n";
+    let generic = b"def avg_list(xs):\n    return sum(xs) / len(xs) if xs else 0";
+    let contextual = b"answer = (1.0 + 11.0) / 2.0\nprint(answer)";
+    for _ in 0..6 {
+        brain.observe(feature_pool, intent);
+        brain.observe(action_pool, generic);
+        brain.advance_tick();
+        brain.observe(feature_pool, intent);
+        brain.observe(context_pool, br#"{"kind":"math"}"#);
+        brain.observe(action_pool, contextual);
+        brain.advance_tick();
+    }
+    let labels = InstructionIntentEncoding { prefix: "intent".into() }.atomize(intent);
+    let decoded = brain.decode_ranked_feature_bindings_with_context(
+        feature_pool,
+        &labels,
+        action_pool,
+        8,
+        None,
+        None,
+        &[feature_pool],
+        &[context_pool],
+    );
+    assert_eq!(decoded.first().map(Vec::as_slice), Some(generic.as_slice()));
+    assert!(!decoded.iter().any(|frame| frame == contextual));
+}

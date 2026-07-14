@@ -1578,13 +1578,15 @@ async fn h_brain_chat(
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
-            brain.decode_ranked_feature_bindings_with_outcomes(
+            brain.decode_ranked_feature_bindings_with_context(
                 *pool_id,
                 labels,
                 action_pool,
                 64,
                 brain.fabric().pool(8).map(|_| 8),
                 brain.fabric().pool(6).map(|_| 6),
+                &chat_query_pools,
+                &[POOL_TURN],
             )
         })
         .unwrap_or_default();
@@ -1615,7 +1617,16 @@ async fn h_brain_chat(
         .as_ref()
         .map(|(pool_id, labels)| {
             brain
-                .decode_ranked_feature_bindings(*pool_id, labels, action_pool, 64)
+                .decode_ranked_feature_bindings_with_context(
+                    *pool_id,
+                    labels,
+                    action_pool,
+                    64,
+                    None,
+                    None,
+                    &chat_query_pools,
+                    &[POOL_TURN],
+                )
                 .len()
         })
         .unwrap_or(0);
