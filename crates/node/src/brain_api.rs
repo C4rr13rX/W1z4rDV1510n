@@ -1006,6 +1006,71 @@ fn is_complete_file_manifest(bytes: &[u8]) -> bool {
         })
 }
 
+/// Recover independently learned whole-project components from small exact
+/// feature subsets inside a richer query. This is deliberately restricted to
+/// complete safe manifests; repair fragments continue through the
+/// outcome-weighted ranked decoder so failed actions cannot re-enter through
+/// this path.
+fn exact_manifest_subset_candidates(
+    brain: &Brain,
+    feature_pool: PoolId,
+    labels: &[String],
+    target_pool: PoolId,
+) -> Vec<Vec<u8>> {
+    if labels.len() < 4 {
+        return Vec::new();
+    }
+    fn visit(
+        brain: &Brain,
+        feature_pool: PoolId,
+        labels: &[String],
+        target_pool: PoolId,
+        size: usize,
+        start: usize,
+        selected: &mut Vec<String>,
+        output: &mut Vec<Vec<u8>>,
+    ) {
+        if selected.len() == size {
+            let decoded = brain.decode_exact_feature_binding(feature_pool, selected, target_pool);
+            if let Some(bytes) = decoded {
+                if is_complete_file_manifest(&bytes) && !output.contains(&bytes) {
+                    output.push(bytes);
+                }
+            }
+            return;
+        }
+        let remaining = size - selected.len();
+        for index in start..=labels.len().saturating_sub(remaining) {
+            selected.push(labels[index].clone());
+            visit(
+                brain,
+                feature_pool,
+                labels,
+                target_pool,
+                size,
+                index + 1,
+                selected,
+                output,
+            );
+            selected.pop();
+        }
+    }
+    let mut output = Vec::new();
+    for size in 2..=3.min(labels.len()) {
+        visit(
+            brain,
+            feature_pool,
+            labels,
+            target_pool,
+            size,
+            0,
+            &mut Vec::new(),
+            &mut output,
+        );
+    }
+    output
+}
+
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
@@ -1415,7 +1480,7 @@ async fn h_brain_chat(
 
     // Authoritative trained-binding decode — Phase B v2.
     let raw_trained = brain.decode_best_trained_binding(POOL_TEXT, action_pool);
-    let feature_candidates = composition_features
+    let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
             brain.decode_ranked_feature_bindings_with_outcomes(
@@ -1428,6 +1493,37 @@ async fn h_brain_chat(
             )
         })
         .unwrap_or_default();
+    if let Some((pool_id, labels)) = composition_features.as_ref() {
+        for candidate in
+            exact_manifest_subset_candidates(&brain, *pool_id, labels, action_pool)
+        {
+            if !feature_candidates.contains(&candidate) {
+                feature_candidates.push(candidate);
+            }
+        }
+        // Raw characters and sparse diagnostics are independent evidence
+        // pools. A complete safe manifest recalled by the raw pathway may be
+        // one component of a richer feature-composed project, so let it join
+        // the candidate set instead of using it only as a final fallback.
+        if labels.len() >= 4 {
+            if let Some(candidate) = raw_trained
+                .as_ref()
+                .filter(|bytes| is_complete_file_manifest(bytes))
+            {
+                if !feature_candidates.contains(candidate) {
+                    feature_candidates.push(candidate.clone());
+                }
+            }
+        }
+    }
+    let diagnostic_unweighted_candidates = composition_features
+        .as_ref()
+        .map(|(pool_id, labels)| {
+            brain
+                .decode_ranked_feature_bindings(*pool_id, labels, action_pool, 64)
+                .len()
+        })
+        .unwrap_or(0);
     let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
         brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
     });
@@ -1541,6 +1637,7 @@ async fn h_brain_chat(
         "intent_diagnostics": {
             "labels": diagnostic_intent_labels,
             "ranked_candidates": feature_candidates.len(),
+            "unweighted_candidates": diagnostic_unweighted_candidates,
             "exact_feature": diagnostic_exact_feature,
             "exact_complete_manifest": diagnostic_exact_manifest,
         },

@@ -27,6 +27,33 @@ use crate::network::{
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
 use crate::pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
 
+/// Page concept membership trees back from the cold tier before a decoder
+/// expands them into atom evidence. Eviction deliberately leaves neuron IDs
+/// stable but clears heavy member vectors; treating that placeholder as an
+/// empty concept makes a learned binding disappear after RAM pressure.
+fn ensure_neuron_trees_loaded(pool: &mut Pool, roots: &[NeuronId]) {
+    let mut pending = roots.to_vec();
+    let mut seen = ahash::AHashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if pool.ensure_loaded(id).is_err() {
+            continue;
+        }
+        let members = pool
+            .get(id)
+            .map(|neuron| neuron.members.clone())
+            .unwrap_or_default();
+        pending.extend(
+            members
+                .into_iter()
+                .filter(|member| member.pool == pool.id())
+                .map(|member| member.neuron),
+        );
+    }
+}
+
 /// Which tier of substrate a [`BindingMatch`] succeeded at.  Stage 11
 /// (concept-tier OOV) audits #1, #4 and #8 in the design log: the
 /// tier tag travels alongside precision/recall so the single OOV gate
@@ -2941,11 +2968,13 @@ impl Brain {
             Some(pool) => pool,
             None => return Vec::new(),
         };
-        let features = feature_handle.read();
-        let query_atoms: ahash::AHashSet<NeuronId> = query_labels
-            .iter()
-            .filter_map(|label| features.label_to_id(label))
-            .collect();
+        let query_atoms: ahash::AHashSet<NeuronId> = {
+            let features = feature_handle.read();
+            query_labels
+                .iter()
+                .filter_map(|label| features.label_to_id(label))
+                .collect()
+        };
         if query_atoms.len() < 3 {
             return Vec::new();
         }
@@ -2974,21 +3003,50 @@ impl Brain {
             None => return Vec::new(),
         };
         let bindings = binding_handle.read();
+        let feature_roots: Vec<NeuronId> = bindings
+            .iter_neurons()
+            .filter(|neuron| !neuron.is_atom())
+            .flat_map(|binding| {
+                binding
+                    .members
+                    .iter()
+                    .filter(move |member| member.pool == feature_pool)
+                    .map(|member| member.neuron)
+            })
+            .collect();
+        ensure_neuron_trees_loaded(&mut feature_handle.write(), &feature_roots);
+        let features = feature_handle.read();
         let mut ranked: Vec<(NeuronId, usize, u64, usize, i32)> = Vec::new();
         for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
-            let mut binding_atoms = ahash::AHashSet::new();
+            let direct_atoms: ahash::AHashSet<NeuronId> = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == feature_pool)
+                .filter(|member| {
+                    features
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .map(|member| member.neuron)
+                .collect();
+            let mut expanded_atoms = ahash::AHashSet::new();
             for member in binding
                 .members
                 .iter()
                 .filter(|member| member.pool == feature_pool)
             {
-                collect_atoms(&features, member.neuron, &mut binding_atoms);
+                collect_atoms(&features, member.neuron, &mut expanded_atoms);
             }
-            if binding_atoms.len() < 2 {
-                continue;
-            }
-            let hits = binding_atoms.intersection(&query_atoms).count();
-            if hits < 2 || hits != binding_atoms.len() {
+            // Direct atoms and an emerged concept are alternative evidence
+            // layers. Unioning them can make a broad concept's unrelated
+            // members mandatory and hide an otherwise exact sparse binding.
+            let hits = [&direct_atoms, &expanded_atoms]
+                .into_iter()
+                .filter(|atoms| atoms.len() >= 2 && atoms.is_subset(&query_atoms))
+                .map(|atoms| atoms.len())
+                .max()
+                .unwrap_or(0);
+            if hits < 2 {
                 continue;
             }
             let target_size = binding
@@ -3100,16 +3158,31 @@ impl Brain {
         target_pool: PoolId,
     ) -> Option<Vec<u8>> {
         let feature_handle = self.fabric.pool(feature_pool)?;
-        let feature = feature_handle.read();
-        let query_atoms: ahash::AHashSet<NeuronId> = query_labels
-            .iter()
-            .filter_map(|label| feature.label_to_id(label))
-            .collect();
+        let query_atoms: ahash::AHashSet<NeuronId> = {
+            let feature = feature_handle.read();
+            query_labels
+                .iter()
+                .filter_map(|label| feature.label_to_id(label))
+                .collect()
+        };
         if query_atoms.len() < 2 {
             return None;
         }
         let bindings_handle = self.fabric.pool(self.binding_pool_id)?;
         let bindings = bindings_handle.read();
+        let feature_roots: Vec<NeuronId> = bindings
+            .iter_neurons()
+            .filter(|neuron| !neuron.is_atom())
+            .flat_map(|binding| {
+                binding
+                    .members
+                    .iter()
+                    .filter(move |member| member.pool == feature_pool)
+                    .map(|member| member.neuron)
+            })
+            .collect();
+        ensure_neuron_trees_loaded(&mut feature_handle.write(), &feature_roots);
+        let feature = feature_handle.read();
         fn collect_atoms(
             pool: &crate::Pool,
             neuron_id: NeuronId,
@@ -3130,15 +3203,26 @@ impl Brain {
         }
         let mut best: Option<(NeuronId, u64)> = None;
         for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
-            let mut binding_atoms = ahash::AHashSet::new();
+            let direct_atoms: ahash::AHashSet<NeuronId> = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == feature_pool)
+                .filter(|member| {
+                    feature
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .map(|member| member.neuron)
+                .collect();
+            let mut expanded_atoms = ahash::AHashSet::new();
             for member in binding
                 .members
                 .iter()
                 .filter(|member| member.pool == feature_pool)
             {
-                collect_atoms(&feature, member.neuron, &mut binding_atoms);
+                collect_atoms(&feature, member.neuron, &mut expanded_atoms);
             }
-            if binding_atoms != query_atoms {
+            if direct_atoms != query_atoms && expanded_atoms != query_atoms {
                 continue;
             }
             if !binding

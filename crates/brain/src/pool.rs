@@ -519,7 +519,11 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("RESILIENCE:CIRCUIT_BREAKER");
         }
-        if text.contains("transactional outbox") || text.contains("outbox event") {
+        if text.contains("transactional outbox")
+            || text.contains("transactional-outbox")
+            || text.contains("outbox event")
+            || text.contains("outbox-event")
+        {
             emit("INTEGRATION:TRANSACTIONAL_OUTBOX");
         }
         if text.contains("deduplicat") || text.contains("duplicate work") {
@@ -530,6 +534,7 @@ impl AtomEncoding for InstructionIntentEncoding {
         }
         if text.contains("optimistic concurr")
             || text.contains("expected version")
+            || text.contains("expected-version")
             || text.contains("stale write")
         {
             emit("STATE:OPTIMISTIC_CONCURRENCY");
@@ -542,6 +547,7 @@ impl AtomEncoding for InstructionIntentEncoding {
             // account operation co-fire rather than becoming isolated atoms.
             emit("PERSISTENCE:ATOMIC_TRANSACTION");
             emit("DOMAIN:ATOMIC_LEDGER_TRANSFER");
+            emit("ENTERPRISE:INPUT_VALIDATION");
         }
         if text.contains("unspecified")
             || text.contains("unknown protocol")
@@ -549,6 +555,7 @@ impl AtomEncoding for InstructionIntentEncoding {
             || (text.contains("schema") && text.contains("unknown"))
             || text.contains("undocumented")
             || text.contains("has not been provided")
+            || text.contains("have not been provided")
             || text.contains("not provided")
             || text.contains("without any service objectives")
         {

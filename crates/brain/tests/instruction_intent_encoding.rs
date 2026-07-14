@@ -242,6 +242,9 @@ fn atomic_ledger_is_both_transactional_and_domain_specific() {
     assert!(features
         .iter()
         .any(|label| label == "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:INPUT_VALIDATION"));
     let unique: std::collections::HashSet<_> = features.iter().collect();
     assert_eq!(unique.len(), features.len(), "intent atoms must be unique");
 }
@@ -358,6 +361,18 @@ fn native_enterprise_intents_combine_language_and_behavior() {
             "{features:?}"
         );
     }
+    let hyphenated_outbox = encoding.atomize(b"Create Node.js outbox-event ordering code.");
+    assert!(
+        hyphenated_outbox
+            .iter()
+            .any(|label| label == "intent:INTEGRATION:TRANSACTIONAL_OUTBOX")
+    );
+    let hyphenated_version = encoding.atomize(b"Create Java expected-version storage.");
+    assert!(
+        hyphenated_version
+            .iter()
+            .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY")
+    );
 }
 
 #[test]
@@ -384,6 +399,14 @@ fn native_ledger_paraphrase_and_missing_context_are_detected() {
     );
     assert!(
         missing
+            .iter()
+            .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
+    );
+    let plural_missing = encoding.atomize(
+        b"Create JavaScript deployment code whose contracts have not been provided.",
+    );
+    assert!(
+        plural_missing
             .iter()
             .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
     );
