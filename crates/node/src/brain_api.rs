@@ -1396,7 +1396,14 @@ async fn h_brain_chat(
     let feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
-            brain.decode_ranked_feature_bindings(*pool_id, labels, action_pool, 64)
+            brain.decode_ranked_feature_bindings_with_outcomes(
+                *pool_id,
+                labels,
+                action_pool,
+                64,
+                brain.fabric().pool(8).map(|_| 8),
+                brain.fabric().pool(6).map(|_| 6),
+            )
         })
         .unwrap_or_default();
     let composed = merge_grounded_code_fragments(&feature_candidates)

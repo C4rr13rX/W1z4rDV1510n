@@ -166,3 +166,55 @@ fn close_richer_intent_class_integrates_subset_evidence() {
     assert!(labels.iter().any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
     assert!(labels.iter().any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
 }
+
+#[test]
+fn confirmed_outcome_promotes_repair_and_inhibits_failed_action_frame() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding { prefix: "intent".into() }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let failure_pool = brain.create_pool(
+        PoolConfig::defaults("failure", 6),
+        Box::new(BytePassthroughEncoding { prefix: "failure" }),
+    );
+    let success_pool = brain.create_pool(
+        PoolConfig::defaults("success", 8),
+        Box::new(BytePassthroughEncoding { prefix: "success" }),
+    );
+    let prompt = b"@intent:LANGUAGE:JAVASCRIPT\n@intent:STATE:INCREMENT_COUNT\n@intent:CODE:FUNCTION_SIGNATURE\n";
+    let bad = b"return value - 1";
+    let good = b"return value + 1";
+    for _ in 0..6 {
+        brain.observe(feature_pool, prompt);
+        brain.observe(action_pool, bad);
+        brain.advance_tick();
+    }
+    for _ in 0..6 {
+        brain.observe(feature_pool, prompt);
+        brain.observe(action_pool, bad);
+        brain.observe(failure_pool, b"wrong_result");
+        brain.advance_tick();
+    }
+    for _ in 0..6 {
+        brain.observe(feature_pool, prompt);
+        brain.observe(action_pool, good);
+        brain.observe(success_pool, b"PASS");
+        brain.advance_tick();
+    }
+    let labels = InstructionIntentEncoding { prefix: "intent".into() }.atomize(prompt);
+    let decoded = brain.decode_ranked_feature_bindings_with_outcomes(
+        feature_pool,
+        &labels,
+        action_pool,
+        8,
+        Some(success_pool),
+        Some(failure_pool),
+    );
+    assert_eq!(decoded.first().map(Vec::as_slice), Some(good.as_slice()));
+    assert!(!decoded.iter().any(|frame| frame == bad));
+}

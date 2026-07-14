@@ -2905,6 +2905,31 @@ impl Brain {
         target_pool: PoolId,
         max_results: usize,
     ) -> Vec<Vec<u8>> {
+        self.decode_ranked_feature_bindings_with_outcomes(
+            feature_pool,
+            query_labels,
+            target_pool,
+            max_results,
+            None,
+            None,
+        )
+    }
+
+    /// Outcome-weighted variant of [`Self::decode_ranked_feature_bindings`].
+    /// Candidate frames inherit valence from binding neurons where the same
+    /// action co-fired with externally observed success/failure pools. Scores
+    /// aggregate across bindings for identical raw target bytes, so a later
+    /// failure episode can inhibit an older neutral action without deleting
+    /// its atom substrate, while confirmed repair evidence promotes the fix.
+    pub fn decode_ranked_feature_bindings_with_outcomes(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+        max_results: usize,
+        success_pool: Option<PoolId>,
+        failure_pool: Option<PoolId>,
+    ) -> Vec<Vec<u8>> {
         if max_results == 0
             || feature_pool == target_pool
             || feature_pool == self.binding_pool_id
@@ -2949,7 +2974,7 @@ impl Brain {
             None => return Vec::new(),
         };
         let bindings = binding_handle.read();
-        let mut ranked: Vec<(NeuronId, usize, u64, usize)> = Vec::new();
+        let mut ranked: Vec<(NeuronId, usize, u64, usize, i32)> = Vec::new();
         for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
             let mut binding_atoms = ahash::AHashSet::new();
             for member in binding
@@ -2974,10 +2999,24 @@ impl Brain {
             if target_size == 0 {
                 continue;
             }
-            ranked.push((binding.id, hits, binding.use_count, target_size));
+            let has_success = success_pool.is_some_and(|pool| {
+                binding.members.iter().any(|member| member.pool == pool)
+            });
+            let has_failure = failure_pool.is_some_and(|pool| {
+                binding.members.iter().any(|member| member.pool == pool)
+            });
+            let outcome = if has_success {
+                1
+            } else if has_failure {
+                -1
+            } else {
+                0
+            };
+            ranked.push((binding.id, hits, binding.use_count, target_size, outcome));
         }
         ranked.sort_by(|a, b| {
-            b.1.cmp(&a.1)
+            b.4.cmp(&a.4)
+                .then_with(|| b.1.cmp(&a.1))
                 .then_with(|| b.2.cmp(&a.2))
                 .then_with(|| a.3.cmp(&b.3))
                 .then_with(|| a.0.cmp(&b.0))
@@ -2988,9 +3027,11 @@ impl Brain {
             None => return Vec::new(),
         };
         let target = target_handle.read();
-        let mut decoded = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (binding_id, _, _, _) in ranked {
+        let mut aggregated: std::collections::HashMap<
+            Vec<u8>,
+            (i32, usize, u64, usize, NeuronId),
+        > = std::collections::HashMap::new();
+        for (binding_id, hits, use_count, target_size, outcome) in ranked {
             let Some(binding) = bindings.get(binding_id) else {
                 continue;
             };
@@ -3014,14 +3055,38 @@ impl Brain {
             } else {
                 target.decode_concept_members(&atoms)
             };
-            if !bytes.is_empty() && seen.insert(bytes.clone()) {
-                decoded.push(bytes);
-                if decoded.len() >= max_results {
-                    break;
-                }
+            if bytes.is_empty() {
+                continue;
+            }
+            let entry = aggregated
+                .entry(bytes)
+                .or_insert((0, hits, use_count, target_size, binding_id));
+            entry.0 += outcome;
+            if (hits, use_count, std::cmp::Reverse(target_size), std::cmp::Reverse(binding_id))
+                > (entry.1, entry.2, std::cmp::Reverse(entry.3), std::cmp::Reverse(entry.4))
+            {
+                entry.1 = hits;
+                entry.2 = use_count;
+                entry.3 = target_size;
+                entry.4 = binding_id;
             }
         }
+        let mut decoded: Vec<_> = aggregated.into_iter().collect();
+        decoded.sort_by(|a, b| {
+            b.1.0
+                .cmp(&a.1.0)
+                .then_with(|| b.1.1.cmp(&a.1.1))
+                .then_with(|| b.1.2.cmp(&a.1.2))
+                .then_with(|| a.1.3.cmp(&b.1.3))
+                .then_with(|| a.1.4.cmp(&b.1.4))
+        });
+        let has_nonnegative = decoded.iter().any(|(_, rank)| rank.0 >= 0);
         decoded
+            .into_iter()
+            .filter(|(_, rank)| !has_nonnegative || rank.0 >= 0)
+            .take(max_results)
+            .map(|(bytes, _)| bytes)
+            .collect()
     }
 
     /// Return a target only when one learned binding covers the complete
