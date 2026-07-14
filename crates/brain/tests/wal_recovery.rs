@@ -6,6 +6,7 @@
 //! same neuron + concept structure as the original.
 
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use w1z4rd_brain::{
     AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MmapWalStore,
@@ -125,5 +126,60 @@ fn load_events_after_marker_returns_only_post_marker_events() {
         .count();
     assert!(ticks_post >= 3, "expected ≥3 post-marker ticks, got {}", ticks_post);
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn post_checkpoint_direct_bindings_are_queryable_after_wal_replay() {
+    let dir = tmpdir("direct_binding_tail");
+    let checkpoint = dir.join("brain.bin");
+    let input = 1;
+    let output = 2;
+    {
+        let mut brain = Brain::new(BrainConfig::default());
+        brain.create_pool(
+            PoolConfig::defaults("text", input),
+            Box::new(BytePassthroughEncoding { prefix: "t" }),
+        );
+        brain.create_pool(
+            PoolConfig::defaults("action", output),
+            Box::new(BytePassthroughEncoding { prefix: "a" }),
+        );
+        brain.designate_action_pool(output);
+        let store: Arc<dyn Store> = Arc::new(MmapWalStore::open(&dir).unwrap());
+        brain.set_store(store);
+        brain.checkpoint(&checkpoint).unwrap();
+        for (prompt, response) in [
+            (b"write alpha".as_slice(), b"def alpha(): return 1".as_slice()),
+            (b"write beta".as_slice(), b"def beta(): return 2".as_slice()),
+        ] {
+            assert!(brain.pretrain_binding_episode(&[
+                (input, prompt.to_vec()),
+                (output, response.to_vec()),
+            ]).is_some());
+        }
+        brain.store_clone().flush().unwrap();
+    }
+
+    let mut encodings: HashMap<u32, Box<dyn AtomEncoding>> = HashMap::new();
+    encodings.insert(0, Box::new(BytePassthroughEncoding { prefix: "bind" }));
+    encodings.insert(input, Box::new(BytePassthroughEncoding { prefix: "t" }));
+    encodings.insert(output, Box::new(BytePassthroughEncoding { prefix: "a" }));
+    let (mut recovered, missing) = Brain::restore(&checkpoint, encodings).unwrap();
+    assert!(missing.is_empty());
+    let events = load_events_after_marker(&dir).unwrap();
+    recovered.apply_wal_events(&events);
+
+    for (prompt, response) in [
+        (b"write alpha".as_slice(), b"def alpha(): return 1".as_slice()),
+        (b"write beta".as_slice(), b"def beta(): return 2".as_slice()),
+    ] {
+        recovered.activate_for_prediction(input, prompt);
+        assert_eq!(
+            recovered.decode_best_trained_binding(input, output),
+            Some(response.to_vec()),
+        );
+        recovered.clear_prediction_activation();
+    }
     std::fs::remove_dir_all(&dir).ok();
 }

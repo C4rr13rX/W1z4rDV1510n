@@ -1283,10 +1283,21 @@ impl Pool {
             );
             return false;
         }
+        let local_members: Vec<NeuronId> = members
+            .iter()
+            .filter(|member| member.pool == self.config.id)
+            .map(|member| member.neuron)
+            .collect();
         let n = Neuron::new_concept(id, label.clone(), kind, members, born_tick);
         self.neurons.push(n);
         self.bloom.insert(&label);
         self.label_to_id.insert(label, id);
+        self.concept_sequence_to_id
+            .entry(local_members.clone())
+            .or_insert(id);
+        if let Some(leaves) = self.expand_to_atom_leaves_bounded(&local_members, 512) {
+            self.concept_multiset_to_id.entry(leaves).or_insert(id);
+        }
         true
     }
 

@@ -6043,6 +6043,11 @@ impl Brain {
                 E::SnapshotMarker { .. } => { /* barrier only */ }
             }
         }
+        // Snapshot restore builds these derived indexes before WAL replay.
+        // Bindings appended by the recovery tail would otherwise exist as
+        // neurons but remain invisible to exact/fuzzy retrieval until they
+        // happened to be observed again.
+        self.rebuild_binding_sequence_index();
         stats
     }
 
