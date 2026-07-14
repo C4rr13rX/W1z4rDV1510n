@@ -899,7 +899,9 @@ async fn h_brain_chat(
         // readout. Raw characters still activate regardless of this gate.
         if brain.activate_for_prediction(pool_id, prompt.as_bytes()).len() >= 2 {
             chat_query_pools.push(pool_id);
-            if labels.len() >= 4 {
+            // Language plus at least two independently grounded behaviors is
+            // the minimal evidence for artifact composition.
+            if labels.len() >= 3 {
                 composition_features = Some((pool_id, labels));
             }
         }
