@@ -62,6 +62,86 @@ def phase_offsets(progress_path: Path) -> tuple[int, int]:
     return ram, durable
 
 
+def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
+    run = subprocess.run(
+        command, cwd=ROOT, capture_output=True, text=True,
+        timeout=timeout, check=False,
+    )
+    if run.returncode != 0:
+        raise RuntimeError(
+            f"gate command failed ({run.returncode}): {' '.join(command)}\n"
+            f"{run.stderr[-2000:]}"
+        )
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError(f"gate command produced no JSON: {' '.join(command)}")
+    return json.loads(lines[-1])
+
+
+def run_completion_gate(args: argparse.Namespace, phase: Phase,
+                        runtime: Path) -> dict:
+    """Require corpus recall plus protected foundation/code execution."""
+    recall = run_json_command([
+        sys.executable, "scripts/programming_corpus_recall.py", str(phase.corpus),
+        "--endpoint", args.endpoint,
+        "--start-row", "0", "--window-rows", str(phase.rows),
+        "--samples", "24", "--syntax", "none",
+    ])
+    if recall.get("accepted_trained_response") != recall.get("sampled"):
+        raise RuntimeError(f"{phase.name} recall regression: {recall}")
+
+    foundation = run_json_command([
+        sys.executable, "scripts/programming_brain_eval.py",
+        "--endpoint", args.endpoint,
+    ])
+    for passed_key, total_key in (
+        ("toddler_exact", "toddler_total"),
+        ("k12_trained_answer", "k12_total"),
+        ("oov_honest", "oov_total"),
+    ):
+        if foundation.get(passed_key) != foundation.get(total_key):
+            raise RuntimeError(f"foundation regression after {phase.name}: {foundation}")
+
+    code = run_json_command([
+        sys.executable, "scripts/programming_code_eval.py",
+        "--endpoint", args.endpoint,
+    ])
+    for kind in ("trained", "novel_paraphrase"):
+        group = (code.get("summary") or {}).get(kind) or {}
+        if (group.get("executes") != group.get("count")
+                or group.get("syntax_valid") != group.get("count")):
+            raise RuntimeError(f"code regression after {phase.name}: {code}")
+
+    typescript = run_json_command([
+        sys.executable, "scripts/programming_typescript_enterprise.py",
+        "--endpoint", args.endpoint, "--no-train",
+        "--output", str(runtime / f"{phase.name}.typescript-gate.json"),
+    ])
+    for key in ("trained", "paraphrase"):
+        group = typescript.get(key) or {}
+        if group.get("executes") != group.get("total"):
+            raise RuntimeError(
+                f"TypeScript regression after {phase.name}: {typescript}"
+            )
+    ts_oov = typescript.get("oov_honesty") or {}
+    if ts_oov.get("passed") != ts_oov.get("total"):
+        raise RuntimeError(
+            f"TypeScript OOV regression after {phase.name}: {typescript}"
+        )
+
+    report = {
+        "phase": phase.name,
+        "passed": True,
+        "recall": recall,
+        "foundation": foundation,
+        "code": code,
+        "typescript": typescript,
+        "updated_unix": time.time(),
+    }
+    publish(runtime / f"{phase.name}.completion-gate.json", report)
+    return report
+
+
 def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path) -> int:
     progress = runtime / f"{phase.name}.progress.json"
     ram, durable = phase_offsets(progress)
@@ -108,6 +188,20 @@ def main() -> int:
               Path(r"D:\w1z4rdv1510n-data\training\mathinstruct.jsonl"), 245_323),
         Phase("metamathqa-domain-safe", "reasoning_math_001",
               Path(r"D:\w1z4rdv1510n-data\training\metamathqa.jsonl"), 385_524),
+        Phase("csn-python-full", "programming_literacy_python_001",
+              Path(r"D:\w1z4rdv1510n-data\training\csn_python_full.jsonl"), 421_477),
+        Phase("csn-python-para5", "programming_literacy_python_001",
+              Path(r"D:\w1z4rdv1510n-data\training\csn_python_full_para5.jsonl"),
+              2_028_816),
+        Phase("jupyter-scientific-full", "domain_scientific_python_001",
+              Path(r"D:\w1z4rdv1510n-data\training\jupyter_scientific_full.jsonl"),
+              690_175),
+        Phase("jupyter-scientific-para4", "domain_scientific_python_001",
+              Path(r"D:\w1z4rdv1510n-data\training\jupyter_scientific_para4.jsonl"),
+              2_760_496),
+        Phase("jupyter-scientific-partial", "domain_scientific_python_001",
+              Path(r"D:\w1z4rdv1510n-data\training\jupyter_scientific_partial.jsonl"),
+              206_948),
     ]
     runtime = args.runtime.resolve()
     status_path = runtime / "curriculum-supervisor.status.json"
@@ -123,6 +217,20 @@ def main() -> int:
         while True:
             ram, durable = phase_offsets(runtime / f"{phase.name}.progress.json")
             if ram >= phase.rows:
+                gate_path = runtime / f"{phase.name}.completion-gate.json"
+                if not read_json(gate_path).get("passed"):
+                    publish(status_path, {"state": "benchmarking",
+                                          "phase": phase.name,
+                                          "updated_unix": time.time()})
+                    try:
+                        run_completion_gate(args, phase, runtime)
+                    except (RuntimeError, subprocess.TimeoutExpired,
+                            json.JSONDecodeError) as exc:
+                        publish(status_path, {"state": "gate_failed",
+                                              "phase": phase.name,
+                                              "error": str(exc),
+                                              "updated_unix": time.time()})
+                        return 1
                 publish(status_path, {"state": "complete", "phase": phase.name,
                                       "ram_next_row": ram,
                                       "durable_next_row": durable,

@@ -11,9 +11,17 @@ from pathlib import Path
 from programming_project_eval import request
 
 
-def read_window(path: Path, start: int, count: int) -> list[dict]:
-    rows: list[dict] = []
+def sample_window(path: Path, start: int, count: int,
+                  sample_count: int) -> tuple[list[dict], int]:
+    """Select evenly distributed logical rows with O(sample_count) memory."""
+    if count <= 0 or sample_count <= 0:
+        return [], 0
+    target_count = min(count, sample_count)
+    targets = [(i * count) // target_count for i in range(target_count)]
+    target_cursor = 0
+    probes: list[dict] = []
     valid = 0
+    window_rows = 0
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             try:
@@ -23,18 +31,15 @@ def read_window(path: Path, start: int, count: int) -> list[dict]:
             if valid < start:
                 valid += 1
                 continue
-            rows.append(row)
+            relative = valid - start
+            if target_cursor < len(targets) and relative == targets[target_cursor]:
+                probes.append(row)
+                target_cursor += 1
             valid += 1
-            if len(rows) >= count:
+            window_rows += 1
+            if window_rows >= count:
                 break
-    return rows
-
-
-def sampled(rows: list[dict], count: int) -> list[dict]:
-    if count >= len(rows):
-        return rows
-    indexes = [(i * len(rows)) // count for i in range(count)]
-    return [rows[index] for index in indexes]
+    return probes, window_rows
 
 
 def accepted_responses(path: Path, prompts: set[str]) -> dict[str, set[str]]:
@@ -65,8 +70,9 @@ def main() -> int:
     parser.add_argument("--syntax", choices=("python", "none"), default="python")
     args = parser.parse_args()
 
-    rows = read_window(args.corpus, args.start_row, args.window_rows)
-    probes = sampled(rows, min(args.samples, len(rows)))
+    probes, window_rows = sample_window(
+        args.corpus, args.start_row, args.window_rows, args.samples
+    )
     probe_prompts = {
         (row.get("prompt") or row.get("question") or "").strip()
         for row in probes
@@ -105,7 +111,7 @@ def main() -> int:
             })
 
     report = {
-        "window": {"start": args.start_row, "rows": len(rows)},
+        "window": {"start": args.start_row, "rows": window_rows},
         "sampled": len(probes),
         "nonempty": nonempty,
         "exact": exact,
