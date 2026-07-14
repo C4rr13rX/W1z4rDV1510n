@@ -437,7 +437,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 direct_pretrain: bool = False,
                 input_path: str = "",
                 batch_size: int = 16,
-                progress_path: Path | None = None) -> dict:
+                progress_path: Path | None = None,
+                checkpoint_rows: int = 4096) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -497,6 +498,32 @@ def drive_one(script, repeats: int, project_root: Path,
         if direct_pretrain:
             episodes = []
             batch_next_row = start_row
+            durable_next_row = start_row
+            accepted_since_checkpoint = 0
+
+            def publish_progress() -> None:
+                if progress_path is not None:
+                    write_progress(progress_path, {
+                        "script_id": script.id,
+                        "corpus": str(corpus_path),
+                        "ram_next_row": batch_next_row,
+                        "durable_next_row": durable_next_row,
+                        "accepted_episodes": summary["posted_ok"],
+                        "updated_unix": time.time(),
+                    })
+
+            def make_durable() -> None:
+                nonlocal durable_next_row, accepted_since_checkpoint
+                ok_checkpoint, checkpoint_result = post_checkpoint(timeout=600.0)
+                if not ok_checkpoint:
+                    raise RuntimeError(
+                        f"[{script.id}] checkpoint failed after logical row "
+                        f"{batch_next_row}: {checkpoint_result}"
+                    )
+                durable_next_row = batch_next_row
+                accepted_since_checkpoint = 0
+                publish_progress()
+
             for row_index, row in enumerate(rows):
                 logical_next_row = start_row + row_index + 1
                 prompt = (row.get("prompt") or row.get("question") or "").strip()
@@ -512,14 +539,11 @@ def drive_one(script, repeats: int, project_root: Path,
                     ok, err = post_pretrain_batch(episodes)
                     if ok:
                         summary["posted_ok"] += len(episodes)
-                        if progress_path is not None:
-                            write_progress(progress_path, {
-                                "script_id": script.id,
-                                "corpus": str(corpus_path),
-                                "next_row": batch_next_row,
-                                "accepted_episodes": summary["posted_ok"],
-                                "updated_unix": time.time(),
-                            })
+                        accepted_since_checkpoint += len(episodes)
+                        publish_progress()
+                        if (checkpoint_rows > 0
+                                and accepted_since_checkpoint >= checkpoint_rows):
+                            make_durable()
                     else:
                         summary["posted_fail"] += len(episodes)
                         raise RuntimeError(
@@ -531,20 +555,16 @@ def drive_one(script, repeats: int, project_root: Path,
                 ok, err = post_pretrain_batch(episodes)
                 if ok:
                     summary["posted_ok"] += len(episodes)
-                    if progress_path is not None:
-                        write_progress(progress_path, {
-                            "script_id": script.id,
-                            "corpus": str(corpus_path),
-                            "next_row": batch_next_row,
-                            "accepted_episodes": summary["posted_ok"],
-                            "updated_unix": time.time(),
-                        })
+                    accepted_since_checkpoint += len(episodes)
+                    publish_progress()
                 else:
                     summary["posted_fail"] += len(episodes)
                     raise RuntimeError(
                         f"[{script.id}] final batch rejected at logical row "
                         f"{batch_next_row}: {err}"
                     )
+            if progress_path is not None and durable_next_row != batch_next_row:
+                make_durable()
             if verbose:
                 print(f"  [{script.id}] direct pretrain done in {time.time()-t0:.1f}s",
                       flush=True)
@@ -668,6 +688,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--progress-path", type=Path,
                      help="atomically record the next fully accepted logical "
                           "row after every direct-pretrain batch")
+    p.add_argument("--checkpoint-rows", type=int, default=4096,
+                     help="persist brain.bin after this many accepted direct-"
+                          "pretrain episodes (default 4096; 0 disables)")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -737,7 +760,8 @@ def main(argv: list[str] | None = None) -> int:
                             direct_pretrain=args.direct_pretrain,
                             input_path=args.input_path,
                             batch_size=args.batch_size,
-                            progress_path=args.progress_path)
+                            progress_path=args.progress_path,
+                            checkpoint_rows=args.checkpoint_rows)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",

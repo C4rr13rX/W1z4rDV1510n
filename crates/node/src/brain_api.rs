@@ -1414,23 +1414,37 @@ async fn h_brain_chat(
     let action_pool = brain.action_pool_id().unwrap_or(POOL_ACTION);
     brain.activate_for_prediction(POOL_TEXT, prompt.as_bytes());
 
+    // Exact ordered sensory evidence can be established from the raw pool
+    // immediately. Do this before semantic-routing diagnostics: those routes
+    // scan broad feature-binding populations and made known-answer latency
+    // grow with total curriculum size even though the exact binding index had
+    // already reduced retrieval itself to O(1)-style lookup.
+    let raw_is_exact = brain.has_exact_trained_binding(POOL_TEXT, action_pool);
+    let exact_raw_trained = raw_is_exact
+        .then(|| brain.decode_best_trained_binding(POOL_TEXT, action_pool))
+        .flatten();
+
     // Parallel instruction feature pools participate in ordinary chat when
     // the deployed identity provides them. Raw POOL_TEXT remains present in
     // every query; derived pools add sparse intent evidence but never replace
     // the character substrate. Unknown intent atoms produce no activation and
     // therefore leave the legacy single-pool path untouched.
-    let feature_pools: Vec<PoolId> = brain
-        .fabric()
-        .pool_ids()
-        .into_iter()
-        .filter(|pid| *pid != POOL_TEXT && *pid != action_pool)
-        .filter(|pid| {
-            brain
-                .fabric()
-                .pool(*pid)
-                .is_some_and(|pool| pool.read().encoding_name() == "instruction-intent")
-        })
-        .collect();
+    let feature_pools: Vec<PoolId> = if raw_is_exact {
+        Vec::new()
+    } else {
+        brain
+            .fabric()
+            .pool_ids()
+            .into_iter()
+            .filter(|pid| *pid != POOL_TEXT && *pid != action_pool)
+            .filter(|pid| {
+                brain
+                    .fabric()
+                    .pool(*pid)
+                    .is_some_and(|pool| pool.read().encoding_name() == "instruction-intent")
+            })
+            .collect()
+    };
     let mut chat_query_pools = vec![POOL_TEXT];
     let mut composition_features: Option<(PoolId, Vec<String>)> = None;
     let mut semantic_refinement_score: Option<f32> = None;
@@ -1559,8 +1573,8 @@ async fn h_brain_chat(
     }
 
     // Authoritative trained-binding decode — Phase B v2.
-    let raw_is_exact = brain.has_exact_trained_binding(POOL_TEXT, action_pool);
-    let raw_trained = brain.decode_best_trained_binding(POOL_TEXT, action_pool);
+    let raw_trained = exact_raw_trained
+        .or_else(|| brain.decode_best_trained_binding(POOL_TEXT, action_pool));
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
