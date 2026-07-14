@@ -37,6 +37,24 @@ def sampled(rows: list[dict], count: int) -> list[dict]:
     return [rows[index] for index in indexes]
 
 
+def accepted_responses(path: Path, prompts: set[str]) -> dict[str, set[str]]:
+    """Collect every supervised answer for only the sampled prompt set."""
+    accepted: dict[str, set[str]] = {prompt: set() for prompt in prompts}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            prompt = (row.get("prompt") or row.get("question") or "").strip()
+            if prompt not in accepted:
+                continue
+            response = (row.get("response") or row.get("answer") or "").strip()
+            if response:
+                accepted[prompt].add(response)
+    return accepted
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("corpus", type=Path)
@@ -49,12 +67,12 @@ def main() -> int:
 
     rows = read_window(args.corpus, args.start_row, args.window_rows)
     probes = sampled(rows, min(args.samples, len(rows)))
-    accepted_by_prompt: dict[str, set[str]] = {}
-    for row in rows:
-        prompt = (row.get("prompt") or row.get("question") or "").strip()
-        expected = (row.get("response") or row.get("answer") or "").strip()
-        if prompt and expected:
-            accepted_by_prompt.setdefault(prompt, set()).add(expected)
+    probe_prompts = {
+        (row.get("prompt") or row.get("question") or "").strip()
+        for row in probes
+    }
+    probe_prompts.discard("")
+    accepted_by_prompt = accepted_responses(args.corpus, probe_prompts)
     exact = accepted = syntax = nonempty = 0
     elapsed: list[float] = []
     failures: list[dict] = []
