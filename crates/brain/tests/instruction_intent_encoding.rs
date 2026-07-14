@@ -157,3 +157,40 @@ fn circuit_breaker_failure_cooldown_paraphrase_shares_intent() {
     );
     assert_eq!(trained, paraphrase);
 }
+
+#[test]
+fn native_enterprise_intents_combine_language_and_behavior() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let cases = [
+        (b"Build a JavaScript transactional outbox event service.".as_slice(),
+         "intent:LANGUAGE:JAVASCRIPT", "intent:INTEGRATION:TRANSACTIONAL_OUTBOX"),
+        (b"Implement Go concurrent deduplication.".as_slice(),
+         "intent:LANGUAGE:GO", "intent:CONCURRENCY:DEDUPLICATION"),
+        (b"Write a C# asynchronous retry policy.".as_slice(),
+         "intent:LANGUAGE:CSHARP", "intent:RESILIENCE:ASYNC_RETRY"),
+        (b"Create Java optimistic concurrency with expected versions.".as_slice(),
+         "intent:LANGUAGE:JAVA", "intent:STATE:OPTIMISTIC_CONCURRENCY"),
+        (b"Build a Rust atomic ledger transfer.".as_slice(),
+         "intent:LANGUAGE:RUST", "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER"),
+    ];
+    for (prompt, language, behavior) in cases {
+        let features = encoding.atomize(prompt);
+        assert!(features.iter().any(|label| label == language), "{features:?}");
+        assert!(features.iter().any(|label| label == behavior), "{features:?}");
+    }
+}
+
+#[test]
+fn native_ledger_paraphrase_and_missing_context_are_detected() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let paraphrase = encoding.atomize(
+        b"Create Rust code for all-or-nothing account transfers that reject missing accounts.",
+    );
+    assert!(paraphrase.iter().any(|label| label == "intent:LANGUAGE:RUST"));
+    assert!(paraphrase.iter().any(|label| label == "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER"));
+
+    let missing = encoding.atomize(
+        b"Implement a Go deduplicator whose retention duration and storage are not provided.",
+    );
+    assert!(missing.iter().any(|label| label == "intent:GROUNDING:UNDERSPECIFIED"));
+}

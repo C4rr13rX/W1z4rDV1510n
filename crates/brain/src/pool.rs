@@ -244,7 +244,9 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("LANGUAGE:CSHARP");
         }
-        if text.contains("golang") || text.contains("go function") || text.contains("go code") {
+        if text.contains("golang") || text.starts_with("go ") || text.contains(" go ")
+            || text.contains("go function") || text.contains("go code")
+        {
             emit("LANGUAGE:GO");
         }
         if text.contains("rust") { emit("LANGUAGE:RUST"); }
@@ -340,8 +342,28 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("RESILIENCE:CIRCUIT_BREAKER");
         }
+        if text.contains("transactional outbox") || text.contains("outbox event") {
+            emit("INTEGRATION:TRANSACTIONAL_OUTBOX");
+        }
+        if text.contains("deduplicat") || text.contains("duplicate work") {
+            emit("CONCURRENCY:DEDUPLICATION");
+        }
+        if (text.contains("async") || text.contains("asynchronous")) && text.contains("retry") {
+            emit("RESILIENCE:ASYNC_RETRY");
+        }
+        if text.contains("optimistic concurr") || text.contains("expected version")
+            || text.contains("stale write")
+        {
+            emit("STATE:OPTIMISTIC_CONCURRENCY");
+        }
+        if (text.contains("ledger") && text.contains("transfer"))
+            || text.contains("all-or-nothing account transfer")
+        {
+            emit("DOMAIN:ATOMIC_LEDGER_TRANSFER");
+        }
         if text.contains("unspecified") || text.contains("unknown protocol")
             || text.contains("undocumented") || text.contains("has not been provided")
+            || text.contains("not provided")
             || text.contains("without any service objectives")
         {
             emit("GROUNDING:UNDERSPECIFIED");
