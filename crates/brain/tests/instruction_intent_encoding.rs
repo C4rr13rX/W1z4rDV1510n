@@ -307,6 +307,12 @@ fn circuit_breaker_failure_cooldown_paraphrase_shares_intent() {
         b"Build Python resilience code that opens after repeated failures and permits a trial after its cooldown.",
     );
     assert_eq!(trained, paraphrase);
+    let compact = encoding.atomize(b"Create Python resilience with a cooldown circuit.");
+    assert!(
+        compact
+            .iter()
+            .any(|label| label == "intent:RESILIENCE:CIRCUIT_BREAKER")
+    );
 }
 
 #[test]
@@ -399,6 +405,14 @@ fn composed_observability_paraphrase_retains_redaction_evidence() {
         features
             .iter()
             .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION")
+    );
+    let audit = encoding.atomize(
+        b"Build Python correlated JSON audit logs with recursive secret redaction.",
+    );
+    assert!(
+        audit
+            .iter()
+            .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING")
     );
 }
 

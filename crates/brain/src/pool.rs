@@ -508,12 +508,14 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("structured log")
             || text.contains("correlation id")
             || text.contains("correlation-id")
+            || (text.contains("correlat") && text.contains("log"))
         {
             emit("OBSERVABILITY:CORRELATED_LOGGING");
         }
         if text.contains("circuit breaker")
             || text.contains("circuit-breaker")
             || (text.contains("opens after") && text.contains("cooldown"))
+            || (text.contains("circuit") && text.contains("cooldown"))
         {
             emit("RESILIENCE:CIRCUIT_BREAKER");
         }
