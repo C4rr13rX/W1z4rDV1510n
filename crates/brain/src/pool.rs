@@ -283,7 +283,12 @@ impl AtomEncoding for InstructionIntentEncoding {
         if !coding_context {
             return features;
         }
-        let mut emit = |feature: &str| features.push(format!("{}:{}", self.prefix, feature));
+        let mut emit = |feature: &str| {
+            let label = format!("{}:{}", self.prefix, feature);
+            if !features.contains(&label) {
+                features.push(label);
+            }
+        };
         // Language is an independent feature rather than part of the task
         // label. Co-firing lets bindings represent, for example,
         // LANGUAGE:RUST + POWER_SELF:2 without discarding the raw words.
@@ -448,6 +453,10 @@ impl AtomEncoding for InstructionIntentEncoding {
         if (text.contains("ledger") && text.contains("transfer"))
             || text.contains("all-or-nothing account transfer")
         {
+            // A ledger transfer is a specialized atomic transaction. Emit
+            // both levels so broad rollback semantics and the specialized
+            // account operation co-fire rather than becoming isolated atoms.
+            emit("PERSISTENCE:ATOMIC_TRANSACTION");
             emit("DOMAIN:ATOMIC_LEDGER_TRANSFER");
         }
         if text.contains("unspecified")

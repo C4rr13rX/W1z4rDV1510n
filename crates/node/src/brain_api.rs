@@ -986,6 +986,54 @@ fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({"files": files})).ok()
 }
 
+/// Combine independent semantic evidence without allowing a fuzzy learned
+/// route to overwrite a feature dimension that the current prompt states
+/// directly. For example, a route learned from "Python authorization" may
+/// contribute SECURITY:AUTHORIZATION to a prompt that directly fires
+/// LANGUAGE:JAVASCRIPT, but its stale LANGUAGE:PYTHON atom is inhibited.
+fn fuse_intent_labels(direct: &[String], learned: &[String]) -> Option<Vec<String>> {
+    if direct.is_empty() || learned.is_empty() {
+        return None;
+    }
+    fn namespace(label: &str) -> &str {
+        label
+            .split_once(':')
+            .map(|(_, semantic)| semantic.split(':').next().unwrap_or(semantic))
+            .unwrap_or(label)
+    }
+    let direct_namespaces: std::collections::HashSet<&str> =
+        direct.iter().map(|label| namespace(label)).collect();
+    // Cross-language fusion is deliberately anchored by an explicit language
+    // neuron. Learned language guesses must never replace that observation.
+    if !direct_namespaces.contains("LANGUAGE") {
+        return None;
+    }
+    let mut fused = direct.to_vec();
+    for label in learned {
+        if label.ends_with(":GROUNDING:UNDERSPECIFIED") {
+            return None;
+        }
+        if !direct_namespaces.contains(namespace(label)) && !fused.contains(label) {
+            fused.push(label.clone());
+        }
+    }
+    (fused.len() > direct.len()).then_some(fused)
+}
+
+fn intent_frame_from_labels(labels: &[String]) -> Vec<u8> {
+    let mut frame = Vec::new();
+    for label in labels {
+        let semantic = label
+            .split_once(':')
+            .map(|(_, semantic)| semantic)
+            .unwrap_or(label);
+        frame.extend_from_slice(b"@intent:");
+        frame.extend_from_slice(semantic.as_bytes());
+        frame.push(b'\n');
+    }
+    frame
+}
+
 /// POST /brain/chat — canonical chat endpoint on the merged node.
 /// Mirrors brain_server's /chat behaviour so existing Django /
 /// wizard_session callers can switch from `:8095/chat` to
@@ -1061,7 +1109,7 @@ async fn h_brain_chat(
             semantic_refinement_margin = Some(*margin);
         }
         let learned_frame = learned_route.as_ref().map(|(bytes, _, _)| bytes.as_slice());
-        let mut effective_frame = prompt.as_bytes();
+        let mut effective_owned: Option<Vec<u8>> = None;
         if let Some(frame) = learned_frame {
             let learned_labels = brain
                 .fabric()
@@ -1090,9 +1138,15 @@ async fn h_brain_chat(
                     .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))
             {
                 labels = learned_labels;
-                effective_frame = frame;
+                effective_owned = Some(frame.to_vec());
+            } else if route_score >= 0.30 && route_margin >= 0.025 {
+                if let Some(fused) = fuse_intent_labels(&labels, &learned_labels) {
+                    effective_owned = Some(intent_frame_from_labels(&fused));
+                    labels = fused;
+                }
             }
         }
+        let effective_frame = effective_owned.as_deref().unwrap_or(prompt.as_bytes());
         // A lone diagnostic (most commonly only LANGUAGE:PYTHON) is too
         // broad to establish task grounding. Require a co-firing composition
         // such as LANGUAGE + BEHAVIOR before derived evidence may influence
@@ -1972,6 +2026,34 @@ mod tests {
         apply_identity_pool_configs(&mut brain, &identity).unwrap();
 
         assert_eq!(response.read().config.max_concept_member_count, 1);
+    }
+
+    #[test]
+    fn direct_language_inhibits_learned_language_during_intent_fusion() {
+        let direct = vec!["intent:LANGUAGE:JAVASCRIPT".to_string()];
+        let learned = vec![
+            "intent:LANGUAGE:PYTHON".to_string(),
+            "intent:SECURITY:AUTHORIZATION".to_string(),
+        ];
+        let fused = fuse_intent_labels(&direct, &learned).unwrap();
+        assert_eq!(
+            fused,
+            vec![
+                "intent:LANGUAGE:JAVASCRIPT".to_string(),
+                "intent:SECURITY:AUTHORIZATION".to_string(),
+            ]
+        );
+        assert_eq!(
+            intent_frame_from_labels(&fused),
+            b"@intent:LANGUAGE:JAVASCRIPT\n@intent:SECURITY:AUTHORIZATION\n"
+        );
+    }
+
+    #[test]
+    fn intent_fusion_rejects_underspecified_learned_evidence() {
+        let direct = vec!["intent:LANGUAGE:RUST".to_string()];
+        let learned = vec!["intent:GROUNDING:UNDERSPECIFIED".to_string()];
+        assert!(fuse_intent_labels(&direct, &learned).is_none());
     }
 }
 

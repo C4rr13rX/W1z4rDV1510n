@@ -229,6 +229,25 @@ fn platform_intents_emit_language_plus_protocol_behavior() {
 }
 
 #[test]
+fn atomic_ledger_is_both_transactional_and_domain_specific() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Build a Go ledger transfer that preserves both balances on failure.",
+    );
+    assert!(features.iter().any(|label| label == "intent:LANGUAGE:GO"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:PERSISTENCE:ATOMIC_TRANSACTION"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER"));
+    let unique: std::collections::HashSet<_> = features.iter().collect();
+    assert_eq!(unique.len(), features.len(), "intent atoms must be unique");
+}
+
+#[test]
 fn missing_specification_emits_inhibitory_grounding_evidence() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
