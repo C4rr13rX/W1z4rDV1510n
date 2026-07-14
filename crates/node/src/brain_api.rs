@@ -1008,6 +1008,28 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     > = std::collections::BTreeMap::new();
     let mut numeric_count = 0usize;
     let mut relative_count = 0usize;
+    let mut outcomes: std::collections::BTreeMap<String, bool> =
+        std::collections::BTreeMap::new();
+    for bytes in candidates {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            continue;
+        };
+        let Some(outcome) = value.get("fragment_outcome").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let (Some(evidence_id), Some(confirmed)) = (
+            outcome.get("evidence_id").and_then(|v| v.as_str()),
+            outcome.get("confirmed").and_then(|v| v.as_bool()),
+        ) else {
+            return None;
+        };
+        if evidence_id.is_empty() {
+            return None;
+        }
+        if outcomes.insert(evidence_id.to_string(), confirmed).is_some() {
+            return None; // contradictory/repeated control evidence is ambiguous
+        }
+    }
     for bytes in candidates {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
             continue;
@@ -1028,6 +1050,11 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
             || source.is_empty()
         {
             return None;
+        }
+        if let Some(evidence_id) = fragment.get("evidence_id").and_then(|v| v.as_str()) {
+            if outcomes.get(evidence_id) == Some(&false) {
+                continue;
+            }
         }
         if let Some(order) = fragment.get("order").and_then(|v| v.as_i64()) {
             let slots = numeric.entry(file.to_string()).or_default();
@@ -1088,29 +1115,51 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     }
     let mut rendered = serde_json::Map::new();
     if relative_count >= 2 {
+        let mut graph: std::collections::BTreeMap<
+            String,
+            (String, String, std::collections::BTreeSet<String>),
+        > = std::collections::BTreeMap::new();
         for (file, roles) in relative {
-            let all_roles: std::collections::BTreeSet<String> = roles.keys().cloned().collect();
-            if roles
-                .values()
-                .any(|fragment| !fragment.after.is_subset(&all_roles))
-            {
-                return None;
-            }
-            let mut emitted = std::collections::BTreeSet::new();
-            let mut source = String::new();
-            while emitted.len() < roles.len() {
-                let next = roles
-                    .iter()
-                    .find(|(role, fragment)| {
-                        !emitted.contains(*role) && fragment.after.is_subset(&emitted)
+            for (role, fragment) in roles {
+                let key = format!("{file}::{role}");
+                let dependencies = fragment
+                    .after
+                    .into_iter()
+                    .map(|dependency| {
+                        if dependency.contains("::") {
+                            dependency
+                        } else {
+                            format!("{file}::{dependency}")
+                        }
                     })
-                    .map(|(role, fragment)| (role.clone(), fragment.source.clone()));
-                let Some((role, fragment_source)) = next else {
-                    return None; // dependency cycle
-                };
-                source.push_str(&fragment_source);
-                emitted.insert(role);
+                    .collect();
+                graph.insert(key, (file.clone(), fragment.source, dependencies));
             }
+        }
+        let all_roles: std::collections::BTreeSet<String> = graph.keys().cloned().collect();
+        if graph
+            .values()
+            .any(|(_, _, dependencies)| !dependencies.is_subset(&all_roles))
+        {
+            return None;
+        }
+        let mut emitted = std::collections::BTreeSet::new();
+        let mut file_sources: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        while emitted.len() < graph.len() {
+            let next = graph
+                .iter()
+                .find(|(key, (_, _, dependencies))| {
+                    !emitted.contains(*key) && dependencies.is_subset(&emitted)
+                })
+                .map(|(key, (file, source, _))| (key.clone(), file.clone(), source.clone()));
+            let Some((key, file, fragment_source)) = next else {
+                return None;
+            };
+            file_sources.entry(file).or_default().push_str(&fragment_source);
+            emitted.insert(key);
+        }
+        for (file, source) in file_sources {
             rendered.insert(file, serde_json::Value::String(source));
         }
     } else {
@@ -1350,8 +1399,8 @@ async fn h_brain_chat(
             brain.decode_ranked_feature_bindings(*pool_id, labels, action_pool, 64)
         })
         .unwrap_or_default();
-    let composed = merge_grounded_file_manifests(&feature_candidates)
-        .or_else(|| merge_grounded_code_fragments(&feature_candidates));
+    let composed = merge_grounded_code_fragments(&feature_candidates)
+        .or_else(|| merge_grounded_file_manifests(&feature_candidates));
     let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
         brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
     });
@@ -2239,6 +2288,21 @@ mod tests {
             br#"{"code_fragment":{"file":"main.js","role":"b","after":["a"],"source":"b"}}"#.to_vec(),
         ];
         assert!(merge_grounded_code_fragments(&candidates).is_none());
+    }
+
+    #[test]
+    fn cross_file_dependencies_and_rejected_evidence_settle_safely() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"domain.py","role":"model","after":[],"source":"VALUE=1\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"service.py","role":"import","after":["domain.py::model"],"evidence_id":"bad","source":"from missing import VALUE\n"}}"#.to_vec(),
+            br#"{"fragment_outcome":{"evidence_id":"bad","confirmed":false}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"service.py","role":"import","after":["domain.py::model"],"evidence_id":"good","source":"from domain import VALUE\n"}}"#.to_vec(),
+            br#"{"fragment_outcome":{"evidence_id":"good","confirmed":true}}"#.to_vec(),
+        ];
+        let assembled = merge_grounded_code_fragments(&candidates).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        assert_eq!(value["files"]["domain.py"], "VALUE=1\n");
+        assert_eq!(value["files"]["service.py"], "from domain import VALUE\n");
     }
 }
 

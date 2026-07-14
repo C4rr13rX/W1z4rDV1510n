@@ -427,6 +427,36 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("ARCHITECTURE:MULTIFILE_SERVICE");
         }
+        if text.contains("inventory")
+            || text.contains("stock reservation")
+            || text.contains("reserve stock")
+        {
+            emit("DOMAIN:INVENTORY");
+        }
+        if text.contains("domain module") || text.contains("domain file") {
+            emit("STRUCTURE:DOMAIN_MODULE");
+        }
+        if text.contains("service module") || text.contains("service file") {
+            emit("STRUCTURE:SERVICE_MODULE");
+        }
+        if text.contains("exception declaration") || text.contains("exception class") {
+            emit("STRUCTURE:EXCEPTION");
+        }
+        if text.contains("import statement") || text.contains("import line") {
+            emit("STRUCTURE:IMPORT");
+        }
+        if text.contains("service class") {
+            emit("STRUCTURE:SERVICE_CLASS");
+        }
+        if text.contains("reserve method") || text.contains("reservation method") {
+            emit("STRUCTURE:RESERVE_METHOD");
+        }
+        if text.contains("over-reservation")
+            || text.contains("over reservation")
+            || text.contains("insufficient stock")
+        {
+            emit("GUARD:INSUFFICIENT_STOCK");
+        }
         if text.contains("sqlite")
             || (text.contains("database") && text.contains("transaction"))
             || text.contains("atomic transfer")
