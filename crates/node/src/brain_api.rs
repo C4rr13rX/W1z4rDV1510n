@@ -989,11 +989,25 @@ fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
-/// Conflicting fragments at the same file/order slot abort composition.
+/// New curricula express order as role dependencies; legacy numeric slots
+/// remain readable for checkpoint compatibility. Conflicts, missing
+/// dependencies, and cycles abort composition rather than guessing.
 fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
-    let mut files: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> =
-        std::collections::BTreeMap::new();
-    let mut accepted = 0usize;
+    #[derive(Clone, PartialEq, Eq)]
+    struct RelativeFragment {
+        source: String,
+        after: std::collections::BTreeSet<String>,
+    }
+    let mut numeric: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<i64, String>,
+    > = std::collections::BTreeMap::new();
+    let mut relative: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, RelativeFragment>,
+    > = std::collections::BTreeMap::new();
+    let mut numeric_count = 0usize;
+    let mut relative_count = 0usize;
     for bytes in candidates {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
             continue;
@@ -1001,9 +1015,8 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
         let Some(fragment) = value.get("code_fragment").and_then(|v| v.as_object()) else {
             continue;
         };
-        let (Some(file), Some(order), Some(source)) = (
+        let (Some(file), Some(source)) = (
             fragment.get("file").and_then(|v| v.as_str()),
-            fragment.get("order").and_then(|v| v.as_i64()),
             fragment.get("source").and_then(|v| v.as_str()),
         ) else {
             return None;
@@ -1016,26 +1029,98 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
         {
             return None;
         }
-        let slots = files.entry(file.to_string()).or_default();
-        if let Some(existing) = slots.get(&order) {
-            if existing != source {
+        if let Some(order) = fragment.get("order").and_then(|v| v.as_i64()) {
+            let slots = numeric.entry(file.to_string()).or_default();
+            if let Some(existing) = slots.get(&order) {
+                if existing != source {
+                    return None;
+                }
+                continue;
+            }
+            slots.insert(order, source.to_string());
+            numeric_count += 1;
+            continue;
+        }
+        let Some(role) = fragment.get("role").and_then(|v| v.as_str()) else {
+            return None;
+        };
+        if role.is_empty()
+            || !role
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':'))
+        {
+            return None;
+        }
+        let after_values = fragment
+            .get("after")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut after = std::collections::BTreeSet::new();
+        for value in after_values {
+            let Some(dependency) = value.as_str() else {
+                return None;
+            };
+            if dependency == role || dependency.is_empty() {
+                return None;
+            }
+            after.insert(dependency.to_string());
+        }
+        let entry = RelativeFragment {
+            source: source.to_string(),
+            after,
+        };
+        let roles = relative.entry(file.to_string()).or_default();
+        if let Some(existing) = roles.get(role) {
+            if existing != &entry {
                 return None;
             }
             continue;
         }
-        slots.insert(order, source.to_string());
-        accepted += 1;
+        roles.insert(role.to_string(), entry);
+        relative_count += 1;
     }
-    if accepted < 2 {
+    if relative_count >= 2 && numeric_count > 0 {
+        return None; // one artifact must use one ordering contract
+    }
+    if relative_count < 2 && numeric_count < 2 {
         return None;
     }
-    let rendered: serde_json::Map<String, serde_json::Value> = files
-        .into_iter()
-        .map(|(file, slots)| {
-            let source: String = slots.into_values().collect();
-            (file, serde_json::Value::String(source))
-        })
-        .collect();
+    let mut rendered = serde_json::Map::new();
+    if relative_count >= 2 {
+        for (file, roles) in relative {
+            let all_roles: std::collections::BTreeSet<String> = roles.keys().cloned().collect();
+            if roles
+                .values()
+                .any(|fragment| !fragment.after.is_subset(&all_roles))
+            {
+                return None;
+            }
+            let mut emitted = std::collections::BTreeSet::new();
+            let mut source = String::new();
+            while emitted.len() < roles.len() {
+                let next = roles
+                    .iter()
+                    .find(|(role, fragment)| {
+                        !emitted.contains(*role) && fragment.after.is_subset(&emitted)
+                    })
+                    .map(|(role, fragment)| (role.clone(), fragment.source.clone()));
+                let Some((role, fragment_source)) = next else {
+                    return None; // dependency cycle
+                };
+                source.push_str(&fragment_source);
+                emitted.insert(role);
+            }
+            rendered.insert(file, serde_json::Value::String(source));
+        }
+    } else {
+        for (file, slots) in numeric {
+            rendered.insert(
+                file,
+                serde_json::Value::String(slots.into_values().collect()),
+            );
+        }
+    }
     serde_json::to_vec(&serde_json::json!({"files": rendered})).ok()
 }
 
@@ -2129,6 +2214,29 @@ mod tests {
         let candidates = vec![
             br#"{"code_fragment":{"file":"main.py","order":10,"source":"a"}}"#.to_vec(),
             br#"{"code_fragment":{"file":"main.py","order":10,"source":"b"}}"#.to_vec(),
+        ];
+        assert!(merge_grounded_code_fragments(&candidates).is_none());
+    }
+
+    #[test]
+    fn grounded_relative_fragments_settle_dependencies_not_input_order() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"main.js","role":"return","after":["signature"],"source":"  return value;\n}\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"main.js","role":"signature","after":[],"source":"function identity(value) {\n"}}"#.to_vec(),
+        ];
+        let assembled = merge_grounded_code_fragments(&candidates).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        assert_eq!(
+            value["files"]["main.js"],
+            "function identity(value) {\n  return value;\n}\n"
+        );
+    }
+
+    #[test]
+    fn grounded_relative_fragment_cycles_are_rejected() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"main.js","role":"a","after":["b"],"source":"a"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"main.js","role":"b","after":["a"],"source":"b"}}"#.to_vec(),
         ];
         assert!(merge_grounded_code_fragments(&candidates).is_none());
     }
