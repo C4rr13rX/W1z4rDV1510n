@@ -2401,6 +2401,132 @@ impl Brain {
         if bytes.is_empty() { None } else { Some(bytes) }
     }
 
+    /// Decode a target from the joint firing state of several evidence pools.
+    /// Every requested pool must be represented in the learned binding and
+    /// must independently clear its coverage gate. This makes the readout an
+    /// integrated multi-stream moment rather than an average dominated by one
+    /// text channel.
+    pub fn decode_best_trained_binding_multi(
+        &self,
+        query_pools: &[PoolId],
+        target_pool: PoolId,
+    ) -> Option<Vec<u8>> {
+        let mut query_ids: Vec<PoolId> = query_pools.iter().copied()
+            .filter(|pid| *pid != target_pool && *pid != self.binding_pool_id)
+            .collect();
+        query_ids.sort_unstable();
+        query_ids.dedup();
+        if query_ids.is_empty() { return None; }
+
+        struct QueryState {
+            atoms: ahash::AHashSet<NeuronId>,
+            concepts: ahash::AHashSet<NeuronId>,
+            sequence: Vec<NeuronId>,
+        }
+        let mut states = std::collections::HashMap::new();
+        for pid in &query_ids {
+            let handle = self.fabric.pool(*pid)?;
+            let pool = handle.read();
+            let mut atoms = ahash::AHashSet::new();
+            let mut concepts = ahash::AHashSet::new();
+            for nid in pool.currently_firing() {
+                match pool.get(nid) {
+                    Some(n) if n.is_atom() => { atoms.insert(nid); }
+                    Some(_) => { concepts.insert(nid); }
+                    None => {}
+                }
+            }
+            if atoms.is_empty() && concepts.is_empty() { return None; }
+            states.insert(*pid, QueryState {
+                atoms,
+                concepts,
+                sequence: pool.last_observed_sequence().to_vec(),
+            });
+        }
+
+        let binding_handle = self.fabric.pool(self.binding_pool_id)?;
+        let bindings = binding_handle.read();
+        // binding id, exact-sequence pool count, joint score, target size
+        let mut best: Option<(NeuronId, usize, f32, usize)> = None;
+        for binding in bindings.iter_neurons().filter(|n| !n.is_atom()) {
+            let target_members: Vec<NeuronRef> = binding.members.iter()
+                .filter(|m| m.pool == target_pool).copied().collect();
+            if target_members.is_empty() { continue; }
+
+            let mut joint_score = 1.0f32;
+            let mut exact_count = 0usize;
+            let mut valid = true;
+            for pid in &query_ids {
+                let state = &states[pid];
+                let pool_handle = self.fabric.pool(*pid)?;
+                let pool = pool_handle.read();
+                let mut member_atoms = Vec::new();
+                let mut member_concepts = ahash::AHashSet::new();
+                for member in binding.members.iter().filter(|m| m.pool == *pid) {
+                    match pool.get(member.neuron) {
+                        Some(n) if n.is_atom() => member_atoms.push(member.neuron),
+                        Some(_) => { member_concepts.insert(member.neuron); }
+                        None => {}
+                    }
+                }
+                if member_atoms.is_empty() && member_concepts.is_empty() {
+                    valid = false;
+                    break;
+                }
+                let exact = !state.sequence.is_empty() && member_atoms == state.sequence;
+                if exact { exact_count += 1; }
+                let member_atom_set: ahash::AHashSet<NeuronId> =
+                    member_atoms.iter().copied().collect();
+                let atom_hits = member_atom_set.intersection(&state.atoms).count() as f32;
+                let atom_score = if member_atom_set.is_empty() || state.atoms.is_empty() { 0.0 }
+                    else { (atom_hits / member_atom_set.len() as f32)
+                         * (atom_hits / state.atoms.len() as f32) };
+                let concept_hits = member_concepts.intersection(&state.concepts).count() as f32;
+                let concept_score = if member_concepts.is_empty() || state.concepts.is_empty() { 0.0 }
+                    else { (concept_hits / member_concepts.len() as f32)
+                         * (concept_hits / state.concepts.len() as f32) };
+                let pool_score = if exact { 1.0 } else { atom_score.max(concept_score) };
+                if pool_score < 0.20 {
+                    valid = false;
+                    break;
+                }
+                // Product penalizes a weak evidence channel; the nth root
+                // below keeps scores comparable as topology adds pools.
+                joint_score *= pool_score.max(f32::EPSILON);
+            }
+            if !valid { continue; }
+            joint_score = joint_score.powf(1.0 / query_ids.len() as f32);
+            joint_score *= 1.0 + (binding.use_count.max(1) as f32).ln();
+            let candidate = (binding.id, exact_count, joint_score, target_members.len());
+            let replace = match best {
+                None => true,
+                Some((_, best_exact, best_score, best_size)) => {
+                    exact_count > best_exact
+                        || (exact_count == best_exact && joint_score > best_score)
+                        || (exact_count == best_exact && joint_score == best_score
+                            && target_members.len() < best_size)
+                }
+            };
+            if replace { best = Some(candidate); }
+        }
+
+        let (binding_id, _, _, _) = best?;
+        let binding = bindings.get(binding_id)?;
+        let target_handle = self.fabric.pool(target_pool)?;
+        let target = target_handle.read();
+        let members: Vec<NeuronRef> = binding.members.iter()
+            .filter(|m| m.pool == target_pool).copied().collect();
+        let atoms: Vec<NeuronRef> = members.iter()
+            .filter(|m| target.get(m.neuron).is_some_and(|n| n.is_atom()))
+            .copied().collect();
+        let bytes = if atoms.is_empty() {
+            target.decode_concept_members(&members)
+        } else {
+            target.decode_concept_members(&atoms)
+        };
+        if bytes.is_empty() { None } else { Some(bytes) }
+    }
+
     fn best_binding_match_atom_tier(&self, query_pool: PoolId) -> BindingMatch {
         let q_atoms: ahash::AHashSet<NeuronId> = {
             let q = match self.fabric.pool(query_pool) {

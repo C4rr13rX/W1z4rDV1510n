@@ -404,6 +404,55 @@ async fn h_pretrain(
     Json(json!({"pool_id": pool_id, "atom_grounded": true, "report": report}))
 }
 
+/// Activate several learned sensor streams in the same read-only inference
+/// moment and decode only a binding supported by every supplied pool.
+async fn h_predict_multi(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let target_pool = req.get("target_pool").and_then(|v| v.as_u64())
+        .unwrap_or(POOL_ACTION as u64) as PoolId;
+    let Some(streams) = req.get("streams").and_then(|v| v.as_array()) else {
+        return Json(json!({"error": "streams must be an array of {pool_id, frame}"}));
+    };
+    let mut decoded = Vec::new();
+    for stream in streams.iter().take(64) {
+        let Some(pool_id) = stream.get("pool_id").and_then(|v| v.as_u64()) else {
+            return Json(json!({"error": "each stream requires pool_id"}));
+        };
+        let Some(frame) = stream.get("frame").and_then(|v| v.as_str()) else {
+            return Json(json!({"error": "each stream requires a base64url frame"}));
+        };
+        match b64_url_decode(frame) {
+            Ok(bytes) => decoded.push((pool_id as PoolId, bytes)),
+            Err(error) => return Json(json!({"error": format!("bad frame base64: {}", error)})),
+        }
+    }
+    if decoded.is_empty() {
+        return Json(json!({"error": "at least one stream is required"}));
+    }
+
+    let mut brain = s.brain.lock().await;
+    brain.clear_prediction_activation();
+    let mut query_pools = Vec::with_capacity(decoded.len());
+    for (pool_id, frame) in &decoded {
+        if brain.fabric().pool(*pool_id).is_none() {
+            brain.clear_prediction_activation();
+            return Json(json!({"error": format!("unknown pool id {}", pool_id)}));
+        }
+        brain.activate_for_prediction(*pool_id, frame);
+        query_pools.push(*pool_id);
+    }
+    let answer = brain.decode_best_trained_binding_multi(&query_pools, target_pool);
+    brain.clear_prediction_activation();
+    Json(json!({
+        "integrated": true,
+        "query_pools": query_pools,
+        "target_pool": target_pool,
+        "answer": answer.map(|bytes| b64_url_no_pad(&bytes)),
+    }))
+}
+
 async fn h_tick(State(s): State<BrainApiState>) -> Json<u64> {
     let handler_t0 = std::time::Instant::now();
     let lock_t0 = std::time::Instant::now();
@@ -1327,6 +1376,7 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/stats",                  get(h_stats))
         .route("/observe",                post(h_observe))
         .route("/pretrain",               post(h_pretrain))
+        .route("/predict/multi",           post(h_predict_multi))
         .route("/tick",                   post(h_tick))
         .route("/integrate",              post(h_integrate))
         .route("/predict",                post(h_predict))
