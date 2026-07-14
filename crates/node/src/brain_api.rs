@@ -858,6 +858,13 @@ async fn h_brain_chat(
         .collect();
     let mut chat_query_pools = vec![POOL_TEXT];
     for pool_id in feature_pools {
+        let inhibits_derived_readout = brain.fabric().pool(pool_id).is_some_and(|pool| {
+            pool.read().encoded_labels(prompt.as_bytes()).iter()
+                .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))
+        });
+        if inhibits_derived_readout {
+            continue;
+        }
         // A lone diagnostic (most commonly only LANGUAGE:PYTHON) is too
         // broad to establish task grounding. Require a co-firing composition
         // such as LANGUAGE + BEHAVIOR before derived evidence may influence

@@ -322,6 +322,30 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("SECURITY:AUTHORIZATION");
         }
+        if text.contains("idempoten") || (text.contains("api") && text.contains("replay")) {
+            emit("API:IDEMPOTENT_COMMAND");
+        }
+        if text.contains("migration") || text.contains("schema version")
+            || text.contains("upgrade path")
+        {
+            emit("PERSISTENCE:SCHEMA_MIGRATION");
+        }
+        if text.contains("observability") || text.contains("structured log")
+            || text.contains("correlation id") || text.contains("correlation-id")
+        {
+            emit("OBSERVABILITY:CORRELATED_LOGGING");
+        }
+        if text.contains("circuit breaker") || text.contains("circuit-breaker")
+            || (text.contains("opens after") && text.contains("cooldown"))
+        {
+            emit("RESILIENCE:CIRCUIT_BREAKER");
+        }
+        if text.contains("unspecified") || text.contains("unknown protocol")
+            || text.contains("undocumented") || text.contains("has not been provided")
+            || text.contains("without any service objectives")
+        {
+            emit("GROUNDING:UNDERSPECIFIED");
+        }
         features
     }
 
@@ -1127,6 +1151,12 @@ impl Pool {
     pub fn id(&self) -> PoolId        { self.config.id }
     pub fn name(&self) -> &str        { &self.config.name }
     pub fn encoding_name(&self) -> &'static str { self.encoding.name() }
+    /// Inspect the deterministic sensor labels for a frame without creating
+    /// neurons or changing activation. This supports inhibitory diagnostics
+    /// (for example, explicitly missing specifications) during prediction.
+    pub fn encoded_labels(&self, frame: &[u8]) -> Vec<String> {
+        self.encoding.atomize(frame)
+    }
     pub fn neuron_count(&self) -> usize { self.neurons.len() }
 
     /// Set the domain id stamped onto every atom + concept created

@@ -117,3 +117,43 @@ fn authorization_paraphrase_retains_security_intent() {
     assert_eq!(trained, paraphrase);
     assert!(trained.iter().any(|label| label == "intent:SECURITY:AUTHORIZATION"));
 }
+
+#[test]
+fn platform_intents_emit_language_plus_protocol_behavior() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let cases = [
+        (b"Implement a Python idempotent API command.".as_slice(),
+         "intent:API:IDEMPOTENT_COMMAND"),
+        (b"Write Python schema migration upgrade paths.".as_slice(),
+         "intent:PERSISTENCE:SCHEMA_MIGRATION"),
+        (b"Create Python structured logs with a correlation ID.".as_slice(),
+         "intent:OBSERVABILITY:CORRELATED_LOGGING"),
+        (b"Build a Python circuit breaker.".as_slice(),
+         "intent:RESILIENCE:CIRCUIT_BREAKER"),
+    ];
+    for (prompt, expected) in cases {
+        let features = encoding.atomize(prompt);
+        assert!(features.iter().any(|label| label == "intent:LANGUAGE:PYTHON"));
+        assert!(features.iter().any(|label| label == expected), "{features:?}");
+    }
+}
+
+#[test]
+fn missing_specification_emits_inhibitory_grounding_evidence() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let features = encoding.atomize(
+        b"Write a Python migration for an unspecified legacy schema and target schema.",
+    );
+    assert!(features.iter().any(|label| label == "intent:PERSISTENCE:SCHEMA_MIGRATION"));
+    assert!(features.iter().any(|label| label == "intent:GROUNDING:UNDERSPECIFIED"));
+}
+
+#[test]
+fn circuit_breaker_failure_cooldown_paraphrase_shares_intent() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let trained = encoding.atomize(b"Implement a Python circuit breaker.");
+    let paraphrase = encoding.atomize(
+        b"Build Python resilience code that opens after repeated failures and permits a trial after its cooldown.",
+    );
+    assert_eq!(trained, paraphrase);
+}
