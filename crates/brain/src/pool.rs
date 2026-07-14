@@ -427,6 +427,8 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("redact")
             || text.contains("mask secrets")
             || text.contains("masks secrets")
+            || ((text.contains("mask") || text.contains("masks"))
+                && text.contains("credential"))
             || (text.contains("password") && text.contains("token"))
         {
             emit("ENTERPRISE:SECRET_REDACTION");

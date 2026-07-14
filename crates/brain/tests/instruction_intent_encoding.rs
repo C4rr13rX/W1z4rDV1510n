@@ -417,6 +417,22 @@ fn batching_size_validation_does_not_alias_generic_input_validation() {
 }
 
 #[test]
+fn masking_nested_credentials_is_secret_redaction_evidence() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Create Python correlated logs that mask nested credentials.",
+    );
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
+}
+
+#[test]
 fn typescript_transport_retry_does_not_alias_a_retry_helper() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
