@@ -424,7 +424,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 limit_rows: int | None = None,
                 start_row: int = 0,
                 direct_pretrain: bool = False,
-                input_path: str = "") -> dict:
+                input_path: str = "",
+                batch_size: int = 16) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -491,7 +492,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 context = row.get("ctx") if isinstance(row.get("ctx"), dict) else None
                 for _ in range(repeats):
                     episodes.append(_pretrain_episode(prompt, resp, context))
-                if len(episodes) >= 256:
+                if len(episodes) >= batch_size:
                     ok, err = post_pretrain_batch(episodes)
                     if ok:
                         summary["posted_ok"] += len(episodes)
@@ -625,6 +626,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--input-path", default="",
                      help="train only the matching corpus path within a "
                           "multi-input registry script")
+    p.add_argument("--batch-size", type=int, default=16,
+                     help="direct-pretrain episodes per request (1..256); "
+                          "smaller batches keep live inference responsive")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -653,6 +657,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="POST /checkpoint at the end so brain.bin persists "
                           "the trained state to disk")
     args = p.parse_args(argv)
+    if not 1 <= args.batch_size <= 256:
+        p.error("--batch-size must be between 1 and 256")
 
     BRAIN_URL = args.brain.rstrip("/")
     # Mid-training benchmarks share the selected brain endpoint.  The runner
@@ -690,7 +696,8 @@ def main(argv: list[str] | None = None) -> int:
                             limit_rows=args.limit_rows,
                             start_row=args.start_row,
                             direct_pretrain=args.direct_pretrain,
-                            input_path=args.input_path)
+                            input_path=args.input_path,
+                            batch_size=args.batch_size)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
