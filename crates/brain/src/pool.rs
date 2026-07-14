@@ -997,6 +997,33 @@ impl Pool {
             self.activation.insert(id, 1.0);
             self.currently_firing.insert(id);
         }
+        // Replay the same hierarchical mini-column collapse used while
+        // learning, but against a query-local stack.  Previously prediction
+        // activated atoms only, so every learned prompt concept was inert at
+        // inference and concept-tier retrieval could never generalise.  This
+        // path performs no neurogenesis, recurrence counting, Hebbian update,
+        // or mutation of the learned recent-atom buffer.
+        let mut stack: Vec<NeuronId> = Vec::with_capacity(fired.len());
+        for &atom in &fired {
+            stack.push(atom);
+            loop {
+                let max_len = self.config.max_concept_member_count.min(stack.len());
+                if max_len < 2 { break; }
+                let mut matched: Option<(usize, NeuronId)> = None;
+                for len in (2..=max_len).rev() {
+                    let start = stack.len() - len;
+                    if let Some(&cid) = self.concept_sequence_to_id.get(&stack[start..]) {
+                        matched = Some((len, cid));
+                        break;
+                    }
+                }
+                let Some((len, cid)) = matched else { break };
+                stack.truncate(stack.len() - len);
+                stack.push(cid);
+                self.activation.insert(cid, 1.0);
+                self.currently_firing.insert(cid);
+            }
+        }
         self.last_observed_sequence = fired.clone();
         fired
     }

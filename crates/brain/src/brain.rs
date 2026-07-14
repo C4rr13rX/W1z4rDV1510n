@@ -932,10 +932,27 @@ impl Brain {
         self.execute_feedback_loops();
         // Snapshot the current moment's firing BEFORE the fabric
         // advances (which clears it).  Build a fingerprint from
-        // multi-pool firing for binding-concept tracking.
+        // multi-pool firing for binding-concept tracking.  Fabric moments
+        // intentionally contain atoms only to keep cross-pool Hebbian fanout
+        // bounded.  Bindings, however, also need the already-collapsed
+        // concepts or concept-tier inference has nothing to match against.
+        // Enrich this private episodic snapshot with deterministically sorted
+        // firing concepts without exposing them to cross-pool wiring.
         let fingerprint = {
             let moment = self.fabric.current_moment();
-            MomentFingerprint::from_fabric_moment(&moment.fired)
+            let mut episodic_fired = moment.fired.clone();
+            for (&pid, sequence) in episodic_fired.iter_mut() {
+                if pid == self.binding_pool_id { continue; }
+                if let Some(pool) = self.fabric.pool(pid) {
+                    let pool = pool.read();
+                    let mut concepts: Vec<NeuronId> = pool.currently_firing()
+                        .filter(|nid| pool.get(*nid).is_some_and(|n| !n.is_atom()))
+                        .collect();
+                    concepts.sort_unstable();
+                    sequence.extend(concepts);
+                }
+            }
+            MomentFingerprint::from_fabric_moment(&episodic_fired)
         };
 
         // Capture per-pool activation frames into the annealer's

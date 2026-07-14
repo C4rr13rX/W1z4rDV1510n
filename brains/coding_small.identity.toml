@@ -37,7 +37,14 @@ atom_encoding_prefix = "response"
 kind = "Action"
 frame_rate = 1
 recent_atoms_window = 65536
-max_concept_member_count = 32
+# Code responses are supervised targets, not a sensory stream.  Their ordered
+# atom sequence is already retained in the binding and is the authoritative
+# decode path.  Running suffix neurogenesis over long source files creates
+# O(bytes * suffix-length) terminals without improving recall (6.46M terminals
+# halfway through the first 582-example Python curriculum).  A maximum below
+# the minimum concept length (2) disables response-pool concept promotion while
+# preserving response atoms, ordered bindings, and prompt-side abstraction.
+max_concept_member_count = 1
 concept_emergence_threshold = 3
 decay_rate = 0.00002
 prune_floor = 0.001

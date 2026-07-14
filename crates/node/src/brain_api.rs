@@ -187,6 +187,22 @@ fn build_from_identity(identity: &BrainIdentitySpec) -> Result<Brain> {
         .map_err(|e| anyhow::anyhow!("build configured brain '{}': {}", identity.name, e))
 }
 
+/// Re-apply the deployed identity's operational pool configuration after a
+/// checkpoint restore.  Checkpoints own learned neurons and terminals; the
+/// identity file owns how those pools continue learning.  Without this step,
+/// tuning an existing brain's decay, pruning, sparsity, or concept-emergence
+/// policy silently had no effect until the brain was rebuilt from scratch.
+fn apply_identity_pool_configs(brain: &mut Brain, identity: &BrainIdentitySpec) -> Result<()> {
+    for spec in &identity.pools {
+        let pool = brain.fabric().pool(spec.id).ok_or_else(|| anyhow::anyhow!(
+            "checkpoint for brain '{}' is missing configured pool {} ({})",
+            identity.name, spec.id, spec.name
+        ))?;
+        pool.write().config = spec.to_pool_config();
+    }
+    Ok(())
+}
+
 fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
     let leaked: &'static str = Box::leak(prefix.to_string().into_boxed_str());
     Box::new(BytePassthroughEncoding { prefix: leaked })
@@ -215,7 +231,12 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
             .map(|(pid, p)| (*pid, leaked_encoding(p)))
             .collect();
         match Brain::restore(&checkpoint, encs) {
-            Ok((brain, _missing)) => brain,
+            Ok((mut brain, _missing)) => {
+                if let Some(spec) = &identity {
+                    apply_identity_pool_configs(&mut brain, spec)?;
+                }
+                brain
+            },
             Err(e) => {
                 tracing::warn!("brain restore failed at {}: {} — starting fresh",
                     checkpoint.display(), e);
@@ -825,6 +846,7 @@ async fn h_binding_diagnose(
         .map(|p| p.read().last_observed_sequence().to_vec())
         .unwrap_or_default();
     let mut exact = Vec::new();
+    let mut fuzzy: Vec<(f32, serde_json::Value)> = Vec::new();
     if let (Some(qh), Some(th), Some(bh)) = (
         brain.fabric().pool(qp), brain.fabric().pool(tp),
         brain.fabric().pool(brain.binding_pool_id()),
@@ -832,24 +854,58 @@ async fn h_binding_diagnose(
         let q = qh.read();
         let t = th.read();
         let bindings = bh.read();
+        let firing_atoms: std::collections::HashSet<NeuronId> = q.currently_firing()
+            .filter(|nid| q.get(*nid).is_some_and(|n| n.is_atom()))
+            .collect();
+        let firing_concepts: std::collections::HashSet<NeuronId> = q.currently_firing()
+            .filter(|nid| q.get(*nid).is_some_and(|n| !n.is_atom()))
+            .collect();
         for binding in bindings.iter_neurons().filter(|n| !n.is_atom()) {
             let q_atoms: Vec<NeuronId> = binding.members.iter()
                 .filter(|m| m.pool == qp && q.get(m.neuron).is_some_and(|n| n.is_atom()))
                 .map(|m| m.neuron).collect();
-            if q_atoms != query_seq { continue; }
+            let q_concepts: std::collections::HashSet<NeuronId> = binding.members.iter()
+                .filter(|m| m.pool == qp && q.get(m.neuron).is_some_and(|n| !n.is_atom()))
+                .map(|m| m.neuron).collect();
+            let q_atom_set: std::collections::HashSet<NeuronId> =
+                q_atoms.iter().copied().collect();
+            let atom_intersect = q_atom_set.intersection(&firing_atoms).count();
+            let atom_precision = atom_intersect as f32 / q_atom_set.len().max(1) as f32;
+            let atom_recall = atom_intersect as f32 / firing_atoms.len().max(1) as f32;
+            let atom_score = atom_precision * atom_recall;
+            let concept_intersect = q_concepts.intersection(&firing_concepts).count();
+            let concept_precision = concept_intersect as f32 / q_concepts.len().max(1) as f32;
+            let concept_recall = concept_intersect as f32 / firing_concepts.len().max(1) as f32;
+            let concept_score = concept_precision * concept_recall;
             let target_atoms: Vec<NeuronRef> = binding.members.iter()
                 .filter(|m| m.pool == tp && t.get(m.neuron).is_some_and(|n| n.is_atom()))
                 .copied().collect();
+            let target = String::from_utf8_lossy(&t.decode_concept_members(&target_atoms)).to_string();
+            fuzzy.push((atom_score.max(concept_score), json!({
+                "binding_id": binding.id,
+                "use_count": binding.use_count,
+                "sequence_match": q_atoms == query_seq,
+                "atom_score": atom_score,
+                "atom_precision": atom_precision,
+                "atom_recall": atom_recall,
+                "concept_score": concept_score,
+                "concept_precision": concept_precision,
+                "concept_recall": concept_recall,
+                "target": target,
+            })));
+            if q_atoms != query_seq { continue; }
             exact.push(json!({
                 "binding_id": binding.id,
                 "use_count": binding.use_count,
                 "query_atom_count": q_atoms.len(),
                 "target_atom_count": target_atoms.len(),
-                "target": String::from_utf8_lossy(&t.decode_concept_members(&target_atoms)),
+                "target": target,
             }));
             if exact.len() >= 32 { break; }
         }
     }
+    fuzzy.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let top_matches: Vec<_> = fuzzy.into_iter().take(10).map(|(_, row)| row).collect();
     brain.clear_prediction_activation();
     Json(json!({
         "learning": false,
@@ -857,6 +913,7 @@ async fn h_binding_diagnose(
         "query_sequence_length": query_seq.len(),
         "exact_binding_count": exact.len(),
         "exact_bindings": exact,
+        "top_matches": top_matches,
     }))
 }
 
@@ -1280,6 +1337,25 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
         .route("/thinking/stop",          post(h_thinking_stop))
         .route("/thinking/status",        get(h_thinking_status))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deployed_identity_reconfigures_restored_pool_learning_policy() {
+        let identity_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../brains/coding_small.identity.toml");
+        let identity = BrainIdentitySpec::load_toml(identity_path).unwrap();
+        let mut brain = build_from_identity(&identity).unwrap();
+        let response = brain.fabric().pool(4).unwrap();
+        response.write().config.max_concept_member_count = 32;
+
+        apply_identity_pool_configs(&mut brain, &identity).unwrap();
+
+        assert_eq!(response.read().config.max_concept_member_count, 1);
+    }
 }
 
 /// Data directory for the main node's embedded brain.  Looks at
