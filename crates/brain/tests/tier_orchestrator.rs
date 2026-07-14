@@ -265,6 +265,7 @@ fn evicted_knowledge_pages_back_in_for_prediction() {
     }
     let evicted_now = brain.fabric().pool(1).unwrap().read().evicted_count();
     assert!(evicted_now > 0, "purge phase must actually evict concepts");
+    let structural_before = brain.stats();
     let purged = brain.fabric().tier_orchestrator_stats();
     assert!(purged.neurons_evicted > 0);
 
@@ -276,19 +277,35 @@ fn evicted_knowledge_pages_back_in_for_prediction() {
     let after = brain.fabric().propagate(1);
     let after_targets: usize = after.values().map(|m| m.len()).sum();
     let stats = brain.fabric().tier_orchestrator_stats();
+    let structural_after = brain.stats();
 
     assert!(stats.neurons_paged_in > 0,
         "prediction must page evicted knowledge back in (paged_in={})",
         stats.neurons_paged_in);
     assert_eq!(stats.page_in_errors, 0,
         "page-ins must not error (got {})", stats.page_in_errors);
-    assert!(after_targets >= baseline_targets,
+    // Equal semantic reach is the target; allow a single boundary neuron
+    // because hash iteration can put one equal-salience candidate on the
+    // other side of the bounded page-in cut.
+    assert!(after_targets.saturating_add(1) >= baseline_targets,
         "activation spread must recover after hydration: after={} baseline={}",
         after_targets, baseline_targets);
     let evicted_after = brain.fabric().pool(1).unwrap().read().evicted_count();
     assert!(evicted_after < evicted_now,
         "hydration must shrink the evicted set ({} -> {})",
         evicted_now, evicted_after);
+    assert_eq!(structural_after.tick, structural_before.tick,
+        "prediction must not advance the learning clock");
+    assert_eq!(structural_after.total_neurons, structural_before.total_neurons,
+        "prediction must not create neurons");
+    assert_eq!(structural_after.total_concepts, structural_before.total_concepts,
+        "prediction must not create concepts");
+    assert_eq!(structural_after.total_binding, structural_before.total_binding,
+        "prediction must not create bindings");
+    assert!(structural_after.resident_terminals >= structural_before.resident_terminals,
+        "page-in restores the existing terminal working set");
+    assert_eq!(structural_after.evicted_neurons, evicted_after,
+        "brain diagnostics must expose the cold/resident transition");
 
     std::fs::remove_dir_all(&dir).ok();
 }

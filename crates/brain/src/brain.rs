@@ -325,7 +325,15 @@ pub struct BrainStats {
     pub total_neurons: usize,
     pub total_concepts: usize,
     pub total_binding: usize,
+    /// Terminals currently resident in RAM. This gauge may increase during
+    /// read-only inference when existing cold-tier neurons are demand-paged
+    /// from SSD; it is not, by itself, a neurogenesis counter.
     pub total_terminals: usize,
+    /// Explicit alias for `total_terminals`, exposed so diagnostics do not
+    /// mistake working-set hydration for structural learning.
+    pub resident_terminals: usize,
+    /// Neurons whose full members/terminals currently live in the cold tier.
+    pub evicted_neurons: usize,
     pub binding_pool_id: PoolId,
     pub fingerprints_window: usize,
     /// Bindings that crossed `tentative_emergence_threshold` but not
@@ -5972,6 +5980,8 @@ impl Brain {
             total_concepts: 0,
             total_binding: 0,
             total_terminals: 0,
+            resident_terminals: 0,
+            evicted_neurons: 0,
             binding_pool_id: self.binding_pool_id,
             fingerprints_window: self.moment_history.len(),
             tentative_bindings: self.tentative_promoted.len(),
@@ -5991,6 +6001,8 @@ impl Brain {
                 // O(1) — maintained terminal counter (was O(N) walk
                 // before pool.total_terminals was introduced).
                 stats.total_terminals += pool.total_terminals();
+                stats.resident_terminals += pool.total_terminals();
+                stats.evicted_neurons += pool.evicted_count();
                 if pid == self.binding_pool_id {
                     stats.total_binding += cc;
                 }

@@ -368,7 +368,12 @@ async fn h_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
         "total_neurons":   st.total_neurons,
         "total_concepts":  st.total_concepts,
         "total_binding":   st.total_binding,
-        "total_terminals": st.total_terminals,
+        // Backward-compatible name. This is the resident RAM working set,
+        // not a structural-growth counter: prediction may page pre-existing
+        // terminals back from SSD without learning anything.
+        "total_terminals":    st.total_terminals,
+        "resident_terminals": st.resident_terminals,
+        "evicted_neurons":    st.evicted_neurons,
         "binding_pool_id": b.binding_pool_id(),
     }))
 }
