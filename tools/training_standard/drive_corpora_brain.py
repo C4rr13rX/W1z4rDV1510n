@@ -248,7 +248,17 @@ def write_progress(path: Path, payload: dict) -> None:
         json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    os.replace(temporary, path)
+    for attempt in range(20):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            # Windows readers and virus scanners can briefly retain a share
+            # handle after closing the progress file. The temp file remains
+            # complete, so retrying the same atomic replacement is safe.
+            time.sleep(0.05 * (attempt + 1))
 
 
 def read_corpus_jsonl(path: Path, *, skip_rows: int = 0,
@@ -446,7 +456,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 batch_size: int = 16,
                 progress_path: Path | None = None,
                 checkpoint_rows: int = 4096,
-                feature_policy: str = "auto") -> dict:
+                feature_policy: str = "auto",
+                durable_start_row: int | None = None) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -506,8 +517,12 @@ def drive_one(script, repeats: int, project_root: Path,
         if direct_pretrain:
             episodes = []
             batch_next_row = start_row
-            durable_next_row = start_row
-            accepted_since_checkpoint = 0
+            durable_next_row = (
+                start_row if durable_start_row is None else durable_start_row
+            )
+            accepted_since_checkpoint = max(
+                0, start_row - durable_next_row
+            ) * repeats
 
             def publish_progress() -> None:
                 if progress_path is not None:
@@ -705,6 +720,9 @@ def main(argv: list[str] | None = None) -> int:
                      default="auto",
                      help="direct-pretrain derived-feature routing: auto "
                           "keeps math/reasoning out of coding-intent pools")
+    p.add_argument("--durable-start-row", type=int,
+                     help="last checkpointed logical row when resuming from "
+                          "a newer RAM offset after a driver-only failure")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -735,6 +753,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if not 1 <= args.batch_size <= 256:
         p.error("--batch-size must be between 1 and 256")
+    if args.durable_start_row is not None and not 0 <= args.durable_start_row <= args.start_row:
+        p.error("--durable-start-row must be between 0 and --start-row")
 
     BRAIN_URL = args.brain.rstrip("/")
     # Mid-training benchmarks share the selected brain endpoint.  The runner
@@ -776,7 +796,8 @@ def main(argv: list[str] | None = None) -> int:
                             batch_size=args.batch_size,
                             progress_path=args.progress_path,
                             checkpoint_rows=args.checkpoint_rows,
-                            feature_policy=args.feature_policy)
+                            feature_policy=args.feature_policy,
+                            durable_start_row=args.durable_start_row)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
