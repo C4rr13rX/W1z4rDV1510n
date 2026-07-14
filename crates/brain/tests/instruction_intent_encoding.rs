@@ -248,6 +248,26 @@ fn atomic_ledger_is_both_transactional_and_domain_specific() {
 }
 
 #[test]
+fn fragment_constraints_cofire_without_replacing_raw_source() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Create a Python clamp function that floors values at a minimum, caps them at a maximum, and otherwise leaves the value unchanged.",
+    );
+    for expected in [
+        "intent:LANGUAGE:PYTHON",
+        "intent:CODE:CLAMP",
+        "intent:CODE:FUNCTION_SIGNATURE",
+        "intent:GUARD:LOWER_BOUND",
+        "intent:GUARD:UPPER_BOUND",
+        "intent:FLOW:RETURN_INPUT",
+    ] {
+        assert!(features.iter().any(|label| label == expected), "{features:?}");
+    }
+}
+
+#[test]
 fn missing_specification_emits_inhibitory_grounding_evidence() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),

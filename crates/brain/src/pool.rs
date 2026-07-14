@@ -360,6 +360,42 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("factorial") {
             emit("MATH:FACTORIAL");
         }
+        // Code-fragment composition features. These describe structural and
+        // behavioral constraints in a parallel pool; the source bytes remain
+        // wholly represented in the raw action pool.
+        if text.contains("clamp") || text.contains("clamping") {
+            emit("CODE:CLAMP");
+        }
+        if text.contains("function signature")
+            || text.contains("declaration line")
+            || ((text.contains("clamp") || text.contains("clamping"))
+                && text.contains("function"))
+        {
+            emit("CODE:FUNCTION_SIGNATURE");
+        }
+        if text.contains("lower-bound")
+            || text.contains("lower bound")
+            || text.contains("below the minimum")
+            || (text.contains("minimum") && text.contains("floor"))
+        {
+            emit("GUARD:LOWER_BOUND");
+        }
+        if text.contains("upper-bound")
+            || text.contains("upper bound")
+            || text.contains("above the maximum")
+            || (text.contains("maximum") && text.contains("cap"))
+        {
+            emit("GUARD:UPPER_BOUND");
+        }
+        if text.contains("otherwise return the input")
+            || text.contains("otherwise returns the input")
+            || text.contains("otherwise return the original")
+            || text.contains("otherwise returns the original")
+            || text.contains("otherwise leaves the value unchanged")
+            || text.contains("within the bounds")
+        {
+            emit("FLOW:RETURN_INPUT");
+        }
         if text.contains("validat")
             || text.contains("required field")
             || text.contains("required user")

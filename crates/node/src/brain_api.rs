@@ -986,6 +986,59 @@ fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({"files": files})).ok()
 }
 
+/// Assemble independently grounded raw-source fragments into files. The
+/// protocol carries only deterministic structural constraints; source remains
+/// byte-atom learned evidence and is never invented by this function.
+/// Conflicting fragments at the same file/order slot abort composition.
+fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut files: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> =
+        std::collections::BTreeMap::new();
+    let mut accepted = 0usize;
+    for bytes in candidates {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            continue;
+        };
+        let Some(fragment) = value.get("code_fragment").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let (Some(file), Some(order), Some(source)) = (
+            fragment.get("file").and_then(|v| v.as_str()),
+            fragment.get("order").and_then(|v| v.as_i64()),
+            fragment.get("source").and_then(|v| v.as_str()),
+        ) else {
+            return None;
+        };
+        if file.is_empty()
+            || file.starts_with('/')
+            || file.starts_with('\\')
+            || file.split(['/', '\\']).any(|part| part == "..")
+            || source.is_empty()
+        {
+            return None;
+        }
+        let slots = files.entry(file.to_string()).or_default();
+        if let Some(existing) = slots.get(&order) {
+            if existing != source {
+                return None;
+            }
+            continue;
+        }
+        slots.insert(order, source.to_string());
+        accepted += 1;
+    }
+    if accepted < 2 {
+        return None;
+    }
+    let rendered: serde_json::Map<String, serde_json::Value> = files
+        .into_iter()
+        .map(|(file, slots)| {
+            let source: String = slots.into_values().collect();
+            (file, serde_json::Value::String(source))
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({"files": rendered})).ok()
+}
+
 /// Combine independent semantic evidence without allowing a fuzzy learned
 /// route to overwrite a feature dimension that the current prompt states
 /// directly. For example, a route learned from "Python authorization" may
@@ -1212,7 +1265,8 @@ async fn h_brain_chat(
             brain.decode_ranked_feature_bindings(*pool_id, labels, action_pool, 64)
         })
         .unwrap_or_default();
-    let composed = merge_grounded_file_manifests(&feature_candidates);
+    let composed = merge_grounded_file_manifests(&feature_candidates)
+        .or_else(|| merge_grounded_code_fragments(&feature_candidates));
     let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
         brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
     });
@@ -2054,6 +2108,29 @@ mod tests {
         let direct = vec!["intent:LANGUAGE:RUST".to_string()];
         let learned = vec!["intent:GROUNDING:UNDERSPECIFIED".to_string()];
         assert!(fuse_intent_labels(&direct, &learned).is_none());
+    }
+
+    #[test]
+    fn grounded_fragments_form_a_never_observed_file_in_slot_order() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"main.py","order":20,"source":"    return value\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"main.py","order":10,"source":"def identity(value):\n"}}"#.to_vec(),
+        ];
+        let assembled = merge_grounded_code_fragments(&candidates).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        assert_eq!(
+            value["files"]["main.py"],
+            "def identity(value):\n    return value\n"
+        );
+    }
+
+    #[test]
+    fn grounded_fragment_conflicts_are_rejected() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"main.py","order":10,"source":"a"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"main.py","order":10,"source":"b"}}"#.to_vec(),
+        ];
+        assert!(merge_grounded_code_fragments(&candidates).is_none());
     }
 }
 
