@@ -986,6 +986,86 @@ fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({"files": files})).ok()
 }
 
+/// Direct cross-pool corpus episode formation. Frames are atomized by each
+/// pool's native encoder and remain lossless binding members, but bypass
+/// ordinary per-frame concept emergence and all-to-all moment wiring.
+async fn h_pretrain_binding(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let Some(items) = req.get("frames").and_then(|value| value.as_array()) else {
+        return Json(json!({"error": "frames must be an array"}));
+    };
+    let mut frames = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(pool_id) = item.get("pool_id").and_then(|value| value.as_u64()) else {
+            return Json(json!({"error": "each frame requires pool_id"}));
+        };
+        let encoded = item.get("frame").and_then(|value| value.as_str()).unwrap_or("");
+        let frame = match b64_url_decode(encoded) {
+            Ok(frame) => frame,
+            Err(error) => return Json(json!({"error": format!("bad frame base64: {}", error)})),
+        };
+        frames.push((pool_id as PoolId, frame));
+    }
+    let mut brain = s.brain.lock().await;
+    let binding_id = brain.pretrain_binding_episode(&frames);
+    Json(json!({
+        "ok": binding_id.is_some(),
+        "binding_id": binding_id,
+        "tick_now": brain.fabric().current_tick(),
+        "frame_count": frames.len(),
+    }))
+}
+
+/// Bounded bulk form of `h_pretrain_binding`. Holding the brain lock across a
+/// small group removes HTTP and mutex overhead while preserving one tick and
+/// one independently addressable binding per episode.
+async fn h_pretrain_bindings(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let Some(episodes) = req.get("episodes").and_then(|value| value.as_array()) else {
+        return Json(json!({"error": "episodes must be an array"}));
+    };
+    if episodes.is_empty() || episodes.len() > 256 {
+        return Json(json!({"error": "episodes must contain 1..=256 items"}));
+    }
+    let mut decoded = Vec::with_capacity(episodes.len());
+    for episode in episodes {
+        let Some(items) = episode.get("frames").and_then(|value| value.as_array()) else {
+            return Json(json!({"error": "each episode requires a frames array"}));
+        };
+        let mut frames = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(pool_id) = item.get("pool_id").and_then(|value| value.as_u64()) else {
+                return Json(json!({"error": "each frame requires pool_id"}));
+            };
+            let encoded = item.get("frame").and_then(|value| value.as_str()).unwrap_or("");
+            let frame = match b64_url_decode(encoded) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return Json(json!({"error": format!("bad frame base64: {}", error)}));
+                }
+            };
+            frames.push((pool_id as PoolId, frame));
+        }
+        decoded.push(frames);
+    }
+    let mut brain = s.brain.lock().await;
+    let binding_ids: Vec<_> = decoded
+        .iter()
+        .map(|frames| brain.pretrain_binding_episode(frames))
+        .collect();
+    let accepted = binding_ids.iter().filter(|id| id.is_some()).count();
+    Json(json!({
+        "ok": accepted == binding_ids.len(),
+        "accepted": accepted,
+        "binding_ids": binding_ids,
+        "tick_now": brain.fabric().current_tick(),
+    }))
+}
+
 /// A directly grounded, complete project answer is stronger evidence than a
 /// set of lower-level fragments that happen to share some broad features.
 /// This prevents a learned whole artifact from being shadowed by a fragment
@@ -2335,6 +2415,8 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/stats", get(h_stats))
         .route("/observe", post(h_observe))
         .route("/pretrain", post(h_pretrain))
+        .route("/pretrain_binding", post(h_pretrain_binding))
+        .route("/pretrain_bindings", post(h_pretrain_bindings))
         .route("/predict/multi", post(h_predict_multi))
         .route("/repair/predict", post(h_repair_predict))
         .route("/tick", post(h_tick))

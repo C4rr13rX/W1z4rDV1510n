@@ -252,3 +252,24 @@ fn reordered_sequences_form_distinct_binding_episodes() {
     brain.activate_for_prediction(input, b"cba");
     assert_eq!(brain.decode_best_trained_binding(input, output), Some(b"second".to_vec()));
 }
+
+#[test]
+fn direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth() {
+    let (mut brain, input, output) = build_two_pool_brain();
+    brain.designate_action_pool(output);
+
+    let binding = brain.pretrain_binding_episode(&[
+        (input, b"write a greeting".to_vec()),
+        (output, b"def greet():\n    return 'hello'\n".to_vec()),
+    ]);
+    assert!(binding.is_some());
+    assert_eq!(brain.fabric().pool(input).unwrap().read().concept_count(), 0);
+    assert_eq!(brain.fabric().pool(output).unwrap().read().concept_count(), 0);
+
+    brain.activate_for_prediction(input, b"write a greeting");
+    assert!(brain.has_exact_trained_binding(input, output));
+    assert_eq!(
+        brain.decode_best_trained_binding(input, output),
+        Some(b"def greet():\n    return 'hello'\n".to_vec()),
+    );
+}

@@ -1662,6 +1662,32 @@ impl Pool {
         }
     }
 
+    /// Atomize one frame for a cross-pool pre-training episode without
+    /// ordinary within-pool recurrence accounting or concept emergence.
+    /// Existing encoders remain authoritative and every returned id is an
+    /// ordinary atom neuron, so direct bindings stay grounded in the same
+    /// substrate as live observations.
+    pub fn ensure_frame_atoms_for_pretrain(
+        &mut self,
+        frame: &[u8],
+        tick: u64,
+    ) -> Vec<NeuronId> {
+        let sequence: Vec<NeuronId> = self
+            .encoding
+            .atomize(frame)
+            .into_iter()
+            .map(|label| self.ensure_atom(label, tick))
+            .collect();
+        for &id in &sequence {
+            if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                neuron.use_count = neuron.use_count.saturating_add(1);
+                neuron.last_fired_tick = tick;
+            }
+        }
+        self.last_observed_sequence = sequence.clone();
+        sequence
+    }
+
     /// Remove query-local activation while preserving all learned neurons,
     /// terminals, weights, counters, and consolidation state.
     pub fn clear_prediction_activation(&mut self) {

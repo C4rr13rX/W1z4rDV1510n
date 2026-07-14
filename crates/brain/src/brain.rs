@@ -1072,6 +1072,62 @@ impl Brain {
         self.fabric.observe(pool_id, frame)
     }
 
+    /// Create one atom-grounded multi-pool episode without replaying the
+    /// frames through ordinary within-pool concept emergence.  This is the
+    /// scalable corpus pre-training path: raw atoms and native feature atoms
+    /// are preserved as binding members, while repeated live experience can
+    /// still grow higher mini-columns later through `observe`.
+    pub fn pretrain_binding_episode(
+        &mut self,
+        frames: &[(PoolId, Vec<u8>)],
+    ) -> Option<NeuronId> {
+        let now = self.fabric.current_tick();
+        let mut fired: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        for (pool_id, frame) in frames {
+            if *pool_id == self.binding_pool_id || frame.is_empty() {
+                continue;
+            }
+            let pool = self.fabric.pool(*pool_id)?;
+            let sequence = pool
+                .write()
+                .ensure_frame_atoms_for_pretrain(frame, now);
+            if !sequence.is_empty() {
+                fired.insert(*pool_id, sequence);
+            }
+        }
+        let fingerprint = MomentFingerprint::from_fabric_moment(&fired)?;
+        self.total_observations = self.total_observations.saturating_add(1);
+        let count = self
+            .lifetime_recurrences
+            .entry(fingerprint.clone())
+            .or_insert(0);
+        *count = count.saturating_add(1);
+
+        let existing = self
+            .promoted_fingerprints
+            .get(&fingerprint)
+            .copied()
+            .or_else(|| self.tentative_promoted.get(&fingerprint).copied());
+        let id = if let Some(id) = existing {
+            if let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) {
+                if let Some(neuron) = binding_pool.write().get_mut(id) {
+                    neuron.use_count = neuron.use_count.saturating_add(1);
+                    neuron.last_fired_tick = now;
+                }
+            }
+            id
+        } else {
+            let id = self.promote_binding_concept(&fingerprint)?;
+            self.tentative_promoted.insert(fingerprint, id);
+            id
+        };
+
+        // No frames entered Fabric::current, so advancing performs bounded
+        // housekeeping without cross-wiring every atom pair.
+        self.fabric.advance_tick();
+        Some(id)
+    }
+
     /// Install a transient, read-only query activation. This does not enter
     /// recent_frames or the Fabric moment and therefore cannot be learned.
     pub fn activate_for_prediction(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {

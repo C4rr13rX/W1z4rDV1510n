@@ -44,6 +44,7 @@ def main() -> int:
     parser.add_argument("--start-row", type=int, default=0)
     parser.add_argument("--window-rows", type=int, default=100)
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument("--syntax", choices=("python", "none"), default="python")
     args = parser.parse_args()
 
     rows = read_window(args.corpus, args.start_row, args.window_rows)
@@ -69,11 +70,14 @@ def main() -> int:
         nonempty += bool(actual)
         exact += actual == expected
         accepted += actual in accepted_by_prompt.get(prompt, set())
-        try:
-            ast.parse(actual)
+        if args.syntax == "none":
             syntax += 1
-        except SyntaxError:
-            pass
+        else:
+            try:
+                ast.parse(actual)
+                syntax += 1
+            except SyntaxError:
+                pass
         if actual not in accepted_by_prompt.get(prompt, set()):
             failures.append({
                 "prompt": prompt[:160],
@@ -88,7 +92,8 @@ def main() -> int:
         "nonempty": nonempty,
         "exact": exact,
         "accepted_trained_response": accepted,
-        "python_syntax_valid": syntax,
+        "syntax_mode": args.syntax,
+        "syntax_valid": syntax,
         "latency_seconds": {
             "mean": round(sum(elapsed) / len(elapsed), 4) if elapsed else 0.0,
             "max": round(max(elapsed), 4) if elapsed else 0.0,

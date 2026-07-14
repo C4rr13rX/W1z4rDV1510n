@@ -90,6 +90,8 @@ def _path(suffix: str) -> str:
 
 POOL_TEXT   = 1
 POOL_ACTION = 4
+POOL_ENVIRONMENT = 5
+POOL_INSTRUCTION_INTENT = 12
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────
@@ -151,7 +153,8 @@ def _post(path: str, body: dict, timeout: float = 60.0) -> tuple[bool, dict | st
     return False, "unreachable"
 
 
-def post_xpool_pair(prompt: str, response: str) -> tuple[bool, str]:
+def post_xpool_pair(prompt: str, response: str,
+                    context: dict | None = None) -> tuple[bool, str]:
     """One cross-pool training step: prompt -> text pool, response -> action
     pool, then advance_tick to crystallize the cross-pool binding."""
     if not prompt or not response:
@@ -162,6 +165,22 @@ def post_xpool_pair(prompt: str, response: str) -> tuple[bool, str]:
     })
     if not ok_t:
         return False, f"text-observe: {err_t}"
+    ok_i, err_i = _post(_path("/observe"), {
+        "pool_id": POOL_INSTRUCTION_INTENT,
+        "frame": _b64url(prompt.encode("utf-8")),
+    })
+    if not ok_i:
+        return False, f"intent-observe: {err_i}"
+    if context:
+        environment = json.dumps(
+            context, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        ok_e, err_e = _post(_path("/observe"), {
+            "pool_id": POOL_ENVIRONMENT,
+            "frame": _b64url(environment),
+        })
+        if not ok_e:
+            return False, f"environment-observe: {err_e}"
     ok_a, err_a = _post(_path("/observe"), {
         "pool_id": POOL_ACTION,
         "frame":   _b64url(response.encode("utf-8")),
@@ -171,6 +190,46 @@ def post_xpool_pair(prompt: str, response: str) -> tuple[bool, str]:
     ok_k, err_k = _post(_path("/tick"), {})
     if not ok_k:
         return False, f"tick: {err_k}"
+    return True, ""
+
+
+def _pretrain_episode(prompt: str, response: str,
+                      context: dict | None = None) -> dict:
+    frames = [
+        {"pool_id": POOL_TEXT, "frame": _b64url(prompt.encode("utf-8"))},
+        {"pool_id": POOL_INSTRUCTION_INTENT,
+         "frame": _b64url(prompt.encode("utf-8"))},
+    ]
+    if context:
+        environment = json.dumps(
+            context, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        frames.append({"pool_id": POOL_ENVIRONMENT,
+                       "frame": _b64url(environment)})
+    frames.append({"pool_id": POOL_ACTION,
+                   "frame": _b64url(response.encode("utf-8"))})
+    return {"frames": frames}
+
+
+def post_pretrain_pair(prompt: str, response: str,
+                       context: dict | None = None) -> tuple[bool, str]:
+    """Form one atom-grounded binding without replay-driven neurogenesis."""
+    frames = _pretrain_episode(prompt, response, context)["frames"]
+    ok, result = _post(_path("/pretrain_binding"), {"frames": frames}, timeout=120.0)
+    if not ok:
+        return False, str(result)
+    if not isinstance(result, dict) or not result.get("ok"):
+        return False, f"pretrain-binding: {result}"
+    return True, ""
+
+
+def post_pretrain_batch(episodes: list[dict]) -> tuple[bool, str]:
+    """Form up to 256 independent atom-grounded episodes in one request."""
+    ok, result = _post(
+        _path("/pretrain_bindings"), {"episodes": episodes}, timeout=300.0
+    )
+    if not ok or not isinstance(result, dict) or not result.get("ok"):
+        return False, f"pretrain-bindings: {result}"
     return True, ""
 
 
@@ -363,7 +422,9 @@ def drive_one(script, repeats: int, project_root: Path,
                 burst: bool = False,
                 midcheck_rows: int = 50_000,
                 limit_rows: int | None = None,
-                start_row: int = 0) -> dict:
+                start_row: int = 0,
+                direct_pretrain: bool = False,
+                input_path: str = "") -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -395,9 +456,12 @@ def drive_one(script, repeats: int, project_root: Path,
         "smoke_ok":    None,
         "target":      "brain_server",
         "start_row":   start_row,
+        "direct_pretrain": direct_pretrain,
     }
     for inp in script.inputs:
         if inp.kind != "corpus":
+            continue
+        if input_path and Path(inp.path).as_posix().lower() != Path(input_path).as_posix().lower():
             continue
         corpus_path = project_root / inp.path
         rows = read_corpus_jsonl(
@@ -417,7 +481,37 @@ def drive_one(script, repeats: int, project_root: Path,
 
         next_midcheck = midcheck_rows if midcheck_rows > 0 else None
 
-        if burst:
+        if direct_pretrain:
+            episodes = []
+            for row in rows:
+                prompt = (row.get("prompt") or row.get("question") or "").strip()
+                resp = (row.get("response") or row.get("answer") or "").strip()
+                if not prompt or not resp:
+                    continue
+                context = row.get("ctx") if isinstance(row.get("ctx"), dict) else None
+                for _ in range(repeats):
+                    episodes.append(_pretrain_episode(prompt, resp, context))
+                if len(episodes) >= 256:
+                    ok, err = post_pretrain_batch(episodes)
+                    if ok:
+                        summary["posted_ok"] += len(episodes)
+                    else:
+                        summary["posted_fail"] += len(episodes)
+                        if verbose:
+                            print(f"  [{script.id}] batch post fail: {err}", flush=True)
+                    episodes = []
+            if episodes:
+                ok, err = post_pretrain_batch(episodes)
+                if ok:
+                    summary["posted_ok"] += len(episodes)
+                else:
+                    summary["posted_fail"] += len(episodes)
+                    if verbose:
+                        print(f"  [{script.id}] batch post fail: {err}", flush=True)
+            if verbose:
+                print(f"  [{script.id}] direct pretrain done in {time.time()-t0:.1f}s",
+                      flush=True)
+        elif burst:
             # Dense-burst: pair outer, reps inner.
             for row in rows:
                 prompt = (row.get("prompt") or row.get("question") or "").strip()
@@ -425,7 +519,9 @@ def drive_one(script, repeats: int, project_root: Path,
                 if not prompt or not resp:
                     continue
                 for _ in range(repeats):
-                    ok, err = post_xpool_pair(prompt, resp)
+                    context = row.get("ctx") if isinstance(row.get("ctx"), dict) else None
+                    post = post_pretrain_pair if direct_pretrain else post_xpool_pair
+                    ok, err = post(prompt, resp, context)
                     if ok:
                         summary["posted_ok"] += 1
                     else:
@@ -449,7 +545,9 @@ def drive_one(script, repeats: int, project_root: Path,
                     resp   = (row.get("response") or row.get("answer") or "").strip()
                     if not prompt or not resp:
                         continue
-                    ok, err = post_xpool_pair(prompt, resp)
+                    context = row.get("ctx") if isinstance(row.get("ctx"), dict) else None
+                    post = post_pretrain_pair if direct_pretrain else post_xpool_pair
+                    ok, err = post(prompt, resp, context)
                     if ok:
                         summary["posted_ok"] += 1
                     else:
@@ -521,6 +619,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--start-row", type=int, default=0,
                      help="skip this many valid JSONL rows before reading; "
                           "combine with --limit-rows for resumable chunks")
+    p.add_argument("--direct-pretrain", action="store_true",
+                     help="form atom-grounded multi-pool bindings directly, "
+                          "bypassing replay-driven concept emergence")
+    p.add_argument("--input-path", default="",
+                     help="train only the matching corpus path within a "
+                          "multi-input registry script")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -584,7 +688,9 @@ def main(argv: list[str] | None = None) -> int:
                             burst=args.burst,
                             midcheck_rows=args.midcheck_rows,
                             limit_rows=args.limit_rows,
-                            start_row=args.start_row)
+                            start_row=args.start_row,
+                            direct_pretrain=args.direct_pretrain,
+                            input_path=args.input_path)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
