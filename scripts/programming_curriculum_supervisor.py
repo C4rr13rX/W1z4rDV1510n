@@ -41,7 +41,11 @@ def read_json(path: Path) -> dict:
 def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
+    try:
+        return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
+    except psutil.Error:
+        # The process can exit between pid_exists and Process construction.
+        return False
 
 
 def publish(path: Path, payload: dict) -> None:
