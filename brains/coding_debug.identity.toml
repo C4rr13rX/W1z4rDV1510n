@@ -2,6 +2,7 @@ name = "coding_debug"
 version = "0.1.0"
 binding_emergence_threshold = 3
 moment_history_window = 256
+min_atom_score = 0.94
 
 # The lossless source and language streams remain raw-byte atomized. Parallel
 # derived feature pools may expose deterministic structure, but never replace

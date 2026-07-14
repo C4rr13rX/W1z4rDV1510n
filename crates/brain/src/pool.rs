@@ -226,6 +226,11 @@ impl AtomEncoding for InstructionIntentEncoding {
     fn atomize(&self, frame: &[u8]) -> Vec<String> {
         let text = String::from_utf8_lossy(frame).to_ascii_lowercase();
         let mut features = Vec::new();
+        let coding_context = ["fix ", "correct ", "change ", "repair ", "prevent ",
+            "create ", "write ", "implement ", "build ", "produce ", "make ",
+            "code", "function", "compute", "calculate", "return"]
+            .iter().any(|cue| text.contains(cue));
+        if !coding_context { return features; }
         let mut emit = |feature: &str| features.push(format!("{}:{}", self.prefix, feature));
         if text.contains("cube") || text.contains("third power") || text.contains("three times") {
             emit("POWER_SELF:3");
@@ -245,6 +250,7 @@ impl AtomEncoding for InstructionIntentEncoding {
         }
         if text.contains("increment") || text.contains("increments")
             || text.contains("repeated words") || text.contains("increase their stored total")
+            || (text.contains("word") && text.contains("count"))
         {
             emit("STATE:INCREMENT_COUNT");
         }

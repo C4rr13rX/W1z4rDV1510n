@@ -220,6 +220,11 @@ pub struct BrainConfig {
     /// Older moments age out so only "recently sustained" co-firings
     /// produce bindings.
     pub moment_history_window: usize,
+    /// Minimum precision×recall accepted by single-pool trained-binding
+    /// retrieval. Kept per brain identity so a broad knowledge brain can be
+    /// OOV-strict without imposing that policy on every deployment.
+    #[serde(default = "default_min_atom_score")]
+    pub min_atom_score: f32,
     /// Pressure-feedback band on the binding density signal
     /// (`bindings_per_observation`).  When the signal sits below
     /// `pressure_band_low` for `pressure_observation_grace` consecutive
@@ -256,6 +261,7 @@ pub struct BrainConfig {
 }
 
 fn default_tentative_emergence_threshold() -> u32 { 1 }
+fn default_min_atom_score() -> f32 { 0.50 }
 fn default_pressure_band_low() -> f32 { 0.001 }
 fn default_pressure_band_high() -> f32 { 0.05 }
 fn default_pressure_threshold_max() -> u32 { 10 }
@@ -274,6 +280,7 @@ impl Default for BrainConfig {
             binding_emergence_threshold: 3,
             tentative_emergence_threshold: default_tentative_emergence_threshold(),
             moment_history_window: 64,
+            min_atom_score: default_min_atom_score(),
             pressure_band_low: default_pressure_band_low(),
             pressure_band_high: default_pressure_band_high(),
             pressure_threshold_max: default_pressure_threshold_max(),
@@ -867,6 +874,10 @@ impl Brain {
     pub fn fabric(&self) -> &Fabric { &self.fabric }
     pub fn fabric_mut(&mut self) -> &mut Fabric { &mut self.fabric }
     pub fn binding_pool_id(&self) -> PoolId { self.binding_pool_id }
+    pub fn min_atom_score(&self) -> f32 { self.config.min_atom_score }
+    pub fn set_min_atom_score(&mut self, value: f32) {
+        self.config.min_atom_score = value.clamp(0.0, 1.0);
+    }
 
     /// Register a sensor pool.  The caller supplies the atomization
     /// contract via [`AtomEncoding`].  Returns the assigned pool id.
@@ -2108,7 +2119,7 @@ impl Brain {
                         0.50
                     }
                 }
-                _ => 0.50,
+                _ => self.config.min_atom_score.clamp(0.0, 1.0),
             }
         };
 
@@ -3792,6 +3803,7 @@ impl Brain {
             binding_emergence_threshold: identity.binding_emergence_threshold,
             tentative_emergence_threshold: default_tentative_emergence_threshold(),
             moment_history_window:       identity.moment_history_window,
+            min_atom_score:               identity.min_atom_score,
             pressure_band_low:           default_pressure_band_low(),
             pressure_band_high:          default_pressure_band_high(),
             pressure_threshold_max:      default_pressure_threshold_max(),
@@ -4892,6 +4904,7 @@ impl Brain {
             binding_emergence_threshold: snap.binding_emergence_threshold,
             tentative_emergence_threshold: snap.tentative_emergence_threshold,
             moment_history_window:       snap.moment_history_window,
+            min_atom_score:               default_min_atom_score(),
             pressure_band_low:           default_pressure_band_low(),
             pressure_band_high:          default_pressure_band_high(),
             pressure_threshold_max:      default_pressure_threshold_max(),

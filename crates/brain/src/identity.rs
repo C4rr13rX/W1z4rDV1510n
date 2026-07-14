@@ -150,6 +150,8 @@ pub struct BrainIdentitySpec {
     pub binding_emergence_threshold: u32,
     #[serde(default = "default_moment_window")]
     pub moment_history_window:       usize,
+    #[serde(default = "default_min_atom_score")]
+    pub min_atom_score:              f32,
     #[serde(default)]
     pub fabric:   FabricConfig,
     #[serde(default)]
@@ -249,6 +251,7 @@ impl BrainDeploymentSpec {
 
 fn default_binding_threshold() -> u32  { 3 }
 fn default_moment_window()     -> usize { 64 }
+fn default_min_atom_score()    -> f32 { 0.50 }
 
 impl BrainIdentitySpec {
     /// Sensible default identity: one text sensor + one action pool.
@@ -265,6 +268,7 @@ impl BrainIdentitySpec {
             ],
             binding_emergence_threshold: default_binding_threshold(),
             moment_history_window:       default_moment_window(),
+            min_atom_score:              default_min_atom_score(),
             fabric:   FabricConfig::default(),
             eem:      EemConfig::default(),
             annealer: AnnealerConfig::default(),

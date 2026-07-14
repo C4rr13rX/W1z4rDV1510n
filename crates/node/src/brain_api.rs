@@ -193,6 +193,7 @@ fn build_from_identity(identity: &BrainIdentitySpec) -> Result<Brain> {
 /// tuning an existing brain's decay, pruning, sparsity, or concept-emergence
 /// policy silently had no effect until the brain was rebuilt from scratch.
 fn apply_identity_pool_configs(brain: &mut Brain, identity: &BrainIdentitySpec) -> Result<()> {
+    brain.set_min_atom_score(identity.min_atom_score);
     for spec in &identity.pools {
         let pool = brain.fabric().pool(spec.id).ok_or_else(|| anyhow::anyhow!(
             "checkpoint for brain '{}' is missing configured pool {} ({})",
@@ -845,9 +846,31 @@ async fn h_brain_chat(
     let action_pool = brain.action_pool_id().unwrap_or(POOL_ACTION);
     brain.activate_for_prediction(POOL_TEXT, prompt.as_bytes());
 
+    // Parallel instruction feature pools participate in ordinary chat when
+    // the deployed identity provides them. Raw POOL_TEXT remains present in
+    // every query; derived pools add sparse intent evidence but never replace
+    // the character substrate. Unknown intent atoms produce no activation and
+    // therefore leave the legacy single-pool path untouched.
+    let feature_pools: Vec<PoolId> = brain.fabric().pool_ids().into_iter()
+        .filter(|pid| *pid != POOL_TEXT && *pid != action_pool)
+        .filter(|pid| brain.fabric().pool(*pid).is_some_and(|pool|
+            pool.read().encoding_name() == "instruction-intent"))
+        .collect();
+    let mut chat_query_pools = vec![POOL_TEXT];
+    for pool_id in feature_pools {
+        if !brain.activate_for_prediction(pool_id, prompt.as_bytes()).is_empty() {
+            chat_query_pools.push(pool_id);
+        }
+    }
+
     // Authoritative trained-binding decode — Phase B v2.
-    let trained_decode: Option<String> = brain
-        .decode_best_trained_binding(POOL_TEXT, action_pool)
+    let trained_bytes = if chat_query_pools.len() > 1 {
+        brain.decode_best_trained_binding_multi(&chat_query_pools, action_pool)
+            .or_else(|| brain.decode_best_trained_binding(POOL_TEXT, action_pool))
+    } else {
+        brain.decode_best_trained_binding(POOL_TEXT, action_pool)
+    };
+    let trained_decode: Option<String> = trained_bytes
         .map(|b| String::from_utf8_lossy(&b).into_owned());
 
     // Autonomous fallback — EEM chain + annealer + multi-fact.
