@@ -181,6 +181,26 @@ fn post_checkpoint_direct_bindings_are_queryable_after_wal_replay() {
         );
         recovered.clear_prediction_activation();
     }
+
+    let recovered_checkpoint = dir.join("recovered.bin");
+    recovered.checkpoint(&recovered_checkpoint).unwrap();
+    let mut encodings: HashMap<u32, Box<dyn AtomEncoding>> = HashMap::new();
+    encodings.insert(0, Box::new(BytePassthroughEncoding { prefix: "bind" }));
+    encodings.insert(input, Box::new(BytePassthroughEncoding { prefix: "t" }));
+    encodings.insert(output, Box::new(BytePassthroughEncoding { prefix: "a" }));
+    let (mut restored_again, missing) = Brain::restore(&recovered_checkpoint, encodings).unwrap();
+    assert!(missing.is_empty());
+    for (prompt, response) in [
+        (b"write alpha".as_slice(), b"def alpha(): return 1".as_slice()),
+        (b"write beta".as_slice(), b"def beta(): return 2".as_slice()),
+    ] {
+        restored_again.activate_for_prediction(input, prompt);
+        assert_eq!(
+            restored_again.decode_best_trained_binding(input, output),
+            Some(response.to_vec()),
+        );
+        restored_again.clear_prediction_activation();
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -200,16 +200,28 @@ fn build_from_identity(identity: &BrainIdentitySpec) -> Result<Brain> {
 /// policy silently had no effect until the brain was rebuilt from scratch.
 fn apply_identity_pool_configs(brain: &mut Brain, identity: &BrainIdentitySpec) -> Result<()> {
     brain.set_min_atom_score(identity.min_atom_score);
+    let registry = PoolPrototypeRegistry::with_defaults();
     for spec in &identity.pools {
-        let pool = brain.fabric().pool(spec.id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "checkpoint for brain '{}' is missing configured pool {} ({})",
-                identity.name,
-                spec.id,
-                spec.name
-            )
-        })?;
-        pool.write().config = spec.to_pool_config();
+        if let Some(pool) = brain.fabric().pool(spec.id) {
+            pool.write().config = spec.to_pool_config();
+            continue;
+        }
+        let encoding = registry
+            .build(&spec.prototype, &spec.atom_encoding_prefix)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown pool prototype '{}' while adding configured pool {} ({})",
+                    spec.prototype,
+                    spec.id,
+                    spec.name
+                )
+            })?;
+        tracing::warn!(
+            pool_id = spec.id,
+            pool_name = %spec.name,
+            "checkpoint lacks an identity pool; creating it empty"
+        );
+        brain.create_pool(spec.to_pool_config(), encoding);
     }
     Ok(())
 }
@@ -253,6 +265,13 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
             encs.insert(POOL_TURN, leaked_encoding("turn"));
         }
         match Brain::restore(&checkpoint, encs) {
+            Ok((_brain, missing)) if !missing.is_empty() => {
+                anyhow::bail!(
+                    "checkpoint {} requires encodings for missing pools {:?}; set W1Z4RD_BRAIN_IDENTITY to the brain's identity file",
+                    checkpoint.display(),
+                    missing
+                );
+            }
             Ok((mut brain, _missing)) => {
                 if let Some(spec) = &identity {
                     apply_identity_pool_configs(&mut brain, spec)?;
