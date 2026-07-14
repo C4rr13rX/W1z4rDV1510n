@@ -2378,58 +2378,11 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data).with_context(|| format!("mkdir {}", data.display()))?;
     let checkpoint_path = data.join("brain.bin");
 
-    let mut brain = load_or_build_brain(&checkpoint_path)?;
-
-    // Per ARCHITECTURE §17.9: when W1Z4RDV1510N_DATA_DIR is set (i.e. we have
-    // a data dir, which we always do at this point), instantiate the
-    // MmapWalStore at <data_dir>/brain.wal and attach it to the brain.
-    // Every neurogenesis / concept-emergence / tick-advance event from this
-    // point on appends to that WAL.  Crash recovery in a future commit will
-    // replay it.  Opening the WAL is best-effort — if it fails (disk full,
-    // permissions, format-version mismatch), the brain falls back to
-    // NoopStore + bincode-checkpoint only, with a logged warning.
-    match w1z4rd_brain::MmapWalStore::open(&data) {
-        Ok(wal) => {
-            let store: Arc<dyn w1z4rd_brain::Store> = Arc::new(wal);
-            brain.set_store(store);
-            info!("WAL attached at {}/brain.wal", data.display());
-        }
-        Err(e) => {
-            warn!("WAL open failed at {}: {} — running in NoopStore mode",
-                data.display(), e);
-        }
-    }
-
-    // Stage 17.4 full: attach cold tiers to every pool so /eviction
-    // has somewhere to write evicted neurons.  Best-effort; pools that
-    // fail to attach run in non-evictable mode.
-    let attached = brain.attach_cold_tiers(&data);
-    info!("cold tiers attached on {} pool(s)", attached);
-
-    // Stage 17.9 recovery: replay any WAL events past the last
-    // SnapshotMarker so the brain reflects everything observed between
-    // the last checkpoint and the previous shutdown / crash.  Best-
-    // effort: if the WAL read fails, we log and continue with brain.bin
-    // state only.
-    match w1z4rd_brain::store::load_events_after_marker(&data) {
-        Ok(events) if !events.is_empty() => {
-            info!("WAL recovery: applying {} event(s) past last snapshot...",
-                events.len());
-            let stats = brain.apply_wal_events(&events);
-            info!(
-                "WAL recovery: total={} ticks_advanced_to={} since_last_snapshot={}",
-                stats.events_total,
-                stats.last_tick,
-                stats.events_since_snapshot,
-            );
-        }
-        Ok(_) => {
-            info!("WAL recovery: no events past the last snapshot");
-        }
-        Err(e) => {
-            warn!("WAL recovery failed: {} — continuing with brain.bin state only", e);
-        }
-    }
+    // Use the same identity-aware restore, WAL recovery, live WAL writer, and
+    // cold-tier attachment as the embedded node. The former standalone
+    // loader silently omitted sparse coding pools (6..12), so curriculum
+    // observations could panic after an apparently successful restore.
+    let brain = brain_api::load_or_build_brain(&data)?;
 
     let bs = brain.stats();
     info!("brain ready  tick={}  pools={}  neurons={}  terminals={}",
@@ -2480,7 +2433,8 @@ async fn main() -> Result<()> {
     // its elaborated /observe, /tick, /stats, /integrate,
     // /pool/concepts handlers (with timing logs and cluster shipping)
     // by mounting them AFTER the merge.
-    let phase_routes = brain_api::brain_phase_routes(brain_api_state);
+    let prefixed_brain_routes = brain_api::brain_routes(brain_api_state.clone());
+    let phase_routes = brain_api::brain_phase_routes_without_core(brain_api_state);
 
     let app = Router::new()
         .route("/health",                get(health))
@@ -2515,7 +2469,8 @@ async fn main() -> Result<()> {
         .route("/sensor/observe_triple", post(sensor_observe_triple))
         .route("/chat",                  post(chat))
         .with_state(state.clone())
-        .merge(phase_routes);
+        .merge(phase_routes)
+        .nest("/brain", prefixed_brain_routes);
 
     let port: u16 = std::env::var("W1Z4RD_BRAIN_PORT")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(8095);

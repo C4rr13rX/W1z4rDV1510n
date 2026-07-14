@@ -2514,7 +2514,17 @@ pub fn brain_routes(state: BrainApiState) -> Router {
 /// brain_server's main router avoids the duplicate definitions
 /// without losing brain_server's diagnostic surface.
 pub fn brain_phase_routes(state: BrainApiState) -> Router {
-    Router::new()
+    brain_phase_routes_impl(state, true)
+}
+
+/// Phase routes for the standalone brain server, which supplies its own
+/// elaborated tick-profile, sleep, and checkpoint handlers.
+pub fn brain_phase_routes_without_core(state: BrainApiState) -> Router {
+    brain_phase_routes_impl(state, false)
+}
+
+fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> Router {
+    let routes = Router::new()
         .route("/set_domain", post(h_set_domain))
         .route("/domain_stats", get(h_domain_stats))
         .route("/qa_db_stats", get(h_qa_db_stats))
@@ -2527,7 +2537,6 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
         .route("/force_decay", post(h_force_decay))
         .route("/idle_ticks", post(h_idle_ticks))
         .route("/sleep_pressure", get(h_sleep_pressure))
-        .route("/tick_profile", get(h_tick_profile))
         .route("/observe_profile", get(h_observe_profile))
         .route("/http_profile", get(h_http_profile))
         .route("/tier_orchestrator", get(h_tier_orchestrator))
@@ -2535,12 +2544,18 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
             "/tier_orchestrator/params",
             post(h_tier_orchestrator_params),
         )
-        .route("/sleep", post(h_sleep))
-        .route("/checkpoint", post(h_checkpoint))
         .route("/thinking/start", post(h_thinking_start))
         .route("/thinking/stop", post(h_thinking_stop))
-        .route("/thinking/status", get(h_thinking_status))
-        .with_state(state)
+        .route("/thinking/status", get(h_thinking_status));
+    let routes = if include_core_routes {
+        routes
+            .route("/tick_profile", get(h_tick_profile))
+            .route("/sleep", post(h_sleep))
+            .route("/checkpoint", post(h_checkpoint))
+    } else {
+        routes
+    };
+    routes.with_state(state)
 }
 
 #[cfg(test)]

@@ -574,6 +574,10 @@ pub struct Brain {
     /// query sequence and requested target pool.  It is rebuilt on restore.
     binding_sequence_index:
         AHashMap<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>,
+    /// Inverted access from a raw feature atom to bindings containing that
+    /// atom either directly or beneath a collapsed feature concept. Derived
+    /// from the atom substrate and rebuilt on restore.
+    binding_feature_atom_index: AHashMap<(PoolId, NeuronId), Vec<NeuronId>>,
     /// Sparse associative access for novel character-stream similarity.
     /// Motifs remain grounded in raw atom sequences; this only avoids
     /// reconstructing and comparing every learned binding on every query.
@@ -752,6 +756,7 @@ impl Brain {
             tentative_promoted: AHashMap::new(),
             promoted_fingerprints: AHashMap::new(),
             binding_sequence_index: AHashMap::new(),
+            binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
             total_observations: 0,
             current_threshold: initial_threshold,
@@ -1610,6 +1615,51 @@ impl Brain {
                     .push(member.neuron);
             }
         }
+        let mut roots_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        for member in members {
+            roots_by_pool
+                .entry(member.pool)
+                .or_default()
+                .push(member.neuron);
+        }
+        for (&pool_id, roots) in &roots_by_pool {
+            let Some(pool_handle) = self.fabric.pool(pool_id) else {
+                continue;
+            };
+            ensure_neuron_trees_loaded(&mut pool_handle.write(), roots);
+            let pool = pool_handle.read();
+            let mut atoms = ahash::AHashSet::new();
+            let mut pending = roots.clone();
+            let mut visited = ahash::AHashSet::new();
+            while let Some(neuron_id) = pending.pop() {
+                if !visited.insert(neuron_id) {
+                    continue;
+                }
+                let Some(neuron) = pool.get(neuron_id) else {
+                    continue;
+                };
+                if neuron.is_atom() {
+                    atoms.insert(neuron_id);
+                } else {
+                    pending.extend(
+                        neuron
+                            .members
+                            .iter()
+                            .filter(|member| member.pool == pool_id)
+                            .map(|member| member.neuron),
+                    );
+                }
+            }
+            for atom in atoms {
+                let ids = self
+                    .binding_feature_atom_index
+                    .entry((pool_id, atom))
+                    .or_default();
+                if !ids.contains(&binding_id) {
+                    ids.push(binding_id);
+                }
+            }
+        }
         for (&query_pool, sequence) in &atom_sequences {
             if sequence.is_empty() {
                 continue;
@@ -1649,6 +1699,7 @@ impl Brain {
 
     fn rebuild_binding_sequence_index(&mut self) {
         self.binding_sequence_index.clear();
+        self.binding_feature_atom_index.clear();
         self.binding_motif_index.clear();
         let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) else {
             return;
@@ -3252,6 +3303,15 @@ impl Brain {
         if query_atoms.len() < 2 {
             return Vec::new();
         }
+        let candidate_ids: ahash::AHashSet<NeuronId> = query_atoms
+            .iter()
+            .filter_map(|atom| self.binding_feature_atom_index.get(&(feature_pool, *atom)))
+            .flatten()
+            .copied()
+            .collect();
+        if candidate_ids.is_empty() {
+            return Vec::new();
+        }
 
         fn collect_atoms(
             pool: &crate::Pool,
@@ -3277,9 +3337,9 @@ impl Brain {
             None => return Vec::new(),
         };
         let bindings = binding_handle.read();
-        let feature_roots: Vec<NeuronId> = bindings
-            .iter_neurons()
-            .filter(|neuron| !neuron.is_atom())
+        let feature_roots: Vec<NeuronId> = candidate_ids
+            .iter()
+            .filter_map(|binding_id| bindings.get(*binding_id))
             .flat_map(|binding| {
                 binding
                     .members
@@ -3291,7 +3351,13 @@ impl Brain {
         ensure_neuron_trees_loaded(&mut feature_handle.write(), &feature_roots);
         let features = feature_handle.read();
         let mut ranked: Vec<(NeuronId, usize, u64, usize, i32)> = Vec::new();
-        for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
+        for binding_id in candidate_ids {
+            let Some(binding) = bindings.get(binding_id) else {
+                continue;
+            };
+            if binding.is_atom() {
+                continue;
+            }
             let missing_condition = conditioned_pools.iter().any(|pool_id| {
                 !active_context_pools.contains(pool_id)
                     && binding.members.iter().any(|member| member.pool == *pool_id)
@@ -3464,11 +3530,20 @@ impl Brain {
         if query_atoms.len() < 2 {
             return None;
         }
+        let candidate_ids: ahash::AHashSet<NeuronId> = query_atoms
+            .iter()
+            .filter_map(|atom| self.binding_feature_atom_index.get(&(feature_pool, *atom)))
+            .flatten()
+            .copied()
+            .collect();
+        if candidate_ids.is_empty() {
+            return None;
+        }
         let bindings_handle = self.fabric.pool(self.binding_pool_id)?;
         let bindings = bindings_handle.read();
-        let feature_roots: Vec<NeuronId> = bindings
-            .iter_neurons()
-            .filter(|neuron| !neuron.is_atom())
+        let feature_roots: Vec<NeuronId> = candidate_ids
+            .iter()
+            .filter_map(|binding_id| bindings.get(*binding_id))
             .flat_map(|binding| {
                 binding
                     .members
@@ -3503,7 +3578,13 @@ impl Brain {
         // allowing their use count to beat a newer direct episode causes
         // unrelated actions to hijack an otherwise exact feature query.
         let mut best: Option<(NeuronId, bool, u64)> = None;
-        for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
+        for binding_id in candidate_ids {
+            let Some(binding) = bindings.get(binding_id) else {
+                continue;
+            };
+            if binding.is_atom() {
+                continue;
+            }
             let direct_atoms: ahash::AHashSet<NeuronId> = binding
                 .members
                 .iter()
@@ -6414,6 +6495,7 @@ impl Brain {
             tentative_promoted,
             promoted_fingerprints,
             binding_sequence_index: AHashMap::new(),
+            binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
             total_observations: snap.total_observations,
             current_threshold: restored_threshold,
