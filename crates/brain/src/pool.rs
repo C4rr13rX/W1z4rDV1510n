@@ -298,6 +298,9 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("javascript") || text.contains("node.js") || text.contains("nodejs") {
             emit("LANGUAGE:JAVASCRIPT");
         }
+        if text.contains("typescript") {
+            emit("LANGUAGE:TYPESCRIPT");
+        }
         if text.contains("c#")
             || text.contains("c sharp")
             || text.contains("dotnet")
@@ -558,6 +561,10 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("have not been provided")
             || text.contains("not provided")
             || text.contains("without any service objectives")
+            || (text.contains("without any")
+                && (text.contains("requirements")
+                    || text.contains("objectives")
+                    || text.contains("metrics")))
         {
             emit("GROUNDING:UNDERSPECIFIED");
         }

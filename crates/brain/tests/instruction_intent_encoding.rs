@@ -376,6 +376,31 @@ fn native_enterprise_intents_combine_language_and_behavior() {
 }
 
 #[test]
+fn typescript_is_an_independent_language_feature() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Implement a TypeScript idempotent order command with bounded retry.",
+    );
+    assert!(
+        features
+            .iter()
+            .any(|label| label == "intent:LANGUAGE:TYPESCRIPT")
+    );
+    assert!(
+        !features
+            .iter()
+            .any(|label| label == "intent:LANGUAGE:JAVASCRIPT")
+    );
+    assert!(
+        features
+            .iter()
+            .any(|label| label == "intent:API:IDEMPOTENT_COMMAND")
+    );
+}
+
+#[test]
 fn native_ledger_paraphrase_and_missing_context_are_detected() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
@@ -407,6 +432,14 @@ fn native_ledger_paraphrase_and_missing_context_are_detected() {
     );
     assert!(
         plural_missing
+            .iter()
+            .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
+    );
+    let requirements_missing = encoding.atomize(
+        b"Build TypeScript retry timing without any latency requirements.",
+    );
+    assert!(
+        requirements_missing
             .iter()
             .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
     );
