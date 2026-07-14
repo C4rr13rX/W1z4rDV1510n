@@ -194,12 +194,18 @@ def post_xpool_pair(prompt: str, response: str,
 
 
 def _pretrain_episode(prompt: str, response: str,
-                      context: dict | None = None) -> dict:
+                      context: dict | None = None,
+                      feature_policy: str = "auto") -> dict:
     frames = [
         {"pool_id": POOL_TEXT, "frame": _b64url(prompt.encode("utf-8"))},
-        {"pool_id": POOL_INSTRUCTION_INTENT,
-         "frame": _b64url(prompt.encode("utf-8"))},
     ]
+    context_kind = str((context or {}).get("kind", "")).strip().lower()
+    include_intent = feature_policy == "all" or (
+        feature_policy == "auto" and context_kind not in {"math", "reasoning"}
+    )
+    if include_intent:
+        frames.append({"pool_id": POOL_INSTRUCTION_INTENT,
+                       "frame": _b64url(prompt.encode("utf-8"))})
     if context:
         environment = json.dumps(
             context, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -212,9 +218,10 @@ def _pretrain_episode(prompt: str, response: str,
 
 
 def post_pretrain_pair(prompt: str, response: str,
-                       context: dict | None = None) -> tuple[bool, str]:
+                       context: dict | None = None,
+                       feature_policy: str = "auto") -> tuple[bool, str]:
     """Form one atom-grounded binding without replay-driven neurogenesis."""
-    frames = _pretrain_episode(prompt, response, context)["frames"]
+    frames = _pretrain_episode(prompt, response, context, feature_policy)["frames"]
     ok, result = _post(_path("/pretrain_binding"), {"frames": frames}, timeout=120.0)
     if not ok:
         return False, str(result)
@@ -438,7 +445,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 input_path: str = "",
                 batch_size: int = 16,
                 progress_path: Path | None = None,
-                checkpoint_rows: int = 4096) -> dict:
+                checkpoint_rows: int = 4096,
+                feature_policy: str = "auto") -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -533,7 +541,9 @@ def drive_one(script, repeats: int, project_root: Path,
                     continue
                 context = row.get("ctx") if isinstance(row.get("ctx"), dict) else None
                 for _ in range(repeats):
-                    episodes.append(_pretrain_episode(prompt, resp, context))
+                    episodes.append(
+                        _pretrain_episode(prompt, resp, context, feature_policy)
+                    )
                 batch_next_row = logical_next_row
                 if len(episodes) >= batch_size:
                     ok, err = post_pretrain_batch(episodes)
@@ -691,6 +701,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--checkpoint-rows", type=int, default=4096,
                      help="persist brain.bin after this many accepted direct-"
                           "pretrain episodes (default 4096; 0 disables)")
+    p.add_argument("--feature-policy", choices=("auto", "all", "none"),
+                     default="auto",
+                     help="direct-pretrain derived-feature routing: auto "
+                          "keeps math/reasoning out of coding-intent pools")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -761,7 +775,8 @@ def main(argv: list[str] | None = None) -> int:
                             input_path=args.input_path,
                             batch_size=args.batch_size,
                             progress_path=args.progress_path,
-                            checkpoint_rows=args.checkpoint_rows)
+                            checkpoint_rows=args.checkpoint_rows,
+                            feature_policy=args.feature_policy)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
