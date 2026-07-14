@@ -48,7 +48,8 @@ impl AtomEncoding for BytePassthroughEncoding {
     fn atomize(&self, frame: &[u8]) -> Vec<String> {
         use base64::Engine;
         let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        frame.iter()
+        frame
+            .iter()
             .map(|&b| format!("{}:{}", self.prefix, engine.encode([b])))
             .collect()
     }
@@ -62,7 +63,8 @@ impl AtomEncoding for BytePassthroughEncoding {
         // and decodes its base64 payload.
         let mut out = Vec::with_capacity(active_atoms.len());
         for (label, _) in active_atoms {
-            if let Some(payload) = label.strip_prefix(self.prefix)
+            if let Some(payload) = label
+                .strip_prefix(self.prefix)
                 .and_then(|s| s.strip_prefix(':'))
             {
                 if let Ok(bytes) = engine.decode(payload) {
@@ -73,7 +75,9 @@ impl AtomEncoding for BytePassthroughEncoding {
         out
     }
 
-    fn name(&self) -> &'static str { "byte-passthrough" }
+    fn name(&self) -> &'static str {
+        "byte-passthrough"
+    }
 }
 
 /// Substrate-internal signal that can drive a knob.  These are the
@@ -115,10 +119,10 @@ pub enum ControlMode {
     /// effective = clamp(min, max, offset + scale * signal_value()).
     DrivenBy {
         signal: ControlSignal,
-        scale:  f32,
+        scale: f32,
         offset: f32,
-        min:    f32,
-        max:    f32,
+        min: f32,
+        max: f32,
     },
 }
 
@@ -127,16 +131,22 @@ impl ControlMode {
     pub fn evaluate(&self, st: &ControlState) -> f32 {
         match self {
             ControlMode::Constant(v) => *v,
-            ControlMode::DrivenBy { signal, scale, offset, min, max } => {
+            ControlMode::DrivenBy {
+                signal,
+                scale,
+                offset,
+                min,
+                max,
+            } => {
                 let raw = match signal {
-                    ControlSignal::Surprise              => st.surprise,
-                    ControlSignal::InvSurprise           => 1.0 - st.surprise,
-                    ControlSignal::FiringRate            => st.firing_rate,
-                    ControlSignal::InvFiringRate         => 1.0 - st.firing_rate,
-                    ControlSignal::DecodePrecisionEma    => st.decode_precision,
+                    ControlSignal::Surprise => st.surprise,
+                    ControlSignal::InvSurprise => 1.0 - st.surprise,
+                    ControlSignal::FiringRate => st.firing_rate,
+                    ControlSignal::InvFiringRate => 1.0 - st.firing_rate,
+                    ControlSignal::DecodePrecisionEma => st.decode_precision,
                     ControlSignal::InvDecodePrecisionEma => 1.0 - st.decode_precision,
-                    ControlSignal::ConceptCountEma       => st.concept_count_norm,
-                    ControlSignal::TerminalCountEma      => st.terminal_count_norm,
+                    ControlSignal::ConceptCountEma => st.concept_count_norm,
+                    ControlSignal::TerminalCountEma => st.terminal_count_norm,
                 };
                 (offset + scale * raw).clamp(*min, *max)
             }
@@ -148,28 +158,28 @@ impl ControlMode {
 /// Materialised once per tick / per-knob-read, not stored — small.
 #[derive(Debug, Clone, Copy)]
 pub struct ControlState {
-    pub surprise:           f32,  // [0, 1] from recent_surprise EMA
-    pub firing_rate:        f32,  // [0, 1] normalised
-    pub decode_precision:   f32,  // [0, 1] from decode_precision_ema
+    pub surprise: f32,            // [0, 1] from recent_surprise EMA
+    pub firing_rate: f32,         // [0, 1] normalised
+    pub decode_precision: f32,    // [0, 1] from decode_precision_ema
     pub concept_count_norm: f32,  // log10(concept_count+1)/4 ≈ [0, ~1]
-    pub terminal_count_norm:f32,  // log10(terminal_count+1)/7 ≈ [0, ~1]
+    pub terminal_count_norm: f32, // log10(terminal_count+1)/7 ≈ [0, ~1]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
-    pub name:                        String,
-    pub id:                          PoolId,
-    pub frame_rate:                  u32,
-    pub recent_atoms_window:         usize,
+    pub name: String,
+    pub id: PoolId,
+    pub frame_rate: u32,
+    pub recent_atoms_window: usize,
     /// A sequence of length 2..=`max_concept_member_count` that recurs at
     /// least `concept_emergence_threshold` times in `recent_atoms` is
     /// promoted to a concept.  Per spec §4.A.
-    pub max_concept_member_count:    usize,
+    pub max_concept_member_count: usize,
     pub concept_emergence_threshold: u32,
-    pub max_weight:                  f32,
-    pub decay_rate:                  f32,
-    pub prune_floor:                 f32,
-    pub plasticity_baseline:         f32,
+    pub max_weight: f32,
+    pub decay_rate: f32,
+    pub prune_floor: f32,
+    pub plasticity_baseline: f32,
 
     /// k-WTA sparsity target — DYNAMICAL.  ControlMode driven by a
     /// substrate-internal signal each tick.  Default is
@@ -181,12 +191,12 @@ pub struct PoolConfig {
     /// modulate sparsity dynamically with input regularity, not
     /// statically.
     #[serde(default = "default_sparsity_mode")]
-    pub sparsity_mode:               ControlMode,
+    pub sparsity_mode: ControlMode,
     /// Minimum number of neurons that stay firing after the k-WTA
     /// gate even when `sparsity_top_k_frac` would round to fewer.
     /// Prevents complete silence in low-traffic pools.
     #[serde(default = "default_sparsity_min_neurons")]
-    pub sparsity_min_neurons:        usize,
+    pub sparsity_min_neurons: usize,
 
     /// Heterosynaptic long-term depression — DYNAMICAL.  ControlMode
     /// driven by substrate state.  Constant(0.0) default = disabled.
@@ -194,7 +204,7 @@ pub struct PoolConfig {
     /// could drive higher LTD; high decode precision could lower it
     /// (don't weaken what's working).
     #[serde(default = "default_heterosynaptic_ltd_mode")]
-    pub heterosynaptic_ltd_mode:     ControlMode,
+    pub heterosynaptic_ltd_mode: ControlMode,
 
     /// Predictive-coding gate — DYNAMICAL.  Constant(0.0) default
     /// = always emerge.  When DrivenBy(InvSurprise, ...) is selected,
@@ -202,7 +212,7 @@ pub struct PoolConfig {
     /// stable → emergence pauses), and self-loosens when surprise
     /// rises (novel input → emergence resumes).
     #[serde(default = "default_predict_gate_mode")]
-    pub predict_gate_mode:           ControlMode,
+    pub predict_gate_mode: ControlMode,
 }
 
 /// A parallel, lossy code sensor that emits structural events while the raw
@@ -225,41 +235,98 @@ pub struct InstructionIntentEncoding {
 impl AtomEncoding for InstructionIntentEncoding {
     fn atomize(&self, frame: &[u8]) -> Vec<String> {
         let text = String::from_utf8_lossy(frame).to_ascii_lowercase();
+        // Internal learned-route frames re-stimulate semantic atoms that were
+        // previously grounded by raw character streams. This is not exposed
+        // as user tokenization: labels are target-pool observations learned
+        // through the same co-firing binding path as any other modality.
+        if text.contains("@intent:") {
+            let mut labels = Vec::new();
+            for line in text.lines() {
+                let Some((_, semantic)) = line.split_once("@intent:") else {
+                    continue;
+                };
+                let semantic = semantic.trim().to_ascii_uppercase();
+                if !semantic.is_empty()
+                    && semantic
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ":_-".contains(ch))
+                {
+                    let label = format!("{}:{}", self.prefix, semantic);
+                    if !labels.contains(&label) {
+                        labels.push(label);
+                    }
+                }
+            }
+            return labels;
+        }
         let mut features = Vec::new();
-        let coding_context = ["fix ", "correct ", "change ", "repair ", "prevent ",
-            "create ", "write ", "implement ", "build ", "produce ", "make ",
-            "code", "function", "compute", "calculate", "return"]
-            .iter().any(|cue| text.contains(cue));
-        if !coding_context { return features; }
+        let coding_context = [
+            "fix ",
+            "correct ",
+            "change ",
+            "repair ",
+            "prevent ",
+            "create ",
+            "write ",
+            "implement ",
+            "build ",
+            "produce ",
+            "make ",
+            "code",
+            "function",
+            "compute",
+            "calculate",
+            "return",
+        ]
+        .iter()
+        .any(|cue| text.contains(cue));
+        if !coding_context {
+            return features;
+        }
         let mut emit = |feature: &str| features.push(format!("{}:{}", self.prefix, feature));
         // Language is an independent feature rather than part of the task
         // label. Co-firing lets bindings represent, for example,
         // LANGUAGE:RUST + POWER_SELF:2 without discarding the raw words.
-        if text.contains("python") { emit("LANGUAGE:PYTHON"); }
+        if text.contains("python") {
+            emit("LANGUAGE:PYTHON");
+        }
         if text.contains("javascript") || text.contains("node.js") || text.contains("nodejs") {
             emit("LANGUAGE:JAVASCRIPT");
         }
-        if text.contains("c#") || text.contains("c sharp") || text.contains("dotnet")
+        if text.contains("c#")
+            || text.contains("c sharp")
+            || text.contains("dotnet")
             || text.contains(".net")
         {
             emit("LANGUAGE:CSHARP");
         }
-        if text.contains("golang") || text.starts_with("go ") || text.contains(" go ")
-            || text.contains("go function") || text.contains("go code")
+        if text.contains("golang")
+            || text.starts_with("go ")
+            || text.contains(" go ")
+            || text.contains("go function")
+            || text.contains("go code")
         {
             emit("LANGUAGE:GO");
         }
-        if text.contains("rust") { emit("LANGUAGE:RUST"); }
-        if text.contains("java") && !text.contains("javascript") { emit("LANGUAGE:JAVA"); }
+        if text.contains("rust") {
+            emit("LANGUAGE:RUST");
+        }
+        if text.contains("java") && !text.contains("javascript") {
+            emit("LANGUAGE:JAVA");
+        }
         if text.contains("cube") || text.contains("third power") || text.contains("three times") {
             emit("POWER_SELF:3");
-        } else if text.contains("square") || text.contains("second power")
+        } else if text.contains("square")
+            || text.contains("second power")
             || text.contains("product of its argument with itself")
             || text.contains("multiplies the value by itself")
         {
             emit("POWER_SELF:2");
         }
-        if text.contains("negative") || text.contains("below zero") || text.contains("less than zero") {
+        if text.contains("negative")
+            || text.contains("below zero")
+            || text.contains("less than zero")
+        {
             emit("COMPARISON:LESS_THAN_ZERO");
         }
         if text.contains("average") || text.contains("arithmetic mean") {
@@ -271,31 +338,41 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("odd") || text.contains("odd parity") {
             emit("PARITY:ODD");
         }
-        if text.contains("increment") || text.contains("increments")
-            || text.contains("repeated words") || text.contains("increase their stored total")
+        if text.contains("increment")
+            || text.contains("increments")
+            || text.contains("repeated words")
+            || text.contains("increase their stored total")
             || (text.contains("word") && text.contains("count"))
         {
             emit("STATE:INCREMENT_COUNT");
         }
-        if text.contains("uppercase") { emit("TEXT:UPPERCASE"); }
-        if text.contains("largest") || text.contains("maximum") { emit("ORDER:MAXIMUM"); }
-        if text.contains("factorial") { emit("MATH:FACTORIAL"); }
-        if text.contains("validat") || text.contains("required field")
+        if text.contains("uppercase") {
+            emit("TEXT:UPPERCASE");
+        }
+        if text.contains("largest") || text.contains("maximum") {
+            emit("ORDER:MAXIMUM");
+        }
+        if text.contains("factorial") {
+            emit("MATH:FACTORIAL");
+        }
+        if text.contains("validat")
+            || text.contains("required field")
             || text.contains("required user")
         {
             emit("ENTERPRISE:INPUT_VALIDATION");
         }
-        if text.contains("retry") || text.contains("attempts")
-            || text.contains("transient failure")
+        if text.contains("retry") || text.contains("attempts") || text.contains("transient failure")
         {
             emit("ENTERPRISE:BOUNDED_RETRY");
         }
-        if text.contains("json") && (text.contains("aggregat") || text.contains("summar")
-            || text.contains("totals"))
+        if text.contains("json")
+            && (text.contains("aggregat") || text.contains("summar") || text.contains("totals"))
         {
             emit("ENTERPRISE:JSON_AGGREGATION");
         }
-        if text.contains("redact") || text.contains("mask secrets") || text.contains("masks secrets")
+        if text.contains("redact")
+            || text.contains("mask secrets")
+            || text.contains("masks secrets")
             || (text.contains("password") && text.contains("token"))
         {
             emit("ENTERPRISE:SECRET_REDACTION");
@@ -303,24 +380,30 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("batch") || text.contains("chunk") {
             emit("ENTERPRISE:BATCHING");
         }
-        if text.contains("multi-file") || text.contains("multiple files")
+        if text.contains("multi-file")
+            || text.contains("multiple files")
             || (text.contains("domain") && text.contains("service file"))
         {
             emit("ARCHITECTURE:MULTIFILE_SERVICE");
         }
-        if text.contains("sqlite") || (text.contains("database") && text.contains("transaction"))
-            || text.contains("atomic transfer") || text.contains("all-or-nothing database transfer")
+        if text.contains("sqlite")
+            || (text.contains("database") && text.contains("transaction"))
+            || text.contains("atomic transfer")
+            || text.contains("all-or-nothing database transfer")
         {
             emit("PERSISTENCE:ATOMIC_TRANSACTION");
         }
-        if text.contains("async") && (text.contains("concurr") || text.contains("semaphore")
-            || text.contains("parallel"))
+        if text.contains("async")
+            && (text.contains("concurr") || text.contains("semaphore") || text.contains("parallel"))
         {
             emit("CONCURRENCY:BOUNDED_ASYNC");
         }
-        if text.contains("authoriz") || text.contains("access-control")
-            || text.contains("access control") || text.contains("rbac")
-            || text.contains("default-deny") || text.contains("default deny")
+        if text.contains("authoriz")
+            || text.contains("access-control")
+            || text.contains("access control")
+            || text.contains("rbac")
+            || text.contains("default-deny")
+            || text.contains("default deny")
             || text.contains("denies by default")
         {
             emit("SECURITY:AUTHORIZATION");
@@ -328,17 +411,21 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("idempoten") || (text.contains("api") && text.contains("replay")) {
             emit("API:IDEMPOTENT_COMMAND");
         }
-        if text.contains("migration") || text.contains("schema version")
+        if text.contains("migration")
+            || text.contains("schema version")
             || text.contains("upgrade path")
         {
             emit("PERSISTENCE:SCHEMA_MIGRATION");
         }
-        if text.contains("observability") || text.contains("structured log")
-            || text.contains("correlation id") || text.contains("correlation-id")
+        if text.contains("observability")
+            || text.contains("structured log")
+            || text.contains("correlation id")
+            || text.contains("correlation-id")
         {
             emit("OBSERVABILITY:CORRELATED_LOGGING");
         }
-        if text.contains("circuit breaker") || text.contains("circuit-breaker")
+        if text.contains("circuit breaker")
+            || text.contains("circuit-breaker")
             || (text.contains("opens after") && text.contains("cooldown"))
         {
             emit("RESILIENCE:CIRCUIT_BREAKER");
@@ -352,7 +439,8 @@ impl AtomEncoding for InstructionIntentEncoding {
         if (text.contains("async") || text.contains("asynchronous")) && text.contains("retry") {
             emit("RESILIENCE:ASYNC_RETRY");
         }
-        if text.contains("optimistic concurr") || text.contains("expected version")
+        if text.contains("optimistic concurr")
+            || text.contains("expected version")
             || text.contains("stale write")
         {
             emit("STATE:OPTIMISTIC_CONCURRENCY");
@@ -362,8 +450,12 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("DOMAIN:ATOMIC_LEDGER_TRANSFER");
         }
-        if text.contains("unspecified") || text.contains("unknown protocol")
-            || text.contains("undocumented") || text.contains("has not been provided")
+        if text.contains("unspecified")
+            || text.contains("unknown protocol")
+            || (text.contains("protocol") && text.contains("unknown"))
+            || (text.contains("schema") && text.contains("unknown"))
+            || text.contains("undocumented")
+            || text.contains("has not been provided")
             || text.contains("not provided")
             || text.contains("without any service objectives")
         {
@@ -372,8 +464,24 @@ impl AtomEncoding for InstructionIntentEncoding {
         features
     }
 
-    fn reassemble(&self, _active_atoms: &[(&str, f32)]) -> Vec<u8> { Vec::new() }
-    fn name(&self) -> &'static str { "instruction-intent" }
+    fn reassemble(&self, active_atoms: &[(&str, f32)]) -> Vec<u8> {
+        let prefix = format!("{}:", self.prefix);
+        let mut output = Vec::new();
+        for (label, activation) in active_atoms {
+            if *activation <= 0.0 {
+                continue;
+            }
+            if let Some(semantic) = label.strip_prefix(&prefix) {
+                output.extend_from_slice(b"@intent:");
+                output.extend_from_slice(semantic.as_bytes());
+                output.push(b'\n');
+            }
+        }
+        output
+    }
+    fn name(&self) -> &'static str {
+        "instruction-intent"
+    }
 }
 
 impl AtomEncoding for CodeStructureEncoding {
@@ -413,13 +521,13 @@ impl AtomEncoding for CodeStructureEncoding {
                 }
                 let word = &text[start..i];
                 let feature = match word {
-                    "def" | "return" | "if" | "else" | "for" | "in" | "while" |
-                    "class" | "try" | "except" | "raise" | "import" | "from" => {
+                    "def" | "return" | "if" | "else" | "for" | "in" | "while" | "class" | "try"
+                    | "except" | "raise" | "import" | "from" => {
                         after_def = word == "def";
                         format!("KW:{}", word)
                     }
-                    "sum" | "len" | "range" | "enumerate" | "zip" | "str" | "int" |
-                    "float" | "list" | "dict" | "set" => format!("BUILTIN:{}", word),
+                    "sum" | "len" | "range" | "enumerate" | "zip" | "str" | "int" | "float"
+                    | "list" | "dict" | "set" => format!("BUILTIN:{}", word),
                     _ if after_def => {
                         after_def = false;
                         "FUNCTION_NAME".to_string()
@@ -436,21 +544,36 @@ impl AtomEncoding for CodeStructureEncoding {
             }
             if b.is_ascii_digit() {
                 i += 1;
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') { i += 1; }
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                    i += 1;
+                }
                 out.push(format!("{}:NUMBER", self.prefix));
                 continue;
             }
             let feature: String = match b {
-                b'(' => { in_params = after_def || out.last().is_some_and(|v| v.ends_with(":FUNCTION_NAME")); "LPAREN".into() }
-                b')' => { in_params = false; "RPAREN".into() }
-                b'[' => "LBRACKET".into(), b']' => "RBRACKET".into(),
-                b'{' => "LBRACE".into(), b'}' => "RBRACE".into(),
-                b':' => "COLON".into(), b',' => "COMMA".into(), b'.' => "DOT".into(),
+                b'(' => {
+                    in_params =
+                        after_def || out.last().is_some_and(|v| v.ends_with(":FUNCTION_NAME"));
+                    "LPAREN".into()
+                }
+                b')' => {
+                    in_params = false;
+                    "RPAREN".into()
+                }
+                b'[' => "LBRACKET".into(),
+                b']' => "RBRACKET".into(),
+                b'{' => "LBRACE".into(),
+                b'}' => "RBRACE".into(),
+                b':' => "COLON".into(),
+                b',' => "COMMA".into(),
+                b'.' => "DOT".into(),
                 b'\'' | b'\"' => "QUOTE".into(),
                 b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'=' | b'!' => {
                     let start = i;
                     i += 1;
-                    while i < bytes.len() && matches!(bytes[i], b'=' | b'<' | b'>' | b'/' | b'*') { i += 1; }
+                    while i < bytes.len() && matches!(bytes[i], b'=' | b'<' | b'>' | b'/' | b'*') {
+                        i += 1;
+                    }
                     out.push(format!("{}:OP:{}", self.prefix, &text[start..i]));
                     continue;
                 }
@@ -462,8 +585,12 @@ impl AtomEncoding for CodeStructureEncoding {
         out
     }
 
-    fn reassemble(&self, _active_atoms: &[(&str, f32)]) -> Vec<u8> { Vec::new() }
-    fn name(&self) -> &'static str { "code-structure" }
+    fn reassemble(&self, _active_atoms: &[(&str, f32)]) -> Vec<u8> {
+        Vec::new()
+    }
+    fn name(&self) -> &'static str {
+        "code-structure"
+    }
 }
 
 /// Result of deterministic batch pretraining. Every promoted pattern is an
@@ -477,10 +604,18 @@ pub struct PretrainReport {
     pub concepts_promoted: usize,
 }
 
-fn default_sparsity_mode() -> ControlMode { ControlMode::Constant(1.0) }
-fn default_sparsity_min_neurons() -> usize { 1 }
-fn default_heterosynaptic_ltd_mode() -> ControlMode { ControlMode::Constant(0.0) }
-fn default_predict_gate_mode() -> ControlMode { ControlMode::Constant(0.0) }
+fn default_sparsity_mode() -> ControlMode {
+    ControlMode::Constant(1.0)
+}
+fn default_sparsity_min_neurons() -> usize {
+    1
+}
+fn default_heterosynaptic_ltd_mode() -> ControlMode {
+    ControlMode::Constant(0.0)
+}
+fn default_predict_gate_mode() -> ControlMode {
+    ControlMode::Constant(0.0)
+}
 
 impl PoolConfig {
     pub fn defaults(name: impl Into<String>, id: PoolId) -> Self {
@@ -511,10 +646,10 @@ impl PoolConfig {
 type SequenceFingerprint = Vec<NeuronId>;
 
 pub struct Pool {
-    pub config:       PoolConfig,
-    encoding:         Box<dyn AtomEncoding>,
-    neurons:          Vec<Neuron>,
-    label_to_id:      AHashMap<String, NeuronId>,
+    pub config: PoolConfig,
+    encoding: Box<dyn AtomEncoding>,
+    neurons: Vec<Neuron>,
+    label_to_id: AHashMap<String, NeuronId>,
     /// Stage 13 — atom-multiset dedup index.  Key = sorted Vec of atom
     /// leaf NeuronIds (the multiset signature of a concept's full
     /// expansion).  Value = the FIRST concept promoted with that
@@ -541,23 +676,23 @@ pub struct Pool {
     concept_sequence_to_id: AHashMap<Vec<NeuronId>, NeuronId>,
     /// Streaming buffer of recently-fired atom/concept IDs.  Drives concept
     /// emergence.  Bounded by `config.recent_atoms_window`.
-    recent_atoms:     VecDeque<NeuronId>,
+    recent_atoms: VecDeque<NeuronId>,
     /// Per-sequence recurrence count.  Concept emergence fires when a
     /// sequence's count crosses the threshold.
-    sequences:        AHashMap<SequenceFingerprint, u32>,
+    sequences: AHashMap<SequenceFingerprint, u32>,
     /// IDs of neurons currently firing (activation > min_activation).
     /// Rebuilt every observe call.  Read by the Fabric for the moment
     /// buffer and cross-pool wiring.
     currently_firing: AHashSet<NeuronId>,
     /// Per-neuron transient activation for the current tick.  Cleared at
     /// the start of each observe call.
-    activation:       AHashMap<NeuronId, f32>,
+    activation: AHashMap<NeuronId, f32>,
 
     /// EMA of "surprise" — fraction of firing atoms that were NOT
     /// in the previous tick's intra-pool terminal-target prediction.
     /// Drives the predictive-coding gate on concept emergence.
     /// Cleared on new(); transient runtime state (not serialised).
-    recent_surprise:  f32,
+    recent_surprise: f32,
 
     /// Last-observed atom sequence (ordered, no concepts).  Rebuilt
     /// on every observe_frame call.  Lets the decoder distinguish
@@ -569,7 +704,7 @@ pub struct Pool {
     /// EMA of `currently_firing.len()` post-k-WTA — driven by every
     /// observe.  Used as a ControlSignal: sparsity controllers can
     /// read this to drive their own thresholds.
-    firing_rate_ema:  f32,
+    firing_rate_ema: f32,
 
     /// EMA of post-emergence concept_count.  Tracks how aggressively
     /// the pool is crystallising new concepts.  Rising fast =
@@ -618,7 +753,7 @@ pub struct Pool {
     /// Transient — not part of the snapshot, defaults back to 0 on
     /// restart so the brain doesn't accidentally keep tagging new
     /// material with a stale domain.
-    pub(crate) domain_for_new:    u32,
+    pub(crate) domain_for_new: u32,
 
     /// Persistence backend per [`ARCHITECTURE.md`] §17.9.  Default is a
     /// [`NoopStore`] — pools constructed without an explicit store stay
@@ -641,7 +776,7 @@ pub struct Pool {
     /// `None` means eviction is disabled — the pool keeps every neuron
     /// in RAM (the legacy mode that all small-scale tests use).  Attach
     /// via [`Pool::set_cold_tier`].
-    cold_tier:     Option<Arc<ColdTier>>,
+    cold_tier: Option<Arc<ColdTier>>,
 
     /// Stage 18.12 step 4b: §18 distributed storage hook.  When set,
     /// the eviction/page-in path routes through this `NeuronStore`
@@ -654,19 +789,19 @@ pub struct Pool {
     /// Attached via [`Pool::set_tiered_store`].  Per [`ARCHITECTURE.md`]
     /// §18.2 this is the abstraction below `Pool::neurons` that lets
     /// the brain transparently use storage from multiple hosts.
-    tiered_store:  Option<Arc<TieredStore>>,
+    tiered_store: Option<Arc<TieredStore>>,
 
     /// Disk offsets for currently-evicted neurons.  An ID in this map
     /// is one whose in-RAM slot has been zeroed out (terminals + members
     /// cleared) and whose authoritative state lives at this byte offset
     /// in `cold_tier`'s file.  Empty if eviction is disabled.
-    cold_offsets:  AHashMap<NeuronId, u64>,
+    cold_offsets: AHashMap<NeuronId, u64>,
 
     /// Set of neuron IDs currently in the evicted state.  Maintained
     /// alongside `cold_offsets` (membership is identical); kept as a
     /// separate set for O(1) "is this evicted?" probes from iteration
     /// + decode paths.
-    evicted:       AHashSet<NeuronId>,
+    evicted: AHashSet<NeuronId>,
 
     /// External signal — set by Brain::decode_best_trained_binding
     /// when this pool is the query_pool of a decode.  Rolling avg
@@ -682,16 +817,16 @@ impl Pool {
         Self {
             config,
             encoding,
-            neurons:          Vec::new(),
-            label_to_id:      AHashMap::new(),
+            neurons: Vec::new(),
+            label_to_id: AHashMap::new(),
             concept_multiset_to_id: AHashMap::new(),
             concept_sequence_to_id: AHashMap::new(),
-            recent_atoms:     VecDeque::with_capacity(window),
-            sequences:        AHashMap::new(),
+            recent_atoms: VecDeque::with_capacity(window),
+            sequences: AHashMap::new(),
             currently_firing: AHashSet::new(),
-            activation:       AHashMap::new(),
-            recent_surprise:  1.0,
-            firing_rate_ema:  0.0,
+            activation: AHashMap::new(),
+            recent_surprise: 1.0,
+            firing_rate_ema: 0.0,
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
             pending_promotions: Vec::new(),
@@ -704,10 +839,10 @@ impl Pool {
             // when load crosses threshold (TODO Stage 17.4 full).  At this
             // scale the filter is ~175 KB per pool — negligible.
             bloom: CountingBloom::with_expected_capacity(100_000),
-            cold_tier:    None,
+            cold_tier: None,
             tiered_store: None,
             cold_offsets: AHashMap::new(),
-            evicted:      AHashSet::new(),
+            evicted: AHashSet::new(),
         }
     }
 
@@ -734,7 +869,9 @@ impl Pool {
 
     /// Stage 18.12 step 4b — diagnostic: true when this pool has a
     /// `TieredStore` attached (i.e. is running in distributed mode).
-    pub fn has_tiered_store(&self) -> bool { self.tiered_store.is_some() }
+    pub fn has_tiered_store(&self) -> bool {
+        self.tiered_store.is_some()
+    }
 
     /// Stage 18.12 step 7 — what NodeId is the home for neuron `id`,
     /// according to this pool's TieredStore?  Returns None if the pool
@@ -766,7 +903,9 @@ impl Pool {
 
     /// Stage 17.4 — number of currently-evicted neurons.  Diagnostic +
     /// `StorageControlState::working_set_pressure` signal source.
-    pub fn evicted_count(&self) -> usize { self.evicted.len() }
+    pub fn evicted_count(&self) -> usize {
+        self.evicted.len()
+    }
 
     /// Stage 17.4 — count of neurons currently held in RAM (live).
     /// Equals `neuron_count() - evicted_count()`.
@@ -784,7 +923,9 @@ impl Pool {
     /// was already evicted (idempotent) or doesn't exist; `Err` if the
     /// cold tier is unattached or the I/O failed.
     pub fn evict_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
-        if self.evicted.contains(&id) { return Ok(false); }
+        if self.evicted.contains(&id) {
+            return Ok(false);
+        }
 
         // Stage 18.12 step 4b: prefer the tiered store when both are
         // present (the §18 distributed path).  Fall back to the
@@ -802,7 +943,9 @@ impl Pool {
         // most fundamental unit; their RAM cost is minimal (no terminals
         // typically) and the cost of paging them back in on every byte
         // is unbearable.  Bindings (members empty + concept) also stay.
-        if n.is_atom() { return Ok(false); }
+        if n.is_atom() {
+            return Ok(false);
+        }
 
         // Choose backend: tiered_store wins when both are attached.
         let used_tiered = if let Some(store) = self.tiered_store.clone() {
@@ -838,7 +981,7 @@ impl Pool {
 
         // Per ARCHITECTURE §17.9: log the eviction.
         let event = WalEvent::NeuronEvicted {
-            pool_id:   self.config.id,
+            pool_id: self.config.id,
             neuron_id: id,
         };
         if let Err(e) = self.store.append(&event) {
@@ -847,7 +990,8 @@ impl Pool {
         if used_tiered {
             tracing::debug!(
                 "evicted neuron pool={} id={} via tiered_store (§18)",
-                self.config.id, id,
+                self.config.id,
+                id,
             );
         }
         Ok(true)
@@ -862,7 +1006,9 @@ impl Pool {
     /// it wasn't evicted to begin with (caller can ignore); `Err` if
     /// the cold tier is missing or the read failed.
     pub fn page_in_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
-        if !self.evicted.contains(&id) { return Ok(false); }
+        if !self.evicted.contains(&id) {
+            return Ok(false);
+        }
 
         // Stage 18.12 step 4b: prefer the tiered store when attached.
         // It routes through local cold disk OR a remote peer depending
@@ -871,10 +1017,12 @@ impl Pool {
         let restored: Neuron = if let Some(store) = self.tiered_store.clone() {
             match store.get(id) {
                 Some(n) => n,
-                None => return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("tiered_store has no neuron id {} (home check?)", id),
-                )),
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("tiered_store has no neuron id {} (home check?)", id),
+                    ));
+                }
             }
         } else {
             let Some(tier) = self.cold_tier.clone() else {
@@ -895,8 +1043,10 @@ impl Pool {
         if restored.id != id {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("cold-tier id mismatch: expected {}, got {}",
-                    id, restored.id),
+                format!(
+                    "cold-tier id mismatch: expected {}, got {}",
+                    id, restored.id
+                ),
             ));
         }
         let Some(slot) = self.neurons.get_mut(id as usize) else {
@@ -940,14 +1090,14 @@ impl Pool {
         // without the symmetric add the pressure factor undercounts after
         // every evict/page-in cycle and eviction gets lazier over time.
         let restored_terms = slot.terminals.len().saturating_sub(live_before);
-        slot.members   = restored.members;
+        slot.members = restored.members;
         slot.prediction_error_ema = restored.prediction_error_ema;
         // Use the more-current salience: in-RAM may have decayed below
         // the cold copy's value, or vice versa.  Eviction freezes
         // salience at evict-time; choose the cold copy as authoritative.
-        slot.salience      = restored.salience;
-        slot.salience_ema  = restored.salience_ema;
-        slot.use_count     = restored.use_count.max(slot.use_count);
+        slot.salience = restored.salience;
+        slot.salience_ema = restored.salience_ema;
+        slot.use_count = restored.use_count.max(slot.use_count);
         slot.last_fired_tick = restored.last_fired_tick.max(slot.last_fired_tick);
 
         self.cold_offsets.remove(&id);
@@ -976,9 +1126,9 @@ impl Pool {
     /// (idempotent on replays).
     pub fn replay_atom_create(
         &mut self,
-        id:        NeuronId,
-        label:     String,
-        kind:      NeuronKind,
+        id: NeuronId,
+        label: String,
+        kind: NeuronKind,
         born_tick: u64,
     ) -> bool {
         if (id as usize) < self.neurons.len() {
@@ -992,7 +1142,8 @@ impl Pool {
         if (id as usize) != self.neurons.len() {
             tracing::warn!(
                 "replay_atom_create: id={} but next slot is {}; refusing",
-                id, self.neurons.len(),
+                id,
+                self.neurons.len(),
             );
             return false;
         }
@@ -1007,17 +1158,20 @@ impl Pool {
     /// [`replay_atom_create`] for concept neurons (non-empty members).
     pub fn replay_concept_create(
         &mut self,
-        id:        NeuronId,
-        label:     String,
-        kind:      NeuronKind,
-        members:   Vec<NeuronRef>,
+        id: NeuronId,
+        label: String,
+        kind: NeuronKind,
+        members: Vec<NeuronRef>,
         born_tick: u64,
     ) -> bool {
-        if (id as usize) < self.neurons.len() { return false; }
+        if (id as usize) < self.neurons.len() {
+            return false;
+        }
         if (id as usize) != self.neurons.len() {
             tracing::warn!(
                 "replay_concept_create: id={} but next slot is {}; refusing",
-                id, self.neurons.len(),
+                id,
+                self.neurons.len(),
             );
             return false;
         }
@@ -1042,7 +1196,8 @@ impl Pool {
         if neuron.id != next {
             tracing::warn!(
                 "replay_full_neuron: id={} but next slot is {}; refusing",
-                neuron.id, next,
+                neuron.id,
+                next,
             );
             return false;
         }
@@ -1076,9 +1231,7 @@ impl Pool {
             let pid = self.neurons.len() as NeuronId;
             // Placeholder: empty label, atom kind, no members/terminals.
             // Not added to label_to_id (only labelled neurons enter it).
-            let placeholder = Neuron::new_atom(
-                pid, String::new(), NeuronKind::Excitatory, 0,
-            );
+            let placeholder = Neuron::new_atom(pid, String::new(), NeuronKind::Excitatory, 0);
             self.neurons.push(placeholder);
         }
         if idx == self.neurons.len() {
@@ -1133,11 +1286,15 @@ impl Pool {
 
     /// Stage 17.3 — diagnostic: number of byte slots the Bloom filter
     /// occupies.  Used by `/stats` to surface filter size.
-    pub fn bloom_byte_size(&self) -> usize { self.bloom.byte_size() }
+    pub fn bloom_byte_size(&self) -> usize {
+        self.bloom.byte_size()
+    }
 
     /// Stage 17.3 — diagnostic: number of distinct keys inserted into
     /// the Bloom filter (approximate; counts transitions from 0).
-    pub fn bloom_inserted_keys(&self) -> usize { self.bloom.inserted_keys() }
+    pub fn bloom_inserted_keys(&self) -> usize {
+        self.bloom.inserted_keys()
+    }
 
     /// Stage 17.6 — compute the deterministic Merkle root for this
     /// pool's current learned state.  Two pools with identical training
@@ -1171,16 +1328,24 @@ impl Pool {
         self.store = store;
     }
 
-    pub fn id(&self) -> PoolId        { self.config.id }
-    pub fn name(&self) -> &str        { &self.config.name }
-    pub fn encoding_name(&self) -> &'static str { self.encoding.name() }
+    pub fn id(&self) -> PoolId {
+        self.config.id
+    }
+    pub fn name(&self) -> &str {
+        &self.config.name
+    }
+    pub fn encoding_name(&self) -> &'static str {
+        self.encoding.name()
+    }
     /// Inspect the deterministic sensor labels for a frame without creating
     /// neurons or changing activation. This supports inhibitory diagnostics
     /// (for example, explicitly missing specifications) during prediction.
     pub fn encoded_labels(&self, frame: &[u8]) -> Vec<String> {
         self.encoding.atomize(frame)
     }
-    pub fn neuron_count(&self) -> usize { self.neurons.len() }
+    pub fn neuron_count(&self) -> usize {
+        self.neurons.len()
+    }
 
     /// Set the domain id stamped onto every atom + concept created
     /// from now on (island architecture).  Doesn't retroactively
@@ -1189,7 +1354,9 @@ impl Pool {
         self.domain_for_new = domain_id;
     }
 
-    pub fn domain_for_new(&self) -> u32 { self.domain_for_new }
+    pub fn domain_for_new(&self) -> u32 {
+        self.domain_for_new
+    }
 
     /// Count neurons per domain.  For operator visibility into how
     /// the island clustering is going.
@@ -1205,14 +1372,18 @@ impl Pool {
     /// the formerly O(N) `iter_neurons().map(|n| n.terminals.len()).sum()`
     /// pattern that turned every brain.stats() call into a fabric-wide
     /// scan.
-    pub fn total_terminals(&self) -> usize { self.total_terminals }
+    pub fn total_terminals(&self) -> usize {
+        self.total_terminals
+    }
     pub fn concept_count(&self) -> usize {
         self.neurons.iter().filter(|n| !n.is_atom()).count()
     }
     /// Number of neuron slots (including evicted ones whose terminals
     /// have been shed).  Tier orchestrator uses this for round-robin
     /// scan bounds.
-    pub fn neurons_len(&self) -> usize { self.neurons.len() }
+    pub fn neurons_len(&self) -> usize {
+        self.neurons.len()
+    }
     /// Indexed read of a neuron slot — `None` past the end.  Used by
     /// the tier orchestrator's bounded scan loop.
     pub fn neuron_at(&self, idx: usize) -> Option<&Neuron> {
@@ -1226,14 +1397,16 @@ impl Pool {
         let neurons = self.neurons.len() as f32;
         let firing_rate = if neurons > 0.0 {
             (self.firing_rate_ema / neurons).clamp(0.0, 1.0)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         ControlState {
-            surprise:            self.recent_surprise.clamp(0.0, 1.0),
+            surprise: self.recent_surprise.clamp(0.0, 1.0),
             firing_rate,
-            decode_precision:    self.decode_precision_ema.clamp(0.0, 1.0),
+            decode_precision: self.decode_precision_ema.clamp(0.0, 1.0),
             // log-norm so a pool with 10K concepts isn't 10× more
             // influential than one with 1K.  /4 keeps log10(10K)=4 at 1.0.
-            concept_count_norm:  (self.concept_count_ema.max(1.0).log10() / 4.0).clamp(0.0, 1.0),
+            concept_count_norm: (self.concept_count_ema.max(1.0).log10() / 4.0).clamp(0.0, 1.0),
             terminal_count_norm: (self.terminal_count_ema.max(1.0).log10() / 7.0).clamp(0.0, 1.0),
         }
     }
@@ -1268,7 +1441,10 @@ impl Pool {
     /// The caller must invoke `clear_prediction_activation` after readout.
     pub fn activate_known_frame_for_prediction(&mut self, frame: &[u8]) -> Vec<NeuronId> {
         self.clear_prediction_activation();
-        let fired: Vec<NeuronId> = self.encoding.atomize(frame).into_iter()
+        let fired: Vec<NeuronId> = self
+            .encoding
+            .atomize(frame)
+            .into_iter()
             .filter_map(|label| self.label_to_id.get(&label).copied())
             .collect();
         for &id in &fired {
@@ -1286,7 +1462,9 @@ impl Pool {
             stack.push(atom);
             loop {
                 let max_len = self.config.max_concept_member_count.min(stack.len());
-                if max_len < 2 { break; }
+                if max_len < 2 {
+                    break;
+                }
                 let mut matched: Option<(usize, NeuronId)> = None;
                 for len in (2..=max_len).rev() {
                     let start = stack.len() - len;
@@ -1325,7 +1503,10 @@ impl Pool {
         let mut atoms_observed = 0usize;
 
         for frame in frames {
-            let sequence: Vec<NeuronId> = self.encoding.atomize(frame).into_iter()
+            let sequence: Vec<NeuronId> = self
+                .encoding
+                .atomize(frame)
+                .into_iter()
                 .map(|label| self.ensure_atom(label, tick))
                 .collect();
             atoms_observed += sequence.len();
@@ -1336,7 +1517,9 @@ impl Pool {
                 }
             }
             let frame_max = max_len.min(sequence.len());
-            if frame_max < 2 { continue; }
+            if frame_max < 2 {
+                continue;
+            }
             for len in 2..=frame_max {
                 for window in sequence.windows(len) {
                     let count = counts.entry(window.to_vec()).or_insert(0);
@@ -1345,13 +1528,15 @@ impl Pool {
             }
         }
 
-        let mut candidates: Vec<(Vec<NeuronId>, u32)> = counts.into_iter()
+        let mut candidates: Vec<(Vec<NeuronId>, u32)> = counts
+            .into_iter()
             .filter(|(_, count)| *count >= min_recurrence)
             .collect();
         candidates.sort_by(|(a_seq, a_count), (b_seq, b_count)| {
             let a_evidence = (*a_count as u64) * (a_seq.len() as u64);
             let b_evidence = (*b_count as u64) * (b_seq.len() as u64);
-            b_evidence.cmp(&a_evidence)
+            b_evidence
+                .cmp(&a_evidence)
                 .then_with(|| b_count.cmp(a_count))
                 .then_with(|| b_seq.len().cmp(&a_seq.len()))
                 .then_with(|| a_seq.cmp(b_seq))
@@ -1382,10 +1567,18 @@ impl Pool {
     pub fn last_observed_sequence(&self) -> &[NeuronId] {
         &self.last_observed_sequence
     }
-    pub fn get(&self, id: NeuronId) -> Option<&Neuron>           { self.neurons.get(id as usize) }
-    pub fn get_mut(&mut self, id: NeuronId) -> Option<&mut Neuron> { self.neurons.get_mut(id as usize) }
-    pub fn iter_neurons(&self) -> impl Iterator<Item = &Neuron>  { self.neurons.iter() }
-    pub fn iter_neurons_mut(&mut self) -> impl Iterator<Item = &mut Neuron> { self.neurons.iter_mut() }
+    pub fn get(&self, id: NeuronId) -> Option<&Neuron> {
+        self.neurons.get(id as usize)
+    }
+    pub fn get_mut(&mut self, id: NeuronId) -> Option<&mut Neuron> {
+        self.neurons.get_mut(id as usize)
+    }
+    pub fn iter_neurons(&self) -> impl Iterator<Item = &Neuron> {
+        self.neurons.iter()
+    }
+    pub fn iter_neurons_mut(&mut self) -> impl Iterator<Item = &mut Neuron> {
+        self.neurons.iter_mut()
+    }
 
     pub fn label_to_id(&self, label: &str) -> Option<NeuronId> {
         self.label_to_id.get(label).copied()
@@ -1404,19 +1597,19 @@ impl Pool {
         // atom path (rare here — atoms usually come through ensure_atom).
         let event = if neuron.members.is_empty() {
             WalEvent::AtomCreated {
-                pool_id:   self.config.id,
+                pool_id: self.config.id,
                 id,
-                label:     label.clone(),
-                kind:      neuron.kind,
+                label: label.clone(),
+                kind: neuron.kind,
                 born_tick: neuron.born_tick,
             }
         } else {
             WalEvent::ConceptEmerged {
-                pool_id:   self.config.id,
+                pool_id: self.config.id,
                 id,
-                label:     label.clone(),
-                kind:      neuron.kind,
-                members:   neuron.members.clone(),
+                label: label.clone(),
+                kind: neuron.kind,
+                members: neuron.members.clone(),
                 born_tick: neuron.born_tick,
             }
         };
@@ -1444,7 +1637,9 @@ impl Pool {
     pub fn expanded_size(&self, members: &[NeuronRef]) -> usize {
         let mut total = 0;
         for m in members {
-            if m.pool != self.config.id { continue; }
+            if m.pool != self.config.id {
+                continue;
+            }
             if let Some(n) = self.neurons.get(m.neuron as usize) {
                 if n.is_atom() {
                     total += 1;
@@ -1470,7 +1665,9 @@ impl Pool {
     pub fn decode_concept_members(&self, members: &[NeuronRef]) -> Vec<u8> {
         let mut out = Vec::new();
         for m in members {
-            if m.pool != self.config.id { continue; }
+            if m.pool != self.config.id {
+                continue;
+            }
             let neuron = match self.neurons.get(m.neuron as usize) {
                 Some(n) => n,
                 None => continue,
@@ -1506,14 +1703,11 @@ impl Pool {
         // cold-tier file itself is data on disk — its name is derived
         // from pool id (see brain_server's attach_cold_tiers call), so
         // restoring the index is sufficient to re-link to it.
-        let cold_offsets: Vec<(NeuronId, u64)> = self
-            .cold_offsets
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
+        let cold_offsets: Vec<(NeuronId, u64)> =
+            self.cold_offsets.iter().map(|(k, v)| (*k, *v)).collect();
         crate::persistence::PoolSnapshot {
-            config:       self.config.clone(),
-            neurons:      self.neurons.clone(),
+            config: self.config.clone(),
+            neurons: self.neurons.clone(),
             label_to_id,
             recent_atoms: self.recent_atoms.clone(),
             sequences,
@@ -1528,21 +1722,23 @@ impl Pool {
     /// encoding contract differs, atoms still hold their labels but
     /// decode-side reassembly may produce different bytes.
     pub fn from_snapshot(
-        snap:     crate::persistence::PoolSnapshot,
+        snap: crate::persistence::PoolSnapshot,
         encoding: Box<dyn AtomEncoding>,
     ) -> Self {
         let mut label_to_id = AHashMap::new();
-        for (k, v) in snap.label_to_id { label_to_id.insert(k, v); }
+        for (k, v) in snap.label_to_id {
+            label_to_id.insert(k, v);
+        }
         let mut sequences = AHashMap::new();
-        for (k, v) in snap.sequences { sequences.insert(k, v); }
+        for (k, v) in snap.sequences {
+            sequences.insert(k, v);
+        }
         // Stage 17.3 — rebuild the Bloom side-car from the restored
         // label index.  Bloom is not part of the snapshot format (it's a
         // probabilistic structure that's cheap to rebuild and avoids a
         // breaking format change).  Rebuild before constructing Self so
         // we don't have to mutate after the move.
-        let mut bloom = CountingBloom::with_expected_capacity(
-            label_to_id.len().max(100_000),
-        );
+        let mut bloom = CountingBloom::with_expected_capacity(label_to_id.len().max(100_000));
         for k in label_to_id.keys() {
             bloom.insert(k);
         }
@@ -1560,21 +1756,20 @@ impl Pool {
         }
         // Compute exact count once before moving neurons into the
         // struct.  Subsequent mutations maintain it incrementally.
-        let total_terminals_init: usize =
-            neurons.iter().map(|n| n.terminals.len()).sum();
+        let total_terminals_init: usize = neurons.iter().map(|n| n.terminals.len()).sum();
         let mut pool = Self {
-            config:           snap.config,
+            config: snap.config,
             encoding,
             neurons,
             label_to_id,
             concept_multiset_to_id: AHashMap::new(),
             concept_sequence_to_id: AHashMap::new(),
-            recent_atoms:     snap.recent_atoms,
+            recent_atoms: snap.recent_atoms,
             sequences,
             currently_firing: AHashSet::new(),
-            activation:       AHashMap::new(),
-            recent_surprise:  1.0,
-            firing_rate_ema:  0.0,
+            activation: AHashMap::new(),
+            recent_surprise: 1.0,
+            firing_rate_ema: 0.0,
             concept_count_ema: 0.0,
             terminal_count_ema: 0.0,
             pending_promotions: Vec::new(),
@@ -1592,29 +1787,35 @@ impl Pool {
             // file handle (`cold_tier`) is set separately by the brain
             // via attach_cold_tiers after fabric registration, because
             // the data_dir isn't known at Pool construction time.
-            cold_tier:    None,
-            tiered_store: None,  // §18.12 step 4b
+            cold_tier: None,
+            tiered_store: None, // §18.12 step 4b
             cold_offsets: snap.cold_offsets.iter().copied().collect(),
-            evicted:      snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
+            evicted: snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
         // can always be rebuilt from members) so restore from older
         // snapshots remains lossless.
-        let concept_ids: Vec<NeuronId> = pool.neurons.iter()
+        let concept_ids: Vec<NeuronId> = pool
+            .neurons
+            .iter()
             .filter(|n| !n.is_atom())
             .map(|n| n.id)
             .collect();
         for cid in concept_ids {
-            let member_ids: Vec<NeuronId> = pool.neurons[cid as usize].members.iter()
+            let member_ids: Vec<NeuronId> = pool.neurons[cid as usize]
+                .members
+                .iter()
                 .filter(|m| m.pool == pool.config.id)
                 .map(|m| m.neuron)
                 .collect();
-            let leaves = pool.expand_to_atom_leaves(&member_ids);
+            let leaves = pool.expand_to_atom_leaves_bounded(&member_ids, 512);
             // ORDERED-sequence dedup (was: sorted multiset).  Each
             // unique atom-leaf order gets its own canonical concept,
             // so anagrams like sad/das remain distinct.
-            pool.concept_multiset_to_id.entry(leaves).or_insert(cid);
+            if let Some(leaves) = leaves {
+                pool.concept_multiset_to_id.entry(leaves).or_insert(cid);
+            }
 
             // Sequence index keyed by the IMMEDIATE member ids (not
             // expanded to atom leaves) — collapse_tail_to_concept
@@ -1625,25 +1826,54 @@ impl Pool {
         pool
     }
 
-    /// Recursively expand a member list into the atom-leaf NeuronIds.
-    /// Concept members are walked into their own members.  Members in
-    /// OTHER pools are skipped.
-    fn expand_to_atom_leaves(&self, member_ids: &[NeuronId]) -> Vec<NeuronId> {
-        let mut leaves = Vec::new();
-        for &id in member_ids {
-            if let Some(n) = self.neurons.get(id as usize) {
-                if n.is_atom() {
-                    leaves.push(id);
-                } else {
-                    let sub: Vec<NeuronId> = n.members.iter()
-                        .filter(|m| m.pool == self.config.id)
-                        .map(|m| m.neuron)
-                        .collect();
-                    leaves.extend(self.expand_to_atom_leaves(&sub));
+    /// Expand a hierarchical concept only while its flattened atom sequence
+    /// remains within `limit`. Mature concepts-of-concepts can represent very
+    /// long repeated ancestry; eagerly materialising every flattened sequence
+    /// during restore made a small checkpoint consume tens of gigabytes.
+    fn expand_to_atom_leaves_bounded(
+        &self,
+        member_ids: &[NeuronId],
+        limit: usize,
+    ) -> Option<Vec<NeuronId>> {
+        fn append_ids(
+            pool: &Pool,
+            ids: &[NeuronId],
+            limit: usize,
+            out: &mut Vec<NeuronId>,
+        ) -> bool {
+            for &id in ids {
+                let Some(neuron) = pool.neurons.get(id as usize) else {
+                    continue;
+                };
+                if neuron.is_atom() {
+                    if out.len() == limit {
+                        return false;
+                    }
+                    out.push(id);
+                } else if !append_refs(pool, &neuron.members, limit, out) {
+                    return false;
                 }
             }
+            true
         }
-        leaves
+        fn append_refs(
+            pool: &Pool,
+            members: &[NeuronRef],
+            limit: usize,
+            out: &mut Vec<NeuronId>,
+        ) -> bool {
+            for member in members
+                .iter()
+                .filter(|member| member.pool == pool.config.id)
+            {
+                if !append_ids(pool, std::slice::from_ref(&member.neuron), limit, out) {
+                    return false;
+                }
+            }
+            true
+        }
+        let mut leaves = Vec::new();
+        append_ids(self, member_ids, limit, &mut leaves).then_some(leaves)
     }
 
     pub fn activation(&self, id: NeuronId) -> f32 {
@@ -1684,7 +1914,8 @@ impl Pool {
         let atomize_t0 = std::time::Instant::now();
         let labels = self.encoding.atomize(frame);
         if let Some(p) = profile {
-            p.atomize_ns.fetch_add(atomize_t0.elapsed().as_nanos() as u64, Relaxed);
+            p.atomize_ns
+                .fetch_add(atomize_t0.elapsed().as_nanos() as u64, Relaxed);
         }
         let mut fired = Vec::with_capacity(labels.len());
         let decay_rate = self.config.decay_rate;
@@ -1693,9 +1924,9 @@ impl Pool {
         // Per-phase accumulators for the per-atom loop below.  Folded
         // into the Arc<ObserveProfile> once at the bottom so we don't
         // hit the atomic on every iteration.
-        let mut atom_fire_ns:         u64 = 0;
-        let mut lazy_decay_ns:        u64 = 0;
-        let mut collapse_ns:          u64 = 0;
+        let mut atom_fire_ns: u64 = 0;
+        let mut lazy_decay_ns: u64 = 0;
+        let mut collapse_ns: u64 = 0;
         let mut concept_emergence_ns: u64 = 0;
 
         // Predictive-coding prediction (P3): before clearing the
@@ -1717,7 +1948,9 @@ impl Pool {
                 }
             }
             set
-        } else { AHashSet::new() };
+        } else {
+            AHashSet::new()
+        };
 
         self.activation.clear();
         self.currently_firing.clear();
@@ -1740,11 +1973,7 @@ impl Pool {
                 // Math identity with eager mode: (1-ε)^k applied once on
                 // access == k single-tick eager applications.  Fast-path
                 // for elapsed==0.
-                pruned_terminals_this_call += n.apply_pending_decay(
-                    tick,
-                    decay_rate,
-                    prune_floor,
-                );
+                pruned_terminals_this_call += n.apply_pending_decay(tick, decay_rate, prune_floor);
             }
             lazy_decay_ns += decay_t0.elapsed().as_nanos() as u64;
 
@@ -1770,7 +1999,9 @@ impl Pool {
         // (`check_concept_emergence` and any DrivenBy on Surprise)
         // read this value.
         if !self.currently_firing.is_empty() {
-            let unpredicted: usize = self.currently_firing.iter()
+            let unpredicted: usize = self
+                .currently_firing
+                .iter()
                 .filter(|id| !prediction.contains(id))
                 .count();
             let surprise = unpredicted as f32 / self.currently_firing.len() as f32;
@@ -1797,17 +2028,20 @@ impl Pool {
 
         // Maintain the O(1) terminals counter for the lazy-decay
         // accumulations from firing neurons.
-        self.total_terminals = self.total_terminals.saturating_sub(pruned_terminals_this_call);
+        self.total_terminals = self
+            .total_terminals
+            .saturating_sub(pruned_terminals_this_call);
         let end_of_frame_ns = end_t0.elapsed().as_nanos() as u64;
 
         // Fold per-atom accumulators into the shared Arc<ObserveProfile>
         // with a single atomic add per phase (rather than per atom).
         if let Some(p) = profile {
-            p.atom_fire_ns        .fetch_add(atom_fire_ns,         Relaxed);
-            p.lazy_decay_ns       .fetch_add(lazy_decay_ns,        Relaxed);
-            p.collapse_ns         .fetch_add(collapse_ns,          Relaxed);
-            p.concept_emergence_ns.fetch_add(concept_emergence_ns, Relaxed);
-            p.end_of_frame_ns     .fetch_add(end_of_frame_ns,      Relaxed);
+            p.atom_fire_ns.fetch_add(atom_fire_ns, Relaxed);
+            p.lazy_decay_ns.fetch_add(lazy_decay_ns, Relaxed);
+            p.collapse_ns.fetch_add(collapse_ns, Relaxed);
+            p.concept_emergence_ns
+                .fetch_add(concept_emergence_ns, Relaxed);
+            p.end_of_frame_ns.fetch_add(end_of_frame_ns, Relaxed);
         }
 
         fired
@@ -1820,7 +2054,9 @@ impl Pool {
     /// loop to detect level-2+ collapses on the new tail).
     fn collapse_tail_to_concept(&mut self, tick: u64) -> bool {
         let buf_len = self.recent_atoms.len();
-        if buf_len < 2 { return false; }
+        if buf_len < 2 {
+            return false;
+        }
         let max_len = self.config.max_concept_member_count.min(buf_len);
 
         let mut found: Option<(usize, NeuronId)> = None;
@@ -1935,13 +2171,23 @@ impl Pool {
     /// pure Hebbian potentiation accumulates indefinitely.
     fn apply_heterosynaptic_ltd(&mut self, current_tick: u64) {
         let state = self.control_state();
-        let ratio = self.config.heterosynaptic_ltd_mode.evaluate(&state).clamp(0.0, 0.9);
-        if ratio <= 0.0 { return; }
+        let ratio = self
+            .config
+            .heterosynaptic_ltd_mode
+            .evaluate(&state)
+            .clamp(0.0, 0.9);
+        if ratio <= 0.0 {
+            return;
+        }
         let keep = 1.0 - ratio;
         for n in self.neurons.iter_mut() {
-            let has_recent = n.terminals.iter()
+            let has_recent = n
+                .terminals
+                .iter()
                 .any(|t| t.last_fired_tick == current_tick);
-            if !has_recent { continue; }
+            if !has_recent {
+                continue;
+            }
             for t in n.terminals.iter_mut() {
                 if t.last_fired_tick != current_tick {
                     t.weight *= keep;
@@ -1969,21 +2215,30 @@ impl Pool {
         // DrivenBy adapts each call based on the substrate's own signals.
         let state = self.control_state();
         let frac = self.config.sparsity_mode.evaluate(&state).clamp(0.01, 1.0);
-        if frac >= 1.0 { return; }
+        if frac >= 1.0 {
+            return;
+        }
         let n_firing = self.currently_firing.len();
-        if n_firing == 0 { return; }
+        if n_firing == 0 {
+            return;
+        }
         let target_k = ((frac * n_firing as f32).ceil() as usize)
             .max(self.config.sparsity_min_neurons)
             .min(n_firing);
-        if target_k >= n_firing { return; }
+        if target_k >= n_firing {
+            return;
+        }
 
         // Collect (id, activation) for all currently-firing neurons.
-        let mut ranked: Vec<(NeuronId, f32)> = self.currently_firing.iter()
+        let mut ranked: Vec<(NeuronId, f32)> = self
+            .currently_firing
+            .iter()
             .map(|&id| (id, *self.activation.get(&id).unwrap_or(&0.0)))
             .collect();
         // Sort descending by activation; ties broken by id (stable).
         ranked.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.0.cmp(&b.0))
         });
 
@@ -2014,19 +2269,23 @@ impl Pool {
     pub fn prune_weak_concepts(
         &mut self,
         min_use_count: u64,
-        stale_ticks:   u64,
-        current_tick:  u64,
+        stale_ticks: u64,
+        current_tick: u64,
     ) -> ahash::AHashSet<NeuronId> {
         // Identify pruneable concept ids first to avoid borrow conflicts.
         let mut to_prune: ahash::AHashSet<NeuronId> = ahash::AHashSet::new();
         for n in self.neurons.iter() {
-            if n.is_atom() { continue; }
+            if n.is_atom() {
+                continue;
+            }
             let age = current_tick.saturating_sub(n.last_fired_tick);
             if n.use_count < min_use_count && age > stale_ticks {
                 to_prune.insert(n.id);
             }
         }
-        if to_prune.is_empty() { return to_prune; }
+        if to_prune.is_empty() {
+            return to_prune;
+        }
 
         // Zero outgoing terminals of pruned concepts and remove their
         // entries from label_to_id (so they can't collapse again).
@@ -2052,9 +2311,8 @@ impl Pool {
         let pool_id = self.config.id;
         for n in self.neurons.iter_mut() {
             let before = n.terminals.len();
-            n.terminals.retain(|t| {
-                !(t.target.pool == pool_id && to_prune.contains(&t.target.neuron))
-            });
+            n.terminals
+                .retain(|t| !(t.target.pool == pool_id && to_prune.contains(&t.target.neuron)));
             if n.terminals.len() != before {
                 n.rebuild_terminal_idx();
                 dropped += before - n.terminals.len();
@@ -2069,7 +2327,8 @@ impl Pool {
         }
 
         // Remove sequences map entries that reference pruned ids.
-        self.sequences.retain(|k, _| !k.iter().any(|id| to_prune.contains(id)));
+        self.sequences
+            .retain(|k, _| !k.iter().any(|id| to_prune.contains(id)));
 
         // Remove recent_atoms entries that point to pruned ids.
         self.recent_atoms.retain(|id| !to_prune.contains(id));
@@ -2081,10 +2340,7 @@ impl Pool {
     /// specified (pool, neuron) ids.  Used by `Fabric::sleep` to
     /// clean up cross-pool terminals after another pool pruned
     /// some of its concepts.
-    pub fn prune_inbound_to(
-        &mut self,
-        targets: &ahash::AHashSet<NeuronRef>,
-    ) -> usize {
+    pub fn prune_inbound_to(&mut self, targets: &ahash::AHashSet<NeuronRef>) -> usize {
         let mut removed = 0;
         for n in self.neurons.iter_mut() {
             let before = n.terminals.len();
@@ -2112,10 +2368,10 @@ impl Pool {
         neuron.domain_id = self.domain_for_new;
         // Per ARCHITECTURE §17.9: append BEFORE in-memory exposure.
         let event = WalEvent::AtomCreated {
-            pool_id:   self.config.id,
+            pool_id: self.config.id,
             id,
-            label:     label.clone(),
-            kind:      neuron.kind,
+            label: label.clone(),
+            kind: neuron.kind,
             born_tick: tick,
         };
         if let Err(e) = self.store.append(&event) {
@@ -2150,12 +2406,18 @@ impl Pool {
         // DrivenBy lets the gate adapt: e.g. `DrivenBy(InvSurprise, 0.5, 0.3)`
         // tightens the gate when the substrate is predicting well.
         let state = self.control_state();
-        let gate = self.config.predict_gate_mode.evaluate(&state).clamp(0.0, 0.95);
+        let gate = self
+            .config
+            .predict_gate_mode
+            .evaluate(&state)
+            .clamp(0.0, 0.95);
         if gate > 0.0 && self.recent_surprise < gate {
             return;
         }
         let buf_len = self.recent_atoms.len();
-        if buf_len < 2 { return; }
+        if buf_len < 2 {
+            return;
+        }
 
         let max_len = self.config.max_concept_member_count.min(buf_len);
         let threshold = self.config.concept_emergence_threshold;
@@ -2163,11 +2425,7 @@ impl Pool {
 
         for len in 2..=max_len {
             let start = buf_len - len;
-            let run: SequenceFingerprint = self.recent_atoms
-                .iter()
-                .skip(start)
-                .copied()
-                .collect();
+            let run: SequenceFingerprint = self.recent_atoms.iter().skip(start).copied().collect();
             let count = self.sequences.entry(run.clone()).or_insert(0);
             *count = count.saturating_add(1);
             if *count == threshold {
@@ -2229,7 +2487,8 @@ impl Pool {
         // Composite label = concatenation of member labels, separated by a
         // glyph that can't appear in base64-url-safe payloads.  Stable and
         // human-readable for debugging.
-        let composite_label: String = members.iter()
+        let composite_label: String = members
+            .iter()
             .map(|id| self.neurons[*id as usize].label.as_str())
             .collect::<Vec<_>>()
             .join("~");
@@ -2255,8 +2514,17 @@ impl Pool {
         // + heterosynaptic LTD + Hebbian freq weighting in decode
         // now dominate that risk: the canonical fragment gets the
         // highest use_count and outscores noise variants.
-        let leaves_seq: Vec<NeuronId> = self.expand_to_atom_leaves(&members);
-        if self.concept_multiset_to_id.contains_key(&leaves_seq) {
+        // Exact immediate structure is a bounded deterministic duplicate
+        // guard even when the flattened atom ancestry is intentionally too
+        // large to materialise.
+        if self.concept_sequence_to_id.contains_key(&members) {
+            return;
+        }
+        let leaves_seq = self.expand_to_atom_leaves_bounded(&members, 512);
+        if leaves_seq
+            .as_ref()
+            .is_some_and(|leaves| self.concept_multiset_to_id.contains_key(leaves))
+        {
             return; // canonical concept already exists for this ordered sequence
         }
 
@@ -2284,24 +2552,29 @@ impl Pool {
         // emergence flexible enough for real vocabulary while
         // preventing runaways from winning selection.
         let id = self.neurons.len() as NeuronId;
-        let member_refs: Vec<NeuronRef> = members.iter()
+        let member_refs: Vec<NeuronRef> = members
+            .iter()
             .map(|m| NeuronRef::new(self.config.id, *m))
             .collect();
         // Per ARCHITECTURE §17.9: append the ConceptEmerged event before
         // the in-memory neuron is exposed.
         let event = WalEvent::ConceptEmerged {
-            pool_id:   self.config.id,
+            pool_id: self.config.id,
             id,
-            label:     composite_label.clone(),
-            kind:      NeuronKind::Excitatory,
-            members:   member_refs.clone(),
+            label: composite_label.clone(),
+            kind: NeuronKind::Excitatory,
+            members: member_refs.clone(),
             born_tick: tick,
         };
         if let Err(e) = self.store.append(&event) {
             tracing::warn!("WAL append failed for promote_to_concept(id={}): {}", id, e);
         }
         let mut concept = Neuron::new_concept(
-            id, composite_label.clone(), NeuronKind::Excitatory, member_refs, tick,
+            id,
+            composite_label.clone(),
+            NeuronKind::Excitatory,
+            member_refs,
+            tick,
         );
         // Island architecture: stamp the new concept with the pool's
         // current `domain_for_new` so it joins the active island.
@@ -2314,14 +2587,19 @@ impl Pool {
         } else {
             // Inherit the dominant domain of members.  Look up each
             // member's domain_id; if any non-zero majority, use it.
-            let dom_votes: std::collections::HashMap<u32, u32> = members.iter()
+            let dom_votes: std::collections::HashMap<u32, u32> = members
+                .iter()
                 .filter_map(|&m| self.neurons.get(m as usize).map(|n| n.domain_id))
                 .filter(|&d| d != 0)
                 .fold(std::collections::HashMap::new(), |mut acc, d| {
                     *acc.entry(d).or_insert(0) += 1;
                     acc
                 });
-            dom_votes.into_iter().max_by_key(|&(_, c)| c).map(|(d, _)| d).unwrap_or(0)
+            dom_votes
+                .into_iter()
+                .max_by_key(|&(_, c)| c)
+                .map(|(d, _)| d)
+                .unwrap_or(0)
         };
         // Wire member→concept terminals (atom→concept bottom-up) and
         // concept→member (concept→atom top-down).  Both Hebbian-strengthen
@@ -2336,7 +2614,9 @@ impl Pool {
             }
             if concept.reinforce_terminal(
                 NeuronRef::new(self.config.id, mid),
-                0.5, tick, self.config.max_weight,
+                0.5,
+                tick,
+                self.config.max_weight,
             ) {
                 added_terminals += 1;
             }
@@ -2345,7 +2625,9 @@ impl Pool {
         self.neurons.push(concept);
         self.bloom.insert(&composite_label);
         self.label_to_id.insert(composite_label, id);
-        self.concept_multiset_to_id.insert(leaves_seq, id);
+        if let Some(leaves_seq) = leaves_seq {
+            self.concept_multiset_to_id.insert(leaves_seq, id);
+        }
         // Sequence index: keyed by the IMMEDIATE member ids in firing
         // order — matches what collapse_tail_to_concept builds from
         // recent_atoms.  Same lockstep with label_to_id.

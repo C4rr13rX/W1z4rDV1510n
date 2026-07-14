@@ -18,14 +18,13 @@ use crate::eem::{Eem, EemConfig};
 use crate::fabric::{Fabric, FabricConfig};
 use crate::grounding::{AnswerWithGrounding, ConfidenceTier, GroundingReport};
 use crate::identity::{
-    BrainDeploymentSpec, BrainIdentitySpec, FeedbackLoopSpec, IdentityBuildError,
-    PoolKind, PoolPrototypeRegistry,
+    BrainDeploymentSpec, BrainIdentitySpec, FeedbackLoopSpec, IdentityBuildError, PoolKind,
+    PoolPrototypeRegistry,
 };
 use crate::network::{
-    BrainId, GossipEquation, GossipMotif, NetworkState, PeerAccuracy,
-    PeerContribution,
+    BrainId, GossipEquation, GossipMotif, NetworkState, PeerAccuracy, PeerContribution,
 };
-use crate::neuron::{NeuronId, NeuronKind, NeuronRef, PoolId, Neuron};
+use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
 use crate::pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
 
 /// Which tier of substrate a [`BindingMatch`] succeeded at.  Stage 11
@@ -55,23 +54,23 @@ pub enum MatchTier {
 #[derive(Debug, Clone, Copy)]
 pub struct BindingMatch {
     pub precision: f32,
-    pub recall:    f32,
-    pub tier:      MatchTier,
+    pub recall: f32,
+    pub tier: MatchTier,
 }
 
 /// Stage 13A — one neuron in a single pool's decoded extrusion.
 #[derive(Debug, Clone)]
 pub struct DecodedConcept {
-    pub neuron:     NeuronRef,
+    pub neuron: NeuronRef,
     pub activation: f32,
-    pub label:      String,
-    pub bytes:      Vec<u8>,
+    pub label: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Stage 13A — one pool's top-K decoded concepts from a settled state.
 #[derive(Debug, Clone)]
 pub struct PoolExtrusion {
-    pub pool:    PoolId,
+    pub pool: PoolId,
     pub decoded: Vec<DecodedConcept>,
 }
 
@@ -84,8 +83,8 @@ pub struct PoolExtrusion {
 #[derive(Debug, Clone)]
 pub struct ResonantExtrusion {
     pub iterations_run: usize,
-    pub converged:      bool,
-    pub pools:          Vec<PoolExtrusion>,
+    pub converged: bool,
+    pub pools: Vec<PoolExtrusion>,
 }
 
 /// Stage 17.4 full — knobs for `Brain::run_eviction_pass`.  Per
@@ -97,22 +96,22 @@ pub struct EvictionParams {
     /// Evict only concepts whose `salience_ema` is **below** this
     /// threshold.  Default `0.1` — well below the typical EMA of a
     /// concept that's been touched by any successful decode.
-    pub max_salience_ema:    f32,
+    pub max_salience_ema: f32,
     /// Evict only concepts whose `last_fired_tick` is at least this
     /// many ticks in the past.  Default `1000`.
-    pub min_stale_ticks:     u64,
+    pub min_stale_ticks: u64,
     /// Cap evictions per pool per pass.  Default `1024` — bounded so a
     /// single pass doesn't lock the brain for an arbitrary amount of
     /// time.  Caller invokes the pass repeatedly to drain large brains.
-    pub target_per_pool:     usize,
+    pub target_per_pool: usize,
 }
 
 impl Default for EvictionParams {
     fn default() -> Self {
         Self {
             max_salience_ema: 0.1,
-            min_stale_ticks:  1000,
-            target_per_pool:  1024,
+            min_stale_ticks: 1000,
+            target_per_pool: 1024,
         }
     }
 }
@@ -120,19 +119,23 @@ impl Default for EvictionParams {
 /// Stage 17.4 full — outcome of one `run_eviction_pass`.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct EvictionStats {
-    pub pools_visited:    usize,
-    pub neurons_evicted:  usize,
-    pub errors:           usize,
-    pub wall_time_ms:     u64,
+    pub pools_visited: usize,
+    pub neurons_evicted: usize,
+    pub errors: usize,
+    pub wall_time_ms: u64,
 }
 
 impl BindingMatch {
     pub const NONE: Self = Self {
-        precision: 0.0, recall: 0.0, tier: MatchTier::None,
+        precision: 0.0,
+        recall: 0.0,
+        tier: MatchTier::None,
     };
     /// Composite score used to pick the strongest match across tiers.
     #[inline]
-    pub fn score(&self) -> f32 { self.precision * self.recall }
+    pub fn score(&self) -> f32 {
+        self.precision * self.recall
+    }
 }
 
 /// Sorted (pool, neuron) signature of a single tick's multi-pool
@@ -160,22 +163,29 @@ struct MomentFingerprint {
 
 impl MomentFingerprint {
     fn from_fabric_moment(fired: &AHashMap<PoolId, Vec<NeuronId>>) -> Option<Self> {
-        let mut pairs: Vec<(PoolId, NeuronId)> = fired.iter()
+        let mut pairs: Vec<(PoolId, NeuronId)> = fired
+            .iter()
             .flat_map(|(&pid, ns)| ns.iter().map(move |&nid| (pid, nid)))
             .collect();
-        if pairs.is_empty() { return None; }
+        if pairs.is_empty() {
+            return None;
+        }
         let pools_represented: std::collections::HashSet<PoolId> =
             pairs.iter().map(|(p, _)| *p).collect();
         // Binding candidates require ≥2 pools — single-pool firing is
         // a within-pool concept-emergence concern, not a binding one.
-        if pools_represented.len() < 2 { return None; }
+        if pools_represented.len() < 2 {
+            return None;
+        }
         // Capture firing order per pool BEFORE we sort `pairs`.
-        let mut ordered_per_pool: Vec<(PoolId, Vec<NeuronId>)> = fired.iter()
-            .map(|(&pid, ns)| (pid, ns.clone()))
-            .collect();
+        let mut ordered_per_pool: Vec<(PoolId, Vec<NeuronId>)> =
+            fired.iter().map(|(&pid, ns)| (pid, ns.clone())).collect();
         ordered_per_pool.sort_by_key(|(p, _)| *p);
         pairs.sort();
-        Some(Self { pairs, ordered_per_pool })
+        Some(Self {
+            pairs,
+            ordered_per_pool,
+        })
     }
 }
 
@@ -260,13 +270,27 @@ pub struct BrainConfig {
     pub annealer: AnnealerConfig,
 }
 
-fn default_tentative_emergence_threshold() -> u32 { 1 }
-fn default_min_atom_score() -> f32 { 0.50 }
-fn default_pressure_band_low() -> f32 { 0.001 }
-fn default_pressure_band_high() -> f32 { 0.05 }
-fn default_pressure_threshold_max() -> u32 { 10 }
-fn default_pressure_observation_grace() -> u64 { 256 }
-fn default_pressure_adjust_enabled() -> bool { true }
+fn default_tentative_emergence_threshold() -> u32 {
+    1
+}
+fn default_min_atom_score() -> f32 {
+    0.50
+}
+fn default_pressure_band_low() -> f32 {
+    0.001
+}
+fn default_pressure_band_high() -> f32 {
+    0.05
+}
+fn default_pressure_threshold_max() -> u32 {
+    10
+}
+fn default_pressure_observation_grace() -> u64 {
+    256
+}
+fn default_pressure_adjust_enabled() -> bool {
+    true
+}
 
 impl Default for BrainConfig {
     fn default() -> Self {
@@ -296,30 +320,30 @@ impl Default for BrainConfig {
 /// Stats surfaced via [`Brain::stats`].
 #[derive(Debug, Clone, Default)]
 pub struct BrainStats {
-    pub tick:                u64,
-    pub pool_count:          usize,
-    pub total_neurons:       usize,
-    pub total_concepts:      usize,
-    pub total_binding:       usize,
-    pub total_terminals:     usize,
-    pub binding_pool_id:     PoolId,
+    pub tick: u64,
+    pub pool_count: usize,
+    pub total_neurons: usize,
+    pub total_concepts: usize,
+    pub total_binding: usize,
+    pub total_terminals: usize,
+    pub binding_pool_id: PoolId,
     pub fingerprints_window: usize,
     /// Bindings that crossed `tentative_emergence_threshold` but not
     /// (yet) `binding_emergence_threshold`.  Visible to /chat retrieval;
     /// invisible to EEM chain exploration.
-    pub tentative_bindings:  usize,
+    pub tentative_bindings: usize,
     /// Bindings that crossed `binding_emergence_threshold` and carry
     /// an EEM grounded fact.
     pub consolidated_bindings: usize,
     /// Current effective consolidated threshold (may differ from
     /// config if pressure-feedback adjusted it).
-    pub current_threshold:   u32,
+    pub current_threshold: u32,
     /// Total observations (advance_tick calls with non-empty fingerprint)
     /// since brain construction or last snapshot restore.
-    pub total_observations:  u64,
+    pub total_observations: u64,
     /// `(tentative+consolidated)/total_observations` — drives the
     /// pressure feedback loop.
-    pub binding_pressure:    f32,
+    pub binding_pressure: f32,
 }
 
 /// One captured prompt→response moment, used by the self-test loop to
@@ -329,10 +353,10 @@ pub struct BrainStats {
 /// normal "ask in one pool, answer in another" interaction pattern.
 #[derive(Debug, Clone)]
 pub struct QaPair {
-    pub prompt_pool:   PoolId,
-    pub prompt:        Vec<u8>,
+    pub prompt_pool: PoolId,
+    pub prompt: Vec<u8>,
     pub response_pool: PoolId,
-    pub response:      Vec<u8>,
+    pub response: Vec<u8>,
     pub observed_tick: u64,
 }
 
@@ -343,26 +367,41 @@ pub struct QaPair {
 /// memory stays finite across long training runs.
 #[derive(Debug)]
 pub struct QaDatabase {
-    pairs:    VecDeque<QaPair>,
+    pairs: VecDeque<QaPair>,
     capacity: usize,
 }
 
 impl QaDatabase {
     pub fn new(capacity: usize) -> Self {
-        Self { pairs: VecDeque::with_capacity(capacity), capacity }
+        Self {
+            pairs: VecDeque::with_capacity(capacity),
+            capacity,
+        }
     }
     pub fn push(&mut self, p: QaPair) {
-        if self.pairs.len() >= self.capacity { self.pairs.pop_front(); }
+        if self.pairs.len() >= self.capacity {
+            self.pairs.pop_front();
+        }
         self.pairs.push_back(p);
     }
-    pub fn len(&self) -> usize { self.pairs.len() }
-    pub fn is_empty(&self) -> bool { self.pairs.is_empty() }
-    pub fn iter(&self) -> impl Iterator<Item = &QaPair> { self.pairs.iter() }
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &QaPair> {
+        self.pairs.iter()
+    }
     /// Stride-sample up to `n` pairs spanning the buffer for deterministic
     /// coverage across recent + historic captures.
     pub fn sample(&self, n: usize) -> Vec<&QaPair> {
-        if n == 0 || self.pairs.is_empty() { return Vec::new(); }
-        if n >= self.pairs.len() { return self.pairs.iter().collect(); }
+        if n == 0 || self.pairs.is_empty() {
+            return Vec::new();
+        }
+        if n >= self.pairs.len() {
+            return self.pairs.iter().collect();
+        }
         let stride = (self.pairs.len() / n).max(1);
         self.pairs.iter().step_by(stride).take(n).collect()
     }
@@ -376,19 +415,19 @@ impl QaDatabase {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TuningState {
     /// Most recent `self_test` mean_byte_match used as the gradient.
-    pub last_recall:     f32,
+    pub last_recall: f32,
     /// Decay rate at the time `last_recall` was sampled.
     pub last_decay_rate: f32,
     /// Sign of the next nudge: +1.0 grows decay, -1.0 shrinks it.
     /// Flips whenever a step yields lower recall than the previous.
-    pub direction:       f32,
+    pub direction: f32,
     /// Best recall observed since the controller started, and the
     /// decay rate that produced it.  Surfaces in `/tuning_state` so
     /// the operator can see the substrate's discovered optimum.
-    pub best_recall:     f32,
+    pub best_recall: f32,
     pub best_decay_rate: f32,
     /// How many retune steps have run.
-    pub steps:           u32,
+    pub steps: u32,
     /// Condition-keyed memory: under what (concept_count_bucket,
     /// locked_count_bucket) condition was the best decay rate
     /// discovered.  The next retune at a similar condition uses this
@@ -396,14 +435,16 @@ pub struct TuningState {
     /// scratch.  Bucketed (log2 of counts) so similar-scale brains
     /// share entries.
     #[serde(serialize_with = "serialize_condition_best")]
-    pub condition_best:  std::collections::HashMap<(u8, u8), (f32, f32)>,
+    pub condition_best: std::collections::HashMap<(u8, u8), (f32, f32)>,
 }
 
 fn serialize_condition_best<S>(
     map: &std::collections::HashMap<(u8, u8), (f32, f32)>,
     s: S,
 ) -> Result<S::Ok, S::Error>
-where S: serde::Serializer {
+where
+    S: serde::Serializer,
+{
     use serde::ser::SerializeSeq;
     let mut seq = s.serialize_seq(Some(map.len()))?;
     for (&(cbucket, lbucket), &(decay, recall)) in map {
@@ -420,13 +461,13 @@ where S: serde::Serializer {
 impl Default for TuningState {
     fn default() -> Self {
         Self {
-            last_recall:     0.0,
+            last_recall: 0.0,
             last_decay_rate: 2e-5,
-            direction:       -1.0,  // shrink first — defaults are usually too aggressive
-            best_recall:     0.0,
+            direction: -1.0, // shrink first — defaults are usually too aggressive
+            best_recall: 0.0,
             best_decay_rate: 2e-5,
-            steps:           0,
-            condition_best:  std::collections::HashMap::new(),
+            steps: 0,
+            condition_best: std::collections::HashMap::new(),
         }
     }
 }
@@ -434,118 +475,118 @@ impl Default for TuningState {
 /// What a single retune step did.  Reported back via `/retune`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TuningReport {
-    pub recall_before:    f32,
-    pub recall_after:     f32,
-    pub decay_before:     f32,
-    pub decay_after:      f32,
-    pub direction_after:  f32,
-    pub best_recall:      f32,
-    pub best_decay_rate:  f32,
-    pub concept_bucket:   u8,
-    pub locked_bucket:    u8,
+    pub recall_before: f32,
+    pub recall_after: f32,
+    pub decay_before: f32,
+    pub decay_after: f32,
+    pub direction_after: f32,
+    pub best_recall: f32,
+    pub best_decay_rate: f32,
+    pub concept_bucket: u8,
+    pub locked_bucket: u8,
 }
 
 /// Per-pair recall outcome from a self-test pass.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SelfTestRecall {
-    pub prompt:           String,
-    pub expected:         String,
-    pub decoded:          String,
+    pub prompt: String,
+    pub expected: String,
+    pub decoded: String,
     pub byte_match_ratio: f32,
-    pub exact:            bool,
+    pub exact: bool,
 }
 
 /// Aggregate self-test report — what the brain produces when it grades
 /// its own recall against its captured QA buffer.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SelfTestReport {
-    pub sampled:        usize,
-    pub exact_recall:   usize,
+    pub sampled: usize,
+    pub exact_recall: usize,
     pub mean_byte_match: f32,
-    pub per_pair:       Vec<SelfTestRecall>,
+    pub per_pair: Vec<SelfTestRecall>,
 }
 
 pub struct Brain {
-    fabric:                       Fabric,
-    config:                       BrainConfig,
-    binding_pool_id:              PoolId,
+    fabric: Fabric,
+    config: BrainConfig,
+    binding_pool_id: PoolId,
     /// Fingerprint history.  Bounded by `moment_history_window`.
-    moment_history:               VecDeque<MomentFingerprint>,
+    moment_history: VecDeque<MomentFingerprint>,
     /// Active-count of each fingerprint within the window.  Decays
     /// when an old fingerprint scrolls out of `moment_history`.
-    binding_recurrences:          AHashMap<MomentFingerprint, u32>,
+    binding_recurrences: AHashMap<MomentFingerprint, u32>,
     /// Lifetime co-firing count per fingerprint — *never* decays.
     /// Sparsely-trained patterns (round-robin training where the
     /// same pair recurs far outside `moment_history_window`) never
     /// accumulate in `binding_recurrences`, so this is the fallback
     /// signal for promotion under sparse schedules.
-    lifetime_recurrences:         AHashMap<MomentFingerprint, u32>,
+    lifetime_recurrences: AHashMap<MomentFingerprint, u32>,
     /// "Tentative" tier promotion — bindings that have a neuron in
     /// the binding pool but no EEM fact yet.  Visible to /chat
     /// retrieval (Stage 7 binding-pool routing reads ALL binding-pool
     /// concepts regardless of tier).  Invisible to EEM chain
     /// exploration.  Upgraded to `promoted_fingerprints` when the
     /// count crosses `binding_emergence_threshold`.
-    tentative_promoted:           AHashMap<MomentFingerprint, NeuronId>,
+    tentative_promoted: AHashMap<MomentFingerprint, NeuronId>,
     /// "Consolidated" tier promotion — these have an EEM grounded
     /// fact and have been gossiped to peers.
-    promoted_fingerprints:        AHashMap<MomentFingerprint, NeuronId>,
+    promoted_fingerprints: AHashMap<MomentFingerprint, NeuronId>,
     /// Count of advance_tick calls that produced a non-empty
     /// fingerprint.  Drives the pressure-feedback loop along with
     /// `len(tentative_promoted) + len(promoted_fingerprints)`.
-    total_observations:           u64,
+    total_observations: u64,
     /// Current pressure-adjusted *consolidated* threshold.  Tracks
     /// `config.binding_emergence_threshold` at construction, then
     /// drifts under the pressure feedback loop within
     /// `[1, config.pressure_threshold_max]`.
-    current_threshold:            u32,
+    current_threshold: u32,
     /// Tick of the last pressure-adjust attempt; we only adjust once
     /// per `config.pressure_observation_grace` observations to avoid
     /// reacting to single-observation noise.
-    last_pressure_check_obs:      u64,
+    last_pressure_check_obs: u64,
     /// Phase 7: action layer state.  `None` until the caller
     /// designates an action pool via `designate_action_pool`.
-    action_pool_id:               Option<PoolId>,
+    action_pool_id: Option<PoolId>,
     /// Already-emitted action events waiting on outcome feedback.
     /// `feed_outcome` looks up the action_id and reinforces (or
     /// weakens) the source→action_neuron terminals per the outcome
     /// score.  Bounded by `action_history_max` to keep memory finite.
-    pending_actions:              AHashMap<ActionId, ActionEvent>,
-    next_action_id:               ActionId,
+    pending_actions: AHashMap<ActionId, ActionEvent>,
+    next_action_id: ActionId,
     /// Tracks which action ids have already been emitted this tick to
     /// prevent firing the same action neuron more than once per tick.
-    emitted_this_tick:            ahash::AHashSet<NeuronRef>,
+    emitted_this_tick: ahash::AHashSet<NeuronRef>,
     /// Phase 5: Environmental Equation Matrix.  Owned by the brain so
     /// integration can consult equations and report their confidence
     /// alongside the fabric's.  Caller seeds equations directly via
     /// `eem_mut().register_equation(...)`.
-    eem:                          Eem,
+    eem: Eem,
     /// Phase 6: Temporal-prediction annealer.  Captures one frame per
     /// pool per tick; consulted by `integrate_with_prediction`.
-    annealer:                     Annealer,
+    annealer: Annealer,
     /// Phase 8: distributed-network state.  Pending outbound motif/
     /// equation gossip, received peer motifs, peer accuracy track
     /// record.  Transport (cluster) lives outside this crate; this
     /// state is the brain-side data model.
-    network:                      NetworkState,
+    network: NetworkState,
     /// Auto-captured prompt→response pairs for self-supervised recall
     /// scoring.  Phase A of the dynamical-feedback architecture: the
     /// brain grades itself against pairs it has actually observed
     /// during training, with no external answer key.
-    qa_db:                        QaDatabase,
+    qa_db: QaDatabase,
     /// Most recent frame observed in each pool plus the tick it landed
     /// on.  Used to recognise the cross-pool prompt→response pattern
     /// during `observe` so the QA buffer auto-populates.
-    recent_frames:                AHashMap<PoolId, (Vec<u8>, u64)>,
+    recent_frames: AHashMap<PoolId, (Vec<u8>, u64)>,
     /// Self-tuning hill-climber state.  The brain feeds `self_test`
     /// recall back into pool decay_rate via this controller — Phase D.
-    tuning:                       TuningState,
+    tuning: TuningState,
     /// Deployment-defined online feedback wiring. This state is rebuilt from
     /// the deployment spec after restore; delayed events are intentionally
     /// ephemeral because their source activations are tick-local.
-    feedback_loops:               Vec<RuntimeFeedbackLoop>,
-    delayed_feedback:             Vec<ScheduledFeedback>,
-    feedback_events_emitted:      u64,
+    feedback_loops: Vec<RuntimeFeedbackLoop>,
+    delayed_feedback: Vec<ScheduledFeedback>,
+    feedback_events_emitted: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -575,15 +616,23 @@ fn cofiring_cosine(
     a: &ahash::AHashMap<NeuronRef, f32>,
     b: &ahash::AHashMap<NeuronRef, f32>,
 ) -> f32 {
-    if a.is_empty() || b.is_empty() { return 0.0; }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
     let mut dot = 0.0f32;
     let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     for (k, &va) in small {
-        if let Some(&vb) = large.get(k) { dot += va * vb; }
+        if let Some(&vb) = large.get(k) {
+            dot += va * vb;
+        }
     }
     let na: f32 = a.values().map(|v| v * v).sum::<f32>().sqrt();
     let nb: f32 = b.values().map(|v| v * v).sum::<f32>().sqrt();
-    if na <= 0.0 || nb <= 0.0 { 0.0 } else { dot / (na * nb) }
+    if na <= 0.0 || nb <= 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 /// Position-weighted byte match between two byte sequences.  1.0 means
@@ -591,12 +640,18 @@ fn cofiring_cosine(
 /// Used by `Brain::self_test` to score decoded responses against
 /// captured ground-truth.
 fn byte_match_ratio_local(decoded: &[u8], expected: &[u8]) -> f32 {
-    if decoded.is_empty() && expected.is_empty() { return 1.0; }
+    if decoded.is_empty() && expected.is_empty() {
+        return 1.0;
+    }
     let len = decoded.len().max(expected.len());
-    if len == 0 { return 0.0; }
+    if len == 0 {
+        return 0.0;
+    }
     let mut hits = 0usize;
     for i in 0..decoded.len().min(expected.len()) {
-        if decoded[i] == expected[i] { hits += 1; }
+        if decoded[i] == expected[i] {
+            hits += 1;
+        }
     }
     hits as f32 / len as f32
 }
@@ -621,26 +676,26 @@ impl Brain {
             fabric,
             config,
             binding_pool_id,
-            moment_history:          VecDeque::with_capacity(window),
-            binding_recurrences:     AHashMap::new(),
-            lifetime_recurrences:    AHashMap::new(),
-            tentative_promoted:      AHashMap::new(),
-            promoted_fingerprints:   AHashMap::new(),
-            total_observations:      0,
-            current_threshold:       initial_threshold,
+            moment_history: VecDeque::with_capacity(window),
+            binding_recurrences: AHashMap::new(),
+            lifetime_recurrences: AHashMap::new(),
+            tentative_promoted: AHashMap::new(),
+            promoted_fingerprints: AHashMap::new(),
+            total_observations: 0,
+            current_threshold: initial_threshold,
             last_pressure_check_obs: 0,
-            action_pool_id:        None,
-            pending_actions:       AHashMap::new(),
-            next_action_id:        1,
-            emitted_this_tick:     ahash::AHashSet::new(),
+            action_pool_id: None,
+            pending_actions: AHashMap::new(),
+            next_action_id: 1,
+            emitted_this_tick: ahash::AHashSet::new(),
             eem,
             annealer,
-            network:               NetworkState::new(""),
-            qa_db:                 QaDatabase::new(4096),
-            recent_frames:         AHashMap::new(),
-            tuning:                TuningState::default(),
-            feedback_loops:        Vec::new(),
-            delayed_feedback:      Vec::new(),
+            network: NetworkState::new(""),
+            qa_db: QaDatabase::new(4096),
+            recent_frames: AHashMap::new(),
+            tuning: TuningState::default(),
+            feedback_loops: Vec::new(),
+            delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
         }
     }
@@ -652,26 +707,41 @@ impl Brain {
         deployment: &BrainDeploymentSpec,
     ) -> Result<(), crate::identity::DeploymentValidationError> {
         deployment.validate(identity)?;
-        let ids: std::collections::HashMap<&str, PoolId> = identity.pools.iter()
-            .map(|pool| (pool.name.as_str(), pool.id)).collect();
-        self.feedback_loops = deployment.feedback_loops.iter().map(|spec| RuntimeFeedbackLoop {
-            source_pool: ids[spec.source_pool.as_str()],
-            target_pool: ids[spec.target_pool.as_str()],
-            spec: spec.clone(),
-            phase: 0.0,
-        }).collect();
+        let ids: std::collections::HashMap<&str, PoolId> = identity
+            .pools
+            .iter()
+            .map(|pool| (pool.name.as_str(), pool.id))
+            .collect();
+        self.feedback_loops = deployment
+            .feedback_loops
+            .iter()
+            .map(|spec| RuntimeFeedbackLoop {
+                source_pool: ids[spec.source_pool.as_str()],
+                target_pool: ids[spec.target_pool.as_str()],
+                spec: spec.clone(),
+                phase: 0.0,
+            })
+            .collect();
         self.delayed_feedback.clear();
         Ok(())
     }
 
-    pub fn feedback_loop_count(&self) -> usize { self.feedback_loops.len() }
-    pub fn feedback_events_emitted(&self) -> u64 { self.feedback_events_emitted }
+    pub fn feedback_loop_count(&self) -> usize {
+        self.feedback_loops.len()
+    }
+    pub fn feedback_events_emitted(&self) -> u64 {
+        self.feedback_events_emitted
+    }
 
     /// Read-only access to the auto-captured QA buffer.
-    pub fn qa_db(&self) -> &QaDatabase { &self.qa_db }
+    pub fn qa_db(&self) -> &QaDatabase {
+        &self.qa_db
+    }
 
     /// Read-only access to the self-tuning controller state.
-    pub fn tuning_state(&self) -> &TuningState { &self.tuning }
+    pub fn tuning_state(&self) -> &TuningState {
+        &self.tuning
+    }
 
     /// One self-tuning step: run a self_test, hill-climb on decay_rate
     /// using the recall delta as the gradient signal.  Stores the
@@ -696,7 +766,10 @@ impl Brain {
         // Bucket the current condition for the condition→value memory.
         // log2 floors give a coarse grid that handles brains spanning
         // many orders of magnitude in size.
-        let total_concepts: usize = self.fabric.pool_ids().into_iter()
+        let total_concepts: usize = self
+            .fabric
+            .pool_ids()
+            .into_iter()
             .filter_map(|pid| self.fabric.pool(pid))
             .map(|p| {
                 let r = p.read();
@@ -709,7 +782,10 @@ impl Brain {
         let cond = (cbucket, lbucket);
 
         // Remember the best decay we've seen at this condition.
-        let cond_entry = self.tuning.condition_best.entry(cond)
+        let cond_entry = self
+            .tuning
+            .condition_best
+            .entry(cond)
             .or_insert((decay_before, recall_now));
         if recall_now > cond_entry.1 {
             *cond_entry = (decay_before, recall_now);
@@ -718,7 +794,9 @@ impl Brain {
         // Hill-climb step: if recall improved, keep direction; if it
         // worsened, reverse.
         if self.tuning.steps > 0 {
-            if recall_now < recall_before { self.tuning.direction *= -1.0; }
+            if recall_now < recall_before {
+                self.tuning.direction *= -1.0;
+            }
         }
 
         // Step magnitude scales with the recall signal — strong
@@ -755,14 +833,14 @@ impl Brain {
 
         TuningReport {
             recall_before,
-            recall_after:    recall_now,
+            recall_after: recall_now,
             decay_before,
             decay_after,
             direction_after: self.tuning.direction,
-            best_recall:     self.tuning.best_recall,
+            best_recall: self.tuning.best_recall,
             best_decay_rate: self.tuning.best_decay_rate,
-            concept_bucket:  cond.0,
-            locked_bucket:   cond.1,
+            concept_bucket: cond.0,
+            locked_bucket: cond.1,
         }
     }
 
@@ -770,11 +848,15 @@ impl Brain {
     /// are decay-exempt by the consolidation lock and form the brain's
     /// permanent recall floor.
     pub fn locked_terminal_count(&self) -> usize {
-        self.fabric.pool_ids().into_iter()
+        self.fabric
+            .pool_ids()
+            .into_iter()
             .filter_map(|pid| self.fabric.pool(pid))
             .map(|pool| {
                 let p = pool.read();
-                p.iter_neurons().map(|n| n.locked_terminal_count()).sum::<usize>()
+                p.iter_neurons()
+                    .map(|n| n.locked_terminal_count())
+                    .sum::<usize>()
             })
             .sum()
     }
@@ -791,8 +873,8 @@ impl Brain {
         &mut self,
         query_pool: PoolId,
         target_pool: PoolId,
-        seed:       &[u8],
-        max_hops:   usize,
+        seed: &[u8],
+        max_hops: usize,
     ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         let mut trail: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::with_capacity(max_hops);
         let mut current: Vec<u8> = seed.to_vec();
@@ -816,7 +898,7 @@ impl Brain {
                 Some(bytes) if !bytes.is_empty() && bytes != current => {
                     current = bytes;
                 }
-                _ => break,  // null answer or fixpoint → stop chain
+                _ => break, // null answer or fixpoint → stop chain
             }
         }
         trail
@@ -835,15 +917,21 @@ impl Brain {
     /// `mean_byte_match` is the trigger Phase B will hook into to
     /// retune decay / emergence params.
     pub fn self_test(&mut self, sample_count: usize) -> SelfTestReport {
-        let pairs: Vec<QaPair> = self.qa_db.sample(sample_count)
-            .into_iter().cloned().collect();
+        let pairs: Vec<QaPair> = self
+            .qa_db
+            .sample(sample_count)
+            .into_iter()
+            .cloned()
+            .collect();
         let mut report = SelfTestReport {
-            sampled:         0,
-            exact_recall:    0,
+            sampled: 0,
+            exact_recall: 0,
             mean_byte_match: 0.0,
-            per_pair:        Vec::with_capacity(pairs.len()),
+            per_pair: Vec::with_capacity(pairs.len()),
         };
-        if pairs.is_empty() { return report; }
+        if pairs.is_empty() {
+            return report;
+        }
         let mut byte_sum = 0.0f32;
         for qp in &pairs {
             self.fabric.observe(qp.prompt_pool, &qp.prompt);
@@ -852,11 +940,13 @@ impl Brain {
             let bm = byte_match_ratio_local(&decoded, &qp.response);
             let exact = decoded == qp.response;
             byte_sum += bm;
-            if exact { report.exact_recall += 1; }
+            if exact {
+                report.exact_recall += 1;
+            }
             report.per_pair.push(SelfTestRecall {
-                prompt:           String::from_utf8_lossy(&qp.prompt).to_string(),
-                expected:         String::from_utf8_lossy(&qp.response).to_string(),
-                decoded:          String::from_utf8_lossy(&decoded).to_string(),
+                prompt: String::from_utf8_lossy(&qp.prompt).to_string(),
+                expected: String::from_utf8_lossy(&qp.response).to_string(),
+                decoded: String::from_utf8_lossy(&decoded).to_string(),
                 byte_match_ratio: bm,
                 exact,
             });
@@ -866,26 +956,38 @@ impl Brain {
         report
     }
 
-    pub fn eem(&self) -> &Eem { &self.eem }
-    pub fn eem_mut(&mut self) -> &mut Eem { &mut self.eem }
-    pub fn annealer(&self) -> &Annealer { &self.annealer }
-    pub fn annealer_mut(&mut self) -> &mut Annealer { &mut self.annealer }
+    pub fn eem(&self) -> &Eem {
+        &self.eem
+    }
+    pub fn eem_mut(&mut self) -> &mut Eem {
+        &mut self.eem
+    }
+    pub fn annealer(&self) -> &Annealer {
+        &self.annealer
+    }
+    pub fn annealer_mut(&mut self) -> &mut Annealer {
+        &mut self.annealer
+    }
 
-    pub fn fabric(&self) -> &Fabric { &self.fabric }
-    pub fn fabric_mut(&mut self) -> &mut Fabric { &mut self.fabric }
-    pub fn binding_pool_id(&self) -> PoolId { self.binding_pool_id }
-    pub fn min_atom_score(&self) -> f32 { self.config.min_atom_score }
+    pub fn fabric(&self) -> &Fabric {
+        &self.fabric
+    }
+    pub fn fabric_mut(&mut self) -> &mut Fabric {
+        &mut self.fabric
+    }
+    pub fn binding_pool_id(&self) -> PoolId {
+        self.binding_pool_id
+    }
+    pub fn min_atom_score(&self) -> f32 {
+        self.config.min_atom_score
+    }
     pub fn set_min_atom_score(&mut self, value: f32) {
         self.config.min_atom_score = value.clamp(0.0, 1.0);
     }
 
     /// Register a sensor pool.  The caller supplies the atomization
     /// contract via [`AtomEncoding`].  Returns the assigned pool id.
-    pub fn create_pool(
-        &mut self,
-        config:   PoolConfig,
-        encoding: Box<dyn AtomEncoding>,
-    ) -> PoolId {
+    pub fn create_pool(&mut self, config: PoolConfig, encoding: Box<dyn AtomEncoding>) -> PoolId {
         let pool = Pool::new(config, encoding);
         self.fabric.register_pool(pool)
     }
@@ -901,7 +1003,9 @@ impl Brain {
         // last 2 ticks, this frame is its response.  Snapshot a
         // candidate then mutate qa_db to avoid an iter-and-mutate
         // borrow conflict.
-        let captured: Option<(PoolId, Vec<u8>)> = self.recent_frames.iter()
+        let captured: Option<(PoolId, Vec<u8>)> = self
+            .recent_frames
+            .iter()
             .filter(|(op, (_, t))| **op != pool_id && now.saturating_sub(*t) <= 2)
             .max_by_key(|(_, (_, t))| *t)
             .map(|(op, (f, _))| (*op, f.clone()));
@@ -909,16 +1013,18 @@ impl Brain {
             if !frame.is_empty() && !prompt_bytes.is_empty() {
                 self.qa_db.push(QaPair {
                     prompt_pool,
-                    prompt:        prompt_bytes,
+                    prompt: prompt_bytes,
                     response_pool: pool_id,
-                    response:      frame.to_vec(),
+                    response: frame.to_vec(),
                     observed_tick: now,
                 });
             }
         }
         self.recent_frames.insert(pool_id, (frame.to_vec(), now));
         let qa_capture_ns = qa_t0.elapsed().as_nanos() as u64;
-        self.fabric.observe_profile.qa_capture_ns
+        self.fabric
+            .observe_profile
+            .qa_capture_ns
             .fetch_add(qa_capture_ns, std::sync::atomic::Ordering::Relaxed);
         self.fabric.observe(pool_id, frame)
     }
@@ -953,10 +1059,13 @@ impl Brain {
             let moment = self.fabric.current_moment();
             let mut episodic_fired = moment.fired.clone();
             for (&pid, sequence) in episodic_fired.iter_mut() {
-                if pid == self.binding_pool_id { continue; }
+                if pid == self.binding_pool_id {
+                    continue;
+                }
                 if let Some(pool) = self.fabric.pool(pid) {
                     let pool = pool.read();
-                    let mut concepts: Vec<NeuronId> = pool.currently_firing()
+                    let mut concepts: Vec<NeuronId> = pool
+                        .currently_firing()
                         .filter(|nid| pool.get(*nid).is_some_and(|n| !n.is_atom()))
                         .collect();
                     concepts.sort_unstable();
@@ -974,7 +1083,8 @@ impl Brain {
         for pid in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pid) {
                 let p = pool.read();
-                let frame: AHashMap<NeuronId, f32> = p.currently_firing()
+                let frame: AHashMap<NeuronId, f32> = p
+                    .currently_firing()
                     .map(|nid| (nid, p.activation(nid)))
                     .collect();
                 drop(p);
@@ -997,16 +1107,24 @@ impl Brain {
         let mut newly_scheduled = Vec::new();
 
         for feedback in &mut self.feedback_loops {
-            let Some(source) = self.fabric.pool(feedback.source_pool) else { continue; };
+            let Some(source) = self.fabric.pool(feedback.source_pool) else {
+                continue;
+            };
             let source = source.read();
-            let mut labels: Vec<String> = source.currently_firing()
+            let mut labels: Vec<String> = source
+                .currently_firing()
                 .filter_map(|id| source.get(id).map(|n| n.label.clone()))
                 .collect();
-            if labels.is_empty() { continue; }
+            if labels.is_empty() {
+                continue;
+            }
             labels.sort();
             labels.dedup();
             let control = source.control_state();
-            let gain = feedback.spec.gain_mode.as_ref()
+            let gain = feedback
+                .spec
+                .gain_mode
+                .as_ref()
                 .map(|mode| mode.evaluate(&control))
                 .unwrap_or(feedback.spec.gain)
                 .max(0.0);
@@ -1015,7 +1133,9 @@ impl Brain {
             feedback.phase += gain;
             let spikes = feedback.phase.floor() as usize;
             feedback.phase -= spikes as f32;
-            if spikes == 0 { continue; }
+            if spikes == 0 {
+                continue;
+            }
 
             // Meta-pools learn a stable pattern-of-patterns fingerprint, not a
             // recursive copy of every lower-pool label.  This bounds feedback
@@ -1023,7 +1143,8 @@ impl Brain {
             // sets and clean separation for different sets.
             let joined = labels.join("|");
             let digest = blake3::hash(joined.as_bytes());
-            let frame = format!("feedback:{}:{}", feedback.spec.signal, digest.to_hex()).into_bytes();
+            let frame =
+                format!("feedback:{}:{}", feedback.spec.signal, digest.to_hex()).into_bytes();
             for _ in 0..spikes {
                 newly_scheduled.push(ScheduledFeedback {
                     due_tick: now.saturating_add(feedback.spec.delay_ticks as u64),
@@ -1053,7 +1174,9 @@ impl Brain {
             if let Some(old) = self.moment_history.pop_front() {
                 if let Some(c) = self.binding_recurrences.get_mut(&old) {
                     *c = c.saturating_sub(1);
-                    if *c == 0 { self.binding_recurrences.remove(&old); }
+                    if *c == 0 {
+                        self.binding_recurrences.remove(&old);
+                    }
                 }
             }
         }
@@ -1077,7 +1200,9 @@ impl Brain {
         // times).  Without this, all bindings score by atom precision
         // (uniformly 1.0 for full overlap) and the decoder's smaller-
         // target-count tiebreak arbitrarily picks shorter category names.
-        let existing_bid: Option<NeuronId> = self.promoted_fingerprints.get(&fp)
+        let existing_bid: Option<NeuronId> = self
+            .promoted_fingerprints
+            .get(&fp)
             .copied()
             .or_else(|| self.tentative_promoted.get(&fp).copied());
         if let Some(bid) = existing_bid {
@@ -1123,23 +1248,20 @@ impl Brain {
         // Tier 2: consolidated promotion.  Registers an EEM grounded
         // fact and gossips the motif.  Upgrades the tentative-tier
         // binding (reuses its neuron id) when one exists.
-        if !already_consolidated
-            && effective_count >= consolidated_thr
-        {
+        if !already_consolidated && effective_count >= consolidated_thr {
             let upgrade_id = self.tentative_promoted.remove(&fp);
             let id = match upgrade_id {
                 Some(id) => Some(id),
-                None     => self.promote_binding_concept(&fp),
+                None => self.promote_binding_concept(&fp),
             };
             if let Some(id) = id {
                 self.network.pending_motif_out.push(GossipMotif {
-                    source_brain:      self.network.brain_id.clone(),
-                    fingerprint:       fp.pairs.clone(),
+                    source_brain: self.network.brain_id.clone(),
+                    fingerprint: fp.pairs.clone(),
                     observation_count: effective_count,
-                    local_confidence:  (effective_count as f32
-                        / (consolidated_thr.max(1) as f32))
+                    local_confidence: (effective_count as f32 / (consolidated_thr.max(1) as f32))
                         .min(1.0),
-                    observed_at_tick:  self.fabric.current_tick(),
+                    observed_at_tick: self.fabric.current_tick(),
                 });
                 self.eem.register_fact(id, fp.pairs.clone());
                 self.promoted_fingerprints.insert(fp, id);
@@ -1151,7 +1273,8 @@ impl Brain {
         // on the binding density signal.  Hysteresis: only adjust
         // when the signal is *outside* the [low, high] band.
         if self.config.pressure_adjust_enabled
-            && self.total_observations
+            && self
+                .total_observations
                 .saturating_sub(self.last_pressure_check_obs)
                 >= self.config.pressure_observation_grace
         {
@@ -1167,8 +1290,7 @@ impl Brain {
         if self.total_observations == 0 {
             return 0.0;
         }
-        let total_bindings = self.tentative_promoted.len()
-            + self.promoted_fingerprints.len();
+        let total_bindings = self.tentative_promoted.len() + self.promoted_fingerprints.len();
         (total_bindings as f32) / (self.total_observations as f32)
     }
 
@@ -1200,11 +1322,14 @@ impl Brain {
     /// tentative-promoted by this call.  Already-promoted
     /// fingerprints are not re-promoted (idempotent).
     pub fn force_promote_tentative(&mut self, min_count: u32) -> Vec<NeuronId> {
-        let candidates: Vec<MomentFingerprint> = self.lifetime_recurrences.iter()
+        let candidates: Vec<MomentFingerprint> = self
+            .lifetime_recurrences
+            .iter()
             .filter(|&(_, c)| *c >= min_count)
-            .filter(|&(fp, _)|
+            .filter(|&(fp, _)| {
                 !self.tentative_promoted.contains_key(fp)
-                && !self.promoted_fingerprints.contains_key(fp))
+                    && !self.promoted_fingerprints.contains_key(fp)
+            })
             .map(|(fp, _)| fp.clone())
             .collect();
         let mut out = Vec::with_capacity(candidates.len());
@@ -1244,12 +1369,14 @@ impl Brain {
         let mut binding = binding_pool.write();
         // Composite label = sorted member references, joined.  Stable
         // and unique per fingerprint (used for dedup).
-        let label: String = fp.pairs.iter()
+        let label: String = fp
+            .pairs
+            .iter()
             .map(|(p, n)| format!("p{}n{}", p, n))
             .collect::<Vec<_>>()
             .join("|");
         if binding.label_to_id(&label).is_some() {
-            return None;  // already exists, idempotent.
+            return None; // already exists, idempotent.
         }
         // Members stored in FIRING ORDER (per-pool sequence as
         // observed at training time), NOT NeuronId-sorted order.
@@ -1257,7 +1384,9 @@ impl Brain {
         // decoding via decode_concept_members — without it,
         // 'animal' atoms (a,n,i,m,a,l) decode as 'aaniml' because
         // sorting by NeuronId interleaves the duplicates.
-        let members: Vec<NeuronRef> = fp.ordered_per_pool.iter()
+        let members: Vec<NeuronRef> = fp
+            .ordered_per_pool
+            .iter()
             .flat_map(|(pid, ns)| ns.iter().map(|&nid| NeuronRef::new(*pid, nid)))
             .collect();
         let max_w = binding.config.max_weight;
@@ -1265,13 +1394,19 @@ impl Brain {
         // Create the binding concept directly with cross-pool members.
         let id = binding.neuron_count() as NeuronId;
         let mut neuron = Neuron::new_concept(
-            id, label.clone(), NeuronKind::Excitatory, members.clone(), now,
+            id,
+            label.clone(),
+            NeuronKind::Excitatory,
+            members.clone(),
+            now,
         );
         // Wire concept → member terminals top-down so activating the
         // binding fires its constituent neurons in all pools.
         let mut added: usize = 0;
         for m in &members {
-            if neuron.reinforce_terminal(*m, 0.5, now, max_w) { added += 1; }
+            if neuron.reinforce_terminal(*m, 0.5, now, max_w) {
+                added += 1;
+            }
         }
         // append_neuron pushes the new concept (with its `added` terminals
         // already attached) onto the binding pool, so the counter grows
@@ -1289,8 +1424,12 @@ impl Brain {
                 let mxw = pp.config.max_weight;
                 let was_added = if let Some(n) = pp.get_mut(m.neuron) {
                     n.reinforce_terminal(binding_ref, 0.5, now, mxw)
-                } else { false };
-                if was_added { pp.total_terminals += 1; }
+                } else {
+                    false
+                };
+                if was_added {
+                    pp.total_terminals += 1;
+                }
             }
         }
         Some(id)
@@ -1301,7 +1440,7 @@ impl Brain {
     pub fn read_activation(&self, pool_id: PoolId) -> AHashMap<NeuronId, f32> {
         let pool = match self.fabric.pool(pool_id) {
             Some(p) => p,
-            None    => return AHashMap::new(),
+            None => return AHashMap::new(),
         };
         let p = pool.read();
         let mut out = AHashMap::new();
@@ -1323,36 +1462,55 @@ impl Brain {
     pub fn concept_depth(&self, pool_id: PoolId, nid: NeuronId) -> usize {
         let p = match self.fabric.pool(pool_id) {
             Some(p) => p,
-            None    => return 0,
+            None => return 0,
         };
         let p_read = p.read();
         let n = match p_read.get(nid) {
             Some(n) => n,
-            None    => return 0,
+            None => return 0,
         };
-        if n.is_atom() { return 0; }
+        if n.is_atom() {
+            return 0;
+        }
         let mut max_d = 0;
         for m in &n.members {
-            if m.pool != pool_id { continue; }
+            if m.pool != pool_id {
+                continue;
+            }
             let d = self.concept_depth_inner(&p_read, m.neuron, 0, 16);
-            if d > max_d { max_d = d; }
+            if d > max_d {
+                max_d = d;
+            }
         }
         max_d + 1
     }
 
-    fn concept_depth_inner(&self, p: &crate::pool::Pool, nid: NeuronId,
-                            current: usize, cap: usize) -> usize {
-        if current >= cap { return current; }
+    fn concept_depth_inner(
+        &self,
+        p: &crate::pool::Pool,
+        nid: NeuronId,
+        current: usize,
+        cap: usize,
+    ) -> usize {
+        if current >= cap {
+            return current;
+        }
         let n = match p.get(nid) {
             Some(n) => n,
-            None    => return current,
+            None => return current,
         };
-        if n.is_atom() { return current; }
+        if n.is_atom() {
+            return current;
+        }
         let mut max_d = current;
         for m in &n.members {
-            if m.pool != p.id() { continue; }
+            if m.pool != p.id() {
+                continue;
+            }
             let d = self.concept_depth_inner(p, m.neuron, current + 1, cap);
-            if d > max_d { max_d = d; }
+            if d > max_d {
+                max_d = d;
+            }
         }
         max_d
     }
@@ -1380,12 +1538,14 @@ impl Brain {
     /// formula or downstream consumers.
     pub fn integrate_concept_first(
         &self,
-        query_pool:  PoolId,
+        query_pool: PoolId,
         target_pool: PoolId,
     ) -> Option<Vec<u8>> {
         let propagated = self.fabric.propagate(query_pool);
         let target_acts = propagated.get(&target_pool)?;
-        if target_acts.is_empty() { return None; }
+        if target_acts.is_empty() {
+            return None;
+        }
 
         let pool_handle = self.fabric.pool(target_pool)?;
         let p = pool_handle.read();
@@ -1418,20 +1578,29 @@ impl Brain {
         for (nid, _act) in target_acts.iter() {
             let n = match p.get(*nid) {
                 Some(n) => n,
-                None    => continue,
+                None => continue,
             };
-            if n.is_atom() { continue; }
+            if n.is_atom() {
+                continue;
+            }
             // Compute avg member activation in target pool.
-            let in_pool_members: Vec<NeuronId> = n.members.iter()
+            let in_pool_members: Vec<NeuronId> = n
+                .members
+                .iter()
                 .filter(|m| m.pool == target_pool)
                 .map(|m| m.neuron)
                 .collect();
-            if in_pool_members.is_empty() { continue; }
-            let member_sum: f32 = in_pool_members.iter()
+            if in_pool_members.is_empty() {
+                continue;
+            }
+            let member_sum: f32 = in_pool_members
+                .iter()
                 .map(|mid| target_acts.get(mid).copied().unwrap_or(0.0))
                 .sum();
             let avg_member_act = member_sum / in_pool_members.len() as f32;
-            if avg_member_act < ACTIVATION_FLOOR { continue; }
+            if avg_member_act < ACTIVATION_FLOOR {
+                continue;
+            }
             // Decode + sanity filters.
             let decoded = p.decode_concept_members(&n.members);
             if decoded.is_empty() || decoded.len() > MAX_REASONABLE_DECODE {
@@ -1447,9 +1616,13 @@ impl Brain {
             let depth = {
                 let mut max_d = 0;
                 for m in &n.members {
-                    if m.pool != target_pool { continue; }
+                    if m.pool != target_pool {
+                        continue;
+                    }
                     let d = self.concept_depth_inner(&p, m.neuron, 0, 16);
-                    if d > max_d { max_d = d; }
+                    if d > max_d {
+                        max_d = d;
+                    }
                 }
                 max_d + 1
             };
@@ -1464,8 +1637,7 @@ impl Brain {
             match &best {
                 None => best = Some((*nid, decoded, score, depth)),
                 Some((_, _, prev_score, prev_depth)) => {
-                    if score > *prev_score
-                       || (score == *prev_score && depth > *prev_depth) {
+                    if score > *prev_score || (score == *prev_score && depth > *prev_depth) {
                         best = Some((*nid, decoded, score, depth));
                     }
                 }
@@ -1473,21 +1645,22 @@ impl Brain {
         }
 
         match best {
-            Some((_nid, decoded, _score, _depth)) => {
-                Some(decoded)
-            }
+            Some((_nid, decoded, _score, _depth)) => Some(decoded),
             None => {
                 // No concept fired — fall back to atom-level
                 // reassembly.  Walk firing target atoms in
                 // descending activation order and emit their bytes.
-                let mut atom_acts: Vec<(NeuronId, f32)> = target_acts.iter()
+                let mut atom_acts: Vec<(NeuronId, f32)> = target_acts
+                    .iter()
                     .filter(|(nid, _)| p.get(**nid).map_or(false, |n| n.is_atom()))
                     .filter(|(_, a)| **a >= ACTIVATION_FLOOR)
                     .map(|(k, v)| (*k, *v))
                     .collect();
-                if atom_acts.is_empty() { return None; }
-                atom_acts.sort_by(|a, b|
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                if atom_acts.is_empty() {
+                    return None;
+                }
+                atom_acts
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 let mut out = Vec::new();
                 for (nid, _) in atom_acts.iter().take(32) {
                     if let Some(n) = p.get(*nid) {
@@ -1503,11 +1676,7 @@ impl Brain {
     ///
     /// The brain doesn't decide whether to surface uncertainty —
     /// uncertainty is always surfaced.  Caller reads the report.
-    pub fn integrate(
-        &self,
-        query_pool:  PoolId,
-        target_pool: PoolId,
-    ) -> AnswerWithGrounding {
+    pub fn integrate(&self, query_pool: PoolId, target_pool: PoolId) -> AnswerWithGrounding {
         // 1. Propagate from query pool across the fabric.
         let propagated = self.fabric.propagate(query_pool);
 
@@ -1520,14 +1689,22 @@ impl Brain {
         // spec §2.5 handling the novelty signal at the concept layer.
         let query_pool_handle = match self.fabric.pool(query_pool) {
             Some(p) => p,
-            None    => return AnswerWithGrounding::unknown(
-                format!("unknown pool id {}", query_pool), target_pool),
+            None => {
+                return AnswerWithGrounding::unknown(
+                    format!("unknown pool id {}", query_pool),
+                    target_pool,
+                );
+            }
         };
-        let fired_in_query = query_pool_handle.read()
-            .currently_firing().collect::<Vec<_>>();
+        let fired_in_query = query_pool_handle
+            .read()
+            .currently_firing()
+            .collect::<Vec<_>>();
         if fired_in_query.is_empty() {
             return AnswerWithGrounding::unknown(
-                "no input observed in query pool — cannot integrate", target_pool);
+                "no input observed in query pool — cannot integrate",
+                target_pool,
+            );
         }
         let input_atom_coverage = 1.0_f32;
 
@@ -1542,8 +1719,12 @@ impl Brain {
         // for the grounding report, not a selection mechanism.
         let target_pool_handle = match self.fabric.pool(target_pool) {
             Some(p) => p,
-            None    => return AnswerWithGrounding::unknown(
-                format!("unknown target pool id {}", target_pool), target_pool),
+            None => {
+                return AnswerWithGrounding::unknown(
+                    format!("unknown target pool id {}", target_pool),
+                    target_pool,
+                );
+            }
         };
         let target = target_pool_handle.read();
 
@@ -1559,9 +1740,13 @@ impl Brain {
             let mut set = ahash::AHashSet::new();
             for nid in q.currently_firing() {
                 if let Some(qn) = q.get(nid) {
-                    if qn.is_atom() { continue; }
+                    if qn.is_atom() {
+                        continue;
+                    }
                     for t in &qn.terminals {
-                        if t.target.pool != target_pool { continue; }
+                        if t.target.pool != target_pool {
+                            continue;
+                        }
                         if let Some(tn) = target.get(t.target.neuron) {
                             if !tn.is_atom() {
                                 set.insert(t.target.neuron);
@@ -1593,8 +1778,12 @@ impl Brain {
             for nid in q.currently_firing() {
                 if let Some(qn) = q.get(nid) {
                     for t in &qn.terminals {
-                        if t.target.pool != target_pool { continue; }
-                        if t.consolidation < crate::neuron::Neuron::CONSOLIDATION_LOCK { continue; }
+                        if t.target.pool != target_pool {
+                            continue;
+                        }
+                        if t.consolidation < crate::neuron::Neuron::CONSOLIDATION_LOCK {
+                            continue;
+                        }
                         if let Some(tn) = target.get(t.target.neuron) {
                             if !tn.is_atom() {
                                 set.insert(t.target.neuron);
@@ -1623,7 +1812,9 @@ impl Brain {
         // target-pool members (in firing order) when the match is
         // exact and the binding is trained.
         let (binding_id_opt, binding_score, binding_target_atoms): (
-            Option<NeuronId>, f32, ahash::AHashSet<NeuronId>
+            Option<NeuronId>,
+            f32,
+            ahash::AHashSet<NeuronId>,
         ) = {
             let bpid = self.binding_pool_id;
             if bpid == target_pool || bpid == query_pool {
@@ -1641,17 +1832,21 @@ impl Brain {
                     let bp_read = bp.read();
                     let mut best: Option<(NeuronId, f32)> = None;
                     for n in bp_read.iter_neurons() {
-                        if n.is_atom() { continue; }
-                        let bind_query: ahash::AHashSet<NeuronId> = n.members.iter()
+                        if n.is_atom() {
+                            continue;
+                        }
+                        let bind_query: ahash::AHashSet<NeuronId> = n
+                            .members
+                            .iter()
                             .filter(|m| m.pool == query_pool)
                             .map(|m| m.neuron)
                             .collect();
-                        let bind_target_has = n.members.iter()
-                            .any(|m| m.pool == target_pool);
-                        if bind_query.is_empty() || !bind_target_has { continue; }
-                        let intersect = bind_query.iter()
-                            .filter(|a| q_atoms.contains(a))
-                            .count() as f32;
+                        let bind_target_has = n.members.iter().any(|m| m.pool == target_pool);
+                        if bind_query.is_empty() || !bind_target_has {
+                            continue;
+                        }
+                        let intersect =
+                            bind_query.iter().filter(|a| q_atoms.contains(a)).count() as f32;
                         let precision = intersect / bind_query.len() as f32;
                         let recall = intersect / q_atoms.len() as f32;
                         let score = precision * recall;
@@ -1662,16 +1857,21 @@ impl Brain {
                     match best {
                         Some((bnid, sc)) => {
                             let atoms = if let Some(n) = bp_read.get(bnid) {
-                                n.members.iter()
+                                n.members
+                                    .iter()
                                     .filter(|m| m.pool == target_pool)
                                     .map(|m| m.neuron)
                                     .collect()
-                            } else { ahash::AHashSet::new() };
+                            } else {
+                                ahash::AHashSet::new()
+                            };
                             (Some(bnid), sc, atoms)
                         }
                         None => (None, 0.0, ahash::AHashSet::new()),
                     }
-                } else { (None, 0.0, ahash::AHashSet::new()) }
+                } else {
+                    (None, 0.0, ahash::AHashSet::new())
+                }
             }
         };
 
@@ -1696,17 +1896,18 @@ impl Brain {
             if let Some(bnid) = binding_id_opt {
                 if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
                     let bp_read = bp.read();
-                    let (use_count, target_members): (u64, Vec<NeuronRef>) =
-                        match bp_read.get(bnid) {
-                            Some(n) => (
-                                n.use_count,
-                                n.members.iter()
-                                    .filter(|m| m.pool == target_pool)
-                                    .copied()
-                                    .collect(),
-                            ),
-                            None => (0, Vec::new()),
-                        };
+                    let (use_count, target_members): (u64, Vec<NeuronRef>) = match bp_read.get(bnid)
+                    {
+                        Some(n) => (
+                            n.use_count,
+                            n.members
+                                .iter()
+                                .filter(|m| m.pool == target_pool)
+                                .copied()
+                                .collect(),
+                        ),
+                        None => (0, Vec::new()),
+                    };
                     drop(bp_read);
                     if use_count >= 2 && !target_members.is_empty() {
                         let decoded = target.decode_concept_members(&target_members);
@@ -1716,7 +1917,9 @@ impl Brain {
                                 grounding: GroundingReport {
                                     input_atom_coverage,
                                     strongest_match: Some(NeuronRef::new(
-                                        self.binding_pool_id, bnid)),
+                                        self.binding_pool_id,
+                                        bnid,
+                                    )),
                                     strongest_match_jaccard: binding_score,
                                     composition_used: Vec::new(),
                                     fabric_confidence: binding_score,
@@ -1735,7 +1938,10 @@ impl Brain {
                                     peer_contributions: Vec::new(),
                                 },
                                 confidence_tier: ConfidenceTier::from_confidence(
-                                    binding_score, false, false),
+                                    binding_score,
+                                    false,
+                                    false,
+                                ),
                                 next_steps_if_ungrounded: Vec::new(),
                             };
                         }
@@ -1781,25 +1987,37 @@ impl Brain {
         let mut best_score: f32 = f32::NEG_INFINITY;
         let mut all_active_concepts: Vec<NeuronRef> = Vec::new();
         for (&nid, &act) in target_activation.iter() {
-            if act < 0.001 { continue; }
+            if act < 0.001 {
+                continue;
+            }
             if let Some(n) = target.get(nid) {
                 if !n.is_atom() {
                     let r = NeuronRef::new(target_pool, nid);
                     all_active_concepts.push(r);
 
-                    let in_pool_members: Vec<NeuronId> = n.members.iter()
+                    let in_pool_members: Vec<NeuronId> = n
+                        .members
+                        .iter()
                         .filter(|m| m.pool == target_pool)
                         .map(|m| m.neuron)
                         .collect();
                     let member_count = in_pool_members.len().max(1);
-                    let unique_count: usize = in_pool_members.iter()
-                        .collect::<ahash::AHashSet<_>>().len().max(1);
-                    let member_activation_sum: f32 = in_pool_members.iter()
+                    let unique_count: usize = in_pool_members
+                        .iter()
+                        .collect::<ahash::AHashSet<_>>()
+                        .len()
+                        .max(1);
+                    let member_activation_sum: f32 = in_pool_members
+                        .iter()
                         .map(|nid| target_activation.get(nid).copied().unwrap_or(0.0))
                         .sum();
                     let avg_member_act = member_activation_sum / member_count as f32;
 
-                    let boost = if directly_targeted.contains(&nid) { pathway_boost } else { 1.0 };
+                    let boost = if directly_targeted.contains(&nid) {
+                        pathway_boost
+                    } else {
+                        1.0
+                    };
                     let length_factor = (member_count as f32).sqrt();
 
                     // Information factor: rewards unique-atom count
@@ -1832,7 +2050,8 @@ impl Brain {
                     let binding_boost = if !binding_target_atoms.is_empty() {
                         let in_pool_member_set: ahash::AHashSet<NeuronId> =
                             in_pool_members.iter().copied().collect();
-                        let matched = binding_target_atoms.iter()
+                        let matched = binding_target_atoms
+                            .iter()
                             .filter(|a| in_pool_member_set.contains(a))
                             .count() as f32;
                         let coverage_of_binding = matched / binding_target_atoms.len() as f32;
@@ -1845,10 +2064,13 @@ impl Brain {
                         } else {
                             1.0
                         }
-                    } else { 1.0 };
+                    } else {
+                        1.0
+                    };
 
-                    let score = avg_member_act * boost * length_factor * info_factor * binding_boost;
-                    let _ = locked_targeted.contains(&nid);  // signal retained for Phase B v2 below
+                    let score =
+                        avg_member_act * boost * length_factor * info_factor * binding_boost;
+                    let _ = locked_targeted.contains(&nid); // signal retained for Phase B v2 below
                     // Hold on to raw activation for grounding metric.
                     let _ = act;
                     let _ = target.expanded_size(&n.members);
@@ -1864,7 +2086,7 @@ impl Brain {
         // sufficiently activated.  Spec §2.2.
         let (strongest_match, strongest_activation) = match strongest {
             Some(x) => (Some(x.0), x.1),
-            None    => {
+            None => {
                 return AnswerWithGrounding {
                     answer: None,
                     grounding: GroundingReport {
@@ -1881,14 +2103,13 @@ impl Brain {
                         peer_contributions: Vec::new(),
                     },
                     confidence_tier: ConfidenceTier::Ungrounded,
-                    next_steps_if_ungrounded: vec![
-                        crate::grounding::RequestObservation {
-                            domain: "target pool has no activated concept for this input".into(),
-                            examples_needed: 1,
-                            why: "extend grounding by co-observing query and target streams together".into(),
-                            pool: target_pool,
-                        },
-                    ],
+                    next_steps_if_ungrounded: vec![crate::grounding::RequestObservation {
+                        domain: "target pool has no activated concept for this input".into(),
+                        examples_needed: 1,
+                        why: "extend grounding by co-observing query and target streams together"
+                            .into(),
+                        pool: target_pool,
+                    }],
                 };
             }
         };
@@ -1896,13 +2117,15 @@ impl Brain {
         // Jaccard against the strongest match's member set (for the
         // grounding report only).  Pure measurement, not a gate.
         let strongest_jaccard = if let Some(r) = strongest_match {
-            let input_set: std::collections::HashSet<NeuronId> = fired_in_query
-                .iter().copied().collect();
+            let input_set: std::collections::HashSet<NeuronId> =
+                fired_in_query.iter().copied().collect();
             // Member NeuronRefs may live in any pool.  We compare only
             // those whose pool == query_pool — atoms in the target
             // concept that originate from the query stream.
             if let Some(n) = target.get(r.neuron) {
-                let concept_in_query: std::collections::HashSet<NeuronId> = n.members.iter()
+                let concept_in_query: std::collections::HashSet<NeuronId> = n
+                    .members
+                    .iter()
                     .filter(|m| m.pool == query_pool)
                     .map(|m| m.neuron)
                     .collect();
@@ -1913,8 +2136,12 @@ impl Brain {
                     let union = input_set.union(&concept_in_query).count().max(1) as f32;
                     inter / union
                 }
-            } else { 0.0 }
-        } else { 0.0 };
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
 
         // Speculation flag: when the strongest match's members span
         // multiple pools (binding concept) OR when the answer arrived
@@ -1923,21 +2150,28 @@ impl Brain {
         // the activation reaching target_pool came through axon
         // terminals, which is compositional by definition.
         let speculation_flag = query_pool != target_pool
-            || strongest_match.map(|r| {
-                target.get(r.neuron)
-                    .map(|n| n.is_binding(target_pool))
-                    .unwrap_or(false)
-            }).unwrap_or(false);
+            || strongest_match
+                .map(|r| {
+                    target
+                        .get(r.neuron)
+                        .map(|n| n.is_binding(target_pool))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
 
         // Fabric confidence = fraction of propagated activation
         // captured by the strongest match (its share of total
         // concept-level activation in the target pool).
-        let total_concept_act: f32 = target_activation.iter()
+        let total_concept_act: f32 = target_activation
+            .iter()
             .filter(|&(&nid, _)| target.get(nid).map_or(false, |n| !n.is_atom()))
-            .map(|(_, &a)| a).sum();
+            .map(|(_, &a)| a)
+            .sum();
         let fabric_confidence = if total_concept_act > 1e-9 {
             (strongest_activation / total_concept_act).clamp(0.0, 1.0)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         // Integrated confidence = fabric_confidence for now (EEM and
         // annealer are not online until phases 5–6; their contribution
@@ -1950,14 +2184,17 @@ impl Brain {
         // that a concept-of-concepts gets decoded all the way down to
         // its atom leaves.  Spec §3.4.
         let answer = strongest_match.and_then(|r| {
-            target.get(r.neuron).map(|n| {
-                target.decode_concept_members(&n.members)
-            })
+            target
+                .get(r.neuron)
+                .map(|n| target.decode_concept_members(&n.members))
         });
 
         let outside_grounding = fabric_confidence < 0.01;
         let confidence_tier = ConfidenceTier::from_confidence(
-            integrated_confidence, outside_grounding, speculation_flag);
+            integrated_confidence,
+            outside_grounding,
+            speculation_flag,
+        );
 
         AnswerWithGrounding {
             answer,
@@ -2056,12 +2293,16 @@ impl Brain {
     /// otherwise (caller falls back to atom-level or chain path).
     pub fn decode_best_trained_binding(
         &self,
-        query_pool:  PoolId,
+        query_pool: PoolId,
         target_pool: PoolId,
     ) -> Option<Vec<u8>> {
-        if query_pool == target_pool { return None; }
+        if query_pool == target_pool {
+            return None;
+        }
         let bpid = self.binding_pool_id;
-        if bpid == query_pool || bpid == target_pool { return None; }
+        if bpid == query_pool || bpid == target_pool {
+            return None;
+        }
 
         // Collect firing query state: atoms and concepts separately.
         let (q_atoms, q_concepts) = {
@@ -2071,14 +2312,20 @@ impl Brain {
             let mut concepts = ahash::AHashSet::new();
             for nid in q.currently_firing() {
                 match q.get(nid) {
-                    Some(n) if n.is_atom() => { atoms.insert(nid); }
-                    Some(_)                => { concepts.insert(nid); }
-                    None                   => {}
+                    Some(n) if n.is_atom() => {
+                        atoms.insert(nid);
+                    }
+                    Some(_) => {
+                        concepts.insert(nid);
+                    }
+                    None => {}
                 }
             }
             (atoms, concepts)
         };
-        if q_atoms.is_empty() && q_concepts.is_empty() { return None; }
+        if q_atoms.is_empty() && q_concepts.is_empty() {
+            return None;
+        }
 
         // Minimum atom-tier score for an OOV-honest match.  A score
         // of `p * r` where p = precision (intersect/bind_atoms.len())
@@ -2106,7 +2353,9 @@ impl Brain {
         let min_atom_score: f32 = {
             let raw = std::env::var("BRAIN_MIN_ATOM_SCORE").ok();
             // Build query-pool state for ControlMode evaluation.
-            let state = self.fabric.pool(query_pool)
+            let state = self
+                .fabric
+                .pool(query_pool)
                 .map(|p| p.read().control_state());
             match (raw, state) {
                 (Some(s), Some(st)) => {
@@ -2131,7 +2380,9 @@ impl Brain {
         // ambiguity: 'sad' query (last_observed [s,a,d]) picks
         // sad->emotion (ordered text [s,a,d]) over das->animal
         // (ordered text [d,a,s]).
-        let query_seq: Vec<NeuronId> = self.fabric.pool(query_pool)
+        let query_seq: Vec<NeuronId> = self
+            .fabric
+            .pool(query_pool)
             .map(|p| p.read().last_observed_sequence().to_vec())
             .unwrap_or_default();
 
@@ -2141,11 +2392,13 @@ impl Brain {
         // (binding_id, score, target_member_count, has_concept_match, seq_match)
         let mut best: Option<(NeuronId, f32, usize, bool, bool)> = None;
         for n in bp_read.iter_neurons() {
-            if n.is_atom() { continue; }
+            if n.is_atom() {
+                continue;
+            }
             // Partition this binding's members by pool.
             // bind_q_atoms is a Vec (preserves ORDER from the moment
             // fingerprint that promoted this binding).
-            let mut bind_q_atoms:    Vec<NeuronId> = Vec::new();
+            let mut bind_q_atoms: Vec<NeuronId> = Vec::new();
             let mut bind_q_concepts: Vec<NeuronId> = Vec::new();
             let mut bind_target_members: Vec<NeuronId> = Vec::new();
             {
@@ -2155,16 +2408,20 @@ impl Brain {
                     if m.pool == query_pool {
                         match q.get(m.neuron) {
                             Some(qn) if qn.is_atom() => bind_q_atoms.push(m.neuron),
-                            Some(_)                  => bind_q_concepts.push(m.neuron),
-                            None                     => {}
+                            Some(_) => bind_q_concepts.push(m.neuron),
+                            None => {}
                         }
                     } else if m.pool == target_pool {
                         bind_target_members.push(m.neuron);
                     }
                 }
             }
-            if bind_target_members.is_empty() { continue; }
-            if bind_q_atoms.is_empty() && bind_q_concepts.is_empty() { continue; }
+            if bind_target_members.is_empty() {
+                continue;
+            }
+            if bind_q_atoms.is_empty() && bind_q_concepts.is_empty() {
+                continue;
+            }
 
             // Ordered equality is direct episodic evidence, not a fuzzy
             // overlap score.  Compute it before the grounding floor: broad
@@ -2191,22 +2448,28 @@ impl Brain {
                 bind_q_atoms.iter().copied().collect();
             let bind_q_concepts_set: ahash::AHashSet<NeuronId> =
                 bind_q_concepts.iter().copied().collect();
-            let concept_intersect = bind_q_concepts_set.iter()
+            let concept_intersect = bind_q_concepts_set
+                .iter()
                 .filter(|c| q_concepts.contains(c))
                 .count() as f32;
             let concept_score = if !bind_q_concepts_set.is_empty() && !q_concepts.is_empty() {
                 let p = concept_intersect / bind_q_concepts_set.len() as f32;
                 let r = concept_intersect / q_concepts.len().max(1) as f32;
                 p * r
-            } else { 0.0 };
-            let atom_intersect = bind_q_atoms_set.iter()
+            } else {
+                0.0
+            };
+            let atom_intersect = bind_q_atoms_set
+                .iter()
                 .filter(|a| q_atoms.contains(a))
                 .count() as f32;
             let atom_score = if !bind_q_atoms_set.is_empty() && !q_atoms.is_empty() {
                 let p = atom_intersect / bind_q_atoms_set.len() as f32;
                 let r = atom_intersect / q_atoms.len().max(1) as f32;
                 p * r
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             // OOV-honesty floor applies BOTH to atom-tier and to the
             // raw concept_score.  Without this, a mega-binding with a
             // 797-member POOL_TEXT footprint (runaway concept-of-
@@ -2218,15 +2481,16 @@ impl Brain {
             // matching by partial-substring emergence (e.g. 'fox'
             // concept fires from OOV 'foobarbaz') wins concept-tier
             // preempt and breaks OOV honesty.
-            let concept_ok = concept_score >= min_atom_score
-                          && atom_score    >= 0.20;
-            let atom_ok    = seq_match || atom_score >= min_atom_score;
-            if !concept_ok && !atom_ok { continue; }
+            let concept_ok = concept_score >= min_atom_score && atom_score >= 0.20;
+            let atom_ok = seq_match || atom_score >= min_atom_score;
+            if !concept_ok && !atom_ok {
+                continue;
+            }
 
             // Concept-tier match preempts atom-tier ONLY when the
             // concept_score itself crosses the floor.
             let base_score = if concept_ok {
-                concept_score + 1.0   // concept-tier preempt bonus
+                concept_score + 1.0 // concept-tier preempt bonus
             } else {
                 atom_score
             };
@@ -2245,15 +2509,20 @@ impl Brain {
             // dense training.
             let freq_strength: f32 = {
                 let raw = std::env::var("BRAIN_FREQ_WEIGHT").ok();
-                let st = self.fabric.pool(query_pool)
+                let st = self
+                    .fabric
+                    .pool(query_pool)
                     .map(|p| p.read().control_state());
                 match (raw, st) {
                     (Some(s), Some(state)) => {
                         let s = s.trim();
-                        if let Ok(v) = s.parse::<f32>() { v.clamp(0.0, 8.0) }
-                        else if let Ok(mode) = serde_json::from_str::<crate::ControlMode>(s) {
+                        if let Ok(v) = s.parse::<f32>() {
+                            v.clamp(0.0, 8.0)
+                        } else if let Ok(mode) = serde_json::from_str::<crate::ControlMode>(s) {
                             mode.evaluate(&state).clamp(0.0, 8.0)
-                        } else { 1.0 }
+                        } else {
+                            1.0
+                        }
                     }
                     _ => 1.0,
                 }
@@ -2274,14 +2543,23 @@ impl Brain {
                 None => true,
                 Some((_, prev_score, prev_target_count, prev_has_concept, prev_seq_match)) => {
                     // Sequence-match preempt is the highest tier.
-                    if seq_match && !*prev_seq_match { true }
-                    else if !seq_match && *prev_seq_match { false }
+                    if seq_match && !*prev_seq_match {
+                        true
+                    } else if !seq_match && *prev_seq_match {
+                        false
+                    }
                     // Concept-tier beats atom-tier.
-                    else if has_concept && !*prev_has_concept { true }
-                    else if !has_concept && *prev_has_concept { false }
+                    else if has_concept && !*prev_has_concept {
+                        true
+                    } else if !has_concept && *prev_has_concept {
+                        false
+                    }
                     // Same tier — higher score wins.
-                    else if score > *prev_score { true }
-                    else if score < *prev_score { false }
+                    else if score > *prev_score {
+                        true
+                    } else if score < *prev_score {
+                        false
+                    }
                     // Tie on score AND on use_count (freq weight) —
                     // tiebreak by target_count.  Direction controlled
                     // by BRAIN_TARGET_TIEBREAK env var as ControlMode
@@ -2293,15 +2571,22 @@ impl Brain {
                     else {
                         let tiebreak_pref: f32 = {
                             let raw = std::env::var("BRAIN_TARGET_TIEBREAK").ok();
-                            let st = self.fabric.pool(query_pool)
+                            let st = self
+                                .fabric
+                                .pool(query_pool)
                                 .map(|p| p.read().control_state());
                             match (raw, st) {
                                 (Some(s), Some(state)) => {
                                     let s = s.trim();
-                                    if let Ok(v) = s.parse::<f32>() { v.clamp(0.0, 1.0) }
-                                    else if let Ok(mode) = serde_json::from_str::<crate::ControlMode>(s) {
+                                    if let Ok(v) = s.parse::<f32>() {
+                                        v.clamp(0.0, 1.0)
+                                    } else if let Ok(mode) =
+                                        serde_json::from_str::<crate::ControlMode>(s)
+                                    {
                                         mode.evaluate(&state).clamp(0.0, 1.0)
-                                    } else { 0.0 }
+                                    } else {
+                                        0.0
+                                    }
                                 }
                                 _ => 0.0,
                             }
@@ -2331,12 +2616,17 @@ impl Brain {
         // moment's ordered atoms are the lossless response representation;
         // use concepts only for older/concept-only bindings that have no
         // target atoms.
-        let target_members: Vec<NeuronRef> = bnode.members.iter()
+        let target_members: Vec<NeuronRef> = bnode
+            .members
+            .iter()
             .filter(|m| m.pool == target_pool)
             .copied()
             .collect();
-        if target_members.is_empty() { return None; }
-        let target_atoms: Vec<NeuronRef> = target_members.iter()
+        if target_members.is_empty() {
+            return None;
+        }
+        let target_atoms: Vec<NeuronRef> = target_members
+            .iter()
             .filter(|m| t.get(m.neuron).is_some_and(|n| n.is_atom()))
             .copied()
             .collect();
@@ -2364,7 +2654,9 @@ impl Brain {
             // Has concept-tier bonus (+1.0).  Recover the freq-weighted
             // concept portion, then clamp to [0,1].
             (winning_score - 1.0).min(1.0)
-        } else { winning_score.min(1.0) };
+        } else {
+            winning_score.min(1.0)
+        };
         if let Some(qp) = self.fabric.pool(query_pool) {
             qp.write().record_decode_precision(raw_score);
         }
@@ -2422,16 +2714,26 @@ impl Brain {
         query_pools: &[PoolId],
         target_pool: PoolId,
     ) -> Option<Vec<u8>> {
-        let mut query_ids: Vec<PoolId> = query_pools.iter().copied()
+        let mut query_ids: Vec<PoolId> = query_pools
+            .iter()
+            .copied()
             .filter(|pid| *pid != target_pool && *pid != self.binding_pool_id)
             .collect();
         query_ids.sort_unstable();
         query_ids.dedup();
-        if query_ids.is_empty() { return None; }
-        let min_pool_score = std::env::var("BRAIN_MULTI_MIN_POOL_SCORE").ok()
-            .and_then(|value| value.parse::<f32>().ok()).unwrap_or(0.20).clamp(0.0, 1.0);
-        let min_joint_score = std::env::var("BRAIN_MULTI_MIN_JOINT_SCORE").ok()
-            .and_then(|value| value.parse::<f32>().ok()).unwrap_or(0.0).clamp(0.0, 1.0);
+        if query_ids.is_empty() {
+            return None;
+        }
+        let min_pool_score = std::env::var("BRAIN_MULTI_MIN_POOL_SCORE")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(0.20)
+            .clamp(0.0, 1.0);
+        let min_joint_score = std::env::var("BRAIN_MULTI_MIN_JOINT_SCORE")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
 
         struct QueryState {
             atoms: ahash::AHashSet<NeuronId>,
@@ -2446,17 +2748,26 @@ impl Brain {
             let mut concepts = ahash::AHashSet::new();
             for nid in pool.currently_firing() {
                 match pool.get(nid) {
-                    Some(n) if n.is_atom() => { atoms.insert(nid); }
-                    Some(_) => { concepts.insert(nid); }
+                    Some(n) if n.is_atom() => {
+                        atoms.insert(nid);
+                    }
+                    Some(_) => {
+                        concepts.insert(nid);
+                    }
                     None => {}
                 }
             }
-            if atoms.is_empty() && concepts.is_empty() { return None; }
-            states.insert(*pid, QueryState {
-                atoms,
-                concepts,
-                sequence: pool.last_observed_sequence().to_vec(),
-            });
+            if atoms.is_empty() && concepts.is_empty() {
+                return None;
+            }
+            states.insert(
+                *pid,
+                QueryState {
+                    atoms,
+                    concepts,
+                    sequence: pool.last_observed_sequence().to_vec(),
+                },
+            );
         }
 
         let binding_handle = self.fabric.pool(self.binding_pool_id)?;
@@ -2464,9 +2775,15 @@ impl Brain {
         // binding id, exact-sequence pool count, joint score, target size
         let mut best: Option<(NeuronId, usize, f32, usize)> = None;
         for binding in bindings.iter_neurons().filter(|n| !n.is_atom()) {
-            let target_members: Vec<NeuronRef> = binding.members.iter()
-                .filter(|m| m.pool == target_pool).copied().collect();
-            if target_members.is_empty() { continue; }
+            let target_members: Vec<NeuronRef> = binding
+                .members
+                .iter()
+                .filter(|m| m.pool == target_pool)
+                .copied()
+                .collect();
+            if target_members.is_empty() {
+                continue;
+            }
 
             let mut joint_score = 1.0f32;
             let mut exact_count = 0usize;
@@ -2480,7 +2797,9 @@ impl Brain {
                 for member in binding.members.iter().filter(|m| m.pool == *pid) {
                     match pool.get(member.neuron) {
                         Some(n) if n.is_atom() => member_atoms.push(member.neuron),
-                        Some(_) => { member_concepts.insert(member.neuron); }
+                        Some(_) => {
+                            member_concepts.insert(member.neuron);
+                        }
                         None => {}
                     }
                 }
@@ -2489,18 +2808,30 @@ impl Brain {
                     break;
                 }
                 let exact = !state.sequence.is_empty() && member_atoms == state.sequence;
-                if exact { exact_count += 1; }
+                if exact {
+                    exact_count += 1;
+                }
                 let member_atom_set: ahash::AHashSet<NeuronId> =
                     member_atoms.iter().copied().collect();
                 let atom_hits = member_atom_set.intersection(&state.atoms).count() as f32;
-                let atom_score = if member_atom_set.is_empty() || state.atoms.is_empty() { 0.0 }
-                    else { (atom_hits / member_atom_set.len() as f32)
-                         * (atom_hits / state.atoms.len() as f32) };
+                let atom_score = if member_atom_set.is_empty() || state.atoms.is_empty() {
+                    0.0
+                } else {
+                    (atom_hits / member_atom_set.len() as f32)
+                        * (atom_hits / state.atoms.len() as f32)
+                };
                 let concept_hits = member_concepts.intersection(&state.concepts).count() as f32;
-                let concept_score = if member_concepts.is_empty() || state.concepts.is_empty() { 0.0 }
-                    else { (concept_hits / member_concepts.len() as f32)
-                         * (concept_hits / state.concepts.len() as f32) };
-                let pool_score = if exact { 1.0 } else { atom_score.max(concept_score) };
+                let concept_score = if member_concepts.is_empty() || state.concepts.is_empty() {
+                    0.0
+                } else {
+                    (concept_hits / member_concepts.len() as f32)
+                        * (concept_hits / state.concepts.len() as f32)
+                };
+                let pool_score = if exact {
+                    1.0
+                } else {
+                    atom_score.max(concept_score)
+                };
                 if pool_score < min_pool_score {
                     valid = false;
                     break;
@@ -2509,9 +2840,13 @@ impl Brain {
                 // below keeps scores comparable as topology adds pools.
                 joint_score *= pool_score.max(f32::EPSILON);
             }
-            if !valid { continue; }
+            if !valid {
+                continue;
+            }
             joint_score = joint_score.powf(1.0 / query_ids.len() as f32);
-            if joint_score < min_joint_score { continue; }
+            if joint_score < min_joint_score {
+                continue;
+            }
             joint_score *= 1.0 + (binding.use_count.max(1) as f32).ln();
             let candidate = (binding.id, exact_count, joint_score, target_members.len());
             let replace = match best {
@@ -2519,22 +2854,31 @@ impl Brain {
                 Some((_, best_exact, best_score, best_size)) => {
                     exact_count > best_exact
                         || (exact_count == best_exact && joint_score > best_score)
-                        || (exact_count == best_exact && joint_score == best_score
+                        || (exact_count == best_exact
+                            && joint_score == best_score
                             && target_members.len() < best_size)
                 }
             };
-            if replace { best = Some(candidate); }
+            if replace {
+                best = Some(candidate);
+            }
         }
 
         let (binding_id, _, _, _) = best?;
         let binding = bindings.get(binding_id)?;
         let target_handle = self.fabric.pool(target_pool)?;
         let target = target_handle.read();
-        let members: Vec<NeuronRef> = binding.members.iter()
-            .filter(|m| m.pool == target_pool).copied().collect();
-        let atoms: Vec<NeuronRef> = members.iter()
+        let members: Vec<NeuronRef> = binding
+            .members
+            .iter()
+            .filter(|m| m.pool == target_pool)
+            .copied()
+            .collect();
+        let atoms: Vec<NeuronRef> = members
+            .iter()
             .filter(|m| target.get(m.neuron).is_some_and(|n| n.is_atom()))
-            .copied().collect();
+            .copied()
+            .collect();
         let bytes = if atoms.is_empty() {
             target.decode_concept_members(&members)
         } else {
@@ -2553,8 +2897,10 @@ impl Brain {
         target_pool: PoolId,
         max_results: usize,
     ) -> Vec<Vec<u8>> {
-        if max_results == 0 || feature_pool == target_pool
-            || feature_pool == self.binding_pool_id || target_pool == self.binding_pool_id
+        if max_results == 0
+            || feature_pool == target_pool
+            || feature_pool == self.binding_pool_id
+            || target_pool == self.binding_pool_id
         {
             return Vec::new();
         }
@@ -2563,17 +2909,22 @@ impl Brain {
             None => return Vec::new(),
         };
         let features = feature_handle.read();
-        let query_atoms: ahash::AHashSet<NeuronId> = query_labels.iter()
+        let query_atoms: ahash::AHashSet<NeuronId> = query_labels
+            .iter()
             .filter_map(|label| features.label_to_id(label))
             .collect();
-        if query_atoms.len() < 3 { return Vec::new(); }
+        if query_atoms.len() < 3 {
+            return Vec::new();
+        }
 
         fn collect_atoms(
             pool: &crate::Pool,
             neuron_id: NeuronId,
             output: &mut ahash::AHashSet<NeuronId>,
         ) {
-            let Some(neuron) = pool.get(neuron_id) else { return; };
+            let Some(neuron) = pool.get(neuron_id) else {
+                return;
+            };
             if neuron.is_atom() {
                 output.insert(neuron_id);
             } else {
@@ -2593,21 +2944,36 @@ impl Brain {
         let mut ranked: Vec<(NeuronId, usize, u64, usize)> = Vec::new();
         for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
             let mut binding_atoms = ahash::AHashSet::new();
-            for member in binding.members.iter().filter(|member| member.pool == feature_pool) {
+            for member in binding
+                .members
+                .iter()
+                .filter(|member| member.pool == feature_pool)
+            {
                 collect_atoms(&features, member.neuron, &mut binding_atoms);
             }
-            if binding_atoms.len() < 2 { continue; }
+            if binding_atoms.len() < 2 {
+                continue;
+            }
             let hits = binding_atoms.intersection(&query_atoms).count();
-            if hits < 2 || hits != binding_atoms.len() { continue; }
-            let target_size = binding.members.iter()
-                .filter(|member| member.pool == target_pool).count();
-            if target_size == 0 { continue; }
+            if hits < 2 || hits != binding_atoms.len() {
+                continue;
+            }
+            let target_size = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == target_pool)
+                .count();
+            if target_size == 0 {
+                continue;
+            }
             ranked.push((binding.id, hits, binding.use_count, target_size));
         }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1)
-            .then_with(|| b.2.cmp(&a.2))
-            .then_with(|| a.3.cmp(&b.3))
-            .then_with(|| a.0.cmp(&b.0)));
+        ranked.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.3.cmp(&b.3))
+                .then_with(|| a.0.cmp(&b.0))
+        });
 
         let target_handle = match self.fabric.pool(target_pool) {
             Some(pool) => pool,
@@ -2617,12 +2983,24 @@ impl Brain {
         let mut decoded = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (binding_id, _, _, _) in ranked {
-            let Some(binding) = bindings.get(binding_id) else { continue; };
-            let members: Vec<NeuronRef> = binding.members.iter()
-                .filter(|member| member.pool == target_pool).copied().collect();
-            let atoms: Vec<NeuronRef> = members.iter()
-                .filter(|member| target.get(member.neuron).is_some_and(|neuron| neuron.is_atom()))
-                .copied().collect();
+            let Some(binding) = bindings.get(binding_id) else {
+                continue;
+            };
+            let members: Vec<NeuronRef> = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == target_pool)
+                .copied()
+                .collect();
+            let atoms: Vec<NeuronRef> = members
+                .iter()
+                .filter(|member| {
+                    target
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .copied()
+                .collect();
             let bytes = if atoms.is_empty() {
                 target.decode_concept_members(&members)
             } else {
@@ -2630,45 +3008,277 @@ impl Brain {
             };
             if !bytes.is_empty() && seen.insert(bytes.clone()) {
                 decoded.push(bytes);
-                if decoded.len() >= max_results { break; }
+                if decoded.len() >= max_results {
+                    break;
+                }
             }
         }
         decoded
+    }
+
+    /// Return a target only when one learned binding covers the complete
+    /// activated feature set. This is stricter than ranked composition,
+    /// whose candidates are intentionally allowed to cover subsets so that
+    /// several independent behaviors can be merged.
+    pub fn decode_exact_feature_binding(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+    ) -> Option<Vec<u8>> {
+        let feature_handle = self.fabric.pool(feature_pool)?;
+        let feature = feature_handle.read();
+        let query_atoms: ahash::AHashSet<NeuronId> = query_labels
+            .iter()
+            .filter_map(|label| feature.label_to_id(label))
+            .collect();
+        if query_atoms.len() < 2 {
+            return None;
+        }
+        let bindings_handle = self.fabric.pool(self.binding_pool_id)?;
+        let bindings = bindings_handle.read();
+        let mut best: Option<(NeuronId, u64)> = None;
+        for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
+            let binding_atoms: ahash::AHashSet<NeuronId> = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == feature_pool)
+                .filter(|member| {
+                    feature
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .map(|member| member.neuron)
+                .collect();
+            if binding_atoms != query_atoms {
+                continue;
+            }
+            if !binding
+                .members
+                .iter()
+                .any(|member| member.pool == target_pool)
+            {
+                continue;
+            }
+            if best.is_none_or(|(_, uses)| binding.use_count > uses) {
+                best = Some((binding.id, binding.use_count));
+            }
+        }
+        let binding = bindings.get(best?.0)?;
+        let target_handle = self.fabric.pool(target_pool)?;
+        let target = target_handle.read();
+        let members: Vec<NeuronRef> = binding
+            .members
+            .iter()
+            .filter(|member| member.pool == target_pool)
+            .copied()
+            .collect();
+        let atoms: Vec<NeuronRef> = members
+            .iter()
+            .filter(|member| {
+                target
+                    .get(member.neuron)
+                    .is_some_and(|neuron| neuron.is_atom())
+            })
+            .copied()
+            .collect();
+        let bytes = if atoms.is_empty() {
+            target.decode_concept_members(&members)
+        } else {
+            target.decode_concept_members(&atoms)
+        };
+        (!bytes.is_empty()).then_some(bytes)
+    }
+
+    /// Decode a learned target binding by similarity of overlapping character
+    /// motifs in the raw source frames. This is an atom-stream generalization
+    /// path: it uses normalized character trigrams, never word tokens, and
+    /// returns only verbatim target evidence from an existing binding.
+    pub fn decode_best_binding_by_char_motifs(
+        &self,
+        query_pool: PoolId,
+        query_frame: &[u8],
+        target_pool: PoolId,
+        min_score: f32,
+    ) -> Option<Vec<u8>> {
+        self.decode_best_binding_by_char_motifs_with_margin(
+            query_pool,
+            query_frame,
+            target_pool,
+            min_score,
+            0.0,
+        )
+        .map(|(bytes, _, _)| bytes)
+    }
+
+    /// Scored character-motif route with a winner-vs-runner-up intent-class
+    /// margin. Bindings that decode to the same target frame reinforce one
+    /// class; they do not compete as separate memorized paraphrases.
+    pub fn decode_best_binding_by_char_motifs_with_margin(
+        &self,
+        query_pool: PoolId,
+        query_frame: &[u8],
+        target_pool: PoolId,
+        min_score: f32,
+        min_margin: f32,
+    ) -> Option<(Vec<u8>, f32, f32)> {
+        if query_pool == target_pool
+            || query_pool == self.binding_pool_id
+            || target_pool == self.binding_pool_id
+        {
+            return None;
+        }
+        fn motifs(bytes: &[u8]) -> std::collections::HashSet<[u8; 3]> {
+            let mut normalized = Vec::with_capacity(bytes.len());
+            let mut previous_space = true;
+            for byte in bytes.iter().map(|byte| byte.to_ascii_lowercase()) {
+                if byte.is_ascii_alphanumeric() {
+                    normalized.push(byte);
+                    previous_space = false;
+                } else if !previous_space {
+                    normalized.push(b' ');
+                    previous_space = true;
+                }
+            }
+            if normalized.last() == Some(&b' ') {
+                normalized.pop();
+            }
+            normalized
+                .windows(3)
+                .map(|window| [window[0], window[1], window[2]])
+                .collect()
+        }
+        let query_motifs = motifs(query_frame);
+        if query_motifs.is_empty() {
+            return None;
+        }
+        let query_handle = self.fabric.pool(query_pool)?;
+        let query = query_handle.read();
+        let bindings_handle = self.fabric.pool(self.binding_pool_id)?;
+        let bindings = bindings_handle.read();
+        let target_handle = self.fabric.pool(target_pool)?;
+        let target = target_handle.read();
+        let mut classes: std::collections::HashMap<Vec<u8>, (f32, u64)> =
+            std::collections::HashMap::new();
+        for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
+            if !binding
+                .members
+                .iter()
+                .any(|member| member.pool == target_pool)
+            {
+                continue;
+            }
+            let source_atoms: Vec<NeuronRef> = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == query_pool)
+                .filter(|member| {
+                    query
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .copied()
+                .collect();
+            if source_atoms.is_empty() {
+                continue;
+            }
+            let learned_frame = query.decode_concept_members(&source_atoms);
+            let learned_motifs = motifs(&learned_frame);
+            if learned_motifs.is_empty() {
+                continue;
+            }
+            let overlap = query_motifs.intersection(&learned_motifs).count() as f32;
+            let score = (2.0 * overlap) / (query_motifs.len() + learned_motifs.len()) as f32;
+            if score < min_score {
+                continue;
+            }
+            let members: Vec<NeuronRef> = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == target_pool)
+                .copied()
+                .collect();
+            let atoms: Vec<NeuronRef> = members
+                .iter()
+                .filter(|member| {
+                    target
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .copied()
+                .collect();
+            let bytes = if atoms.is_empty() {
+                target.decode_concept_members(&members)
+            } else {
+                target.decode_concept_members(&atoms)
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            let candidate = (score, binding.use_count);
+            let entry = classes.entry(bytes).or_insert(candidate);
+            if candidate.0 > entry.0 || (candidate.0 == entry.0 && candidate.1 > entry.1) {
+                *entry = candidate;
+            }
+        }
+        let mut ranked: Vec<(Vec<u8>, f32, u64)> = classes
+            .into_iter()
+            .map(|(bytes, (score, uses))| (bytes, score, uses))
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.2.cmp(&a.2))
+        });
+        let runner_score = ranked.get(1).map(|candidate| candidate.1).unwrap_or(0.0);
+        let (bytes, score, _) = ranked.into_iter().next()?;
+        let margin = score - runner_score;
+        (margin >= min_margin).then_some((bytes, score, margin))
     }
 
     fn best_binding_match_atom_tier(&self, query_pool: PoolId) -> BindingMatch {
         let q_atoms: ahash::AHashSet<NeuronId> = {
             let q = match self.fabric.pool(query_pool) {
                 Some(p) => p,
-                None    => return BindingMatch::NONE,
+                None => return BindingMatch::NONE,
             };
             let q = q.read();
             q.currently_firing()
                 .filter(|nid| q.get(*nid).map_or(false, |n| n.is_atom()))
                 .collect()
         };
-        if q_atoms.is_empty() { return BindingMatch::NONE; }
+        if q_atoms.is_empty() {
+            return BindingMatch::NONE;
+        }
 
         let bpid = self.binding_pool_id;
         let bp = match self.fabric.pool(bpid) {
             Some(p) => p,
-            None    => return BindingMatch::NONE,
+            None => return BindingMatch::NONE,
         };
         let bp_read = bp.read();
         let mut best = BindingMatch::NONE;
         for n in bp_read.iter_neurons() {
-            if n.is_atom() { continue; }
-            let bind_query: ahash::AHashSet<NeuronId> = n.members.iter()
+            if n.is_atom() {
+                continue;
+            }
+            let bind_query: ahash::AHashSet<NeuronId> = n
+                .members
+                .iter()
                 .filter(|m| m.pool == query_pool)
                 .map(|m| m.neuron)
                 .collect();
-            if bind_query.is_empty() { continue; }
-            let intersect = bind_query.iter()
-                .filter(|a| q_atoms.contains(a))
-                .count() as f32;
+            if bind_query.is_empty() {
+                continue;
+            }
+            let intersect = bind_query.iter().filter(|a| q_atoms.contains(a)).count() as f32;
             let precision = intersect / bind_query.len() as f32;
             let recall = intersect / q_atoms.len() as f32;
-            let candidate = BindingMatch { precision, recall, tier: MatchTier::Atom };
+            let candidate = BindingMatch {
+                precision,
+                recall,
+                tier: MatchTier::Atom,
+            };
             if candidate.score() > best.score() {
                 best = candidate;
             }
@@ -2686,28 +3296,25 @@ impl Brain {
         //                              ARCHITECTURE.md, these are
         //                              concept-LAYER evidence not
         //                              atom-LAYER noise)
-        let (
-            query_concept_set,
-            firing_concepts,
-            firing_atoms,
-            concept_member_atoms,
-            firing_total,
-        ) = {
+        let (query_concept_set, firing_concepts, firing_atoms, concept_member_atoms, firing_total) = {
             let qp = match self.fabric.pool(query_pool) {
                 Some(p) => p,
-                None    => return BindingMatch::NONE,
+                None => return BindingMatch::NONE,
             };
             let q = qp.read();
-            let concept_set: ahash::AHashSet<NeuronId> = q.iter_neurons()
+            let concept_set: ahash::AHashSet<NeuronId> = q
+                .iter_neurons()
                 .filter(|n| !n.is_atom())
                 .map(|n| n.id)
                 .collect();
             let firing: Vec<NeuronId> = q.currently_firing().collect();
-            let firing_concepts: ahash::AHashSet<NeuronId> = firing.iter()
+            let firing_concepts: ahash::AHashSet<NeuronId> = firing
+                .iter()
                 .copied()
                 .filter(|nid| concept_set.contains(nid))
                 .collect();
-            let firing_atoms: ahash::AHashSet<NeuronId> = firing.iter()
+            let firing_atoms: ahash::AHashSet<NeuronId> = firing
+                .iter()
                 .copied()
                 .filter(|nid| !concept_set.contains(nid))
                 .collect();
@@ -2717,8 +3324,7 @@ impl Brain {
             // up in `currently_firing`.  Counting those atoms as
             // atom-layer noise would discard the trained sequence-precedence
             // signal — the Stage 11A bug fixed here.
-            let mut concept_member_atoms: ahash::AHashSet<NeuronId> =
-                ahash::AHashSet::new();
+            let mut concept_member_atoms: ahash::AHashSet<NeuronId> = ahash::AHashSet::new();
             for &cid in &firing_concepts {
                 if let Some(c) = q.get(cid) {
                     for m in &c.members {
@@ -2728,7 +3334,13 @@ impl Brain {
                     }
                 }
             }
-            (concept_set, firing_concepts, firing_atoms, concept_member_atoms, firing.len())
+            (
+                concept_set,
+                firing_concepts,
+                firing_atoms,
+                concept_member_atoms,
+                firing.len(),
+            )
         };
 
         if firing_concepts.is_empty() || firing_total == 0 {
@@ -2759,8 +3371,7 @@ impl Brain {
         // concept_layer = 1 + 4 = 5, total = 11, ratio = 0.45.  Falls
         // back to atom-tier — correct, because the query IS dominated
         // by loose atoms.
-        let concept_layer_evidence =
-            firing_concepts.len() + concept_member_atoms.len();
+        let concept_layer_evidence = firing_concepts.len() + concept_member_atoms.len();
         let layer_coverage = concept_layer_evidence as f32 / firing_total as f32;
         if layer_coverage < 0.5 {
             return BindingMatch::NONE;
@@ -2769,24 +3380,35 @@ impl Brain {
         let bpid = self.binding_pool_id;
         let bp = match self.fabric.pool(bpid) {
             Some(p) => p,
-            None    => return BindingMatch::NONE,
+            None => return BindingMatch::NONE,
         };
         let bp_read = bp.read();
         let mut best = BindingMatch::NONE;
         for n in bp_read.iter_neurons() {
-            if n.is_atom() { continue; }
-            let bind_concepts: ahash::AHashSet<NeuronId> = n.members.iter()
+            if n.is_atom() {
+                continue;
+            }
+            let bind_concepts: ahash::AHashSet<NeuronId> = n
+                .members
+                .iter()
                 .filter(|m| m.pool == query_pool)
                 .map(|m| m.neuron)
                 .filter(|nid| query_concept_set.contains(nid))
                 .collect();
-            if bind_concepts.is_empty() { continue; }
-            let intersect = bind_concepts.iter()
+            if bind_concepts.is_empty() {
+                continue;
+            }
+            let intersect = bind_concepts
+                .iter()
                 .filter(|a| firing_concepts.contains(a))
                 .count() as f32;
             let precision = intersect / bind_concepts.len() as f32;
             let recall = intersect / firing_concepts.len() as f32;
-            let candidate = BindingMatch { precision, recall, tier: MatchTier::Concept };
+            let candidate = BindingMatch {
+                precision,
+                recall,
+                tier: MatchTier::Concept,
+            };
             if candidate.score() > best.score() {
                 best = candidate;
             }
@@ -2811,11 +3433,11 @@ impl Brain {
     /// `max_iter`/`eps`: settling parameters; see `Fabric::settle`.
     pub fn integrate_resonant(
         &self,
-        query_pool:    PoolId,
-        target_pools:  &[PoolId],
-        top_per_pool:  usize,
-        max_iter:      usize,
-        eps:           f32,
+        query_pool: PoolId,
+        target_pools: &[PoolId],
+        top_per_pool: usize,
+        max_iter: usize,
+        eps: f32,
     ) -> ResonantExtrusion {
         let settle = self.fabric.settle(
             query_pool,
@@ -2828,7 +3450,7 @@ impl Brain {
         for &tp in target_pools {
             let pool_handle = match self.fabric.pool(tp) {
                 Some(p) => p,
-                None    => {
+                None => {
                     per_pool.push(PoolExtrusion {
                         pool: tp,
                         decoded: Vec::new(),
@@ -2862,12 +3484,17 @@ impl Brain {
                         ranked.push((n.id, act, false));
                     }
                 } else {
-                    let in_pool_members: Vec<NeuronId> = n.members.iter()
+                    let in_pool_members: Vec<NeuronId> = n
+                        .members
+                        .iter()
                         .filter(|m| m.pool == tp)
                         .map(|m| m.neuron)
                         .collect();
-                    if in_pool_members.is_empty() { continue; }
-                    let sum: f32 = in_pool_members.iter()
+                    if in_pool_members.is_empty() {
+                        continue;
+                    }
+                    let sum: f32 = in_pool_members
+                        .iter()
                         .map(|nid| atom_acts.get(nid).copied().unwrap_or(0.0))
                         .sum();
                     let avg = sum / in_pool_members.len() as f32;
@@ -2899,7 +3526,7 @@ impl Brain {
             for (nid, score, _is_concept) in ranked {
                 let neuron = match pool.get(nid) {
                     Some(n) => n,
-                    None    => continue,
+                    None => continue,
                 };
                 let bytes: Vec<u8> = if neuron.is_atom() {
                     pool.encoding_reassemble(&[(neuron.label.as_str(), 1.0)])
@@ -2907,9 +3534,9 @@ impl Brain {
                     pool.decode_concept_members(&neuron.members)
                 };
                 decoded.push(DecodedConcept {
-                    neuron:     NeuronRef::new(tp, nid),
+                    neuron: NeuronRef::new(tp, nid),
                     activation: score,
-                    label:      neuron.label.clone(),
+                    label: neuron.label.clone(),
                     bytes,
                 });
             }
@@ -2918,8 +3545,8 @@ impl Brain {
 
         ResonantExtrusion {
             iterations_run: settle.iterations_run,
-            converged:      settle.converged,
-            pools:          per_pool,
+            converged: settle.converged,
+            pools: per_pool,
         }
     }
 
@@ -2947,28 +3574,30 @@ impl Brain {
     /// prompts ("doggy" → animal, "blue!" → color).
     pub fn integrate_autonomous(
         &self,
-        query_pool:                  PoolId,
-        target_pool:                 PoolId,
+        query_pool: PoolId,
+        target_pool: PoolId,
         fabric_confidence_threshold: f32,
-        chain_max_depth:             usize,
-        chain_max_visit:             usize,
+        chain_max_depth: usize,
+        chain_max_visit: usize,
     ) -> AnswerWithGrounding {
         self.integrate_autonomous_tuned(
-            query_pool, target_pool,
+            query_pool,
+            target_pool,
             fabric_confidence_threshold,
-            chain_max_depth, chain_max_visit,
+            chain_max_depth,
+            chain_max_visit,
             0.70,
         )
     }
 
     pub fn integrate_autonomous_tuned(
         &self,
-        query_pool:                  PoolId,
-        target_pool:                 PoolId,
+        query_pool: PoolId,
+        target_pool: PoolId,
         fabric_confidence_threshold: f32,
-        chain_max_depth:             usize,
-        chain_max_visit:             usize,
-        binding_match_threshold:     f32,
+        chain_max_depth: usize,
+        chain_max_visit: usize,
+        binding_match_threshold: f32,
     ) -> AnswerWithGrounding {
         // 0. Out-of-vocab gate (Stage 9 + Stage 11 concept tier).
         // SINGLE source of truth for "is this prompt grounded".  Tries
@@ -2994,19 +3623,21 @@ impl Brain {
                     peer_contributions: Vec::new(),
                 },
                 confidence_tier: ConfidenceTier::Ungrounded,
-                next_steps_if_ungrounded: vec![
-                    crate::grounding::RequestObservation {
-                        domain: format!(
-                            "no trained binding matches this prompt at tier={:?} \
+                next_steps_if_ungrounded: vec![crate::grounding::RequestObservation {
+                    domain: format!(
+                        "no trained binding matches this prompt at tier={:?} \
                              with sufficient precision",
-                            bm.tier).into(),
-                        examples_needed: 1,
-                        why: format!(
-                            "best binding precision={:.2} (tier={:?}) < threshold={:.2}",
-                            bm.precision, bm.tier, binding_match_threshold).into(),
-                        pool: query_pool,
-                    },
-                ],
+                        bm.tier
+                    )
+                    .into(),
+                    examples_needed: 1,
+                    why: format!(
+                        "best binding precision={:.2} (tier={:?}) < threshold={:.2}",
+                        bm.precision, bm.tier, binding_match_threshold
+                    )
+                    .into(),
+                    pool: query_pool,
+                }],
             };
         }
 
@@ -3022,8 +3653,11 @@ impl Brain {
         // a non-empty answer at or above `fabric_confidence_threshold`,
         // accept it instead of letting chain_explore re-decide.
         let fabric_ans = self.integrate(query_pool, target_pool);
-        let fabric_has_answer = fabric_ans.answer.as_ref()
-            .map(|b| !b.is_empty()).unwrap_or(false);
+        let fabric_has_answer = fabric_ans
+            .answer
+            .as_ref()
+            .map(|b| !b.is_empty())
+            .unwrap_or(false);
         if fabric_has_answer
             && fabric_ans.grounding.fabric_confidence >= fabric_confidence_threshold
         {
@@ -3044,7 +3678,7 @@ impl Brain {
         // refs the chain explorer walks from.
         let query_handle = match self.fabric.pool(query_pool) {
             Some(p) => p,
-            None    => return fabric_ans,
+            None => return fabric_ans,
         };
         let q = query_handle.read();
         let mut seed: Vec<(PoolId, NeuronId)> = Vec::new();
@@ -3052,16 +3686,21 @@ impl Brain {
             seed.push((query_pool, nid));
         }
         drop(q);
-        if seed.is_empty() { return fabric_ans; }
+        if seed.is_empty() {
+            return fabric_ans;
+        }
 
         // 3. Walk the EEM's grounded-fact graph from those seeds.
-        let chain = self.eem.chain_explore(&seed, chain_max_depth, chain_max_visit);
+        let chain = self
+            .eem
+            .chain_explore(&seed, chain_max_depth, chain_max_visit);
 
         // 4. Filter reached members to the target pool and rank by
         // chain confidence (product of fact confidences along the
         // shortest path).
         let mut target_candidates: Vec<((PoolId, NeuronId), f32)> = chain
-            .reached_members.iter()
+            .reached_members
+            .iter()
             .filter(|((p, _), _)| *p == target_pool)
             .map(|(k, v)| (*k, *v))
             .collect();
@@ -3070,8 +3709,8 @@ impl Brain {
             // attempt (which may have low confidence; honest signal).
             return fabric_ans;
         }
-        target_candidates.sort_by(|a, b|
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        target_candidates
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // 5. Annealer-guided ranking + Stage 11C multi-fact assembly.
         //
@@ -3081,15 +3720,17 @@ impl Brain {
         let prediction = self.annealer.predict_next(target_pool);
         let pred_frame = prediction.as_ref().map(|p| &p.predicted_frame);
 
-        let mut ranked: Vec<((PoolId, NeuronId), f32, f32)> = target_candidates.iter()
+        let mut ranked: Vec<((PoolId, NeuronId), f32, f32)> = target_candidates
+            .iter()
             .map(|(nref, conf)| {
-                let pred = pred_frame.and_then(|f| f.get(&nref.1).copied()).unwrap_or(0.0);
+                let pred = pred_frame
+                    .and_then(|f| f.get(&nref.1).copied())
+                    .unwrap_or(0.0);
                 let score = conf + 0.5 * pred;
                 (*nref, *conf, score)
             })
             .collect();
-        ranked.sort_by(|a, b|
-            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
         // Multi-fact gate.  Audit-2 hard cap: at most 4 facts assembled.
         // Audit-10 confidence-delta gate: facts 2..N are only included
@@ -3103,17 +3744,17 @@ impl Brain {
         const MULTI_FACT_SEP: &[u8] = b". ";
 
         let top_conf = ranked.first().map(|(_, c, _)| *c).unwrap_or(0.0);
-        let selected: Vec<((PoolId, NeuronId), f32)> = ranked.iter()
+        let selected: Vec<((PoolId, NeuronId), f32)> = ranked
+            .iter()
             .take(MULTI_FACT_CAP)
             .enumerate()
-            .filter(|(i, (_, c, _))|
-                *i == 0 || *c >= top_conf * MULTI_FACT_MIN_RATIO)
+            .filter(|(i, (_, c, _))| *i == 0 || *c >= top_conf * MULTI_FACT_MIN_RATIO)
             .map(|(_, (nref, c, _))| (*nref, *c))
             .collect();
 
         let (best_ref, best_conf) = match selected.first().copied() {
             Some(x) => x,
-            None    => return fabric_ans,
+            None => return fabric_ans,
         };
 
         // Multi-fact trigger correction (audit-8 single-fact pin).
@@ -3135,7 +3776,7 @@ impl Brain {
         // the period+space separator.
         let target_handle = match self.fabric.pool(target_pool) {
             Some(p) => p,
-            None    => return fabric_ans,
+            None => return fabric_ans,
         };
         let t = target_handle.read();
 
@@ -3146,7 +3787,7 @@ impl Brain {
                     Some(t.encoding_reassemble(&pairs))
                 }
                 Some(n) => Some(t.decode_concept_members(&n.members)),
-                None    => None,
+                None => None,
             }
         };
 
@@ -3180,8 +3821,8 @@ impl Brain {
             // decode like "alpha" or "beta"), assembly proceeds
             // normally, preserving back-compat with the multi-fact
             // regression pins.
-            let all_single_byte = !decoded_parts.is_empty()
-                && decoded_parts.iter().all(|p| p.len() == 1);
+            let all_single_byte =
+                !decoded_parts.is_empty() && decoded_parts.iter().all(|p| p.len() == 1);
             if all_single_byte || decoded_parts.is_empty() {
                 None
             } else if decoded_parts.len() == 1 {
@@ -3189,7 +3830,9 @@ impl Brain {
             } else {
                 let mut out = Vec::new();
                 for (i, part) in decoded_parts.iter().enumerate() {
-                    if i > 0 { out.extend_from_slice(MULTI_FACT_SEP); }
+                    if i > 0 {
+                        out.extend_from_slice(MULTI_FACT_SEP);
+                    }
                     out.extend_from_slice(part);
                 }
                 Some(out)
@@ -3205,7 +3848,8 @@ impl Brain {
         g.integrated_confidence = ((f * best_conf).sqrt()).max(best_conf * 0.5);
         g.strongest_match = Some(NeuronRef::new(target_pool, best_ref.1));
         g.composition_used = if fire_multi_fact {
-            selected.iter()
+            selected
+                .iter()
                 .map(|(nref, _)| NeuronRef::new(nref.0, nref.1))
                 .collect()
         } else {
@@ -3218,7 +3862,10 @@ impl Brain {
         g.outside_grounding = answer_bytes.as_ref().map(|b| b.is_empty()).unwrap_or(true);
         g.speculation_flag = true; // chain-composed answer is by definition speculation
         let tier = ConfidenceTier::from_confidence(
-            g.integrated_confidence, g.outside_grounding, g.speculation_flag);
+            g.integrated_confidence,
+            g.outside_grounding,
+            g.speculation_flag,
+        );
         AnswerWithGrounding {
             answer: answer_bytes,
             grounding: g,
@@ -3229,7 +3876,9 @@ impl Brain {
 
     /// Telemetry: count grounded facts the EEM has crystallized from
     /// binding emergence.
-    pub fn eem_fact_count(&self) -> usize { self.eem.fact_count() }
+    pub fn eem_fact_count(&self) -> usize {
+        self.eem.fact_count()
+    }
 
     // ---------------------------------------------------------------
     // Phase 5 — EEM-augmented integration (spec §4.D + §4.B).
@@ -3295,9 +3944,9 @@ impl Brain {
     /// elsewhere in the API.
     pub fn generate(
         &mut self,
-        query_pool:     PoolId,
-        target_pool:    PoolId,
-        max_steps:      usize,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        max_steps: usize,
         min_confidence: f32,
     ) -> Vec<u8> {
         self.generate_weighted(query_pool, target_pool, max_steps, min_confidence, 0.5)
@@ -3310,10 +3959,10 @@ impl Brain {
     /// important as propagation-activation.
     pub fn generate_weighted(
         &mut self,
-        query_pool:      PoolId,
-        target_pool:     PoolId,
-        max_steps:       usize,
-        min_confidence:  f32,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        max_steps: usize,
+        min_confidence: f32,
         annealer_weight: f32,
     ) -> Vec<u8> {
         let mut output: Vec<u8> = Vec::new();
@@ -3343,14 +3992,20 @@ impl Brain {
                 let mut best: Option<(NeuronRef, f32)> = None;
                 let mut best_score = f32::NEG_INFINITY;
                 for (&nid, &act) in target_act.iter() {
-                    if act < min_confidence { continue; }
+                    if act < min_confidence {
+                        continue;
+                    }
                     let n = match p.get(nid) {
                         Some(n) => n,
                         None => continue,
                     };
-                    if n.is_atom() { continue; }
+                    if n.is_atom() {
+                        continue;
+                    }
                     let r = NeuronRef::new(target_pool, nid);
-                    if already_emitted.contains(&r) { continue; }
+                    if already_emitted.contains(&r) {
+                        continue;
+                    }
                     let size = p.expanded_size(&n.members).max(1);
                     let pred_act = pred_frame
                         .and_then(|pf| pf.get(&nid).copied())
@@ -3362,14 +4017,19 @@ impl Brain {
                         best = Some((r, act));
                     }
                 }
-                best.and_then(|(r, _)| p.get(r.neuron).map(|n| (r, p.decode_concept_members(&n.members))))
+                best.and_then(|(r, _)| {
+                    p.get(r.neuron)
+                        .map(|n| (r, p.decode_concept_members(&n.members)))
+                })
             };
 
             let (r, bytes) = match chunk {
                 Some(x) => x,
                 None => break,
             };
-            if bytes.is_empty() { break; }
+            if bytes.is_empty() {
+                break;
+            }
 
             output.extend_from_slice(&bytes);
             already_emitted.insert(r);
@@ -3392,7 +4052,7 @@ impl Brain {
     /// `annealer_confidence` stays `None`.
     pub fn integrate_with_prediction(
         &self,
-        query_pool:  PoolId,
+        query_pool: PoolId,
         target_pool: PoolId,
     ) -> AnswerWithGrounding {
         let mut base = self.integrate(query_pool, target_pool);
@@ -3417,10 +4077,10 @@ impl Brain {
     /// stays `None` (honestly: the EEM could not contribute).
     pub fn integrate_with_equation(
         &self,
-        query_pool:    PoolId,
-        target_pool:   PoolId,
+        query_pool: PoolId,
+        target_pool: PoolId,
         equation_name: &str,
-        bindings:      &AHashMap<&str, f64>,
+        bindings: &AHashMap<&str, f64>,
     ) -> AnswerWithGrounding {
         let mut base = self.integrate(query_pool, target_pool);
         let application = self.eem.apply_by_name(equation_name, bindings);
@@ -3474,9 +4134,12 @@ impl Brain {
     /// configuration step; getting it wrong is a programmer error,
     /// not a runtime condition.
     pub fn register_action(&mut self, label: String) -> NeuronRef {
-        let pool_id = self.action_pool_id
+        let pool_id = self
+            .action_pool_id
             .expect("designate_action_pool must be called before register_action");
-        let pool = self.fabric.pool(pool_id)
+        let pool = self
+            .fabric
+            .pool(pool_id)
             .expect("action pool id is not a registered pool");
         let mut p = pool.write();
         if let Some(existing) = p.label_to_id(&label) {
@@ -3521,11 +4184,11 @@ impl Brain {
     pub fn take_action(&mut self, min_activation: f32) -> Vec<ActionEvent> {
         let pool_id = match self.action_pool_id {
             Some(p) => p,
-            None    => return Vec::new(),
+            None => return Vec::new(),
         };
         let pool = match self.fabric.pool(pool_id) {
             Some(p) => p,
-            None    => return Vec::new(),
+            None => return Vec::new(),
         };
 
         // Step 1: collect direct firings (from `fire_action` or
@@ -3543,27 +4206,34 @@ impl Brain {
         // Step 2: propagate from each non-action pool that has firing
         // neurons; merge activation reaching the action pool.
         for src_pool_id in self.fabric.pool_ids() {
-            if src_pool_id == pool_id { continue; }
+            if src_pool_id == pool_id {
+                continue;
+            }
             let any_firing = match self.fabric.pool(src_pool_id) {
                 Some(p) => p.read().currently_firing().next().is_some(),
-                None    => false,
+                None => false,
             };
-            if !any_firing { continue; }
+            if !any_firing {
+                continue;
+            }
             let propagated = self.fabric.propagate(src_pool_id);
             if let Some(act_map) = propagated.get(&pool_id) {
                 let p = pool.read();
                 for (&nid, &act) in act_map.iter() {
-                    if act < min_activation { continue; }
+                    if act < min_activation {
+                        continue;
+                    }
                     if let Some(n) = p.get(nid) {
-                        let entry = firings.entry(nid)
-                            .or_insert_with(|| (n.label.clone(), 0.0));
+                        let entry = firings.entry(nid).or_insert_with(|| (n.label.clone(), 0.0));
                         entry.1 = entry.1.max(act);
                     }
                 }
             }
         }
 
-        if firings.is_empty() { return Vec::new(); }
+        if firings.is_empty() {
+            return Vec::new();
+        }
 
         let tick = self.fabric.current_tick();
         let mut events = Vec::with_capacity(firings.len());
@@ -3574,14 +4244,18 @@ impl Brain {
         // fabric-level routing table, so we scan owning neurons.
         for (action_nid, (action_label, activation)) in firings {
             let action_ref = NeuronRef::new(pool_id, action_nid);
-            if self.emitted_this_tick.contains(&action_ref) { continue; }
+            if self.emitted_this_tick.contains(&action_ref) {
+                continue;
+            }
 
             let mut sources: Vec<NeuronRef> = Vec::new();
             for src_pool_id in self.fabric.pool_ids() {
-                if src_pool_id == pool_id { continue; }
+                if src_pool_id == pool_id {
+                    continue;
+                }
                 let src_pool = match self.fabric.pool(src_pool_id) {
                     Some(p) => p,
-                    None    => continue,
+                    None => continue,
                 };
                 let sp = src_pool.read();
                 let firing_here: ahash::AHashSet<NeuronId> = sp.currently_firing().collect();
@@ -3623,13 +4297,13 @@ impl Brain {
     pub fn feed_outcome(&mut self, action_id: ActionId, score: f32) -> bool {
         let event = match self.pending_actions.remove(&action_id) {
             Some(e) => e,
-            None    => return false,
+            None => return false,
         };
         let now = self.fabric.current_tick();
         for src in &event.sources {
             let src_pool = match self.fabric.pool(src.pool) {
                 Some(p) => p,
-                None    => continue,
+                None => continue,
             };
             let mut sp = src_pool.write();
             let max_w = sp.config.max_weight;
@@ -3644,7 +4318,9 @@ impl Brain {
                         delta_terminals = 1;
                     }
                 } else {
-                    if let Some(t) = n.terminals.iter_mut()
+                    if let Some(t) = n
+                        .terminals
+                        .iter_mut()
                         .find(|t| t.target == event.action_neuron)
                     {
                         t.weight = (t.weight + score).max(0.0);
@@ -3673,7 +4349,9 @@ impl Brain {
     // brain factory, not a baked-in stack.
     // ---------------------------------------------------------------
 
-    pub fn brain_id(&self) -> &str { &self.network.brain_id }
+    pub fn brain_id(&self) -> &str {
+        &self.network.brain_id
+    }
     pub fn set_brain_id(&mut self, id: impl Into<String>) {
         self.network.brain_id = id.into();
     }
@@ -3699,10 +4377,15 @@ impl Brain {
     /// duplicating.
     pub fn ingest_motif_gossip(&mut self, motifs: Vec<GossipMotif>) {
         for mut m in motifs {
-            if m.source_brain == self.network.brain_id { continue; }
+            if m.source_brain == self.network.brain_id {
+                continue;
+            }
             m.fingerprint.sort();
             let key = (m.source_brain.clone(), m.fingerprint.clone());
-            if let Some(slot) = self.network.received_motifs.iter_mut()
+            if let Some(slot) = self
+                .network
+                .received_motifs
+                .iter_mut()
                 .find(|(k, _)| *k == key)
             {
                 slot.1 = m;
@@ -3717,7 +4400,9 @@ impl Brain {
     }
 
     pub fn received_motifs_from(&self, peer: &str) -> Vec<&GossipMotif> {
-        self.network.received_motifs.iter()
+        self.network
+            .received_motifs
+            .iter()
             .filter(|((b, _), _)| b == peer)
             .map(|(_, m)| m)
             .collect()
@@ -3728,23 +4413,29 @@ impl Brain {
     /// honest and idempotent — receivers merge by confidence.
     pub fn export_equations_for_gossip(&self) -> Vec<GossipEquation> {
         let id = self.network.brain_id.clone();
-        self.eem.iter_equations().map(|eq| {
-            let variable_names = eq.variables.iter()
-                .filter_map(|vid| self.eem.variable(*vid).map(|v| v.name.clone()))
-                .collect();
-            let discipline_name = eq.discipline
-                .and_then(|did| self.eem.discipline(did).map(|d| d.name.clone()));
-            GossipEquation {
-                source_brain:         id.clone(),
-                name:                 eq.name.clone(),
-                expression:           eq.expression.clone(),
-                variable_names,
-                discipline_name,
-                confidence:           eq.confidence,
-                validation_successes: eq.validation_successes,
-                validation_failures:  eq.validation_failures,
-            }
-        }).collect()
+        self.eem
+            .iter_equations()
+            .map(|eq| {
+                let variable_names = eq
+                    .variables
+                    .iter()
+                    .filter_map(|vid| self.eem.variable(*vid).map(|v| v.name.clone()))
+                    .collect();
+                let discipline_name = eq
+                    .discipline
+                    .and_then(|did| self.eem.discipline(did).map(|d| d.name.clone()));
+                GossipEquation {
+                    source_brain: id.clone(),
+                    name: eq.name.clone(),
+                    expression: eq.expression.clone(),
+                    variable_names,
+                    discipline_name,
+                    confidence: eq.confidence,
+                    validation_successes: eq.validation_successes,
+                    validation_failures: eq.validation_failures,
+                }
+            })
+            .collect()
     }
 
     /// Merge peer equation deltas into the local EEM.  Conflict
@@ -3755,12 +4446,18 @@ impl Brain {
     /// equations are added at the peer's confidence.
     pub fn ingest_equation_gossip(&mut self, equations: Vec<GossipEquation>) {
         for ge in equations {
-            if ge.source_brain == self.network.brain_id { continue; }
+            if ge.source_brain == self.network.brain_id {
+                continue;
+            }
             // Variables: register by name (idempotent).
-            let var_ids: Vec<_> = ge.variable_names.iter()
+            let var_ids: Vec<_> = ge
+                .variable_names
+                .iter()
                 .map(|n| self.eem.register_variable(n.clone(), None))
                 .collect();
-            let disc_id = ge.discipline_name.as_ref()
+            let disc_id = ge
+                .discipline_name
+                .as_ref()
                 .map(|n| self.eem.register_discipline(n.clone()));
 
             match self.eem.equation_by_name(&ge.name) {
@@ -3769,11 +4466,12 @@ impl Brain {
                     if ge.confidence > local_conf {
                         // Replace expression and re-seat confidence /
                         // validation counters from the peer.
-                        self.eem.replace_equation_expression(eq_id, ge.expression.clone());
+                        self.eem
+                            .replace_equation_expression(eq_id, ge.expression.clone());
                         if let Some(eq) = self.eem.equation_mut(eq_id) {
-                            eq.confidence           = ge.confidence;
+                            eq.confidence = ge.confidence;
                             eq.validation_successes = ge.validation_successes;
-                            eq.validation_failures  = ge.validation_failures;
+                            eq.validation_failures = ge.validation_failures;
                         }
                     }
                 }
@@ -3785,9 +4483,9 @@ impl Brain {
                         disc_id,
                     );
                     if let Some(eq) = self.eem.equation_mut(eq_id) {
-                        eq.confidence           = ge.confidence;
+                        eq.confidence = ge.confidence;
                         eq.validation_successes = ge.validation_successes;
-                        eq.validation_failures  = ge.validation_failures;
+                        eq.validation_failures = ge.validation_failures;
                     }
                 }
             }
@@ -3824,19 +4522,25 @@ impl Brain {
     /// fabric confidence and the average weighted peer confidence.
     pub fn integrate_with_peers(
         &self,
-        query_pool:  PoolId,
+        query_pool: PoolId,
         target_pool: PoolId,
-        peers:       &[PeerContribution],
+        peers: &[PeerContribution],
     ) -> AnswerWithGrounding {
         let mut base = self.integrate(query_pool, target_pool);
-        if peers.is_empty() { return base; }
+        if peers.is_empty() {
+            return base;
+        }
 
         let mut weighted: Vec<(BrainId, f32)> = Vec::with_capacity(peers.len());
         let mut sum_weights = 0.0_f32;
         let mut sum_weighted_conf = 0.0_f32;
         for p in peers {
-            let rate = self.network.peer_accuracy
-                .get(&p.brain_id).map(|a| a.rate()).unwrap_or(0.5);
+            let rate = self
+                .network
+                .peer_accuracy
+                .get(&p.brain_id)
+                .map(|a| a.rate())
+                .unwrap_or(0.5);
             let weighted_conf = (p.fabric_confidence * rate).clamp(0.0, 1.0);
             weighted.push((p.brain_id.clone(), weighted_conf));
             sum_weights += rate;
@@ -3846,7 +4550,9 @@ impl Brain {
         let local_fabric = base.grounding.fabric_confidence;
         let peer_blend = if sum_weights > 1e-9 {
             sum_weighted_conf / sum_weights
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         // Blend local + peer 50/50 by weighted contribution mass.
         // A stronger local signal still dominates; a confident-and-
@@ -3892,19 +4598,19 @@ impl Brain {
         let mut binding_pool_config = PoolConfig::defaults("binding", binding_pool_id);
         binding_pool_config.concept_emergence_threshold = u32::MAX;
         let config = BrainConfig {
-            fabric:                      identity.fabric.clone(),
+            fabric: identity.fabric.clone(),
             binding_emergence_threshold: identity.binding_emergence_threshold,
             tentative_emergence_threshold: default_tentative_emergence_threshold(),
-            moment_history_window:       identity.moment_history_window,
-            min_atom_score:               identity.min_atom_score,
-            pressure_band_low:           default_pressure_band_low(),
-            pressure_band_high:          default_pressure_band_high(),
-            pressure_threshold_max:      default_pressure_threshold_max(),
-            pressure_observation_grace:  default_pressure_observation_grace(),
-            pressure_adjust_enabled:     default_pressure_adjust_enabled(),
+            moment_history_window: identity.moment_history_window,
+            min_atom_score: identity.min_atom_score,
+            pressure_band_low: default_pressure_band_low(),
+            pressure_band_high: default_pressure_band_high(),
+            pressure_threshold_max: default_pressure_threshold_max(),
+            pressure_observation_grace: default_pressure_observation_grace(),
+            pressure_adjust_enabled: default_pressure_adjust_enabled(),
             binding_pool_config,
-            eem:                         identity.eem.clone(),
-            annealer:                    identity.annealer.clone(),
+            eem: identity.eem.clone(),
+            annealer: identity.annealer.clone(),
         };
         let mut brain = Self::new(config);
 
@@ -3993,15 +4699,16 @@ impl Brain {
     /// lock only — other pools stay readable during this call.
     pub fn sleep_pool_phase1(
         &self,
-        pool_id:       PoolId,
+        pool_id: PoolId,
         min_use_count: u64,
-        stale_ticks:   u64,
+        stale_ticks: u64,
     ) -> ahash::AHashSet<NeuronRef> {
         let current_tick = self.fabric.current_tick();
         let Some(pool) = self.fabric.pool(pool_id) else {
             return ahash::AHashSet::new();
         };
-        let pruned_ids = pool.write()
+        let pruned_ids = pool
+            .write()
             .prune_weak_concepts(min_use_count, stale_ticks, current_tick);
         let mut out = ahash::AHashSet::with_capacity(pruned_ids.len());
         for nid in pruned_ids {
@@ -4013,13 +4720,13 @@ impl Brain {
     /// Phase 2 of [`ARCHITECTURE.md`] §17.4 sleep decomposition — clean
     /// inbound cross-pool terminals targeting any of `pruned_refs` from
     /// `pool_id`.  Brief per-pool write lock only.
-    pub fn sleep_pool_phase2(
-        &self,
-        pool_id:       PoolId,
-        pruned_refs:   &ahash::AHashSet<NeuronRef>,
-    ) {
-        if pruned_refs.is_empty() { return; }
-        let Some(pool) = self.fabric.pool(pool_id) else { return; };
+    pub fn sleep_pool_phase2(&self, pool_id: PoolId, pruned_refs: &ahash::AHashSet<NeuronRef>) {
+        if pruned_refs.is_empty() {
+            return;
+        }
+        let Some(pool) = self.fabric.pool(pool_id) else {
+            return;
+        };
         pool.write().prune_inbound_to(pruned_refs);
     }
 
@@ -4028,7 +4735,9 @@ impl Brain {
     /// write lock only.
     pub fn sleep_pool_housekeeping(&self, pool_id: PoolId) {
         let now = self.fabric.current_tick();
-        let Some(pool) = self.fabric.pool(pool_id) else { return; };
+        let Some(pool) = self.fabric.pool(pool_id) else {
+            return;
+        };
         pool.write().tick_housekeeping(now);
     }
 
@@ -4044,7 +4753,9 @@ impl Brain {
         let now = self.fabric.current_tick();
         let mut total = 0;
         for pid in self.fabric.pool_ids() {
-            let Some(pool) = self.fabric.pool(pid) else { continue; };
+            let Some(pool) = self.fabric.pool(pid) else {
+                continue;
+            };
             total += pool.write().drain_pending_promotions(now);
         }
         total
@@ -4054,7 +4765,9 @@ impl Brain {
     /// Surfaced via /sleep_pressure so the operator can see when the
     /// brain is overdue for a sleep cycle under deferred mode.
     pub fn pending_promotion_count(&self) -> usize {
-        self.fabric.pool_ids().into_iter()
+        self.fabric
+            .pool_ids()
+            .into_iter()
             .filter_map(|pid| self.fabric.pool(pid))
             .map(|p| p.read().pending_promotion_count())
             .sum()
@@ -4104,16 +4817,14 @@ impl Brain {
     /// fabric.rs lets that happen during ordinary training).
     ///
     /// Returns total bridges added across all pools and domain pairs.
-    pub fn integrate_islands(
-        &self,
-        sample_size: usize,
-        similarity_threshold: f32,
-    ) -> usize {
+    pub fn integrate_islands(&self, sample_size: usize, similarity_threshold: f32) -> usize {
         let now = self.fabric.current_tick();
         let mut total_bridges = 0usize;
 
         for pid in self.fabric.pool_ids() {
-            let Some(pool) = self.fabric.pool(pid) else { continue };
+            let Some(pool) = self.fabric.pool(pid) else {
+                continue;
+            };
 
             // Bucket concept ids by domain, building a co-firing
             // signature for each as we go.  Skip atoms (no analogical
@@ -4121,10 +4832,12 @@ impl Brain {
             type Sig = ahash::AHashMap<NeuronRef, f32>;
             let buckets: std::collections::HashMap<u32, Vec<(NeuronId, Sig)>> = {
                 let p = pool.read();
-                let mut b: std::collections::HashMap<u32, Vec<(NeuronId, Sig)>>
-                    = std::collections::HashMap::new();
+                let mut b: std::collections::HashMap<u32, Vec<(NeuronId, Sig)>> =
+                    std::collections::HashMap::new();
                 for n in p.iter_neurons() {
-                    if n.is_atom() || n.domain_id == 0 { continue; }
+                    if n.is_atom() || n.domain_id == 0 {
+                        continue;
+                    }
                     // Co-firing signature = outgoing terminal weights
                     // by target.  Effective weight folds in
                     // consolidation, so well-trained edges dominate
@@ -4164,7 +4877,9 @@ impl Brain {
                         }
                     }
 
-                    if pairs.is_empty() { continue; }
+                    if pairs.is_empty() {
+                        continue;
+                    }
 
                     let mut pw = pool.write();
                     let max_w = pw.config.max_weight;
@@ -4249,34 +4964,48 @@ impl Brain {
     /// state produces the same sampled set.
     pub fn replay_free_energy_weighted(
         &mut self,
-        count:    usize,
+        count: usize,
         strength: f32,
-        beta:     f32,
-        seed:     u64,
+        beta: f32,
+        seed: u64,
     ) -> usize {
         if count == 0 || strength <= 0.0 || self.moment_history.is_empty() {
             return 0;
         }
         // 1. Score every moment.
-        let scored: Vec<(f32, MomentFingerprint)> = self.moment_history
+        let scored: Vec<(f32, MomentFingerprint)> = self
+            .moment_history
             .iter()
             .map(|fp| (self.moment_salience_score(fp), fp.clone()))
             .collect();
         // 2. Numerically-stable softmax: subtract max before exp.
-        let max_score = scored.iter().map(|(s, _)| *s)
+        let max_score = scored
+            .iter()
+            .map(|(s, _)| *s)
             .fold(f32::NEG_INFINITY, f32::max);
-        let safe_max = if max_score.is_finite() { max_score } else { 0.0 };
-        let mut weights: Vec<f32> = scored.iter()
+        let safe_max = if max_score.is_finite() {
+            max_score
+        } else {
+            0.0
+        };
+        let mut weights: Vec<f32> = scored
+            .iter()
             .map(|(s, _)| ((s - safe_max) * beta).exp().max(1e-30))
             .collect();
         let mut remaining_total: f32 = weights.iter().sum();
 
         // 3. Sample without replacement via the cumulative-distribution
         //    inverse method.  Local xorshift64 — deterministic given seed.
-        let mut rng_state = if seed == 0 { 0xDEADBEEF_CAFEBABE_u64 } else { seed };
+        let mut rng_state = if seed == 0 {
+            0xDEADBEEF_CAFEBABE_u64
+        } else {
+            seed
+        };
         let next_f32_unit = |state: &mut u64| -> f32 {
             let mut x = *state;
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             *state = x;
             let mixed = x.wrapping_mul(0x2545F4914F6CDD1D);
             ((mixed >> 40) as f32) / ((1u32 << 24) as f32)
@@ -4284,13 +5013,18 @@ impl Brain {
         let n_target = count.min(scored.len());
         let mut chosen: Vec<MomentFingerprint> = Vec::with_capacity(n_target);
         for _ in 0..n_target {
-            if remaining_total <= 0.0 { break; }
+            if remaining_total <= 0.0 {
+                break;
+            }
             let u = next_f32_unit(&mut rng_state) * remaining_total;
             let mut acc = 0.0f32;
             let mut picked = 0usize;
             for (i, w) in weights.iter().enumerate() {
                 acc += *w;
-                if acc >= u { picked = i; break; }
+                if acc >= u {
+                    picked = i;
+                    break;
+                }
             }
             chosen.push(scored[picked].1.clone());
             remaining_total -= weights[picked];
@@ -4347,7 +5081,8 @@ impl Brain {
         // Score every moment in history.  Avoid scoring more than we need
         // to consider — sort by score, take top-K.  At typical
         // moment_history_window sizes (256-1024) this is fast.
-        let mut scored: Vec<(f32, MomentFingerprint)> = self.moment_history
+        let mut scored: Vec<(f32, MomentFingerprint)> = self
+            .moment_history
             .iter()
             .map(|fp| (self.moment_salience_score(fp), fp.clone()))
             .collect();
@@ -4360,8 +5095,7 @@ impl Brain {
         // selecting those whose fingerprints match.  Cheap because count
         // is small.  Simpler: just replay in score-descending order, which
         // gives an emphasis on most-salient-first.
-        let to_replay: Vec<MomentFingerprint> =
-            scored.into_iter().map(|(_, fp)| fp).collect();
+        let to_replay: Vec<MomentFingerprint> = scored.into_iter().map(|(_, fp)| fp).collect();
 
         let mut replayed = 0usize;
         for fp in &to_replay {
@@ -4405,13 +5139,22 @@ impl Brain {
     /// called AFTER `sleep()` prunes weak concepts so replay only
     /// strengthens patterns that survived pruning.
     pub fn replay_recent_moments(&mut self, count: usize, strength: f32) -> usize {
-        if count == 0 || strength <= 0.0 { return 0; }
+        if count == 0 || strength <= 0.0 {
+            return 0;
+        }
         // Snapshot the last `count` fingerprints.  Replay in original
         // temporal order (oldest first) so any sequential structure
         // between them is preserved.
-        let recent: Vec<MomentFingerprint> = self.moment_history.iter()
-            .rev().take(count).cloned().collect::<Vec<_>>()
-            .into_iter().rev().collect();
+        let recent: Vec<MomentFingerprint> = self
+            .moment_history
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         let mut replayed = 0usize;
         for fp in &recent {
             let now = self.fabric.current_tick();
@@ -4458,47 +5201,87 @@ impl Brain {
     /// struct.  Use [`crate::persistence::save_snapshot`] to write it
     /// to disk, or hold it in memory for tests.
     pub fn snapshot(&self) -> crate::persistence::BrainSnapshot {
-        let moment_history: std::collections::VecDeque<crate::persistence::SerializableFingerprint> =
-            self.moment_history.iter()
-                .map(|f| crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() })
-                .collect();
-        let binding_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)> =
-            self.binding_recurrences.iter()
-                .map(|(f, &c)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, c))
-                .collect();
+        let moment_history: std::collections::VecDeque<
+            crate::persistence::SerializableFingerprint,
+        > = self
+            .moment_history
+            .iter()
+            .map(|f| crate::persistence::SerializableFingerprint {
+                pairs: f.pairs.clone(),
+            })
+            .collect();
+        let binding_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)> = self
+            .binding_recurrences
+            .iter()
+            .map(|(f, &c)| {
+                (
+                    crate::persistence::SerializableFingerprint {
+                        pairs: f.pairs.clone(),
+                    },
+                    c,
+                )
+            })
+            .collect();
         let promoted_fingerprints: Vec<(crate::persistence::SerializableFingerprint, NeuronId)> =
-            self.promoted_fingerprints.iter()
-                .map(|(f, &n)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, n))
+            self.promoted_fingerprints
+                .iter()
+                .map(|(f, &n)| {
+                    (
+                        crate::persistence::SerializableFingerprint {
+                            pairs: f.pairs.clone(),
+                        },
+                        n,
+                    )
+                })
                 .collect();
-        let tentative_promoted: Vec<(crate::persistence::SerializableFingerprint, NeuronId)> =
-            self.tentative_promoted.iter()
-                .map(|(f, &n)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, n))
-                .collect();
-        let lifetime_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)> =
-            self.lifetime_recurrences.iter()
-                .map(|(f, &c)| (crate::persistence::SerializableFingerprint { pairs: f.pairs.clone() }, c))
-                .collect();
-        let pending_actions: Vec<(ActionId, ActionEvent)> = self.pending_actions
-            .iter().map(|(k, v)| (*k, v.clone())).collect();
+        let tentative_promoted: Vec<(crate::persistence::SerializableFingerprint, NeuronId)> = self
+            .tentative_promoted
+            .iter()
+            .map(|(f, &n)| {
+                (
+                    crate::persistence::SerializableFingerprint {
+                        pairs: f.pairs.clone(),
+                    },
+                    n,
+                )
+            })
+            .collect();
+        let lifetime_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)> = self
+            .lifetime_recurrences
+            .iter()
+            .map(|(f, &c)| {
+                (
+                    crate::persistence::SerializableFingerprint {
+                        pairs: f.pairs.clone(),
+                    },
+                    c,
+                )
+            })
+            .collect();
+        let pending_actions: Vec<(ActionId, ActionEvent)> = self
+            .pending_actions
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
         crate::persistence::BrainSnapshot {
-            format_version:              crate::persistence::CURRENT_SNAPSHOT_VERSION,
-            binding_pool_id:             self.binding_pool_id,
+            format_version: crate::persistence::CURRENT_SNAPSHOT_VERSION,
+            binding_pool_id: self.binding_pool_id,
             binding_emergence_threshold: self.config.binding_emergence_threshold,
-            moment_history_window:       self.config.moment_history_window,
-            fabric:                      self.fabric.snapshot(),
-            eem:                         self.eem.snapshot(),
-            annealer:                    self.annealer.snapshot(),
+            moment_history_window: self.config.moment_history_window,
+            fabric: self.fabric.snapshot(),
+            eem: self.eem.snapshot(),
+            annealer: self.annealer.snapshot(),
             moment_history,
             binding_recurrences,
             promoted_fingerprints,
             tentative_promoted,
             lifetime_recurrences,
             tentative_emergence_threshold: self.config.tentative_emergence_threshold,
-            current_threshold:             self.current_threshold,
-            total_observations:            self.total_observations,
-            action_pool_id:              self.action_pool_id,
+            current_threshold: self.current_threshold,
+            total_observations: self.total_observations,
+            action_pool_id: self.action_pool_id,
             pending_actions,
-            next_action_id:              self.next_action_id,
+            next_action_id: self.next_action_id,
         }
     }
 
@@ -4570,29 +5353,35 @@ impl Brain {
     pub fn scan_cross_shard_deposits(
         &self,
         local_node: crate::store::NodeId,
-    ) -> std::collections::HashMap<
-            crate::store::NodeId,
-            Vec<(PoolId, NeuronId, f32)>
-        >
-    {
+    ) -> std::collections::HashMap<crate::store::NodeId, Vec<(PoolId, NeuronId, f32)>> {
         use std::collections::HashMap as StdHashMap;
-        let mut out: StdHashMap<crate::store::NodeId, Vec<(PoolId, NeuronId, f32)>>
-            = StdHashMap::new();
+        let mut out: StdHashMap<crate::store::NodeId, Vec<(PoolId, NeuronId, f32)>> =
+            StdHashMap::new();
 
         for pid in self.fabric.pool_ids() {
-            let Some(pool_arc) = self.fabric.pool(pid) else { continue; };
+            let Some(pool_arc) = self.fabric.pool(pid) else {
+                continue;
+            };
             let pool = pool_arc.read();
             // Need access to tiered_store; not exposed directly, so we
             // peek via has_tiered_store + a helper.  Until that's wired,
             // we walk each pool's neurons individually.
-            if !pool.has_tiered_store() { continue; }
+            if !pool.has_tiered_store() {
+                continue;
+            }
 
             // For each firing neuron, walk its terminals.
             for nid in pool.currently_firing() {
-                let Some(neuron) = pool.get(nid) else { continue; };
-                if neuron.terminals.is_empty() { continue; }
+                let Some(neuron) = pool.get(nid) else {
+                    continue;
+                };
+                if neuron.terminals.is_empty() {
+                    continue;
+                }
                 let src_activation = pool.activation(nid);
-                if src_activation <= 0.0 { continue; }
+                if src_activation <= 0.0 {
+                    continue;
+                }
 
                 for term in &neuron.terminals {
                     // Get the home of target.neuron.  We need the
@@ -4604,17 +5393,22 @@ impl Brain {
                             // home_for through whichever store the
                             // target pool has.  Solo pools return local
                             // (so no deposit queued — correct).
-                            tp.tiered_home_for(term.target.neuron)
-                                .unwrap_or(local_node)
+                            tp.tiered_home_for(term.target.neuron).unwrap_or(local_node)
                         }
                         None => local_node,
                     };
-                    if target_home == local_node { continue; }
+                    if target_home == local_node {
+                        continue;
+                    }
                     let deposit = term.effective_weight() * src_activation;
-                    if deposit <= 0.0 { continue; }
-                    out.entry(target_home)
-                       .or_insert_with(Vec::new)
-                       .push((term.target.pool, term.target.neuron, deposit));
+                    if deposit <= 0.0 {
+                        continue;
+                    }
+                    out.entry(target_home).or_insert_with(Vec::new).push((
+                        term.target.pool,
+                        term.target.neuron,
+                        deposit,
+                    ));
                 }
             }
         }
@@ -4654,7 +5448,9 @@ impl Brain {
     ///
     /// Returns the count of newly-inserted neurons.
     pub fn cluster_merge_pool(&self, pool_id: PoolId, incoming: Vec<crate::Neuron>) -> usize {
-        let Some(pool_arc) = self.fabric.pool(pool_id) else { return 0; };
+        let Some(pool_arc) = self.fabric.pool(pool_id) else {
+            return 0;
+        };
         let mut pool = pool_arc.write();
         let mut inserted = 0usize;
         for n in incoming {
@@ -4664,7 +5460,9 @@ impl Brain {
             // ids line up naturally.  Future: a translation table for
             // peers with divergent id-space.
             let next = pool.neuron_count() as crate::NeuronId;
-            if n.id != next { continue; }
+            if n.id != next {
+                continue;
+            }
             if pool.replay_full_neuron(n) {
                 inserted += 1;
             }
@@ -4717,18 +5515,33 @@ impl Brain {
             stats.observe(ev);
             match ev {
                 E::PoolRegistered { .. } => { /* skip: already registered */ }
-                E::AtomCreated { pool_id, id, label, kind, born_tick } => {
+                E::AtomCreated {
+                    pool_id,
+                    id,
+                    label,
+                    kind,
+                    born_tick,
+                } => {
                     if let Some(pool) = self.fabric.pool(*pool_id) {
-                        pool.write().replay_atom_create(
-                            *id, label.clone(), *kind, *born_tick,
-                        );
+                        pool.write()
+                            .replay_atom_create(*id, label.clone(), *kind, *born_tick);
                     }
                 }
-                E::ConceptEmerged { pool_id, id, label, kind, members, born_tick } => {
+                E::ConceptEmerged {
+                    pool_id,
+                    id,
+                    label,
+                    kind,
+                    members,
+                    born_tick,
+                } => {
                     if let Some(pool) = self.fabric.pool(*pool_id) {
                         pool.write().replay_concept_create(
-                            *id, label.clone(), *kind,
-                            members.clone(), *born_tick,
+                            *id,
+                            label.clone(),
+                            *kind,
+                            members.clone(),
+                            *born_tick,
                         );
                     }
                 }
@@ -4811,8 +5624,12 @@ impl Brain {
 
         for pid in pool_ids {
             // Skip binding pool — bindings are answer keys, must stay hot.
-            if pid == self.binding_pool_id { continue; }
-            let Some(pool_arc) = self.fabric.pool(pid) else { continue; };
+            if pid == self.binding_pool_id {
+                continue;
+            }
+            let Some(pool_arc) = self.fabric.pool(pid) else {
+                continue;
+            };
             stats.pools_visited += 1;
 
             // Phase 1 (read): identify candidates + collect their terminal
@@ -4820,26 +5637,27 @@ impl Brain {
             let candidates_ordered: Vec<NeuronId> = {
                 let p = pool_arc.read();
                 // First filter by salience + staleness.
-                let mut filtered: Vec<(NeuronId, f32, u64, Vec<NeuronRef>)> = p.iter_neurons()
+                let mut filtered: Vec<(NeuronId, f32, u64, Vec<NeuronRef>)> = p
+                    .iter_neurons()
                     .filter(|n| !n.is_atom())
                     .filter(|n| !p.is_evicted(n.id))
                     .filter(|n| n.salience_ema < params.max_salience_ema)
                     .filter(|n| now.saturating_sub(n.last_fired_tick) >= params.min_stale_ticks)
                     .map(|n| {
-                        let tgts: Vec<NeuronRef> = n.terminals.iter()
-                            .map(|t| t.target)
-                            .collect();
+                        let tgts: Vec<NeuronRef> = n.terminals.iter().map(|t| t.target).collect();
                         (n.id, n.salience_ema, n.last_fired_tick, tgts)
                     })
                     .collect();
                 // Pre-sort: lowest salience first, ties by oldest last_fired.
                 filtered.sort_by(|a, b| {
-                    a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a.2.cmp(&b.2))
                 });
                 filtered.truncate(params.target_per_pool);
-                if filtered.is_empty() { Vec::new() }
-                else {
+                if filtered.is_empty() {
+                    Vec::new()
+                } else {
                     // §17.2 reorder: greedy nearest-neighbour by Jaccard
                     // similarity of terminal target sets.  Start from the
                     // lowest-salience candidate; each subsequent step
@@ -4850,7 +5668,8 @@ impl Brain {
                     // offset on append to cold tier.
                     use std::collections::HashSet;
                     let n = filtered.len();
-                    let target_sets: Vec<HashSet<NeuronRef>> = filtered.iter()
+                    let target_sets: Vec<HashSet<NeuronRef>> = filtered
+                        .iter()
                         .map(|(_, _, _, tgts)| tgts.iter().copied().collect())
                         .collect();
                     let mut chosen: Vec<bool> = vec![false; n];
@@ -4860,13 +5679,16 @@ impl Brain {
                     chosen[0] = true;
                     for _ in 1..n {
                         // Find the previous chosen candidate's target set.
-                        let last_idx = order.last()
+                        let last_idx = order
+                            .last()
                             .and_then(|nid| filtered.iter().position(|(i, _, _, _)| i == nid))
                             .unwrap_or(0);
                         let prev_set = &target_sets[last_idx];
                         let mut best: Option<(usize, f32)> = None;
                         for i in 0..n {
-                            if chosen[i] { continue; }
+                            if chosen[i] {
+                                continue;
+                            }
                             let ts = &target_sets[i];
                             // Jaccard: |A∩B| / |A∪B|; constant when both
                             // are empty, but we don't reorder isolated
@@ -4883,12 +5705,16 @@ impl Brain {
                         if let Some((idx, _)) = best {
                             order.push(filtered[idx].0);
                             chosen[idx] = true;
-                        } else { break; }
+                        } else {
+                            break;
+                        }
                     }
                     order
                 }
             };
-            if candidates_ordered.is_empty() { continue; }
+            if candidates_ordered.is_empty() {
+                continue;
+            }
 
             // Phase 2 (write): evict each in the Hebbian-locality order.
             // Cold-tier file appends in this exact order → co-fired
@@ -4898,13 +5724,12 @@ impl Brain {
                 let mut p = pool_arc.write();
                 for cid in candidates_ordered {
                     match p.evict_neuron(cid) {
-                        Ok(true)  => { stats.neurons_evicted += 1; }
+                        Ok(true) => {
+                            stats.neurons_evicted += 1;
+                        }
                         Ok(false) => { /* already evicted or atom */ }
                         Err(e) => {
-                            tracing::warn!(
-                                "evict_neuron(pool={}, id={}) failed: {}",
-                                pid, cid, e,
-                            );
+                            tracing::warn!("evict_neuron(pool={}, id={}) failed: {}", pid, cid, e,);
                             stats.errors += 1;
                         }
                     }
@@ -4936,8 +5761,8 @@ impl Brain {
         const NBINS: usize = 10;
         let mut bins = [0u64; NBINS];
         let mut bloom_inserted: u64 = 0;
-        let mut bloom_slots:    u64 = 0;
-        let mut total_neurons:  u64 = 0;
+        let mut bloom_slots: u64 = 0;
+        let mut total_neurons: u64 = 0;
         let mut evicted_neurons: u64 = 0;
         for pid in self.fabric.pool_ids() {
             if let Some(p) = self.fabric.pool(pid) {
@@ -4951,30 +5776,33 @@ impl Brain {
                 // Bloom slot count is a function of the bloom — fetch
                 // via byte_size * 2 (4-bit counters → 2 slots per byte).
                 bloom_slots += (pool.bloom_byte_size() as u64) * 2;
-                total_neurons    += pool.neuron_count() as u64;
-                evicted_neurons  += pool.evicted_count() as u64;
+                total_neurons += pool.neuron_count() as u64;
+                evicted_neurons += pool.evicted_count() as u64;
             }
         }
         let entropy = crate::store::StorageControlState::entropy_from_bins(&bins);
         let load = if bloom_slots > 0 {
             (bloom_inserted as f32 / bloom_slots as f32).clamp(0.0, 1.0)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         // Stage 17.4 full: working_set_pressure = live / total.  1.0 means
         // every neuron is in RAM (full pressure to evict); 0.0 means all
         // evicted.  Caller's ControlMode interprets — typically
         // "DrivenBy(working_set_pressure, scale, offset)" makes eviction
         // more aggressive as pressure climbs.
         let ws_pressure = if total_neurons > 0 {
-            ((total_neurons - evicted_neurons) as f32 / total_neurons as f32)
-                .clamp(0.0, 1.0)
-        } else { 0.0 };
+            ((total_neurons - evicted_neurons) as f32 / total_neurons as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         crate::store::StorageControlState {
-            working_set_pressure:       ws_pressure,
-            cache_hit_rate:             0.0,  // §17.4 step 2 deferred
-            replay_value_score:         0.0,  // §17.7 full
+            working_set_pressure: ws_pressure,
+            cache_hit_rate: 0.0,     // §17.4 step 2 deferred
+            replay_value_score: 0.0, // §17.7 full
             salience_distribution_entropy: entropy,
-            bloom_load:                 load,
+            bloom_load: load,
         }
     }
 
@@ -4988,7 +5816,7 @@ impl Brain {
     /// supplied — those pools are silently skipped.  Callers should
     /// treat a non-empty missing list as a misconfiguration.
     pub fn from_snapshot(
-        snap:      crate::persistence::BrainSnapshot,
+        snap: crate::persistence::BrainSnapshot,
         encodings: std::collections::HashMap<PoolId, Box<dyn AtomEncoding>>,
     ) -> (Self, Vec<PoolId>) {
         let (fabric, missing) = Fabric::from_snapshot(snap.fabric, encodings);
@@ -4996,40 +5824,69 @@ impl Brain {
             fabric: fabric.config.clone(),
             binding_emergence_threshold: snap.binding_emergence_threshold,
             tentative_emergence_threshold: snap.tentative_emergence_threshold,
-            moment_history_window:       snap.moment_history_window,
-            min_atom_score:               default_min_atom_score(),
-            pressure_band_low:           default_pressure_band_low(),
-            pressure_band_high:          default_pressure_band_high(),
-            pressure_threshold_max:      default_pressure_threshold_max(),
-            pressure_observation_grace:  default_pressure_observation_grace(),
-            pressure_adjust_enabled:     default_pressure_adjust_enabled(),
-            binding_pool_config:         PoolConfig::defaults("binding", snap.binding_pool_id),
-            eem:                         snap.eem.config.clone(),
-            annealer:                    snap.annealer.config.clone(),
+            moment_history_window: snap.moment_history_window,
+            min_atom_score: default_min_atom_score(),
+            pressure_band_low: default_pressure_band_low(),
+            pressure_band_high: default_pressure_band_high(),
+            pressure_threshold_max: default_pressure_threshold_max(),
+            pressure_observation_grace: default_pressure_observation_grace(),
+            pressure_adjust_enabled: default_pressure_adjust_enabled(),
+            binding_pool_config: PoolConfig::defaults("binding", snap.binding_pool_id),
+            eem: snap.eem.config.clone(),
+            annealer: snap.annealer.config.clone(),
         };
 
         let mut moment_history = VecDeque::with_capacity(snap.moment_history_window);
         for f in snap.moment_history {
-            moment_history.push_back(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() });
+            moment_history.push_back(MomentFingerprint {
+                pairs: f.pairs,
+                ordered_per_pool: Vec::new(),
+            });
         }
         let mut binding_recurrences = AHashMap::new();
         for (f, c) in snap.binding_recurrences {
-            binding_recurrences.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, c);
+            binding_recurrences.insert(
+                MomentFingerprint {
+                    pairs: f.pairs,
+                    ordered_per_pool: Vec::new(),
+                },
+                c,
+            );
         }
         let mut promoted_fingerprints = AHashMap::new();
         for (f, n) in snap.promoted_fingerprints {
-            promoted_fingerprints.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, n);
+            promoted_fingerprints.insert(
+                MomentFingerprint {
+                    pairs: f.pairs,
+                    ordered_per_pool: Vec::new(),
+                },
+                n,
+            );
         }
         let mut tentative_promoted = AHashMap::new();
         for (f, n) in snap.tentative_promoted {
-            tentative_promoted.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, n);
+            tentative_promoted.insert(
+                MomentFingerprint {
+                    pairs: f.pairs,
+                    ordered_per_pool: Vec::new(),
+                },
+                n,
+            );
         }
         let mut lifetime_recurrences = AHashMap::new();
         for (f, c) in snap.lifetime_recurrences {
-            lifetime_recurrences.insert(MomentFingerprint { pairs: f.pairs, ordered_per_pool: Vec::new() }, c);
+            lifetime_recurrences.insert(
+                MomentFingerprint {
+                    pairs: f.pairs,
+                    ordered_per_pool: Vec::new(),
+                },
+                c,
+            );
         }
         let mut pending_actions = AHashMap::new();
-        for (k, v) in snap.pending_actions { pending_actions.insert(k, v); }
+        for (k, v) in snap.pending_actions {
+            pending_actions.insert(k, v);
+        }
 
         let restored_threshold = if snap.current_threshold == 0 {
             snap.binding_emergence_threshold.max(1)
@@ -5039,27 +5896,27 @@ impl Brain {
         let brain = Self {
             fabric,
             config,
-            binding_pool_id:       snap.binding_pool_id,
+            binding_pool_id: snap.binding_pool_id,
             moment_history,
             binding_recurrences,
             lifetime_recurrences,
             tentative_promoted,
             promoted_fingerprints,
-            total_observations:      snap.total_observations,
-            current_threshold:       restored_threshold,
+            total_observations: snap.total_observations,
+            current_threshold: restored_threshold,
             last_pressure_check_obs: snap.total_observations,
-            action_pool_id:        snap.action_pool_id,
+            action_pool_id: snap.action_pool_id,
             pending_actions,
-            next_action_id:        snap.next_action_id,
-            emitted_this_tick:     ahash::AHashSet::new(),
-            eem:                   crate::eem::Eem::from_snapshot(snap.eem),
-            annealer:              crate::annealer::Annealer::from_snapshot(snap.annealer),
-            network:               NetworkState::new(""),
-            qa_db:                 QaDatabase::new(4096),
-            recent_frames:         AHashMap::new(),
-            tuning:                TuningState::default(),
-            feedback_loops:        Vec::new(),
-            delayed_feedback:      Vec::new(),
+            next_action_id: snap.next_action_id,
+            emitted_this_tick: ahash::AHashSet::new(),
+            eem: crate::eem::Eem::from_snapshot(snap.eem),
+            annealer: crate::annealer::Annealer::from_snapshot(snap.annealer),
+            network: NetworkState::new(""),
+            qa_db: QaDatabase::new(4096),
+            recent_frames: AHashMap::new(),
+            tuning: TuningState::default(),
+            feedback_loops: Vec::new(),
+            delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
         };
         (brain, missing)
@@ -5068,7 +5925,7 @@ impl Brain {
     /// Load a brain from `path`.  Convenience wrapper over
     /// `persistence::load_snapshot()` + `from_snapshot()`.
     pub fn restore<P: AsRef<std::path::Path>>(
-        path:      P,
+        path: P,
         encodings: std::collections::HashMap<PoolId, Box<dyn AtomEncoding>>,
     ) -> std::io::Result<(Self, Vec<PoolId>)> {
         let snap = crate::persistence::load_snapshot(path)?;
@@ -5077,19 +5934,19 @@ impl Brain {
 
     pub fn stats(&self) -> BrainStats {
         let mut stats = BrainStats {
-            tick:                self.fabric.current_tick(),
-            pool_count:          0,
-            total_neurons:       0,
-            total_concepts:      0,
-            total_binding:       0,
-            total_terminals:     0,
-            binding_pool_id:     self.binding_pool_id,
+            tick: self.fabric.current_tick(),
+            pool_count: 0,
+            total_neurons: 0,
+            total_concepts: 0,
+            total_binding: 0,
+            total_terminals: 0,
+            binding_pool_id: self.binding_pool_id,
             fingerprints_window: self.moment_history.len(),
-            tentative_bindings:    self.tentative_promoted.len(),
+            tentative_bindings: self.tentative_promoted.len(),
             consolidated_bindings: self.promoted_fingerprints.len(),
-            current_threshold:     self.current_threshold,
-            total_observations:    self.total_observations,
-            binding_pressure:      self.binding_pressure(),
+            current_threshold: self.current_threshold,
+            total_observations: self.total_observations,
+            binding_pressure: self.binding_pressure(),
         };
         for pid in self.fabric.pool_ids() {
             if let Some(p) = self.fabric.pool(pid) {

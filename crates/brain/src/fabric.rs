@@ -26,35 +26,35 @@ use crate::store::{NoopStore, Store, WalEvent};
 /// brain mutex.
 #[derive(Debug, Default)]
 pub struct TickProfile {
-    pub ticks:                          AtomicU64,
-    pub cross_pool_atom_wiring_ns:      AtomicU64,
-    pub cross_pool_concept_wiring_ns:   AtomicU64,
-    pub within_pool_temporal_ns:        AtomicU64,
-    pub housekeeping_ns:                AtomicU64,
-    pub total_ns:                       AtomicU64,
+    pub ticks: AtomicU64,
+    pub cross_pool_atom_wiring_ns: AtomicU64,
+    pub cross_pool_concept_wiring_ns: AtomicU64,
+    pub within_pool_temporal_ns: AtomicU64,
+    pub housekeeping_ns: AtomicU64,
+    pub total_ns: AtomicU64,
 }
 
 impl TickProfile {
     pub fn snapshot(&self) -> TickProfileSnapshot {
         TickProfileSnapshot {
-            ticks:                        self.ticks.load(Ordering::Relaxed),
-            cross_pool_atom_wiring_ns:    self.cross_pool_atom_wiring_ns.load(Ordering::Relaxed),
+            ticks: self.ticks.load(Ordering::Relaxed),
+            cross_pool_atom_wiring_ns: self.cross_pool_atom_wiring_ns.load(Ordering::Relaxed),
             cross_pool_concept_wiring_ns: self.cross_pool_concept_wiring_ns.load(Ordering::Relaxed),
-            within_pool_temporal_ns:      self.within_pool_temporal_ns.load(Ordering::Relaxed),
-            housekeeping_ns:              self.housekeeping_ns.load(Ordering::Relaxed),
-            total_ns:                     self.total_ns.load(Ordering::Relaxed),
+            within_pool_temporal_ns: self.within_pool_temporal_ns.load(Ordering::Relaxed),
+            housekeeping_ns: self.housekeeping_ns.load(Ordering::Relaxed),
+            total_ns: self.total_ns.load(Ordering::Relaxed),
         }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TickProfileSnapshot {
-    pub ticks:                        u64,
-    pub cross_pool_atom_wiring_ns:    u64,
+    pub ticks: u64,
+    pub cross_pool_atom_wiring_ns: u64,
     pub cross_pool_concept_wiring_ns: u64,
-    pub within_pool_temporal_ns:      u64,
-    pub housekeeping_ns:              u64,
-    pub total_ns:                     u64,
+    pub within_pool_temporal_ns: u64,
+    pub housekeeping_ns: u64,
+    pub total_ns: u64,
 }
 
 /// Per-phase nanosecond counters for `Pool::observe_frame` + the brain
@@ -64,66 +64,66 @@ pub struct TickProfileSnapshot {
 /// "find the dominant cost without a sampling profiler" workflow.
 #[derive(Debug, Default)]
 pub struct ObserveProfile {
-    pub observes:               AtomicU64,
+    pub observes: AtomicU64,
     /// `encoding.atomize(frame)` — turning bytes into atom labels.
-    pub atomize_ns:             AtomicU64,
+    pub atomize_ns: AtomicU64,
     /// `ensure_atom` + `push_recent` + activation/firing inserts for
     /// every atom in the frame.
-    pub atom_fire_ns:           AtomicU64,
+    pub atom_fire_ns: AtomicU64,
     /// `apply_pending_decay` on each fired atom neuron — walks its
     /// terminals, top suspect for big-brain slowness.
-    pub lazy_decay_ns:          AtomicU64,
+    pub lazy_decay_ns: AtomicU64,
     /// `collapse_tail_to_concept` loop (one pass per atom, may loop
     /// for multi-level collapses).
-    pub collapse_ns:            AtomicU64,
+    pub collapse_ns: AtomicU64,
     /// `check_concept_emergence` — sequence count bumps + threshold
     /// detection (or deferred enqueue under W1Z4RD_DEFER_PROMOTION).
-    pub concept_emergence_ns:   AtomicU64,
+    pub concept_emergence_ns: AtomicU64,
     /// k-WTA sparsity, predictive-coding surprise update, EMA refresh
     /// at end of observe_frame.
-    pub end_of_frame_ns:        AtomicU64,
+    pub end_of_frame_ns: AtomicU64,
     /// QA-capture path: scan `recent_frames` + push to `qa_db`.  Pure
     /// Brain::observe overhead on top of `fabric.observe`.
-    pub qa_capture_ns:          AtomicU64,
+    pub qa_capture_ns: AtomicU64,
     /// WAL events appended during this observe (atom births, fires,
     /// concept promotions).  Includes mmap append cost.
-    pub wal_events:             AtomicU64,
-    pub wal_append_ns:          AtomicU64,
-    pub total_ns:               AtomicU64,
+    pub wal_events: AtomicU64,
+    pub wal_append_ns: AtomicU64,
+    pub total_ns: AtomicU64,
 }
 
 impl ObserveProfile {
     pub fn snapshot(&self) -> ObserveProfileSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
         ObserveProfileSnapshot {
-            observes:             self.observes.load(Relaxed),
-            atomize_ns:           self.atomize_ns.load(Relaxed),
-            atom_fire_ns:         self.atom_fire_ns.load(Relaxed),
-            lazy_decay_ns:        self.lazy_decay_ns.load(Relaxed),
-            collapse_ns:          self.collapse_ns.load(Relaxed),
+            observes: self.observes.load(Relaxed),
+            atomize_ns: self.atomize_ns.load(Relaxed),
+            atom_fire_ns: self.atom_fire_ns.load(Relaxed),
+            lazy_decay_ns: self.lazy_decay_ns.load(Relaxed),
+            collapse_ns: self.collapse_ns.load(Relaxed),
             concept_emergence_ns: self.concept_emergence_ns.load(Relaxed),
-            end_of_frame_ns:      self.end_of_frame_ns.load(Relaxed),
-            qa_capture_ns:        self.qa_capture_ns.load(Relaxed),
-            wal_events:           self.wal_events.load(Relaxed),
-            wal_append_ns:        self.wal_append_ns.load(Relaxed),
-            total_ns:             self.total_ns.load(Relaxed),
+            end_of_frame_ns: self.end_of_frame_ns.load(Relaxed),
+            qa_capture_ns: self.qa_capture_ns.load(Relaxed),
+            wal_events: self.wal_events.load(Relaxed),
+            wal_append_ns: self.wal_append_ns.load(Relaxed),
+            total_ns: self.total_ns.load(Relaxed),
         }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ObserveProfileSnapshot {
-    pub observes:             u64,
-    pub atomize_ns:           u64,
-    pub atom_fire_ns:         u64,
-    pub lazy_decay_ns:        u64,
-    pub collapse_ns:          u64,
+    pub observes: u64,
+    pub atomize_ns: u64,
+    pub atom_fire_ns: u64,
+    pub lazy_decay_ns: u64,
+    pub collapse_ns: u64,
     pub concept_emergence_ns: u64,
-    pub end_of_frame_ns:      u64,
-    pub qa_capture_ns:        u64,
-    pub wal_events:           u64,
-    pub wal_append_ns:        u64,
-    pub total_ns:             u64,
+    pub end_of_frame_ns: u64,
+    pub qa_capture_ns: u64,
+    pub wal_events: u64,
+    pub wal_append_ns: u64,
+    pub total_ns: u64,
 }
 
 /// What fired in every pool at a given tick.  Used by cross-pool wiring:
@@ -131,14 +131,17 @@ pub struct ObserveProfileSnapshot {
 /// grown between them, Hebbian-strengthened on repeat co-firing.
 #[derive(Debug, Clone)]
 pub struct Moment {
-    pub tick:      u64,
+    pub tick: u64,
     /// pool_id → set of neuron_ids that fired this tick.
-    pub fired:     AHashMap<PoolId, Vec<NeuronId>>,
+    pub fired: AHashMap<PoolId, Vec<NeuronId>>,
 }
 
 impl Moment {
     fn new(tick: u64) -> Self {
-        Self { tick, fired: AHashMap::new() }
+        Self {
+            tick,
+            fired: AHashMap::new(),
+        }
     }
 }
 
@@ -153,10 +156,10 @@ pub struct FabricConfig {
     /// Maximum hops in propagation.  One hop = atoms fire concepts.
     /// Two hops = concepts fire concepts (or cross-pool targets).  Spec
     /// §4.A: propagation is one uniform loop with hop-decay.
-    pub max_hops:      usize,
+    pub max_hops: usize,
     /// Per-hop decay multiplier — activation × decay each hop.  Mirrors
     /// biological signal attenuation along long axons.
-    pub hop_decay:     f32,
+    pub hop_decay: f32,
     /// Reinforcement applied to CROSS-POOL terminals between concept
     /// neurons (not atoms) that co-fire at the same tick.  This is
     /// the position-aware binding mechanism: a concept encodes its
@@ -171,9 +174,9 @@ pub struct FabricConfig {
 impl Default for FabricConfig {
     fn default() -> Self {
         Self {
-            cross_pool_lr:         0.15,
-            max_hops:              2,
-            hop_decay:             0.85,
+            cross_pool_lr: 0.15,
+            max_hops: 2,
+            hop_decay: 0.85,
             cross_pool_concept_lr: 0.20,
         }
     }
@@ -181,9 +184,9 @@ impl Default for FabricConfig {
 
 pub struct Fabric {
     pub config: FabricConfig,
-    pools:      AHashMap<PoolId, Arc<RwLock<Pool>>>,
-    current:    Moment,
-    tick:       u64,
+    pools: AHashMap<PoolId, Arc<RwLock<Pool>>>,
+    current: Moment,
+    tick: u64,
     /// Per-pool: which CONCEPT neurons fired during the most-recently
     /// closed tick.  Stage 2b uses this to grow concept→concept
     /// terminals when concept A fires then concept B fires next tick
@@ -205,8 +208,9 @@ pub struct Fabric {
     /// `advance_tick` on a configurable cadence.  Default params come
     /// from env (`W1Z4RD_TIER_*`) so production can iterate without
     /// recompiling.  See [`crate::tier_orchestrator`].
-    pub(crate) orchestrator:       parking_lot::Mutex<crate::tier_orchestrator::TierOrchestrator>,
-    pub(crate) orchestrator_params: parking_lot::Mutex<crate::tier_orchestrator::OrchestratorParams>,
+    pub(crate) orchestrator: parking_lot::Mutex<crate::tier_orchestrator::TierOrchestrator>,
+    pub(crate) orchestrator_params:
+        parking_lot::Mutex<crate::tier_orchestrator::OrchestratorParams>,
     /// Cumulative orchestrator counters.  Atomic so `/tier_orchestrator_stats`
     /// reads them without taking the brain mutex.
     pub orchestrator_stats: Arc<crate::tier_orchestrator::OrchestratorStats>,
@@ -216,15 +220,17 @@ impl Fabric {
     pub fn new(config: FabricConfig) -> Self {
         Self {
             config,
-            pools:              AHashMap::new(),
-            current:            Moment::new(0),
-            tick:               0,
+            pools: AHashMap::new(),
+            current: Moment::new(0),
+            tick: 0,
             prev_tick_concepts: AHashMap::new(),
-            store:              Arc::new(NoopStore),
-            profile:            Arc::new(TickProfile::default()),
-            observe_profile:    Arc::new(ObserveProfile::default()),
-            orchestrator:       parking_lot::Mutex::new(crate::tier_orchestrator::TierOrchestrator::new()),
-            orchestrator_params: parking_lot::Mutex::new(crate::tier_orchestrator::OrchestratorParams::from_env_or_disabled()),
+            store: Arc::new(NoopStore),
+            profile: Arc::new(TickProfile::default()),
+            observe_profile: Arc::new(ObserveProfile::default()),
+            orchestrator: parking_lot::Mutex::new(crate::tier_orchestrator::TierOrchestrator::new()),
+            orchestrator_params: parking_lot::Mutex::new(
+                crate::tier_orchestrator::OrchestratorParams::from_env_or_disabled(),
+            ),
             orchestrator_stats: Arc::new(crate::tier_orchestrator::OrchestratorStats::default()),
         }
     }
@@ -249,7 +255,10 @@ impl Fabric {
 
     /// Replace the active orchestrator params (used by tests + the
     /// /brain/tier_orchestrator/params endpoint).
-    pub fn set_tier_orchestrator_params(&self, params: crate::tier_orchestrator::OrchestratorParams) {
+    pub fn set_tier_orchestrator_params(
+        &self,
+        params: crate::tier_orchestrator::OrchestratorParams,
+    ) {
         *self.orchestrator_params.lock() = params;
     }
 
@@ -309,23 +318,31 @@ impl Fabric {
         // not the floor — it pages back in on demand.
         let emergency_caps = |emergency: bool| -> (u64, usize, usize) {
             if emergency {
-                (0,
-                 params.max_evict_per_pass.saturating_mul(8),
-                 params.scan_budget.saturating_mul(8))
+                (
+                    0,
+                    params.max_evict_per_pass.saturating_mul(8),
+                    params.scan_budget.saturating_mul(8),
+                )
             } else {
-                (params.min_age_ticks,
-                 params.max_evict_per_pass,
-                 params.scan_budget)
+                (
+                    params.min_age_ticks,
+                    params.max_evict_per_pass,
+                    params.scan_budget,
+                )
             }
         };
         for pid in pool_ids {
-            let Some(pool_arc) = self.pools.get(&pid) else { continue };
+            let Some(pool_arc) = self.pools.get(&pid) else {
+                continue;
+            };
             // Phase A: read pool — gather candidates within budget,
             // measure pressure, score, pick evict set.
             let candidates: Vec<(NeuronId, f32)> = {
                 let p = pool_arc.read();
                 let n_total = p.neurons_len();
-                if n_total == 0 { continue; }
+                if n_total == 0 {
+                    continue;
+                }
                 // No-cold-tier short-circuit: if the pool has neither
                 // a cold-tier file nor a distributed tiered store
                 // attached, eviction would always fail with
@@ -333,12 +350,16 @@ impl Fabric {
                 // spam evict_errors at thousands per second.  Just
                 // skip the scan entirely.  When the brain attaches
                 // cold tiers later, the next pass picks it up.
-                if !p.has_storage_tier() { continue; }
+                if !p.has_storage_tier() {
+                    continue;
+                }
                 // Whichever signal is more urgent wins: the pool's own
                 // terminal budget, or the machine running out of RAM.
                 let pressure = TierOrchestrator::pressure_factor(
-                    p.total_terminals, params.target_terminals_per_pool)
-                    .min(system_pressure);
+                    p.total_terminals,
+                    params.target_terminals_per_pool,
+                )
+                .min(system_pressure);
                 last_pressure_x1k = (pressure * 1000.0) as u64;
                 let (effective_min_age, effective_max_evict, effective_scan) =
                     emergency_caps(pressure <= 0.5);
@@ -354,7 +375,10 @@ impl Fabric {
                     continue;
                 }
                 let start = self.orchestrator.lock().advance_cursor(
-                    pid, effective_scan.min(n_total), n_total);
+                    pid,
+                    effective_scan.min(n_total),
+                    n_total,
+                );
                 let mut chosen: Vec<(NeuronId, f32)> = Vec::new();
                 let budget = effective_scan.min(n_total);
                 let mut scanned: u64 = 0;
@@ -363,8 +387,12 @@ impl Fabric {
                     let Some(n) = p.neuron_at(idx) else { continue };
                     scanned += 1;
                     // Filters (mirror Brain::run_eviction_pass policy):
-                    if n.is_atom() { continue; }
-                    if p.is_evicted(n.id) { continue; }
+                    if n.is_atom() {
+                        continue;
+                    }
+                    if p.is_evicted(n.id) {
+                        continue;
+                    }
                     // Newborn protection — give freshly created concepts
                     // at least `min_age_ticks` to demonstrate their
                     // salience.  Without this the orchestrator can throw
@@ -387,7 +415,9 @@ impl Fabric {
                     );
                     if TierOrchestrator::should_evict(&params, s, pressure) {
                         chosen.push((n.id, s));
-                        if chosen.len() >= effective_max_evict { break; }
+                        if chosen.len() >= effective_max_evict {
+                            break;
+                        }
                     }
                 }
                 stats.neurons_scanned.fetch_add(scanned, Ordering::Relaxed);
@@ -410,8 +440,12 @@ impl Fabric {
                 }
             }
         }
-        stats.last_pressure_x1k.store(last_pressure_x1k, Ordering::Relaxed);
-        stats.total_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        stats
+            .last_pressure_x1k
+            .store(last_pressure_x1k, Ordering::Relaxed);
+        stats
+            .total_ns
+            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         total_evicted
     }
 
@@ -428,9 +462,13 @@ impl Fabric {
 
     /// Clone the persistence handle.  Used by [`crate::Brain::checkpoint`]
     /// to flush the WAL and emit a snapshot marker.
-    pub fn store_clone(&self) -> Arc<dyn Store> { self.store.clone() }
+    pub fn store_clone(&self) -> Arc<dyn Store> {
+        self.store.clone()
+    }
 
-    pub fn current_tick(&self) -> u64 { self.tick }
+    pub fn current_tick(&self) -> u64 {
+        self.tick
+    }
 
     /// Stage 17.9 — explicit tick set, used only by WAL recovery.
     /// Normal training advances the tick via [`Fabric::advance_tick`],
@@ -457,7 +495,7 @@ impl Fabric {
         }
         crate::persistence::FabricSnapshot {
             config: self.config.clone(),
-            tick:   self.tick,
+            tick: self.tick,
             pool_order,
             pools,
         }
@@ -467,36 +505,44 @@ impl Fabric {
     /// match every pool id in the snapshot — missing encodings cause
     /// the pool to be skipped (logged via the returned Vec).
     pub fn from_snapshot(
-        snap:      crate::persistence::FabricSnapshot,
+        mut snap: crate::persistence::FabricSnapshot,
         mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>>,
     ) -> (Self, Vec<PoolId>) {
         let mut fabric = Self {
-            config:             snap.config,
-            pools:              AHashMap::new(),
-            current:            Moment::new(snap.tick),
-            tick:               snap.tick,
+            config: snap.config,
+            pools: AHashMap::new(),
+            current: Moment::new(snap.tick),
+            tick: snap.tick,
             prev_tick_concepts: AHashMap::new(),
             // Snapshot-restored fabric defaults to NoopStore; caller plugs
             // in the live backend via set_store after restore so subsequent
             // observations get logged.
-            store:              Arc::new(NoopStore),
+            store: Arc::new(NoopStore),
             // Fresh profile on restore — pre-snapshot ticks aren't
             // attributed here, only ticks after this point.
-            profile:            Arc::new(TickProfile::default()),
-            observe_profile:    Arc::new(ObserveProfile::default()),
-            orchestrator:       parking_lot::Mutex::new(crate::tier_orchestrator::TierOrchestrator::new()),
-            orchestrator_params: parking_lot::Mutex::new(crate::tier_orchestrator::OrchestratorParams::from_env_or_disabled()),
+            profile: Arc::new(TickProfile::default()),
+            observe_profile: Arc::new(ObserveProfile::default()),
+            orchestrator: parking_lot::Mutex::new(crate::tier_orchestrator::TierOrchestrator::new()),
+            orchestrator_params: parking_lot::Mutex::new(
+                crate::tier_orchestrator::OrchestratorParams::from_env_or_disabled(),
+            ),
             orchestrator_stats: Arc::new(crate::tier_orchestrator::OrchestratorStats::default()),
         };
         let mut missing = Vec::new();
         for pid in snap.pool_order {
-            let pool_snap = match snap.pools.get(&pid) {
-                Some(s) => s.clone(),
-                None    => { missing.push(pid); continue; }
+            let pool_snap = match snap.pools.remove(&pid) {
+                Some(s) => s,
+                None => {
+                    missing.push(pid);
+                    continue;
+                }
             };
             let encoding = match encodings.remove(&pid) {
                 Some(e) => e,
-                None    => { missing.push(pid); continue; }
+                None => {
+                    missing.push(pid);
+                    continue;
+                }
             };
             let pool = crate::pool::Pool::from_snapshot(pool_snap, encoding);
             fabric.register_pool(pool);
@@ -507,7 +553,9 @@ impl Fabric {
     /// Read the current (un-closed) tick's moment.  Used by [`crate::Brain`]
     /// to capture the multi-pool firing fingerprint for binding-concept
     /// emergence before `advance_tick` clears it.
-    pub fn current_moment(&self) -> &Moment { &self.current }
+    pub fn current_moment(&self) -> &Moment {
+        &self.current
+    }
 
     pub fn register_pool(&mut self, mut pool: Pool) -> PoolId {
         let id = pool.id();
@@ -549,7 +597,7 @@ impl Fabric {
         // Per-tick (not cumulative) phase nanoseconds so we can log the
         // breakdown for individual slow ticks.  The Arc<TickProfile>
         // atomics still accumulate as before; these are local deltas.
-        let mut per_tick = [0u64; 4];   // atom, concept, temporal, housekeeping
+        let mut per_tick = [0u64; 4]; // atom, concept, temporal, housekeeping
 
         // Island-architecture gate: when enabled, the hot cross-pool
         // wiring path only fires for neurons sharing a domain_id (or
@@ -611,7 +659,9 @@ impl Fabric {
                 let pid_b = pool_ids[j];
                 let fired_a = self.current.fired.get(&pid_a).cloned().unwrap_or_default();
                 let fired_b = self.current.fired.get(&pid_b).cloned().unwrap_or_default();
-                if fired_a.is_empty() || fired_b.is_empty() { continue; }
+                if fired_a.is_empty() || fired_b.is_empty() {
+                    continue;
+                }
 
                 let pool_a = self.pools.get(&pid_a).unwrap().clone();
                 let pool_b = self.pools.get(&pid_b).unwrap().clone();
@@ -621,14 +671,26 @@ impl Fabric {
                 // behaves identically to the pre-island code path.
                 let fired_a_dom: Vec<u32> = if domain_mode {
                     let pa = pool_a.read();
-                    fired_a.iter().map(|&id| pa.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
-                } else { Vec::new() };
+                    fired_a
+                        .iter()
+                        .map(|&id| pa.get(id).map(|n| n.domain_id).unwrap_or(0))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let fired_b_dom: Vec<u32> = if domain_mode {
                     let pb = pool_b.read();
-                    fired_b.iter().map(|&id| pb.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
-                } else { Vec::new() };
+                    fired_b
+                        .iter()
+                        .map(|&id| pb.get(id).map(|n| n.domain_id).unwrap_or(0))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let cross_domain = |i: usize, j: usize| -> bool {
-                    if !domain_mode { return false; }
+                    if !domain_mode {
+                        return false;
+                    }
                     let da = fired_a_dom[i];
                     let db = fired_b_dom[j];
                     da != 0 && db != 0 && da != db
@@ -640,11 +702,19 @@ impl Fabric {
                     for (i, &na) in fired_a.iter().enumerate() {
                         if let Some(neuron) = pa.get_mut(na) {
                             for (j, &nb) in fired_b.iter().enumerate() {
-                                let eff_lr = if cross_domain(i, j) { lr * cross_domain_scale } else { lr };
+                                let eff_lr = if cross_domain(i, j) {
+                                    lr * cross_domain_scale
+                                } else {
+                                    lr
+                                };
                                 if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_b, nb),
-                                    eff_lr, self.tick, max_w,
-                                ) { added += 1; }
+                                    eff_lr,
+                                    self.tick,
+                                    max_w,
+                                ) {
+                                    added += 1;
+                                }
                             }
                         }
                     }
@@ -657,11 +727,19 @@ impl Fabric {
                     for (j, &nb) in fired_b.iter().enumerate() {
                         if let Some(neuron) = pb.get_mut(nb) {
                             for (i, &na) in fired_a.iter().enumerate() {
-                                let eff_lr = if cross_domain(i, j) { lr * cross_domain_scale } else { lr };
+                                let eff_lr = if cross_domain(i, j) {
+                                    lr * cross_domain_scale
+                                } else {
+                                    lr
+                                };
                                 if neuron.reinforce_terminal(
                                     NeuronRef::new(pid_a, na),
-                                    eff_lr, self.tick, max_w,
-                                ) { added += 1; }
+                                    eff_lr,
+                                    self.tick,
+                                    max_w,
+                                ) {
+                                    added += 1;
+                                }
                             }
                         }
                     }
@@ -672,7 +750,9 @@ impl Fabric {
 
         let dt = phase_t0.elapsed().as_nanos() as u64;
         per_tick[0] = dt;
-        self.profile.cross_pool_atom_wiring_ns.fetch_add(dt, Ordering::Relaxed);
+        self.profile
+            .cross_pool_atom_wiring_ns
+            .fetch_add(dt, Ordering::Relaxed);
 
         // Stage 3 (position-aware binding): cross-pool concept→concept
         // wiring.  Concepts encode positional sequences in their
@@ -691,19 +771,25 @@ impl Fabric {
             let mut concepts_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
             for (pid, pool) in self.pools.iter() {
                 let p = pool.read();
-                let mut firing: Vec<(NeuronId, f32)> = p.currently_firing()
-                    .filter_map(|nid| p.get(nid).and_then(|n| {
-                        if n.is_atom() { None } else { Some((nid, p.activation(nid))) }
-                    }))
+                let mut firing: Vec<(NeuronId, f32)> = p
+                    .currently_firing()
+                    .filter_map(|nid| {
+                        p.get(nid).and_then(|n| {
+                            if n.is_atom() {
+                                None
+                            } else {
+                                Some((nid, p.activation(nid)))
+                            }
+                        })
+                    })
                     .collect();
                 if concept_cap > 0 && firing.len() > concept_cap {
                     // Partial sort by activation descending, then truncate.
-                    firing.sort_by(|a, b| b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal));
+                    firing
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     firing.truncate(concept_cap);
                 }
-                let firing_ids: Vec<NeuronId> = firing.into_iter()
-                    .map(|(id, _)| id).collect();
+                let firing_ids: Vec<NeuronId> = firing.into_iter().map(|(id, _)| id).collect();
                 if !firing_ids.is_empty() {
                     concepts_by_pool.insert(*pid, firing_ids);
                 }
@@ -723,15 +809,28 @@ impl Fabric {
                     // applied at concept granularity.
                     let dom_a: Vec<u32> = if domain_mode {
                         let pa = pool_a.read();
-                        concepts_a.iter().map(|&id| pa.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
-                    } else { Vec::new() };
+                        concepts_a
+                            .iter()
+                            .map(|&id| pa.get(id).map(|n| n.domain_id).unwrap_or(0))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let dom_b: Vec<u32> = if domain_mode {
                         let pb = pool_b.read();
-                        concepts_b.iter().map(|&id| pb.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
-                    } else { Vec::new() };
+                        concepts_b
+                            .iter()
+                            .map(|&id| pb.get(id).map(|n| n.domain_id).unwrap_or(0))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let cross_dom = |i: usize, j: usize| -> bool {
-                        if !domain_mode { return false; }
-                        let da = dom_a[i]; let db = dom_b[j];
+                        if !domain_mode {
+                            return false;
+                        }
+                        let da = dom_a[i];
+                        let db = dom_b[j];
                         da != 0 && db != 0 && da != db
                     };
                     {
@@ -741,11 +840,19 @@ impl Fabric {
                         for (i, &na) in concepts_a.iter().enumerate() {
                             if let Some(n) = pa.get_mut(na) {
                                 for (j, &nb) in concepts_b.iter().enumerate() {
-                                    let eff_lr = if cross_dom(i, j) { concept_lr * cross_domain_scale } else { concept_lr };
+                                    let eff_lr = if cross_dom(i, j) {
+                                        concept_lr * cross_domain_scale
+                                    } else {
+                                        concept_lr
+                                    };
                                     if n.reinforce_terminal(
                                         NeuronRef::new(pid_b, nb),
-                                        eff_lr, self.tick, max_w,
-                                    ) { added += 1; }
+                                        eff_lr,
+                                        self.tick,
+                                        max_w,
+                                    ) {
+                                        added += 1;
+                                    }
                                 }
                             }
                         }
@@ -758,11 +865,19 @@ impl Fabric {
                         for (j, &nb) in concepts_b.iter().enumerate() {
                             if let Some(n) = pb.get_mut(nb) {
                                 for (i, &na) in concepts_a.iter().enumerate() {
-                                    let eff_lr = if cross_dom(i, j) { concept_lr * cross_domain_scale } else { concept_lr };
+                                    let eff_lr = if cross_dom(i, j) {
+                                        concept_lr * cross_domain_scale
+                                    } else {
+                                        concept_lr
+                                    };
                                     if n.reinforce_terminal(
                                         NeuronRef::new(pid_a, na),
-                                        eff_lr, self.tick, max_w,
-                                    ) { added += 1; }
+                                        eff_lr,
+                                        self.tick,
+                                        max_w,
+                                    ) {
+                                        added += 1;
+                                    }
                                 }
                             }
                         }
@@ -774,7 +889,9 @@ impl Fabric {
 
         let dt = phase_t0.elapsed().as_nanos() as u64;
         per_tick[1] = dt;
-        self.profile.cross_pool_concept_wiring_ns.fetch_add(dt, Ordering::Relaxed);
+        self.profile
+            .cross_pool_concept_wiring_ns
+            .fetch_add(dt, Ordering::Relaxed);
 
         // Stage 2b: within-pool concept→concept temporal wiring.
         // For each pool, identify the CONCEPT neurons currently firing
@@ -793,15 +910,22 @@ impl Fabric {
             };
             let current_concepts: Vec<NeuronId> = {
                 let p = pool.read();
-                let mut firing: Vec<(NeuronId, f32)> = p.currently_firing()
-                    .filter_map(|nid| p.get(nid).and_then(|n| {
-                        if n.is_atom() { None } else { Some((nid, p.activation(nid))) }
-                    }))
+                let mut firing: Vec<(NeuronId, f32)> = p
+                    .currently_firing()
+                    .filter_map(|nid| {
+                        p.get(nid).and_then(|n| {
+                            if n.is_atom() {
+                                None
+                            } else {
+                                Some((nid, p.activation(nid)))
+                            }
+                        })
+                    })
                     .collect();
                 // Phase 3 cap by activation — same rationale as Phase 2.
                 if concept_cap > 0 && firing.len() > concept_cap {
-                    firing.sort_by(|a, b| b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal));
+                    firing
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     firing.truncate(concept_cap);
                 }
                 firing.into_iter().map(|(id, _)| id).collect()
@@ -816,10 +940,11 @@ impl Fabric {
                 // for the previous tick (we don't snapshot it), so we
                 // just truncate — the substrate's training signal is
                 // dominated by the most-recent firings anyway.
-                let prev: Vec<NeuronId> = if concept_cap > 0
-                    && prev_full.len() > concept_cap {
+                let prev: Vec<NeuronId> = if concept_cap > 0 && prev_full.len() > concept_cap {
                     prev_full.into_iter().take(concept_cap).collect()
-                } else { prev_full };
+                } else {
+                    prev_full
+                };
                 if !prev.is_empty() && !current_concepts.is_empty() {
                     let mut pw = pool.write();
                     let max_w = pw.config.max_weight;
@@ -829,30 +954,50 @@ impl Fabric {
                     // coincidence — let the integration cycle decide
                     // if that's structurally meaningful).
                     let dom_src: Vec<u32> = if domain_mode {
-                        prev.iter().map(|&id| pw.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
-                    } else { Vec::new() };
+                        prev.iter()
+                            .map(|&id| pw.get(id).map(|n| n.domain_id).unwrap_or(0))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let dom_dst: Vec<u32> = if domain_mode {
-                        current_concepts.iter().map(|&id| pw.get(id).map(|n| n.domain_id).unwrap_or(0)).collect()
-                    } else { Vec::new() };
+                        current_concepts
+                            .iter()
+                            .map(|&id| pw.get(id).map(|n| n.domain_id).unwrap_or(0))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let mut added: usize = 0;
                     for (i, &src) in prev.iter().enumerate() {
                         // Skip if source no longer exists (pruned).
-                        if pw.get(src).is_none() { continue; }
+                        if pw.get(src).is_none() {
+                            continue;
+                        }
                         for (j, &dst) in current_concepts.iter().enumerate() {
-                            if src == dst { continue; }
+                            if src == dst {
+                                continue;
+                            }
                             let eff_lr = if domain_mode {
-                                let da = dom_src[i]; let db = dom_dst[j];
+                                let da = dom_src[i];
+                                let db = dom_dst[j];
                                 if da != 0 && db != 0 && da != db {
                                     0.3 * cross_domain_scale
-                                } else { 0.3 }
-                            } else { 0.3 };
+                                } else {
+                                    0.3
+                                }
+                            } else {
+                                0.3
+                            };
                             if let Some(n) = pw.get_mut(src) {
                                 if n.reinforce_terminal(
                                     NeuronRef::new(pid, dst),
                                     eff_lr,
                                     self.tick,
                                     max_w,
-                                ) { added += 1; }
+                                ) {
+                                    added += 1;
+                                }
                             }
                         }
                     }
@@ -864,7 +1009,9 @@ impl Fabric {
 
         let dt = phase_t0.elapsed().as_nanos() as u64;
         per_tick[2] = dt;
-        self.profile.within_pool_temporal_ns.fetch_add(dt, Ordering::Relaxed);
+        self.profile
+            .within_pool_temporal_ns
+            .fetch_add(dt, Ordering::Relaxed);
 
         // Per-pool housekeeping: decay every terminal, prune sub-floor,
         // apply heterosynaptic LTD, apply k-WTA sparsity.
@@ -884,8 +1031,8 @@ impl Fabric {
         //          decay; over long runs the fabric bloats with dead
         //          terminals.  Use lazy for production.
         let phase_t0 = std::time::Instant::now();
-        let mode = std::env::var("W1Z4RD_TICK_HOUSEKEEPING")
-            .unwrap_or_else(|_| "eager".to_string());
+        let mode =
+            std::env::var("W1Z4RD_TICK_HOUSEKEEPING").unwrap_or_else(|_| "eager".to_string());
         match mode.as_str() {
             "skip" => { /* nothing */ }
             "lazy" => {
@@ -907,7 +1054,9 @@ impl Fabric {
         }
         let dt = phase_t0.elapsed().as_nanos() as u64;
         per_tick[3] = dt;
-        self.profile.housekeeping_ns.fetch_add(dt, Ordering::Relaxed);
+        self.profile
+            .housekeeping_ns
+            .fetch_add(dt, Ordering::Relaxed);
 
         // Phase 5: continuous cost-aware tier orchestration.  Runs at
         // the configured cadence (default every tick).  No-op when the
@@ -916,14 +1065,18 @@ impl Fabric {
 
         let tick_total = tick_t0.elapsed().as_nanos() as u64;
         self.profile.ticks.fetch_add(1, Ordering::Relaxed);
-        self.profile.total_ns.fetch_add(tick_total, Ordering::Relaxed);
+        self.profile
+            .total_ns
+            .fetch_add(tick_total, Ordering::Relaxed);
 
         // Outlier-tick diagnostic: when a single tick crosses the
         // configurable threshold (default 5000 ms), log its breakdown
         // so we can see which phase blew up.  Most ticks are <<1 s; an
         // occasional outlier above 5 s is the symptom we're hunting.
         let threshold_ms = std::env::var("W1Z4RD_SLOW_TICK_MS")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(5_000);
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5_000);
         if tick_total > threshold_ms * 1_000_000 {
             let total_ms = tick_total / 1_000_000;
             let atom_ms = per_tick[0] / 1_000_000;
@@ -946,7 +1099,9 @@ impl Fabric {
         // Per ARCHITECTURE §17.9: TickAdvanced is the per-tick boundary
         // marker.  Lets crash-recovery rebuild the fabric's tick counter
         // and order events temporally.
-        let event = WalEvent::TickAdvanced { new_tick: self.tick };
+        let event = WalEvent::TickAdvanced {
+            new_tick: self.tick,
+        };
         if let Err(e) = self.store.append(&event) {
             tracing::warn!("WAL append failed for TickAdvanced({}): {}", self.tick, e);
         }
@@ -962,7 +1117,11 @@ impl Fabric {
         let pool = self.pools.get(&pool_id).expect("unknown pool").clone();
         let prof = self.observe_profile.clone();
         let fired = pool.write().observe_frame(frame, self.tick, Some(&prof));
-        self.current.fired.entry(pool_id).or_default().extend(fired.iter().copied());
+        self.current
+            .fired
+            .entry(pool_id)
+            .or_default()
+            .extend(fired.iter().copied());
         let total_ns = total_t0.elapsed().as_nanos() as u64;
         prof.observes.fetch_add(1, Ordering::Relaxed);
         prof.total_ns.fetch_add(total_ns, Ordering::Relaxed);
@@ -972,7 +1131,10 @@ impl Fabric {
     /// Query-time activation that is deliberately excluded from the current
     /// learning moment. Unknown atoms are ignored rather than created.
     pub fn activate_for_prediction(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
-        self.pools.get(&pool_id).expect("unknown pool").write()
+        self.pools
+            .get(&pool_id)
+            .expect("unknown pool")
+            .write()
             .activate_known_frame_for_prediction(frame)
     }
 
@@ -1025,15 +1187,16 @@ impl Fabric {
         const VISIT_BUDGET: usize = 4_096;
 
         let mut frontier: Vec<(PoolId, NeuronId)> = {
-            let Some(p) = self.pools.get(&from_pool) else { return 0 };
+            let Some(p) = self.pools.get(&from_pool) else {
+                return 0;
+            };
             let pool = p.read();
             pool.currently_firing()
                 .into_iter()
                 .map(|nid| (from_pool, nid))
                 .collect()
         };
-        let mut visited: AHashSet<(PoolId, NeuronId)> =
-            frontier.iter().copied().collect();
+        let mut visited: AHashSet<(PoolId, NeuronId)> = frontier.iter().copied().collect();
         let mut paged_per_pool: AHashMap<PoolId, usize> = AHashMap::new();
         let mut paged_total = 0usize;
         let mut visits = 0usize;
@@ -1050,10 +1213,14 @@ impl Fabric {
                 by_pool.entry(pid).or_default().push(nid);
             }
             for (pid, nids) in by_pool {
-                let Some(pa) = self.pools.get(&pid) else { continue };
+                let Some(pa) = self.pools.get(&pid) else {
+                    continue;
+                };
                 let pool = pa.read();
                 for nid in nids {
-                    if visits >= VISIT_BUDGET { break; }
+                    if visits >= VISIT_BUDGET {
+                        break;
+                    }
                     visits += 1;
                     let Some(n) = pool.get(nid) else { continue };
                     for t in &n.terminals {
@@ -1074,38 +1241,46 @@ impl Fabric {
                 by_target_pool.entry(*pid).or_default().push(*nid);
             }
             for (pid, nids) in by_target_pool {
-                let Some(pa) = self.pools.get(&pid) else { continue };
+                let Some(pa) = self.pools.get(&pid) else {
+                    continue;
+                };
                 let already = paged_per_pool.entry(pid).or_insert(0);
                 let mut to_page: Vec<NeuronId> = Vec::new();
                 {
                     let pool = pa.read();
-                    if !pool.has_storage_tier() { continue; }
+                    if !pool.has_storage_tier() {
+                        continue;
+                    }
                     for nid in nids {
                         if *already + to_page.len() >= params.max_page_in_per_pass {
                             break;
                         }
-                        if !pool.is_evicted(nid) { continue; }
-                        let salience = pool.get(nid)
-                            .map(|n| n.salience_ema)
-                            .unwrap_or(0.0);
+                        if !pool.is_evicted(nid) {
+                            continue;
+                        }
+                        let salience = pool.get(nid).map(|n| n.salience_ema).unwrap_or(0.0);
                         if salience >= params.page_in_salience_floor {
                             to_page.push(nid);
                         }
                     }
                 }
-                if to_page.is_empty() { continue; }
+                if to_page.is_empty() {
+                    continue;
+                }
                 let mut pool = pa.write();
                 for nid in to_page {
                     match pool.page_in_neuron(nid) {
                         Ok(true) => {
                             *already += 1;
                             paged_total += 1;
-                            self.orchestrator_stats.neurons_paged_in
+                            self.orchestrator_stats
+                                .neurons_paged_in
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                         Ok(false) => {}
                         Err(_) => {
-                            self.orchestrator_stats.page_in_errors
+                            self.orchestrator_stats
+                                .page_in_errors
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -1150,7 +1325,9 @@ impl Fabric {
                 };
                 let pool = pool_a.read();
                 for (&nid, &activation) in neurons.iter() {
-                    if activation < 0.001 { continue; }
+                    if activation < 0.001 {
+                        continue;
+                    }
                     let neuron = match pool.get(nid) {
                         Some(n) => n,
                         None => continue,
@@ -1159,11 +1336,11 @@ impl Fabric {
                     // common neurons spread their signal thinly, no kwta).
                     let fan_out = (neuron.terminals.len() as f32).sqrt().max(1.0);
                     for t in &neuron.terminals {
-                        let contribution = activation
-                            * t.effective_weight()
-                            * self.config.hop_decay
-                            / fan_out;
-                        if contribution.abs() < 0.0001 { continue; }
+                        let contribution =
+                            activation * t.effective_weight() * self.config.hop_decay / fan_out;
+                        if contribution.abs() < 0.0001 {
+                            continue;
+                        }
                         let tgt_pool = acts.entry(t.target.pool).or_default();
                         *tgt_pool.entry(t.target.neuron).or_insert(0.0) += contribution;
                     }
@@ -1203,16 +1380,16 @@ impl Fabric {
     pub fn settle(
         &self,
         from_pool: PoolId,
-        max_iter:  usize,
-        top_k:     usize,
-        eps:       f32,
+        max_iter: usize,
+        top_k: usize,
+        eps: f32,
     ) -> SettleResult {
         // Deserialize-on-expectation, same as propagate(): the resonance
         // walk must not hit cleared terminal lists on evicted neurons.
         let _ = self.hydrate_for_propagation(from_pool);
         let pool_arc = match self.pools.get(&from_pool) {
             Some(p) => p.clone(),
-            None    => return SettleResult::empty(),
+            None => return SettleResult::empty(),
         };
 
         // Seed state from source pool's currently-firing neurons.
@@ -1231,7 +1408,9 @@ impl Fabric {
             }
             seed
         };
-        if seed_atoms.is_empty() { return SettleResult::empty(); }
+        if seed_atoms.is_empty() {
+            return SettleResult::empty();
+        }
         state.insert(from_pool, seed_atoms.clone());
 
         let mut iterations_run = 0usize;
@@ -1260,22 +1439,24 @@ impl Fabric {
             for (pid, neurons) in state.iter() {
                 let pool_a = match self.pools.get(pid) {
                     Some(p) => p.clone(),
-                    None    => continue,
+                    None => continue,
                 };
                 let pool = pool_a.read();
                 for (&nid, &activation) in neurons.iter() {
-                    if activation < 0.001 { continue; }
+                    if activation < 0.001 {
+                        continue;
+                    }
                     let neuron = match pool.get(nid) {
                         Some(n) => n,
-                        None    => continue,
+                        None => continue,
                     };
                     let fan_out = (neuron.terminals.len() as f32).sqrt().max(1.0);
                     for t in &neuron.terminals {
-                        let contribution = activation
-                            * t.effective_weight()
-                            * self.config.hop_decay
-                            / fan_out;
-                        if contribution.abs() < 0.0001 { continue; }
+                        let contribution =
+                            activation * t.effective_weight() * self.config.hop_decay / fan_out;
+                        if contribution.abs() < 0.0001 {
+                            continue;
+                        }
                         let tgt_pool = next.entry(t.target.pool).or_default();
                         *tgt_pool.entry(t.target.neuron).or_insert(0.0) += contribution;
                     }
@@ -1289,10 +1470,9 @@ impl Fabric {
             let mut sharpened: AHashMap<PoolId, AHashMap<NeuronId, f32>> =
                 AHashMap::with_capacity(next.len());
             for (pid, neurons) in next.iter() {
-                let mut entries: Vec<(NeuronId, f32)> = neurons.iter()
-                    .map(|(k, v)| (*k, *v)).collect();
-                entries.sort_by(|a, b|
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let mut entries: Vec<(NeuronId, f32)> =
+                    neurons.iter().map(|(k, v)| (*k, *v)).collect();
+                entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 entries.truncate(top_k);
                 let max = entries.first().map(|(_, a)| *a).unwrap_or(0.0);
                 let mut pool_state: AHashMap<NeuronId, f32> =
@@ -1339,16 +1519,16 @@ impl Fabric {
 #[derive(Debug, Clone)]
 pub struct SettleResult {
     pub pool_activations: AHashMap<PoolId, AHashMap<NeuronId, f32>>,
-    pub iterations_run:   usize,
-    pub converged:        bool,
+    pub iterations_run: usize,
+    pub converged: bool,
 }
 
 impl SettleResult {
     fn empty() -> Self {
         Self {
             pool_activations: AHashMap::new(),
-            iterations_run:   0,
-            converged:        true,
+            iterations_run: 0,
+            converged: true,
         }
     }
     /// Top-N (NeuronId, activation) entries in a given pool from the
@@ -1356,12 +1536,10 @@ impl SettleResult {
     pub fn top_in_pool(&self, pool: PoolId, n: usize) -> Vec<(NeuronId, f32)> {
         let pool_map = match self.pool_activations.get(&pool) {
             Some(m) => m,
-            None    => return Vec::new(),
+            None => return Vec::new(),
         };
-        let mut entries: Vec<(NeuronId, f32)> = pool_map.iter()
-            .map(|(k, v)| (*k, *v)).collect();
-        entries.sort_by(|a, b|
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut entries: Vec<(NeuronId, f32)> = pool_map.iter().map(|(k, v)| (*k, *v)).collect();
+        entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         entries.truncate(n);
         entries
     }
@@ -1382,11 +1560,11 @@ fn top_k_delta(
         let n = next.get(pid);
         // Collect top-k of each side.
         let topk = |m: Option<&AHashMap<NeuronId, f32>>| -> Vec<(NeuronId, f32)> {
-            let mut v: Vec<(NeuronId, f32)> = m.into_iter()
+            let mut v: Vec<(NeuronId, f32)> = m
+                .into_iter()
                 .flat_map(|h| h.iter().map(|(k, v)| (*k, *v)))
                 .collect();
-            v.sort_by(|a, b|
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             v.truncate(top_k);
             v
         };

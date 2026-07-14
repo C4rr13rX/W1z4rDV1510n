@@ -1,43 +1,43 @@
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use serde::{Deserialize, Serialize};
 
-mod chain;
-mod bridge;
 mod api;
 mod brain_api;
-mod mesh_gen;
+mod bridge;
+mod chain;
 mod config;
 mod data_mesh;
 mod distributed;
 mod identity;
 mod label_queue;
 mod ledger;
+mod mesh_gen;
 mod openstack;
-mod paths;
 mod p2p;
+mod paths;
 mod performance;
 mod runtime;
 mod sim;
 mod wallet;
 
-use config::NodeConfig;
-use runtime::NodeRuntime;
+use crate::data_mesh::PatternResponse;
 use api::run_api;
+use config::NodeConfig;
 use label_queue::{
     load_latest_fabric_share, load_latest_subnet_report, parse_label_queue,
     parse_visual_label_queue,
 };
-use wallet::{WalletStore, node_id_from_wallet};
 use reqwest::blocking::Client;
-use w1z4rdv1510n::hardware::HardwareProfile;
-use w1z4rdv1510n::config::RunConfig;
+use runtime::NodeRuntime;
 use w1z4rdv1510n::blockchain::{BridgeIntent, bridge_intent_id, bridge_intent_payload};
 use w1z4rdv1510n::bridge::ChainKind;
+use w1z4rdv1510n::config::RunConfig;
+use w1z4rdv1510n::hardware::HardwareProfile;
 use w1z4rdv1510n::network::compute_payload_hash;
 use w1z4rdv1510n::schema::Timestamp;
 use w1z4rdv1510n::streaming::{
@@ -45,7 +45,7 @@ use w1z4rdv1510n::streaming::{
     KnowledgeIngestConfig, KnowledgeIngestReport, KnowledgeQueue, LabelQueueReport,
     NetworkPatternSummary, NlmJatsIngestor, VisualLabelReport,
 };
-use crate::data_mesh::PatternResponse;
+use wallet::{WalletStore, node_id_from_wallet};
 
 #[derive(Parser, Debug)]
 #[command(name = "w1z4rd", about = "W1z4rD Node — neural fabric + cluster + API")]
@@ -96,6 +96,11 @@ enum Command {
     },
     Api {
         #[arg(long, default_value = "127.0.0.1:8090")]
+        addr: String,
+    },
+    /// Run only the persistent coding-brain API under `/brain/*`.
+    BrainApi {
+        #[arg(long, default_value = "127.0.0.1:18600")]
         addr: String,
     },
     BridgeIntentCreate {
@@ -232,7 +237,6 @@ enum Command {
     },
 
     // ── Distributed cluster ───────────────────────────────────────────────────
-
     /// Start a new cluster on this machine and print the join OTP.
     /// Default cluster port: 51611 (SIGIL in leet).
     ClusterInit {
@@ -319,6 +323,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Api { addr }) => run_api_mode(&config_path, &addr),
+        Some(Command::BrainApi { addr }) => run_brain_api_mode(&addr),
         Some(Command::BridgeIntentCreate {
             chain_id,
             chain_kind,
@@ -342,9 +347,11 @@ fn main() -> anyhow::Result<()> {
             created_at_unix,
             out,
         ),
-        Some(Command::BridgeIntentVerify { file, json, expected_hash }) => {
-            bridge_intent_verify(file, json, expected_hash)
-        }
+        Some(Command::BridgeIntentVerify {
+            file,
+            json,
+            expected_hash,
+        }) => bridge_intent_verify(file, json, expected_hash),
         Some(Command::KnowledgeIngest {
             xml_file,
             xml,
@@ -375,9 +382,7 @@ fn main() -> anyhow::Result<()> {
             votes_json,
             out,
         }) => knowledge_vote(ingest_file, ingest_json, votes_file, votes_json, out),
-        Some(Command::LabelQueue { limit, out }) => {
-            label_queue_report(&config_path, limit, out)
-        }
+        Some(Command::LabelQueue { limit, out }) => label_queue_report(&config_path, limit, out),
         Some(Command::VisualLabelQueue { limit, out }) => {
             visual_label_queue_report(&config_path, limit, out)
         }
@@ -439,15 +444,13 @@ fn main() -> anyhow::Result<()> {
             out,
         ),
         // ── Cluster commands ──────────────────────────────────────────────────
-        Some(Command::ClusterInit { bind, otp_ttl }) => {
-            cluster_init(bind, otp_ttl)
-        }
-        Some(Command::ClusterJoin { coordinator, otp, bind }) => {
-            cluster_join(coordinator, otp, bind)
-        }
-        Some(Command::ClusterStatus { node }) => {
-            cluster_status(node)
-        }
+        Some(Command::ClusterInit { bind, otp_ttl }) => cluster_init(bind, otp_ttl),
+        Some(Command::ClusterJoin {
+            coordinator,
+            otp,
+            bind,
+        }) => cluster_join(coordinator, otp, bind),
+        Some(Command::ClusterStatus { node }) => cluster_status(node),
         Some(Command::ClusterOtp { bind: _ }) => {
             println!("OTP generation requires a running coordinator process.");
             println!("Use `cluster init` to start a new cluster and get the first OTP.");
@@ -460,10 +463,10 @@ fn main() -> anyhow::Result<()> {
 
 /// Default mode: start neuro API (8080) + node API (8090) then block until Ctrl-C.
 fn run_node_server(config_path: &Path, api_addr: &str, storage: &str) -> anyhow::Result<()> {
-    let node_cfg    = load_or_create_config(config_path)?;
+    let node_cfg = load_or_create_config(config_path)?;
     let node_addr: std::net::SocketAddr = args_node_addr();
-    let api_sock:  std::net::SocketAddr = api_addr.parse()?;
-    let storage_s  = storage.to_string();
+    let api_sock: std::net::SocketAddr = api_addr.parse()?;
+    let storage_s = storage.to_string();
 
     // Node API (8090) runs its own internal tokio runtime — spawn on a thread.
     let node_cfg_clone = node_cfg.clone();
@@ -477,10 +480,12 @@ fn run_node_server(config_path: &Path, api_addr: &str, storage: &str) -> anyhow:
         })?;
 
     // Neuro API (8080) + shutdown watcher run on the shared tokio runtime.
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         match w1z4rdv1510n::service::run(api_sock, &storage_s).await {
-            Ok(_)  => tracing::info!("neuro API up on {api_sock}"),
+            Ok(_) => tracing::info!("neuro API up on {api_sock}"),
             Err(e) => tracing::warn!("neuro API failed to start: {e}"),
         }
         tokio::signal::ctrl_c().await.ok();
@@ -547,6 +552,29 @@ fn run_api_mode(config_path: &Path, addr: &str) -> anyhow::Result<()> {
     run_api(config, addr)
 }
 
+fn run_brain_api_mode(addr: &str) -> anyhow::Result<()> {
+    let addr: std::net::SocketAddr = addr.parse()?;
+    let data_dir = brain_api::default_node_brain_dir();
+    std::fs::create_dir_all(&data_dir)?;
+    let brain = brain_api::load_or_build_brain(&data_dir)?;
+    let state = brain_api::build_brain_api_state(brain);
+    let app = axum::Router::new().nest("/brain", brain_api::brain_routes(state));
+    info!(
+        target: "w1z4rdv1510n::node",
+        %addr,
+        data_dir = %data_dir.display(),
+        "starting brain-only api"
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
 fn metacognition_tune(
     config_path: &Path,
     min_depth: Option<usize>,
@@ -563,7 +591,13 @@ fn metacognition_tune(
     let run_config_path = PathBuf::from(&config.streaming.run_config_path);
     let raw = fs::read_to_string(&run_config_path)?;
     let mut run_config: RunConfig = serde_json::from_str(&raw)?;
-    let (min_depth_value, max_depth_value, confident_depth_value, accuracy_target_value, uncertainty_threshold_value);
+    let (
+        min_depth_value,
+        max_depth_value,
+        confident_depth_value,
+        accuracy_target_value,
+        uncertainty_threshold_value,
+    );
     {
         let meta = &mut run_config.streaming.metacognition;
         if let Some(value) = min_depth {
@@ -671,7 +705,9 @@ fn pattern_query(
         signature.append(&mut from_file);
     }
     if signature.is_empty() {
-        anyhow::bail!("behavior_signature is required (use --behavior-signature or --behavior-signature-file)");
+        anyhow::bail!(
+            "behavior_signature is required (use --behavior-signature or --behavior-signature-file)"
+        );
     }
     let request = PatternQueryRequest {
         phenotype_hash,
@@ -692,9 +728,7 @@ fn pattern_query(
         anyhow::bail!("api key required (set --api-key or --api-key-env)");
     }
     let url = normalize_pattern_query_url(&api_url);
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
     let mut builder = client.post(url).json(&request);
     if let Some(key) = api_key {
         builder = builder.header(&config.api.api_key_header, key);
@@ -739,7 +773,10 @@ fn normalize_pattern_query_url(api_url: &str) -> String {
     if with_scheme.ends_with("/network/patterns/query") {
         with_scheme
     } else {
-        format!("{}/network/patterns/query", with_scheme.trim_end_matches('/'))
+        format!(
+            "{}/network/patterns/query",
+            with_scheme.trim_end_matches('/')
+        )
     }
 }
 
@@ -830,9 +867,8 @@ fn bridge_intent_create(
     let created_at = Timestamp {
         unix: created_at_unix.unwrap_or_else(now_unix),
     };
-    let idempotency_key = idempotency_key.unwrap_or_else(|| {
-        default_intent_key(&chain_id, &asset, amount, &recipient_node_id)
-    });
+    let idempotency_key = idempotency_key
+        .unwrap_or_else(|| default_intent_key(&chain_id, &asset, amount, &recipient_node_id));
     let mut intent = BridgeIntent {
         intent_id: String::new(),
         chain_id,
@@ -1077,10 +1113,7 @@ fn visual_label_queue_report(
     Ok(())
 }
 
-fn subnet_report(
-    config_path: &Path,
-    out: Option<String>,
-) -> anyhow::Result<()> {
+fn subnet_report(config_path: &Path, out: Option<String>) -> anyhow::Result<()> {
     let config = load_config(config_path)?;
     let report = load_latest_subnet_report(&config)?;
     let output = SubnetReportOutput {
@@ -1119,12 +1152,7 @@ fn parse_chain_kind(raw: &str) -> anyhow::Result<ChainKind> {
     Ok(kind)
 }
 
-fn default_intent_key(
-    chain_id: &str,
-    asset: &str,
-    amount: f64,
-    recipient_node_id: &str,
-) -> String {
+fn default_intent_key(chain_id: &str, asset: &str, amount: f64, recipient_node_id: &str) -> String {
     format!(
         "intent|{}|{}|{:.6}|{}",
         chain_id, asset, amount, recipient_node_id
@@ -1148,7 +1176,10 @@ fn load_text_input(file: Option<String>, inline: Option<String>) -> anyhow::Resu
     }
 }
 
-fn load_ingest_output(file: Option<String>, json: Option<String>) -> anyhow::Result<KnowledgeIngestOutput> {
+fn load_ingest_output(
+    file: Option<String>,
+    json: Option<String>,
+) -> anyhow::Result<KnowledgeIngestOutput> {
     let raw = match (file, json) {
         (Some(path), None) => fs::read_to_string(path)?,
         (None, Some(json)) => json,
@@ -1230,8 +1261,11 @@ fn cluster_init(bind: String, otp_ttl: u64) -> anyhow::Result<()> {
 fn cluster_join(coordinator: String, otp: String, bind: String) -> anyhow::Result<()> {
     use w1z4rdv1510n_cluster::{ClusterConfig, ClusterNode};
     let coord_addr = coordinator.parse()?;
-    let bind_addr  = bind.parse()?;
-    let config = ClusterConfig { bind_addr, ..Default::default() };
+    let bind_addr = bind.parse()?;
+    let config = ClusterConfig {
+        bind_addr,
+        ..Default::default()
+    };
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         println!("Joining cluster at {coord_addr}…");
@@ -1256,14 +1290,26 @@ fn cluster_status(node_addr: String) -> anyhow::Result<()> {
         let mut writer = tokio::io::BufWriter::new(w);
         protocol::send_msg(&mut writer, &Message::StatusRequest).await?;
         match protocol::recv_msg(&mut reader).await? {
-            Message::StatusResponse { cluster_id, coordinator, nodes, ring_size } => {
+            Message::StatusResponse {
+                cluster_id,
+                coordinator,
+                nodes,
+                ring_size,
+            } => {
                 println!("Cluster  : {cluster_id}");
                 println!("Coord    : {coordinator}");
                 println!("Ring     : {ring_size} virtual slots");
                 println!("Nodes    : {}", nodes.len());
                 for n in &nodes {
-                    let role = if n.is_coordinator { " [coordinator]" } else { "" };
-                    println!("  {} @ {} ({} cores, {}){role}", n.id, n.addr, n.capabilities.cpu_cores, n.capabilities.os);
+                    let role = if n.is_coordinator {
+                        " [coordinator]"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  {} @ {} ({} cores, {}){role}",
+                        n.id, n.addr, n.capabilities.cpu_cores, n.capabilities.os
+                    );
                 }
             }
             other => println!("Unexpected response: {other:?}"),

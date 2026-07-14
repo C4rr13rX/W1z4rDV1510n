@@ -17,23 +17,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use anyhow::Result;
-use axum::{Json, Router, extract::State, routing::{get, post}};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use serde_json::json;
 use tokio::sync::Mutex;
-use w1z4rd_brain::{Brain, BrainConfig, BrainDeploymentSpec, BrainIdentitySpec, PoolConfig, PoolPrototypeRegistry};
 use w1z4rd_brain::neuron::{NeuronId, NeuronRef, PoolId};
 use w1z4rd_brain::pool::{AtomEncoding, BytePassthroughEncoding};
+use w1z4rd_brain::{
+    Brain, BrainConfig, BrainDeploymentSpec, BrainIdentitySpec, PoolConfig, PoolPrototypeRegistry,
+};
 
 // ---------------------------------------------------------------------
 // Standard pool ids — must match brain_server.rs and any client script.
 // ---------------------------------------------------------------------
 
 pub const POOL_BINDING: PoolId = 0;
-pub const POOL_TEXT:    PoolId = 1;
-pub const POOL_IMAGE:   PoolId = 2;
-pub const POOL_AUDIO:   PoolId = 3;
-pub const POOL_ACTION:  PoolId = 4;
-pub const POOL_TURN:    PoolId = 5;
+pub const POOL_TEXT: PoolId = 1;
+pub const POOL_IMAGE: PoolId = 2;
+pub const POOL_AUDIO: PoolId = 3;
+pub const POOL_ACTION: PoolId = 4;
+pub const POOL_TURN: PoolId = 5;
 
 // ---------------------------------------------------------------------
 // Shared state
@@ -44,22 +50,22 @@ pub const POOL_TURN:    PoolId = 5;
 /// brain lock.
 #[derive(Debug)]
 pub struct ThinkingState {
-    pub enabled:     AtomicBool,
-    pub query_pool:  AtomicU32,
+    pub enabled: AtomicBool,
+    pub query_pool: AtomicU32,
     pub target_pool: AtomicU32,
-    pub hops_taken:  AtomicU64,
-    pub last_seed:   std::sync::Mutex<Option<Vec<u8>>>,
+    pub hops_taken: AtomicU64,
+    pub last_seed: std::sync::Mutex<Option<Vec<u8>>>,
     pub last_answer: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl Default for ThinkingState {
     fn default() -> Self {
         Self {
-            enabled:     AtomicBool::new(false),
-            query_pool:  AtomicU32::new(POOL_TEXT),
+            enabled: AtomicBool::new(false),
+            query_pool: AtomicU32::new(POOL_TEXT),
             target_pool: AtomicU32::new(POOL_ACTION),
-            hops_taken:  AtomicU64::new(0),
-            last_seed:   std::sync::Mutex::new(None),
+            hops_taken: AtomicU64::new(0),
+            last_seed: std::sync::Mutex::new(None),
             last_answer: std::sync::Mutex::new(None),
         }
     }
@@ -73,20 +79,20 @@ impl Default for ThinkingState {
 /// work from handler-total reveals serde/HTTP framing cost.
 #[derive(Debug, Default)]
 pub struct HttpProfile {
-    pub observe_calls:         AtomicU64,
-    pub observe_lock_wait_ns:  AtomicU64,
-    pub observe_handler_ns:    AtomicU64,
-    pub tick_calls:            AtomicU64,
-    pub tick_lock_wait_ns:     AtomicU64,
-    pub tick_handler_ns:       AtomicU64,
+    pub observe_calls: AtomicU64,
+    pub observe_lock_wait_ns: AtomicU64,
+    pub observe_handler_ns: AtomicU64,
+    pub tick_calls: AtomicU64,
+    pub tick_lock_wait_ns: AtomicU64,
+    pub tick_handler_ns: AtomicU64,
 }
 
 /// Router state passed to every brain handler.  Clone-friendly because
 /// every field is Arc-backed.
 #[derive(Clone)]
 pub struct BrainApiState {
-    pub brain:        Arc<Mutex<Brain>>,
-    pub thinking:     Arc<ThinkingState>,
+    pub brain: Arc<Mutex<Brain>>,
+    pub thinking: Arc<ThinkingState>,
     pub http_profile: Arc<HttpProfile>,
 }
 
@@ -101,48 +107,48 @@ pub struct BrainApiState {
 pub fn build_default_brain() -> Result<Brain> {
     let mut cfg = BrainConfig::default();
     cfg.binding_emergence_threshold = 3;
-    cfg.moment_history_window       = 256;
+    cfg.moment_history_window = 256;
     let mut brain = Brain::new(cfg);
 
     let mut text = PoolConfig::defaults("text", POOL_TEXT);
-    text.recent_atoms_window         = 65536;
+    text.recent_atoms_window = 65536;
     text.concept_emergence_threshold = 3;
-    text.max_concept_member_count    = 32;
-    text.decay_rate                  = 0.00002;
-    text.prune_floor                 = 0.001;
+    text.max_concept_member_count = 32;
+    text.decay_rate = 0.00002;
+    text.prune_floor = 0.001;
     brain.create_pool(text, leaked_encoding("t"));
 
     let mut image = PoolConfig::defaults("image", POOL_IMAGE);
-    image.recent_atoms_window         = 4096;
+    image.recent_atoms_window = 4096;
     image.concept_emergence_threshold = 3;
-    image.max_concept_member_count    = 32;
-    image.decay_rate                  = 0.00002;
-    image.prune_floor                 = 0.001;
+    image.max_concept_member_count = 32;
+    image.decay_rate = 0.00002;
+    image.prune_floor = 0.001;
     brain.create_pool(image, leaked_encoding("i"));
 
     let mut audio = PoolConfig::defaults("audio", POOL_AUDIO);
-    audio.recent_atoms_window         = 4096;
+    audio.recent_atoms_window = 4096;
     audio.concept_emergence_threshold = 3;
-    audio.max_concept_member_count    = 32;
-    audio.decay_rate                  = 0.00002;
-    audio.prune_floor                 = 0.001;
+    audio.max_concept_member_count = 32;
+    audio.decay_rate = 0.00002;
+    audio.prune_floor = 0.001;
     brain.create_pool(audio, leaked_encoding("a"));
 
     let mut action = PoolConfig::defaults("action", POOL_ACTION);
-    action.recent_atoms_window         = 65536;
+    action.recent_atoms_window = 65536;
     action.concept_emergence_threshold = 3;
-    action.max_concept_member_count    = 32;
-    action.decay_rate                  = 0.00002;
-    action.prune_floor                 = 0.001;
+    action.max_concept_member_count = 32;
+    action.decay_rate = 0.00002;
+    action.prune_floor = 0.001;
     brain.create_pool(action, leaked_encoding("act"));
     brain.designate_action_pool(POOL_ACTION);
 
     let mut turn = PoolConfig::defaults("turn", POOL_TURN);
-    turn.recent_atoms_window         = 32;
+    turn.recent_atoms_window = 32;
     turn.concept_emergence_threshold = u32::MAX;
-    turn.max_concept_member_count    = 4;
-    turn.decay_rate                  = 0.001;
-    turn.prune_floor                 = 0.01;
+    turn.max_concept_member_count = 4;
+    turn.decay_rate = 0.001;
+    turn.prune_floor = 0.01;
     brain.create_pool(turn, leaked_encoding("turn"));
 
     Ok(brain)
@@ -195,10 +201,14 @@ fn build_from_identity(identity: &BrainIdentitySpec) -> Result<Brain> {
 fn apply_identity_pool_configs(brain: &mut Brain, identity: &BrainIdentitySpec) -> Result<()> {
     brain.set_min_atom_score(identity.min_atom_score);
     for spec in &identity.pools {
-        let pool = brain.fabric().pool(spec.id).ok_or_else(|| anyhow::anyhow!(
-            "checkpoint for brain '{}' is missing configured pool {} ({})",
-            identity.name, spec.id, spec.name
-        ))?;
+        let pool = brain.fabric().pool(spec.id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "checkpoint for brain '{}' is missing configured pool {} ({})",
+                identity.name,
+                spec.id,
+                spec.name
+            )
+        })?;
         pool.write().config = spec.to_pool_config();
     }
     Ok(())
@@ -221,11 +231,16 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
         if let Some(spec) = &identity {
             let registry = PoolPrototypeRegistry::with_defaults();
             for pool in &spec.pools {
-                let encoding = registry.build(&pool.prototype, &pool.atom_encoding_prefix)
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "unknown pool prototype '{}' while restoring pool {} ({})",
-                        pool.prototype, pool.id, pool.name
-                    ))?;
+                let encoding = registry
+                    .build(&pool.prototype, &pool.atom_encoding_prefix)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unknown pool prototype '{}' while restoring pool {} ({})",
+                            pool.prototype,
+                            pool.id,
+                            pool.name
+                        )
+                    })?;
                 encs.insert(pool.id, encoding);
             }
         } else {
@@ -241,10 +256,13 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
                     apply_identity_pool_configs(&mut brain, spec)?;
                 }
                 brain
-            },
+            }
             Err(e) => {
-                tracing::warn!("brain restore failed at {}: {} — starting fresh",
-                    checkpoint.display(), e);
+                tracing::warn!(
+                    "brain restore failed at {}: {} — starting fresh",
+                    checkpoint.display(),
+                    e
+                );
                 match &identity {
                     Some(spec) => build_from_identity(spec)?,
                     None => build_default_brain()?,
@@ -263,12 +281,19 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     // means RAM grows unbounded as neurons accumulate (the brain blew
     // up to 19 GB on the last run because of this).
     let n_attached = brain.attach_cold_tiers(data_dir);
-    tracing::info!("attached cold tiers to {} pools at {}",
-        n_attached, data_dir.display());
+    tracing::info!(
+        "attached cold tiers to {} pools at {}",
+        n_attached,
+        data_dir.display()
+    );
     if let (Some(identity), Some(deployment)) = (&identity, configured_deployment()?) {
-        brain.configure_feedback_loops(identity, &deployment)
+        brain
+            .configure_feedback_loops(identity, &deployment)
             .map_err(|e| anyhow::anyhow!("configure feedback loops: {}", e))?;
-        tracing::info!("configured {} online feedback loops", brain.feedback_loop_count());
+        tracing::info!(
+            "configured {} online feedback loops",
+            brain.feedback_loop_count()
+        );
         // Enforce the deployment resource budget: translate max_resident_bytes
         // into the tier orchestrator's per-pool terminal target.  ~1000 bytes
         // per terminal is MEASURED, not theoretical: a 6.77M-terminal market
@@ -281,12 +306,13 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
             if budget > 0 {
                 let pools = identity.pools.len().max(1) as u64;
                 let mut params = brain.fabric().orchestrator_params_snapshot();
-                params.target_terminals_per_pool =
-                    ((budget / 1_000) / pools).max(10_000) as usize;
+                params.target_terminals_per_pool = ((budget / 1_000) / pools).max(10_000) as usize;
                 brain.fabric().set_tier_orchestrator_params(params);
                 tracing::info!(
                     "deployment resource budget {} bytes → {} terminals/pool eviction target",
-                    budget, params.target_terminals_per_pool);
+                    budget,
+                    params.target_terminals_per_pool
+                );
             }
         }
     }
@@ -297,8 +323,8 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
 /// `Brain` so the state can be sent across tasks (router clone, etc.).
 pub fn build_brain_api_state(brain: Brain) -> BrainApiState {
     BrainApiState {
-        brain:        Arc::new(Mutex::new(brain)),
-        thinking:     Arc::new(ThinkingState::default()),
+        brain: Arc::new(Mutex::new(brain)),
+        thinking: Arc::new(ThinkingState::default()),
         http_profile: Arc::new(HttpProfile::default()),
     }
 }
@@ -329,7 +355,9 @@ fn b64_url_no_pad(b: &[u8]) -> String {
 // can mount them.
 // ---------------------------------------------------------------------
 
-async fn h_health() -> &'static str { "ok\n" }
+async fn h_health() -> &'static str {
+    "ok\n"
+}
 
 async fn h_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let b = s.brain.lock().await;
@@ -363,8 +391,12 @@ async fn h_observe(
     drop(brain);
     let handler_ns = handler_t0.elapsed().as_nanos() as u64;
     s.http_profile.observe_calls.fetch_add(1, Ordering::Relaxed);
-    s.http_profile.observe_lock_wait_ns.fetch_add(lock_ns, Ordering::Relaxed);
-    s.http_profile.observe_handler_ns.fetch_add(handler_ns, Ordering::Relaxed);
+    s.http_profile
+        .observe_lock_wait_ns
+        .fetch_add(lock_ns, Ordering::Relaxed);
+    s.http_profile
+        .observe_handler_ns
+        .fetch_add(handler_ns, Ordering::Relaxed);
     Json(json!({ "fired_count": fired.len() }))
 }
 
@@ -375,14 +407,30 @@ async fn h_pretrain(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let pool_id = req.get("pool_id").and_then(|v| v.as_u64())
+    let pool_id = req
+        .get("pool_id")
+        .and_then(|v| v.as_u64())
         .unwrap_or(POOL_TEXT as u64) as PoolId;
-    let min_recurrence = req.get("min_recurrence").and_then(|v| v.as_u64())
-        .unwrap_or(3).clamp(2, u32::MAX as u64) as u32;
-    let max_promotions = req.get("max_promotions").and_then(|v| v.as_u64())
-        .unwrap_or(1_024).clamp(1, 10_000) as usize;
-    let encoded: Vec<&str> = req.get("frames").and_then(|v| v.as_array())
-        .map(|frames| frames.iter().filter_map(|v| v.as_str()).take(4_096).collect())
+    let min_recurrence = req
+        .get("min_recurrence")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3)
+        .clamp(2, u32::MAX as u64) as u32;
+    let max_promotions = req
+        .get("max_promotions")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1_024)
+        .clamp(1, 10_000) as usize;
+    let encoded: Vec<&str> = req
+        .get("frames")
+        .and_then(|v| v.as_array())
+        .map(|frames| {
+            frames
+                .iter()
+                .filter_map(|v| v.as_str())
+                .take(4_096)
+                .collect()
+        })
         .unwrap_or_default();
     if encoded.is_empty() {
         return Json(json!({"error": "frames must contain at least one base64url frame"}));
@@ -400,7 +448,10 @@ async fn h_pretrain(
         return Json(json!({"error": format!("unknown pool id {}", pool_id)}));
     };
     let report = pool.write().pretrain_recurring_patterns(
-        &frames, brain.fabric().current_tick(), min_recurrence, max_promotions,
+        &frames,
+        brain.fabric().current_tick(),
+        min_recurrence,
+        max_promotions,
     );
     Json(json!({"pool_id": pool_id, "atom_grounded": true, "report": report}))
 }
@@ -411,7 +462,9 @@ async fn h_predict_multi(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let target_pool = req.get("target_pool").and_then(|v| v.as_u64())
+    let target_pool = req
+        .get("target_pool")
+        .and_then(|v| v.as_u64())
         .unwrap_or(POOL_ACTION as u64) as PoolId;
     let Some(streams) = req.get("streams").and_then(|v| v.as_array()) else {
         return Json(json!({"error": "streams must be an array of {pool_id, frame}"}));
@@ -461,7 +514,10 @@ async fn h_repair_predict(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let relation_pool = req.get("relation_pool").and_then(|v| v.as_u64()).unwrap_or(11) as PoolId;
+    let relation_pool = req
+        .get("relation_pool")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(11) as PoolId;
     let Some(source_b64) = req.get("source").and_then(|v| v.as_str()) else {
         return Json(json!({"error": "source must be a base64url frame"}));
     };
@@ -534,18 +590,22 @@ async fn h_tick(State(s): State<BrainApiState>) -> Json<u64> {
     drop(brain);
     let handler_ns = handler_t0.elapsed().as_nanos() as u64;
     s.http_profile.tick_calls.fetch_add(1, Ordering::Relaxed);
-    s.http_profile.tick_lock_wait_ns.fetch_add(lock_ns, Ordering::Relaxed);
-    s.http_profile.tick_handler_ns.fetch_add(handler_ns, Ordering::Relaxed);
+    s.http_profile
+        .tick_lock_wait_ns
+        .fetch_add(lock_ns, Ordering::Relaxed);
+    s.http_profile
+        .tick_handler_ns
+        .fetch_add(handler_ns, Ordering::Relaxed);
     Json(tick)
 }
 
 async fn h_http_profile(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let obs_calls = s.http_profile.observe_calls.load(Ordering::Relaxed);
-    let obs_lock  = s.http_profile.observe_lock_wait_ns.load(Ordering::Relaxed);
-    let obs_hand  = s.http_profile.observe_handler_ns.load(Ordering::Relaxed);
+    let obs_lock = s.http_profile.observe_lock_wait_ns.load(Ordering::Relaxed);
+    let obs_hand = s.http_profile.observe_handler_ns.load(Ordering::Relaxed);
     let tick_calls = s.http_profile.tick_calls.load(Ordering::Relaxed);
-    let tick_lock  = s.http_profile.tick_lock_wait_ns.load(Ordering::Relaxed);
-    let tick_hand  = s.http_profile.tick_handler_ns.load(Ordering::Relaxed);
+    let tick_lock = s.http_profile.tick_lock_wait_ns.load(Ordering::Relaxed);
+    let tick_hand = s.http_profile.tick_handler_ns.load(Ordering::Relaxed);
     let mean = |ns: u64, n: u64| if n == 0 { 0 } else { (ns / n / 1_000) };
     Json(json!({
         "observe": {
@@ -573,8 +633,11 @@ async fn h_set_domain(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let domain_id = req.get("domain_id")
-        .and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0);
+    let domain_id = req
+        .get("domain_id")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(0);
     let brain = s.brain.lock().await;
     brain.set_domain_for_new(domain_id);
     Json(json!({ "domain_for_new": domain_id }))
@@ -583,7 +646,8 @@ async fn h_set_domain(
 async fn h_domain_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let hist = brain.domain_histogram();
-    let entries: Vec<_> = hist.into_iter()
+    let entries: Vec<_> = hist
+        .into_iter()
         .map(|((pool, domain), count)| json!({"pool": pool, "domain": domain, "count": count}))
         .collect();
     Json(json!({ "histogram": entries }))
@@ -607,7 +671,10 @@ async fn h_self_test(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let n = req.get("sample_count").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
+    let n = req
+        .get("sample_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(32) as usize;
     let mut brain = s.brain.lock().await;
     Json(json!(brain.self_test(n)))
 }
@@ -616,9 +683,14 @@ async fn h_integrate(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
+    let qp = req
+        .get("query_pool")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(POOL_TEXT as u64) as PoolId;
     let brain = s.brain.lock().await;
-    let tp = req.get("target_pool").and_then(|v| v.as_u64())
+    let tp = req
+        .get("target_pool")
+        .and_then(|v| v.as_u64())
         .map(|v| v as PoolId)
         .or_else(|| brain.action_pool_id())
         .unwrap_or(POOL_ACTION);
@@ -647,15 +719,21 @@ async fn h_integrate(
 /// Read-only prediction. Query activation is never admitted to the learning
 /// moment and is cleared before releasing the brain lock.
 async fn h_predict(
-    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
+    let qp = req
+        .get("query_pool")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(POOL_TEXT as u64) as PoolId;
     let frame = match b64_url_decode(req.get("frame").and_then(|v| v.as_str()).unwrap_or("")) {
         Ok(b) => b,
         Err(e) => return Json(json!({"error": format!("bad frame base64: {}", e)})),
     };
     let mut brain = s.brain.lock().await;
-    let tp = req.get("target_pool").and_then(|v| v.as_u64())
+    let tp = req
+        .get("target_pool")
+        .and_then(|v| v.as_u64())
         .map(|v| v as PoolId)
         .or_else(|| brain.action_pool_id())
         .unwrap_or(POOL_ACTION);
@@ -676,7 +754,9 @@ async fn h_predict(
 /// Politeness floor in MB (same env the tier orchestrator reads).
 fn politeness_floor_mb() -> u64 {
     std::env::var("W1Z4RD_TIER_MIN_SYS_AVAIL_MB")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(4_096)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4_096)
 }
 
 /// Ingest backpressure: when the machine's available RAM is below the
@@ -686,7 +766,9 @@ fn politeness_floor_mb() -> u64 {
 /// when the caller should back off and retry.
 fn ingest_backpressure() -> Option<Json<serde_json::Value>> {
     let floor = politeness_floor_mb();
-    if floor == 0 { return None; }
+    if floor == 0 {
+        return None;
+    }
     let avail = w1z4rd_brain::tier_orchestrator::TierOrchestrator::system_available_mb();
     if avail < floor {
         return Some(Json(json!({
@@ -703,20 +785,36 @@ fn ingest_backpressure() -> Option<Json<serde_json::Value>> {
 /// The only supervised hot-path operation that closes a Hebbian moment:
 /// an input and its subsequently observed outcome are consolidated together.
 async fn h_consolidate(
-    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     if let Some(reply) = ingest_backpressure() {
         return reply;
     }
-    let input_pool = req.get("input_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
-    let input = match b64_url_decode(req.get("input_frame").and_then(|v| v.as_str()).unwrap_or("")) {
-        Ok(b) => b, Err(e) => return Json(json!({"error": format!("bad input base64: {}", e)})),
+    let input_pool = req
+        .get("input_pool")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(POOL_TEXT as u64) as PoolId;
+    let input = match b64_url_decode(
+        req.get("input_frame")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    ) {
+        Ok(b) => b,
+        Err(e) => return Json(json!({"error": format!("bad input base64: {}", e)})),
     };
-    let outcome = match b64_url_decode(req.get("outcome_frame").and_then(|v| v.as_str()).unwrap_or("")) {
-        Ok(b) => b, Err(e) => return Json(json!({"error": format!("bad outcome base64: {}", e)})),
+    let outcome = match b64_url_decode(
+        req.get("outcome_frame")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    ) {
+        Ok(b) => b,
+        Err(e) => return Json(json!({"error": format!("bad outcome base64: {}", e)})),
     };
     let mut brain = s.brain.lock().await;
-    let outcome_pool = req.get("outcome_pool").and_then(|v| v.as_u64())
+    let outcome_pool = req
+        .get("outcome_pool")
+        .and_then(|v| v.as_u64())
         .map(|v| v as PoolId)
         .or_else(|| brain.action_pool_id())
         .unwrap_or(POOL_ACTION);
@@ -730,7 +828,8 @@ async fn h_consolidate(
 /// Admit a semantic pathway only when the caller supplies an externally
 /// confirmed outcome. Predictions cannot call this successfully by default.
 async fn h_logic_consolidate(
-    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     if req.get("outcome_confirmed").and_then(|v| v.as_bool()) != Some(true) {
         return Json(json!({"consolidated": false,
@@ -760,15 +859,23 @@ async fn h_logic_consolidate(
 
 /// Resolve confirmed logical pathways in a disposable, read-only workspace.
 async fn h_logic_compose(
-    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let rounds = req.get("max_rounds").and_then(|v| v.as_u64()).unwrap_or(8).min(64) as usize;
+    let rounds = req
+        .get("max_rounds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8)
+        .min(64) as usize;
     let predicate = req.get("predicate").and_then(|v| v.as_str());
     let brain = s.brain.lock().await;
     let workspace = brain.eem().compose_transient(rounds);
-    let facts: Vec<_> = workspace.facts().iter()
+    let facts: Vec<_> = workspace
+        .facts()
+        .iter()
         .filter(|fact| predicate.map_or(true, |p| fact.predicate == p))
-        .cloned().collect();
+        .cloned()
+        .collect();
     Json(json!({"learning": false, "facts": facts,
                 "semantic_relation_count": brain.eem().semantic_relation_count(),
                 "composition_rule_count": brain.eem().composition_rule_count()}))
@@ -776,14 +883,18 @@ async fn h_logic_compose(
 
 /// Learn invariant structure and variable roles only from confirmed frames.
 async fn h_logic_crystallize(
-    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     if req.get("outcome_confirmed").and_then(|v| v.as_bool()) != Some(true) {
         return Json(json!({"consolidated": false,
             "error": "outcome_confirmed=true is required"}));
     }
-    let frame = match req.get("frame").cloned()
-        .map(serde_json::from_value::<w1z4rd_brain::SemanticFrame>) {
+    let frame = match req
+        .get("frame")
+        .cloned()
+        .map(serde_json::from_value::<w1z4rd_brain::SemanticFrame>)
+    {
         Some(Ok(frame)) => frame,
         Some(Err(e)) => return Json(json!({"consolidated": false, "error": e.to_string()})),
         None => return Json(json!({"consolidated": false, "error": "frame is required"})),
@@ -797,23 +908,36 @@ async fn h_logic_crystallize(
 /// Recognize roles in novel frames and compose them against durable EEM
 /// pathways without changing either the crystallizer or the brain.
 async fn h_logic_recognize(
-    State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let frames = match req.get("frames").cloned()
-        .map(serde_json::from_value::<Vec<w1z4rd_brain::SemanticFrame>>) {
+    let frames = match req
+        .get("frames")
+        .cloned()
+        .map(serde_json::from_value::<Vec<w1z4rd_brain::SemanticFrame>>)
+    {
         Some(Ok(frames)) => frames,
         Some(Err(e)) => return Json(json!({"learning": false, "error": e.to_string()})),
         None => return Json(json!({"learning": false, "error": "frames are required"})),
     };
-    let rounds = req.get("max_rounds").and_then(|v| v.as_u64()).unwrap_or(8).min(64) as usize;
+    let rounds = req
+        .get("max_rounds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8)
+        .min(64) as usize;
     let predicate = req.get("predicate").and_then(|v| v.as_str());
     let brain = s.brain.lock().await;
-    let recognized: Vec<_> = frames.iter()
-        .flat_map(|frame| brain.eem().recognize_semantic_frame(frame)).collect();
+    let recognized: Vec<_> = frames
+        .iter()
+        .flat_map(|frame| brain.eem().recognize_semantic_frame(frame))
+        .collect();
     let workspace = brain.eem().compose_with_transient(recognized, rounds);
-    let facts: Vec<_> = workspace.facts().iter()
+    let facts: Vec<_> = workspace
+        .facts()
+        .iter()
         .filter(|fact| predicate.map_or(true, |p| fact.predicate == p))
-        .cloned().collect();
+        .cloned()
+        .collect();
     Json(json!({"learning": false, "facts": facts,
                 "template_count": brain.eem().semantic_template_count()}))
 }
@@ -824,23 +948,36 @@ fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut files = serde_json::Map::new();
     let mut manifests = 0usize;
     for bytes in candidates {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else { continue; };
-        let Some(candidate_files) = value.get("files").and_then(|files| files.as_object())
-            else { continue; };
-        if candidate_files.is_empty() { continue; }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            continue;
+        };
+        let Some(candidate_files) = value.get("files").and_then(|files| files.as_object()) else {
+            continue;
+        };
+        if candidate_files.is_empty() {
+            continue;
+        }
         let mut accepted = false;
         for (name, content) in candidate_files {
-            if !content.is_string() { return None; }
+            if !content.is_string() {
+                return None;
+            }
             if let Some(existing) = files.get(name) {
-                if existing != content { return None; }
+                if existing != content {
+                    return None;
+                }
             } else {
                 files.insert(name.clone(), content.clone());
                 accepted = true;
             }
         }
-        if accepted { manifests += 1; }
+        if accepted {
+            manifests += 1;
+        }
     }
-    if manifests < 2 || files.len() < 2 { return None; }
+    if manifests < 2 || files.len() < 2 {
+        return None;
+    }
     serde_json::to_vec(&serde_json::json!({"files": files})).ok()
 }
 
@@ -877,31 +1014,129 @@ async fn h_brain_chat(
     // every query; derived pools add sparse intent evidence but never replace
     // the character substrate. Unknown intent atoms produce no activation and
     // therefore leave the legacy single-pool path untouched.
-    let feature_pools: Vec<PoolId> = brain.fabric().pool_ids().into_iter()
+    let feature_pools: Vec<PoolId> = brain
+        .fabric()
+        .pool_ids()
+        .into_iter()
         .filter(|pid| *pid != POOL_TEXT && *pid != action_pool)
-        .filter(|pid| brain.fabric().pool(*pid).is_some_and(|pool|
-            pool.read().encoding_name() == "instruction-intent"))
+        .filter(|pid| {
+            brain
+                .fabric()
+                .pool(*pid)
+                .is_some_and(|pool| pool.read().encoding_name() == "instruction-intent")
+        })
         .collect();
     let mut chat_query_pools = vec![POOL_TEXT];
     let mut composition_features: Option<(PoolId, Vec<String>)> = None;
-    for pool_id in feature_pools {
-        let labels = brain.fabric().pool(pool_id)
+    let mut semantic_refinement_score: Option<f32> = None;
+    let mut semantic_refinement_margin: Option<f32> = None;
+    let mut inhibited_feature_pools = std::collections::HashSet::new();
+    for pool_id in feature_pools.iter().copied() {
+        let mut labels = brain
+            .fabric()
+            .pool(pool_id)
             .map(|pool| pool.read().encoded_labels(prompt.as_bytes()))
             .unwrap_or_default();
-        let inhibits_derived_readout = labels.iter()
+        let inhibits_derived_readout = labels
+            .iter()
             .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"));
         if inhibits_derived_readout {
+            inhibited_feature_pools.insert(pool_id);
             continue;
+        }
+        let learned_route = brain.decode_best_binding_by_char_motifs_with_margin(
+            POOL_TEXT,
+            prompt.as_bytes(),
+            pool_id,
+            0.0,
+            0.0,
+        );
+        if let Some((_, score, margin)) = learned_route.as_ref() {
+            semantic_refinement_score = Some(*score);
+            semantic_refinement_margin = Some(*margin);
+        }
+        let learned_frame = learned_route.as_ref().map(|(bytes, _, _)| bytes.as_slice());
+        let mut effective_frame = prompt.as_bytes();
+        if let Some(frame) = learned_frame {
+            let learned_labels = brain
+                .fabric()
+                .pool(pool_id)
+                .map(|pool| pool.read().encoded_labels(frame))
+                .unwrap_or_default();
+            let refines_overcomplete_diagnostics = learned_labels.len() == 2
+                && labels.len() == 3
+                && learned_labels.iter().all(|label| labels.contains(label));
+            let route_score = learned_route
+                .as_ref()
+                .map(|(_, score, _)| *score)
+                .unwrap_or(0.0);
+            let route_margin = learned_route
+                .as_ref()
+                .map(|(_, _, margin)| *margin)
+                .unwrap_or(0.0);
+            if route_score >= 0.39
+                && route_margin >= 0.025
+                && refines_overcomplete_diagnostics
+                && !learned_labels
+                    .iter()
+                    .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))
+            {
+                labels = learned_labels;
+                effective_frame = frame;
+            }
         }
         // A lone diagnostic (most commonly only LANGUAGE:PYTHON) is too
         // broad to establish task grounding. Require a co-firing composition
         // such as LANGUAGE + BEHAVIOR before derived evidence may influence
         // readout. Raw characters still activate regardless of this gate.
-        if brain.activate_for_prediction(pool_id, prompt.as_bytes()).len() >= 2 {
+        if brain
+            .activate_for_prediction(pool_id, effective_frame)
+            .len()
+            >= 2
+        {
             chat_query_pools.push(pool_id);
             // Language plus at least two independently grounded behaviors is
             // the minimal evidence for artifact composition.
-            if labels.len() >= 3 {
+            if labels.len() >= 2 {
+                composition_features = Some((pool_id, labels));
+            }
+        }
+    }
+
+    // Learned semantic route: raw character atoms may have been co-trained
+    // with sparse intent neurons even when the surface phrase contains none
+    // of the hand-authored diagnostics. Decode that internal intent frame,
+    // then re-stimulate the same feature pool used by grounded code actions.
+    for pool_id in feature_pools.iter().copied() {
+        if chat_query_pools.contains(&pool_id) || inhibited_feature_pools.contains(&pool_id) {
+            continue;
+        }
+        let intent_frame = brain
+            .decode_best_binding_by_char_motifs_with_margin(
+                POOL_TEXT,
+                prompt.as_bytes(),
+                pool_id,
+                0.275,
+                0.025,
+            )
+            .map(|(bytes, _, _)| bytes);
+        let Some(intent_frame) = intent_frame else {
+            continue;
+        };
+        let labels = brain
+            .fabric()
+            .pool(pool_id)
+            .map(|pool| pool.read().encoded_labels(&intent_frame))
+            .unwrap_or_default();
+        if labels
+            .iter()
+            .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))
+        {
+            continue;
+        }
+        if brain.activate_for_prediction(pool_id, &intent_frame).len() >= 2 {
+            chat_query_pools.push(pool_id);
+            if labels.len() >= 2 {
                 composition_features = Some((pool_id, labels));
             }
         }
@@ -909,14 +1144,20 @@ async fn h_brain_chat(
 
     // Authoritative trained-binding decode — Phase B v2.
     let raw_trained = brain.decode_best_trained_binding(POOL_TEXT, action_pool);
-    let composed = composition_features.as_ref().and_then(|(pool_id, labels)| {
-            let candidates = brain.decode_ranked_feature_bindings(
-                *pool_id, labels, action_pool, 64,
-            );
-            merge_grounded_file_manifests(&candidates)
-        });
+    let feature_candidates = composition_features
+        .as_ref()
+        .map(|(pool_id, labels)| {
+            brain.decode_ranked_feature_bindings(*pool_id, labels, action_pool, 64)
+        })
+        .unwrap_or_default();
+    let composed = merge_grounded_file_manifests(&feature_candidates);
+    let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
+        brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
+    });
     let trained_bytes = if composed.is_some() {
         composed
+    } else if exact_feature.is_some() {
+        exact_feature
     } else if raw_trained.is_some() {
         raw_trained
     } else if chat_query_pools.len() > 1 {
@@ -924,19 +1165,24 @@ async fn h_brain_chat(
     } else {
         None
     };
-    let trained_decode: Option<String> = trained_bytes
-        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    let trained_decode: Option<String> =
+        trained_bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
 
     // Autonomous fallback — EEM chain + annealer + multi-fact.
     let xpool = brain.integrate_autonomous(
-        POOL_TEXT, action_pool,
+        POOL_TEXT,
+        action_pool,
         /*fabric_threshold*/ 0.0,
-        /*chain_max_depth*/  4,
-        /*chain_max_visit*/  200);
+        /*chain_max_depth*/ 4,
+        /*chain_max_visit*/ 200,
+    );
     let xpool_reply: Option<String> = if xpool.grounding.outside_grounding {
         None
     } else {
-        xpool.answer.as_ref().map(|b| String::from_utf8_lossy(b).into_owned())
+        xpool
+            .answer
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
     };
 
     let reply = if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
@@ -955,19 +1201,29 @@ async fn h_brain_chat(
         String::new()
     };
 
-    let outside_grounding = reply.is_empty() || xpool.grounding.outside_grounding;
+    let outside_grounding =
+        reply.is_empty() || (trained_decode.is_none() && xpool.grounding.outside_grounding);
 
     let decoder = if xpool_reply.as_deref().map_or(false, |a| !a.is_empty()) {
-        if xpool.grounding.eem_confidence.is_some()
-            && xpool.grounding.fabric_confidence < 0.3 { "eem" }
-        else { "multi_pool" }
-    } else { "char_chain" }.to_string();
+        if xpool.grounding.eem_confidence.is_some() && xpool.grounding.fabric_confidence < 0.3 {
+            "eem"
+        } else {
+            "multi_pool"
+        }
+    } else {
+        "char_chain"
+    }
+    .to_string();
 
-    let activated: Vec<String> = xpool.grounding.composition_used.iter()
+    let activated: Vec<String> = xpool
+        .grounding
+        .composition_used
+        .iter()
         .filter_map(|nref| {
-            brain.fabric().pool(nref.pool).and_then(|p| {
-                p.read().get(nref.neuron).map(|n| n.label.clone())
-            })
+            brain
+                .fabric()
+                .pool(nref.pool)
+                .and_then(|p| p.read().get(nref.neuron).map(|n| n.label.clone()))
         })
         .collect();
     brain.clear_prediction_activation();
@@ -985,6 +1241,8 @@ async fn h_brain_chat(
         },
         "activated_concepts": activated,
         "word_activations":   Vec::<serde_json::Value>::new(),
+        "semantic_refinement_score": semantic_refinement_score,
+        "semantic_refinement_margin": semantic_refinement_margin,
     }))
 }
 
@@ -1007,8 +1265,14 @@ async fn h_integrate_chain(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
-    let tp = req.get("target_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
+    let qp = req
+        .get("query_pool")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(POOL_TEXT as u64) as PoolId;
+    let tp = req
+        .get("target_pool")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(POOL_ACTION as u64) as PoolId;
     let hops = req.get("max_hops").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
     let seed_b64 = req.get("seed").and_then(|v| v.as_str()).unwrap_or("");
     let seed = match b64_url_decode(seed_b64) {
@@ -1017,10 +1281,13 @@ async fn h_integrate_chain(
     };
     let mut brain = s.brain.lock().await;
     let trail = brain.integrate_chain(qp, tp, &seed, hops);
-    let steps: Vec<_> = trail.into_iter().map(|(q, a)| {
-        json!({ "query": b64_url_no_pad(&q),
+    let steps: Vec<_> = trail
+        .into_iter()
+        .map(|(q, a)| {
+            json!({ "query": b64_url_no_pad(&q),
                 "answer": a.map(|b| b64_url_no_pad(&b)) })
-    }).collect();
+        })
+        .collect();
     Json(json!({ "steps": steps }))
 }
 
@@ -1028,8 +1295,14 @@ async fn h_integrate_islands(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let sample = req.get("sample_size").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
-    let thr    = req.get("similarity_threshold").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+    let sample = req
+        .get("sample_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(500) as usize;
+    let thr = req
+        .get("similarity_threshold")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.5) as f32;
     let brain = s.brain.lock().await;
     let bridges = brain.integrate_islands(sample, thr);
     Json(json!({
@@ -1050,7 +1323,8 @@ async fn h_pool_concepts(
         return Json(json!({"error": format!("unknown pool id {}", pool_id), "concepts": []}));
     };
     let p = pool.read();
-    let concepts: Vec<_> = p.iter_neurons()
+    let concepts: Vec<_> = p
+        .iter_neurons()
         .filter(|n| !n.is_atom())
         .map(|n| {
             let decoded = p.decode_concept_members(&n.members);
@@ -1072,40 +1346,55 @@ async fn h_binding_diagnose(
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
+    let qp = req
+        .get("query_pool")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(POOL_TEXT as u64) as PoolId;
     let mut brain = s.brain.lock().await;
-    let tp = req.get("target_pool").and_then(|v| v.as_u64())
+    let tp = req
+        .get("target_pool")
+        .and_then(|v| v.as_u64())
         .map(|v| v as PoolId)
         .or_else(|| brain.action_pool_id())
         .unwrap_or(POOL_ACTION);
     let known = brain.activate_for_prediction(qp, text.as_bytes());
-    let query_seq = brain.fabric().pool(qp)
+    let query_seq = brain
+        .fabric()
+        .pool(qp)
         .map(|p| p.read().last_observed_sequence().to_vec())
         .unwrap_or_default();
     let mut exact = Vec::new();
     let mut fuzzy: Vec<(f32, serde_json::Value)> = Vec::new();
     if let (Some(qh), Some(th), Some(bh)) = (
-        brain.fabric().pool(qp), brain.fabric().pool(tp),
+        brain.fabric().pool(qp),
+        brain.fabric().pool(tp),
         brain.fabric().pool(brain.binding_pool_id()),
     ) {
         let q = qh.read();
         let t = th.read();
         let bindings = bh.read();
-        let firing_atoms: std::collections::HashSet<NeuronId> = q.currently_firing()
+        let firing_atoms: std::collections::HashSet<NeuronId> = q
+            .currently_firing()
             .filter(|nid| q.get(*nid).is_some_and(|n| n.is_atom()))
             .collect();
-        let firing_concepts: std::collections::HashSet<NeuronId> = q.currently_firing()
+        let firing_concepts: std::collections::HashSet<NeuronId> = q
+            .currently_firing()
             .filter(|nid| q.get(*nid).is_some_and(|n| !n.is_atom()))
             .collect();
         for binding in bindings.iter_neurons().filter(|n| !n.is_atom()) {
-            let q_atoms: Vec<NeuronId> = binding.members.iter()
+            let q_atoms: Vec<NeuronId> = binding
+                .members
+                .iter()
                 .filter(|m| m.pool == qp && q.get(m.neuron).is_some_and(|n| n.is_atom()))
-                .map(|m| m.neuron).collect();
-            let q_concepts: std::collections::HashSet<NeuronId> = binding.members.iter()
+                .map(|m| m.neuron)
+                .collect();
+            let q_concepts: std::collections::HashSet<NeuronId> = binding
+                .members
+                .iter()
                 .filter(|m| m.pool == qp && q.get(m.neuron).is_some_and(|n| !n.is_atom()))
-                .map(|m| m.neuron).collect();
-            let q_atom_set: std::collections::HashSet<NeuronId> =
-                q_atoms.iter().copied().collect();
+                .map(|m| m.neuron)
+                .collect();
+            let q_atom_set: std::collections::HashSet<NeuronId> = q_atoms.iter().copied().collect();
             let atom_intersect = q_atom_set.intersection(&firing_atoms).count();
             let atom_precision = atom_intersect as f32 / q_atom_set.len().max(1) as f32;
             let atom_recall = atom_intersect as f32 / firing_atoms.len().max(1) as f32;
@@ -1114,23 +1403,32 @@ async fn h_binding_diagnose(
             let concept_precision = concept_intersect as f32 / q_concepts.len().max(1) as f32;
             let concept_recall = concept_intersect as f32 / firing_concepts.len().max(1) as f32;
             let concept_score = concept_precision * concept_recall;
-            let target_atoms: Vec<NeuronRef> = binding.members.iter()
+            let target_atoms: Vec<NeuronRef> = binding
+                .members
+                .iter()
                 .filter(|m| m.pool == tp && t.get(m.neuron).is_some_and(|n| n.is_atom()))
-                .copied().collect();
-            let target = String::from_utf8_lossy(&t.decode_concept_members(&target_atoms)).to_string();
-            fuzzy.push((atom_score.max(concept_score), json!({
-                "binding_id": binding.id,
-                "use_count": binding.use_count,
-                "sequence_match": q_atoms == query_seq,
-                "atom_score": atom_score,
-                "atom_precision": atom_precision,
-                "atom_recall": atom_recall,
-                "concept_score": concept_score,
-                "concept_precision": concept_precision,
-                "concept_recall": concept_recall,
-                "target": target,
-            })));
-            if q_atoms != query_seq { continue; }
+                .copied()
+                .collect();
+            let target =
+                String::from_utf8_lossy(&t.decode_concept_members(&target_atoms)).to_string();
+            fuzzy.push((
+                atom_score.max(concept_score),
+                json!({
+                    "binding_id": binding.id,
+                    "use_count": binding.use_count,
+                    "sequence_match": q_atoms == query_seq,
+                    "atom_score": atom_score,
+                    "atom_precision": atom_precision,
+                    "atom_recall": atom_recall,
+                    "concept_score": concept_score,
+                    "concept_precision": concept_precision,
+                    "concept_recall": concept_recall,
+                    "target": target,
+                }),
+            ));
+            if q_atoms != query_seq {
+                continue;
+            }
             exact.push(json!({
                 "binding_id": binding.id,
                 "use_count": binding.use_count,
@@ -1138,7 +1436,9 @@ async fn h_binding_diagnose(
                 "target_atom_count": target_atoms.len(),
                 "target": target,
             }));
-            if exact.len() >= 32 { break; }
+            if exact.len() >= 32 {
+                break;
+            }
         }
     }
     fuzzy.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -1158,7 +1458,10 @@ async fn h_retune(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let n = req.get("sample_count").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+    let n = req
+        .get("sample_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(16) as usize;
     let mut brain = s.brain.lock().await;
     Json(json!(brain.retune(n)))
 }
@@ -1172,7 +1475,10 @@ async fn h_force_decay(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let v = req.get("decay_rate").and_then(|v| v.as_f64()).unwrap_or(2e-5) as f32;
+    let v = req
+        .get("decay_rate")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(2e-5) as f32;
     let v = v.clamp(1e-7, 0.5);
     let brain = s.brain.lock().await;
     let pids = brain.fabric().pool_ids();
@@ -1190,7 +1496,9 @@ async fn h_idle_ticks(
 ) -> Json<serde_json::Value> {
     let n = req.get("n").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
     let mut brain = s.brain.lock().await;
-    for _ in 0..n { brain.advance_tick(); }
+    for _ in 0..n {
+        brain.advance_tick();
+    }
     Json(json!({ "ticks_advanced": n, "current_tick": brain.fabric().current_tick() }))
 }
 
@@ -1198,8 +1506,14 @@ async fn h_sleep(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let min_use_count = req.get("min_use_count").and_then(|v| v.as_u64()).unwrap_or(2);
-    let stale_ticks   = req.get("stale_ticks").and_then(|v| v.as_u64()).unwrap_or(1000);
+    let min_use_count = req
+        .get("min_use_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2);
+    let stale_ticks = req
+        .get("stale_ticks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1000);
     let brain = s.brain.lock().await;
     // Phase 0 — drain deferred promotions (when W1Z4RD_DEFER_PROMOTION
     // mode is active, this is where structure work crystallises).
@@ -1252,8 +1566,13 @@ async fn h_observe_profile(State(s): State<BrainApiState>) -> Json<serde_json::V
     let observes = snap.observes.max(1) as f64;
     let to_us = |ns: u64| (ns as f64 / 1_000.0) as u64;
     let mean_us = |ns: u64| ((ns as f64) / observes / 1_000.0) as u64;
-    let pct = |ns: u64| if snap.total_ns == 0 { 0.0 }
-        else { (ns as f64) * 100.0 / (snap.total_ns as f64) };
+    let pct = |ns: u64| {
+        if snap.total_ns == 0 {
+            0.0
+        } else {
+            (ns as f64) * 100.0 / (snap.total_ns as f64)
+        }
+    };
     Json(json!({
         "observes":             snap.observes,
         "atomize_us":           to_us(snap.atomize_ns),
@@ -1294,7 +1613,11 @@ async fn h_observe_profile(State(s): State<BrainApiState>) -> Json<serde_json::V
 async fn h_tier_orchestrator(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let snap = brain.fabric().tier_orchestrator_stats();
-    let mean_per_pass_ns = if snap.passes == 0 { 0 } else { snap.total_ns / snap.passes };
+    let mean_per_pass_ns = if snap.passes == 0 {
+        0
+    } else {
+        snap.total_ns / snap.passes
+    };
     Json(json!({
         "passes":             snap.passes,
         "neurons_scanned":    snap.neurons_scanned,
@@ -1329,11 +1652,15 @@ async fn h_tier_orchestrator_params(
     if let Some(action) = body.get("action").and_then(|v| v.as_str()) {
         match action {
             "disable" => {
-                brain.fabric().set_tier_orchestrator_params(OrchestratorParams::disabled());
+                brain
+                    .fabric()
+                    .set_tier_orchestrator_params(OrchestratorParams::disabled());
                 return Json(json!({"status": "disabled"}));
             }
             "enable" => {
-                brain.fabric().set_tier_orchestrator_params(OrchestratorParams::from_env_or_disabled());
+                brain
+                    .fabric()
+                    .set_tier_orchestrator_params(OrchestratorParams::from_env_or_disabled());
                 return Json(json!({"status": "enabled", "source": "env_or_default"}));
             }
             _ => {}
@@ -1341,20 +1668,51 @@ async fn h_tier_orchestrator_params(
     }
     // Field-by-field override: start from current params and patch what's in body.
     let mut p = brain.fabric().orchestrator_params_snapshot();
-    if let Some(v) = body.get("run_every_n_ticks").and_then(|x| x.as_u64()) { p.run_every_n_ticks = v; }
-    if let Some(v) = body.get("scan_budget").and_then(|x| x.as_u64()) { p.scan_budget = v as usize; }
-    if let Some(v) = body.get("max_evict_per_pass").and_then(|x| x.as_u64()) { p.max_evict_per_pass = v as usize; }
-    if let Some(v) = body.get("target_terminals_per_pool").and_then(|x| x.as_u64()) { p.target_terminals_per_pool = v as usize; }
-    if let Some(v) = body.get("evict_threshold").and_then(|x| x.as_f64()) { p.evict_threshold = v as f32; }
-    if let Some(v) = body.get("w_terminals").and_then(|x| x.as_f64()) { p.w_terminals = v as f32; }
-    if let Some(v) = body.get("w_staleness").and_then(|x| x.as_f64()) { p.w_staleness = v as f32; }
-    if let Some(v) = body.get("w_inverse_salience").and_then(|x| x.as_f64()) { p.w_inverse_salience = v as f32; }
-    if let Some(v) = body.get("w_pinned").and_then(|x| x.as_f64()) { p.w_pinned = v as f32; }
-    if let Some(v) = body.get("decay_horizon_ticks").and_then(|x| x.as_u64()) { p.decay_horizon_ticks = v; }
-    if let Some(v) = body.get("salience_eps").and_then(|x| x.as_f64()) { p.salience_eps = v as f32; }
-    if let Some(v) = body.get("page_in_salience_floor").and_then(|x| x.as_f64()) { p.page_in_salience_floor = v as f32; }
-    if let Some(v) = body.get("max_page_in_per_pass").and_then(|x| x.as_u64()) { p.max_page_in_per_pass = v as usize; }
-    if let Some(v) = body.get("min_age_ticks").and_then(|x| x.as_u64()) { p.min_age_ticks = v; }
+    if let Some(v) = body.get("run_every_n_ticks").and_then(|x| x.as_u64()) {
+        p.run_every_n_ticks = v;
+    }
+    if let Some(v) = body.get("scan_budget").and_then(|x| x.as_u64()) {
+        p.scan_budget = v as usize;
+    }
+    if let Some(v) = body.get("max_evict_per_pass").and_then(|x| x.as_u64()) {
+        p.max_evict_per_pass = v as usize;
+    }
+    if let Some(v) = body
+        .get("target_terminals_per_pool")
+        .and_then(|x| x.as_u64())
+    {
+        p.target_terminals_per_pool = v as usize;
+    }
+    if let Some(v) = body.get("evict_threshold").and_then(|x| x.as_f64()) {
+        p.evict_threshold = v as f32;
+    }
+    if let Some(v) = body.get("w_terminals").and_then(|x| x.as_f64()) {
+        p.w_terminals = v as f32;
+    }
+    if let Some(v) = body.get("w_staleness").and_then(|x| x.as_f64()) {
+        p.w_staleness = v as f32;
+    }
+    if let Some(v) = body.get("w_inverse_salience").and_then(|x| x.as_f64()) {
+        p.w_inverse_salience = v as f32;
+    }
+    if let Some(v) = body.get("w_pinned").and_then(|x| x.as_f64()) {
+        p.w_pinned = v as f32;
+    }
+    if let Some(v) = body.get("decay_horizon_ticks").and_then(|x| x.as_u64()) {
+        p.decay_horizon_ticks = v;
+    }
+    if let Some(v) = body.get("salience_eps").and_then(|x| x.as_f64()) {
+        p.salience_eps = v as f32;
+    }
+    if let Some(v) = body.get("page_in_salience_floor").and_then(|x| x.as_f64()) {
+        p.page_in_salience_floor = v as f32;
+    }
+    if let Some(v) = body.get("max_page_in_per_pass").and_then(|x| x.as_u64()) {
+        p.max_page_in_per_pass = v as usize;
+    }
+    if let Some(v) = body.get("min_age_ticks").and_then(|x| x.as_u64()) {
+        p.min_age_ticks = v;
+    }
     brain.fabric().set_tier_orchestrator_params(p);
     Json(json!({
         "status": "params_set",
@@ -1385,8 +1743,13 @@ async fn h_tick_profile(State(s): State<BrainApiState>) -> Json<serde_json::Valu
     let to_us = |ns: u64| (ns as f64 / 1_000.0) as u64;
     let to_ms = |ns: u64| (ns as f64 / 1_000_000.0) as u64;
     let mean_us = |ns: u64| ((ns as f64) / ticks / 1_000.0) as u64;
-    let pct = |ns: u64| if snap.total_ns == 0 { 0.0 }
-        else { (ns as f64) * 100.0 / (snap.total_ns as f64) };
+    let pct = |ns: u64| {
+        if snap.total_ns == 0 {
+            0.0
+        } else {
+            (ns as f64) * 100.0 / (snap.total_ns as f64)
+        }
+    };
     Json(json!({
         "ticks":                       snap.ticks,
         "cross_pool_atom_wiring_us":   to_us(snap.cross_pool_atom_wiring_ns),
@@ -1414,7 +1777,8 @@ async fn h_tick_profile(State(s): State<BrainApiState>) -> Json<serde_json::Valu
 async fn h_sleep_pressure(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let deferred = std::env::var("W1Z4RD_DEFER_PROMOTION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     Json(json!({
         "deferred_promotion_enabled": deferred,
         "pending_promotions":         brain.pending_promotion_count(),
@@ -1447,7 +1811,7 @@ async fn h_thinking_stop(State(s): State<BrainApiState>) -> Json<serde_json::Val
 }
 
 async fn h_thinking_status(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
-    let seed   = s.thinking.last_seed.lock().unwrap().clone();
+    let seed = s.thinking.last_seed.lock().unwrap().clone();
     let answer = s.thinking.last_answer.lock().unwrap().clone();
     Json(json!({
         "enabled":      s.thinking.enabled.load(Ordering::Acquire),
@@ -1474,14 +1838,16 @@ pub async fn run_thinking_loop(state: BrainApiState) {
         let tp = state.thinking.target_pool.load(Ordering::Acquire);
 
         let last_answer_snap = state.thinking.last_answer.lock().unwrap().clone();
-        let last_seed_snap   = state.thinking.last_seed.lock().unwrap().clone();
+        let last_seed_snap = state.thinking.last_seed.lock().unwrap().clone();
 
         let seed: Option<Vec<u8>> = match last_answer_snap {
             Some(ans) if !ans.is_empty() && Some(&ans) != last_seed_snap.as_ref() => Some(ans),
             _ => {
                 let brain = state.brain.lock().await;
                 let len = brain.qa_db().len();
-                if len == 0 { None } else {
+                if len == 0 {
+                    None
+                } else {
                     let idx = qa_cursor % len;
                     qa_cursor = qa_cursor.wrapping_add(1);
                     brain.qa_db().iter().nth(idx).map(|qp| qp.prompt.clone())
@@ -1519,23 +1885,23 @@ pub async fn run_thinking_loop(state: BrainApiState) {
 /// is on that prefix.
 pub fn brain_routes(state: BrainApiState) -> Router {
     Router::new()
-        .route("/health",                 get(h_health))
-        .route("/stats",                  get(h_stats))
-        .route("/observe",                post(h_observe))
-        .route("/pretrain",               post(h_pretrain))
-        .route("/predict/multi",           post(h_predict_multi))
-        .route("/repair/predict",          post(h_repair_predict))
-        .route("/tick",                   post(h_tick))
-        .route("/integrate",              post(h_integrate))
-        .route("/predict",                post(h_predict))
-        .route("/consolidate",            post(h_consolidate))
-        .route("/logic/consolidate",      post(h_logic_consolidate))
-        .route("/logic/compose",          post(h_logic_compose))
-        .route("/logic/crystallize",      post(h_logic_crystallize))
-        .route("/logic/recognize",        post(h_logic_recognize))
-        .route("/chat",                   post(h_brain_chat))
-        .route("/pool/concepts",          post(h_pool_concepts))
-        .route("/binding/diagnose",        post(h_binding_diagnose))
+        .route("/health", get(h_health))
+        .route("/stats", get(h_stats))
+        .route("/observe", post(h_observe))
+        .route("/pretrain", post(h_pretrain))
+        .route("/predict/multi", post(h_predict_multi))
+        .route("/repair/predict", post(h_repair_predict))
+        .route("/tick", post(h_tick))
+        .route("/integrate", post(h_integrate))
+        .route("/predict", post(h_predict))
+        .route("/consolidate", post(h_consolidate))
+        .route("/logic/consolidate", post(h_logic_consolidate))
+        .route("/logic/compose", post(h_logic_compose))
+        .route("/logic/crystallize", post(h_logic_crystallize))
+        .route("/logic/recognize", post(h_logic_recognize))
+        .route("/chat", post(h_brain_chat))
+        .route("/pool/concepts", post(h_pool_concepts))
+        .route("/binding/diagnose", post(h_binding_diagnose))
         .with_state(state.clone())
         .merge(brain_phase_routes(state))
 }
@@ -1554,28 +1920,31 @@ pub fn brain_routes(state: BrainApiState) -> Router {
 /// without losing brain_server's diagnostic surface.
 pub fn brain_phase_routes(state: BrainApiState) -> Router {
     Router::new()
-        .route("/set_domain",             post(h_set_domain))
-        .route("/domain_stats",           get(h_domain_stats))
-        .route("/qa_db_stats",            get(h_qa_db_stats))
-        .route("/consolidation_stats",    get(h_consolidation_stats))
-        .route("/self_test",              post(h_self_test))
-        .route("/integrate_chain",        post(h_integrate_chain))
-        .route("/integrate_islands",      post(h_integrate_islands))
-        .route("/retune",                 post(h_retune))
-        .route("/tuning_state",           get(h_tuning_state))
-        .route("/force_decay",            post(h_force_decay))
-        .route("/idle_ticks",             post(h_idle_ticks))
-        .route("/sleep_pressure",         get(h_sleep_pressure))
-        .route("/tick_profile",           get(h_tick_profile))
-        .route("/observe_profile",        get(h_observe_profile))
-        .route("/http_profile",           get(h_http_profile))
-        .route("/tier_orchestrator",      get(h_tier_orchestrator))
-        .route("/tier_orchestrator/params", post(h_tier_orchestrator_params))
-        .route("/sleep",                  post(h_sleep))
-        .route("/checkpoint",             post(h_checkpoint))
-        .route("/thinking/start",         post(h_thinking_start))
-        .route("/thinking/stop",          post(h_thinking_stop))
-        .route("/thinking/status",        get(h_thinking_status))
+        .route("/set_domain", post(h_set_domain))
+        .route("/domain_stats", get(h_domain_stats))
+        .route("/qa_db_stats", get(h_qa_db_stats))
+        .route("/consolidation_stats", get(h_consolidation_stats))
+        .route("/self_test", post(h_self_test))
+        .route("/integrate_chain", post(h_integrate_chain))
+        .route("/integrate_islands", post(h_integrate_islands))
+        .route("/retune", post(h_retune))
+        .route("/tuning_state", get(h_tuning_state))
+        .route("/force_decay", post(h_force_decay))
+        .route("/idle_ticks", post(h_idle_ticks))
+        .route("/sleep_pressure", get(h_sleep_pressure))
+        .route("/tick_profile", get(h_tick_profile))
+        .route("/observe_profile", get(h_observe_profile))
+        .route("/http_profile", get(h_http_profile))
+        .route("/tier_orchestrator", get(h_tier_orchestrator))
+        .route(
+            "/tier_orchestrator/params",
+            post(h_tier_orchestrator_params),
+        )
+        .route("/sleep", post(h_sleep))
+        .route("/checkpoint", post(h_checkpoint))
+        .route("/thinking/start", post(h_thinking_start))
+        .route("/thinking/stop", post(h_thinking_stop))
+        .route("/thinking/status", get(h_thinking_status))
         .with_state(state)
 }
 
@@ -1585,8 +1954,8 @@ mod tests {
 
     #[test]
     fn deployed_identity_reconfigures_restored_pool_learning_policy() {
-        let identity_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../brains/coding_small.identity.toml");
+        let identity_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../brains/coding_small.identity.toml");
         let identity = BrainIdentitySpec::load_toml(identity_path).unwrap();
         let mut brain = build_from_identity(&identity).unwrap();
         let response = brain.fabric().pool(4).unwrap();
