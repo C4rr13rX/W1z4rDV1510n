@@ -264,6 +264,8 @@ fn direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth() 
     ]);
     assert!(binding.is_some());
     assert_eq!(brain.fabric().pool(input).unwrap().read().concept_count(), 0);
+    // A unique action stays as its original byte atoms. Only recurrence causes
+    // a reusable atom-grounded action concept to emerge.
     assert_eq!(brain.fabric().pool(output).unwrap().read().concept_count(), 0);
 
     brain.activate_for_prediction(input, b"write a greeting");
@@ -272,6 +274,49 @@ fn direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth() 
         brain.decode_best_trained_binding(input, output),
         Some(b"def greet():\n    return 'hello'\n".to_vec()),
     );
+}
+
+#[test]
+fn direct_pretrain_reuses_atom_grounded_action_frame_across_paraphrases() {
+    let (mut brain, input, output) = build_two_pool_brain();
+    brain.designate_action_pool(output);
+    let response = b"def greet():\n    return 'hello'\n".to_vec();
+
+    let first = brain.pretrain_binding_episode(&[
+        (input, b"write a greeting".to_vec()),
+        (output, response.clone()),
+    ]);
+    let second = brain.pretrain_binding_episode(&[
+        (input, b"create hello code".to_vec()),
+        (output, response.clone()),
+    ]);
+    assert!(first.is_some() && second.is_some());
+    assert_ne!(first, second);
+    assert_eq!(brain.fabric().pool(output).unwrap().read().concept_count(), 1);
+    for (binding, expected_action_members) in [
+        (first.unwrap(), response.len()),
+        (second.unwrap(), 1),
+    ] {
+        let binding_pool = brain.fabric().pool(0).unwrap();
+        let binding_pool = binding_pool.read();
+        let action_members = binding_pool
+            .get(binding)
+            .unwrap()
+            .members
+            .iter()
+            .filter(|member| member.pool == output)
+            .count();
+        assert_eq!(action_members, expected_action_members);
+    }
+
+    for prompt in [b"write a greeting".as_slice(), b"create hello code".as_slice()] {
+        brain.activate_for_prediction(input, prompt);
+        assert_eq!(
+            brain.decode_best_trained_binding(input, output),
+            Some(response.clone()),
+        );
+        brain.clear_prediction_activation();
+    }
 }
 
 #[test]

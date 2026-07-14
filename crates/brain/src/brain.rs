@@ -1103,9 +1103,11 @@ impl Brain {
 
     /// Create one atom-grounded multi-pool episode without replaying the
     /// frames through ordinary within-pool concept emergence.  This is the
-    /// scalable corpus pre-training path: raw atoms and native feature atoms
-    /// are preserved as binding members, while repeated live experience can
-    /// still grow higher mini-columns later through `observe`.
+    /// scalable corpus pre-training path: source and native feature atoms are
+    /// preserved as binding members. The target/action frame is collapsed to
+    /// one reusable atom-grounded concept so paraphrases do not duplicate a
+    /// long response membership vector. Repeated live experience can still
+    /// grow higher mini-columns later through `observe`.
     pub fn pretrain_binding_episode(
         &mut self,
         frames: &[(PoolId, Vec<u8>)],
@@ -1117,9 +1119,11 @@ impl Brain {
                 continue;
             }
             let pool = self.fabric.pool(*pool_id)?;
-            let sequence = pool
-                .write()
-                .ensure_frame_atoms_for_pretrain(frame, now);
+            let sequence = if Some(*pool_id) == self.action_pool_id {
+                pool.write().ensure_frame_concept_for_pretrain(frame, now)
+            } else {
+                pool.write().ensure_frame_atoms_for_pretrain(frame, now)
+            };
             if !sequence.is_empty() {
                 fired.insert(*pool_id, sequence);
             }
@@ -1588,6 +1592,12 @@ impl Brain {
     }
 
     fn index_binding_members(&mut self, binding_id: NeuronId, members: &[NeuronRef]) {
+        let represented: Vec<PoolId> = members
+            .iter()
+            .map(|member| member.pool)
+            .collect::<ahash::AHashSet<_>>()
+            .into_iter()
+            .collect();
         let mut atom_sequences: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         for member in members {
             let Some(pool) = self.fabric.pool(member.pool) else {
@@ -1600,7 +1610,6 @@ impl Brain {
                     .push(member.neuron);
             }
         }
-        let represented: Vec<PoolId> = atom_sequences.keys().copied().collect();
         for (&query_pool, sequence) in &atom_sequences {
             if sequence.is_empty() {
                 continue;

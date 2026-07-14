@@ -10,6 +10,7 @@
 use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
@@ -1686,6 +1687,61 @@ impl Pool {
         }
         self.last_observed_sequence = sequence.clone();
         sequence
+    }
+
+    /// Return an ordered pretraining frame, collapsing it to one reusable,
+    /// atom-grounded concept only after recurrence. The first observation
+    /// remains raw atoms, so unique targets have no concept overhead. From the
+    /// second observation onward, paraphrase bindings store one shared concept
+    /// reference instead of another full response membership vector.
+    pub fn ensure_frame_concept_for_pretrain(
+        &mut self,
+        frame: &[u8],
+        tick: u64,
+    ) -> Vec<NeuronId> {
+        let sequence = self.ensure_frame_atoms_for_pretrain(frame, tick);
+        if sequence.is_empty() {
+            return Vec::new();
+        }
+        if let Some(&id) = self.concept_sequence_to_id.get(&sequence) {
+            if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                neuron.use_count = neuron.use_count.saturating_add(1);
+                neuron.last_fired_tick = tick;
+            }
+            return vec![id];
+        }
+
+        let recurrence = self.sequences.entry(sequence.clone()).or_insert(0);
+        *recurrence = recurrence.saturating_add(1);
+        if *recurrence < 2 {
+            return sequence;
+        }
+
+        let mut hasher = DefaultHasher::new();
+        sequence.hash(&mut hasher);
+        let label = format!(
+            "pretrain-frame:{}:{:016x}",
+            sequence.len(),
+            hasher.finish(),
+        );
+        let members: Vec<NeuronRef> = sequence
+            .iter()
+            .map(|&id| NeuronRef::new(self.config.id, id))
+            .collect();
+        let id = self.neurons.len() as NeuronId;
+        let neuron = Neuron::new_concept(
+            id,
+            label.clone(),
+            NeuronKind::Excitatory,
+            members,
+            tick,
+        );
+        let id = self.append_neuron(neuron, label);
+        self.concept_sequence_to_id.insert(sequence.clone(), id);
+        if sequence.len() <= 512 {
+            self.concept_multiset_to_id.entry(sequence).or_insert(id);
+        }
+        vec![id]
     }
 
     /// Remove query-local activation while preserving all learned neurons,
