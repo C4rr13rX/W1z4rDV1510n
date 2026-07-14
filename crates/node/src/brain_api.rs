@@ -986,6 +986,26 @@ fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({"files": files})).ok()
 }
 
+/// A directly grounded, complete project answer is stronger evidence than a
+/// set of lower-level fragments that happen to share some broad features.
+/// This prevents a learned whole artifact from being shadowed by a fragment
+/// during paraphrase recall.
+fn is_complete_file_manifest(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("files").and_then(|files| files.as_object()).cloned())
+        .is_some_and(|files| {
+            !files.is_empty()
+                && files.iter().all(|(name, content)| {
+                    !name.is_empty()
+                        && !name.starts_with('/')
+                        && !name.starts_with('\\')
+                        && !name.split(['/', '\\']).any(|part| part == "..")
+                        && content.as_str().is_some_and(|source| !source.is_empty())
+                })
+        })
+}
+
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
@@ -1271,6 +1291,7 @@ async fn h_brain_chat(
     let mut semantic_refinement_score: Option<f32> = None;
     let mut semantic_refinement_margin: Option<f32> = None;
     let mut inhibited_feature_pools = std::collections::HashSet::new();
+    let mut directly_underspecified = false;
     for pool_id in feature_pools.iter().copied() {
         let mut labels = brain
             .fabric()
@@ -1281,6 +1302,7 @@ async fn h_brain_chat(
             .iter()
             .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"));
         if inhibits_derived_readout {
+            directly_underspecified = true;
             inhibited_feature_pools.insert(pool_id);
             continue;
         }
@@ -1406,12 +1428,24 @@ async fn h_brain_chat(
             )
         })
         .unwrap_or_default();
-    let composed = merge_grounded_code_fragments(&feature_candidates)
-        .or_else(|| merge_grounded_file_manifests(&feature_candidates));
     let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
         brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
     });
-    let trained_bytes = if composed.is_some() {
+    let exact_complete_manifest = exact_feature
+        .as_ref()
+        .filter(|bytes| is_complete_file_manifest(bytes))
+        .cloned();
+    let diagnostic_intent_labels = composition_features
+        .as_ref()
+        .map(|(_, labels)| labels.clone())
+        .unwrap_or_default();
+    let diagnostic_exact_feature = exact_feature.is_some();
+    let diagnostic_exact_manifest = exact_complete_manifest.is_some();
+    let composed = merge_grounded_code_fragments(&feature_candidates)
+        .or_else(|| merge_grounded_file_manifests(&feature_candidates));
+    let trained_bytes = if exact_complete_manifest.is_some() {
+        exact_complete_manifest
+    } else if composed.is_some() {
         composed
     } else if exact_feature.is_some() {
         exact_feature
@@ -1442,7 +1476,11 @@ async fn h_brain_chat(
             .map(|b| String::from_utf8_lossy(b).into_owned())
     };
 
-    let reply = if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
+    let reply = if directly_underspecified {
+        // Explicit missing-information evidence inhibits every generative
+        // route, including raw-character fuzzy recall.
+        String::new()
+    } else if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
         td.clone()
     } else if !xpool.grounding.outside_grounding
         && !xpool.grounding.speculation_flag
@@ -1500,6 +1538,12 @@ async fn h_brain_chat(
         "word_activations":   Vec::<serde_json::Value>::new(),
         "semantic_refinement_score": semantic_refinement_score,
         "semantic_refinement_margin": semantic_refinement_margin,
+        "intent_diagnostics": {
+            "labels": diagnostic_intent_labels,
+            "ranked_candidates": feature_candidates.len(),
+            "exact_feature": diagnostic_exact_feature,
+            "exact_complete_manifest": diagnostic_exact_manifest,
+        },
     }))
 }
 
@@ -2249,6 +2293,19 @@ mod tests {
         let direct = vec!["intent:LANGUAGE:RUST".to_string()];
         let learned = vec!["intent:GROUNDING:UNDERSPECIFIED".to_string()];
         assert!(fuse_intent_labels(&direct, &learned).is_none());
+    }
+
+    #[test]
+    fn complete_manifest_is_distinguished_from_partial_fragment_evidence() {
+        assert!(is_complete_file_manifest(
+            br#"{"files":{"domain.py":"VALUE = 1\n","service.py":"from domain import VALUE\n"}}"#
+        ));
+        assert!(!is_complete_file_manifest(
+            br#"{"code_fragment":{"file":"service.py","role":"import","source":"from domain import VALUE\n"}}"#
+        ));
+        assert!(!is_complete_file_manifest(
+            br#"{"files":{"../escape.py":"VALUE = 1\n"}}"#
+        ));
     }
 
     #[test]

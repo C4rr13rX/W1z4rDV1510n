@@ -166,10 +166,9 @@ fn project_level_intents_are_compositional_and_distinct() {
             features.iter().any(|label| label == expected),
             "{features:?}"
         );
-        assert_eq!(
-            features.len(),
-            2,
-            "project prompt should emit language + one behavior"
+        assert!(
+            features.len() >= 2,
+            "project prompt should emit language plus compositional evidence"
         );
     }
 }
@@ -400,6 +399,40 @@ fn composed_observability_paraphrase_retains_redaction_evidence() {
         features
             .iter()
             .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION")
+    );
+}
+
+#[test]
+fn complete_project_intent_is_distinct_from_an_internal_fragment() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let project = encoding.atomize(
+        b"Create Python code in multiple files separating inventory rules from a service.",
+    );
+    let fragment = encoding.atomize(b"Write a Python multi-file inventory service class.");
+    assert!(
+        project
+            .iter()
+            .any(|label| label == "intent:ARTIFACT:PROJECT")
+    );
+    let safe_inventory = encoding.atomize(
+        b"Create Python code in multiple files separating inventory rules from a service that reserves stock safely.",
+    );
+    assert!(
+        safe_inventory
+            .iter()
+            .any(|label| label == "intent:GUARD:INSUFFICIENT_STOCK")
+    );
+    assert!(
+        safe_inventory
+            .iter()
+            .any(|label| label == "intent:STRUCTURE:SERVICE_MODULE")
+    );
+    assert!(
+        !fragment
+            .iter()
+            .any(|label| label == "intent:ARTIFACT:PROJECT")
     );
 }
 

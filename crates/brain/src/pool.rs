@@ -427,6 +427,12 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("ARCHITECTURE:MULTIFILE_SERVICE");
         }
+        if text.contains("project")
+            || text.contains("code in multiple files")
+            || text.contains("code across multiple files")
+        {
+            emit("ARTIFACT:PROJECT");
+        }
         if text.contains("inventory")
             || text.contains("stock reservation")
             || text.contains("reserve stock")
@@ -436,7 +442,13 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("domain module") || text.contains("domain file") {
             emit("STRUCTURE:DOMAIN_MODULE");
         }
-        if text.contains("service module") || text.contains("service file") {
+        if text.contains("service module")
+            || text.contains("service file")
+            || ((text.contains("multi-file")
+                || text.contains("multiple files")
+                || text.contains("code in multiple files"))
+                && text.contains("service"))
+        {
             emit("STRUCTURE:SERVICE_MODULE");
         }
         if text.contains("exception declaration") || text.contains("exception class") {
@@ -454,6 +466,10 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("over-reservation")
             || text.contains("over reservation")
             || text.contains("insufficient stock")
+            || ((text.contains("inventory")
+                || text.contains("stock")
+                || text.contains("reserv"))
+                && (text.contains("safely") || text.contains("safe reservation")))
         {
             emit("GUARD:INSUFFICIENT_STOCK");
         }

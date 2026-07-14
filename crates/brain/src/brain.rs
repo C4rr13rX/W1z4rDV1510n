@@ -3110,19 +3110,34 @@ impl Brain {
         }
         let bindings_handle = self.fabric.pool(self.binding_pool_id)?;
         let bindings = bindings_handle.read();
+        fn collect_atoms(
+            pool: &crate::Pool,
+            neuron_id: NeuronId,
+            output: &mut ahash::AHashSet<NeuronId>,
+        ) {
+            let Some(neuron) = pool.get(neuron_id) else {
+                return;
+            };
+            if neuron.is_atom() {
+                output.insert(neuron_id);
+            } else {
+                for member in &neuron.members {
+                    if member.pool == pool.id() {
+                        collect_atoms(pool, member.neuron, output);
+                    }
+                }
+            }
+        }
         let mut best: Option<(NeuronId, u64)> = None;
         for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
-            let binding_atoms: ahash::AHashSet<NeuronId> = binding
+            let mut binding_atoms = ahash::AHashSet::new();
+            for member in binding
                 .members
                 .iter()
                 .filter(|member| member.pool == feature_pool)
-                .filter(|member| {
-                    feature
-                        .get(member.neuron)
-                        .is_some_and(|neuron| neuron.is_atom())
-                })
-                .map(|member| member.neuron)
-                .collect();
+            {
+                collect_atoms(&feature, member.neuron, &mut binding_atoms);
+            }
             if binding_atoms != query_atoms {
                 continue;
             }
