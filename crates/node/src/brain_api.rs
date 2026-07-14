@@ -1406,54 +1406,6 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({"files": rendered})).ok()
 }
 
-/// Combine independent semantic evidence without allowing a fuzzy learned
-/// route to overwrite a feature dimension that the current prompt states
-/// directly. For example, a route learned from "Python authorization" may
-/// contribute SECURITY:AUTHORIZATION to a prompt that directly fires
-/// LANGUAGE:JAVASCRIPT, but its stale LANGUAGE:PYTHON atom is inhibited.
-fn fuse_intent_labels(direct: &[String], learned: &[String]) -> Option<Vec<String>> {
-    if direct.is_empty() || learned.is_empty() {
-        return None;
-    }
-    fn namespace(label: &str) -> &str {
-        label
-            .split_once(':')
-            .map(|(_, semantic)| semantic.split(':').next().unwrap_or(semantic))
-            .unwrap_or(label)
-    }
-    let direct_namespaces: std::collections::HashSet<&str> =
-        direct.iter().map(|label| namespace(label)).collect();
-    // Cross-language fusion is deliberately anchored by an explicit language
-    // neuron. Learned language guesses must never replace that observation.
-    if !direct_namespaces.contains("LANGUAGE") {
-        return None;
-    }
-    let mut fused = direct.to_vec();
-    for label in learned {
-        if label.ends_with(":GROUNDING:UNDERSPECIFIED") {
-            return None;
-        }
-        if !direct_namespaces.contains(namespace(label)) && !fused.contains(label) {
-            fused.push(label.clone());
-        }
-    }
-    (fused.len() > direct.len()).then_some(fused)
-}
-
-fn intent_frame_from_labels(labels: &[String]) -> Vec<u8> {
-    let mut frame = Vec::new();
-    for label in labels {
-        let semantic = label
-            .split_once(':')
-            .map(|(_, semantic)| semantic)
-            .unwrap_or(label);
-        frame.extend_from_slice(b"@intent:");
-        frame.extend_from_slice(semantic.as_bytes());
-        frame.push(b'\n');
-    }
-    frame
-}
-
 /// POST /brain/chat — canonical chat endpoint on the merged node.
 /// Mirrors brain_server's /chat behaviour so existing Django /
 /// wizard_session callers can switch from `:8095/chat` to
@@ -1555,9 +1507,6 @@ async fn h_brain_chat(
             let removes_one_spurious_diagnostic = learned_labels.len() == 2
                 && labels.len() == 3
                 && learned_labels.iter().all(|label| labels.contains(label));
-            let adds_one_missing_diagnostic = labels.len() >= 2
-                && learned_labels.len() == labels.len() + 1
-                && labels.iter().all(|label| learned_labels.contains(label));
             let route_score = learned_route
                 .as_ref()
                 .map(|(_, score, _)| *score)
@@ -1566,20 +1515,16 @@ async fn h_brain_chat(
                 .as_ref()
                 .map(|(_, _, margin)| *margin)
                 .unwrap_or(0.0);
-            if route_score >= 0.39
+            let reliable_removal = route_score >= 0.39
                 && route_margin >= 0.025
-                && (removes_one_spurious_diagnostic || adds_one_missing_diagnostic)
+                && removes_one_spurious_diagnostic;
+            if reliable_removal
                 && !learned_labels
                     .iter()
                     .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))
             {
                 labels = learned_labels;
                 effective_owned = Some(frame.to_vec());
-            } else if route_score >= 0.30 && route_margin >= 0.025 {
-                if let Some(fused) = fuse_intent_labels(&labels, &learned_labels) {
-                    effective_owned = Some(intent_frame_from_labels(&fused));
-                    labels = fused;
-                }
             }
         }
         let effective_frame = effective_owned.as_deref().unwrap_or(prompt.as_bytes());
@@ -1640,14 +1585,27 @@ async fn h_brain_chat(
         }
     }
 
-    // Authoritative trained-binding decode — Phase B v2.
+    // Authoritative trained-binding decode — Phase B v2. Pool ids are
+    // identity-specific: discover conversational turn pools by role rather
+    // than treating the default topology's pool 5 as universal.
+    let turn_pools: Vec<PoolId> = brain
+        .fabric()
+        .pool_ids()
+        .into_iter()
+        .filter(|pool_id| {
+            brain
+                .fabric()
+                .pool(*pool_id)
+                .is_some_and(|pool| pool.read().name() == "turn")
+        })
+        .collect();
     let raw_trained = exact_raw_trained
         .or_else(|| {
             brain.decode_best_trained_binding_with_context(
                 POOL_TEXT,
                 action_pool,
                 &chat_query_pools,
-                &[POOL_TURN],
+                &turn_pools,
             )
         });
     let mut feature_candidates = composition_features
@@ -1661,7 +1619,7 @@ async fn h_brain_chat(
                 brain.fabric().pool(8).map(|_| 8),
                 brain.fabric().pool(6).map(|_| 6),
                 &chat_query_pools,
-                &[POOL_TURN],
+                &turn_pools,
             )
         })
         .unwrap_or_default();
@@ -1700,7 +1658,7 @@ async fn h_brain_chat(
                     None,
                     None,
                     &chat_query_pools,
-                    &[POOL_TURN],
+                    &turn_pools,
                 )
                 .len()
         })
@@ -1727,10 +1685,15 @@ async fn h_brain_chat(
         raw_trained.clone()
     } else if exact_complete_manifest.is_some() {
         exact_complete_manifest
+    } else if exact_feature.is_some() {
+        // An exact sparse-intent episode is stronger evidence than a fuzzy
+        // assembly of several partially matching artifacts.  In particular,
+        // LANGUAGE + BEHAVIOR can identify a learned single-function answer
+        // exactly while broad project fragments share enough diagnostics to
+        // form a syntactically valid but unrelated composition.
+        exact_feature
     } else if composed.is_some() {
         composed
-    } else if exact_feature.is_some() {
-        exact_feature
     } else if raw_trained.is_some() {
         raw_trained
     } else if chat_query_pools.len() > 1 {
@@ -2008,6 +1971,8 @@ async fn h_binding_diagnose(
             .filter(|nid| q.get(*nid).is_some_and(|n| !n.is_atom()))
             .collect();
         for binding in bindings.iter_neurons().filter(|n| !n.is_atom()) {
+            let member_pools: std::collections::BTreeSet<PoolId> =
+                binding.members.iter().map(|member| member.pool).collect();
             let q_atoms: Vec<NeuronId> = binding
                 .members
                 .iter()
@@ -2041,6 +2006,7 @@ async fn h_binding_diagnose(
                 atom_score.max(concept_score),
                 json!({
                     "binding_id": binding.id,
+                    "member_pools": member_pools.clone(),
                     "use_count": binding.use_count,
                     "sequence_match": q_atoms == query_seq,
                     "atom_score": atom_score,
@@ -2057,6 +2023,7 @@ async fn h_binding_diagnose(
             }
             exact.push(json!({
                 "binding_id": binding.id,
+                "member_pools": member_pools,
                 "use_count": binding.use_count,
                 "query_atom_count": q_atoms.len(),
                 "target_atom_count": target_atoms.len(),
@@ -2592,34 +2559,6 @@ mod tests {
         apply_identity_pool_configs(&mut brain, &identity).unwrap();
 
         assert_eq!(response.read().config.max_concept_member_count, 1);
-    }
-
-    #[test]
-    fn direct_language_inhibits_learned_language_during_intent_fusion() {
-        let direct = vec!["intent:LANGUAGE:JAVASCRIPT".to_string()];
-        let learned = vec![
-            "intent:LANGUAGE:PYTHON".to_string(),
-            "intent:SECURITY:AUTHORIZATION".to_string(),
-        ];
-        let fused = fuse_intent_labels(&direct, &learned).unwrap();
-        assert_eq!(
-            fused,
-            vec![
-                "intent:LANGUAGE:JAVASCRIPT".to_string(),
-                "intent:SECURITY:AUTHORIZATION".to_string(),
-            ]
-        );
-        assert_eq!(
-            intent_frame_from_labels(&fused),
-            b"@intent:LANGUAGE:JAVASCRIPT\n@intent:SECURITY:AUTHORIZATION\n"
-        );
-    }
-
-    #[test]
-    fn intent_fusion_rejects_underspecified_learned_evidence() {
-        let direct = vec!["intent:LANGUAGE:RUST".to_string()];
-        let learned = vec!["intent:GROUNDING:UNDERSPECIFIED".to_string()];
-        assert!(fuse_intent_labels(&direct, &learned).is_none());
     }
 
     #[test]

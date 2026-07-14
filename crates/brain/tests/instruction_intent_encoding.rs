@@ -401,6 +401,45 @@ fn typescript_is_an_independent_language_feature() {
 }
 
 #[test]
+fn typescript_transport_retry_does_not_alias_a_retry_helper() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let idempotent = encoding.atomize(
+        b"Create typed order-handling code that prevents duplicate TypeScript commands when clients retry with the same idempotency key.",
+    );
+    assert!(idempotent
+        .iter()
+        .any(|label| label == "intent:API:IDEMPOTENT_COMMAND"));
+    assert!(!idempotent
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:BOUNDED_RETRY"));
+
+    let retry = encoding.atomize(
+        b"Write TypeScript async retry code that limits attempts and stops after success.",
+    );
+    assert!(retry
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:BOUNDED_RETRY"));
+}
+
+#[test]
+fn version_checked_storage_is_optimistic_concurrency_evidence() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Create typed version-checked storage so stale TypeScript writers cannot replace newer state.",
+    );
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:LANGUAGE:TYPESCRIPT"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY"));
+}
+
+#[test]
 fn native_ledger_paraphrase_and_missing_context_are_detected() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),

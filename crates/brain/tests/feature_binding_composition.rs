@@ -58,6 +58,35 @@ fn ranked_feature_readout_returns_independent_grounded_actions() {
 }
 
 #[test]
+fn language_and_behavior_can_recall_one_extra_learned_constraint() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let learned = b"@intent:LANGUAGE:TYPESCRIPT\n@intent:API:IDEMPOTENT_COMMAND\n@intent:ENTERPRISE:INPUT_VALIDATION\n";
+    let response = br#"{"files":{"orders.ts":"VALIDATED IDEMPOTENT SERVICE"}}"#;
+    for _ in 0..6 {
+        brain.observe(feature_pool, learned);
+        brain.observe(action_pool, response);
+        brain.advance_tick();
+    }
+    let query = b"@intent:LANGUAGE:TYPESCRIPT\n@intent:API:IDEMPOTENT_COMMAND\n";
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(query);
+    let decoded = brain.decode_ranked_feature_bindings(feature_pool, &labels, action_pool, 8);
+    assert_eq!(decoded.first().map(Vec::as_slice), Some(response.as_slice()));
+}
+
+#[test]
 fn character_motif_route_generalizes_raw_phrase_to_learned_intent() {
     let mut brain = Brain::new(BrainConfig::default());
     let raw_pool = brain.create_pool(

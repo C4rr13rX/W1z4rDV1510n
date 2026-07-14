@@ -406,7 +406,14 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("ENTERPRISE:INPUT_VALIDATION");
         }
-        if text.contains("retry") || text.contains("attempts") || text.contains("transient failure")
+        if text.contains("attempts")
+            || text.contains("transient failure")
+            || (text.contains("retry")
+                && (text.contains("async")
+                    || text.contains("asynchronous")
+                    || text.contains("bounded")
+                    || text.contains("last exception")
+                    || text.contains("after success")))
         {
             emit("ENTERPRISE:BOUNDED_RETRY");
         }
@@ -540,6 +547,9 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("expected version")
             || text.contains("expected-version")
             || text.contains("stale write")
+            || text.contains("version-checked")
+            || text.contains("version checked")
+            || (text.contains("stale") && text.contains("writer"))
         {
             emit("STATE:OPTIMISTIC_CONCURRENCY");
         }

@@ -3249,7 +3249,7 @@ impl Brain {
                 .filter_map(|label| features.label_to_id(label))
                 .collect()
         };
-        if query_atoms.len() < 3 {
+        if query_atoms.len() < 2 {
             return Vec::new();
         }
 
@@ -3323,8 +3323,23 @@ impl Brain {
             // members mandatory and hide an otherwise exact sparse binding.
             let hits = [&direct_atoms, &expanded_atoms]
                 .into_iter()
-                .filter(|atoms| atoms.len() >= 2 && atoms.is_subset(&query_atoms))
-                .map(|atoms| atoms.len())
+                .filter_map(|atoms| {
+                    if atoms.len() >= 2 && atoms.is_subset(&query_atoms) {
+                        Some(atoms.len())
+                    } else if query_atoms.len() >= 2
+                        && query_atoms.is_subset(atoms)
+                        && atoms.len() == query_atoms.len() + 1
+                    {
+                        // Language + one grounded behavior is sufficient to
+                        // recall an episode with one additional learned
+                        // constraint (for example, an idempotent service
+                        // whose implementation also validates input). Wider
+                        // supersets remain ineligible.
+                        Some(query_atoms.len())
+                    } else {
+                        None
+                    }
+                })
                 .max()
                 .unwrap_or(0);
             if hits < 2 {
