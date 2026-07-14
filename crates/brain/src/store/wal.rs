@@ -42,6 +42,11 @@ pub trait Store: Send + Sync {
     /// survive a process or OS crash.  Called by `Brain::checkpoint`.
     fn flush(&self) -> io::Result<()>;
 
+    /// Discard history already covered by an atomically durable checkpoint.
+    /// Backends that cannot compact in place may retain it; replay remains
+    /// correct because SnapshotMarker still identifies the usable tail.
+    fn compact_after_checkpoint(&self) -> io::Result<()> { Ok(()) }
+
     /// Returns the on-disk byte size of the log, if known.  Used by
     /// diagnostics and tests; default-impl returns 0.
     fn log_size_bytes(&self) -> u64 { 0 }
@@ -256,6 +261,19 @@ impl Store for MmapWalStore {
         Ok(())
     }
 
+    fn compact_after_checkpoint(&self) -> io::Result<()> {
+        let mut inner = self.inner.lock();
+        inner.writer.flush()?;
+        // The checkpoint has already been written through an atomic rename
+        // and fsync. Retain the validated file header and make all future
+        // appends the post-checkpoint recovery tail.
+        inner.writer.get_mut().set_len(8)?;
+        inner.writer.seek(SeekFrom::Start(8))?;
+        inner.writer.get_ref().sync_all()?;
+        inner.bytes = 8;
+        Ok(())
+    }
+
     fn log_size_bytes(&self) -> u64 {
         self.inner.lock().bytes
     }
@@ -403,6 +421,33 @@ mod tests {
         let evs: Vec<_> = WalReader::new(f).map(|r| r.unwrap()).collect();
         assert_eq!(evs.len(), 6);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkpoint_compaction_keeps_only_the_new_recovery_tail() {
+        let dir = tmpdir_for("checkpoint_compact");
+        let store = MmapWalStore::open(&dir).unwrap();
+        for tick in 1..=4 {
+            store.append(&WalEvent::TickAdvanced { new_tick: tick }).unwrap();
+        }
+        store.append(&WalEvent::SnapshotMarker {
+            tick: 4,
+            wall_time_ms: 0,
+        }).unwrap();
+        store.flush().unwrap();
+        assert!(store.log_size_bytes() > 8);
+
+        store.compact_after_checkpoint().unwrap();
+        assert_eq!(store.log_size_bytes(), 8);
+        store.append(&WalEvent::TickAdvanced { new_tick: 5 }).unwrap();
+        store.flush().unwrap();
+        drop(store);
+
+        let file = MmapWalStore::open_replay_only(&dir).unwrap();
+        let events: Vec<_> = WalReader::new(file).map(|event| event.unwrap()).collect();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], WalEvent::TickAdvanced { new_tick: 5 }));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

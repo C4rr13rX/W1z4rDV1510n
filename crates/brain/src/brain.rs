@@ -5799,6 +5799,9 @@ impl Brain {
         if let Err(e) = store.flush() {
             tracing::warn!("WAL flush after marker failed: {}", e);
         }
+        if let Err(e) = store.compact_after_checkpoint() {
+            tracing::warn!("WAL compaction after checkpoint failed: {}", e);
+        }
         Ok(())
     }
 
