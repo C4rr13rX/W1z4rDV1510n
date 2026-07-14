@@ -63,3 +63,25 @@ fn average_paraphrases_share_language_and_task_features() {
     assert_eq!(average, mean);
     assert!(average.iter().any(|label| label == "intent:MATH:AVERAGE"));
 }
+
+#[test]
+fn enterprise_paraphrases_emit_independent_behavior_features() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let cases = [
+        (b"Implement Python input validation for required user fields.".as_slice(),
+         "intent:ENTERPRISE:INPUT_VALIDATION"),
+        (b"Write Python with bounded retry attempts for transient failures.".as_slice(),
+         "intent:ENTERPRISE:BOUNDED_RETRY"),
+        (b"Create Python code to summarize JSON order totals.".as_slice(),
+         "intent:ENTERPRISE:JSON_AGGREGATION"),
+        (b"Build Python code to recursively mask secrets and tokens.".as_slice(),
+         "intent:ENTERPRISE:SECRET_REDACTION"),
+        (b"Write a Python function to chunk records into batches.".as_slice(),
+         "intent:ENTERPRISE:BATCHING"),
+    ];
+    for (prompt, expected) in cases {
+        let features = encoding.atomize(prompt);
+        assert!(features.iter().any(|label| label == expected), "{features:?}");
+        assert!(features.iter().any(|label| label == "intent:LANGUAGE:PYTHON"));
+    }
+}

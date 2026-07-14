@@ -858,7 +858,11 @@ async fn h_brain_chat(
         .collect();
     let mut chat_query_pools = vec![POOL_TEXT];
     for pool_id in feature_pools {
-        if !brain.activate_for_prediction(pool_id, prompt.as_bytes()).is_empty() {
+        // A lone diagnostic (most commonly only LANGUAGE:PYTHON) is too
+        // broad to establish task grounding. Require a co-firing composition
+        // such as LANGUAGE + BEHAVIOR before derived evidence may influence
+        // readout. Raw characters still activate regardless of this gate.
+        if brain.activate_for_prediction(pool_id, prompt.as_bytes()).len() >= 2 {
             chat_query_pools.push(pool_id);
         }
     }

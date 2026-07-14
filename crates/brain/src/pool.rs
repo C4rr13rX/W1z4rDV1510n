@@ -278,6 +278,29 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("uppercase") { emit("TEXT:UPPERCASE"); }
         if text.contains("largest") || text.contains("maximum") { emit("ORDER:MAXIMUM"); }
         if text.contains("factorial") { emit("MATH:FACTORIAL"); }
+        if text.contains("validat") || text.contains("required field")
+            || text.contains("required user")
+        {
+            emit("ENTERPRISE:INPUT_VALIDATION");
+        }
+        if text.contains("retry") || text.contains("attempts")
+            || text.contains("transient failure")
+        {
+            emit("ENTERPRISE:BOUNDED_RETRY");
+        }
+        if text.contains("json") && (text.contains("aggregat") || text.contains("summar")
+            || text.contains("totals"))
+        {
+            emit("ENTERPRISE:JSON_AGGREGATION");
+        }
+        if text.contains("redact") || text.contains("mask secrets")
+            || (text.contains("password") && text.contains("token"))
+        {
+            emit("ENTERPRISE:SECRET_REDACTION");
+        }
+        if text.contains("batch") || text.contains("chunk") {
+            emit("ENTERPRISE:BATCHING");
+        }
         features
     }
 
