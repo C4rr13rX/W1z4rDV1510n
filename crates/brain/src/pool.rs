@@ -301,6 +301,27 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("batch") || text.contains("chunk") {
             emit("ENTERPRISE:BATCHING");
         }
+        if text.contains("multi-file") || text.contains("multiple files")
+            || (text.contains("domain") && text.contains("service file"))
+        {
+            emit("ARCHITECTURE:MULTIFILE_SERVICE");
+        }
+        if text.contains("sqlite") || (text.contains("database") && text.contains("transaction"))
+            || text.contains("atomic transfer")
+        {
+            emit("PERSISTENCE:ATOMIC_TRANSACTION");
+        }
+        if text.contains("async") && (text.contains("concurr") || text.contains("semaphore")
+            || text.contains("parallel"))
+        {
+            emit("CONCURRENCY:BOUNDED_ASYNC");
+        }
+        if text.contains("authoriz") || text.contains("access-control") || text.contains("rbac")
+            || text.contains("default-deny") || text.contains("default deny")
+            || text.contains("denies by default")
+        {
+            emit("SECURITY:AUTHORIZATION");
+        }
         features
     }
 

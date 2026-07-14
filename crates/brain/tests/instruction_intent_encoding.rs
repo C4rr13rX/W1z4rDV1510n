@@ -85,3 +85,35 @@ fn enterprise_paraphrases_emit_independent_behavior_features() {
         assert!(features.iter().any(|label| label == "intent:LANGUAGE:PYTHON"));
     }
 }
+
+#[test]
+fn project_level_intents_are_compositional_and_distinct() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let cases = [
+        (b"Build a Python multi-file domain and service project.".as_slice(),
+         "intent:ARCHITECTURE:MULTIFILE_SERVICE"),
+        (b"Implement a Python SQLite atomic transfer transaction.".as_slice(),
+         "intent:PERSISTENCE:ATOMIC_TRANSACTION"),
+        (b"Write Python async code with bounded concurrency.".as_slice(),
+         "intent:CONCURRENCY:BOUNDED_ASYNC"),
+        (b"Create Python default-deny authorization logic.".as_slice(),
+         "intent:SECURITY:AUTHORIZATION"),
+    ];
+    for (prompt, expected) in cases {
+        let features = encoding.atomize(prompt);
+        assert!(features.iter().any(|label| label == "intent:LANGUAGE:PYTHON"));
+        assert!(features.iter().any(|label| label == expected), "{features:?}");
+        assert_eq!(features.len(), 2, "project prompt should emit language + one behavior");
+    }
+}
+
+#[test]
+fn authorization_paraphrase_retains_security_intent() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let trained = encoding.atomize(b"Implement Python default-deny authorization logic.");
+    let paraphrase = encoding.atomize(
+        b"Create Python access-control code that denies by default and permits administrators.",
+    );
+    assert_eq!(trained, paraphrase);
+    assert!(trained.iter().any(|label| label == "intent:SECURITY:AUTHORIZATION"));
+}
