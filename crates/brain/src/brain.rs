@@ -3230,8 +3230,40 @@ impl Brain {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.2.cmp(&a.2))
         });
-        let runner_score = ranked.get(1).map(|candidate| candidate.1).unwrap_or(0.0);
-        let (bytes, score, _) = ranked.into_iter().next()?;
+        let mut selected = 0usize;
+        let label_sets: Vec<std::collections::HashSet<String>> = ranked
+            .iter()
+            .map(|candidate| target.encoded_labels(&candidate.0).into_iter().collect())
+            .collect();
+        if let Some(top_labels) = label_sets.first().filter(|labels| !labels.is_empty()) {
+            let top_score = ranked[0].1;
+            for index in 1..ranked.len() {
+                let candidate_labels = &label_sets[index];
+                let is_close = top_score - ranked[index].1 <= 0.05;
+                let is_strict_superset = candidate_labels.len() > top_labels.len()
+                    && top_labels.is_subset(candidate_labels);
+                let is_richer_than_selected = candidate_labels.len() > label_sets[selected].len();
+                if is_close && is_strict_superset && is_richer_than_selected {
+                    selected = index;
+                }
+            }
+        }
+        let runner_score = if selected == 0 {
+            ranked.get(1).map(|candidate| candidate.1).unwrap_or(0.0)
+        } else {
+            let selected_labels = &label_sets[selected];
+            ranked
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != selected)
+                .filter(|(index, _)| {
+                    let labels = &label_sets[*index];
+                    !labels.is_subset(selected_labels) && !selected_labels.is_subset(labels)
+                })
+                .map(|(_, candidate)| candidate.1)
+                .fold(0.0_f32, f32::max)
+        };
+        let (bytes, score, _) = ranked.into_iter().nth(selected)?;
         let margin = score - runner_score;
         (margin >= min_margin).then_some((bytes, score, margin))
     }

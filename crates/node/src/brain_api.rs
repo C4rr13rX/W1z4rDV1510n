@@ -1063,9 +1063,12 @@ async fn h_brain_chat(
                 .pool(pool_id)
                 .map(|pool| pool.read().encoded_labels(frame))
                 .unwrap_or_default();
-            let refines_overcomplete_diagnostics = learned_labels.len() == 2
+            let removes_one_spurious_diagnostic = learned_labels.len() == 2
                 && labels.len() == 3
                 && learned_labels.iter().all(|label| labels.contains(label));
+            let adds_one_missing_diagnostic = labels.len() >= 2
+                && learned_labels.len() == labels.len() + 1
+                && labels.iter().all(|label| learned_labels.contains(label));
             let route_score = learned_route
                 .as_ref()
                 .map(|(_, score, _)| *score)
@@ -1076,7 +1079,7 @@ async fn h_brain_chat(
                 .unwrap_or(0.0);
             if route_score >= 0.39
                 && route_margin >= 0.025
-                && refines_overcomplete_diagnostics
+                && (removes_one_spurious_diagnostic || adds_one_missing_diagnostic)
                 && !learned_labels
                     .iter()
                     .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))

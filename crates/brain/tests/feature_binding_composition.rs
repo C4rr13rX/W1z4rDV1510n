@@ -129,3 +129,40 @@ fn exact_feature_readout_rejects_partial_binding_candidates() {
             .any(|window| window == b"observability.py")
     );
 }
+
+#[test]
+fn close_richer_intent_class_integrates_subset_evidence() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let raw_pool = brain.create_pool(
+        PoolConfig::defaults("raw", 1),
+        Box::new(BytePassthroughEncoding { prefix: "raw" }),
+    );
+    let intent_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 2),
+        Box::new(InstructionIntentEncoding { prefix: "intent".into() }),
+    );
+    let routes: [(&[u8], &[u8]); 2] = [
+        (
+            b"Implement a Python function redact_secrets that recursively redacts password, token, and api_key values.",
+            b"@intent:LANGUAGE:PYTHON\n@intent:ENTERPRISE:SECRET_REDACTION\n",
+        ),
+        (
+            b"Create Python audit output that attaches a request trace to every record and scrubs credentials at any nesting depth.",
+            b"@intent:LANGUAGE:PYTHON\n@intent:OBSERVABILITY:CORRELATED_LOGGING\n@intent:ENTERPRISE:SECRET_REDACTION\n",
+        ),
+    ];
+    for _ in 0..6 {
+        for (prompt, intent) in routes {
+            brain.observe(raw_pool, prompt);
+            brain.observe(intent_pool, intent);
+            brain.advance_tick();
+        }
+    }
+    let query = b"Develop Python audit entries with request tracking that recursively remove passwords and tokens.";
+    let (decoded, _, _) = brain
+        .decode_best_binding_by_char_motifs_with_margin(raw_pool, query, intent_pool, 0.20, 0.0)
+        .expect("a close richer intent should integrate the subset class");
+    let labels = InstructionIntentEncoding { prefix: "intent".into() }.atomize(&decoded);
+    assert!(labels.iter().any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
+    assert!(labels.iter().any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
+}
