@@ -45,7 +45,7 @@ pub mod workspace;
 pub mod crystallizer;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
-pub use pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig};
+pub use pool::{AtomEncoding, BytePassthroughEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig, PretrainReport};
 pub use fabric::{Fabric, FabricConfig, Moment, SettleResult, TickProfile, TickProfileSnapshot};
 pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,

@@ -205,6 +205,17 @@ pub struct PoolConfig {
     pub predict_gate_mode:           ControlMode,
 }
 
+/// Result of deterministic batch pretraining. Every promoted pattern is an
+/// ordinary concept neuron whose members are the original atom neurons; no
+/// alternate vocabulary or opaque token identity is introduced.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PretrainReport {
+    pub frames: usize,
+    pub atoms_observed: usize,
+    pub recurring_candidates: usize,
+    pub concepts_promoted: usize,
+}
+
 fn default_sparsity_mode() -> ControlMode { ControlMode::Constant(1.0) }
 fn default_sparsity_min_neurons() -> usize { 1 }
 fn default_heterosynaptic_ltd_mode() -> ControlMode { ControlMode::Constant(0.0) }
@@ -1026,6 +1037,70 @@ impl Pool {
         }
         self.last_observed_sequence = fired.clone();
         fired
+    }
+
+    /// Fast-forward recurrence evidence from a batch of raw frames.
+    ///
+    /// This is deliberately not tokenization: frames are atomized by the
+    /// pool's existing encoding, candidate sequences contain those exact atom
+    /// neuron ids in firing order, and promotion uses the normal concept birth
+    /// path. It merely counts recurrence in one deterministic pass.
+    pub fn pretrain_recurring_patterns(
+        &mut self,
+        frames: &[Vec<u8>],
+        tick: u64,
+        min_recurrence: u32,
+        max_promotions: usize,
+    ) -> PretrainReport {
+        let min_recurrence = min_recurrence.max(2);
+        let max_len = self.config.max_concept_member_count;
+        let mut counts: AHashMap<Vec<NeuronId>, u32> = AHashMap::new();
+        let mut atoms_observed = 0usize;
+
+        for frame in frames {
+            let sequence: Vec<NeuronId> = self.encoding.atomize(frame).into_iter()
+                .map(|label| self.ensure_atom(label, tick))
+                .collect();
+            atoms_observed += sequence.len();
+            for &id in &sequence {
+                if let Some(neuron) = self.neurons.get_mut(id as usize) {
+                    neuron.use_count = neuron.use_count.saturating_add(1);
+                    neuron.last_fired_tick = tick;
+                }
+            }
+            let frame_max = max_len.min(sequence.len());
+            if frame_max < 2 { continue; }
+            for len in 2..=frame_max {
+                for window in sequence.windows(len) {
+                    let count = counts.entry(window.to_vec()).or_insert(0);
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+
+        let mut candidates: Vec<(Vec<NeuronId>, u32)> = counts.into_iter()
+            .filter(|(_, count)| *count >= min_recurrence)
+            .collect();
+        candidates.sort_by(|(a_seq, a_count), (b_seq, b_count)| {
+            let a_evidence = (*a_count as u64) * (a_seq.len() as u64);
+            let b_evidence = (*b_count as u64) * (b_seq.len() as u64);
+            b_evidence.cmp(&a_evidence)
+                .then_with(|| b_count.cmp(a_count))
+                .then_with(|| b_seq.len().cmp(&a_seq.len()))
+                .then_with(|| a_seq.cmp(b_seq))
+        });
+        let recurring_candidates = candidates.len();
+        let before = self.concept_count();
+        for (sequence, _) in candidates.into_iter().take(max_promotions) {
+            self.promote_to_concept(sequence, tick);
+        }
+
+        PretrainReport {
+            frames: frames.len(),
+            atoms_observed,
+            recurring_candidates,
+            concepts_promoted: self.concept_count().saturating_sub(before),
+        }
     }
 
     /// Remove query-local activation while preserving all learned neurons,

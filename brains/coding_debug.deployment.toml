@@ -1,0 +1,12 @@
+instance_id = "coding-debug-a"
+identity_path = "brains/coding_debug.identity.toml"
+data_dir = "runtime/brains/coding-debug-a"
+
+[resource_budget]
+max_resident_bytes = 4294967296
+max_neurons = 20000000
+max_propagation_steps = 96
+max_learning_steps_per_second = 1000
+
+# Feedback is intentionally empty. Verified failure→repair→success episodes
+# provide external outcome evidence without recycling predictions as inputs.

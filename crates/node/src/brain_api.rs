@@ -215,21 +215,25 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let checkpoint = data_dir.join("brain.bin");
     let identity = configured_identity()?;
     let mut brain = if checkpoint.exists() {
-        let mut prefixes = HashMap::new();
-        prefixes.insert(POOL_BINDING, "bind".to_string());
+        let mut encs: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();
+        encs.insert(POOL_BINDING, leaked_encoding("bind"));
         if let Some(spec) = &identity {
-            prefixes.extend(spec.pools.iter()
-                .map(|pool| (pool.id, pool.atom_encoding_prefix.clone())));
+            let registry = PoolPrototypeRegistry::with_defaults();
+            for pool in &spec.pools {
+                let encoding = registry.build(&pool.prototype, &pool.atom_encoding_prefix)
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "unknown pool prototype '{}' while restoring pool {} ({})",
+                        pool.prototype, pool.id, pool.name
+                    ))?;
+                encs.insert(pool.id, encoding);
+            }
         } else {
-            prefixes.insert(POOL_TEXT,    "t".to_string());
-            prefixes.insert(POOL_IMAGE,   "i".to_string());
-            prefixes.insert(POOL_AUDIO,   "a".to_string());
-            prefixes.insert(POOL_ACTION,  "act".to_string());
-            prefixes.insert(POOL_TURN,    "turn".to_string());
+            encs.insert(POOL_TEXT, leaked_encoding("t"));
+            encs.insert(POOL_IMAGE, leaked_encoding("i"));
+            encs.insert(POOL_AUDIO, leaked_encoding("a"));
+            encs.insert(POOL_ACTION, leaked_encoding("act"));
+            encs.insert(POOL_TURN, leaked_encoding("turn"));
         }
-        let encs: HashMap<PoolId, Box<dyn AtomEncoding>> = prefixes.iter()
-            .map(|(pid, p)| (*pid, leaked_encoding(p)))
-            .collect();
         match Brain::restore(&checkpoint, encs) {
             Ok((mut brain, _missing)) => {
                 if let Some(spec) = &identity {
@@ -361,6 +365,43 @@ async fn h_observe(
     s.http_profile.observe_lock_wait_ns.fetch_add(lock_ns, Ordering::Relaxed);
     s.http_profile.observe_handler_ns.fetch_add(handler_ns, Ordering::Relaxed);
     Json(json!({ "fired_count": fired.len() }))
+}
+
+/// Deterministic batch fast-forward for within-pool concept neurogenesis.
+/// Input remains raw sensor frames; promoted concepts retain ordered links to
+/// the original atom neurons and use the ordinary WAL/wiring path.
+async fn h_pretrain(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let pool_id = req.get("pool_id").and_then(|v| v.as_u64())
+        .unwrap_or(POOL_TEXT as u64) as PoolId;
+    let min_recurrence = req.get("min_recurrence").and_then(|v| v.as_u64())
+        .unwrap_or(3).clamp(2, u32::MAX as u64) as u32;
+    let max_promotions = req.get("max_promotions").and_then(|v| v.as_u64())
+        .unwrap_or(1_024).clamp(1, 10_000) as usize;
+    let encoded: Vec<&str> = req.get("frames").and_then(|v| v.as_array())
+        .map(|frames| frames.iter().filter_map(|v| v.as_str()).take(4_096).collect())
+        .unwrap_or_default();
+    if encoded.is_empty() {
+        return Json(json!({"error": "frames must contain at least one base64url frame"}));
+    }
+    let mut frames = Vec::with_capacity(encoded.len());
+    for frame in encoded {
+        match b64_url_decode(frame) {
+            Ok(bytes) => frames.push(bytes),
+            Err(error) => return Json(json!({"error": format!("bad frame base64: {}", error)})),
+        }
+    }
+
+    let brain = s.brain.lock().await;
+    let Some(pool) = brain.fabric().pool(pool_id) else {
+        return Json(json!({"error": format!("unknown pool id {}", pool_id)}));
+    };
+    let report = pool.write().pretrain_recurring_patterns(
+        &frames, brain.fabric().current_tick(), min_recurrence, max_promotions,
+    );
+    Json(json!({"pool_id": pool_id, "atom_grounded": true, "report": report}))
 }
 
 async fn h_tick(State(s): State<BrainApiState>) -> Json<u64> {
@@ -1285,6 +1326,7 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/health",                 get(h_health))
         .route("/stats",                  get(h_stats))
         .route("/observe",                post(h_observe))
+        .route("/pretrain",               post(h_pretrain))
         .route("/tick",                   post(h_tick))
         .route("/integrate",              post(h_integrate))
         .route("/predict",                post(h_predict))

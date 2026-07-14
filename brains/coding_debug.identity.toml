@@ -1,0 +1,124 @@
+name = "coding_debug"
+version = "0.1.0"
+binding_emergence_threshold = 3
+moment_history_window = 256
+
+# Every pool remains raw-byte atomized.  Different pools extract different
+# contextual streams by receiving different evidence, not by substituting an
+# opaque vocabulary for character atoms.
+[[pools]]
+name = "instruction"
+id = 1
+prototype = "byte-passthrough"
+atom_encoding_prefix = "instruction"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 32
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "source_before"
+id = 2
+prototype = "byte-passthrough"
+atom_encoding_prefix = "source_before"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 32
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "console_before"
+id = 3
+prototype = "byte-passthrough"
+atom_encoding_prefix = "console_before"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 32
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "corrected_source"
+id = 4
+prototype = "byte-passthrough"
+atom_encoding_prefix = "corrected_source"
+kind = "Action"
+frame_rate = 1
+recent_atoms_window = 128
+max_concept_member_count = 1
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "environment"
+id = 5
+prototype = "byte-passthrough"
+atom_encoding_prefix = "environment"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 24
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "failure_outcome"
+id = 6
+prototype = "byte-passthrough"
+atom_encoding_prefix = "failure_outcome"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 24
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "repair_delta"
+id = 7
+prototype = "byte-passthrough"
+atom_encoding_prefix = "repair_delta"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 32
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "console_after"
+id = 8
+prototype = "byte-passthrough"
+atom_encoding_prefix = "console_after"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 24
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "resolution"
+id = 9
+prototype = "byte-passthrough"
+atom_encoding_prefix = "resolution"
+kind = "Internal"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 24
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
