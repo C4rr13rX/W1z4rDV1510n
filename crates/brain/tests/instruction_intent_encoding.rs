@@ -433,6 +433,38 @@ fn masking_nested_credentials_is_secret_redaction_evidence() {
 }
 
 #[test]
+fn relational_enterprise_phrases_activate_cross_language_behaviors() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let cases = [
+        (
+            b"Create JavaScript rules where superusers perform every operation while members view only objects they own.".as_slice(),
+            "intent:SECURITY:AUTHORIZATION",
+        ),
+        (
+            b"Make Golang account movement reject a missing account or insufficient funds without partial updates.".as_slice(),
+            "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER",
+        ),
+        (
+            b"Have Rust command retries remember a request key and return the first result.".as_slice(),
+            "intent:API:IDEMPOTENT_COMMAND",
+        ),
+        (
+            b"Produce Java event records with request tracing and masked credentials.".as_slice(),
+            "intent:OBSERVABILITY:CORRELATED_LOGGING",
+        ),
+    ];
+    for (prompt, expected) in cases {
+        let features = encoding.atomize(prompt);
+        assert!(
+            features.iter().any(|label| label == expected),
+            "prompt={prompt:?} features={features:?}"
+        );
+    }
+}
+
+#[test]
 fn typescript_transport_retry_does_not_alias_a_retry_helper() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),

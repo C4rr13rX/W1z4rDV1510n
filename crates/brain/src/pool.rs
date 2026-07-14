@@ -507,10 +507,16 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("default-deny")
             || text.contains("default deny")
             || text.contains("denies by default")
+            || (text.contains("superuser")
+                && (text.contains("operation") || text.contains("own")))
         {
             emit("SECURITY:AUTHORIZATION");
         }
-        if text.contains("idempoten") || (text.contains("api") && text.contains("replay")) {
+        if text.contains("idempoten")
+            || (text.contains("api") && text.contains("replay"))
+            || ((text.contains("request key") || text.contains("command key"))
+                && (text.contains("retr") || text.contains("first result")))
+        {
             emit("API:IDEMPOTENT_COMMAND");
         }
         if text.contains("migration")
@@ -524,6 +530,8 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("correlation id")
             || text.contains("correlation-id")
             || (text.contains("correlat") && text.contains("log"))
+            || (text.contains("request trac")
+                && (text.contains("event record") || text.contains("audit")))
         {
             emit("OBSERVABILITY:CORRELATED_LOGGING");
         }
@@ -559,6 +567,9 @@ impl AtomEncoding for InstructionIntentEncoding {
         }
         if (text.contains("ledger") && text.contains("transfer"))
             || text.contains("all-or-nothing account transfer")
+            || ((text.contains("account movement") || text.contains("move funds"))
+                && text.contains("missing account")
+                && text.contains("insufficient"))
         {
             // A ledger transfer is a specialized atomic transaction. Emit
             // both levels so broad rollback semantics and the specialized
