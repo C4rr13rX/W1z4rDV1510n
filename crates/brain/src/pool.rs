@@ -232,15 +232,36 @@ impl AtomEncoding for InstructionIntentEncoding {
             .iter().any(|cue| text.contains(cue));
         if !coding_context { return features; }
         let mut emit = |feature: &str| features.push(format!("{}:{}", self.prefix, feature));
+        // Language is an independent feature rather than part of the task
+        // label. Co-firing lets bindings represent, for example,
+        // LANGUAGE:RUST + POWER_SELF:2 without discarding the raw words.
+        if text.contains("python") { emit("LANGUAGE:PYTHON"); }
+        if text.contains("javascript") || text.contains("node.js") || text.contains("nodejs") {
+            emit("LANGUAGE:JAVASCRIPT");
+        }
+        if text.contains("c#") || text.contains("c sharp") || text.contains("dotnet")
+            || text.contains(".net")
+        {
+            emit("LANGUAGE:CSHARP");
+        }
+        if text.contains("golang") || text.contains("go function") || text.contains("go code") {
+            emit("LANGUAGE:GO");
+        }
+        if text.contains("rust") { emit("LANGUAGE:RUST"); }
+        if text.contains("java") && !text.contains("javascript") { emit("LANGUAGE:JAVA"); }
         if text.contains("cube") || text.contains("third power") || text.contains("three times") {
             emit("POWER_SELF:3");
-        } else if text.contains("square") || text.contains("product of its argument with itself")
+        } else if text.contains("square") || text.contains("second power")
+            || text.contains("product of its argument with itself")
             || text.contains("multiplies the value by itself")
         {
             emit("POWER_SELF:2");
         }
         if text.contains("negative") || text.contains("below zero") || text.contains("less than zero") {
             emit("COMPARISON:LESS_THAN_ZERO");
+        }
+        if text.contains("average") || text.contains("arithmetic mean") {
+            emit("MATH:AVERAGE");
         }
         if text.contains("empty") || text.contains("no elements") {
             emit("GUARD:EMPTY_INPUT");

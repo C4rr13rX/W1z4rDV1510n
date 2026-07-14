@@ -42,3 +42,24 @@ fn repair_verb_paraphrases_retain_the_same_intent() {
     assert_eq!(fixed, corrected);
     assert!(!fixed.is_empty());
 }
+
+#[test]
+fn language_and_task_are_independent_cofiring_features() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let rust = encoding.atomize(b"Create Rust code computing the second power of a number.");
+    assert!(rust.iter().any(|label| label == "intent:LANGUAGE:RUST"));
+    assert!(rust.iter().any(|label| label == "intent:POWER_SELF:2"));
+
+    let javascript = encoding.atomize(b"Write a JavaScript function that returns a square.");
+    assert!(javascript.iter().any(|label| label == "intent:LANGUAGE:JAVASCRIPT"));
+    assert!(!javascript.iter().any(|label| label == "intent:LANGUAGE:JAVA"));
+}
+
+#[test]
+fn average_paraphrases_share_language_and_task_features() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let average = encoding.atomize(b"Implement avg_list in Python to return the average.");
+    let mean = encoding.atomize(b"Write Python that calculates the arithmetic mean.");
+    assert_eq!(average, mean);
+    assert!(average.iter().any(|label| label == "intent:MATH:AVERAGE"));
+}
