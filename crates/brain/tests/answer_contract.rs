@@ -273,3 +273,30 @@ fn direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth() 
         Some(b"def greet():\n    return 'hello'\n".to_vec()),
     );
 }
+
+#[test]
+fn direct_pretrain_distinguishes_long_reorderings_with_the_same_atom_inventory() {
+    let (mut brain, input, output) = build_two_pool_brain();
+    brain.designate_action_pool(output);
+
+    let first = b"abcdefghijklmnopqrstuvwxyz 0123456789".to_vec();
+    let second = b"9876543210 zyxwvutsrqponmlkjihgfedcba".to_vec();
+    assert!(brain
+        .pretrain_binding_episode(&[(input, first.clone()), (output, b"first".to_vec())])
+        .is_some());
+    assert!(brain
+        .pretrain_binding_episode(&[(input, second.clone()), (output, b"second".to_vec())])
+        .is_some());
+
+    brain.activate_for_prediction(input, &first);
+    assert_eq!(
+        brain.decode_best_trained_binding(input, output),
+        Some(b"first".to_vec())
+    );
+    brain.clear_prediction_activation();
+    brain.activate_for_prediction(input, &second);
+    assert_eq!(
+        brain.decode_best_trained_binding(input, output),
+        Some(b"second".to_vec())
+    );
+}

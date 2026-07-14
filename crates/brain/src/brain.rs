@@ -11,6 +11,7 @@
 
 use ahash::AHashMap;
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::action::{ActionEvent, ActionId};
 use crate::annealer::{Annealer, AnnealerConfig};
@@ -1496,14 +1497,17 @@ impl Brain {
         let mut binding = binding_pool.write();
         // Composite label = sorted member references, joined.  Stable
         // and unique per fingerprint (used for dedup).
-        let label: String = fp
+        let member_label: String = fp
             .pairs
             .iter()
             .map(|(p, n)| format!("p{}n{}", p, n))
             .collect::<Vec<_>>()
             .join("|");
-        if binding.label_to_id(&label).is_some() {
-            return None; // already exists, idempotent.
+        let mut ordered_hasher = DefaultHasher::new();
+        fp.hash(&mut ordered_hasher);
+        let label = format!("{}|ordered:{:016x}", member_label, ordered_hasher.finish());
+        if let Some(existing) = binding.label_to_id(&label) {
+            return Some(existing); // already exists, idempotent.
         }
         // Members stored in FIRING ORDER (per-pool sequence as
         // observed at training time), NOT NeuronId-sorted order.
