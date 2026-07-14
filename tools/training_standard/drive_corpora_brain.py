@@ -64,6 +64,7 @@ import time
 import urllib.error
 import urllib.request
 import http.client
+from collections.abc import Iterator
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -261,19 +262,18 @@ def write_progress(path: Path, payload: dict) -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
-def read_corpus_jsonl(path: Path, *, skip_rows: int = 0,
-                      limit_rows: int | None = None) -> list[dict]:
-    """Read a bounded logical-row window from a JSONL corpus.
+def iter_corpus_jsonl(path: Path, *, skip_rows: int = 0,
+                      limit_rows: int | None = None) -> Iterator[dict]:
+    """Yield a bounded logical-row window without retaining the corpus.
 
-    Blank or malformed physical lines do not count toward ``skip_rows``.
-    Keeping only the requested window in memory makes multi-gigabyte corpora
-    safe to train as independently benchmarked, resumable chunks.
+    Logical rows are successfully decoded JSON objects; blank and malformed
+    physical lines are ignored and therefore do not affect durable offsets.
     """
     if not path.exists():
-        return []
-    out: list[dict] = []
+        return
+    emitted = 0
+    valid_index = 0
     with path.open("r", encoding="utf-8") as fh:
-        valid_index = 0
         for line in fh:
             line = line.strip()
             if not line:
@@ -285,11 +285,24 @@ def read_corpus_jsonl(path: Path, *, skip_rows: int = 0,
             if valid_index < skip_rows:
                 valid_index += 1
                 continue
-            out.append(row)
+            yield row
             valid_index += 1
-            if limit_rows is not None and len(out) >= limit_rows:
+            emitted += 1
+            if limit_rows is not None and emitted >= limit_rows:
                 break
-    return out
+
+
+def read_corpus_jsonl(path: Path, *, skip_rows: int = 0,
+                      limit_rows: int | None = None) -> list[dict]:
+    """Read a bounded logical-row window from a JSONL corpus.
+
+    Blank or malformed physical lines do not count toward ``skip_rows``.
+    Keeping only the requested window in memory makes multi-gigabyte corpora
+    safe to train as independently benchmarked, resumable chunks.
+    """
+    return list(iter_corpus_jsonl(
+        path, skip_rows=skip_rows, limit_rows=limit_rows
+    ))
 
 
 # ── Smoke test ─────────────────────────────────────────────────────────────
@@ -497,18 +510,20 @@ def drive_one(script, repeats: int, project_root: Path,
         if input_path and Path(inp.path).as_posix().lower() != Path(input_path).as_posix().lower():
             continue
         corpus_path = project_root / inp.path
-        rows = read_corpus_jsonl(
+        rows = None if direct_pretrain else read_corpus_jsonl(
             corpus_path, skip_rows=start_row, limit_rows=limit_rows
         )
-        if not rows:
+        if rows is not None and not rows:
             print(f"  [{script.id}] corpus missing or empty: {corpus_path}",
-                    flush=True)
+                  flush=True)
             continue
         if verbose and (start_row or limit_rows is not None):
-            end_row = start_row + len(rows)
-            print(f"  [{script.id}] logical rows [{start_row}, {end_row})",
+            end_label = (str(start_row + limit_rows)
+                         if limit_rows is not None else "EOF")
+            print(f"  [{script.id}] logical rows [{start_row}, {end_label})",
                   flush=True)
-        summary["pairs"] += len(rows)
+        if rows is not None:
+            summary["pairs"] += len(rows)
         smoke_ran = False
         t0 = time.time()
 
@@ -516,6 +531,7 @@ def drive_one(script, repeats: int, project_root: Path,
 
         if direct_pretrain:
             episodes = []
+            streamed_count = 0
             batch_next_row = start_row
             durable_next_row = (
                 start_row if durable_start_row is None else durable_start_row
@@ -547,7 +563,12 @@ def drive_one(script, repeats: int, project_root: Path,
                 accepted_since_checkpoint = 0
                 publish_progress()
 
-            for row_index, row in enumerate(rows):
+            streamed_rows = iter_corpus_jsonl(
+                corpus_path, skip_rows=start_row, limit_rows=limit_rows
+            )
+            for row_index, row in enumerate(streamed_rows):
+                streamed_count += 1
+                summary["pairs"] += 1
                 logical_next_row = start_row + row_index + 1
                 prompt = (row.get("prompt") or row.get("question") or "").strip()
                 resp = (row.get("response") or row.get("answer") or "").strip()
@@ -576,6 +597,10 @@ def drive_one(script, repeats: int, project_root: Path,
                             f"{batch_next_row}: {err}"
                         )
                     episodes = []
+            if streamed_count == 0:
+                print(f"  [{script.id}] corpus missing or empty: {corpus_path}",
+                      flush=True)
+                continue
             if episodes:
                 ok, err = post_pretrain_batch(episodes)
                 if ok:
