@@ -3497,7 +3497,12 @@ impl Brain {
                 }
             }
         }
-        let mut best: Option<(NeuronId, u64)> = None;
+        // Direct atom equality is stronger evidence than equality obtained by
+        // recursively expanding a collapsed concept.  Old, heavily-used
+        // concepts can contain the same atom set after historical co-firing;
+        // allowing their use count to beat a newer direct episode causes
+        // unrelated actions to hijack an otherwise exact feature query.
+        let mut best: Option<(NeuronId, bool, u64)> = None;
         for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
             let direct_atoms: ahash::AHashSet<NeuronId> = binding
                 .members
@@ -3518,7 +3523,8 @@ impl Brain {
             {
                 collect_atoms(&feature, member.neuron, &mut expanded_atoms);
             }
-            if direct_atoms != query_atoms && expanded_atoms != query_atoms {
+            let direct_exact = direct_atoms == query_atoms;
+            if !direct_exact && expanded_atoms != query_atoms {
                 continue;
             }
             if !binding
@@ -3528,8 +3534,10 @@ impl Brain {
             {
                 continue;
             }
-            if best.is_none_or(|(_, uses)| binding.use_count > uses) {
-                best = Some((binding.id, binding.use_count));
+            if best.is_none_or(|(_, best_direct, uses)| {
+                (direct_exact, binding.use_count) > (best_direct, uses)
+            }) {
+                best = Some((binding.id, direct_exact, binding.use_count));
             }
         }
         let binding = bindings.get(best?.0)?;

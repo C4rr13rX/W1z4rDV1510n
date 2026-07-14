@@ -401,6 +401,22 @@ fn typescript_is_an_independent_language_feature() {
 }
 
 #[test]
+fn batching_size_validation_does_not_alias_generic_input_validation() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Write a Python batching function that splits records into fixed-size chunks and validates the size.",
+    );
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:BATCHING"));
+    assert!(!features
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:INPUT_VALIDATION"));
+}
+
+#[test]
 fn typescript_transport_retry_does_not_alias_a_retry_helper() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),

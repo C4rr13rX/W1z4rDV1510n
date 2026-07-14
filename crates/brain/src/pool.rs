@@ -400,7 +400,9 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("FLOW:RETURN_INPUT");
         }
-        if text.contains("validat")
+        if text.contains("input validation")
+            || text.contains("validate input")
+            || text.contains("validates input")
             || text.contains("required field")
             || text.contains("required user")
         {
