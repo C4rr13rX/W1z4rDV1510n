@@ -2543,6 +2543,99 @@ impl Brain {
         if bytes.is_empty() { None } else { Some(bytes) }
     }
 
+    /// Rank learned actions whose feature atoms are fully covered by a larger
+    /// compositional query. Returned target bytes remain verbatim learned
+    /// evidence; callers may integrate structured artifacts such as manifests.
+    pub fn decode_ranked_feature_bindings(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+        max_results: usize,
+    ) -> Vec<Vec<u8>> {
+        if max_results == 0 || feature_pool == target_pool
+            || feature_pool == self.binding_pool_id || target_pool == self.binding_pool_id
+        {
+            return Vec::new();
+        }
+        let feature_handle = match self.fabric.pool(feature_pool) {
+            Some(pool) => pool,
+            None => return Vec::new(),
+        };
+        let features = feature_handle.read();
+        let query_atoms: ahash::AHashSet<NeuronId> = query_labels.iter()
+            .filter_map(|label| features.label_to_id(label))
+            .collect();
+        if query_atoms.len() < 3 { return Vec::new(); }
+
+        fn collect_atoms(
+            pool: &crate::Pool,
+            neuron_id: NeuronId,
+            output: &mut ahash::AHashSet<NeuronId>,
+        ) {
+            let Some(neuron) = pool.get(neuron_id) else { return; };
+            if neuron.is_atom() {
+                output.insert(neuron_id);
+            } else {
+                for member in &neuron.members {
+                    if member.pool == pool.id() {
+                        collect_atoms(pool, member.neuron, output);
+                    }
+                }
+            }
+        }
+
+        let binding_handle = match self.fabric.pool(self.binding_pool_id) {
+            Some(pool) => pool,
+            None => return Vec::new(),
+        };
+        let bindings = binding_handle.read();
+        let mut ranked: Vec<(NeuronId, usize, u64, usize)> = Vec::new();
+        for binding in bindings.iter_neurons().filter(|neuron| !neuron.is_atom()) {
+            let mut binding_atoms = ahash::AHashSet::new();
+            for member in binding.members.iter().filter(|member| member.pool == feature_pool) {
+                collect_atoms(&features, member.neuron, &mut binding_atoms);
+            }
+            if binding_atoms.len() < 2 { continue; }
+            let hits = binding_atoms.intersection(&query_atoms).count();
+            if hits < 2 || hits != binding_atoms.len() { continue; }
+            let target_size = binding.members.iter()
+                .filter(|member| member.pool == target_pool).count();
+            if target_size == 0 { continue; }
+            ranked.push((binding.id, hits, binding.use_count, target_size));
+        }
+        ranked.sort_by(|a, b| b.1.cmp(&a.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| a.0.cmp(&b.0)));
+
+        let target_handle = match self.fabric.pool(target_pool) {
+            Some(pool) => pool,
+            None => return Vec::new(),
+        };
+        let target = target_handle.read();
+        let mut decoded = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (binding_id, _, _, _) in ranked {
+            let Some(binding) = bindings.get(binding_id) else { continue; };
+            let members: Vec<NeuronRef> = binding.members.iter()
+                .filter(|member| member.pool == target_pool).copied().collect();
+            let atoms: Vec<NeuronRef> = members.iter()
+                .filter(|member| target.get(member.neuron).is_some_and(|neuron| neuron.is_atom()))
+                .copied().collect();
+            let bytes = if atoms.is_empty() {
+                target.decode_concept_members(&members)
+            } else {
+                target.decode_concept_members(&atoms)
+            };
+            if !bytes.is_empty() && seen.insert(bytes.clone()) {
+                decoded.push(bytes);
+                if decoded.len() >= max_results { break; }
+            }
+        }
+        decoded
+    }
+
     fn best_binding_match_atom_tier(&self, query_pool: PoolId) -> BindingMatch {
         let q_atoms: ahash::AHashSet<NeuronId> = {
             let q = match self.fabric.pool(query_pool) {

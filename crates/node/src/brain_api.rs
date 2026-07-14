@@ -818,6 +818,32 @@ async fn h_logic_recognize(
                 "template_count": brain.eem().semantic_template_count()}))
 }
 
+/// Union files from independently grounded action manifests. Conflicting
+/// filenames abort composition rather than guessing which implementation wins.
+fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut files = serde_json::Map::new();
+    let mut manifests = 0usize;
+    for bytes in candidates {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else { continue; };
+        let Some(candidate_files) = value.get("files").and_then(|files| files.as_object())
+            else { continue; };
+        if candidate_files.is_empty() { continue; }
+        let mut accepted = false;
+        for (name, content) in candidate_files {
+            if !content.is_string() { return None; }
+            if let Some(existing) = files.get(name) {
+                if existing != content { return None; }
+            } else {
+                files.insert(name.clone(), content.clone());
+                accepted = true;
+            }
+        }
+        if accepted { manifests += 1; }
+    }
+    if manifests < 2 || files.len() < 2 { return None; }
+    serde_json::to_vec(&serde_json::json!({"files": files})).ok()
+}
+
 /// POST /brain/chat — canonical chat endpoint on the merged node.
 /// Mirrors brain_server's /chat behaviour so existing Django /
 /// wizard_session callers can switch from `:8095/chat` to
@@ -857,11 +883,13 @@ async fn h_brain_chat(
             pool.read().encoding_name() == "instruction-intent"))
         .collect();
     let mut chat_query_pools = vec![POOL_TEXT];
+    let mut composition_features: Option<(PoolId, Vec<String>)> = None;
     for pool_id in feature_pools {
-        let inhibits_derived_readout = brain.fabric().pool(pool_id).is_some_and(|pool| {
-            pool.read().encoded_labels(prompt.as_bytes()).iter()
-                .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))
-        });
+        let labels = brain.fabric().pool(pool_id)
+            .map(|pool| pool.read().encoded_labels(prompt.as_bytes()))
+            .unwrap_or_default();
+        let inhibits_derived_readout = labels.iter()
+            .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"));
         if inhibits_derived_readout {
             continue;
         }
@@ -871,15 +899,28 @@ async fn h_brain_chat(
         // readout. Raw characters still activate regardless of this gate.
         if brain.activate_for_prediction(pool_id, prompt.as_bytes()).len() >= 2 {
             chat_query_pools.push(pool_id);
+            if labels.len() >= 4 {
+                composition_features = Some((pool_id, labels));
+            }
         }
     }
 
     // Authoritative trained-binding decode — Phase B v2.
-    let trained_bytes = if chat_query_pools.len() > 1 {
+    let raw_trained = brain.decode_best_trained_binding(POOL_TEXT, action_pool);
+    let composed = composition_features.as_ref().and_then(|(pool_id, labels)| {
+            let candidates = brain.decode_ranked_feature_bindings(
+                *pool_id, labels, action_pool, 64,
+            );
+            merge_grounded_file_manifests(&candidates)
+        });
+    let trained_bytes = if composed.is_some() {
+        composed
+    } else if raw_trained.is_some() {
+        raw_trained
+    } else if chat_query_pools.len() > 1 {
         brain.decode_best_trained_binding_multi(&chat_query_pools, action_pool)
-            .or_else(|| brain.decode_best_trained_binding(POOL_TEXT, action_pool))
     } else {
-        brain.decode_best_trained_binding(POOL_TEXT, action_pool)
+        None
     };
     let trained_decode: Option<String> = trained_bytes
         .map(|b| String::from_utf8_lossy(&b).into_owned());

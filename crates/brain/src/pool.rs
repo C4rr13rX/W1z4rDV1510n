@@ -295,7 +295,7 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("ENTERPRISE:JSON_AGGREGATION");
         }
-        if text.contains("redact") || text.contains("mask secrets")
+        if text.contains("redact") || text.contains("mask secrets") || text.contains("masks secrets")
             || (text.contains("password") && text.contains("token"))
         {
             emit("ENTERPRISE:SECRET_REDACTION");
@@ -309,7 +309,7 @@ impl AtomEncoding for InstructionIntentEncoding {
             emit("ARCHITECTURE:MULTIFILE_SERVICE");
         }
         if text.contains("sqlite") || (text.contains("database") && text.contains("transaction"))
-            || text.contains("atomic transfer")
+            || text.contains("atomic transfer") || text.contains("all-or-nothing database transfer")
         {
             emit("PERSISTENCE:ATOMIC_TRANSACTION");
         }
@@ -318,7 +318,8 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("CONCURRENCY:BOUNDED_ASYNC");
         }
-        if text.contains("authoriz") || text.contains("access-control") || text.contains("rbac")
+        if text.contains("authoriz") || text.contains("access-control")
+            || text.contains("access control") || text.contains("rbac")
             || text.contains("default-deny") || text.contains("default deny")
             || text.contains("denies by default")
         {

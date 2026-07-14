@@ -194,3 +194,13 @@ fn native_ledger_paraphrase_and_missing_context_are_detected() {
     );
     assert!(missing.iter().any(|label| label == "intent:GROUNDING:UNDERSPECIFIED"));
 }
+
+#[test]
+fn composed_observability_paraphrase_retains_redaction_evidence() {
+    let encoding = InstructionIntentEncoding { prefix: "intent".into() };
+    let features = encoding.atomize(
+        b"Create Python correlated JSON observability that masks secrets.",
+    );
+    assert!(features.iter().any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
+    assert!(features.iter().any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
+}
