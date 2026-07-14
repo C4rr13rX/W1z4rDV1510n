@@ -14,11 +14,7 @@ depends_on  = ["conversation_basics_001"]
 
 [[inputs]]
 kind = "corpus"
-path = "data/code/python_function_examples.jsonl"
-
-[[inputs]]
-kind = "template"
-path = "templates/python_function.tmpl"
+path = "data/training/code_gen_python_001.jsonl"
 
 [[benchmarks]]
 label         = "reverse linked list"

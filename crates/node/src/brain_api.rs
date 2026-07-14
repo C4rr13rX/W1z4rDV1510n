@@ -435,8 +435,11 @@ async fn h_integrate(
     Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
-    let tp = req.get("target_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
     let brain = s.brain.lock().await;
+    let tp = req.get("target_pool").and_then(|v| v.as_u64())
+        .map(|v| v as PoolId)
+        .or_else(|| brain.action_pool_id())
+        .unwrap_or(POOL_ACTION);
     // Mirror brain_server's authoritative path: keep confidence/grounding
     // signals from integrate(), but prefer the decode_best_trained_binding
     // answer (which is what lifts paraphrase recall to 100% — the older
@@ -465,12 +468,15 @@ async fn h_predict(
     State(s): State<BrainApiState>, Json(req): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
-    let tp = req.get("target_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
     let frame = match b64_url_decode(req.get("frame").and_then(|v| v.as_str()).unwrap_or("")) {
         Ok(b) => b,
         Err(e) => return Json(json!({"error": format!("bad frame base64: {}", e)})),
     };
     let mut brain = s.brain.lock().await;
+    let tp = req.get("target_pool").and_then(|v| v.as_u64())
+        .map(|v| v as PoolId)
+        .or_else(|| brain.action_pool_id())
+        .unwrap_or(POOL_ACTION);
     let fired = brain.activate_for_prediction(qp, &frame);
     let legacy = brain.integrate(qp, tp);
     let authoritative = brain.decode_best_trained_binding(qp, tp);
@@ -521,7 +527,6 @@ async fn h_consolidate(
         return reply;
     }
     let input_pool = req.get("input_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
-    let outcome_pool = req.get("outcome_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
     let input = match b64_url_decode(req.get("input_frame").and_then(|v| v.as_str()).unwrap_or("")) {
         Ok(b) => b, Err(e) => return Json(json!({"error": format!("bad input base64: {}", e)})),
     };
@@ -529,6 +534,10 @@ async fn h_consolidate(
         Ok(b) => b, Err(e) => return Json(json!({"error": format!("bad outcome base64: {}", e)})),
     };
     let mut brain = s.brain.lock().await;
+    let outcome_pool = req.get("outcome_pool").and_then(|v| v.as_u64())
+        .map(|v| v as PoolId)
+        .or_else(|| brain.action_pool_id())
+        .unwrap_or(POOL_ACTION);
     let input_fired = brain.observe(input_pool, &input).len();
     let outcome_fired = brain.observe(outcome_pool, &outcome).len();
     brain.advance_tick();
@@ -652,16 +661,17 @@ async fn h_brain_chat(
     let prompt = unwrap_wizard_prompt(text);
 
     let mut brain = s.brain.lock().await;
+    let action_pool = brain.action_pool_id().unwrap_or(POOL_ACTION);
     brain.activate_for_prediction(POOL_TEXT, prompt.as_bytes());
 
     // Authoritative trained-binding decode — Phase B v2.
     let trained_decode: Option<String> = brain
-        .decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+        .decode_best_trained_binding(POOL_TEXT, action_pool)
         .map(|b| String::from_utf8_lossy(&b).into_owned());
 
     // Autonomous fallback — EEM chain + annealer + multi-fact.
     let xpool = brain.integrate_autonomous(
-        POOL_TEXT, POOL_ACTION,
+        POOL_TEXT, action_pool,
         /*fabric_threshold*/ 0.0,
         /*chain_max_depth*/  4,
         /*chain_max_visit*/  200);
@@ -805,8 +815,11 @@ async fn h_binding_diagnose(
 ) -> Json<serde_json::Value> {
     let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let qp = req.get("query_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_TEXT as u64) as PoolId;
-    let tp = req.get("target_pool").and_then(|v| v.as_u64()).unwrap_or(POOL_ACTION as u64) as PoolId;
     let mut brain = s.brain.lock().await;
+    let tp = req.get("target_pool").and_then(|v| v.as_u64())
+        .map(|v| v as PoolId)
+        .or_else(|| brain.action_pool_id())
+        .unwrap_or(POOL_ACTION);
     let known = brain.activate_for_prediction(qp, text.as_bytes());
     let query_seq = brain.fabric().pool(qp)
         .map(|p| p.read().last_observed_sequence().to_vec())
