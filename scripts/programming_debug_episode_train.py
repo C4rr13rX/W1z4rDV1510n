@@ -24,6 +24,7 @@ POOL_FIELDS = {
     7: "repair_delta",
     8: "console_after",
     9: "resolution",
+    10: "source_before",
 }
 ACTION_POOL = 4
 

@@ -205,6 +205,105 @@ pub struct PoolConfig {
     pub predict_gate_mode:           ControlMode,
 }
 
+/// A parallel, lossy code sensor that emits structural events while the raw
+/// byte pool remains the authoritative source representation. Identifiers are
+/// deliberately represented by grammatical role rather than spelling, so a
+/// renamed function can reinstate the same learned structural concept. This
+/// is a feature extractor, not a replacement tokenizer or a decoder.
+pub struct CodeStructureEncoding {
+    pub prefix: String,
+}
+
+impl AtomEncoding for CodeStructureEncoding {
+    fn atomize(&self, frame: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(frame);
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        let mut after_def = false;
+        let mut in_params = false;
+        let mut line_start = true;
+        let mut parameter_names = AHashSet::new();
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'\n' {
+                out.push(format!("{}:NEWLINE", self.prefix));
+                line_start = true;
+                i += 1;
+                continue;
+            }
+            if b.is_ascii_whitespace() {
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'\n' && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if line_start {
+                    out.push(format!("{}:INDENT:{}", self.prefix, i - start));
+                }
+                continue;
+            }
+            line_start = false;
+            if b.is_ascii_alphabetic() || b == b'_' {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let word = &text[start..i];
+                let feature = match word {
+                    "def" | "return" | "if" | "else" | "for" | "in" | "while" |
+                    "class" | "try" | "except" | "raise" | "import" | "from" => {
+                        after_def = word == "def";
+                        format!("KW:{}", word)
+                    }
+                    "sum" | "len" | "range" | "enumerate" | "zip" | "str" | "int" |
+                    "float" | "list" | "dict" | "set" => format!("BUILTIN:{}", word),
+                    _ if after_def => {
+                        after_def = false;
+                        "FUNCTION_NAME".to_string()
+                    }
+                    _ if in_params => {
+                        parameter_names.insert(word.to_string());
+                        "PARAMETER_DECL".to_string()
+                    }
+                    _ if parameter_names.contains(word) => "PARAMETER_REF".to_string(),
+                    _ => "IDENTIFIER".to_string(),
+                };
+                out.push(format!("{}:{}", self.prefix, feature));
+                continue;
+            }
+            if b.is_ascii_digit() {
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') { i += 1; }
+                out.push(format!("{}:NUMBER", self.prefix));
+                continue;
+            }
+            let feature: String = match b {
+                b'(' => { in_params = after_def || out.last().is_some_and(|v| v.ends_with(":FUNCTION_NAME")); "LPAREN".into() }
+                b')' => { in_params = false; "RPAREN".into() }
+                b'[' => "LBRACKET".into(), b']' => "RBRACKET".into(),
+                b'{' => "LBRACE".into(), b'}' => "RBRACE".into(),
+                b':' => "COLON".into(), b',' => "COMMA".into(), b'.' => "DOT".into(),
+                b'\'' | b'\"' => "QUOTE".into(),
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'=' | b'!' => {
+                    let start = i;
+                    i += 1;
+                    while i < bytes.len() && matches!(bytes[i], b'=' | b'<' | b'>' | b'/' | b'*') { i += 1; }
+                    out.push(format!("{}:OP:{}", self.prefix, &text[start..i]));
+                    continue;
+                }
+                _ => "PUNCT".into(),
+            };
+            out.push(format!("{}:{}", self.prefix, feature));
+            i += 1;
+        }
+        out
+    }
+
+    fn reassemble(&self, _active_atoms: &[(&str, f32)]) -> Vec<u8> { Vec::new() }
+    fn name(&self) -> &'static str { "code-structure" }
+}
+
 /// Result of deterministic batch pretraining. Every promoted pattern is an
 /// ordinary concept neuron whose members are the original atom neurons; no
 /// alternate vocabulary or opaque token identity is introduced.

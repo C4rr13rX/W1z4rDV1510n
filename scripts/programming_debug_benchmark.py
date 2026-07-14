@@ -12,7 +12,7 @@ from pathlib import Path
 from programming_debug_episode_train import Case, CASES, classify, environment, execute, generate
 
 CAUSAL_FIELDS = {1: "instruction", 2: "source_before", 3: "console_before",
-                 5: "environment", 6: "failure_outcome"}
+                 5: "environment", 6: "failure_outcome", 10: "source_before"}
 
 PARAPHRASES = [
     "Make square compute the product of its argument with itself.",

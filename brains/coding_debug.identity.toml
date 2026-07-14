@@ -3,9 +3,9 @@ version = "0.1.0"
 binding_emergence_threshold = 3
 moment_history_window = 256
 
-# Every pool remains raw-byte atomized.  Different pools extract different
-# contextual streams by receiving different evidence, not by substituting an
-# opaque vocabulary for character atoms.
+# The lossless source and language streams remain raw-byte atomized. Parallel
+# derived feature pools may expose deterministic structure, but never replace
+# or sever their grounding in the raw character substrate.
 [[pools]]
 name = "instruction"
 id = 1
@@ -116,6 +116,19 @@ id = 9
 prototype = "byte-passthrough"
 atom_encoding_prefix = "resolution"
 kind = "Internal"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 24
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "source_structure"
+id = 10
+prototype = "code-structure"
+atom_encoding_prefix = "source_structure"
+kind = "SensoryInput"
 frame_rate = 1
 recent_atoms_window = 16384
 max_concept_member_count = 24
