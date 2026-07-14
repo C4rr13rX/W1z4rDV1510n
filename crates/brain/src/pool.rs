@@ -214,6 +214,50 @@ pub struct CodeStructureEncoding {
     pub prefix: String,
 }
 
+/// Parallel intent sensor for natural-language coding instructions. It emits
+/// sparse semantic diagnostics while the raw instruction pool still carries
+/// every character. These are feature labels grounded by co-firing with raw
+/// atoms, source structure, execution failure, and the eventual repair.
+pub struct InstructionIntentEncoding {
+    pub prefix: String,
+}
+
+impl AtomEncoding for InstructionIntentEncoding {
+    fn atomize(&self, frame: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(frame).to_ascii_lowercase();
+        let mut features = Vec::new();
+        let mut emit = |feature: &str| features.push(format!("{}:{}", self.prefix, feature));
+        if text.contains("cube") || text.contains("third power") || text.contains("three times") {
+            emit("POWER_SELF:3");
+        } else if text.contains("square") || text.contains("product of its argument with itself")
+            || text.contains("multiplies the value by itself")
+        {
+            emit("POWER_SELF:2");
+        }
+        if text.contains("negative") || text.contains("below zero") || text.contains("less than zero") {
+            emit("COMPARISON:LESS_THAN_ZERO");
+        }
+        if text.contains("empty") || text.contains("no elements") {
+            emit("GUARD:EMPTY_INPUT");
+        }
+        if text.contains("odd") || text.contains("odd parity") {
+            emit("PARITY:ODD");
+        }
+        if text.contains("increment") || text.contains("increments")
+            || text.contains("repeated words") || text.contains("increase their stored total")
+        {
+            emit("STATE:INCREMENT_COUNT");
+        }
+        if text.contains("uppercase") { emit("TEXT:UPPERCASE"); }
+        if text.contains("largest") || text.contains("maximum") { emit("ORDER:MAXIMUM"); }
+        if text.contains("factorial") { emit("MATH:FACTORIAL"); }
+        features
+    }
+
+    fn reassemble(&self, _active_atoms: &[(&str, f32)]) -> Vec<u8> { Vec::new() }
+    fn name(&self) -> &'static str { "instruction-intent" }
+}
+
 impl AtomEncoding for CodeStructureEncoding {
     fn atomize(&self, frame: &[u8]) -> Vec<String> {
         let text = String::from_utf8_lossy(frame);

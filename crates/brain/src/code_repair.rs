@@ -11,6 +11,7 @@ pub enum CodeRepairRelation {
     ReplaceText { from: String, to: String },
     GuardEmpty { fallback: String },
     IncrementStoredCount { amount: i64 },
+    PowerSelf { exponent: usize },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -76,6 +77,23 @@ pub fn apply_relation(
                 if !changed && line.contains(".get(") && !line.trim_end().ends_with(&suffix) {
                     changed = true;
                     format!("{}{}", line, suffix)
+                } else { line.to_string() }
+            }).collect::<Vec<_>>().join("\n");
+            if changed { Ok(preserve_final_newline(source, lines)) }
+            else { Err(CodeRepairError::NoApplicableSite) }
+        }
+        CodeRepairRelation::PowerSelf { exponent } => {
+            if *exponent < 2 { return Err(CodeRepairError::NoApplicableSite); }
+            let parameter = first_python_parameter(source)
+                .ok_or(CodeRepairError::NoApplicableSite)?;
+            let expression = std::iter::repeat(parameter).take(*exponent)
+                .collect::<Vec<_>>().join(" * ");
+            let mut changed = false;
+            let lines = source.lines().map(|line| {
+                if !changed && line.trim_start().starts_with("return ") {
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    changed = true;
+                    format!("{}return {}", indent, expression)
                 } else { line.to_string() }
             }).collect::<Vec<_>>().join("\n");
             if changed { Ok(preserve_final_newline(source, lines)) }

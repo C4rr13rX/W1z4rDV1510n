@@ -148,3 +148,16 @@ max_concept_member_count = 1
 concept_emergence_threshold = 3
 decay_rate = 0.00002
 prune_floor = 0.001
+
+[[pools]]
+name = "instruction_intent"
+id = 12
+prototype = "instruction-intent"
+atom_encoding_prefix = "instruction_intent"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 256
+max_concept_member_count = 8
+concept_emergence_threshold = 6
+decay_rate = 0.00002
+prune_floor = 0.001

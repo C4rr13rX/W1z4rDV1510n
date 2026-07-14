@@ -26,6 +26,7 @@ POOL_FIELDS = {
     9: "resolution",
     10: "source_before",
     11: "repair_relation",
+    12: "instruction",
 }
 ACTION_POOL = 4
 
@@ -61,6 +62,10 @@ CASES = [
          "def word_freq(s):\n    out = {}\n    for w in s.split():\n        out[w] = out.get(w, 0)\n    return out",
          "def word_freq(s):\n    out = {}\n    for w in s.split():\n        out[w] = out.get(w, 0) + 1\n    return out",
          "word_freq", ["a b a"], {"a": 2, "b": 1}, "state_update_repair"),
+    Case("cube_power", "Fix cube so it multiplies the value by itself three times.",
+         "def cube(value):\n    return value + value",
+         "def cube(value):\n    return value * value * value",
+         "cube", [3], 27, "power_composition"),
 ]
 
 
@@ -155,6 +160,8 @@ def repair_relation(case: Case) -> dict:
         return {"kind": "replace_text", "from": "% 2 == 0", "to": "% 2 == 1"}
     if case.name == "word_frequency_increment":
         return {"kind": "increment_stored_count", "amount": 1}
+    if case.name == "cube_power":
+        return {"kind": "power_self", "exponent": 3}
     raise ValueError(f"no repair relation for {case.name}")
 
 

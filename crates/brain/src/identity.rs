@@ -37,7 +37,7 @@ use crate::annealer::AnnealerConfig;
 use crate::eem::EemConfig;
 use crate::fabric::FabricConfig;
 use crate::neuron::PoolId;
-use crate::pool::{AtomEncoding, BytePassthroughEncoding, CodeStructureEncoding, ControlMode, PoolConfig};
+use crate::pool::{AtomEncoding, BytePassthroughEncoding, CodeStructureEncoding, InstructionIntentEncoding, ControlMode, PoolConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PoolKind {
@@ -318,6 +318,9 @@ impl PoolPrototypeRegistry {
             Box::new(BytePassthroughEncoding { prefix: leaked })
         });
         r.register("code-structure", |prefix| Box::new(CodeStructureEncoding {
+            prefix: prefix.to_owned(),
+        }));
+        r.register("instruction-intent", |prefix| Box::new(InstructionIntentEncoding {
             prefix: prefix.to_owned(),
         }));
         r

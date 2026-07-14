@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OPTIONAL_POOLS = (3, 5, 6, 10)
+OPTIONAL_POOLS = (3, 5, 6, 10, 12)
 
 
 @dataclass
@@ -32,7 +32,7 @@ class DebugGenome:
 
 
 def seed() -> DebugGenome:
-    return DebugGenome("debug-g0-seed", [1, 2, 3, 5, 6, 10], 0.20, 0.0, 3, 24, 4)
+    return DebugGenome("debug-g0-seed", [1, 2, 3, 5, 6, 10, 12], 0.20, 0.0, 6, 24, 4)
 
 
 def mutate(parent: DebugGenome, rng: random.Random, index: int) -> DebugGenome:
@@ -49,11 +49,9 @@ def mutate(parent: DebugGenome, rng: random.Random, index: int) -> DebugGenome:
             child.evidence_pools.append(pool)
             child.evidence_pools.sort()
     elif gene == "pool_floor":
-        child.min_pool_score = round(min(0.85, max(0.05,
-            child.min_pool_score + rng.uniform(-0.20, 0.20))), 3)
+        child.min_pool_score = round(rng.uniform(0.05, 0.85), 3)
     elif gene == "joint_floor":
-        child.min_joint_score = round(min(0.95, max(0.0,
-            child.min_joint_score + rng.uniform(-0.25, 0.25))), 3)
+        child.min_joint_score = round(rng.uniform(0.0, 0.95), 3)
     elif gene == "threshold":
         child.concept_threshold = rng.randint(2, 6)
     elif gene == "window":

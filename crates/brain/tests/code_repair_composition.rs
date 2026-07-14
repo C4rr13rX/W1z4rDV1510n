@@ -27,3 +27,10 @@ fn counter_relation_preserves_current_mapping_and_key_names() {
     }).unwrap();
     assert!(repaired.contains("counts[token] = counts.get(token, 0) + 1"));
 }
+
+#[test]
+fn power_relation_composes_requested_number_of_current_parameter_references() {
+    let source = "def third_power(value):\n    return value + value";
+    let repaired = apply_relation(source, &CodeRepairRelation::PowerSelf { exponent: 3 }).unwrap();
+    assert_eq!(repaired, "def third_power(value):\n    return value * value * value");
+}

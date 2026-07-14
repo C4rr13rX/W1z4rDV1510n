@@ -12,7 +12,8 @@ from pathlib import Path
 from programming_debug_episode_train import Case, CASES, classify, environment, execute, generate
 
 CAUSAL_FIELDS = {1: "instruction", 2: "source_before", 3: "console_before",
-                 5: "environment", 6: "failure_outcome", 10: "source_before"}
+                 5: "environment", 6: "failure_outcome", 10: "source_before",
+                 12: "instruction"}
 
 PARAPHRASES = [
     "Make square compute the product of its argument with itself.",
@@ -20,6 +21,7 @@ PARAPHRASES = [
     "Prevent avg_list from failing when it receives no elements; return zero.",
     "Change filter_odd so only integers with odd parity remain.",
     "Repair word_freq so repeated words increase their stored total.",
+    "Make cube calculate the third power of its input.",
 ]
 
 VARIANTS = [
@@ -28,6 +30,7 @@ VARIANTS = [
     replace(CASES[2], args=[[2, 4, 6]], expected=4),
     replace(CASES[3], args=[[6, 7, 8, 9]], expected=[7, 9]),
     replace(CASES[4], args=["x x y x"], expected={"x": 3, "y": 1}),
+    replace(CASES[5], args=[5], expected=125),
 ]
 
 STRUCTURAL_TRANSFER = [
@@ -43,13 +46,17 @@ STRUCTURAL_TRANSFER = [
          "def mean_values(values):\n    return sum(values) / len(values)",
          "def mean_values(values):\n    return sum(values) / len(values) if values else 0",
          "mean_values", [[]], 0, "empty_input_guard"),
+    Case("renamed_cube", "Make third_power multiply its input by itself three times.",
+         "def third_power(item):\n    return item + item",
+         "def third_power(item):\n    return item * item * item",
+         "third_power", [4], 64, "power_composition"),
 ]
 
 UNSUPPORTED = [
-    Case("cube_unsupported", "Fix cube so it multiplies the value three times.",
-         "def cube(value):\n    return value + value",
-         "def cube(value):\n    return value * value * value",
-         "cube", [3], 27, "unsupported_cube"),
+    Case("factorial_unsupported", "Fix factorial so it computes the factorial of the value.",
+         "def factorial(value):\n    return value * value",
+         "def factorial(value):\n    return 1 if value < 2 else value * factorial(value - 1)",
+         "factorial", [4], 24, "unsupported_factorial"),
     Case("uppercase_unsupported", "Fix shout so it returns uppercase text.",
          "def shout(text):\n    return text",
          "def shout(text):\n    return text.upper()",
