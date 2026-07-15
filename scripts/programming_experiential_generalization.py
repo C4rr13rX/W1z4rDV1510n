@@ -192,6 +192,45 @@ def run_enterprise_retention(endpoint: str, output: Path) -> dict:
     return json.loads(output.read_text(encoding="utf-8"))
 
 
+def begin_experience_transaction(endpoint: str, runtime: Path) -> tuple[Path, Path]:
+    """Checkpoint and hard-link the pre-experience state until every gate passes."""
+    brain_dir = runtime.resolve() / "brain"
+    snapshot = brain_dir / "brain.bin"
+    guard = brain_dir / "brain.experience-last-good.bin"
+    metadata = brain_dir / "brain.experience-last-good.json"
+    if guard.exists() or metadata.exists():
+        raise RuntimeError(
+            f"unresolved experiential transaction guard exists: {guard}"
+        )
+    checkpoint = request(endpoint, "/brain/checkpoint", {}, timeout=2 * 3600)
+    if not checkpoint.get("ok"):
+        raise RuntimeError(f"pre-experience checkpoint failed: {checkpoint}")
+    reported = Path(str(checkpoint.get("path", ""))).resolve()
+    if reported != snapshot.resolve():
+        raise RuntimeError(
+            f"checkpoint path {reported} does not match runtime snapshot {snapshot}"
+        )
+    if not snapshot.is_file():
+        raise RuntimeError(f"checkpoint did not create snapshot: {snapshot}")
+    os.link(snapshot, guard)
+    metadata.write_text(json.dumps({
+        "snapshot": str(snapshot), "guard": str(guard),
+        "tick": checkpoint.get("tick"), "created_unix": time.time(),
+        "recovery": "stop the node, replace brain.bin with this guard, then restart",
+    }, indent=2) + "\n", encoding="utf-8")
+    return guard, metadata
+
+
+def commit_experience_transaction(endpoint: str, guard: Path, metadata: Path) -> dict:
+    """Persist admitted learning before releasing its rollback snapshot."""
+    checkpoint = request(endpoint, "/brain/checkpoint", {}, timeout=2 * 3600)
+    if not checkpoint.get("ok"):
+        raise RuntimeError(f"post-experience checkpoint failed: {checkpoint}")
+    guard.unlink()
+    metadata.unlink()
+    return checkpoint
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:18600")
@@ -199,9 +238,18 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=6)
     parser.add_argument("--skip-retention", action="store_true")
     parser.add_argument("--enterprise-gate", action="store_true")
+    parser.add_argument("--runtime", type=Path)
     parser.add_argument("--output", type=Path,
                         default=Path("runtime/benchmarks/experiential-generalization.json"))
     args = parser.parse_args()
+
+    if args.train and args.runtime is None:
+        parser.error("--train requires --runtime for transactional rollback protection")
+
+    transaction = (
+        begin_experience_transaction(args.endpoint, args.runtime)
+        if args.train else None
+    )
 
     retention_before = (
         run_retention(args.endpoint, args.output.with_name("experience-foundation-before.json"))
@@ -249,6 +297,13 @@ def main() -> int:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    admitted_checkpoint = None
+    if passed and transaction is not None:
+        admitted_checkpoint = commit_experience_transaction(
+            args.endpoint, transaction[0], transaction[1]
+        )
+        report["admitted_checkpoint"] = admitted_checkpoint
+        args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({
         "passed": passed, "baseline": baseline["executes"],
         "learned": learned["executes"], "heldout_transfer": transfer["executes"],

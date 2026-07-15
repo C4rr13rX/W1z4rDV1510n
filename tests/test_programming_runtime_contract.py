@@ -28,6 +28,8 @@ from scripts.programming_capstone_readiness import safe_manifest, structural_che
 from scripts.programming_experiential_generalization import (
     EXPERIENCE,
     HELDOUT,
+    begin_experience_transaction,
+    commit_experience_transaction,
     execute as execute_experience,
     retention_passed,
 )
@@ -166,6 +168,31 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertTrue(retention_passed(report))
         report["after_debug"]["debug"]["transfer"]["passed"] = 3
         self.assertFalse(retention_passed(report))
+
+    def test_experiential_training_keeps_guard_until_admitted_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            snapshot = runtime / "brain" / "brain.bin"
+            snapshot.parent.mkdir()
+            snapshot.write_bytes(b"accepted-before-experience")
+            with patch(
+                "scripts.programming_experiential_generalization.request",
+                return_value={"ok": True, "path": str(snapshot), "tick": 41},
+            ):
+                guard, metadata = begin_experience_transaction("http://brain", runtime)
+            self.assertEqual(guard.read_bytes(), snapshot.read_bytes())
+            self.assertTrue(metadata.is_file())
+            self.assertGreaterEqual(snapshot.stat().st_nlink, 2)
+            with patch(
+                "scripts.programming_experiential_generalization.request",
+                return_value={"ok": True, "path": str(snapshot), "tick": 47},
+            ):
+                committed = commit_experience_transaction(
+                    "http://brain", guard, metadata
+                )
+            self.assertEqual(committed["tick"], 47)
+            self.assertFalse(guard.exists())
+            self.assertFalse(metadata.exists())
 
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
