@@ -17,7 +17,16 @@ def sample_window(path: Path, start: int, count: int,
     if count <= 0 or sample_count <= 0:
         return [], 0
     target_count = min(count, sample_count)
-    targets = [(i * count) // target_count for i in range(target_count)]
+    if target_count == 1:
+        targets = [0]
+    else:
+        # Cover the entire trained interval, including its newest row. Using
+        # i*count/target_count leaves the final 1/N segment unprobed and can
+        # miss a tail-only durability or interference failure.
+        targets = [
+            (i * (count - 1)) // (target_count - 1)
+            for i in range(target_count)
+        ]
     target_cursor = 0
     probes: list[dict] = []
     valid = 0

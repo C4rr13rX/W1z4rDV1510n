@@ -17,6 +17,7 @@ from scripts.programming_integrated_retention import mutation_enabled
 from scripts.programming_curriculum_supervisor import phase_offsets, publish
 from scripts.programming_enterprise_retention import run_suite
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
+from scripts.programming_corpus_recall import sample_window
 from tools.training_standard.drive_corpora_brain import checkpoint_due
 
 
@@ -89,6 +90,20 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("programming_enterprise_retention.py", source)
         self.assertIn('enterprise.get("tick_delta") != 0', source)
+
+    def test_corpus_sampler_covers_both_ends_of_trained_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory) / "corpus.jsonl"
+            corpus.write_text(
+                "".join(
+                    f'{{"prompt":"p{index}","response":"r{index}"}}\n'
+                    for index in range(10)
+                ),
+                encoding="utf-8",
+            )
+            probes, rows = sample_window(corpus, 2, 6, 3)
+            self.assertEqual(rows, 6)
+            self.assertEqual([row["prompt"] for row in probes], ["p2", "p4", "p7"])
 
 
 if __name__ == "__main__":

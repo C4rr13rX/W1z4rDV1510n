@@ -94,7 +94,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
         sys.executable, "scripts/programming_corpus_recall.py", str(phase.corpus),
         "--endpoint", args.endpoint,
         "--start-row", "0", "--window-rows", str(phase.rows),
-        "--samples", "24", "--syntax", "none",
+        "--samples", "64", "--syntax", "none",
     ])
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(f"{phase.name} recall regression: {recall}")
