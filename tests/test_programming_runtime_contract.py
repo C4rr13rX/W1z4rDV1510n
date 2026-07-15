@@ -144,6 +144,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
 
+    def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
+        source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('parser.add_argument("--attach-phase", default="")', source)
+        self.assertIn("run_midphase_gate(args, attach_phase, runtime, attached_ram)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -306,6 +306,7 @@ def main() -> int:
     parser.add_argument("--endpoint", default="http://127.0.0.1:18600")
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--attach-pid", type=int, default=0)
+    parser.add_argument("--attach-phase", default="")
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.1)
@@ -338,10 +339,50 @@ def main() -> int:
     status_path = runtime / "curriculum-supervisor.status.json"
 
     if args.attach_pid:
+        attach_phase = next(
+            (phase for phase in phases if phase.name == args.attach_phase),
+            next((phase for phase in phases
+                  if phase_offsets(runtime / f"{phase.name}.progress.json")[0]
+                  < phase.rows), phases[0]),
+        )
+        attached_start, _ = phase_offsets(
+            runtime / f"{attach_phase.name}.progress.json"
+        )
         publish(status_path, {"state": "attached", "pid": args.attach_pid,
-                              "phase": phases[0].name, "updated_unix": time.time()})
+                              "phase": attach_phase.name,
+                              "ram_next_row": attached_start,
+                              "updated_unix": time.time()})
         while process_alive(args.attach_pid):
             time.sleep(max(1.0, args.poll_seconds))
+        attached_ram, attached_durable = phase_offsets(
+            runtime / f"{attach_phase.name}.progress.json"
+        )
+        if attached_ram > attached_start and attached_ram < attach_phase.rows:
+            if attached_durable != attached_ram:
+                publish(status_path, {"state": "midphase_gate_failed",
+                                      "phase": attach_phase.name,
+                                      "error": "attached worker ended before durable boundary",
+                                      "ram_next_row": attached_ram,
+                                      "durable_next_row": attached_durable,
+                                      "updated_unix": time.time()})
+                return 1
+            publish(status_path, {"state": "midphase_benchmarking",
+                                  "phase": attach_phase.name,
+                                  "ram_next_row": attached_ram,
+                                  "durable_next_row": attached_durable,
+                                  "updated_unix": time.time()})
+            try:
+                run_midphase_gate(args, attach_phase, runtime, attached_ram)
+            except (RuntimeError, subprocess.TimeoutExpired,
+                    json.JSONDecodeError) as exc:
+                publish(status_path, {"state": "midphase_gate_failed",
+                                      "phase": attach_phase.name,
+                                      "ram_next_row": attached_ram,
+                                      "durable_next_row": attached_durable,
+                                      "error": str(exc),
+                                      "updated_unix": time.time()})
+                return 1
+            accept_last_good_guard(runtime)
 
     for phase in phases:
         restarts = 0
