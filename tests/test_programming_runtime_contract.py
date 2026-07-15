@@ -23,6 +23,11 @@ from scripts.programming_curriculum_supervisor import (
     responsive_batch_size,
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
+from scripts.train_programming_brain import (
+    SEED_STAGES,
+    guard_seed_stage,
+    resolve_seed_guard,
+)
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
 from scripts.programming_corpus_recall import sample_window
 from tools.training_standard.drive_corpora_brain import checkpoint_due
@@ -160,6 +165,42 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(ensure_last_good_guard(runtime, phase, 6), guard)
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
+
+    def test_seed_stage_transaction_resolves_without_duplicate_training(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.bin"
+            snapshot.write_bytes(b"accepted")
+            guard_seed_stage(runtime, "multilanguage")
+            snapshot.unlink()
+            snapshot.write_bytes(b"unaccepted")
+            self.assertEqual(
+                resolve_seed_guard(runtime, {"completed_seed_stages": []}),
+                ("multilanguage", "restored"),
+            )
+            self.assertEqual(snapshot.read_bytes(), b"accepted")
+
+            guard_seed_stage(runtime, "multilanguage")
+            snapshot.unlink()
+            snapshot.write_bytes(b"accepted-candidate")
+            self.assertEqual(
+                resolve_seed_guard(
+                    runtime, {"completed_seed_stages": ["multilanguage"]}
+                ),
+                ("multilanguage", "committed"),
+            )
+            self.assertEqual(snapshot.read_bytes(), b"accepted-candidate")
+
+    def test_reproducible_trainer_covers_proven_seed_curriculum(self) -> None:
+        self.assertEqual(SEED_STAGES[0].name, "foundation-python-debug")
+        self.assertIn("semantic-routing", [stage.name for stage in SEED_STAGES])
+        source = (ROOT / "scripts/programming_curriculum_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"--include-seed-corpora"', source)
+        self.assertIn('"--repeats", str(phase.repeats)', source)
 
     def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(

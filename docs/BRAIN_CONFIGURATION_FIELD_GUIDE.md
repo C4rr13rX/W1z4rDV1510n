@@ -157,6 +157,8 @@ Read-only validation must distinguish learned topology from tier residency. In t
 9. Expand the curriculum in stages, checkpointing only passing configurations.
 10. Record each conclusion below with its artifacts and evidence label.
 
+For a new programming brain, use `scripts/train_programming_brain.py` rather than reconstructing the successful training order manually. The exact stage order, repetitions, transaction guards, resume behavior, and gate artifacts are described in `docs/PROGRAMMING_BRAIN_REPRODUCTION.md`.
+
 ## Evidence ledger
 
 | Date | Finding | Evidence | Artifacts |

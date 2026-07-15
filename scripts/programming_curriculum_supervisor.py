@@ -29,6 +29,7 @@ class Phase:
     script_id: str
     corpus: Path
     rows: int
+    repeats: int = 1
 
 
 def read_json(path: Path) -> dict:
@@ -280,7 +281,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--brain", args.endpoint,
         "--script", phase.script_id,
         "--input-path", str(phase.corpus),
-        "--repeats", "1",
+        "--repeats", str(phase.repeats),
         "--direct-pretrain",
         "--start-row", str(ram),
         "--limit-rows", str(min(args.gate_rows, phase.rows - ram)),
@@ -337,28 +338,48 @@ def main() -> int:
     parser.add_argument("--checkpoint-rows", type=int, default=4096)
     parser.add_argument("--gate-rows", type=int, default=16384)
     parser.add_argument("--max-restarts", type=int, default=3)
+    parser.add_argument(
+        "--corpus-root", type=Path,
+        default=Path(r"D:\w1z4rdv1510n-data\training"),
+        help="directory containing the generated programming corpora",
+    )
+    parser.add_argument(
+        "--include-seed-corpora", action="store_true",
+        help="also train the canonical algorithms and GSM8K phases used by a fresh brain",
+    )
     args = parser.parse_args()
 
+    corpus_root = args.corpus_root.resolve()
     phases = [
         Phase("mathinstruct-domain-safe", "reasoning_math_001",
-              Path(r"D:\w1z4rdv1510n-data\training\mathinstruct.jsonl"), 245_323),
+              corpus_root / "mathinstruct.jsonl", 245_323),
         Phase("metamathqa-domain-safe", "reasoning_math_001",
-              Path(r"D:\w1z4rdv1510n-data\training\metamathqa.jsonl"), 385_524),
+              corpus_root / "metamathqa.jsonl", 385_524),
         Phase("csn-python-full", "programming_literacy_python_001",
-              Path(r"D:\w1z4rdv1510n-data\training\csn_python_full.jsonl"), 421_477),
+              corpus_root / "csn_python_full.jsonl", 421_477),
         Phase("csn-python-para5", "programming_literacy_python_001",
-              Path(r"D:\w1z4rdv1510n-data\training\csn_python_full_para5.jsonl"),
+              corpus_root / "csn_python_full_para5.jsonl",
               2_028_816),
         Phase("jupyter-scientific-full", "domain_scientific_python_001",
-              Path(r"D:\w1z4rdv1510n-data\training\jupyter_scientific_full.jsonl"),
+              corpus_root / "jupyter_scientific_full.jsonl",
               690_175),
         Phase("jupyter-scientific-para4", "domain_scientific_python_001",
-              Path(r"D:\w1z4rdv1510n-data\training\jupyter_scientific_para4.jsonl"),
+              corpus_root / "jupyter_scientific_para4.jsonl",
               2_760_496),
         Phase("jupyter-scientific-partial", "domain_scientific_python_001",
-              Path(r"D:\w1z4rdv1510n-data\training\jupyter_scientific_partial.jsonl"),
+              corpus_root / "jupyter_scientific_partial.jsonl",
               206_948),
     ]
+    if args.include_seed_corpora:
+        phases[0:0] = [
+            Phase("canonical-algorithms", "dsa_classical_001",
+                  corpus_root / "the_algorithms_full.jsonl", 1_953, repeats=4),
+            Phase("gsm8k-domain-safe", "reasoning_math_001",
+                  corpus_root / "gsm8k.jsonl", 7_473),
+        ]
+    missing = [str(phase.corpus) for phase in phases if not phase.corpus.is_file()]
+    if missing:
+        parser.error("missing corpus files: " + ", ".join(missing))
     runtime = args.runtime.resolve()
     status_path = runtime / "curriculum-supervisor.status.json"
 
