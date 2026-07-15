@@ -49,10 +49,19 @@ def process_alive(pid: int) -> bool:
 
 
 def publish(path: Path, payload: dict) -> None:
+    """Atomically publish state despite transient Windows reader locks."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    deadline = time.monotonic() + 10.0
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def phase_offsets(progress_path: Path) -> tuple[int, int]:
@@ -142,7 +151,8 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
     return report
 
 
-def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path) -> int:
+def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
+              status_path: Path) -> int:
     progress = runtime / f"{phase.name}.progress.json"
     ram, durable = phase_offsets(progress)
     if ram >= phase.rows:
@@ -166,11 +176,33 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path) -> int:
         "--no-sleep-between",
         "--progress-path", str(progress),
     ]
+    worker_pid_path = runtime / f"{phase.name}.pid"
     with stdout_path.open("a", encoding="utf-8") as stdout, \
             stderr_path.open("a", encoding="utf-8") as stderr:
-        return subprocess.run(
-            command, cwd=ROOT, stdout=stdout, stderr=stderr, check=False,
-        ).returncode
+        worker = subprocess.Popen(
+            command, cwd=ROOT, stdout=stdout, stderr=stderr,
+        )
+        worker_pid_path.write_text(f"{worker.pid}\n", encoding="ascii")
+        try:
+            while True:
+                code = worker.poll()
+                ram, durable = phase_offsets(progress)
+                publish(status_path, {
+                    "state": "running", "phase": phase.name,
+                    "worker_pid": worker.pid, "ram_next_row": ram,
+                    "durable_next_row": durable,
+                    "updated_unix": time.time(),
+                })
+                if code is not None:
+                    return code
+                time.sleep(max(1.0, args.poll_seconds))
+        finally:
+            try:
+                recorded_pid = worker_pid_path.read_text(encoding="ascii").strip()
+                if recorded_pid == str(worker.pid):
+                    worker_pid_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def main() -> int:
@@ -242,7 +274,7 @@ def main() -> int:
                                   "durable_next_row": durable,
                                   "restart": restarts,
                                   "updated_unix": time.time()})
-            code = run_phase(args, phase, runtime)
+            code = run_phase(args, phase, runtime, status_path)
             ram_after, durable_after = phase_offsets(
                 runtime / f"{phase.name}.progress.json"
             )
