@@ -14,7 +14,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.programming_integrated_retention import mutation_enabled
-from scripts.programming_curriculum_supervisor import phase_offsets, publish
+from scripts.programming_curriculum_supervisor import (
+    Phase,
+    accept_last_good_guard,
+    ensure_last_good_guard,
+    phase_offsets,
+    publish,
+)
 from scripts.programming_enterprise_retention import run_suite
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
 from scripts.programming_corpus_recall import sample_window
@@ -119,6 +125,24 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('"--batch-size", type=int, default=32', source)
         self.assertIn('"--inter-batch-yield-seconds", type=float, default=0.1', source)
+
+    def test_chunk_snapshot_guard_survives_until_explicit_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.bin"
+            snapshot.write_bytes(b"accepted-state")
+            phase = Phase("phase-a", "script-a", runtime / "corpus.jsonl", 10)
+            guard = ensure_last_good_guard(runtime, phase, 4)
+            self.assertTrue(guard.exists())
+            self.assertTrue(snapshot.samefile(guard))
+            snapshot.unlink()
+            snapshot.write_bytes(b"candidate-state")
+            self.assertEqual(guard.read_bytes(), b"accepted-state")
+            self.assertEqual(ensure_last_good_guard(runtime, phase, 6), guard)
+            accept_last_good_guard(runtime)
+            self.assertFalse(guard.exists())
 
 
 if __name__ == "__main__":

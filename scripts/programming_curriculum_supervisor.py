@@ -71,6 +71,42 @@ def phase_offsets(progress_path: Path) -> tuple[int, int]:
     return ram, durable
 
 
+def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
+    """Hard-link the accepted snapshot until the next retention gate passes."""
+    brain_dir = runtime / "brain"
+    snapshot = brain_dir / "brain.bin"
+    guard = brain_dir / "brain.last-good.bin"
+    metadata = brain_dir / "brain.last-good.json"
+    if guard.exists():
+        existing = read_json(metadata)
+        if (existing.get("phase") != phase.name
+                or not isinstance(existing.get("row"), int)
+                or existing["row"] > row):
+            raise RuntimeError(
+                "unresolved last-good snapshot guard exists: "
+                f"{existing or guard}"
+            )
+        return guard
+    if not snapshot.exists():
+        raise RuntimeError(f"cannot guard missing snapshot: {snapshot}")
+    os.link(snapshot, guard)
+    publish(metadata, {
+        "phase": phase.name,
+        "row": row,
+        "snapshot": str(snapshot),
+        "guard": str(guard),
+        "created_unix": time.time(),
+    })
+    return guard
+
+
+def accept_last_good_guard(runtime: Path) -> None:
+    """Discard the prior snapshot only after the new state passes its gates."""
+    brain_dir = runtime / "brain"
+    (brain_dir / "brain.last-good.bin").unlink(missing_ok=True)
+    (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
+
+
 def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
     run = subprocess.run(
         command, cwd=ROOT, capture_output=True, text=True,
@@ -330,12 +366,14 @@ def main() -> int:
                                       "ram_next_row": ram,
                                       "durable_next_row": durable,
                                       "updated_unix": time.time()})
+                accept_last_good_guard(runtime)
                 break
             publish(status_path, {"state": "running", "phase": phase.name,
                                   "ram_next_row": ram,
                                   "durable_next_row": durable,
                                   "restart": restarts,
                                   "updated_unix": time.time()})
+            ensure_last_good_guard(runtime, phase, ram)
             code = run_phase(args, phase, runtime, status_path)
             ram_after, durable_after = phase_offsets(
                 runtime / f"{phase.name}.progress.json"
@@ -359,6 +397,7 @@ def main() -> int:
                                           "error": str(exc),
                                           "updated_unix": time.time()})
                     return 1
+                accept_last_good_guard(runtime)
                 continue
             restarts += 1
             if restarts > args.max_restarts or ram_after <= ram:
