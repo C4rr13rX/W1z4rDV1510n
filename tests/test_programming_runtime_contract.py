@@ -22,7 +22,7 @@ from scripts.programming_curriculum_supervisor import (
     publish,
     responsive_batch_size,
 )
-from scripts.programming_enterprise_retention import run_suite
+from scripts.programming_enterprise_retention import run_suite, stable_structure
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
 from scripts.programming_corpus_recall import sample_window
 from tools.training_standard.drive_corpora_brain import checkpoint_due
@@ -71,6 +71,20 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertTrue(result["timed_out"])
 
+    def test_enterprise_structure_guard_ignores_cache_residency(self) -> None:
+        baseline = {
+            "pool_count": 13, "total_neurons": 100,
+            "total_concepts": 25, "total_binding": 7,
+            "binding_pool_id": 0, "resident_terminals": 500,
+            "evicted_neurons": 40,
+        }
+        paged_in = dict(
+            baseline, resident_terminals=800, evicted_neurons=35,
+        )
+        self.assertEqual(stable_structure(baseline), stable_structure(paged_in))
+        rewired = dict(baseline, total_binding=8)
+        self.assertNotEqual(stable_structure(baseline), stable_structure(rewired))
+
     def test_compiler_caches_are_confined_to_benchmark_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -97,6 +111,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("programming_enterprise_retention.py", source)
         self.assertIn('enterprise.get("tick_delta") != 0', source)
+        self.assertIn('enterprise.get("structure_unchanged") is not True', source)
 
     def test_corpus_sampler_covers_both_ends_of_trained_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

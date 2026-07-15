@@ -194,7 +194,8 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
     ], timeout=4 * 3600.0)
     if (not enterprise.get("passed")
             or enterprise.get("passed_suites") != enterprise.get("total_suites")
-            or enterprise.get("tick_delta") != 0):
+            or enterprise.get("tick_delta") != 0
+            or enterprise.get("structure_unchanged") is not True):
         raise RuntimeError(
             f"enterprise regression after {phase.name}: {enterprise}"
         )
@@ -239,7 +240,8 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
     ], timeout=4 * 3600.0)
     if (not enterprise.get("passed")
             or enterprise.get("passed_suites") != enterprise.get("total_suites")
-            or enterprise.get("tick_delta") != 0):
+            or enterprise.get("tick_delta") != 0
+            or enterprise.get("structure_unchanged") is not True):
         raise RuntimeError(
             f"enterprise midphase regression after {phase.name} row "
             f"{trained_rows}: {enterprise}"
