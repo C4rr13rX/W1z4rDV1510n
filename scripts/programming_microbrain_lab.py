@@ -31,6 +31,8 @@ VARIANTS = (
     ("noise_then_target", (("noise", 3), ("target", 6))),
     ("target_then_noise", (("target", 6), ("noise", 3))),
     ("heavy_noise_then_target", (("noise", 6), ("target", 6))),
+    ("heavy_noise_then_target_r1", (("noise", 6), ("target", 1))),
+    ("target_r1_then_heavy_noise", (("target", 1), ("noise", 6))),
 )
 
 
