@@ -664,6 +664,34 @@ fn multidomain_synthesis_prompt_exposes_every_required_feature_path() {
 }
 
 #[test]
+fn domain_shifted_multidomain_prompt_preserves_abstract_feature_paths() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Create a new executable Python class named ResilientFulfillmentService. It manages inventory initialized with 10 widgets and must validate an order containing key, actor, sku, quantity, and expected_version; default-deny fulfillment authorization except for the warehouse role; support only forward schema migration; recursively redact token and password fields; write correlation-aware structured JSON audit logs; open a resettable circuit after two exhausted operations; retry transient asynchronous allocation at most three times; return the original response when an order key is replayed; reject an order whose expected inventory version is stale; reject duplicate sku and quantity work under a different key; restore inventory completely when fulfillment cannot commit; atomically append an inventory-allocated outbox event.",
+    );
+    for expected in [
+        "intent:LANGUAGE:PYTHON",
+        "intent:ENTERPRISE:INPUT_VALIDATION",
+        "intent:SECURITY:AUTHORIZATION",
+        "intent:PERSISTENCE:SCHEMA_MIGRATION",
+        "intent:ENTERPRISE:SECRET_REDACTION",
+        "intent:OBSERVABILITY:CORRELATED_LOGGING",
+        "intent:RESILIENCE:CIRCUIT_BREAKER",
+        "intent:ENTERPRISE:BOUNDED_RETRY",
+        "intent:RESILIENCE:ASYNC_RETRY",
+        "intent:API:IDEMPOTENT_COMMAND",
+        "intent:STATE:OPTIMISTIC_CONCURRENCY",
+        "intent:CONCURRENCY:DEDUPLICATION",
+        "intent:PERSISTENCE:ATOMIC_TRANSACTION",
+        "intent:INTEGRATION:TRANSACTIONAL_OUTBOX",
+    ] {
+        assert!(features.iter().any(|feature| feature == expected), "{expected}");
+    }
+}
+
+#[test]
 fn semantic_stress_phrases_preserve_enterprise_behaviors() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),

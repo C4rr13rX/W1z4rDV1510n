@@ -407,6 +407,11 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("validates input")
             || text.contains("required field")
             || text.contains("required user")
+            || (text.contains("validate")
+                && (text.contains("order")
+                    || text.contains("command")
+                    || text.contains("request")
+                    || text.contains("payload")))
         {
             emit("ENTERPRISE:INPUT_VALIDATION");
         }
@@ -505,6 +510,9 @@ impl AtomEncoding for InstructionIntentEncoding {
             || (text.contains("database") && text.contains("transaction"))
             || text.contains("atomic transfer")
             || text.contains("all-or-nothing database transfer")
+            || (text.contains("restore")
+                && (text.contains("inventory") || text.contains("state"))
+                && (text.contains("commit") || text.contains("fulfillment")))
         {
             emit("PERSISTENCE:ATOMIC_TRANSACTION");
         }
@@ -531,6 +539,9 @@ impl AtomEncoding for InstructionIntentEncoding {
         }
         if text.contains("idempoten")
             || (text.contains("api") && text.contains("replay"))
+            || (text.contains("replay")
+                && (text.contains("order key") || text.contains("request key"))
+                && (text.contains("response") || text.contains("result")))
             || ((text.contains("repeating") || text.contains("resending"))
                 && (text.contains("first result") || text.contains("same response"))
                 && text.contains("order"))
@@ -561,6 +572,9 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("circuit-breaker")
             || (text.contains("opens after") && text.contains("cooldown"))
             || (text.contains("circuit") && text.contains("cooldown"))
+            || (text.contains("circuit")
+                && text.contains("open")
+                && (text.contains("reset") || text.contains("failure")))
         {
             emit("RESILIENCE:CIRCUIT_BREAKER");
         }
@@ -571,7 +585,12 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("INTEGRATION:TRANSACTIONAL_OUTBOX");
         }
-        if text.contains("deduplicat") || text.contains("duplicate work") {
+        if text.contains("deduplicat")
+            || text.contains("duplicate work")
+            || (text.contains("duplicate")
+                && text.contains("work")
+                && (text.contains("order") || text.contains("sku")))
+        {
             emit("CONCURRENCY:DEDUPLICATION");
         }
         if !no_retry
@@ -584,6 +603,7 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("optimistic-concurr")
             || text.contains("expected version")
             || text.contains("expected-version")
+            || (text.contains("expected") && text.contains("version"))
             || text.contains("stale write")
             || text.contains("version-checked")
             || text.contains("version checked")
