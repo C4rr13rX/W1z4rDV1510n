@@ -17,6 +17,10 @@ from programming_debug_episode_train import generate, train as train_debug
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def mutation_enabled(read_only: bool) -> bool:
+    return not read_only
+
+
 def b64(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode()).rstrip(b"=").decode()
 
@@ -83,7 +87,7 @@ def main() -> int:
     parser.add_argument("--debug-repeats", type=int, default=4)
     parser.add_argument("--pretrain-debug", action="store_true")
     parser.add_argument("--no-checkpoint", action="store_true",
-                        help="run read-only retention gates without snapshotting")
+                        help="run the complete retention suite read-only: no training and no snapshot")
     parser.add_argument("--output", type=Path,
                         default=ROOT / "runtime/benchmarks/integrated_retention.json")
     args = parser.parse_args()
@@ -96,15 +100,22 @@ def main() -> int:
         row = next(row for row in examples if str(row.get("response", "")).startswith(response_prefix))
         python_pairs.append((row["prompt"], row["response"]))
 
-    train_pairs(args.endpoint, TODDLER, args.toddler_repeats)
-    train_pairs(args.endpoint, k12_pairs, args.k12_repeats)
-    train_pairs(args.endpoint, python_pairs, args.python_repeats, instruction_features=True)
+    # Read-only verification must be a genuinely separate branch.  The old
+    # --no-checkpoint implementation skipped only the final snapshot while
+    # silently retraining every protected curriculum and the debug episodes.
+    # That made a benchmark mutate the state it claimed to measure and added
+    # thousands of ticks when a timed-out client retried it.
+    if mutation_enabled(args.no_checkpoint):
+        train_pairs(args.endpoint, TODDLER, args.toddler_repeats)
+        train_pairs(args.endpoint, k12_pairs, args.k12_repeats)
+        train_pairs(args.endpoint, python_pairs, args.python_repeats, instruction_features=True)
     before = {"foundation": foundation_eval(args.endpoint, accepted),
               "python": code_eval(args.endpoint),
               "stats": request(args.endpoint, "/brain/stats")}
 
     episodes = generate()
-    train_debug(args.endpoint, episodes, args.debug_repeats, args.pretrain_debug)
+    if mutation_enabled(args.no_checkpoint):
+        train_debug(args.endpoint, episodes, args.debug_repeats, args.pretrain_debug)
     after = {"foundation": foundation_eval(args.endpoint, accepted),
              "python": code_eval(args.endpoint),
              "debug": debug_eval(args.endpoint, args.output.with_name("integrated_debug.json")),

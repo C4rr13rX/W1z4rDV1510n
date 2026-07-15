@@ -89,6 +89,11 @@ _BRAIN_PREFIX = "" if os.environ.get(
 def _path(suffix: str) -> str:
     return f"{_BRAIN_PREFIX}{suffix}"
 
+
+def checkpoint_due(checkpoint_rows: int, accepted_since_checkpoint: int) -> bool:
+    """Whether the replay tail has reached its bounded snapshot window."""
+    return checkpoint_rows > 0 and accepted_since_checkpoint >= checkpoint_rows
+
 POOL_TEXT   = 1
 POOL_ACTION = 4
 POOL_ENVIRONMENT = 5
@@ -591,10 +596,12 @@ def drive_one(script, repeats: int, project_root: Path,
                             # Bulk success is returned only after the server's
                             # WAL flush succeeds, so this row is crash-durable.
                             durable_next_row = batch_next_row
-                            accepted_since_checkpoint = 0
                         publish_progress()
-                        if (not wal_durable and checkpoint_rows > 0
-                                and accepted_since_checkpoint >= checkpoint_rows):
+                        # WAL acknowledgement protects every batch; periodic
+                        # snapshots bound restart/replay time and compact the
+                        # acknowledged tail. These are complementary durability
+                        # layers, not mutually-exclusive modes.
+                        if checkpoint_due(checkpoint_rows, accepted_since_checkpoint):
                             make_durable()
                     else:
                         summary["posted_fail"] += len(episodes)
@@ -614,7 +621,6 @@ def drive_one(script, repeats: int, project_root: Path,
                     accepted_since_checkpoint += len(episodes)
                     if wal_durable:
                         durable_next_row = batch_next_row
-                        accepted_since_checkpoint = 0
                     publish_progress()
                 else:
                     summary["posted_fail"] += len(episodes)
@@ -622,8 +628,9 @@ def drive_one(script, repeats: int, project_root: Path,
                         f"[{script.id}] final batch rejected at logical row "
                         f"{batch_next_row}: {err}"
                     )
-            if (not wal_durable and progress_path is not None
-                    and durable_next_row != batch_next_row):
+            if (progress_path is not None
+                    and (durable_next_row != batch_next_row
+                         or accepted_since_checkpoint > 0)):
                 make_durable()
             if verbose:
                 print(f"  [{script.id}] direct pretrain done in {time.time()-t0:.1f}s",

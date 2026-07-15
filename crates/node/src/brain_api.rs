@@ -154,11 +154,7 @@ pub fn build_default_brain() -> Result<Brain> {
     Ok(brain)
 }
 
-fn configured_identity() -> Result<Option<BrainIdentitySpec>> {
-    let Some(path) = std::env::var_os("W1Z4RD_BRAIN_IDENTITY") else {
-        return Ok(None);
-    };
-    let path = Path::new(&path);
+fn load_identity(path: &Path) -> Result<BrainIdentitySpec> {
     let identity = if path.extension().and_then(|v| v.to_str()) == Some("json") {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read brain identity {}: {}", path.display(), e))?;
@@ -168,7 +164,37 @@ fn configured_identity() -> Result<Option<BrainIdentitySpec>> {
         BrainIdentitySpec::load_toml(path)
             .map_err(|e| anyhow::anyhow!("load brain identity {}: {}", path.display(), e))?
     };
-    Ok(Some(identity))
+    Ok(identity)
+}
+
+/// Treat the encoding identity as durable brain metadata. A checkpoint owns
+/// neurons but cannot reconstruct encoding trait objects, so a restart must
+/// not depend solely on a process-local environment variable. The first
+/// configured launch writes a canonical identity beside `brain.bin`; later
+/// launches recover it automatically when the variable is absent.
+fn resolve_identity(
+    data_dir: &Path,
+    configured_path: Option<&Path>,
+) -> Result<Option<BrainIdentitySpec>> {
+    let persisted = data_dir.join("brain.identity.toml");
+    if let Some(path) = configured_path {
+        let identity = load_identity(path)?;
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| anyhow::anyhow!("create brain data dir {}: {}", data_dir.display(), e))?;
+        identity.save_toml(&persisted).map_err(|e| {
+            anyhow::anyhow!("persist brain identity {}: {}", persisted.display(), e)
+        })?;
+        return Ok(Some(identity));
+    }
+    if persisted.exists() {
+        return load_identity(&persisted).map(Some);
+    }
+    Ok(None)
+}
+
+fn configured_identity(data_dir: &Path) -> Result<Option<BrainIdentitySpec>> {
+    let configured = std::env::var_os("W1Z4RD_BRAIN_IDENTITY").map(PathBuf::from);
+    resolve_identity(data_dir, configured.as_deref())
 }
 
 fn configured_deployment() -> Result<Option<BrainDeploymentSpec>> {
@@ -238,7 +264,7 @@ fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
 /// and merged-node modes obey the same durability contract.
 pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let checkpoint = data_dir.join("brain.bin");
-    let identity = configured_identity()?;
+    let identity = configured_identity(data_dir)?;
     let mut brain = if checkpoint.exists() {
         let mut encs: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();
         encs.insert(POOL_BINDING, leaked_encoding("bind"));
@@ -2522,6 +2548,23 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
     brain_phase_routes_impl(state, true)
 }
 
+/// Force the attached WAL through the OS durability boundary.  This mirrors
+/// the standalone server's top-level `/flush` handler so merged-node and
+/// `/brain/*` clients do not need topology-specific route knowledge.
+async fn h_flush(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
+    let brain = s.brain.lock().await;
+    match brain.store_clone().flush() {
+        Ok(()) => {
+            let wal_path = default_node_brain_dir().join("brain.wal");
+            let wal_bytes = std::fs::metadata(&wal_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            Json(json!({ "ok": true, "wal_bytes": wal_bytes }))
+        }
+        Err(error) => Json(json!({ "ok": false, "error": error.to_string() })),
+    }
+}
+
 /// An exact fragment is not a complete answer when another grounded fragment
 /// explicitly depends on its role.
 fn exact_fragment_has_grounded_dependents(exact: &[u8], candidates: &[Vec<u8>]) -> bool {
@@ -2593,6 +2636,7 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
             .route("/tick_profile", get(h_tick_profile))
             .route("/sleep", post(h_sleep))
             .route("/checkpoint", post(h_checkpoint))
+            .route("/flush", post(h_flush))
     } else {
         routes
     };
@@ -2602,6 +2646,32 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_identity_persists_and_reloads_without_process_environment() {
+        let identity_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../brains/coding_debug.identity.toml");
+        let unique = format!(
+            "w1z4rd_identity_contract_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(unique);
+
+        let configured = resolve_identity(&data_dir, Some(&identity_path))
+            .unwrap()
+            .unwrap();
+        assert!(data_dir.join("brain.identity.toml").exists());
+        let recovered = resolve_identity(&data_dir, None).unwrap().unwrap();
+        assert_eq!(recovered.name, configured.name);
+        assert_eq!(recovered.pools.len(), 12);
+        assert_eq!(recovered.pools[11].prototype, "instruction-intent");
+
+        std::fs::remove_dir_all(data_dir).ok();
+    }
 
     #[test]
     fn deployed_identity_reconfigures_restored_pool_learning_policy() {
