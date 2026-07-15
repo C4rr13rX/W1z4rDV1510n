@@ -226,11 +226,11 @@ def main() -> int:
     ))
     args = parser.parse_args()
     runtime = args.runtime.resolve()
+    live_training = active_training_pids(runtime)
     if args.train:
-        live = active_training_pids(runtime)
-        if live:
+        if live_training:
             parser.error("pause corpus training before motif mutation; active PIDs: "
-                         + ",".join(map(str, live)))
+                         + ",".join(map(str, live_training)))
 
     transaction = begin_experience_transaction(args.endpoint, runtime) if args.train else None
     retention_before = run_retention(
@@ -272,6 +272,11 @@ def main() -> int:
         "tick_after": tick_after,
         "tick_delta": tick_after - tick_before if isinstance(tick_before, int)
         and isinstance(tick_after, int) else None,
+        "concurrent_training_pids": live_training,
+        "concurrent_mutation_detected": bool(
+            live_training and isinstance(tick_before, int)
+            and isinstance(tick_after, int) and tick_after != tick_before
+        ),
         "updated_unix": time.time(),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

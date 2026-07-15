@@ -290,6 +290,10 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                             for response in responses))
         self.assertTrue(all("class DurableWarehouseEngine" not in response
                             for response in responses))
+        supervisor = (ROOT / "scripts/programming_parameterized_fulfillment.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"concurrent_mutation_detected"', supervisor)
 
     def test_multidomain_failed_gate_keeps_authoritative_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
