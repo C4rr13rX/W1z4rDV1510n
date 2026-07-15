@@ -9,6 +9,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Serialize};
+use serde::ser::{SerializeSeq, SerializeStruct};
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -942,6 +943,52 @@ pub struct Pool {
     /// produced).  Used as a ControlSignal so decode-time floor
     /// adapters can read it.
     pub decode_precision_ema: f32,
+}
+
+/// Borrowed, wire-compatible view of [`crate::persistence::PoolSnapshot`].
+///
+/// `Pool::snapshot()` must remain available for tests and callers that need
+/// an owned value, but production checkpoints must not clone every neuron's
+/// terminal vector first.  This serializer emits the exact same six fields
+/// in the same order while borrowing the live pool.  Bincode therefore
+/// remains compatible with `PoolSnapshot` on restore and peak checkpoint
+/// memory is independent of synapse count.
+pub(crate) struct PoolSnapshotRef<'a>(pub(crate) &'a Pool);
+
+struct PairSeq<'a, K, V>(&'a AHashMap<K, V>);
+
+impl<K, V> Serialize for PairSeq<'_, K, V>
+where
+    K: Serialize,
+    V: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for pair in self.0.iter() {
+            seq.serialize_element(&pair)?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for PoolSnapshotRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let pool = self.0;
+        let mut state = serializer.serialize_struct("PoolSnapshot", 6)?;
+        state.serialize_field("config", &pool.config)?;
+        state.serialize_field("neurons", &pool.neurons)?;
+        state.serialize_field("label_to_id", &pool.label_to_id)?;
+        state.serialize_field("recent_atoms", &pool.recent_atoms)?;
+        state.serialize_field("sequences", &PairSeq(&pool.sequences))?;
+        state.serialize_field("cold_offsets", &PairSeq(&pool.cold_offsets))?;
+        state.end()
+    }
 }
 
 impl Pool {

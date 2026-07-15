@@ -181,6 +181,18 @@ fn default_tentative_threshold_for_restore() -> u32 { 1 }
 /// Returns `io::Error` for filesystem failures or `InvalidData` for
 /// serialisation failures (every field above derives `Serialize`).
 pub fn save_snapshot<P: AsRef<Path>>(snap: &BrainSnapshot, path: P) -> io::Result<()> {
+    save_serializable(snap, path)
+}
+
+/// Streaming checkpoint primitive shared by owned snapshots and the
+/// borrowed live-brain view used by `Brain::checkpoint`.  Keeping this
+/// generic is what lets the production path avoid materialising a cloned
+/// `BrainSnapshot` while preserving the existing bincode wire format.
+pub(crate) fn save_serializable<T, P>(value: &T, path: P) -> io::Result<()>
+where
+    T: Serialize + ?Sized,
+    P: AsRef<Path>,
+{
     use std::io::BufWriter;
     // Write to a sibling temp path then rename — atomic-replace guarantees
     // that a partially-written file never displaces a good one.  Crash
@@ -192,7 +204,7 @@ pub fn save_snapshot<P: AsRef<Path>>(snap: &BrainSnapshot, path: P) -> io::Resul
     {
         let file = fs::File::create(&tmp_path)?;
         let mut w = BufWriter::with_capacity(256 * 1024, file);
-        bincode::serialize_into(&mut w, snap)
+        bincode::serialize_into(&mut w, value)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         w.flush()?;
         w.get_ref().sync_all()?;

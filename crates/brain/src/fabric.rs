@@ -12,11 +12,13 @@
 
 use ahash::AHashMap;
 use parking_lot::RwLock;
+use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeStruct};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::neuron::{NeuronId, NeuronRef, PoolId};
-use crate::pool::Pool;
+use crate::pool::{Pool, PoolSnapshotRef};
 use crate::store::{NoopStore, Store, WalEvent};
 
 /// Per-phase nanosecond counters for advance_tick.  Cumulative since
@@ -214,6 +216,45 @@ pub struct Fabric {
     /// Cumulative orchestrator counters.  Atomic so `/tier_orchestrator_stats`
     /// reads them without taking the brain mutex.
     pub orchestrator_stats: Arc<crate::tier_orchestrator::OrchestratorStats>,
+}
+
+/// Borrowed serializer for the persistent portion of a fabric.  Pools are
+/// read-locked and emitted one at a time, so checkpointing never constructs
+/// an owned copy of the full neural graph.
+pub(crate) struct FabricSnapshotRef<'a>(pub(crate) &'a Fabric);
+
+struct PoolsSnapshotRef<'a>(&'a Fabric, &'a [PoolId]);
+
+impl Serialize for PoolsSnapshotRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.1.len()))?;
+        for pid in self.1 {
+            if let Some(pool) = self.0.pools.get(pid) {
+                let guard = pool.read();
+                map.serialize_entry(pid, &PoolSnapshotRef(&guard))?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl Serialize for FabricSnapshotRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let fabric = self.0;
+        let pool_order = fabric.pool_ids();
+        let mut state = serializer.serialize_struct("FabricSnapshot", 4)?;
+        state.serialize_field("config", &fabric.config)?;
+        state.serialize_field("tick", &fabric.tick)?;
+        state.serialize_field("pool_order", &pool_order)?;
+        state.serialize_field("pools", &PoolsSnapshotRef(fabric, &pool_order))?;
+        state.end()
+    }
 }
 
 impl Fabric {

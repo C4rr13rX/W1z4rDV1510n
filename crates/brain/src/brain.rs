@@ -5886,9 +5886,84 @@ impl Brain {
     /// already covers.  The bincode path is interim until the content-
     /// addressed terminal store ships in full (Stage 17.4+).
     pub fn checkpoint<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
-        // 1. Streaming-serialize the snapshot to disk (the §17.1 interim
-        //    path with peak-RAM = write-buffer, not brain-size).
-        crate::persistence::save_snapshot(&self.snapshot(), path)?;
+        // 1. Stream a borrowed view of the live graph.  Calling snapshot()
+        //    here used to clone every neuron and terminal before the first
+        //    byte reached disk; a 4.5 GB brain consequently needed another
+        //    ~6 GB of private memory and paged for minutes.  Field order and
+        //    shapes intentionally mirror BrainSnapshot exactly, so existing
+        //    restore code reads this file without a format migration.
+        #[derive(serde::Serialize)]
+        struct BrainSnapshotRef<'a> {
+            format_version: u32,
+            binding_pool_id: PoolId,
+            binding_emergence_threshold: u32,
+            tentative_emergence_threshold: u32,
+            moment_history_window: usize,
+            fabric: crate::fabric::FabricSnapshotRef<'a>,
+            eem: crate::persistence::EemSnapshot,
+            annealer: crate::persistence::AnnealerSnapshot,
+            moment_history: VecDeque<crate::persistence::SerializableFingerprint>,
+            binding_recurrences:
+                Vec<(crate::persistence::SerializableFingerprint, u32)>,
+            promoted_fingerprints:
+                Vec<(crate::persistence::SerializableFingerprint, NeuronId)>,
+            tentative_promoted:
+                Vec<(crate::persistence::SerializableFingerprint, NeuronId)>,
+            lifetime_recurrences:
+                Vec<(crate::persistence::SerializableFingerprint, u32)>,
+            current_threshold: u32,
+            total_observations: u64,
+            action_pool_id: Option<PoolId>,
+            pending_actions: Vec<(ActionId, ActionEvent)>,
+            next_action_id: ActionId,
+        }
+
+        let fingerprint = |f: &MomentFingerprint| {
+            crate::persistence::SerializableFingerprint {
+                pairs: f.pairs.clone(),
+            }
+        };
+        let borrowed = BrainSnapshotRef {
+            format_version: crate::persistence::CURRENT_SNAPSHOT_VERSION,
+            binding_pool_id: self.binding_pool_id,
+            binding_emergence_threshold: self.config.binding_emergence_threshold,
+            tentative_emergence_threshold: self.config.tentative_emergence_threshold,
+            moment_history_window: self.config.moment_history_window,
+            fabric: crate::fabric::FabricSnapshotRef(&self.fabric),
+            eem: self.eem.snapshot(),
+            annealer: self.annealer.snapshot(),
+            moment_history: self.moment_history.iter().map(fingerprint).collect(),
+            binding_recurrences: self
+                .binding_recurrences
+                .iter()
+                .map(|(f, &count)| (fingerprint(f), count))
+                .collect(),
+            promoted_fingerprints: self
+                .promoted_fingerprints
+                .iter()
+                .map(|(f, &id)| (fingerprint(f), id))
+                .collect(),
+            tentative_promoted: self
+                .tentative_promoted
+                .iter()
+                .map(|(f, &id)| (fingerprint(f), id))
+                .collect(),
+            lifetime_recurrences: self
+                .lifetime_recurrences
+                .iter()
+                .map(|(f, &count)| (fingerprint(f), count))
+                .collect(),
+            current_threshold: self.current_threshold,
+            total_observations: self.total_observations,
+            action_pool_id: self.action_pool_id,
+            pending_actions: self
+                .pending_actions
+                .iter()
+                .map(|(&id, event)| (id, event.clone()))
+                .collect(),
+            next_action_id: self.next_action_id,
+        };
+        crate::persistence::save_serializable(&borrowed, path)?;
 
         // 2. Flush the WAL and emit a snapshot marker.  When a NoopStore
         //    is attached (the default, no W1Z4RDV1510N_DATA_DIR set) both
