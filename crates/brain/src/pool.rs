@@ -510,8 +510,11 @@ impl AtomEncoding for InstructionIntentEncoding {
             || (text.contains("database") && text.contains("transaction"))
             || text.contains("atomic transfer")
             || text.contains("all-or-nothing database transfer")
+            || (text.contains("all-or-nothing") && text.contains("transaction"))
             || (text.contains("restore")
-                && (text.contains("inventory") || text.contains("state"))
+                && (text.contains("inventory")
+                    || text.contains("state")
+                    || text.contains("capacity"))
                 && (text.contains("commit") || text.contains("fulfillment")))
         {
             emit("PERSISTENCE:ATOMIC_TRANSACTION");

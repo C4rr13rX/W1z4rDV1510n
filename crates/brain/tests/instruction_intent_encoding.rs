@@ -692,6 +692,34 @@ fn domain_shifted_multidomain_prompt_preserves_abstract_feature_paths() {
 }
 
 #[test]
+fn scheduler_transfer_prompt_preserves_all_twelve_abstract_disciplines() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Create a complete executable Python class named ResilientJobScheduler with an async method named schedule. It starts with capacity 10 and must strict input validation for key, actor, job, slots, and expected_version; default-deny authorization except for the operator role; forward-only schema migration; recursive token and password secret redaction; correlated structured JSON audit logging; a resettable circuit breaker that opens after two exhausted operations; bounded asynchronous retry after transient dispatch failure; idempotent command replay that returns the original response; optimistic concurrency using an expected version; duplicate-work deduplication for job and slot requests; an all-or-nothing transaction that restores scheduler capacity; a transactional job-scheduled outbox event.",
+    );
+    for expected in [
+        "intent:LANGUAGE:PYTHON",
+        "intent:ENTERPRISE:INPUT_VALIDATION",
+        "intent:SECURITY:AUTHORIZATION",
+        "intent:PERSISTENCE:SCHEMA_MIGRATION",
+        "intent:ENTERPRISE:SECRET_REDACTION",
+        "intent:OBSERVABILITY:CORRELATED_LOGGING",
+        "intent:RESILIENCE:CIRCUIT_BREAKER",
+        "intent:ENTERPRISE:BOUNDED_RETRY",
+        "intent:RESILIENCE:ASYNC_RETRY",
+        "intent:API:IDEMPOTENT_COMMAND",
+        "intent:STATE:OPTIMISTIC_CONCURRENCY",
+        "intent:CONCURRENCY:DEDUPLICATION",
+        "intent:PERSISTENCE:ATOMIC_TRANSACTION",
+        "intent:INTEGRATION:TRANSACTIONAL_OUTBOX",
+    ] {
+        assert!(features.iter().any(|feature| feature == expected), "{expected}");
+    }
+}
+
+#[test]
 fn semantic_stress_phrases_preserve_enterprise_behaviors() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
