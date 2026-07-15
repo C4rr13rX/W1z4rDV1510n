@@ -452,6 +452,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('parser.add_argument("--attach-phase", default="")', source)
         self.assertIn("run_midphase_gate(args, attach_phase, runtime, attached_ram)", source)
+        self.assertIn('parser.add_argument(\n        "--gate-only-phase"', source)
+        self.assertIn('"state": "gate_only_complete"', source)
 
     def test_bulk_size_adapts_to_measured_live_lock_window(self) -> None:
         self.assertEqual(

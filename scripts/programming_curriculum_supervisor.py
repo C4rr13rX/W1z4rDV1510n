@@ -370,6 +370,10 @@ def main() -> int:
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--attach-pid", type=int, default=0)
     parser.add_argument("--attach-phase", default="")
+    parser.add_argument(
+        "--gate-only-phase", default="",
+        help="gate the phase's current durable boundary and exit without training",
+    )
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.1)
@@ -421,6 +425,44 @@ def main() -> int:
         parser.error("missing corpus files: " + ", ".join(missing))
     runtime = args.runtime.resolve()
     status_path = runtime / "curriculum-supervisor.status.json"
+
+    if args.gate_only_phase:
+        phase = next(
+            (item for item in phases if item.name == args.gate_only_phase), None
+        )
+        if phase is None:
+            parser.error(f"unknown --gate-only-phase: {args.gate_only_phase}")
+        ram, durable = phase_offsets(runtime / f"{phase.name}.progress.json")
+        if ram <= 0 or durable != ram:
+            parser.error(
+                f"gate-only requires a positive durable boundary; ram={ram}, "
+                f"durable={durable}"
+            )
+        publish(status_path, {
+            "state": "gate_only_benchmarking", "phase": phase.name,
+            "ram_next_row": ram, "durable_next_row": durable,
+            "updated_unix": time.time(),
+        })
+        try:
+            if ram >= phase.rows:
+                run_completion_gate(args, phase, runtime)
+            else:
+                run_midphase_gate(args, phase, runtime, ram)
+        except (RuntimeError, subprocess.TimeoutExpired,
+                json.JSONDecodeError) as exc:
+            publish(status_path, {
+                "state": "gate_only_failed", "phase": phase.name,
+                "ram_next_row": ram, "durable_next_row": durable,
+                "error": str(exc), "updated_unix": time.time(),
+            })
+            return 1
+        accept_last_good_guard(runtime)
+        publish(status_path, {
+            "state": "gate_only_complete", "phase": phase.name,
+            "ram_next_row": ram, "durable_next_row": durable,
+            "updated_unix": time.time(),
+        })
+        return 0
 
     if args.attach_pid:
         attach_phase = next(
