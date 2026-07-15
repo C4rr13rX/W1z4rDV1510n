@@ -476,7 +476,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 checkpoint_rows: int = 4096,
                 feature_policy: str = "auto",
                 durable_start_row: int | None = None,
-                wal_durable: bool = False) -> dict:
+                wal_durable: bool = False,
+                max_live_batch_seconds: float = 0.0) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -537,6 +538,18 @@ def drive_one(script, repeats: int, project_root: Path,
 
         if direct_pretrain:
             episodes = []
+            current_batch_size = batch_size
+            previous_progress: dict = {}
+            if progress_path is not None:
+                try:
+                    previous_progress = json.loads(
+                        progress_path.read_text(encoding="utf-8")
+                    )
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    previous_progress = {}
+            adaptive_batch_reductions = int(
+                previous_progress.get("adaptive_batch_reductions", 0)
+            )
             streamed_count = 0
             batch_next_row = start_row
             durable_next_row = (
@@ -545,17 +558,18 @@ def drive_one(script, repeats: int, project_root: Path,
             accepted_since_checkpoint = max(
                 0, start_row - durable_next_row
             ) * repeats
-            last_batch_size = 0
-            last_batch_seconds = 0.0
-            max_batch_size = 0
-            max_batch_seconds = 0.0
-            batch_seconds_ema = 0.0
-            timed_batches = 0
+            last_batch_size = int(previous_progress.get("last_batch_size", 0))
+            last_batch_seconds = float(previous_progress.get("last_batch_seconds", 0.0))
+            max_batch_size = int(previous_progress.get("max_batch_size", 0))
+            max_batch_seconds = float(previous_progress.get("max_batch_seconds", 0.0))
+            batch_seconds_ema = float(previous_progress.get("batch_seconds_ema", 0.0))
+            timed_batches = int(previous_progress.get("timed_batches", 0))
 
             def record_batch_timing(size: int, elapsed: float) -> None:
                 nonlocal last_batch_size, last_batch_seconds
                 nonlocal max_batch_size, max_batch_seconds
                 nonlocal batch_seconds_ema, timed_batches
+                nonlocal current_batch_size, adaptive_batch_reductions
                 last_batch_size = size
                 last_batch_seconds = elapsed
                 timed_batches += 1
@@ -566,6 +580,14 @@ def drive_one(script, repeats: int, project_root: Path,
                     elapsed if timed_batches == 1
                     else 0.2 * elapsed + 0.8 * batch_seconds_ema
                 )
+                if (max_live_batch_seconds > 0
+                        and elapsed > max_live_batch_seconds):
+                    scaled = max(
+                        1, int(size * max_live_batch_seconds / elapsed)
+                    )
+                    if scaled < current_batch_size:
+                        current_batch_size = scaled
+                        adaptive_batch_reductions += 1
 
             def publish_progress() -> None:
                 if progress_path is not None:
@@ -581,6 +603,8 @@ def drive_one(script, repeats: int, project_root: Path,
                         "max_batch_seconds": round(max_batch_seconds, 4),
                         "batch_seconds_ema": round(batch_seconds_ema, 4),
                         "timed_batches": timed_batches,
+                        "current_batch_size": current_batch_size,
+                        "adaptive_batch_reductions": adaptive_batch_reductions,
                         "updated_unix": time.time(),
                     })
 
@@ -614,7 +638,7 @@ def drive_one(script, repeats: int, project_root: Path,
                         _pretrain_episode(prompt, resp, context, feature_policy)
                     )
                 batch_next_row = logical_next_row
-                if len(episodes) >= batch_size:
+                if len(episodes) >= current_batch_size:
                     submitted_count = len(episodes)
                     batch_started = time.monotonic()
                     ok, err = post_pretrain_batch(episodes)
@@ -796,6 +820,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-size", type=int, default=16,
                      help="direct-pretrain episodes per request (1..256); "
                           "smaller batches keep live inference responsive")
+    p.add_argument("--max-batch-seconds", type=float, default=0.0,
+                     help="adapt the direct-pretrain batch downward within a "
+                          "run when an acknowledged batch exceeds this live-"
+                          "lock ceiling (0 disables)")
     p.add_argument("--progress-path", type=Path,
                      help="atomically record the next fully accepted logical "
                           "row after every direct-pretrain batch")
@@ -887,7 +915,8 @@ def main(argv: list[str] | None = None) -> int:
                             checkpoint_rows=args.checkpoint_rows,
                             feature_policy=args.feature_policy,
                             durable_start_row=args.durable_start_row,
-                            wal_durable=args.wal_durable)
+                            wal_durable=args.wal_durable,
+                            max_live_batch_seconds=args.max_batch_seconds)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",

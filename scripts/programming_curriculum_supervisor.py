@@ -130,6 +130,16 @@ def accept_last_good_guard(runtime: Path) -> None:
     (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
 
 
+def guarded_block_target(runtime: Path, phase: Phase, current_row: int,
+                         gate_rows: int) -> int:
+    """Keep one immutable retention boundary across worker/supervisor restarts."""
+    metadata = read_json(runtime / "brain" / "brain.last-good.json")
+    start = metadata.get("row") if metadata.get("phase") == phase.name else None
+    if not isinstance(start, int) or start > current_row:
+        start = current_row
+    return min(phase.rows, start + gate_rows)
+
+
 def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
     run = subprocess.run(
         command, cwd=ROOT, capture_output=True, text=True,
@@ -278,7 +288,7 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
 
 
 def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
-              status_path: Path) -> int:
+              status_path: Path, block_target_row: int) -> int:
     progress = runtime / f"{phase.name}.progress.json"
     ram, durable = phase_offsets(progress)
     if ram >= phase.rows:
@@ -296,9 +306,10 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--repeats", str(phase.repeats),
         "--direct-pretrain",
         "--start-row", str(ram),
-        "--limit-rows", str(min(args.gate_rows, phase.rows - ram)),
+        "--limit-rows", str(max(0, block_target_row - ram)),
         "--durable-start-row", str(durable),
         "--batch-size", str(batch_size),
+        "--max-batch-seconds", str(args.max_live_lock_seconds),
         "--inter-post-sleep", str(args.inter_batch_yield_seconds),
         "--checkpoint-rows", str(args.checkpoint_rows),
         "--wal-durable",
@@ -323,6 +334,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                     "worker_pid": worker.pid, "ram_next_row": ram,
                     "durable_next_row": durable,
                     "batch_size": batch_size,
+                    "block_target_row": block_target_row,
                     "updated_unix": time.time(),
                 })
                 if code is not None:
@@ -472,7 +484,10 @@ def main() -> int:
                                   "restart": restarts,
                                   "updated_unix": time.time()})
             ensure_last_good_guard(runtime, phase, ram)
-            code = run_phase(args, phase, runtime, status_path)
+            block_target = guarded_block_target(
+                runtime, phase, ram, args.gate_rows
+            )
+            code = run_phase(args, phase, runtime, status_path, block_target)
             ram_after, durable_after = phase_offsets(
                 runtime / f"{phase.name}.progress.json"
             )

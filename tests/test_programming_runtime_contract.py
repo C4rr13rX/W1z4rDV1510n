@@ -19,6 +19,7 @@ from scripts.programming_curriculum_supervisor import (
     Phase,
     accept_last_good_guard,
     ensure_last_good_guard,
+    guarded_block_target,
     phase_offsets,
     publish,
     responsive_batch_size,
@@ -32,6 +33,14 @@ from scripts.programming_experiential_generalization import (
     commit_experience_transaction,
     execute as execute_experience,
     retention_passed,
+)
+from scripts.programming_multidomain_synthesis import (
+    DISCIPLINES,
+    HEADER as MULTIDOMAIN_HEADER,
+    PREMISES as MULTIDOMAIN_PREMISES,
+    execute as execute_multidomain,
+    execute_no_retry_contradiction,
+    training_rows as multidomain_training_rows,
 )
 from scripts.train_programming_brain import (
     SEED_STAGES,
@@ -208,6 +217,22 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn('"/brain/pretrain_bindings"', source)
         self.assertNotIn('"/brain/pretrain/batch"', source)
 
+    def test_multidomain_fixture_requires_twelve_independent_premises(self) -> None:
+        self.assertEqual(len(DISCIPLINES), 12)
+        self.assertEqual(len({premise.name for premise in DISCIPLINES}), 12)
+        complete = "".join(
+            premise.source for premise in MULTIDOMAIN_HEADER + MULTIDOMAIN_PREMISES
+        )
+        self.assertTrue(execute_multidomain(complete)[0])
+        self.assertFalse(execute_no_retry_contradiction(complete)[0])
+        responses = [response for _, response in multidomain_training_rows()]
+        self.assertTrue(all(complete not in response for response in responses))
+        source = (ROOT / "scripts/programming_multidomain_synthesis.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("active_training_pids", source)
+        self.assertIn('"concurrent_mutation_detected"', source)
+
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
             encoding="utf-8"
@@ -234,7 +259,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"--limit-rows", str(min(args.gate_rows, phase.rows - ram))', source)
+        self.assertIn('"--limit-rows", str(max(0, block_target_row - ram))', source)
+        self.assertIn("guarded_block_target", source)
         self.assertIn("run_midphase_gate(args, phase, runtime, ram_after)", source)
         self.assertIn('"--no-checkpoint"', source)
         self.assertIn('"--gate-rows", type=int, default=16384', source)
@@ -246,6 +272,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('"--batch-size", type=int, default=32', source)
         self.assertIn('"--inter-batch-yield-seconds", type=float, default=0.1', source)
+        self.assertIn('"--max-batch-seconds", str(args.max_live_lock_seconds)', source)
+        driver = (ROOT / "tools/training_standard/drive_corpora_brain.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("adaptive_batch_reductions", driver)
+        self.assertIn("current_batch_size = scaled", driver)
+        self.assertIn('previous_progress.get("max_batch_seconds"', driver)
 
     def test_chunk_snapshot_guard_survives_until_explicit_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -264,6 +297,19 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(ensure_last_good_guard(runtime, phase, 6), guard)
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
+
+    def test_guarded_block_target_survives_worker_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus", "row": 100,
+            }), encoding="utf-8")
+            phase = Phase("corpus", "script", Path("corpus.jsonl"), 1000)
+            self.assertEqual(guarded_block_target(runtime, phase, 100, 200), 300)
+            self.assertEqual(guarded_block_target(runtime, phase, 175, 200), 300)
+            self.assertEqual(guarded_block_target(runtime, phase, 299, 200), 300)
 
     def test_seed_stage_transaction_resolves_without_duplicate_training(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
