@@ -228,6 +228,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--limit-rows", str(min(args.gate_rows, phase.rows - ram)),
         "--durable-start-row", str(durable),
         "--batch-size", str(args.batch_size),
+        "--inter-post-sleep", str(args.inter_batch_yield_seconds),
         "--checkpoint-rows", str(args.checkpoint_rows),
         "--wal-durable",
         "--feature-policy", "auto",
@@ -270,7 +271,8 @@ def main() -> int:
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--attach-pid", type=int, default=0)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.1)
     parser.add_argument("--checkpoint-rows", type=int, default=4096)
     parser.add_argument("--gate-rows", type=int, default=4096)
     parser.add_argument("--max-restarts", type=int, default=3)

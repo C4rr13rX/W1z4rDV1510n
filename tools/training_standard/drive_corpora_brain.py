@@ -603,6 +603,11 @@ def drive_one(script, repeats: int, project_root: Path,
                         # layers, not mutually-exclusive modes.
                         if checkpoint_due(checkpoint_rows, accepted_since_checkpoint):
                             make_durable()
+                        if inter_post_sleep > 0:
+                            # Yield between bulk transactions so live chat,
+                            # stats, and health requests can acquire the brain
+                            # lock before the next training batch begins.
+                            time.sleep(inter_post_sleep)
                     else:
                         summary["posted_fail"] += len(episodes)
                         raise RuntimeError(
@@ -622,6 +627,8 @@ def drive_one(script, repeats: int, project_root: Path,
                     if wal_durable:
                         durable_next_row = batch_next_row
                     publish_progress()
+                    if inter_post_sleep > 0:
+                        time.sleep(inter_post_sleep)
                 else:
                     summary["posted_fail"] += len(episodes)
                     raise RuntimeError(

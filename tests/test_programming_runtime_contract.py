@@ -113,11 +113,12 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn("run_midphase_gate(args, phase, runtime, ram_after)", source)
         self.assertIn('"--no-checkpoint"', source)
 
-    def test_dedicated_corpus_supervisor_uses_measured_bulk_batch(self) -> None:
+    def test_dedicated_corpus_supervisor_preserves_live_inference_windows(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"--batch-size", type=int, default=128', source)
+        self.assertIn('"--batch-size", type=int, default=32', source)
+        self.assertIn('"--inter-batch-yield-seconds", type=float, default=0.1', source)
 
 
 if __name__ == "__main__":
