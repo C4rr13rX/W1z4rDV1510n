@@ -50,6 +50,11 @@ from scripts.programming_multidomain_holdout import (
     CLASS_NAME as HOLDOUT_CLASS_NAME,
     DOMAIN_REQUIREMENTS as HOLDOUT_REQUIREMENTS,
     holdout_prompt,
+    execute as execute_multidomain_holdout,
+)
+from scripts.programming_parameterized_fulfillment import (
+    FRAGMENTS as PARAMETERIZED_FULFILLMENT_FRAGMENTS,
+    training_rows as parameterized_fulfillment_training_rows,
 )
 from scripts.train_programming_brain import (
     SEED_STAGES,
@@ -263,6 +268,28 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         for name, requirement in HOLDOUT_REQUIREMENTS.items():
             self.assertIn(requirement, full)
             self.assertNotIn(requirement, holdout_prompt(name))
+
+    def test_parameterized_fulfillment_motif_executes_unseen_symbols(self) -> None:
+        template = "".join(
+            fragment.source for fragment in PARAMETERIZED_FULFILLMENT_FRAGMENTS
+        )
+        for class_name, method_name in [
+            ("ResilientFulfillmentService", "fulfill"),
+            ("DurableWarehouseEngine", "allocate_order"),
+        ]:
+            source = template.replace("{{CLASS_NAME}}", class_name).replace(
+                "{{METHOD_NAME}}", method_name
+            )
+            self.assertTrue(
+                execute_multidomain_holdout(source, class_name, method_name)[0]
+            )
+        responses = [
+            response for _, response in parameterized_fulfillment_training_rows()
+        ]
+        self.assertTrue(all("class ResilientFulfillmentService" not in response
+                            for response in responses))
+        self.assertTrue(all("class DurableWarehouseEngine" not in response
+                            for response in responses))
 
     def test_multidomain_failed_gate_keeps_authoritative_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
