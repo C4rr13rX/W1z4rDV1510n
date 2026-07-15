@@ -25,6 +25,11 @@ from scripts.programming_curriculum_supervisor import (
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
 from scripts.programming_capstone_readiness import safe_manifest, structural_checks
+from scripts.programming_experiential_generalization import (
+    EXPERIENCE,
+    HELDOUT,
+    execute as execute_experience,
+)
 from scripts.train_programming_brain import (
     SEED_STAGES,
     guard_seed_stage,
@@ -136,6 +141,15 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('("capstone_safety"', source)
+
+    def test_experiential_fixture_requires_repair_and_transfers_relation(self) -> None:
+        self.assertFalse(execute_experience(EXPERIENCE, EXPERIENCE.broken)[0])
+        self.assertTrue(execute_experience(EXPERIENCE, EXPERIENCE.corrected)[0])
+        self.assertFalse(execute_experience(HELDOUT, HELDOUT.broken)[0])
+        self.assertTrue(execute_experience(HELDOUT, HELDOUT.corrected)[0])
+        self.assertNotEqual(EXPERIENCE.function, HELDOUT.function)
+        self.assertNotEqual(EXPERIENCE.factor, HELDOUT.factor)
+        self.assertNotEqual(EXPERIENCE.offset, HELDOUT.offset)
 
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(

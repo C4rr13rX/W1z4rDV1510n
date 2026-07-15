@@ -84,6 +84,8 @@ False confident generation is worse than an honest unsupported response. Every c
 
 A candidate that raises exact recall while lowering any protected integration or retention gate is not an improvement.
 
+Integration must include experiential learning, not only safe retrieval. A coding brain should receive a previously unseen rule or API contract in the task context, attempt a solution, execute it, and co-activate the instruction, source, environment, console output, failure outcome, repair delta/relation, corrected source, successful console output, and verified resolution. Re-query both the experienced task and a held-out task that shares the abstract repair but changes identifiers and constants. Exact post-correction recall alone is memorization; improvement on the held-out task is the transfer evidence. Always re-run protected retention after admitting the experience.
+
 ## Known-good programming baseline
 
 The persisted programming brain currently derives from `brains/coding_debug.identity.toml`. Treat these as a starting point for similar supervised coding brains, not universal constants.
@@ -183,6 +185,7 @@ For a new programming brain, use `scripts/train_programming_brain.py` rather tha
 | 2026-07-15 | Inference-only enterprise evaluation paged cold neurons from SSD, changing resident terminal and eviction counters while tick and stable topology counts remained fixed. Residency is not a valid structural non-mutation invariant. | Architecture-confirmed live observation | `crates/brain/src/pool.rs`, `crates/brain/src/brain.rs`, and row `196912` runtime stats |
 | 2026-07-15 | At row `201008`, 4,096 MathInstruct episodes grew the full snapshot by about `121.6 MB`. With WAL acknowledgement already making every batch durable, snapshotting four times per guarded block creates increasing full-snapshot write amplification without improving retention admission. Align full snapshots with the `16,384`-row guard boundary. | Proven live operational measurement | `runtime/brains/programming-integrated-20260713/brain/brain.bin` and `mathinstruct-domain-safe.progress.json` |
 | 2026-07-15 | An unseen strict-TypeScript Multiscale Robot World prompt incorrectly selected recent MathInstruct prose despite detecting `LANGUAGE:TYPESCRIPT` and finding zero compatible feature candidates. Programming-language intent now inhibits ungrounded raw fallback, and capstone safety is a required enterprise suite that accepts only a structurally grounded manifest or honest OOV. | Failure reproduced; correction unit-tested, pending live deployment gate | `runtime/benchmarks/capstone-readiness-before-domain-guard.json`, `scripts/programming_capstone_readiness.py` |
+| 2026-07-15 | Experiential coding must be measured as `baseline attempt -> verified failure/success episode -> experienced retry -> held-out structural transfer`, with the held-out function, constants, and wording changed. | Benchmark protocol implemented; live result pending | `scripts/programming_experiential_generalization.py` |
 
 ## Maintenance rule
 
