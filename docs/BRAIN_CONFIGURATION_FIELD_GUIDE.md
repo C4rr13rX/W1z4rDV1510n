@@ -168,6 +168,20 @@ Read-only validation must distinguish learned topology from tier residency. In t
 9. Expand the curriculum in stages, checkpointing only passing configurations.
 10. Record each conclusion below with its artifacts and evidence label.
 
+Use parallel disposable micro-brains before loading a multi-gigabyte persisted
+brain for an architecture or configuration experiment. Give every variant the
+same identity and native decoder, train only the target motif plus deliberately
+selected interference motifs, and run execution, causal ablation, OOV, and
+ordering gates. Repetition sweeps and noise-order sweeps can then complete in
+seconds. Only a micro-scale winner should pay the production-brain load and
+full-retention cost. Micro-brains prove algorithmic behavior, not behavior at
+scale; the production admission remains mandatory.
+
+Before admitting any structured lesson, verify that its prompt actually fires
+the intended behavioral feature. A prompt with only language/domain atoms is
+too broad even when its English wording sounds specific. Repetition cannot
+repair a missing feature edge.
+
 For a new programming brain, use `scripts/train_programming_brain.py` rather than reconstructing the successful training order manually. The exact stage order, repetitions, transaction guards, resume behavior, and gate artifacts are described in `docs/PROGRAMMING_BRAIN_REPRODUCTION.md`.
 
 ## Evidence ledger
@@ -212,6 +226,9 @@ For a new programming brain, use `scripts/train_programming_brain.py` rather tha
 | 2026-07-15 | The pre-training two-symbol baseline failed causally: both requested interfaces activated all twelve disciplines and returned the same 3,476-byte set of separate learned components, but neither requested class existed. The read-only run overlapped MetaMath, so its tick delta is explicitly attributed to recorded concurrent training PIDs rather than to inference. This provides the before-state for the guarded parameterized-motif admission. | Proven live baseline | `runtime/benchmarks/parameterized-fulfillment-baseline.json` |
 | 2026-07-15 | A third-domain transfer holdout now requests `ResilientJobScheduler.schedule` with scheduler capacity, job/slot commands, operator authorization, dispatch retry, capacity rollback, and a job-scheduled outbox while retaining the same twelve abstract disciplines. It is intentionally withheld from fulfillment-motif training. Passing the two fulfillment symbol variants but failing this scheduler proves symbol/structure reuse without state-contract transfer; passing both is evidence that the integrated motif generalized across business state models. | Implemented and contract-tested; live result pending parameterized-motif admission | `scripts/programming_domain_transfer_holdout.py` |
 | 2026-07-15 | MetaMath's first 16,384-row gate initially reported only `14/32` corpus-local accepted answers even though all prompts returned in milliseconds. A failed sample returned the exact previously admitted MathInstruct explanation and the same correct final value (`sqrt(5)`), while MetaMath held fourteen alternative wordings for that identical prompt. Recall admission now accepts any exact supervised response from every corpus with a positive durable ledger, never arbitrary output. The same sample set then passed `32/32`, preserving deterministic one-answer recall without falsely treating retained cross-corpus knowledge as interference. Gate-command errors also retain stdout diagnostics. | Proven live and corrected | `scripts/programming_corpus_recall.py`, `scripts/programming_curriculum_supervisor.py`, and `tests/test_programming_runtime_contract.py` |
+| 2026-07-15 | Six parallel micro-brains reproduced the parameterized-composition failure regardless of `1x`, `3x`, or `6x` presentation and regardless of interference order. All twelve dependent fragments fired, but the root fragment carried `STRUCTURE:SERVICE_CLASS` while “class named …” did not; unifying those equivalent structural cues restored all 13 fragments. | Causal micro-brain sweep | `runtime/benchmarks/microbrain-composition-service-class.json` |
+| 2026-07-15 | A partial unrelated historical dependency chain globally vetoed a complete target chain. Pruning incomplete connected components to a dependency-closed subgraph preserved the complete parameterized artifact under every noise order, including heavy prior noise. | Causal micro-brain sweep and unit-tested core fix | `runtime/benchmarks/microbrain-composition-closed-components.json` and `crates/node/src/brain_api.rs` |
+| 2026-07-15 | Component recovery must use language plus a behavioral namespace, never language plus domain/container/structure. The transaction lesson also failed to emit its intended atomic-transaction feature despite seemingly specific wording. After restricting recovery and preflighting lesson features, all six variants executed both unseen interfaces (`2/2`) and rejected all twelve premise ablations (`12/12`); one presentation matched six. The unrelated scheduler remained honest OOV, localizing the next problem to state-contract transfer. | Causal parallel micro-brain sweep | `runtime/benchmarks/microbrain-composition-causal-complete.json` and `scripts/programming_microbrain_lab.py` |
 
 ## Maintenance rule
 

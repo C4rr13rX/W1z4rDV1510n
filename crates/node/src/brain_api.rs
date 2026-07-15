@@ -13,14 +13,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
     extract::State,
     routing::{get, post},
+    Json, Router,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -1218,9 +1218,12 @@ fn is_grounded_code_fragment(bytes: &[u8]) -> bool {
     let dependencies = fragment
         .get("after")
         .and_then(|v| v.as_array())
-        .is_some_and(|items| items.iter().all(|item| {
-            item.as_str().is_some_and(|dependency| !dependency.is_empty())
-        }));
+        .is_some_and(|items| {
+            items.iter().all(|item| {
+                item.as_str()
+                    .is_some_and(|dependency| !dependency.is_empty())
+            })
+        });
     safe_file && role && source && dependencies
 }
 
@@ -1302,9 +1305,21 @@ fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
     let behaviors: Vec<_> = labels
         .iter()
         .filter(|label| {
-            !label.contains(":LANGUAGE:")
-                && !label.ends_with(":ARTIFACT:PROJECT")
-                && !label.ends_with(":GROUNDING:UNDERSPECIFIED")
+            [
+                ":API:",
+                ":SECURITY:",
+                ":ENTERPRISE:",
+                ":PERSISTENCE:",
+                ":OBSERVABILITY:",
+                ":RESILIENCE:",
+                ":INTEGRATION:",
+                ":CONCURRENCY:",
+                ":STATE:",
+                ":GUARD:",
+                ":FLOW:",
+            ]
+            .iter()
+            .any(|namespace| label.contains(namespace))
         })
         .collect();
     languages
@@ -1323,10 +1338,7 @@ fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
 /// one omitted learned constraint, so its first complete manifest is safe to
 /// use directly. Multi-language requests must continue through composition;
 /// returning one component would silently truncate the requested project.
-fn single_language_ranked_manifest(
-    labels: &[String],
-    candidates: &[Vec<u8>],
-) -> Option<Vec<u8>> {
+fn single_language_ranked_manifest(labels: &[String], candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     (labels
         .iter()
         .filter(|label| label.contains(":LANGUAGE:"))
@@ -1359,9 +1371,11 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
     }
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim_start();
-    let has = |needles: &[&str]| needles.iter().any(|needle| {
-        trimmed.starts_with(needle) || text.contains(&format!("\n{needle}"))
-    });
+    let has = |needles: &[&str]| {
+        needles
+            .iter()
+            .any(|needle| trimmed.starts_with(needle) || text.contains(&format!("\n{needle}")))
+    };
     labels.iter().any(|label| {
         let Some(language) = label.split(":LANGUAGE:").nth(1) else {
             return false;
@@ -1370,23 +1384,64 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
         match language {
             "PYTHON" => has(&["def ", "class ", "from ", "import ", "@", "```python"]),
             "TYPESCRIPT" => has(&[
-                "export ", "import ", "interface ", "type ", "class ",
-                "function ", "const ", "let ", "```typescript", "```ts",
+                "export ",
+                "import ",
+                "interface ",
+                "type ",
+                "class ",
+                "function ",
+                "const ",
+                "let ",
+                "```typescript",
+                "```ts",
             ]),
             "JAVASCRIPT" => has(&[
-                "export ", "import ", "class ", "function ", "const ", "let ",
-                "```javascript", "```js",
+                "export ",
+                "import ",
+                "class ",
+                "function ",
+                "const ",
+                "let ",
+                "```javascript",
+                "```js",
             ]),
-            "RUST" => has(&["fn ", "pub ", "use ", "struct ", "enum ", "impl ", "```rust"]),
+            "RUST" => has(&[
+                "fn ", "pub ", "use ", "struct ", "enum ", "impl ", "```rust",
+            ]),
             "GO" => has(&["package ", "func ", "import ", "type ", "```go"]),
-            "JAVA" => has(&["package ", "import ", "public class ", "class ", "interface ", "```java"]),
-            "CSHARP" | "C_SHARP" => has(&["using ", "namespace ", "public class ", "class ", "```csharp", "```cs"]),
-            "C" | "CPP" | "CPLUSPLUS" => has(&["#include", "int main", "void ", "struct ", "```c", "```cpp"]),
+            "JAVA" => has(&[
+                "package ",
+                "import ",
+                "public class ",
+                "class ",
+                "interface ",
+                "```java",
+            ]),
+            "CSHARP" | "C_SHARP" => has(&[
+                "using ",
+                "namespace ",
+                "public class ",
+                "class ",
+                "```csharp",
+                "```cs",
+            ]),
+            "C" | "CPP" | "CPLUSPLUS" => {
+                has(&["#include", "int main", "void ", "struct ", "```c", "```cpp"])
+            }
             "RUBY" => has(&["def ", "class ", "module ", "require ", "```ruby"]),
             "PHP" => has(&["<?php", "namespace ", "function ", "class ", "```php"]),
-            "KOTLIN" => has(&["package ", "import ", "fun ", "class ", "data class ", "```kotlin"]),
+            "KOTLIN" => has(&[
+                "package ",
+                "import ",
+                "fun ",
+                "class ",
+                "data class ",
+                "```kotlin",
+            ]),
             "SWIFT" => has(&["import ", "func ", "struct ", "class ", "enum ", "```swift"]),
-            "SQL" => has(&["SELECT ", "CREATE ", "INSERT ", "UPDATE ", "WITH ", "```sql"]),
+            "SQL" => has(&[
+                "SELECT ", "CREATE ", "INSERT ", "UPDATE ", "WITH ", "```sql",
+            ]),
             "HTML" => has(&["<!DOCTYPE", "<!doctype", "<html", "```html"]),
             "SHELL" | "BASH" => has(&["#!/bin/", "set -", "function ", "```bash", "```sh"]),
             _ => false,
@@ -1397,10 +1452,7 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
 /// A ranked language+behavior binding may hold a complete single-file source
 /// response rather than a JSON project manifest. Admit it only for exactly
 /// one requested language and only when the response is language-shaped.
-fn single_language_ranked_source(
-    labels: &[String],
-    candidates: &[Vec<u8>],
-) -> Option<Vec<u8>> {
+fn single_language_ranked_source(labels: &[String], candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     (labels
         .iter()
         .filter(|label| label.contains(":LANGUAGE:"))
@@ -1588,10 +1640,7 @@ fn merge_grounded_code_fragments_for_prompt(
             }
             after.insert(dependency.to_string());
         }
-        let entry = RelativeFragment {
-            source,
-            after,
-        };
+        let entry = RelativeFragment { source, after };
         let roles = relative.entry(file.to_string()).or_default();
         if let Some(existing) = roles.get(role) {
             if existing != &entry {
@@ -1631,11 +1680,26 @@ fn merge_grounded_code_fragments_for_prompt(
                 graph.insert(key, (file.clone(), fragment.source, dependencies));
             }
         }
-        let all_roles: std::collections::BTreeSet<String> = graph.keys().cloned().collect();
-        if graph
-            .values()
-            .any(|(_, _, dependencies)| !dependencies.is_subset(&all_roles))
-        {
+        // Ranked retrieval can activate one complete artifact alongside a
+        // partial, unrelated historical chain.  Missing dependencies make
+        // that connected component ineligible; they must not veto an
+        // independently complete component.  Prune to a dependency-closed
+        // subgraph (including descendants of every removed node).
+        loop {
+            let all_roles: std::collections::BTreeSet<String> = graph.keys().cloned().collect();
+            let incomplete: Vec<String> = graph
+                .iter()
+                .filter(|(_, (_, _, dependencies))| !dependencies.is_subset(&all_roles))
+                .map(|(key, _)| key.clone())
+                .collect();
+            if incomplete.is_empty() {
+                break;
+            }
+            for key in incomplete {
+                graph.remove(&key);
+            }
+        }
+        if graph.len() < 2 {
             return None;
         }
         let mut emitted = std::collections::BTreeSet::new();
@@ -1907,8 +1971,7 @@ async fn h_brain_chat(
                 &chat_query_pools,
                 &turn_pools,
             ) {
-                if (is_complete_file_manifest(&candidate)
-                    || is_grounded_code_fragment(&candidate))
+                if (is_complete_file_manifest(&candidate) || is_grounded_code_fragment(&candidate))
                     && !feature_candidates.contains(&candidate)
                 {
                     feature_candidates.push(candidate);
@@ -1963,13 +2026,9 @@ async fn h_brain_chat(
         .unwrap_or_default();
     let diagnostic_exact_feature = exact_feature.is_some();
     let diagnostic_exact_manifest = exact_complete_manifest.is_some();
-    let programming_language_intent = has_programming_language_intent(
-        &diagnostic_intent_labels,
-    );
-    let ranked_single_source = single_language_ranked_source(
-        &diagnostic_intent_labels,
-        &feature_candidates,
-    );
+    let programming_language_intent = has_programming_language_intent(&diagnostic_intent_labels);
+    let ranked_single_source =
+        single_language_ranked_source(&diagnostic_intent_labels, &feature_candidates);
     let raw_programming_compatible = raw_trained.as_ref().is_some_and(|candidate| {
         programming_response_compatible(&diagnostic_intent_labels, candidate)
     });
@@ -2014,8 +2073,7 @@ async fn h_brain_chat(
         // language and behavior. Plain single-file source is valid here as
         // long as its shape agrees with that language.
         ranked_single_source
-    } else if raw_trained.is_some()
-        && (!programming_language_intent || raw_programming_compatible)
+    } else if raw_trained.is_some() && (!programming_language_intent || raw_programming_compatible)
     {
         // Fuzzy raw recall is valid for ordinary same-domain retrieval, but
         // a recognized code-language request must be supported by its
@@ -2132,6 +2190,23 @@ async fn h_brain_chat(
     let speculation_flag = xpool
         .as_ref()
         .is_some_and(|result| result.grounding.speculation_flag);
+    // Keep composition failures observable without returning learned source.
+    // File/role/dependency metadata is sufficient to distinguish retrieval
+    // gaps from rendering or dependency-closure failures.
+    let diagnostic_fragment_candidates: Vec<serde_json::Value> = feature_candidates
+        .iter()
+        .filter_map(|bytes| {
+            let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+            let fragment = value.get("code_fragment")?.as_object()?;
+            Some(json!({
+                "file": fragment.get("file")?.as_str()?,
+                "role": fragment.get("role").and_then(|value| value.as_str()),
+                "order": fragment.get("order").and_then(|value| value.as_i64()),
+                "after": fragment.get("after").cloned().unwrap_or_else(|| json!([])),
+                "parameters": fragment.get("parameters").cloned().unwrap_or_else(|| json!({})),
+            }))
+        })
+        .collect();
     brain.clear_prediction_activation();
 
     Json(json!({
@@ -2153,6 +2228,7 @@ async fn h_brain_chat(
             "labels": diagnostic_intent_labels,
             "ranked_candidates": feature_candidates.len(),
             "unweighted_candidates": diagnostic_unweighted_candidates,
+            "fragment_candidates": diagnostic_fragment_candidates,
             "exact_feature": diagnostic_exact_feature,
             "exact_complete_manifest": diagnostic_exact_manifest,
             "raw_fallback_inhibited": programming_language_intent
@@ -3097,6 +3173,8 @@ mod tests {
             "intent:LANGUAGE:JAVASCRIPT".to_string(),
             "intent:LANGUAGE:GO".to_string(),
             "intent:ARTIFACT:PROJECT".to_string(),
+            "intent:DOMAIN:INVENTORY".to_string(),
+            "intent:STRUCTURE:SERVICE_CLASS".to_string(),
             "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
             "intent:CONCURRENCY:DEDUPLICATION".to_string(),
         ];
@@ -3105,9 +3183,11 @@ mod tests {
         assert!(pairs.iter().all(|pair| pair.len() == 2));
         assert!(pairs.iter().all(|pair| {
             pair.iter().any(|label| label.contains(":LANGUAGE:"))
-                && pair
-                    .iter()
-                    .all(|label| !label.ends_with(":ARTIFACT:PROJECT"))
+                && pair.iter().all(|label| {
+                    !label.contains(":ARTIFACT:")
+                        && !label.contains(":DOMAIN:")
+                        && !label.contains(":STRUCTURE:")
+                })
         }));
     }
 
@@ -3125,7 +3205,10 @@ mod tests {
 
         let mut polyglot = labels;
         polyglot.push("intent:LANGUAGE:GO".to_string());
-        assert_eq!(single_language_ranked_manifest(&polyglot, &[manifest]), None);
+        assert_eq!(
+            single_language_ranked_manifest(&polyglot, &[manifest]),
+            None
+        );
     }
 
     #[test]
@@ -3151,9 +3234,7 @@ mod tests {
             b"The construction cost is 216 dollars.",
         ));
 
-        let typescript = vec![
-            "instruction_intent:LANGUAGE:TYPESCRIPT".to_string(),
-        ];
+        let typescript = vec!["instruction_intent:LANGUAGE:TYPESCRIPT".to_string()];
         assert!(programming_response_compatible(
             &typescript,
             b"export class Integrator {}",
@@ -3199,6 +3280,23 @@ mod tests {
                 .to_vec(),
         ];
         assert!(merge_grounded_code_fragments(&candidates).is_none());
+    }
+
+    #[test]
+    fn incomplete_unrelated_chain_does_not_veto_complete_artifact() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"complete.py","role":"root","after":[],"source":"class Ready:\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"complete.py","role":"body","after":["root"],"source":"    value = 1\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"partial.py","role":"tail","after":["missing_root"],"source":"return broken\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"partial.py","role":"later","after":["tail"],"source":"return later\n"}}"#.to_vec(),
+        ];
+        let assembled = merge_grounded_code_fragments(&candidates).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        assert_eq!(
+            value["files"]["complete.py"],
+            "class Ready:\n    value = 1\n"
+        );
+        assert!(value["files"].get("partial.py").is_none());
     }
 
     #[test]

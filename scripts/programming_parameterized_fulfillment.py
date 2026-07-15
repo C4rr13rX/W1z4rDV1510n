@@ -140,7 +140,7 @@ FRAGMENTS = (
         "            raise\n",
     ),
     Fragment(
-        "transaction", "atomic Python inventory rollback when fulfillment cannot commit",
+        "transaction", "restore Python inventory completely when fulfillment cannot commit",
         "transaction", ("circuit_use",),
         "        before = copy.deepcopy(self.inventory)\n"
         "        try:\n"
@@ -163,6 +163,22 @@ FRAGMENTS = (
         "        return response\n",
     ),
 )
+
+REQUIRED_FEATURE = {
+    "validation_structure": "ENTERPRISE:INPUT_VALIDATION",
+    "authorization": "SECURITY:AUTHORIZATION",
+    "migration": "PERSISTENCE:SCHEMA_MIGRATION",
+    "redaction": "ENTERPRISE:SECRET_REDACTION",
+    "logging": "OBSERVABILITY:CORRELATED_LOGGING",
+    "circuit": "RESILIENCE:CIRCUIT_BREAKER",
+    "retry": "RESILIENCE:ASYNC_RETRY",
+    "idempotency": "API:IDEMPOTENT_COMMAND",
+    "optimistic_concurrency": "STATE:OPTIMISTIC_CONCURRENCY",
+    "deduplication": "CONCURRENCY:DEDUPLICATION",
+    "circuit_use": "RESILIENCE:CIRCUIT_BREAKER",
+    "transaction": "PERSISTENCE:ATOMIC_TRANSACTION",
+    "outbox_commit": "INTEGRATION:TRANSACTIONAL_OUTBOX",
+}
 
 
 def encoded_fragment(fragment: Fragment) -> str:
@@ -196,6 +212,14 @@ def train(endpoint: str, repeats: int) -> dict:
     result = request(endpoint, "/brain/pretrain_bindings", {"episodes": episodes}, timeout=1200)
     if not result.get("ok") or result.get("accepted") != len(episodes):
         raise RuntimeError(f"parameterized motif training rejected: {result}")
+    for fragment, (prompt, _) in zip(FRAGMENTS, rows, strict=True):
+        probe = request(endpoint, "/brain/chat", {"text": prompt + " Verify its intent."}, timeout=60)
+        labels = (probe.get("intent_diagnostics") or {}).get("labels") or []
+        required = REQUIRED_FEATURE[fragment.name]
+        if not any(label.endswith(":" + required) for label in labels):
+            raise RuntimeError(
+                f"training prompt for {fragment.name!r} did not fire {required}: {labels}"
+            )
     return result
 
 

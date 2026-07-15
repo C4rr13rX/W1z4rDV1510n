@@ -40,6 +40,11 @@ REQUIREMENTS = {
 
 def transfer_prompt(excluded: str | None = None) -> str:
     requirements = [value for name, value in REQUIREMENTS.items() if name != excluded]
+    if excluded == "optimistic_concurrency":
+        requirements = [value.replace(", and expected_version", "") for value in requirements]
+    if excluded == "atomic_transaction":
+        requirements = [value.replace("transactional job-scheduled", "job-scheduled")
+                        for value in requirements]
     return (
         f"Create a complete executable Python class named {CLASS_NAME} with an async "
         f"method named {METHOD_NAME}. It starts with capacity 10 and must "

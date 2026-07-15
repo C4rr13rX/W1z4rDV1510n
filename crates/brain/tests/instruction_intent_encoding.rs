@@ -29,11 +29,9 @@ fn bare_k12_concept_does_not_fire_a_coding_intent() {
         prefix: "intent".into(),
     };
     assert!(encoding.atomize(b"square").is_empty());
-    assert!(
-        !encoding
-            .atomize(b"Write a function that returns a square.")
-            .is_empty()
-    );
+    assert!(!encoding
+        .atomize(b"Write a function that returns a square.")
+        .is_empty());
 }
 
 #[test]
@@ -68,16 +66,12 @@ fn language_and_task_are_independent_cofiring_features() {
     assert!(rust.iter().any(|label| label == "intent:POWER_SELF:2"));
 
     let javascript = encoding.atomize(b"Write a JavaScript function that returns a square.");
-    assert!(
-        javascript
-            .iter()
-            .any(|label| label == "intent:LANGUAGE:JAVASCRIPT")
-    );
-    assert!(
-        !javascript
-            .iter()
-            .any(|label| label == "intent:LANGUAGE:JAVA")
-    );
+    assert!(javascript
+        .iter()
+        .any(|label| label == "intent:LANGUAGE:JAVASCRIPT"));
+    assert!(!javascript
+        .iter()
+        .any(|label| label == "intent:LANGUAGE:JAVA"));
 }
 
 #[test]
@@ -124,11 +118,9 @@ fn enterprise_paraphrases_emit_independent_behavior_features() {
             features.iter().any(|label| label == expected),
             "{features:?}"
         );
-        assert!(
-            features
-                .iter()
-                .any(|label| label == "intent:LANGUAGE:PYTHON")
-        );
+        assert!(features
+            .iter()
+            .any(|label| label == "intent:LANGUAGE:PYTHON"));
     }
 }
 
@@ -157,11 +149,9 @@ fn project_level_intents_are_compositional_and_distinct() {
     ];
     for (prompt, expected) in cases {
         let features = encoding.atomize(prompt);
-        assert!(
-            features
-                .iter()
-                .any(|label| label == "intent:LANGUAGE:PYTHON")
-        );
+        assert!(features
+            .iter()
+            .any(|label| label == "intent:LANGUAGE:PYTHON"));
         assert!(
             features.iter().any(|label| label == expected),
             "{features:?}"
@@ -183,11 +173,9 @@ fn authorization_paraphrase_retains_security_intent() {
         b"Create Python access-control code that denies by default and permits administrators.",
     );
     assert_eq!(trained, paraphrase);
-    assert!(
-        trained
-            .iter()
-            .any(|label| label == "intent:SECURITY:AUTHORIZATION")
-    );
+    assert!(trained
+        .iter()
+        .any(|label| label == "intent:SECURITY:AUTHORIZATION"));
 }
 
 #[test]
@@ -215,11 +203,9 @@ fn platform_intents_emit_language_plus_protocol_behavior() {
     ];
     for (prompt, expected) in cases {
         let features = encoding.atomize(prompt);
-        assert!(
-            features
-                .iter()
-                .any(|label| label == "intent:LANGUAGE:PYTHON")
-        );
+        assert!(features
+            .iter()
+            .any(|label| label == "intent:LANGUAGE:PYTHON"));
         assert!(
             features.iter().any(|label| label == expected),
             "{features:?}"
@@ -232,9 +218,8 @@ fn atomic_ledger_is_both_transactional_and_domain_specific() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
     };
-    let features = encoding.atomize(
-        b"Build a Go ledger transfer that preserves both balances on failure.",
-    );
+    let features =
+        encoding.atomize(b"Build a Go ledger transfer that preserves both balances on failure.");
     assert!(features.iter().any(|label| label == "intent:LANGUAGE:GO"));
     assert!(features
         .iter()
@@ -265,7 +250,10 @@ fn fragment_constraints_cofire_without_replacing_raw_source() {
         "intent:GUARD:UPPER_BOUND",
         "intent:FLOW:RETURN_INPUT",
     ] {
-        assert!(features.iter().any(|label| label == expected), "{features:?}");
+        assert!(
+            features.iter().any(|label| label == expected),
+            "{features:?}"
+        );
     }
 }
 
@@ -276,16 +264,12 @@ fn missing_specification_emits_inhibitory_grounding_evidence() {
     };
     let features = encoding
         .atomize(b"Write a Python migration for an unspecified legacy schema and target schema.");
-    assert!(
-        features
-            .iter()
-            .any(|label| label == "intent:PERSISTENCE:SCHEMA_MIGRATION")
-    );
-    assert!(
-        features
-            .iter()
-            .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
-    );
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:PERSISTENCE:SCHEMA_MIGRATION"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED"));
     for prompt in [
         b"Write Python code that migrates an unknown production database schema.".as_slice(),
         b"Implement a Python API client for an endpoint whose protocol is unknown.".as_slice(),
@@ -311,11 +295,9 @@ fn circuit_breaker_failure_cooldown_paraphrase_shares_intent() {
     );
     assert_eq!(trained, paraphrase);
     let compact = encoding.atomize(b"Create Python resilience with a cooldown circuit.");
-    assert!(
-        compact
-            .iter()
-            .any(|label| label == "intent:RESILIENCE:CIRCUIT_BREAKER")
-    );
+    assert!(compact
+        .iter()
+        .any(|label| label == "intent:RESILIENCE:CIRCUIT_BREAKER"));
 }
 
 #[test]
@@ -362,24 +344,17 @@ fn native_enterprise_intents_combine_language_and_behavior() {
         );
     }
     let hyphenated_outbox = encoding.atomize(b"Create Node.js outbox-event ordering code.");
-    assert!(
-        hyphenated_outbox
-            .iter()
-            .any(|label| label == "intent:INTEGRATION:TRANSACTIONAL_OUTBOX")
-    );
+    assert!(hyphenated_outbox
+        .iter()
+        .any(|label| label == "intent:INTEGRATION:TRANSACTIONAL_OUTBOX"));
     let hyphenated_version = encoding.atomize(b"Create Java expected-version storage.");
-    assert!(
-        hyphenated_version
-            .iter()
-            .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY")
-    );
-    let hyphenated_optimistic =
-        encoding.atomize(b"Build a Java optimistic-concurrency store.");
-    assert!(
-        hyphenated_optimistic
-            .iter()
-            .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY")
-    );
+    assert!(hyphenated_version
+        .iter()
+        .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY"));
+    let hyphenated_optimistic = encoding.atomize(b"Build a Java optimistic-concurrency store.");
+    assert!(hyphenated_optimistic
+        .iter()
+        .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY"));
 }
 
 #[test]
@@ -387,24 +362,17 @@ fn typescript_is_an_independent_language_feature() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
     };
-    let features = encoding.atomize(
-        b"Implement a TypeScript idempotent order command with bounded retry.",
-    );
-    assert!(
-        features
-            .iter()
-            .any(|label| label == "intent:LANGUAGE:TYPESCRIPT")
-    );
-    assert!(
-        !features
-            .iter()
-            .any(|label| label == "intent:LANGUAGE:JAVASCRIPT")
-    );
-    assert!(
-        features
-            .iter()
-            .any(|label| label == "intent:API:IDEMPOTENT_COMMAND")
-    );
+    let features =
+        encoding.atomize(b"Implement a TypeScript idempotent order command with bounded retry.");
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:LANGUAGE:TYPESCRIPT"));
+    assert!(!features
+        .iter()
+        .any(|label| label == "intent:LANGUAGE:JAVASCRIPT"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:API:IDEMPOTENT_COMMAND"));
 }
 
 #[test]
@@ -428,9 +396,7 @@ fn masking_nested_credentials_is_secret_redaction_evidence() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
     };
-    let features = encoding.atomize(
-        b"Create Python correlated logs that mask nested credentials.",
-    );
+    let features = encoding.atomize(b"Create Python correlated logs that mask nested credentials.");
     assert!(features
         .iter()
         .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
@@ -518,41 +484,29 @@ fn native_ledger_paraphrase_and_missing_context_are_detected() {
     let paraphrase = encoding.atomize(
         b"Create Rust code for all-or-nothing account transfers that reject missing accounts.",
     );
-    assert!(
-        paraphrase
-            .iter()
-            .any(|label| label == "intent:LANGUAGE:RUST")
-    );
-    assert!(
-        paraphrase
-            .iter()
-            .any(|label| label == "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER")
-    );
+    assert!(paraphrase
+        .iter()
+        .any(|label| label == "intent:LANGUAGE:RUST"));
+    assert!(paraphrase
+        .iter()
+        .any(|label| label == "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER"));
 
     let missing = encoding.atomize(
         b"Implement a Go deduplicator whose retention duration and storage are not provided.",
     );
-    assert!(
-        missing
-            .iter()
-            .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
-    );
-    let plural_missing = encoding.atomize(
-        b"Create JavaScript deployment code whose contracts have not been provided.",
-    );
-    assert!(
-        plural_missing
-            .iter()
-            .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
-    );
-    let requirements_missing = encoding.atomize(
-        b"Build TypeScript retry timing without any latency requirements.",
-    );
-    assert!(
-        requirements_missing
-            .iter()
-            .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED")
-    );
+    assert!(missing
+        .iter()
+        .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED"));
+    let plural_missing = encoding
+        .atomize(b"Create JavaScript deployment code whose contracts have not been provided.");
+    assert!(plural_missing
+        .iter()
+        .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED"));
+    let requirements_missing =
+        encoding.atomize(b"Build TypeScript retry timing without any latency requirements.");
+    assert!(requirements_missing
+        .iter()
+        .any(|label| label == "intent:GROUNDING:UNDERSPECIFIED"));
 }
 
 #[test]
@@ -562,24 +516,17 @@ fn composed_observability_paraphrase_retains_redaction_evidence() {
     };
     let features =
         encoding.atomize(b"Create Python correlated JSON observability that masks secrets.");
-    assert!(
-        features
-            .iter()
-            .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING")
-    );
-    assert!(
-        features
-            .iter()
-            .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION")
-    );
-    let audit = encoding.atomize(
-        b"Build Python correlated JSON audit logs with recursive secret redaction.",
-    );
-    assert!(
-        audit
-            .iter()
-            .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING")
-    );
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
+    let audit = encoding
+        .atomize(b"Build Python correlated JSON audit logs with recursive secret redaction.");
+    assert!(audit
+        .iter()
+        .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
 }
 
 #[test]
@@ -591,29 +538,21 @@ fn complete_project_intent_is_distinct_from_an_internal_fragment() {
         b"Create Python code in multiple files separating inventory rules from a service.",
     );
     let fragment = encoding.atomize(b"Write a Python multi-file inventory service class.");
-    assert!(
-        project
-            .iter()
-            .any(|label| label == "intent:ARTIFACT:PROJECT")
-    );
+    assert!(project
+        .iter()
+        .any(|label| label == "intent:ARTIFACT:PROJECT"));
     let safe_inventory = encoding.atomize(
         b"Create Python code in multiple files separating inventory rules from a service that reserves stock safely.",
     );
-    assert!(
-        safe_inventory
-            .iter()
-            .any(|label| label == "intent:GUARD:INSUFFICIENT_STOCK")
-    );
-    assert!(
-        safe_inventory
-            .iter()
-            .any(|label| label == "intent:STRUCTURE:SERVICE_MODULE")
-    );
-    assert!(
-        !fragment
-            .iter()
-            .any(|label| label == "intent:ARTIFACT:PROJECT")
-    );
+    assert!(safe_inventory
+        .iter()
+        .any(|label| label == "intent:GUARD:INSUFFICIENT_STOCK"));
+    assert!(safe_inventory
+        .iter()
+        .any(|label| label == "intent:STRUCTURE:SERVICE_MODULE"));
+    assert!(!fragment
+        .iter()
+        .any(|label| label == "intent:ARTIFACT:PROJECT"));
 }
 
 #[test]
@@ -659,7 +598,10 @@ fn multidomain_synthesis_prompt_exposes_every_required_feature_path() {
         "intent:PERSISTENCE:ATOMIC_TRANSACTION",
         "intent:INTEGRATION:TRANSACTIONAL_OUTBOX",
     ] {
-        assert!(features.iter().any(|feature| feature == expected), "{expected}");
+        assert!(
+            features.iter().any(|feature| feature == expected),
+            "{expected}"
+        );
     }
 }
 
@@ -673,6 +615,7 @@ fn domain_shifted_multidomain_prompt_preserves_abstract_feature_paths() {
     );
     for expected in [
         "intent:LANGUAGE:PYTHON",
+        "intent:STRUCTURE:SERVICE_CLASS",
         "intent:ENTERPRISE:INPUT_VALIDATION",
         "intent:SECURITY:AUTHORIZATION",
         "intent:PERSISTENCE:SCHEMA_MIGRATION",
@@ -687,7 +630,10 @@ fn domain_shifted_multidomain_prompt_preserves_abstract_feature_paths() {
         "intent:PERSISTENCE:ATOMIC_TRANSACTION",
         "intent:INTEGRATION:TRANSACTIONAL_OUTBOX",
     ] {
-        assert!(features.iter().any(|feature| feature == expected), "{expected}");
+        assert!(
+            features.iter().any(|feature| feature == expected),
+            "{expected}"
+        );
     }
 }
 
@@ -701,6 +647,7 @@ fn scheduler_transfer_prompt_preserves_all_twelve_abstract_disciplines() {
     );
     for expected in [
         "intent:LANGUAGE:PYTHON",
+        "intent:STRUCTURE:SERVICE_CLASS",
         "intent:ENTERPRISE:INPUT_VALIDATION",
         "intent:SECURITY:AUTHORIZATION",
         "intent:PERSISTENCE:SCHEMA_MIGRATION",
@@ -715,7 +662,10 @@ fn scheduler_transfer_prompt_preserves_all_twelve_abstract_disciplines() {
         "intent:PERSISTENCE:ATOMIC_TRANSACTION",
         "intent:INTEGRATION:TRANSACTIONAL_OUTBOX",
     ] {
-        assert!(features.iter().any(|feature| feature == expected), "{expected}");
+        assert!(
+            features.iter().any(|feature| feature == expected),
+            "{expected}"
+        );
     }
 }
 
@@ -761,7 +711,10 @@ fn semantic_stress_phrases_preserve_enterprise_behaviors() {
     for (prompt, expected) in cases {
         let labels = encoding.atomize(prompt);
         for label in *expected {
-            assert!(labels.iter().any(|actual| actual == label), "{label} missing from {labels:?}");
+            assert!(
+                labels.iter().any(|actual| actual == label),
+                "{label} missing from {labels:?}"
+            );
         }
     }
 }

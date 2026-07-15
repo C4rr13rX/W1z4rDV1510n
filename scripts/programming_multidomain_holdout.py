@@ -43,6 +43,14 @@ def holdout_prompt(excluded: str | None = None, class_name: str = CLASS_NAME,
         requirement for name, requirement in DOMAIN_REQUIREMENTS.items()
         if name != excluded
     ]
+    # Causal ablations must remove every cue for the withheld premise, not
+    # merely its dedicated clause.  Otherwise expected_version reintroduces
+    # optimistic concurrency and "atomically append" reintroduces transaction
+    # evidence through the outbox clause.
+    if excluded == "optimistic_concurrency":
+        requirements = [value.replace(", and expected_version", "") for value in requirements]
+    if excluded == "atomic_transaction":
+        requirements = [value.replace("atomically append", "append") for value in requirements]
     return (
         f"Create a new executable Python class named {class_name}. It manages "
         f"inventory initialized with 10 widgets through an async method named {method_name} and must "

@@ -8,8 +8,8 @@
 //! requires the moment buffer (what fired in every pool at tick T).
 
 use ahash::{AHashMap, AHashSet};
-use serde::{Deserialize, Serialize};
 use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -374,8 +374,7 @@ impl AtomEncoding for InstructionIntentEncoding {
         }
         if text.contains("function signature")
             || text.contains("declaration line")
-            || ((text.contains("clamp") || text.contains("clamping"))
-                && text.contains("function"))
+            || ((text.contains("clamp") || text.contains("clamping")) && text.contains("function"))
         {
             emit("CODE:FUNCTION_SIGNATURE");
         }
@@ -423,14 +422,15 @@ impl AtomEncoding for InstructionIntentEncoding {
         if no_retry {
             emit("RESILIENCE:NO_RETRY");
         }
-        if !no_retry && (text.contains("attempts")
-            || text.contains("transient failure")
-            || (text.contains("retry")
-                && (text.contains("async")
-                    || text.contains("asynchronous")
-                    || text.contains("bounded")
-                    || text.contains("last exception")
-                    || text.contains("after success"))))
+        if !no_retry
+            && (text.contains("attempts")
+                || text.contains("transient failure")
+                || (text.contains("retry")
+                    && (text.contains("async")
+                        || text.contains("asynchronous")
+                        || text.contains("bounded")
+                        || text.contains("last exception")
+                        || text.contains("after success"))))
         {
             emit("ENTERPRISE:BOUNDED_RETRY");
         }
@@ -445,8 +445,7 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("remove credentials")
             || text.contains("removing credentials")
             || text.contains("cleanses nested credentials")
-            || ((text.contains("mask") || text.contains("masks"))
-                && text.contains("credential"))
+            || ((text.contains("mask") || text.contains("masks")) && text.contains("credential"))
             || (text.contains("password") && text.contains("token"))
         {
             emit("ENTERPRISE:SECRET_REDACTION");
@@ -490,7 +489,14 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("import statement") || text.contains("import line") {
             emit("STRUCTURE:IMPORT");
         }
-        if text.contains("service class") {
+        // A requested named executable class is the same structural role as
+        // a training episode phrased as a "service class".  Keeping those
+        // phrases on separate atoms can remove the root of an otherwise
+        // complete dependency chain while every behavioral child fires.
+        if text.contains("service class")
+            || text.contains("class named ")
+            || text.contains("class called ")
+        {
             emit("STRUCTURE:SERVICE_CLASS");
         }
         if text.contains("reserve method") || text.contains("reservation method") {
@@ -499,9 +505,7 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("over-reservation")
             || text.contains("over reservation")
             || text.contains("insufficient stock")
-            || ((text.contains("inventory")
-                || text.contains("stock")
-                || text.contains("reserv"))
+            || ((text.contains("inventory") || text.contains("stock") || text.contains("reserv"))
                 && (text.contains("safely") || text.contains("safe reservation")))
         {
             emit("GUARD:INSUFFICIENT_STOCK");
@@ -1802,11 +1806,7 @@ impl Pool {
     /// Existing encoders remain authoritative and every returned id is an
     /// ordinary atom neuron, so direct bindings stay grounded in the same
     /// substrate as live observations.
-    pub fn ensure_frame_atoms_for_pretrain(
-        &mut self,
-        frame: &[u8],
-        tick: u64,
-    ) -> Vec<NeuronId> {
+    pub fn ensure_frame_atoms_for_pretrain(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
         let sequence: Vec<NeuronId> = self
             .encoding
             .atomize(frame)
@@ -1828,11 +1828,7 @@ impl Pool {
     /// remains raw atoms, so unique targets have no concept overhead. From the
     /// second observation onward, paraphrase bindings store one shared concept
     /// reference instead of another full response membership vector.
-    pub fn ensure_frame_concept_for_pretrain(
-        &mut self,
-        frame: &[u8],
-        tick: u64,
-    ) -> Vec<NeuronId> {
+    pub fn ensure_frame_concept_for_pretrain(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
         let sequence = self.ensure_frame_atoms_for_pretrain(frame, tick);
         if sequence.is_empty() {
             return Vec::new();
@@ -1853,23 +1849,13 @@ impl Pool {
 
         let mut hasher = DefaultHasher::new();
         sequence.hash(&mut hasher);
-        let label = format!(
-            "pretrain-frame:{}:{:016x}",
-            sequence.len(),
-            hasher.finish(),
-        );
+        let label = format!("pretrain-frame:{}:{:016x}", sequence.len(), hasher.finish(),);
         let members: Vec<NeuronRef> = sequence
             .iter()
             .map(|&id| NeuronRef::new(self.config.id, id))
             .collect();
         let id = self.neurons.len() as NeuronId;
-        let neuron = Neuron::new_concept(
-            id,
-            label.clone(),
-            NeuronKind::Excitatory,
-            members,
-            tick,
-        );
+        let neuron = Neuron::new_concept(id, label.clone(), NeuronKind::Excitatory, members, tick);
         let id = self.append_neuron(neuron, label);
         self.concept_sequence_to_id.insert(sequence.clone(), id);
         if sequence.len() <= 512 {
