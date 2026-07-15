@@ -6181,6 +6181,11 @@ impl Brain {
     ) -> crate::store::RecoveryStats {
         use crate::store::WalEvent as E;
         let mut stats = crate::store::RecoveryStats::default();
+        // Snapshot restore has already built indexes for every binding it
+        // contains.  Remember only binding concepts genuinely appended by
+        // this recovery tail; rebuilding the complete index here made a
+        // large startup perform the same multi-minute graph walk twice.
+        let mut recovered_bindings: Vec<(NeuronId, Vec<NeuronRef>)> = Vec::new();
         for ev in events {
             stats.observe(ev);
             match ev {
@@ -6206,13 +6211,16 @@ impl Brain {
                     born_tick,
                 } => {
                     if let Some(pool) = self.fabric.pool(*pool_id) {
-                        pool.write().replay_concept_create(
+                        let inserted = pool.write().replay_concept_create(
                             *id,
                             label.clone(),
                             *kind,
                             members.clone(),
                             *born_tick,
                         );
+                        if inserted && *pool_id == self.binding_pool_id {
+                            recovered_bindings.push((*id, members.clone()));
+                        }
                     }
                 }
                 E::NeuronEvicted { pool_id, neuron_id } => {
@@ -6230,11 +6238,13 @@ impl Brain {
                 E::SnapshotMarker { .. } => { /* barrier only */ }
             }
         }
-        // Snapshot restore builds these derived indexes before WAL replay.
-        // Bindings appended by the recovery tail would otherwise exist as
-        // neurons but remain invisible to exact/fuzzy retrieval until they
-        // happened to be observed again.
-        self.rebuild_binding_sequence_index();
+        // Bindings appended by the recovery tail must become visible to
+        // exact/fuzzy retrieval, but snapshot-resident bindings are already
+        // indexed.  Incremental insertion preserves identical semantics with
+        // work proportional to the tail rather than the whole brain.
+        for (id, members) in recovered_bindings {
+            self.index_binding_members(id, &members);
+        }
         stats
     }
 
