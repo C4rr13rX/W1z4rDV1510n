@@ -105,6 +105,14 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(rows, 6)
             self.assertEqual([row["prompt"] for row in probes], ["p2", "p4", "p7"])
 
+    def test_direct_pretrain_is_chunked_between_retention_gates(self) -> None:
+        source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"--limit-rows", str(min(args.gate_rows, phase.rows - ram))', source)
+        self.assertIn("run_midphase_gate(args, phase, runtime, ram_after)", source)
+        self.assertIn('"--no-checkpoint"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

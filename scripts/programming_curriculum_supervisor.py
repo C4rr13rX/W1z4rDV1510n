@@ -165,6 +165,50 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
     return report
 
 
+def run_midphase_gate(args: argparse.Namespace, phase: Phase,
+                      runtime: Path, trained_rows: int) -> dict:
+    """Protect retained knowledge before permitting the next corpus chunk."""
+    recall = run_json_command([
+        sys.executable, "scripts/programming_corpus_recall.py", str(phase.corpus),
+        "--endpoint", args.endpoint,
+        "--start-row", "0", "--window-rows", str(trained_rows),
+        "--samples", "32", "--syntax", "none",
+    ])
+    if recall.get("accepted_trained_response") != recall.get("sampled"):
+        raise RuntimeError(
+            f"{phase.name} midphase recall regression at {trained_rows}: {recall}"
+        )
+    foundation = run_json_command([
+        sys.executable, "scripts/programming_integrated_retention.py",
+        "--endpoint", args.endpoint, "--no-checkpoint",
+        "--output", str(runtime / f"{phase.name}.row-{trained_rows}.foundation.json"),
+    ], timeout=2 * 3600.0)
+    enterprise = run_json_command([
+        sys.executable, "scripts/programming_enterprise_retention.py",
+        "--endpoint", args.endpoint,
+        "--output", str(runtime / f"{phase.name}.row-{trained_rows}.enterprise.json"),
+        "--suite-timeout", "900",
+    ], timeout=4 * 3600.0)
+    if (not enterprise.get("passed")
+            or enterprise.get("passed_suites") != enterprise.get("total_suites")
+            or enterprise.get("tick_delta") != 0):
+        raise RuntimeError(
+            f"enterprise midphase regression after {phase.name} row "
+            f"{trained_rows}: {enterprise}"
+        )
+    report = {
+        "phase": phase.name,
+        "trained_rows": trained_rows,
+        "passed": True,
+        "recall": recall,
+        "foundation": foundation,
+        "enterprise": enterprise,
+        "updated_unix": time.time(),
+    }
+    publish(runtime / f"{phase.name}.row-{trained_rows}.retention-gate.json", report)
+    return report
+
+
 def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
               status_path: Path) -> int:
     progress = runtime / f"{phase.name}.progress.json"
@@ -181,6 +225,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--repeats", "1",
         "--direct-pretrain",
         "--start-row", str(ram),
+        "--limit-rows", str(min(args.gate_rows, phase.rows - ram)),
         "--durable-start-row", str(durable),
         "--batch-size", str(args.batch_size),
         "--checkpoint-rows", str(args.checkpoint_rows),
@@ -227,6 +272,7 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--checkpoint-rows", type=int, default=4096)
+    parser.add_argument("--gate-rows", type=int, default=4096)
     parser.add_argument("--max-restarts", type=int, default=3)
     args = parser.parse_args()
 
@@ -293,6 +339,24 @@ def main() -> int:
                 runtime / f"{phase.name}.progress.json"
             )
             if code == 0 and ram_after >= phase.rows:
+                continue
+            if code == 0 and ram_after > ram and durable_after == ram_after:
+                publish(status_path, {"state": "midphase_benchmarking",
+                                      "phase": phase.name,
+                                      "ram_next_row": ram_after,
+                                      "durable_next_row": durable_after,
+                                      "updated_unix": time.time()})
+                try:
+                    run_midphase_gate(args, phase, runtime, ram_after)
+                except (RuntimeError, subprocess.TimeoutExpired,
+                        json.JSONDecodeError) as exc:
+                    publish(status_path, {"state": "midphase_gate_failed",
+                                          "phase": phase.name,
+                                          "ram_next_row": ram_after,
+                                          "durable_next_row": durable_after,
+                                          "error": str(exc),
+                                          "updated_unix": time.time()})
+                    return 1
                 continue
             restarts += 1
             if restarts > args.max_restarts or ram_after <= ram:
