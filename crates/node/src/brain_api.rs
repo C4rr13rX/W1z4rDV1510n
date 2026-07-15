@@ -1421,7 +1421,63 @@ fn single_language_ranked_source(
 /// New curricula express order as role dependencies; legacy numeric slots
 /// remain readable for checkpoint compatibility. Conflicts, missing
 /// dependencies, and cycles abort composition rather than guessing.
+fn requested_python_class(prompt: &str) -> Option<&str> {
+    let lower = prompt.to_ascii_lowercase();
+    for cue in ["class named ", "class called "] {
+        let Some(start) = lower.find(cue).map(|index| index + cue.len()) else {
+            continue;
+        };
+        let candidate = prompt[start..]
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .next()
+            .unwrap_or("");
+        let valid = !candidate.is_empty()
+            && candidate
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+            && candidate
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+        if valid {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn render_grounded_fragment_source(
+    fragment: &serde_json::Map<String, serde_json::Value>,
+    source: &str,
+    prompt: &str,
+) -> Option<String> {
+    let Some(parameters) = fragment.get("parameters") else {
+        return (!source.contains("{{")).then(|| source.to_string());
+    };
+    let parameters = parameters.as_object()?;
+    let mut rendered = source.to_string();
+    for (name, kind) in parameters {
+        let placeholder = format!("{{{{{name}}}}}");
+        if !rendered.contains(&placeholder) {
+            return None;
+        }
+        let value = match kind.as_str()? {
+            "python_class_named" => requested_python_class(prompt)?,
+            _ => return None,
+        };
+        rendered = rendered.replace(&placeholder, value);
+    }
+    (!rendered.contains("{{")).then_some(rendered)
+}
+
 fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
+    merge_grounded_code_fragments_for_prompt(candidates, "")
+}
+
+fn merge_grounded_code_fragments_for_prompt(
+    candidates: &[Vec<u8>],
+    prompt: &str,
+) -> Option<Vec<u8>> {
     #[derive(Clone, PartialEq, Eq)]
     struct RelativeFragment {
         source: String,
@@ -1466,7 +1522,7 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
         let Some(fragment) = value.get("code_fragment").and_then(|v| v.as_object()) else {
             continue;
         };
-        let (Some(file), Some(source)) = (
+        let (Some(file), Some(raw_source)) = (
             fragment.get("file").and_then(|v| v.as_str()),
             fragment.get("source").and_then(|v| v.as_str()),
         ) else {
@@ -1476,10 +1532,11 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
             || file.starts_with('/')
             || file.starts_with('\\')
             || file.split(['/', '\\']).any(|part| part == "..")
-            || source.is_empty()
+            || raw_source.is_empty()
         {
             return None;
         }
+        let source = render_grounded_fragment_source(fragment, raw_source, prompt)?;
         if let Some(evidence_id) = fragment.get("evidence_id").and_then(|v| v.as_str()) {
             if outcomes.get(evidence_id) == Some(&false) {
                 continue;
@@ -1488,12 +1545,12 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
         if let Some(order) = fragment.get("order").and_then(|v| v.as_i64()) {
             let slots = numeric.entry(file.to_string()).or_default();
             if let Some(existing) = slots.get(&order) {
-                if existing != source {
+                if existing != &source {
                     return None;
                 }
                 continue;
             }
-            slots.insert(order, source.to_string());
+            slots.insert(order, source);
             numeric_count += 1;
             continue;
         }
@@ -1523,7 +1580,7 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
             after.insert(dependency.to_string());
         }
         let entry = RelativeFragment {
-            source: source.to_string(),
+            source,
             after,
         };
         let roles = relative.entry(file.to_string()).or_default();
@@ -1907,7 +1964,7 @@ async fn h_brain_chat(
     let raw_programming_compatible = raw_trained.as_ref().is_some_and(|candidate| {
         programming_response_compatible(&diagnostic_intent_labels, candidate)
     });
-    let composed = merge_grounded_code_fragments(&feature_candidates)
+    let composed = merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt)
         .or_else(|| merge_grounded_file_manifests(&feature_candidates));
     let exact_is_composition_prerequisite = exact_feature
         .as_ref()
@@ -2977,6 +3034,34 @@ mod tests {
             value["files"]["main.js"],
             "function identity(value) {\n  return value;\n}\n"
         );
+    }
+
+    #[test]
+    fn grounded_fragment_template_binds_valid_requested_class_name() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"python_class_named"},"source":"class {{CLASS_NAME}}:\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"service.py","role":"method","after":["class"],"source":"    def ready(self):\n        return True\n"}}"#.to_vec(),
+        ];
+        let assembled = merge_grounded_code_fragments_for_prompt(
+            &candidates,
+            "Create a Python class named NovelCoordinator.",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        assert_eq!(
+            value["files"]["service.py"],
+            "class NovelCoordinator:\n    def ready(self):\n        return True\n"
+        );
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &candidates,
+            "Create a Python service without a specified class name.",
+        )
+        .is_none());
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &candidates,
+            "Create a Python class named 7Invalid.",
+        )
+        .is_none());
     }
 
     #[test]
