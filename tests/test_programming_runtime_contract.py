@@ -56,6 +56,11 @@ from scripts.programming_parameterized_fulfillment import (
     FRAGMENTS as PARAMETERIZED_FULFILLMENT_FRAGMENTS,
     training_rows as parameterized_fulfillment_training_rows,
 )
+from scripts.programming_domain_transfer_holdout import (
+    CLASS_NAME as TRANSFER_CLASS_NAME,
+    REQUIREMENTS as TRANSFER_REQUIREMENTS,
+    transfer_prompt,
+)
 from scripts.train_programming_brain import (
     SEED_STAGES,
     guard_seed_stage,
@@ -294,6 +299,20 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('"concurrent_mutation_detected"', supervisor)
+
+    def test_domain_transfer_holdout_changes_state_contract(self) -> None:
+        self.assertEqual(TRANSFER_CLASS_NAME, "ResilientJobScheduler")
+        self.assertEqual(set(TRANSFER_REQUIREMENTS), {
+            premise.name for premise in DISCIPLINES
+        })
+        full = transfer_prompt()
+        self.assertIn("capacity 10", full)
+        self.assertIn("method named schedule", full)
+        self.assertNotIn("Fulfillment", full)
+        self.assertNotIn("inventory initialized", full)
+        for name, requirement in TRANSFER_REQUIREMENTS.items():
+            self.assertIn(requirement, full)
+            self.assertNotIn(requirement, transfer_prompt(name))
 
     def test_multidomain_failed_gate_keeps_authoritative_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
