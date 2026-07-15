@@ -239,7 +239,7 @@ def main() -> int:
     tick_before = request(args.endpoint, "/brain/stats", None).get("tick")
     baseline = evaluate(args.endpoint)
     trained = train(args.endpoint, args.repeats) if args.train else None
-    learned = evaluate(args.endpoint)
+    learned = evaluate(args.endpoint) if args.train else baseline
     tick_after = request(args.endpoint, "/brain/stats", None).get("tick")
     retention_after = run_retention(
         args.endpoint, args.output.with_name("parameterized-foundation-after.json")
