@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ from scripts.programming_curriculum_supervisor import (
     responsive_batch_size,
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
+from scripts.programming_capstone_readiness import safe_manifest, structural_checks
 from scripts.train_programming_brain import (
     SEED_STAGES,
     guard_seed_stage,
@@ -109,6 +111,31 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('all(row["recalled"] for row in rows)', source)
+
+    def test_code_intent_inhibits_cross_domain_raw_fallback(self) -> None:
+        source = (ROOT / "crates/node/src/brain_api.rs").read_text(encoding="utf-8")
+        self.assertIn("has_programming_language_intent", source)
+        self.assertIn("raw_trained.is_some() && !programming_language_intent", source)
+        self.assertIn('"raw_fallback_inhibited"', source)
+
+    def test_capstone_safety_rejects_prose_and_requires_kernel_boundaries(self) -> None:
+        self.assertEqual(safe_manifest("an unrelated math answer"), {})
+        manifest = safe_manifest(json.dumps({"files": {
+            "tsconfig.json": '{"compilerOptions":{"strict":true}}',
+            "src/physics/kernel.ts": "SI units CODATA gravity electrostatic symplectic collision conservation validity error budget refine coarsen deterministic inverse",
+            "src/render/three.ts": "Three instancing LOD origin worker Float64Array budget",
+            "tests/kernel.test.ts": "deterministic inverse test",
+            "README.md": "roadmap limitations",
+        }}))
+        checks = structural_checks(manifest)
+        self.assertTrue(checks["renderer_separated"])
+        self.assertTrue(all(checks.values()))
+
+    def test_enterprise_retention_includes_capstone_safety(self) -> None:
+        source = (ROOT / "scripts/programming_enterprise_retention.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('("capstone_safety"', source)
 
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(

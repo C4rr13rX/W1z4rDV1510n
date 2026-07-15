@@ -1307,6 +1307,13 @@ fn single_language_ranked_manifest(
         .flatten()
 }
 
+/// A derived programming-language signal is a domain boundary, not merely a
+/// weak ranking hint. If no action is grounded through that feature space, a
+/// fuzzy raw-character binding from a different curriculum must not answer.
+fn has_programming_language_intent(labels: &[String]) -> bool {
+    labels.iter().any(|label| label.contains(":LANGUAGE:"))
+}
+
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
@@ -1787,6 +1794,9 @@ async fn h_brain_chat(
         .unwrap_or_default();
     let diagnostic_exact_feature = exact_feature.is_some();
     let diagnostic_exact_manifest = exact_complete_manifest.is_some();
+    let programming_language_intent = has_programming_language_intent(
+        &diagnostic_intent_labels,
+    );
     let composed = merge_grounded_code_fragments(&feature_candidates)
         .or_else(|| merge_grounded_file_manifests(&feature_candidates));
     let exact_is_composition_prerequisite = exact_feature
@@ -1815,9 +1825,13 @@ async fn h_brain_chat(
         // This is the normal path for a paraphrase that omits one constraint
         // from a learned single-language project episode.
         ranked_single_manifest
-    } else if raw_trained.is_some() {
+    } else if raw_trained.is_some() && !programming_language_intent {
+        // Fuzzy raw recall is valid for ordinary same-domain retrieval, but
+        // a recognized code-language request must be supported by its
+        // derived feature bindings. Otherwise a recently trained reasoning
+        // corpus can answer an unknown code request with unrelated prose.
         raw_trained
-    } else if chat_query_pools.len() > 1 {
+    } else if chat_query_pools.len() > 1 && !programming_language_intent {
         brain.decode_best_trained_binding_multi(&chat_query_pools, action_pool)
     } else {
         None
@@ -1950,6 +1964,9 @@ async fn h_brain_chat(
             "unweighted_candidates": diagnostic_unweighted_candidates,
             "exact_feature": diagnostic_exact_feature,
             "exact_complete_manifest": diagnostic_exact_manifest,
+            "raw_fallback_inhibited": programming_language_intent
+                && !raw_is_exact
+                && trained_decode.is_none(),
         },
     }))
 }
@@ -2862,6 +2879,17 @@ mod tests {
         let mut polyglot = labels;
         polyglot.push("intent:LANGUAGE:GO".to_string());
         assert_eq!(single_language_ranked_manifest(&polyglot, &[manifest]), None);
+    }
+
+    #[test]
+    fn programming_language_intent_is_a_raw_fallback_domain_boundary() {
+        assert!(has_programming_language_intent(&[
+            "instruction_intent:LANGUAGE:TYPESCRIPT".to_string(),
+            "instruction_intent:ENTERPRISE:BATCHING".to_string(),
+        ]));
+        assert!(!has_programming_language_intent(&[
+            "instruction_intent:MATH:ARITHMETIC".to_string(),
+        ]));
     }
 
     #[test]

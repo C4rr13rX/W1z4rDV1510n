@@ -103,6 +103,8 @@ def main() -> int:
                           "--output", str(output_dir / "composition.json")]),
         ("semantic_stress", ["scripts/programming_semantic_stress.py", *endpoint_args,
                               "--output", str(output_dir / "semantic-stress.json")]),
+        ("capstone_safety", ["scripts/programming_capstone_readiness.py", *endpoint_args,
+                             "--output", str(output_dir / "capstone-readiness.json")]),
     ]
 
     stats_before = brain_stats(args.endpoint)
