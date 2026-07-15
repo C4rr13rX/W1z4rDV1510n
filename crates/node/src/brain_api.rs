@@ -1921,7 +1921,10 @@ async fn h_brain_chat(
         exact_complete_manifest
     } else if exact_is_composition_prerequisite && composed.is_some() {
         composed
-    } else if exact_feature.is_some() {
+    } else if exact_feature
+        .as_ref()
+        .is_some_and(|candidate| !is_grounded_code_fragment(candidate))
+    {
         // An exact sparse-intent episode is stronger evidence than a fuzzy
         // assembly of several partially matching artifacts.  In particular,
         // LANGUAGE + BEHAVIOR can identify a learned single-function answer
@@ -1935,6 +1938,11 @@ async fn h_brain_chat(
         // This is the normal path for a paraphrase that omits one constraint
         // from a learned single-language project episode.
         ranked_single_manifest
+    } else if exact_feature.is_some() {
+        // An isolated exact fragment is useful training evidence, but it is
+        // not a complete user-facing artifact. Return it only after grounded
+        // composition and complete ranked manifests have both failed.
+        exact_feature
     } else if ranked_single_source.is_some() {
         // Ranked sparse intent has independently grounded the requested
         // language and behavior. Plain single-file source is valid here as
