@@ -1678,6 +1678,9 @@ async fn h_brain_chat(
     let diagnostic_exact_manifest = exact_complete_manifest.is_some();
     let composed = merge_grounded_code_fragments(&feature_candidates)
         .or_else(|| merge_grounded_file_manifests(&feature_candidates));
+    let exact_is_composition_prerequisite = exact_feature.as_ref().is_some_and(|exact| {
+        exact_fragment_has_grounded_dependents(exact, &feature_candidates)
+    });
     let trained_bytes = if raw_is_exact && raw_trained.is_some() {
         // Direct sensory evidence is the strongest tier. Derived diagnostic
         // pools may compose novel requests, but can never overwrite an
@@ -1685,6 +1688,8 @@ async fn h_brain_chat(
         raw_trained.clone()
     } else if exact_complete_manifest.is_some() {
         exact_complete_manifest
+    } else if exact_is_composition_prerequisite && composed.is_some() {
+        composed
     } else if exact_feature.is_some() {
         // An exact sparse-intent episode is stronger evidence than a fuzzy
         // assembly of several partially matching artifacts.  In particular,
@@ -2517,6 +2522,42 @@ pub fn brain_phase_routes(state: BrainApiState) -> Router {
     brain_phase_routes_impl(state, true)
 }
 
+/// An exact fragment is not a complete answer when another grounded fragment
+/// explicitly depends on its role.
+fn exact_fragment_has_grounded_dependents(exact: &[u8], candidates: &[Vec<u8>]) -> bool {
+    let Some(fragment) = serde_json::from_slice::<serde_json::Value>(exact)
+        .ok()
+        .and_then(|value| value.get("code_fragment").cloned())
+    else {
+        return false;
+    };
+    let Some(role) = fragment.get("role").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    let file = fragment
+        .get("file")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let qualified = format!("{file}::{role}");
+    candidates.iter().any(|candidate| {
+        if candidate.as_slice() == exact {
+            return false;
+        }
+        serde_json::from_slice::<serde_json::Value>(candidate)
+            .ok()
+            .and_then(|value| value.get("code_fragment").cloned())
+            .and_then(|value| value.get("after").cloned())
+            .and_then(|value| value.as_array().cloned())
+            .is_some_and(|after| {
+                after.iter().any(|dependency| {
+                    dependency
+                        .as_str()
+                        .is_some_and(|dependency| dependency == role || dependency == qualified)
+                })
+            })
+    })
+}
+
 /// Phase routes for the standalone brain server, which supplies its own
 /// elaborated tick-profile, sleep, and checkpoint handlers.
 pub fn brain_phase_routes_without_core(state: BrainApiState) -> Router {
@@ -2624,6 +2665,20 @@ mod tests {
             value["files"]["main.js"],
             "function identity(value) {\n  return value;\n}\n"
         );
+    }
+
+    #[test]
+    fn exact_prerequisite_fragment_yields_to_its_grounded_dependent() {
+        let signature = br#"{"code_fragment":{"file":"main.js","role":"signature","after":[],"source":"function identity(value) {\n"}}"#.to_vec();
+        let body = br#"{"code_fragment":{"file":"main.js","role":"return","after":["signature"],"source":"  return value;\n}\n"}}"#.to_vec();
+        assert!(exact_fragment_has_grounded_dependents(
+            &signature,
+            &[signature.clone(), body]
+        ));
+        assert!(!exact_fragment_has_grounded_dependents(
+            &signature,
+            &[signature.clone()]
+        ));
     }
 
     #[test]
