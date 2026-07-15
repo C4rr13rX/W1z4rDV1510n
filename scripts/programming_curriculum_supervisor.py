@@ -270,7 +270,7 @@ def main() -> int:
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--attach-pid", type=int, default=0)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--checkpoint-rows", type=int, default=4096)
     parser.add_argument("--gate-rows", type=int, default=4096)
     parser.add_argument("--max-restarts", type=int, default=3)
