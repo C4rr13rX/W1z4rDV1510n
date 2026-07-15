@@ -187,6 +187,11 @@ struct MomentFingerprint {
     /// firing orders is still the same binding for emergence
     /// purposes.
     ordered_per_pool: Vec<(PoolId, Vec<NeuronId>)>,
+    /// Full binding membership captured for promotion. This begins with the
+    /// stable ordered atom stream and may additionally contain currently
+    /// firing concepts. Concept emergence must enrich what a binding stores,
+    /// not change the identity/hash of the sensory episode itself.
+    members_per_pool: Vec<(PoolId, Vec<NeuronId>)>,
 }
 
 impl MomentFingerprint {
@@ -212,6 +217,7 @@ impl MomentFingerprint {
         pairs.sort();
         Some(Self {
             pairs,
+            members_per_pool: ordered_per_pool.clone(),
             ordered_per_pool,
         })
     }
@@ -1194,12 +1200,13 @@ impl Brain {
         // firing concepts without exposing them to cross-pool wiring.
         let fingerprint = {
             let moment = self.fabric.current_moment();
-            let mut episodic_fired = moment.fired.clone();
-            for (&pid, sequence) in episodic_fired.iter_mut() {
-                if pid == self.binding_pool_id {
+            let mut fingerprint = MomentFingerprint::from_fabric_moment(&moment.fired);
+            if let Some(fingerprint) = fingerprint.as_mut() {
+                for (pid, sequence) in &mut fingerprint.members_per_pool {
+                if *pid == self.binding_pool_id {
                     continue;
                 }
-                if let Some(pool) = self.fabric.pool(pid) {
+                if let Some(pool) = self.fabric.pool(*pid) {
                     let pool = pool.read();
                     let mut concepts: Vec<NeuronId> = pool
                         .currently_firing()
@@ -1209,7 +1216,8 @@ impl Brain {
                     sequence.extend(concepts);
                 }
             }
-            MomentFingerprint::from_fabric_moment(&episodic_fired)
+            }
+            fingerprint
         };
 
         // Capture per-pool activation frames into the annealer's
@@ -1525,7 +1533,7 @@ impl Brain {
         // 'animal' atoms (a,n,i,m,a,l) decode as 'aaniml' because
         // sorting by NeuronId interleaves the duplicates.
         let members: Vec<NeuronRef> = fp
-            .ordered_per_pool
+            .members_per_pool
             .iter()
             .flat_map(|(pid, ns)| ns.iter().map(|&nid| NeuronRef::new(*pid, nid)))
             .collect();
@@ -6433,6 +6441,7 @@ impl Brain {
             moment_history.push_back(MomentFingerprint {
                 pairs: f.pairs,
                 ordered_per_pool: Vec::new(),
+                members_per_pool: Vec::new(),
             });
         }
         let mut binding_recurrences = AHashMap::new();
@@ -6441,6 +6450,7 @@ impl Brain {
                 MomentFingerprint {
                     pairs: f.pairs,
                     ordered_per_pool: Vec::new(),
+                    members_per_pool: Vec::new(),
                 },
                 c,
             );
@@ -6451,6 +6461,7 @@ impl Brain {
                 MomentFingerprint {
                     pairs: f.pairs,
                     ordered_per_pool: Vec::new(),
+                    members_per_pool: Vec::new(),
                 },
                 n,
             );
@@ -6461,6 +6472,7 @@ impl Brain {
                 MomentFingerprint {
                     pairs: f.pairs,
                     ordered_per_pool: Vec::new(),
+                    members_per_pool: Vec::new(),
                 },
                 n,
             );
@@ -6471,6 +6483,7 @@ impl Brain {
                 MomentFingerprint {
                     pairs: f.pairs,
                     ordered_per_pool: Vec::new(),
+                    members_per_pool: Vec::new(),
                 },
                 c,
             );

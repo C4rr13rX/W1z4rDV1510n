@@ -104,7 +104,7 @@ fn wal_captures_atom_concept_and_tick_events_for_a_short_training_run() {
 }
 
 #[test]
-fn checkpoint_emits_snapshot_marker_and_flushes_wal() {
+fn checkpoint_flushes_snapshot_and_compacts_acknowledged_wal_tail() {
     let dir = tmpdir("marker");
     let mut brain = build_brain_with_wal(&dir);
 
@@ -112,7 +112,9 @@ fn checkpoint_emits_snapshot_marker_and_flushes_wal() {
     brain.fabric_mut().observe(1, b"xy");
     brain.fabric_mut().advance_tick();
 
-    // Checkpoint — should write the snapshot bin AND emit a marker into the WAL.
+    // Checkpoint writes the snapshot, flushes a marker, then compacts every
+    // event acknowledged by that snapshot. Recovery must therefore see an
+    // empty tail rather than replaying already-snapshotted mutations.
     let bin_path = dir.join("brain.bin");
     brain.checkpoint(&bin_path).expect("checkpoint");
     assert!(bin_path.exists(), "brain.bin must exist after checkpoint");
@@ -121,11 +123,8 @@ fn checkpoint_emits_snapshot_marker_and_flushes_wal() {
     let events: Vec<WalEvent> = WalReader::new(replay)
         .map(|r| r.expect("event ok"))
         .collect();
-    let markers = events.iter()
-        .filter(|e| matches!(e, WalEvent::SnapshotMarker { .. }))
-        .count();
-    assert!(markers >= 1,
-        "expected ≥1 SnapshotMarker after checkpoint, events = {:?}",
+    assert!(events.is_empty(),
+        "checkpoint-compacted WAL must expose no recovery tail, events = {:?}",
         events.iter().map(|e| e.variant_name()).collect::<Vec<_>>());
 
     std::fs::remove_dir_all(&dir).ok();

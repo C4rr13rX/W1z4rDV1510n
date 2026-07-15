@@ -82,6 +82,8 @@ def main() -> int:
     parser.add_argument("--python-repeats", type=int, default=4)
     parser.add_argument("--debug-repeats", type=int, default=4)
     parser.add_argument("--pretrain-debug", action="store_true")
+    parser.add_argument("--no-checkpoint", action="store_true",
+                        help="run read-only retention gates without snapshotting")
     parser.add_argument("--output", type=Path,
                         default=ROOT / "runtime/benchmarks/integrated_retention.json")
     args = parser.parse_args()
@@ -107,7 +109,7 @@ def main() -> int:
              "python": code_eval(args.endpoint),
              "debug": debug_eval(args.endpoint, args.output.with_name("integrated_debug.json")),
              "stats": request(args.endpoint, "/brain/stats")}
-    checkpoint = request(args.endpoint, "/brain/checkpoint", {})
+    checkpoint = None if args.no_checkpoint else request(args.endpoint, "/brain/checkpoint", {})
     report = {"before_debug": before, "after_debug": after, "checkpoint": checkpoint}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")

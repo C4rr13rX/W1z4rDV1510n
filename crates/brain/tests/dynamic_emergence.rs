@@ -85,6 +85,10 @@ fn lifetime_count_promotes_sparse_schedule() {
     // consolidated tier must promote.
     let mut cfg = default_cfg();
     cfg.moment_history_window = 64;
+    // Isolate lifetime recurrence from the orthogonal pressure controller.
+    // The 400 unique filler moments otherwise raise the adaptive threshold
+    // from 3 to 4 before the third sparse recurrence.
+    cfg.pressure_adjust_enabled = false;
     let (mut brain, pa, pb) = build(cfg);
     let interval = 200;
     for rep in 0..3 {
