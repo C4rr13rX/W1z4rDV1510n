@@ -43,7 +43,7 @@ def holdout_prompt(excluded: str | None = None) -> str:
     ]
     return (
         f"Create a new executable Python class named {CLASS_NAME}. It manages "
-        "inventory initialized with 10 widgets and must "
+        "inventory initialized with 10 widgets through an async method named fulfill and must "
         + "; ".join(requirements)
         + ". Return the complete implementation, not fragments or pseudocode."
     )

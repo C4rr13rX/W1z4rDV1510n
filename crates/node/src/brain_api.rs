@@ -1421,9 +1421,9 @@ fn single_language_ranked_source(
 /// New curricula express order as role dependencies; legacy numeric slots
 /// remain readable for checkpoint compatibility. Conflicts, missing
 /// dependencies, and cycles abort composition rather than guessing.
-fn requested_python_class(prompt: &str) -> Option<&str> {
+fn requested_python_identifier<'a>(prompt: &'a str, cues: &[&str]) -> Option<&'a str> {
     let lower = prompt.to_ascii_lowercase();
-    for cue in ["class named ", "class called "] {
+    for cue in cues {
         let Some(start) = lower.find(cue).map(|index| index + cue.len()) else {
             continue;
         };
@@ -1446,6 +1446,14 @@ fn requested_python_class(prompt: &str) -> Option<&str> {
     None
 }
 
+fn requested_python_class(prompt: &str) -> Option<&str> {
+    requested_python_identifier(prompt, &["class named ", "class called "])
+}
+
+fn requested_python_method(prompt: &str) -> Option<&str> {
+    requested_python_identifier(prompt, &["method named ", "method called "])
+}
+
 fn render_grounded_fragment_source(
     fragment: &serde_json::Map<String, serde_json::Value>,
     source: &str,
@@ -1463,6 +1471,7 @@ fn render_grounded_fragment_source(
         }
         let value = match kind.as_str()? {
             "python_class_named" => requested_python_class(prompt)?,
+            "python_method_named" => requested_python_method(prompt)?,
             _ => return None,
         };
         rendered = rendered.replace(&placeholder, value);
@@ -3040,11 +3049,11 @@ mod tests {
     fn grounded_fragment_template_binds_valid_requested_class_name() {
         let candidates = vec![
             br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"python_class_named"},"source":"class {{CLASS_NAME}}:\n"}}"#.to_vec(),
-            br#"{"code_fragment":{"file":"service.py","role":"method","after":["class"],"source":"    def ready(self):\n        return True\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"service.py","role":"method","after":["class"],"parameters":{"METHOD_NAME":"python_method_named"},"source":"    def {{METHOD_NAME}}(self):\n        return True\n"}}"#.to_vec(),
         ];
         let assembled = merge_grounded_code_fragments_for_prompt(
             &candidates,
-            "Create a Python class named NovelCoordinator.",
+            "Create a Python class named NovelCoordinator with a method called ready.",
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
