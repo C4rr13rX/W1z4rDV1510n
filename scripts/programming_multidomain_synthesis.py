@@ -308,6 +308,16 @@ def active_training_pids(runtime: Path) -> list[int]:
     return sorted(active)
 
 
+def retain_failed_gate_report(call, output: Path) -> dict:
+    """Preserve an authoritative failed gate artifact instead of losing diagnostics."""
+    try:
+        return call()
+    except RuntimeError:
+        if output.is_file():
+            return json.loads(output.read_text(encoding="utf-8"))
+        raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:18600")
@@ -354,11 +364,15 @@ def main() -> int:
         "" if contradiction_pass else contradiction_detail
     )
     tick_after = request(args.endpoint, "/brain/stats", None).get("tick")
-    retention_after = run_retention(
-        args.endpoint, args.output.with_name("multidomain-foundation-after.json")
+    foundation_after_path = args.output.with_name("multidomain-foundation-after.json")
+    retention_after = retain_failed_gate_report(
+        lambda: run_retention(args.endpoint, foundation_after_path),
+        foundation_after_path,
     ) if args.train else None
-    enterprise = run_enterprise_retention(
-        args.endpoint, args.output.with_name("multidomain-enterprise-after.json")
+    enterprise_path = args.output.with_name("multidomain-enterprise-after.json")
+    enterprise = retain_failed_gate_report(
+        lambda: run_enterprise_retention(args.endpoint, enterprise_path),
+        enterprise_path,
     ) if args.train and args.enterprise_gate else None
 
     ablations_pass = all(

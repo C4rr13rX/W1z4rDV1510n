@@ -42,6 +42,7 @@ from scripts.programming_multidomain_synthesis import (
     PRIMARY_FEATURE,
     execute as execute_multidomain,
     execute_no_retry_contradiction,
+    retain_failed_gate_report,
     training_rows as multidomain_training_rows,
 )
 from scripts.train_programming_brain import (
@@ -243,6 +244,18 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("active_training_pids", source)
         self.assertIn('"concurrent_mutation_detected"', source)
+
+    def test_multidomain_failed_gate_keeps_authoritative_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "gate.json"
+            output.write_text('{"passed":false,"passed_suites":11}', encoding="utf-8")
+
+            def failed() -> dict:
+                raise RuntimeError("gate failed")
+
+            report = retain_failed_gate_report(failed, output)
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["passed_suites"], 11)
 
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
