@@ -249,17 +249,17 @@ def write_progress(path: Path, payload: dict) -> None:
         json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    for attempt in range(20):
+    for attempt in range(120):
         try:
             os.replace(temporary, path)
             return
         except PermissionError:
-            if attempt == 19:
+            if attempt == 119:
                 raise
             # Windows readers and virus scanners can briefly retain a share
             # handle after closing the progress file. The temp file remains
             # complete, so retrying the same atomic replacement is safe.
-            time.sleep(0.05 * (attempt + 1))
+            time.sleep(min(0.5, 0.05 * (attempt + 1)))
 
 
 def iter_corpus_jsonl(path: Path, *, skip_rows: int = 0,
