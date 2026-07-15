@@ -20,6 +20,7 @@ from programming_multidomain_synthesis import DISCIPLINES, PRIMARY_FEATURE
 
 
 CLASS_NAME = "ResilientFulfillmentService"
+METHOD_NAME = "fulfill"
 DOMAIN_REQUIREMENTS = {
     "validation": "validate an order containing key, actor, sku, quantity, and expected_version",
     "authorization": "default-deny fulfillment authorization except for the warehouse role",
@@ -36,14 +37,15 @@ DOMAIN_REQUIREMENTS = {
 }
 
 
-def holdout_prompt(excluded: str | None = None) -> str:
+def holdout_prompt(excluded: str | None = None, class_name: str = CLASS_NAME,
+                   method_name: str = METHOD_NAME) -> str:
     requirements = [
         requirement for name, requirement in DOMAIN_REQUIREMENTS.items()
         if name != excluded
     ]
     return (
-        f"Create a new executable Python class named {CLASS_NAME}. It manages "
-        "inventory initialized with 10 widgets through an async method named fulfill and must "
+        f"Create a new executable Python class named {class_name}. It manages "
+        f"inventory initialized with 10 widgets through an async method named {method_name} and must "
         + "; ".join(requirements)
         + ". Return the complete implementation, not fragments or pseudocode."
     )
@@ -59,12 +61,13 @@ def extract_source(reply: str) -> str:
     return "\n".join(sources)
 
 
-def execute(source: str) -> tuple[bool, str]:
+def execute(source: str, class_name: str = CLASS_NAME,
+            method_name: str = METHOD_NAME) -> tuple[bool, str]:
     if not source:
         return False, "no source"
-    harness = "import asyncio\nimport json\n" + source + r'''
+    harness_body = r'''
 async def _verify_holdout():
-    service = ResilientFulfillmentService()
+    service = globals()[__EXPECTED_CLASS__]()
     service.migrate(2)
     attempts = {'count': 0}
     async def allocate():
@@ -74,22 +77,27 @@ async def _verify_holdout():
         return 'bin-7'
     order = {'key':'order-91','actor':'warehouse','sku':'widget','quantity':3,
              'expected_version':1,'token':'do-not-log'}
-    first = await service.fulfill(order, allocate)
+    first = await getattr(service, __EXPECTED_METHOD__)(order, allocate)
     assert first['allocation'] == 'bin-7' and attempts['count'] == 2
     assert service.inventory['widget'] == 7 and service.version == 2
     assert service.schema_version == 2 and len(service.outbox) == 1
-    replay = await service.fulfill(order, allocate)
+    replay = await getattr(service, __EXPECTED_METHOD__)(order, allocate)
     assert replay == first and service.inventory['widget'] == 7
     assert json.loads(service.logs[0])['order']['token'] == '[REDACTED]'
     denied = dict(order, key='order-92', actor='customer', expected_version=2)
     try:
-        await service.fulfill(denied, allocate)
+        await getattr(service, __EXPECTED_METHOD__)(denied, allocate)
         raise AssertionError('authorization allowed')
     except PermissionError:
         pass
 asyncio.run(_verify_holdout())
 print('PASS')
 '''
+    harness = (
+        "import asyncio\nimport json\n" + source + harness_body
+        .replace("__EXPECTED_CLASS__", repr(class_name))
+        .replace("__EXPECTED_METHOD__", repr(method_name))
+    )
     with tempfile.TemporaryDirectory(prefix="wv-multidomain-holdout-") as raw:
         path = Path(raw) / "verify.py"
         path.write_text(harness, encoding="utf-8")
@@ -101,11 +109,12 @@ print('PASS')
     return run.returncode == 0 and "PASS" in run.stdout, detail[-2000:]
 
 
-def query(endpoint: str, prompt: str) -> dict:
+def query(endpoint: str, prompt: str, class_name: str = CLASS_NAME,
+          method_name: str = METHOD_NAME) -> dict:
     started = time.perf_counter()
     response = request(endpoint, "/brain/chat", {"text": prompt}, timeout=300)
     source = extract_source(str(response.get("reply") or ""))
-    passed, detail = execute(source)
+    passed, detail = execute(source, class_name, method_name)
     return {
         "executes": passed,
         "source": source,
