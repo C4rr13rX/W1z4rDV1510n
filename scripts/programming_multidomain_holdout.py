@@ -62,7 +62,7 @@ def extract_source(reply: str) -> str:
 def execute(source: str) -> tuple[bool, str]:
     if not source:
         return False, "no source"
-    harness = source + r'''
+    harness = "import asyncio\nimport json\n" + source + r'''
 async def _verify_holdout():
     service = ResilientFulfillmentService()
     service.migrate(2)
