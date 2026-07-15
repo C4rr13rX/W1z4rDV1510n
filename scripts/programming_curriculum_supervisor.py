@@ -138,6 +138,19 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
             f"TypeScript OOV regression after {phase.name}: {typescript}"
         )
 
+    enterprise = run_json_command([
+        sys.executable, "scripts/programming_enterprise_retention.py",
+        "--endpoint", args.endpoint,
+        "--output", str(runtime / f"{phase.name}.enterprise-gate.json"),
+        "--suite-timeout", "900",
+    ], timeout=4 * 3600.0)
+    if (not enterprise.get("passed")
+            or enterprise.get("passed_suites") != enterprise.get("total_suites")
+            or enterprise.get("tick_delta") != 0):
+        raise RuntimeError(
+            f"enterprise regression after {phase.name}: {enterprise}"
+        )
+
     report = {
         "phase": phase.name,
         "passed": True,
@@ -145,6 +158,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
         "foundation": foundation,
         "code": code,
         "typescript": typescript,
+        "enterprise": enterprise,
         "updated_unix": time.time(),
     }
     publish(runtime / f"{phase.name}.completion-gate.json", report)

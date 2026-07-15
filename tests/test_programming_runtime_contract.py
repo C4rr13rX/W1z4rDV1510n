@@ -83,6 +83,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('all(row["recalled"] for row in rows)', source)
 
+    def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
+        source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("programming_enterprise_retention.py", source)
+        self.assertIn('enterprise.get("tick_delta") != 0', source)
+
 
 if __name__ == "__main__":
     unittest.main()
