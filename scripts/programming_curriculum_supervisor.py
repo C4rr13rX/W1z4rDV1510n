@@ -162,7 +162,7 @@ def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
     if run.returncode != 0:
         raise RuntimeError(
             f"gate command failed ({run.returncode}): {' '.join(command)}\n"
-            f"{run.stderr[-2000:]}"
+            f"stdout: {run.stdout[-4000:]}\nstderr: {run.stderr[-2000:]}"
         )
     lines = [line for line in run.stdout.splitlines() if line.strip()]
     if not lines:
@@ -170,15 +170,32 @@ def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
     return json.loads(lines[-1])
 
 
+def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
+                   rows: int, samples: int) -> list[str]:
+    """Accept deterministic answers supervised by any durable prior corpus."""
+    command = [
+        sys.executable, "scripts/programming_corpus_recall.py", str(phase.corpus),
+        "--endpoint", args.endpoint,
+        "--start-row", "0", "--window-rows", str(rows),
+        "--samples", str(samples), "--syntax", "none",
+    ]
+    accepted = {phase.corpus.resolve()}
+    for progress_path in runtime.glob("*.progress.json"):
+        progress = read_json(progress_path)
+        if int(progress.get("durable_next_row") or 0) <= 0:
+            continue
+        corpus = Path(str(progress.get("corpus") or ""))
+        if corpus.is_file():
+            accepted.add(corpus.resolve())
+    for corpus in sorted(accepted - {phase.corpus.resolve()}, key=str):
+        command.extend(["--accepted-corpus", str(corpus)])
+    return command
+
+
 def run_completion_gate(args: argparse.Namespace, phase: Phase,
                         runtime: Path) -> dict:
     """Require corpus recall plus protected foundation/code execution."""
-    recall = run_json_command([
-        sys.executable, "scripts/programming_corpus_recall.py", str(phase.corpus),
-        "--endpoint", args.endpoint,
-        "--start-row", "0", "--window-rows", str(phase.rows),
-        "--samples", "64", "--syntax", "none",
-    ])
+    recall = run_json_command(recall_command(args, phase, runtime, phase.rows, 64))
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(f"{phase.name} recall regression: {recall}")
 
@@ -252,12 +269,9 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
 def run_midphase_gate(args: argparse.Namespace, phase: Phase,
                       runtime: Path, trained_rows: int) -> dict:
     """Protect retained knowledge before permitting the next corpus chunk."""
-    recall = run_json_command([
-        sys.executable, "scripts/programming_corpus_recall.py", str(phase.corpus),
-        "--endpoint", args.endpoint,
-        "--start-row", "0", "--window-rows", str(trained_rows),
-        "--samples", "32", "--syntax", "none",
-    ])
+    recall = run_json_command(
+        recall_command(args, phase, runtime, trained_rows, 32)
+    )
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(
             f"{phase.name} midphase recall regression at {trained_rows}: {recall}"

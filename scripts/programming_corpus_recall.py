@@ -51,21 +51,22 @@ def sample_window(path: Path, start: int, count: int,
     return probes, window_rows
 
 
-def accepted_responses(path: Path, prompts: set[str]) -> dict[str, set[str]]:
+def accepted_responses(paths: list[Path], prompts: set[str]) -> dict[str, set[str]]:
     """Collect every supervised answer for only the sampled prompt set."""
     accepted: dict[str, set[str]] = {prompt: set() for prompt in prompts}
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            prompt = (row.get("prompt") or row.get("question") or "").strip()
-            if prompt not in accepted:
-                continue
-            response = (row.get("response") or row.get("answer") or "").strip()
-            if response:
-                accepted[prompt].add(response)
+    for path in paths:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                prompt = (row.get("prompt") or row.get("question") or "").strip()
+                if prompt not in accepted:
+                    continue
+                response = (row.get("response") or row.get("answer") or "").strip()
+                if response:
+                    accepted[prompt].add(response)
     return accepted
 
 
@@ -76,6 +77,10 @@ def main() -> int:
     parser.add_argument("--start-row", type=int, default=0)
     parser.add_argument("--window-rows", type=int, default=100)
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument(
+        "--accepted-corpus", action="append", type=Path, default=[],
+        help="also accept supervised answers from this durably trained corpus",
+    )
     parser.add_argument("--syntax", choices=("python", "none"), default="python")
     args = parser.parse_args()
 
@@ -87,7 +92,8 @@ def main() -> int:
         for row in probes
     }
     probe_prompts.discard("")
-    accepted_by_prompt = accepted_responses(args.corpus, probe_prompts)
+    accepted_paths = list(dict.fromkeys([args.corpus, *args.accepted_corpus]))
+    accepted_by_prompt = accepted_responses(accepted_paths, probe_prompts)
     exact = accepted = syntax = nonempty = 0
     elapsed: list[float] = []
     failures: list[dict] = []
@@ -121,6 +127,7 @@ def main() -> int:
 
     report = {
         "window": {"start": args.start_row, "rows": window_rows},
+        "accepted_corpora": [str(path) for path in accepted_paths],
         "sampled": len(probes),
         "nonempty": nonempty,
         "exact": exact,

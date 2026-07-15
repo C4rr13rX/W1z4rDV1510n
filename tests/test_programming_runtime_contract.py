@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from scripts.programming_curriculum_supervisor import (
     guarded_block_target,
     phase_offsets,
     publish,
+    recall_command,
     responsive_batch_size,
     runtime_responsive_batch_size,
 )
@@ -67,7 +69,7 @@ from scripts.train_programming_brain import (
     resolve_seed_guard,
 )
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
-from scripts.programming_corpus_recall import sample_window
+from scripts.programming_corpus_recall import accepted_responses, sample_window
 from tools.training_standard.drive_corpora_brain import checkpoint_due
 
 
@@ -348,6 +350,30 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             probes, rows = sample_window(corpus, 2, 6, 3)
             self.assertEqual(rows, 6)
             self.assertEqual([row["prompt"] for row in probes], ["p2", "p4", "p7"])
+
+    def test_corpus_recall_accepts_prior_durable_supervision(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            current = runtime / "current.jsonl"
+            prior = runtime / "prior.jsonl"
+            current.write_text(
+                '{"prompt":"same","response":"new wording"}\n', encoding="utf-8"
+            )
+            prior.write_text(
+                '{"prompt":"same","response":"retained wording"}\n', encoding="utf-8"
+            )
+            accepted = accepted_responses([current, prior], {"same"})
+            self.assertEqual(
+                accepted["same"], {"new wording", "retained wording"}
+            )
+            (runtime / "prior.progress.json").write_text(json.dumps({
+                "corpus": str(prior), "durable_next_row": 1,
+            }), encoding="utf-8")
+            args = argparse.Namespace(endpoint="http://brain")
+            phase = Phase("current", "reasoning", current, 1)
+            command = recall_command(args, phase, runtime, 1, 1)
+            self.assertIn("--accepted-corpus", command)
+            self.assertIn(str(prior.resolve()), command)
 
     def test_direct_pretrain_is_chunked_between_retention_gates(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
