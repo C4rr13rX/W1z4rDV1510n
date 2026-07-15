@@ -71,6 +71,18 @@ def phase_offsets(progress_path: Path) -> tuple[int, int]:
     return ram, durable
 
 
+def responsive_batch_size(configured: int, progress: dict,
+                          max_lock_seconds: float) -> int:
+    """Reduce future bulk size when the last transaction blocked too long."""
+    previous_size = int(progress.get("last_batch_size") or 0)
+    previous_seconds = float(progress.get("last_batch_seconds") or 0.0)
+    if (previous_size <= 0 or previous_seconds <= max_lock_seconds
+            or max_lock_seconds <= 0):
+        return configured
+    scaled = int(previous_size * max_lock_seconds / previous_seconds)
+    return max(1, min(configured, scaled))
+
+
 def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
     """Hard-link the accepted snapshot until the next retention gate passes."""
     brain_dir = runtime / "brain"
@@ -253,6 +265,9 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         return 0
     stdout_path = runtime / f"{phase.name}.stdout.log"
     stderr_path = runtime / f"{phase.name}.stderr.log"
+    batch_size = responsive_batch_size(
+        args.batch_size, read_json(progress), args.max_live_lock_seconds
+    )
     command = [
         sys.executable, "-m", "tools.training_standard.drive_corpora_brain",
         "--brain", args.endpoint,
@@ -263,7 +278,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--start-row", str(ram),
         "--limit-rows", str(min(args.gate_rows, phase.rows - ram)),
         "--durable-start-row", str(durable),
-        "--batch-size", str(args.batch_size),
+        "--batch-size", str(batch_size),
         "--inter-post-sleep", str(args.inter_batch_yield_seconds),
         "--checkpoint-rows", str(args.checkpoint_rows),
         "--wal-durable",
@@ -287,6 +302,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                     "state": "running", "phase": phase.name,
                     "worker_pid": worker.pid, "ram_next_row": ram,
                     "durable_next_row": durable,
+                    "batch_size": batch_size,
                     "updated_unix": time.time(),
                 })
                 if code is not None:
@@ -310,6 +326,7 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.1)
+    parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)
     parser.add_argument("--checkpoint-rows", type=int, default=4096)
     parser.add_argument("--gate-rows", type=int, default=16384)
     parser.add_argument("--max-restarts", type=int, default=3)

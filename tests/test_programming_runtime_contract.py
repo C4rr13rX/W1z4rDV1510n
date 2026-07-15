@@ -20,6 +20,7 @@ from scripts.programming_curriculum_supervisor import (
     ensure_last_good_guard,
     phase_offsets,
     publish,
+    responsive_batch_size,
 )
 from scripts.programming_enterprise_retention import run_suite
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
@@ -151,6 +152,20 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('parser.add_argument("--attach-phase", default="")', source)
         self.assertIn("run_midphase_gate(args, attach_phase, runtime, attached_ram)", source)
+
+    def test_bulk_size_adapts_to_measured_live_lock_window(self) -> None:
+        self.assertEqual(
+            responsive_batch_size(
+                32, {"last_batch_size": 32, "last_batch_seconds": 16}, 8
+            ),
+            16,
+        )
+        self.assertEqual(
+            responsive_batch_size(
+                32, {"last_batch_size": 32, "last_batch_seconds": 6.5}, 8
+            ),
+            32,
+        )
 
 
 if __name__ == "__main__":

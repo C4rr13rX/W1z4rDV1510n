@@ -545,6 +545,8 @@ def drive_one(script, repeats: int, project_root: Path,
             accepted_since_checkpoint = max(
                 0, start_row - durable_next_row
             ) * repeats
+            last_batch_size = 0
+            last_batch_seconds = 0.0
 
             def publish_progress() -> None:
                 if progress_path is not None:
@@ -554,6 +556,8 @@ def drive_one(script, repeats: int, project_root: Path,
                         "ram_next_row": batch_next_row,
                         "durable_next_row": durable_next_row,
                         "accepted_episodes": summary["posted_ok"],
+                        "last_batch_size": last_batch_size,
+                        "last_batch_seconds": round(last_batch_seconds, 4),
                         "updated_unix": time.time(),
                     })
 
@@ -588,7 +592,11 @@ def drive_one(script, repeats: int, project_root: Path,
                     )
                 batch_next_row = logical_next_row
                 if len(episodes) >= batch_size:
+                    submitted_count = len(episodes)
+                    batch_started = time.monotonic()
                     ok, err = post_pretrain_batch(episodes)
+                    last_batch_size = submitted_count
+                    last_batch_seconds = time.monotonic() - batch_started
                     if ok:
                         summary["posted_ok"] += len(episodes)
                         accepted_since_checkpoint += len(episodes)
@@ -620,7 +628,11 @@ def drive_one(script, repeats: int, project_root: Path,
                       flush=True)
                 continue
             if episodes:
+                submitted_count = len(episodes)
+                batch_started = time.monotonic()
                 ok, err = post_pretrain_batch(episodes)
+                last_batch_size = submitted_count
+                last_batch_seconds = time.monotonic() - batch_started
                 if ok:
                     summary["posted_ok"] += len(episodes)
                     accepted_since_checkpoint += len(episodes)
