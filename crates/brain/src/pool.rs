@@ -410,14 +410,22 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("ENTERPRISE:INPUT_VALIDATION");
         }
-        if text.contains("attempts")
+        let no_retry = text.contains("no retries")
+            || text.contains("without retries")
+            || text.contains("without retry")
+            || text.contains("fail immediately")
+            || text.contains("first transient failure");
+        if no_retry {
+            emit("RESILIENCE:NO_RETRY");
+        }
+        if !no_retry && (text.contains("attempts")
             || text.contains("transient failure")
             || (text.contains("retry")
                 && (text.contains("async")
                     || text.contains("asynchronous")
                     || text.contains("bounded")
                     || text.contains("last exception")
-                    || text.contains("after success")))
+                    || text.contains("after success"))))
         {
             emit("ENTERPRISE:BOUNDED_RETRY");
         }
@@ -566,7 +574,10 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("deduplicat") || text.contains("duplicate work") {
             emit("CONCURRENCY:DEDUPLICATION");
         }
-        if (text.contains("async") || text.contains("asynchronous")) && text.contains("retry") {
+        if !no_retry
+            && (text.contains("async") || text.contains("asynchronous"))
+            && text.contains("retry")
+        {
             emit("RESILIENCE:ASYNC_RETRY");
         }
         if text.contains("optimistic concurr")

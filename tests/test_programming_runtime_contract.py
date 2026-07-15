@@ -35,6 +35,7 @@ from scripts.programming_experiential_generalization import (
     retention_passed,
 )
 from scripts.programming_multidomain_synthesis import (
+    ALTERNATIVE_PREMISES,
     DISCIPLINES,
     HEADER as MULTIDOMAIN_HEADER,
     PREMISES as MULTIDOMAIN_PREMISES,
@@ -225,6 +226,14 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertTrue(execute_multidomain(complete)[0])
         self.assertFalse(execute_no_retry_contradiction(complete)[0])
+        no_retry = "".join(
+            premise.source for premise in MULTIDOMAIN_HEADER
+        ) + "".join(
+            (ALTERNATIVE_PREMISES[0].source
+             if premise.name == "async_retry" else premise.source)
+            for premise in MULTIDOMAIN_PREMISES
+        )
+        self.assertTrue(execute_no_retry_contradiction(no_retry)[0])
         responses = [response for _, response in multidomain_training_rows()]
         self.assertTrue(all(complete not in response for response in responses))
         source = (ROOT / "scripts/programming_multidomain_synthesis.py").read_text(

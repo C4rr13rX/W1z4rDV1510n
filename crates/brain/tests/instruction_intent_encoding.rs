@@ -617,6 +617,25 @@ fn complete_project_intent_is_distinct_from_an_internal_fragment() {
 }
 
 #[test]
+fn explicit_no_retry_is_mutually_exclusive_with_positive_retry_intent() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Implement Python async work with no retries: fail immediately after the first transient failure.",
+    );
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:RESILIENCE:NO_RETRY"));
+    assert!(!features
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:BOUNDED_RETRY"));
+    assert!(!features
+        .iter()
+        .any(|label| label == "intent:RESILIENCE:ASYNC_RETRY"));
+}
+
+#[test]
 fn semantic_stress_phrases_preserve_enterprise_behaviors() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),

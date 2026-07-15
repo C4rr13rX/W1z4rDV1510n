@@ -133,6 +133,16 @@ PREMISES = (
             "        return response\n"),
 )
 
+ALTERNATIVE_PREMISES = (
+    Premise(
+        "no_retry_policy",
+        "no retries: fail immediately after the first transient failure",
+        "retry", ("circuit",),
+        "    async def _retry(self, operation, attempts=1):\n"
+        "        return await operation()\n\n",
+    ),
+)
+
 # `circuit_use` is the implementation continuation of the same circuit-breaker
 # discipline, not a thirteenth independent premise.
 DISCIPLINES = tuple(
@@ -142,7 +152,7 @@ DISCIPLINES = tuple(
 
 def training_rows() -> list[tuple[str, str]]:
     rows = []
-    for premise in HEADER + PREMISES:
+    for premise in HEADER + PREMISES + ALTERNATIVE_PREMISES:
         prompt = f"Implement {premise.phrase} for the AdaptiveCoordinator Python project."
         rows.append((prompt, fragment(premise.role, premise.after, premise.source)))
     return rows
