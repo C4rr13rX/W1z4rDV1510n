@@ -73,9 +73,14 @@ def phase_offsets(progress_path: Path) -> tuple[int, int]:
 
 def responsive_batch_size(configured: int, progress: dict,
                           max_lock_seconds: float) -> int:
-    """Reduce future bulk size when the last transaction blocked too long."""
-    previous_size = int(progress.get("last_batch_size") or 0)
-    previous_seconds = float(progress.get("last_batch_seconds") or 0.0)
+    """Reduce future bulk size when any measured transaction blocked too long."""
+    previous_size = int(
+        progress.get("max_batch_size") or progress.get("last_batch_size") or 0
+    )
+    previous_seconds = float(
+        progress.get("max_batch_seconds")
+        or progress.get("last_batch_seconds") or 0.0
+    )
     if (previous_size <= 0 or previous_seconds <= max_lock_seconds
             or max_lock_seconds <= 0):
         return configured

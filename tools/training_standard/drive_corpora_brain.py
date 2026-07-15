@@ -547,6 +547,25 @@ def drive_one(script, repeats: int, project_root: Path,
             ) * repeats
             last_batch_size = 0
             last_batch_seconds = 0.0
+            max_batch_size = 0
+            max_batch_seconds = 0.0
+            batch_seconds_ema = 0.0
+            timed_batches = 0
+
+            def record_batch_timing(size: int, elapsed: float) -> None:
+                nonlocal last_batch_size, last_batch_seconds
+                nonlocal max_batch_size, max_batch_seconds
+                nonlocal batch_seconds_ema, timed_batches
+                last_batch_size = size
+                last_batch_seconds = elapsed
+                timed_batches += 1
+                if elapsed > max_batch_seconds:
+                    max_batch_size = size
+                    max_batch_seconds = elapsed
+                batch_seconds_ema = (
+                    elapsed if timed_batches == 1
+                    else 0.2 * elapsed + 0.8 * batch_seconds_ema
+                )
 
             def publish_progress() -> None:
                 if progress_path is not None:
@@ -558,6 +577,10 @@ def drive_one(script, repeats: int, project_root: Path,
                         "accepted_episodes": summary["posted_ok"],
                         "last_batch_size": last_batch_size,
                         "last_batch_seconds": round(last_batch_seconds, 4),
+                        "max_batch_size": max_batch_size,
+                        "max_batch_seconds": round(max_batch_seconds, 4),
+                        "batch_seconds_ema": round(batch_seconds_ema, 4),
+                        "timed_batches": timed_batches,
                         "updated_unix": time.time(),
                     })
 
@@ -595,8 +618,9 @@ def drive_one(script, repeats: int, project_root: Path,
                     submitted_count = len(episodes)
                     batch_started = time.monotonic()
                     ok, err = post_pretrain_batch(episodes)
-                    last_batch_size = submitted_count
-                    last_batch_seconds = time.monotonic() - batch_started
+                    record_batch_timing(
+                        submitted_count, time.monotonic() - batch_started
+                    )
                     if ok:
                         summary["posted_ok"] += len(episodes)
                         accepted_since_checkpoint += len(episodes)
@@ -631,8 +655,9 @@ def drive_one(script, repeats: int, project_root: Path,
                 submitted_count = len(episodes)
                 batch_started = time.monotonic()
                 ok, err = post_pretrain_batch(episodes)
-                last_batch_size = submitted_count
-                last_batch_seconds = time.monotonic() - batch_started
+                record_batch_timing(
+                    submitted_count, time.monotonic() - batch_started
+                )
                 if ok:
                     summary["posted_ok"] += len(episodes)
                     accepted_since_checkpoint += len(episodes)

@@ -181,6 +181,17 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             ),
             32,
         )
+        self.assertEqual(
+            responsive_batch_size(
+                32,
+                {
+                    "last_batch_size": 32, "last_batch_seconds": 6.5,
+                    "max_batch_size": 32, "max_batch_seconds": 12.0,
+                },
+                8,
+            ),
+            21,
+        )
 
 
 if __name__ == "__main__":
