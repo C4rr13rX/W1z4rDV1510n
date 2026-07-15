@@ -186,6 +186,12 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertGreaterEqual(snapshot.stat().st_nlink, 2)
             with patch(
                 "scripts.programming_experiential_generalization.request",
+                return_value={"tick": 41},
+            ):
+                resumed = begin_experience_transaction("http://brain", runtime)
+            self.assertEqual(resumed, (guard, metadata))
+            with patch(
+                "scripts.programming_experiential_generalization.request",
                 return_value={"ok": True, "path": str(snapshot), "tick": 47},
             ):
                 committed = commit_experience_transaction(
@@ -194,6 +200,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(committed["tick"], 47)
             self.assertFalse(guard.exists())
             self.assertFalse(metadata.exists())
+
+    def test_experiential_batch_uses_deployed_bulk_route(self) -> None:
+        source = (ROOT / "scripts/programming_experiential_generalization.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"/brain/pretrain_bindings"', source)
+        self.assertNotIn('"/brain/pretrain/batch"', source)
 
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(

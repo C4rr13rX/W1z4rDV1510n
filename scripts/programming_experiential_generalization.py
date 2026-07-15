@@ -151,7 +151,7 @@ def train_experience(endpoint: str, case: Case, repeats: int) -> dict:
             for pool_id, frame in sorted(frames.items())
         ]
     }
-    result = request(endpoint, "/brain/pretrain/batch", {
+    result = request(endpoint, "/brain/pretrain_bindings", {
         "episodes": [payload_episode for _ in range(repeats)],
     }, timeout=600.0)
     if not result.get("ok") or result.get("accepted") != repeats:
@@ -189,9 +189,19 @@ def begin_experience_transaction(endpoint: str, runtime: Path) -> tuple[Path, Pa
     snapshot = brain_dir / "brain.bin"
     guard = brain_dir / "brain.experience-last-good.bin"
     metadata = brain_dir / "brain.experience-last-good.json"
+    if guard.exists() and metadata.exists():
+        recorded = json.loads(metadata.read_text(encoding="utf-8"))
+        current_tick = request(endpoint, "/brain/stats", None).get("tick")
+        if current_tick == recorded.get("tick"):
+            return guard, metadata
+        raise RuntimeError(
+            "experiential transaction already mutated the brain; restore its "
+            f"guard before retrying (guard tick {recorded.get('tick')}, "
+            f"current tick {current_tick})"
+        )
     if guard.exists() or metadata.exists():
         raise RuntimeError(
-            f"unresolved experiential transaction guard exists: {guard}"
+            f"incomplete experiential transaction metadata/guard pair: {guard}"
         )
     checkpoint = request(endpoint, "/brain/checkpoint", {}, timeout=2 * 3600)
     if not checkpoint.get("ok"):
