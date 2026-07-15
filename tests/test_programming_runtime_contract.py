@@ -75,7 +75,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         environment = benchmark_tool_env()
         runtime = ROOT / "runtime" / "benchmark-tool-cache"
         for key in ("GOCACHE", "GOMODCACHE", "DOTNET_CLI_HOME", "NUGET_PACKAGES"):
-            self.assertTrue(Path(environment[key]).is_relative_to(runtime))
+                self.assertTrue(Path(environment[key]).is_relative_to(runtime))
+
+    def test_semantic_stress_fails_on_any_missing_recall(self) -> None:
+        source = (ROOT / "scripts" / "programming_semantic_stress.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('all(row["recalled"] for row in rows)', source)
 
 
 if __name__ == "__main__":

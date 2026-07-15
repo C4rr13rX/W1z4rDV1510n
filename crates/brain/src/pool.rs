@@ -274,6 +274,7 @@ impl AtomEncoding for InstructionIntentEncoding {
             "build ",
             "produce ",
             "make ",
+            "develop ",
             "code",
             "function",
             "compute",
@@ -428,6 +429,9 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("redact")
             || text.contains("mask secrets")
             || text.contains("masks secrets")
+            || text.contains("remove credentials")
+            || text.contains("removing credentials")
+            || text.contains("cleanses nested credentials")
             || ((text.contains("mask") || text.contains("masks"))
                 && text.contains("credential"))
             || (text.contains("password") && text.contains("token"))
@@ -509,12 +513,19 @@ impl AtomEncoding for InstructionIntentEncoding {
             || text.contains("default deny")
             || text.contains("denies by default")
             || (text.contains("superuser")
-                && (text.contains("operation") || text.contains("own")))
+                && (text.contains("operation")
+                    || text.contains("own")
+                    || (text.contains("restrict") && text.contains("identity"))))
+            || ((text.contains("administrator") || text.contains("admin"))
+                && (text.contains("refused") || text.contains("own")))
         {
             emit("SECURITY:AUTHORIZATION");
         }
         if text.contains("idempoten")
             || (text.contains("api") && text.contains("replay"))
+            || ((text.contains("repeating") || text.contains("resending"))
+                && (text.contains("first result") || text.contains("same response"))
+                && text.contains("order"))
             || ((text.contains("request key") || text.contains("command key"))
                 && (text.contains("retr") || text.contains("first result")))
         {
@@ -533,6 +544,8 @@ impl AtomEncoding for InstructionIntentEncoding {
             || (text.contains("correlat") && text.contains("log"))
             || (text.contains("request trac")
                 && (text.contains("event record") || text.contains("audit")))
+            || (text.contains("request identifier")
+                && (text.contains("audit") || text.contains("machine-readable")))
         {
             emit("OBSERVABILITY:CORRELATED_LOGGING");
         }
@@ -579,6 +592,15 @@ impl AtomEncoding for InstructionIntentEncoding {
             emit("PERSISTENCE:ATOMIC_TRANSACTION");
             emit("DOMAIN:ATOMIC_LEDGER_TRANSFER");
             emit("ENTERPRISE:INPUT_VALIDATION");
+        }
+        if ((text.contains("debit") && text.contains("credit"))
+            || text.contains("restores the debit"))
+            && (text.contains("neither happens")
+                || text.contains("cannot be completed")
+                || text.contains("account is invalid"))
+        {
+            emit("PERSISTENCE:ATOMIC_TRANSACTION");
+            emit("DOMAIN:ATOMIC_LEDGER_TRANSFER");
         }
         if text.contains("unspecified")
             || text.contains("unknown protocol")

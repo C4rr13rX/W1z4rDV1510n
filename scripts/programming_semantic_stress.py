@@ -39,7 +39,7 @@ def main() -> int:
     report={"summary":summary,"results":rows}
     args.output.parent.mkdir(parents=True,exist_ok=True); args.output.write_text(json.dumps(report,indent=2),encoding="utf-8")
     print(json.dumps(summary))
-    return 0
+    return 0 if all(row["recalled"] for row in rows) else 1
 
 
 if __name__=="__main__": raise SystemExit(main())

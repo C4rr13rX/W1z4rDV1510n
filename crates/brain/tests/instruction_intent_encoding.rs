@@ -617,6 +617,53 @@ fn complete_project_intent_is_distinct_from_an_internal_fragment() {
 }
 
 #[test]
+fn semantic_stress_phrases_preserve_enterprise_behaviors() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let cases: &[(&[u8], &[&str])] = &[
+        (
+            b"Build a Python project where operations are refused unless the caller is an administrator, except people may view records they own.",
+            &["intent:LANGUAGE:PYTHON", "intent:SECURITY:AUTHORIZATION"],
+        ),
+        (
+            b"Develop Python rules that let superusers change any object but restrict normal accounts to inspecting objects tied to their identity.",
+            &["intent:LANGUAGE:PYTHON", "intent:SECURITY:AUTHORIZATION"],
+        ),
+        (
+            b"Build a Python order project where repeating the same client command must return the first result without creating another order.",
+            &["intent:LANGUAGE:PYTHON", "intent:API:IDEMPOTENT_COMMAND"],
+        ),
+        (
+            b"Develop Python order handling so resending one request yields the same response and only one stored order.",
+            &["intent:LANGUAGE:PYTHON", "intent:API:IDEMPOTENT_COMMAND"],
+        ),
+        (
+            b"Build Python balance-movement code where debit and credit either both happen or neither happens when an account is invalid.",
+            &["intent:LANGUAGE:PYTHON", "intent:PERSISTENCE:ATOMIC_TRANSACTION"],
+        ),
+        (
+            b"Develop Python account movement that restores the debit whenever the credit cannot be completed.",
+            &["intent:LANGUAGE:PYTHON", "intent:PERSISTENCE:ATOMIC_TRANSACTION"],
+        ),
+        (
+            b"Build a Python module emitting machine-readable audit records carrying a request identifier while removing credentials from nested data.",
+            &["intent:LANGUAGE:PYTHON", "intent:OBSERVABILITY:CORRELATED_LOGGING", "intent:ENTERPRISE:SECRET_REDACTION"],
+        ),
+        (
+            b"Develop Python audit entries with request tracking that recursively remove passwords and tokens.",
+            &["intent:LANGUAGE:PYTHON", "intent:OBSERVABILITY:CORRELATED_LOGGING", "intent:ENTERPRISE:SECRET_REDACTION"],
+        ),
+    ];
+    for (prompt, expected) in cases {
+        let labels = encoding.atomize(prompt);
+        for label in *expected {
+            assert!(labels.iter().any(|actual| actual == label), "{label} missing from {labels:?}");
+        }
+    }
+}
+
+#[test]
 fn internal_intent_frames_round_trip_sparse_semantic_atoms() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
