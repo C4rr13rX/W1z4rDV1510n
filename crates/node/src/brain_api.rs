@@ -1190,6 +1190,40 @@ fn is_complete_file_manifest(bytes: &[u8]) -> bool {
         })
 }
 
+fn is_grounded_code_fragment(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(fragment) = value.get("code_fragment").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    let safe_file = fragment
+        .get("file")
+        .and_then(|v| v.as_str())
+        .is_some_and(|file| {
+            !file.is_empty()
+                && !file.starts_with('/')
+                && !file.starts_with('\\')
+                && !file.contains("..")
+                && !file.contains(':')
+        });
+    let role = fragment
+        .get("role")
+        .and_then(|v| v.as_str())
+        .is_some_and(|role| !role.is_empty());
+    let source = fragment
+        .get("source")
+        .and_then(|v| v.as_str())
+        .is_some_and(|source| !source.is_empty());
+    let dependencies = fragment
+        .get("after")
+        .and_then(|v| v.as_array())
+        .is_some_and(|items| items.iter().all(|item| {
+            item.as_str().is_some_and(|dependency| !dependency.is_empty())
+        }));
+    safe_file && role && source && dependencies
+}
+
 /// Recover independently learned whole-project components from small exact
 /// feature subsets inside a richer query. This is deliberately restricted to
 /// complete safe manifests; repair fragments continue through the
@@ -1807,7 +1841,9 @@ async fn h_brain_chat(
                 &chat_query_pools,
                 &turn_pools,
             ) {
-                if is_complete_file_manifest(&candidate) && !feature_candidates.contains(&candidate)
+                if (is_complete_file_manifest(&candidate)
+                    || is_grounded_code_fragment(&candidate))
+                    && !feature_candidates.contains(&candidate)
                 {
                     feature_candidates.push(candidate);
                 }
@@ -2884,6 +2920,15 @@ mod tests {
         ));
         assert!(!is_complete_file_manifest(
             br#"{"files":{"../escape.py":"VALUE = 1\n"}}"#
+        ));
+        assert!(is_grounded_code_fragment(
+            br#"{"code_fragment":{"file":"service.py","role":"import","after":[],"source":"from domain import VALUE\n"}}"#
+        ));
+        assert!(!is_grounded_code_fragment(
+            br#"{"code_fragment":{"file":"../escape.py","role":"import","after":[],"source":"bad"}}"#
+        ));
+        assert!(!is_grounded_code_fragment(
+            br#"{"code_fragment":{"file":"service.py","role":"","after":[],"source":"bad"}}"#
         ));
     }
 
