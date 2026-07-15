@@ -179,7 +179,8 @@ def encoded_fragment(fragment: Fragment) -> str:
 
 def training_rows() -> list[tuple[str, str]]:
     return [
-        (f"Implement {fragment.phrase} as a reusable grounded fragment.",
+        (f"Implement {fragment.phrase} for an inventory fulfillment domain "
+         "as a reusable grounded fragment.",
          encoded_fragment(fragment))
         for fragment in FRAGMENTS
     ]

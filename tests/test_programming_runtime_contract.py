@@ -288,9 +288,10 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertTrue(
                 execute_multidomain_holdout(source, class_name, method_name)[0]
             )
-        responses = [
-            response for _, response in parameterized_fulfillment_training_rows()
-        ]
+        motif_rows = parameterized_fulfillment_training_rows()
+        self.assertTrue(all("inventory fulfillment domain" in prompt
+                            for prompt, _ in motif_rows))
+        responses = [response for _, response in motif_rows]
         self.assertTrue(all("class ResilientFulfillmentService" not in response
                             for response in responses))
         self.assertTrue(all("class DurableWarehouseEngine" not in response
