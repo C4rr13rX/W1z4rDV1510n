@@ -3071,6 +3071,24 @@ mod tests {
             "Create a Python class named 7Invalid.",
         )
         .is_none());
+        let unknown_kind = vec![
+            br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"unbounded_text"},"source":"class {{CLASS_NAME}}:\n"}}"#.to_vec(),
+            candidates[1].clone(),
+        ];
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &unknown_kind,
+            "Create a Python class named SafeName with a method named ready.",
+        )
+        .is_none());
+        let unresolved = vec![
+            br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"python_class_named"},"source":"class {{CLASS_NAME}}:\n    value = '{{UNDECLARED}}'\n"}}"#.to_vec(),
+            candidates[1].clone(),
+        ];
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &unresolved,
+            "Create a Python class named SafeName with a method named ready.",
+        )
+        .is_none());
     }
 
     #[test]
