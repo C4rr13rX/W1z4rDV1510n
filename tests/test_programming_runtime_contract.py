@@ -46,6 +46,11 @@ from scripts.programming_multidomain_synthesis import (
     retain_failed_gate_report,
     training_rows as multidomain_training_rows,
 )
+from scripts.programming_multidomain_holdout import (
+    CLASS_NAME as HOLDOUT_CLASS_NAME,
+    DOMAIN_REQUIREMENTS as HOLDOUT_REQUIREMENTS,
+    holdout_prompt,
+)
 from scripts.train_programming_brain import (
     SEED_STAGES,
     guard_seed_stage,
@@ -229,6 +234,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             premise.source for premise in MULTIDOMAIN_HEADER + MULTIDOMAIN_PREMISES
         )
         self.assertTrue(execute_multidomain(complete)[0])
+
         self.assertFalse(execute_no_retry_contradiction(complete)[0])
         no_retry = "".join(
             premise.source for premise in MULTIDOMAIN_HEADER
@@ -245,6 +251,18 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("active_training_pids", source)
         self.assertIn('"concurrent_mutation_detected"', source)
+
+    def test_multidomain_holdout_changes_domain_and_is_causally_ablatable(self) -> None:
+        self.assertEqual(HOLDOUT_CLASS_NAME, "ResilientFulfillmentService")
+        self.assertEqual(set(HOLDOUT_REQUIREMENTS), {
+            premise.name for premise in DISCIPLINES
+        })
+        full = holdout_prompt()
+        self.assertIn(HOLDOUT_CLASS_NAME, full)
+        self.assertNotIn("AdaptiveCoordinator", full)
+        for name, requirement in HOLDOUT_REQUIREMENTS.items():
+            self.assertIn(requirement, full)
+            self.assertNotIn(requirement, holdout_prompt(name))
 
     def test_multidomain_failed_gate_keeps_authoritative_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
