@@ -21,6 +21,7 @@ from programming_domain_transfer_holdout import query as query_domain_transfer, 
 from programming_multidomain_holdout import DOMAIN_REQUIREMENTS, holdout_prompt, query
 from programming_multidomain_synthesis import train as train_noise
 from programming_parameterized_fulfillment import train as train_target, training_rows
+from programming_state_contract_holdout import query as query_third_state_contract
 
 
 VARIANTS = (
@@ -87,6 +88,7 @@ def run_variant(name: str, schedule: tuple[tuple[str, int], ...], port: int,
             for name in DOMAIN_REQUIREMENTS
         }
         domain_transfer = query_domain_transfer(endpoint, transfer_prompt())
+        third_state_contract = query_third_state_contract(endpoint)
         probes = []
         for prompt, _ in training_rows():
             probe = request(endpoint, "/brain/chat", {"text": prompt + " Please reuse it."}, timeout=20)
@@ -113,6 +115,7 @@ def run_variant(name: str, schedule: tuple[tuple[str, int], ...], port: int,
             "fulfillment_cases": fulfillment_cases,
             "ablations": ablations,
             "domain_transfer": domain_transfer,
+            "third_state_contract": third_state_contract,
             "files": sorted(files),
             "reply_chars": len(reply),
         }

@@ -51,11 +51,22 @@ def holdout_prompt(excluded: str | None = None, class_name: str = CLASS_NAME,
         requirements = [value.replace(", and expected_version", "") for value in requirements]
     if excluded == "atomic_transaction":
         requirements = [value.replace("atomically append", "append") for value in requirements]
+    contract = [
+        "mapping resource field inventory with default item widget",
+        "item field sku",
+        "amount field quantity",
+        "result field allocation",
+        "event kind inventory-allocated",
+        "log request as order",
+    ]
+    if excluded != "authorization":
+        contract.append("authorized role warehouse")
     return (
         f"Create a new executable Python class named {class_name}. It manages "
         f"inventory initialized with 10 widgets through an async method named {method_name} and must "
         + "; ".join(requirements)
-        + ". Return the complete implementation, not fragments or pseudocode."
+        + ". Use " + ", ".join(contract) + ". Return the complete "
+          "implementation, not fragments or pseudocode."
     )
 
 

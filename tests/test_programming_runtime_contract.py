@@ -56,6 +56,7 @@ from scripts.programming_multidomain_holdout import (
 )
 from scripts.programming_parameterized_fulfillment import (
     FRAGMENTS as PARAMETERIZED_FULFILLMENT_FRAGMENTS,
+    render_fulfillment_fixture,
     training_rows as parameterized_fulfillment_training_rows,
 )
 from scripts.programming_domain_transfer_holdout import (
@@ -277,22 +278,20 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertNotIn(requirement, holdout_prompt(name))
 
     def test_parameterized_fulfillment_motif_executes_unseen_symbols(self) -> None:
-        template = "".join(
-            fragment.source for fragment in PARAMETERIZED_FULFILLMENT_FRAGMENTS
-        )
         for class_name, method_name in [
             ("ResilientFulfillmentService", "fulfill"),
             ("DurableWarehouseEngine", "allocate_order"),
         ]:
-            source = template.replace("{{CLASS_NAME}}", class_name).replace(
-                "{{METHOD_NAME}}", method_name
-            )
+            source = render_fulfillment_fixture(class_name, method_name)
             self.assertTrue(
                 execute_multidomain_holdout(source, class_name, method_name)[0]
             )
         motif_rows = parameterized_fulfillment_training_rows()
+        self.assertEqual(len(motif_rows), len(PARAMETERIZED_FULFILLMENT_FRAGMENTS) * 2)
         self.assertTrue(all("inventory fulfillment domain" in prompt
-                            for prompt, _ in motif_rows))
+                            for prompt, _ in motif_rows[:len(PARAMETERIZED_FULFILLMENT_FRAGMENTS)]))
+        self.assertTrue(all("inventory fulfillment domain" not in prompt
+                            for prompt, _ in motif_rows[len(PARAMETERIZED_FULFILLMENT_FRAGMENTS):]))
         responses = [response for _, response in motif_rows]
         self.assertTrue(all("class ResilientFulfillmentService" not in response
                             for response in responses))

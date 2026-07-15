@@ -1506,6 +1506,161 @@ fn requested_python_method(prompt: &str) -> Option<&str> {
     requested_python_identifier(prompt, &["method named ", "method called "])
 }
 
+fn requested_ascii_identifier_after<'a>(prompt: &'a str, cue: &str) -> Option<&'a str> {
+    let lower = prompt.to_ascii_lowercase();
+    let start = lower.find(cue)? + cue.len();
+    let tail = &prompt[start..];
+    let end = tail
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .unwrap_or(tail.len());
+    let value = &tail[..end];
+    (!value.is_empty() && (value.as_bytes()[0].is_ascii_alphabetic() || value.starts_with('_')))
+        .then_some(value)
+}
+
+fn requested_authorized_role(prompt: &str) -> Option<&str> {
+    requested_ascii_identifier_after(prompt, "authorized role ")
+        .or_else(|| requested_ascii_identifier_after(prompt, "except for the "))
+}
+
+fn requested_resource_field(prompt: &str) -> Option<&str> {
+    if let Some(value) = requested_ascii_identifier_after(prompt, "resource field ") {
+        return Some(value);
+    }
+    let text = prompt.to_ascii_lowercase();
+    if text.contains("inventory") {
+        Some("inventory")
+    } else if text.contains("capacity") {
+        Some("capacity")
+    } else {
+        None
+    }
+}
+
+fn requested_item_field(prompt: &str) -> Option<&str> {
+    if let Some(value) = requested_ascii_identifier_after(prompt, "item field ") {
+        return Some(value);
+    }
+    let text = prompt.to_ascii_lowercase();
+    if text.contains("sku") {
+        Some("sku")
+    } else if text.contains("job") {
+        Some("job")
+    } else {
+        None
+    }
+}
+
+fn requested_amount_field(prompt: &str) -> Option<&str> {
+    if let Some(value) = requested_ascii_identifier_after(prompt, "amount field ") {
+        return Some(value);
+    }
+    let text = prompt.to_ascii_lowercase();
+    if text.contains("quantity") {
+        Some("quantity")
+    } else if text.contains("slots") {
+        Some("slots")
+    } else {
+        None
+    }
+}
+
+fn requested_resource_initializer(prompt: &str) -> Option<String> {
+    if prompt
+        .to_ascii_lowercase()
+        .contains("mapping resource field")
+    {
+        let item = requested_ascii_identifier_after(prompt, "default item ")?;
+        return Some(format!("{{'{item}': 10}}"));
+    }
+    if prompt
+        .to_ascii_lowercase()
+        .contains("scalar resource field")
+    {
+        return Some("10".to_string());
+    }
+    match requested_resource_field(prompt)? {
+        "inventory" => Some("{'widget': 10}".to_string()),
+        "capacity" => Some("10".to_string()),
+        _ => None,
+    }
+}
+
+fn requested_resource_available(prompt: &str) -> Option<String> {
+    let field = requested_resource_field(prompt)?;
+    if prompt
+        .to_ascii_lowercase()
+        .contains("mapping resource field")
+        || field == "inventory"
+    {
+        Some(format!("self.{field}.get(item, 0)"))
+    } else {
+        Some(format!("self.{field}"))
+    }
+}
+
+fn requested_resource_decrement(prompt: &str) -> Option<String> {
+    let field = requested_resource_field(prompt)?;
+    if prompt
+        .to_ascii_lowercase()
+        .contains("mapping resource field")
+        || field == "inventory"
+    {
+        Some(format!("self.{field}[item] -= amount"))
+    } else {
+        Some(format!("self.{field} -= amount"))
+    }
+}
+
+fn requested_result_key(prompt: &str) -> Option<&str> {
+    if let Some(value) = requested_ascii_identifier_after(prompt, "result field ") {
+        return Some(value);
+    }
+    let text = prompt.to_ascii_lowercase();
+    if text.contains("allocation") || text.contains("fulfillment") {
+        Some("allocation")
+    } else if text.contains("dispatch") || text.contains("scheduler") {
+        Some("worker")
+    } else {
+        None
+    }
+}
+
+fn requested_event_kind(prompt: &str) -> Option<&str> {
+    if let Some(start) = prompt.to_ascii_lowercase().find("event kind ") {
+        let tail = &prompt[start + "event kind ".len()..];
+        let end = tail
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+            .unwrap_or(tail.len());
+        let value = &tail[..end];
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    let text = prompt.to_ascii_lowercase();
+    if text.contains("inventory-allocated") {
+        Some("inventory-allocated")
+    } else if text.contains("job-scheduled") {
+        Some("job-scheduled")
+    } else {
+        None
+    }
+}
+
+fn requested_log_request_key(prompt: &str) -> Option<&str> {
+    if let Some(value) = requested_ascii_identifier_after(prompt, "log request as ") {
+        return Some(value);
+    }
+    let text = prompt.to_ascii_lowercase();
+    if text.contains("order containing") || text.contains("order key") {
+        Some("order")
+    } else if text.contains("command") || text.contains("job") {
+        Some("command")
+    } else {
+        None
+    }
+}
+
 fn render_grounded_fragment_source(
     fragment: &serde_json::Map<String, serde_json::Value>,
     source: &str,
@@ -1522,11 +1677,21 @@ fn render_grounded_fragment_source(
             return None;
         }
         let value = match kind.as_str()? {
-            "python_class_named" => requested_python_class(prompt)?,
-            "python_method_named" => requested_python_method(prompt)?,
+            "python_class_named" => requested_python_class(prompt)?.to_string(),
+            "python_method_named" => requested_python_method(prompt)?.to_string(),
+            "python_authorized_role" => requested_authorized_role(prompt)?.to_string(),
+            "python_resource_field" => requested_resource_field(prompt)?.to_string(),
+            "python_item_field" => requested_item_field(prompt)?.to_string(),
+            "python_amount_field" => requested_amount_field(prompt)?.to_string(),
+            "python_resource_initializer" => requested_resource_initializer(prompt)?,
+            "python_resource_available" => requested_resource_available(prompt)?,
+            "python_resource_decrement" => requested_resource_decrement(prompt)?,
+            "python_result_key" => requested_result_key(prompt)?.to_string(),
+            "python_event_kind" => requested_event_kind(prompt)?.to_string(),
+            "python_log_request_key" => requested_log_request_key(prompt)?.to_string(),
             _ => return None,
         };
-        rendered = rendered.replace(&placeholder, value);
+        rendered = rendered.replace(&placeholder, &value);
     }
     (!rendered.contains("{{")).then_some(rendered)
 }
@@ -3163,6 +3328,36 @@ mod tests {
         assert!(merge_grounded_code_fragments_for_prompt(
             &unresolved,
             "Create a Python class named SafeName with a method named ready.",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn grounded_state_contract_parameters_bind_only_controlled_code_shapes() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"service.py","role":"root","after":[],"parameters":{"CLASS":"python_class_named","METHOD":"python_method_named","STATE":"python_resource_field","INIT":"python_resource_initializer","ITEM":"python_item_field","AMOUNT":"python_amount_field","ROLE":"python_authorized_role"},"source":"class {{CLASS}}:\n    def __init__(self): self.{{STATE}} = {{INIT}}\n    async def {{METHOD}}(self, request):\n        required = {'{{ITEM}}', '{{AMOUNT}}'}\n        if request['actor'] != '{{ROLE}}': raise PermissionError\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"service.py","role":"body","after":["root"],"parameters":{"AVAILABLE":"python_resource_available","DECREMENT":"python_resource_decrement","RESULT":"python_result_key","EVENT":"python_event_kind","LOG":"python_log_request_key"},"source":"        item, amount = request['tenant'], request['units']\n        if {{AVAILABLE}} < amount: raise ValueError\n        {{DECREMENT}}\n        return {'{{RESULT}}': 'ok', 'event': '{{EVENT}}', 'log_key': '{{LOG}}'}\n"}}"#.to_vec(),
+        ];
+        let prompt = "Create a Python class named QuotaBroker with a method named reserve. Use scalar resource field credits, item field tenant, amount field units, authorized role auditor, result field receipt, event kind quota-reserved, and log request as command.";
+        let assembled = merge_grounded_code_fragments_for_prompt(&candidates, prompt).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        let source = value["files"]["service.py"].as_str().unwrap();
+        for expected in [
+            "class QuotaBroker:",
+            "self.credits = 10",
+            "async def reserve",
+            "request['actor'] != 'auditor'",
+            "self.credits < amount",
+            "self.credits -= amount",
+            "'receipt': 'ok'",
+            "'event': 'quota-reserved'",
+            "'log_key': 'command'",
+        ] {
+            assert!(source.contains(expected), "missing {expected}: {source}");
+        }
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &candidates,
+            "Create a Python class named 9Bad with a method named reserve; scalar resource field credits.",
         )
         .is_none());
     }

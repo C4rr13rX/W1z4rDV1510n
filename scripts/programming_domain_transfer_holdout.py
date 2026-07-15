@@ -49,7 +49,10 @@ def transfer_prompt(excluded: str | None = None) -> str:
         f"Create a complete executable Python class named {CLASS_NAME} with an async "
         f"method named {METHOD_NAME}. It starts with capacity 10 and must "
         + "; ".join(requirements)
-        + ". Return complete implementation source, not fragments or pseudocode."
+        + ". Use scalar resource field capacity, item field job, amount field slots, "
+          "authorized role operator, result field worker, event kind job-scheduled, "
+          "and log request as command. Return complete implementation source, not "
+          "fragments or pseudocode."
     )
 
 

@@ -44,23 +44,28 @@ FRAGMENTS = (
         "import asyncio\nimport copy\nimport json\n\n"
         "class {{CLASS_NAME}}:\n"
         "    def __init__(self):\n"
-        "        self.inventory = {'widget': 10}\n"
+        "        self.{{STATE_FIELD}} = {{STATE_INITIALIZER}}\n"
         "        self.version = 1\n        self.schema_version = 1\n"
         "        self.idempotency = {}\n        self.seen = set()\n"
         "        self.outbox = []\n        self.logs = []\n"
         "        self.failures = 0\n        self.circuit_open = False\n\n"
         "    def _validate(self, order):\n"
-        "        required = {'key','actor','sku','quantity','expected_version'}\n"
-        "        if not required <= set(order) or order['quantity'] <= 0:\n"
+        "        required = {'key','actor','{{ITEM_FIELD}}','{{AMOUNT_FIELD}}','expected_version'}\n"
+        "        if not required <= set(order) or order['{{AMOUNT_FIELD}}'] <= 0:\n"
         "            raise ValueError('invalid order')\n\n",
-        (("CLASS_NAME", "python_class_named"),),
+        (("CLASS_NAME", "python_class_named"),
+         ("STATE_FIELD", "python_resource_field"),
+         ("STATE_INITIALIZER", "python_resource_initializer"),
+         ("ITEM_FIELD", "python_item_field"),
+         ("AMOUNT_FIELD", "python_amount_field")),
     ),
     Fragment(
         "authorization", "default-deny warehouse-role authorization in Python",
         "authorization", ("validation_structure",),
         "    def _authorize(self, order):\n"
-        "        if order['actor'] != 'warehouse':\n"
+        "        if order['actor'] != '{{AUTHORIZED_ROLE}}':\n"
         "            raise PermissionError('denied')\n\n",
+        (("AUTHORIZED_ROLE", "python_authorized_role"),),
     ),
     Fragment(
         "migration", "forward-only Python schema migration",
@@ -124,9 +129,11 @@ FRAGMENTS = (
     Fragment(
         "deduplication", "duplicate Python sku and quantity work rejection",
         "dedup", ("version",),
-        "        fingerprint = (order['sku'], order['quantity'])\n"
+        "        fingerprint = (order['{{ITEM_FIELD}}'], order['{{AMOUNT_FIELD}}'])\n"
         "        if fingerprint in self.seen:\n"
         "            raise RuntimeError('duplicate work')\n",
+        (("ITEM_FIELD", "python_item_field"),
+         ("AMOUNT_FIELD", "python_amount_field")),
     ),
     Fragment(
         "circuit_use", "Python circuit breaker enforcement around async retry",
@@ -142,25 +149,33 @@ FRAGMENTS = (
     Fragment(
         "transaction", "restore Python inventory completely when fulfillment cannot commit",
         "transaction", ("circuit_use",),
-        "        before = copy.deepcopy(self.inventory)\n"
+        "        before = copy.deepcopy(self.{{STATE_FIELD}})\n"
         "        try:\n"
-        "            sku, quantity = order['sku'], order['quantity']\n"
-        "            if self.inventory.get(sku, 0) < quantity:\n"
+        "            item, amount = order['{{ITEM_FIELD}}'], order['{{AMOUNT_FIELD}}']\n"
+        "            if {{STATE_AVAILABLE}} < amount:\n"
         "                raise ValueError('insufficient inventory')\n"
-        "            self.inventory[sku] -= quantity\n"
+        "            {{STATE_DECREMENT}}\n"
         "        except Exception:\n"
-        "            self.inventory = before\n            raise\n",
+        "            self.{{STATE_FIELD}} = before\n            raise\n",
+        (("STATE_FIELD", "python_resource_field"),
+         ("ITEM_FIELD", "python_item_field"),
+         ("AMOUNT_FIELD", "python_amount_field"),
+         ("STATE_AVAILABLE", "python_resource_available"),
+         ("STATE_DECREMENT", "python_resource_decrement")),
     ),
     Fragment(
         "outbox_commit", "a transactional Python inventory-allocated outbox event",
         "outbox_commit", ("transaction",),
-        "        event = {'kind':'inventory-allocated','key':key,'allocation':allocation}\n"
+        "        event = {'kind':'{{EVENT_KIND}}','key':key,'{{RESULT_KEY}}':allocation}\n"
         "        self.outbox.append(event)\n"
         "        self.seen.add(fingerprint)\n        self.version += 1\n"
-        "        response = {'ok': True, 'allocation': allocation, 'version': self.version}\n"
+        "        response = {'ok': True, '{{RESULT_KEY}}': allocation, 'version': self.version}\n"
         "        self.idempotency[key] = response\n"
-        "        self._log('fulfilled', key, order=order, response=response)\n"
+        "        self._log('fulfilled', key, {{LOG_REQUEST_KEY}}=order, response=response)\n"
         "        return response\n",
+        (("EVENT_KIND", "python_event_kind"),
+         ("RESULT_KEY", "python_result_key"),
+         ("LOG_REQUEST_KEY", "python_log_request_key")),
     ),
 )
 
@@ -180,6 +195,22 @@ REQUIRED_FEATURE = {
     "outbox_commit": "INTEGRATION:TRANSACTIONAL_OUTBOX",
 }
 
+ABSTRACT_PHRASE = {
+    "validation_structure": "strict input validation in a Python service class",
+    "authorization": "default-deny role authorization in Python",
+    "migration": "forward-only Python schema migration",
+    "redaction": "recursive Python token and password secret redaction",
+    "logging": "correlation-aware structured JSON audit logging in Python",
+    "circuit": "a resettable Python circuit breaker that opens after two failures",
+    "retry": "bounded Python async retry for transient operation failure",
+    "idempotency": "idempotent Python request-key replay in an async method",
+    "optimistic_concurrency": "optimistic Python concurrency with expected state version",
+    "deduplication": "duplicate-work deduplication in Python",
+    "circuit_use": "Python circuit breaker enforcement around async retry",
+    "transaction": "restore Python resource state completely when an operation cannot commit",
+    "outbox_commit": "a transactional Python outbox event",
+}
+
 
 def encoded_fragment(fragment: Fragment) -> str:
     payload: dict[str, object] = {
@@ -193,13 +224,43 @@ def encoded_fragment(fragment: Fragment) -> str:
     return json.dumps({"code_fragment": payload}, sort_keys=True, separators=(",", ":"))
 
 
+def render_fulfillment_fixture(class_name: str, method_name: str) -> str:
+    """Render the deterministic inventory contract for local execution tests."""
+    source = "".join(fragment.source for fragment in FRAGMENTS)
+    values = {
+        "CLASS_NAME": class_name,
+        "METHOD_NAME": method_name,
+        "STATE_FIELD": "inventory",
+        "STATE_INITIALIZER": "{'widget': 10}",
+        "ITEM_FIELD": "sku",
+        "AMOUNT_FIELD": "quantity",
+        "AUTHORIZED_ROLE": "warehouse",
+        "STATE_AVAILABLE": "self.inventory.get(item, 0)",
+        "STATE_DECREMENT": "self.inventory[item] -= amount",
+        "EVENT_KIND": "inventory-allocated",
+        "RESULT_KEY": "allocation",
+        "LOG_REQUEST_KEY": "order",
+    }
+    for name, value in values.items():
+        source = source.replace("{{" + name + "}}", value)
+    if "{{" in source:
+        raise RuntimeError("unresolved fixture parameter")
+    return source
+
+
 def training_rows() -> list[tuple[str, str]]:
-    return [
+    domain_rows = [
         (f"Implement {fragment.phrase} for an inventory fulfillment domain "
          "as a reusable grounded fragment.",
          encoded_fragment(fragment))
         for fragment in FRAGMENTS
     ]
+    abstract_rows = [
+        (f"Implement {ABSTRACT_PHRASE[fragment.name]} as a reusable grounded fragment.",
+         encoded_fragment(fragment))
+        for fragment in FRAGMENTS
+    ]
+    return domain_rows + abstract_rows
 
 
 def train(endpoint: str, repeats: int) -> dict:
@@ -212,14 +273,17 @@ def train(endpoint: str, repeats: int) -> dict:
     result = request(endpoint, "/brain/pretrain_bindings", {"episodes": episodes}, timeout=1200)
     if not result.get("ok") or result.get("accepted") != len(episodes):
         raise RuntimeError(f"parameterized motif training rejected: {result}")
-    for fragment, (prompt, _) in zip(FRAGMENTS, rows, strict=True):
-        probe = request(endpoint, "/brain/chat", {"text": prompt + " Verify its intent."}, timeout=60)
-        labels = (probe.get("intent_diagnostics") or {}).get("labels") or []
-        required = REQUIRED_FEATURE[fragment.name]
-        if not any(label.endswith(":" + required) for label in labels):
-            raise RuntimeError(
-                f"training prompt for {fragment.name!r} did not fire {required}: {labels}"
-            )
+    width = len(FRAGMENTS)
+    for family, family_rows in (("domain", rows[:width]), ("abstract", rows[width:])):
+        for fragment, (prompt, _) in zip(FRAGMENTS, family_rows, strict=True):
+            probe = request(endpoint, "/brain/chat", {"text": prompt + " Verify its intent."}, timeout=60)
+            labels = (probe.get("intent_diagnostics") or {}).get("labels") or []
+            required = REQUIRED_FEATURE[fragment.name]
+            if not any(label.endswith(":" + required) for label in labels):
+                raise RuntimeError(
+                    f"{family} training prompt for {fragment.name!r} did not fire "
+                    f"{required}: {labels}"
+                )
     return result
 
 
