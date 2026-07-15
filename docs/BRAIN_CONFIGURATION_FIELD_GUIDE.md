@@ -134,6 +134,8 @@ GA fitness is meaningful only when all essential gates are components of the obj
 6. Reject or revise any training/configuration change that improves the new domain by materially damaging protected knowledge.
 7. Checkpoint only after the new block and all protected gates pass. Record the identity, snapshot, curriculum position, and benchmark outputs together.
 
+For very large corpora, a “block” must be bounded rather than an entire corpus phase. The current programming curriculum uses 4,096-row durable chunks. Each chunk ends in a snapshot, then runs distributed corpus recall (including the first and newest trained rows), complete foundational retention, and the strict enterprise battery before the next chunk is permitted. A checkpoint without a retention gate proves durability, not non-interference.
+
 “Pre-training” in Wizard Vision should mean accelerated construction of complete atom-grounded episodes and their derived simultaneous features. It must not mean replacing character/byte learning with an external token vocabulary.
 
 ## Procedure for configuring a new domain brain
@@ -163,6 +165,7 @@ GA fitness is meaningful only when all essential gates are components of the obj
 | 2026-07-15 | A single ranked complete manifest must outrank raw similarity for one-language requests. An initially green semantic-stress diagnostic was discovered to return success despite missing recalls; after making that gate strict and sweeping equivalent coding verbs and enterprise behavior phrases, all `11/11` suites genuinely passed with no tick mutation. | Proven live | `runtime/benchmarks/enterprise-retention-strict-semantic.json` |
 | 2026-07-15 | Post-correction foundation retention remained toddler `32/32`, K-12 `16/16`, OOV `3/3`, Python execution `10/10`, and all debug transfer gates perfect. | Proven live | `runtime/benchmarks/integrated-retention-after-ranked-manifest.json` |
 | 2026-07-15 | Semantic feature coverage must be tested across equivalent action verbs and relational phrases, not only canonical keywords. Adding “develop” and behavior-equivalent authorization, replay, rollback, correlation, and redaction evidence raised strict semantic stress from trained `2/4`, held-out `1/4` to `4/4` and `4/4` without training held-out answers. | Proven live | `runtime/benchmarks/semantic-stress-strict-after-feature-sweep.json` |
+| 2026-07-15 | Multi-million-row phases require bounded train/checkpoint/gate cycles. The supervisor now limits direct pretraining to 4,096 durable rows, then blocks continuation on distributed corpus recall plus complete foundational and strict enterprise retention. | Operationally enforced | `scripts/programming_curriculum_supervisor.py` |
 
 ## Maintenance rule
 
