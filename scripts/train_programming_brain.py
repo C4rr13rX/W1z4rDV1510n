@@ -258,7 +258,7 @@ def main() -> int:
     parser.add_argument("--corpus-root", type=Path,
                         default=Path(r"D:\w1z4rdv1510n-data\training"))
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--checkpoint-rows", type=int, default=4096)
+    parser.add_argument("--checkpoint-rows", type=int, default=16384)
     parser.add_argument("--gate-rows", type=int, default=16384)
     parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)
     args = parser.parse_args()

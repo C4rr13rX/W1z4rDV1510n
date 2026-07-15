@@ -47,7 +47,7 @@ The corpus supervisor then trains:
 8. four-way scientific Jupyter paraphrases;
 9. partial-context scientific Jupyter examples.
 
-Corpus processing is resumable, WAL-durable, snapshotted every 4,096 rows, and retention-gated in 16,384-row blocks. Each block keeps a last-known-good snapshot and must pass distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and non-mutation checks before the next block starts. Batch size adapts downward when observed brain-lock time exceeds the configured ceiling.
+Corpus processing is resumable, WAL-durable, snapshotted and retention-gated in 16,384-row blocks. Every small batch is flushed to the WAL before acknowledgement, so a full multi-gigabyte snapshot need not be rewritten four times inside one gate. Each block keeps a last-known-good snapshot and must pass distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and non-mutation checks before the next block starts. Batch size adapts downward when observed brain-lock time exceeds the configured ceiling.
 
 ## Authoritative artifacts
 

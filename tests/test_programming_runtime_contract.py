@@ -140,6 +140,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn("run_midphase_gate(args, phase, runtime, ram_after)", source)
         self.assertIn('"--no-checkpoint"', source)
         self.assertIn('"--gate-rows", type=int, default=16384', source)
+        self.assertIn('"--checkpoint-rows", type=int, default=16384', source)
 
     def test_dedicated_corpus_supervisor_preserves_live_inference_windows(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
