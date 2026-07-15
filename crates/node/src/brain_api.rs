@@ -344,8 +344,7 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     }
     match w1z4rd_brain::MmapWalStore::open(data_dir) {
         Ok(wal) => {
-            let store: std::sync::Arc<dyn w1z4rd_brain::Store> =
-                std::sync::Arc::new(wal);
+            let store: std::sync::Arc<dyn w1z4rd_brain::Store> = std::sync::Arc::new(wal);
             brain.set_store(store);
             tracing::info!(
                 wal = %data_dir.join("brain.wal").display(),
@@ -1085,7 +1084,10 @@ async fn h_pretrain_binding(
         let Some(pool_id) = item.get("pool_id").and_then(|value| value.as_u64()) else {
             return Json(json!({"error": "each frame requires pool_id"}));
         };
-        let encoded = item.get("frame").and_then(|value| value.as_str()).unwrap_or("");
+        let encoded = item
+            .get("frame")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let frame = match b64_url_decode(encoded) {
             Ok(frame) => frame,
             Err(error) => return Json(json!({"error": format!("bad frame base64: {}", error)})),
@@ -1130,7 +1132,10 @@ async fn h_pretrain_bindings(
             let Some(pool_id) = item.get("pool_id").and_then(|value| value.as_u64()) else {
                 return Json(json!({"error": "each frame requires pool_id"}));
             };
-            let encoded = item.get("frame").and_then(|value| value.as_str()).unwrap_or("");
+            let encoded = item
+                .get("frame")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             let frame = match b64_url_decode(encoded) {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -1167,7 +1172,12 @@ async fn h_pretrain_bindings(
 fn is_complete_file_manifest(bytes: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()
-        .and_then(|value| value.get("files").and_then(|files| files.as_object()).cloned())
+        .and_then(|value| {
+            value
+                .get("files")
+                .and_then(|files| files.as_object())
+                .cloned()
+        })
         .is_some_and(|files| {
             !files.is_empty()
                 && files.iter().all(|(name, content)| {
@@ -1245,6 +1255,58 @@ fn exact_manifest_subset_candidates(
     output
 }
 
+/// Produce only language+behavior conjunctions for component recovery. A
+/// language alone is too broad, while ARTIFACT:PROJECT describes the container
+/// rather than a component. These pairs let a richer learned component (for
+/// example JavaScript+idempotency+outbox) respond to a grounded request that
+/// explicitly supplies JavaScript+outbox without inventing source.
+fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
+    let languages: Vec<_> = labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .collect();
+    let behaviors: Vec<_> = labels
+        .iter()
+        .filter(|label| {
+            !label.contains(":LANGUAGE:")
+                && !label.ends_with(":ARTIFACT:PROJECT")
+                && !label.ends_with(":GROUNDING:UNDERSPECIFIED")
+        })
+        .collect();
+    languages
+        .into_iter()
+        .flat_map(|language| {
+            behaviors
+                .iter()
+                .map(move |behavior| vec![language.clone(), (*behavior).clone()])
+        })
+        .collect()
+}
+
+/// A paraphrased single-language request may state a strict subset of the
+/// constraints present in its training episode. The ranked decoder has
+/// already required at least language+behavior evidence and allows at most
+/// one omitted learned constraint, so its first complete manifest is safe to
+/// use directly. Multi-language requests must continue through composition;
+/// returning one component would silently truncate the requested project.
+fn single_language_ranked_manifest(
+    labels: &[String],
+    candidates: &[Vec<u8>],
+) -> Option<Vec<u8>> {
+    (labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .count()
+        == 1)
+        .then(|| {
+            candidates
+                .iter()
+                .find(|candidate| is_complete_file_manifest(candidate))
+                .cloned()
+        })
+        .flatten()
+}
+
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
@@ -1257,18 +1319,15 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
         source: String,
         after: std::collections::BTreeSet<String>,
     }
-    let mut numeric: std::collections::BTreeMap<
-        String,
-        std::collections::BTreeMap<i64, String>,
-    > = std::collections::BTreeMap::new();
+    let mut numeric: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, String>> =
+        std::collections::BTreeMap::new();
     let mut relative: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, RelativeFragment>,
     > = std::collections::BTreeMap::new();
     let mut numeric_count = 0usize;
     let mut relative_count = 0usize;
-    let mut outcomes: std::collections::BTreeMap<String, bool> =
-        std::collections::BTreeMap::new();
+    let mut outcomes: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     for bytes in candidates {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
             continue;
@@ -1285,7 +1344,10 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
         if evidence_id.is_empty() {
             return None;
         }
-        if outcomes.insert(evidence_id.to_string(), confirmed).is_some() {
+        if outcomes
+            .insert(evidence_id.to_string(), confirmed)
+            .is_some()
+        {
             return None; // contradictory/repeated control evidence is ambiguous
         }
     }
@@ -1415,7 +1477,10 @@ fn merge_grounded_code_fragments(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
             let Some((key, file, fragment_source)) = next else {
                 return None;
             };
-            file_sources.entry(file).or_default().push_str(&fragment_source);
+            file_sources
+                .entry(file)
+                .or_default()
+                .push_str(&fragment_source);
             emitted.insert(key);
         }
         for (file, source) in file_sources {
@@ -1541,9 +1606,8 @@ async fn h_brain_chat(
                 .as_ref()
                 .map(|(_, _, margin)| *margin)
                 .unwrap_or(0.0);
-            let reliable_removal = route_score >= 0.39
-                && route_margin >= 0.025
-                && removes_one_spurious_diagnostic;
+            let reliable_removal =
+                route_score >= 0.39 && route_margin >= 0.025 && removes_one_spurious_diagnostic;
             if reliable_removal
                 && !learned_labels
                     .iter()
@@ -1625,15 +1689,14 @@ async fn h_brain_chat(
                 .is_some_and(|pool| pool.read().name() == "turn")
         })
         .collect();
-    let raw_trained = exact_raw_trained
-        .or_else(|| {
-            brain.decode_best_trained_binding_with_context(
-                POOL_TEXT,
-                action_pool,
-                &chat_query_pools,
-                &turn_pools,
-            )
-        });
+    let raw_trained = exact_raw_trained.or_else(|| {
+        brain.decode_best_trained_binding_with_context(
+            POOL_TEXT,
+            action_pool,
+            &chat_query_pools,
+            &turn_pools,
+        )
+    });
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
@@ -1650,11 +1713,30 @@ async fn h_brain_chat(
         })
         .unwrap_or_default();
     if let Some((pool_id, labels)) = composition_features.as_ref() {
-        for candidate in
-            exact_manifest_subset_candidates(&brain, *pool_id, labels, action_pool)
-        {
+        for candidate in exact_manifest_subset_candidates(&brain, *pool_id, labels, action_pool) {
             if !feature_candidates.contains(&candidate) {
                 feature_candidates.push(candidate);
+            }
+        }
+        // A combined project request may state fewer details for each
+        // independently learned component than that component's own training
+        // episode. Recover through grounded LANGUAGE+BEHAVIOR conjunctions,
+        // never through a language-only or generic-project match.
+        for subset in manifest_component_feature_pairs(labels) {
+            for candidate in brain.decode_ranked_feature_bindings_with_context(
+                *pool_id,
+                &subset,
+                action_pool,
+                4,
+                brain.fabric().pool(8).map(|_| 8),
+                brain.fabric().pool(6).map(|_| 6),
+                &chat_query_pools,
+                &turn_pools,
+            ) {
+                if is_complete_file_manifest(&candidate) && !feature_candidates.contains(&candidate)
+                {
+                    feature_candidates.push(candidate);
+                }
             }
         }
         // Raw characters and sparse diagnostics are independent evidence
@@ -1696,6 +1778,9 @@ async fn h_brain_chat(
         .as_ref()
         .filter(|bytes| is_complete_file_manifest(bytes))
         .cloned();
+    let ranked_single_manifest = composition_features
+        .as_ref()
+        .and_then(|(_, labels)| single_language_ranked_manifest(labels, &feature_candidates));
     let diagnostic_intent_labels = composition_features
         .as_ref()
         .map(|(_, labels)| labels.clone())
@@ -1704,9 +1789,9 @@ async fn h_brain_chat(
     let diagnostic_exact_manifest = exact_complete_manifest.is_some();
     let composed = merge_grounded_code_fragments(&feature_candidates)
         .or_else(|| merge_grounded_file_manifests(&feature_candidates));
-    let exact_is_composition_prerequisite = exact_feature.as_ref().is_some_and(|exact| {
-        exact_fragment_has_grounded_dependents(exact, &feature_candidates)
-    });
+    let exact_is_composition_prerequisite = exact_feature
+        .as_ref()
+        .is_some_and(|exact| exact_fragment_has_grounded_dependents(exact, &feature_candidates));
     let trained_bytes = if raw_is_exact && raw_trained.is_some() {
         // Direct sensory evidence is the strongest tier. Derived diagnostic
         // pools may compose novel requests, but can never overwrite an
@@ -1725,6 +1810,11 @@ async fn h_brain_chat(
         exact_feature
     } else if composed.is_some() {
         composed
+    } else if ranked_single_manifest.is_some() {
+        // Ranked feature evidence is stronger than raw character similarity.
+        // This is the normal path for a paraphrase that omits one constraint
+        // from a learned single-language project episode.
+        ranked_single_manifest
     } else if raw_trained.is_some() {
         raw_trained
     } else if chat_query_pools.len() > 1 {
@@ -1742,19 +1832,18 @@ async fn h_brain_chat(
     let has_compositional_evidence = chat_query_pools.len() > 1
         || composition_features.is_some()
         || !feature_candidates.is_empty();
-    let xpool = if trained_decode.as_ref().is_some_and(|s| !s.is_empty())
-        || !has_compositional_evidence
-    {
-        None
-    } else {
-        Some(brain.integrate_autonomous(
-            POOL_TEXT,
-            action_pool,
-            /*fabric_threshold*/ 0.0,
-            /*chain_max_depth*/ 4,
-            /*chain_max_visit*/ 200,
-        ))
-    };
+    let xpool =
+        if trained_decode.as_ref().is_some_and(|s| !s.is_empty()) || !has_compositional_evidence {
+            None
+        } else {
+            Some(brain.integrate_autonomous(
+                POOL_TEXT,
+                action_pool,
+                /*fabric_threshold*/ 0.0,
+                /*chain_max_depth*/ 4,
+                /*chain_max_visit*/ 200,
+            ))
+        };
     let xpool_reply: Option<String> = xpool.as_ref().and_then(|result| {
         if result.grounding.outside_grounding {
             None
@@ -1777,8 +1866,7 @@ async fn h_brain_chat(
             && !result.grounding.speculation_flag
             && result.grounding.integrated_confidence >= 0.30
             && result.grounding.composition_used.len() >= 2
-    })
-    {
+    }) {
         // Novel prompts may compose an answer through multiple independently
         // learned pathways. This activation is transient; it is not a new
         // binding until an external outcome later confirms it.
@@ -1797,10 +1885,10 @@ async fn h_brain_chat(
     let decoder = if trained_decode.as_ref().is_some_and(|s| !s.is_empty()) {
         "trained_binding"
     } else if xpool_reply.as_deref().is_some_and(|a| !a.is_empty()) {
-        let result = xpool.as_ref().expect("xpool reply requires integration result");
-        if result.grounding.eem_confidence.is_some()
-            && result.grounding.fabric_confidence < 0.3
-        {
+        let result = xpool
+            .as_ref()
+            .expect("xpool reply requires integration result");
+        if result.grounding.eem_confidence.is_some() && result.grounding.fabric_confidence < 0.3 {
             "eem"
         } else {
             "multi_pool"
@@ -2703,8 +2791,10 @@ mod tests {
     #[test]
     fn grounded_fragments_form_a_never_observed_file_in_slot_order() {
         let candidates = vec![
-            br#"{"code_fragment":{"file":"main.py","order":20,"source":"    return value\n"}}"#.to_vec(),
-            br#"{"code_fragment":{"file":"main.py","order":10,"source":"def identity(value):\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"main.py","order":20,"source":"    return value\n"}}"#
+                .to_vec(),
+            br#"{"code_fragment":{"file":"main.py","order":10,"source":"def identity(value):\n"}}"#
+                .to_vec(),
         ];
         let assembled = merge_grounded_code_fragments(&candidates).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
@@ -2738,6 +2828,43 @@ mod tests {
     }
 
     #[test]
+    fn component_recovery_requires_language_plus_concrete_behavior() {
+        let labels = vec![
+            "intent:LANGUAGE:JAVASCRIPT".to_string(),
+            "intent:LANGUAGE:GO".to_string(),
+            "intent:ARTIFACT:PROJECT".to_string(),
+            "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
+            "intent:CONCURRENCY:DEDUPLICATION".to_string(),
+        ];
+        let pairs = manifest_component_feature_pairs(&labels);
+        assert_eq!(pairs.len(), 4);
+        assert!(pairs.iter().all(|pair| pair.len() == 2));
+        assert!(pairs.iter().all(|pair| {
+            pair.iter().any(|label| label.contains(":LANGUAGE:"))
+                && pair
+                    .iter()
+                    .all(|label| !label.ends_with(":ARTIFACT:PROJECT"))
+        }));
+    }
+
+    #[test]
+    fn single_language_ranked_manifest_beats_raw_similarity_fallback() {
+        let manifest = br#"{"files":{"service.js":"module.exports = 1;\n"}}"#.to_vec();
+        let labels = vec![
+            "intent:LANGUAGE:JAVASCRIPT".to_string(),
+            "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
+        ];
+        assert_eq!(
+            single_language_ranked_manifest(&labels, &[manifest.clone()]),
+            Some(manifest.clone())
+        );
+
+        let mut polyglot = labels;
+        polyglot.push("intent:LANGUAGE:GO".to_string());
+        assert_eq!(single_language_ranked_manifest(&polyglot, &[manifest]), None);
+    }
+
+    #[test]
     fn exact_prerequisite_fragment_yields_to_its_grounded_dependent() {
         let signature = br#"{"code_fragment":{"file":"main.js","role":"signature","after":[],"source":"function identity(value) {\n"}}"#.to_vec();
         let body = br#"{"code_fragment":{"file":"main.js","role":"return","after":["signature"],"source":"  return value;\n}\n"}}"#.to_vec();
@@ -2754,8 +2881,10 @@ mod tests {
     #[test]
     fn grounded_relative_fragment_cycles_are_rejected() {
         let candidates = vec![
-            br#"{"code_fragment":{"file":"main.js","role":"a","after":["b"],"source":"a"}}"#.to_vec(),
-            br#"{"code_fragment":{"file":"main.js","role":"b","after":["a"],"source":"b"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"main.js","role":"a","after":["b"],"source":"a"}}"#
+                .to_vec(),
+            br#"{"code_fragment":{"file":"main.js","role":"b","after":["a"],"source":"b"}}"#
+                .to_vec(),
         ];
         assert!(merge_grounded_code_fragments(&candidates).is_none());
     }

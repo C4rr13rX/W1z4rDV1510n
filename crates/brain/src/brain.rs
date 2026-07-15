@@ -736,6 +736,30 @@ fn normalized_char_motifs(bytes: &[u8]) -> ahash::AHashSet<[u8; 3]> {
         .collect()
 }
 
+#[cfg(test)]
+mod posting_tests {
+    use super::append_binding_posting;
+
+    #[test]
+    fn posting_append_is_constant_time_idempotent_and_bounded() {
+        let mut ids = Vec::new();
+        append_binding_posting(&mut ids, 4, 2);
+        append_binding_posting(&mut ids, 4, 2);
+        append_binding_posting(&mut ids, 5, 2);
+        append_binding_posting(&mut ids, 6, 2);
+        assert_eq!(ids, vec![4, 5]);
+    }
+}
+
+/// Binding indexes are populated once per newly allocated binding id and are
+/// rebuilt in ascending neuron order. Preserve consecutive idempotence without
+/// an O(posting-list-length) scan for every insertion.
+fn append_binding_posting(ids: &mut Vec<NeuronId>, binding_id: NeuronId, limit: usize) {
+    if ids.len() < limit && ids.last().copied() != Some(binding_id) {
+        ids.push(binding_id);
+    }
+}
+
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
     /// pool is auto-created at pool_id = `binding_pool_config.id`.
@@ -1663,9 +1687,7 @@ impl Brain {
                     .binding_feature_atom_index
                     .entry((pool_id, atom))
                     .or_default();
-                if !ids.contains(&binding_id) {
-                    ids.push(binding_id);
-                }
+                append_binding_posting(ids, binding_id, usize::MAX);
             }
         }
         for (&query_pool, sequence) in &atom_sequences {
@@ -1680,9 +1702,7 @@ impl Brain {
                     .binding_sequence_index
                     .entry((query_pool, target_pool, sequence.clone()))
                     .or_default();
-                if !ids.contains(&binding_id) {
-                    ids.push(binding_id);
-                }
+                append_binding_posting(ids, binding_id, usize::MAX);
             }
             if let Some(pool) = self.fabric.pool(query_pool) {
                 let pool = pool.read();
@@ -1697,9 +1717,7 @@ impl Brain {
                         .entry((query_pool, motif))
                         .or_default();
                     const MAX_MOTIF_POSTINGS: usize = 512;
-                    if ids.len() < MAX_MOTIF_POSTINGS && !ids.contains(&binding_id) {
-                        ids.push(binding_id);
-                    }
+                    append_binding_posting(ids, binding_id, MAX_MOTIF_POSTINGS);
                 }
             }
         }

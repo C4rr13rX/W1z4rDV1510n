@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.programming_integrated_retention import mutation_enabled
 from scripts.programming_curriculum_supervisor import phase_offsets, publish
+from scripts.programming_enterprise_retention import run_suite
+from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
 from tools.training_standard.drive_corpora_brain import checkpoint_due
 
 
@@ -48,6 +50,32 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 publish(target, {"ram_next_row": 12, "durable_next_row": 10})
             self.assertEqual(phase_offsets(target), (12, 10))
             self.assertEqual(attempts, 3)
+
+    def test_enterprise_suite_failure_is_preserved(self) -> None:
+        result = run_suite("failure", ["-c", "import sys; sys.exit(7)"], 5)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["exit_code"], 7)
+
+    def test_enterprise_suite_timeout_is_preserved(self) -> None:
+        result = run_suite(
+            "timeout", ["-c", "import time; time.sleep(1)"], 0.01,
+        )
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["timed_out"])
+
+    def test_compiler_caches_are_confined_to_benchmark_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = isolated_tool_env(root)
+            for key in ("GOCACHE", "GOMODCACHE", "DOTNET_CLI_HOME", "NUGET_PACKAGES"):
+                self.assertTrue(Path(environment[key]).is_relative_to(root))
+                self.assertTrue(Path(environment[key]).is_dir())
+
+    def test_shared_compiler_cache_stays_inside_repository_runtime(self) -> None:
+        environment = benchmark_tool_env()
+        runtime = ROOT / "runtime" / "benchmark-tool-cache"
+        for key in ("GOCACHE", "GOMODCACHE", "DOTNET_CLI_HOME", "NUGET_PACKAGES"):
+            self.assertTrue(Path(environment[key]).is_relative_to(runtime))
 
 
 if __name__ == "__main__":

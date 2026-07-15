@@ -373,6 +373,13 @@ fn native_enterprise_intents_combine_language_and_behavior() {
             .iter()
             .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY")
     );
+    let hyphenated_optimistic =
+        encoding.atomize(b"Build a Java optimistic-concurrency store.");
+    assert!(
+        hyphenated_optimistic
+            .iter()
+            .any(|label| label == "intent:STATE:OPTIMISTIC_CONCURRENCY")
+    );
 }
 
 #[test]

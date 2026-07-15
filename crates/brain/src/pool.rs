@@ -557,6 +557,7 @@ impl AtomEncoding for InstructionIntentEncoding {
             emit("RESILIENCE:ASYNC_RETRY");
         }
         if text.contains("optimistic concurr")
+            || text.contains("optimistic-concurr")
             || text.contains("expected version")
             || text.contains("expected-version")
             || text.contains("stale write")

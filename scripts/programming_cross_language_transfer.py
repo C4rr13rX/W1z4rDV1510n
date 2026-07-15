@@ -15,6 +15,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from programming_exec_env import benchmark_tool_env, run_tool
+
 from programming_project_eval import b64, manifest, request
 
 
@@ -102,6 +104,7 @@ def execute(case: Case, response: str) -> tuple[bool, str]:
         return False, f"invalid manifest: {error}"
     with tempfile.TemporaryDirectory(prefix=f"wv-transfer-{case.name}-") as raw:
         root = Path(raw)
+        environment = benchmark_tool_env()
         for name, content in {**files, **case.harness}.items():
             relative = PurePosixPath(name)
             if relative.is_absolute() or ".." in relative.parts or not isinstance(content, str):
@@ -110,12 +113,12 @@ def execute(case: Case, response: str) -> tuple[bool, str]:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         try:
-            run = subprocess.run(case.compile, cwd=root, capture_output=True, text=True, timeout=45)
+            run = run_tool(case.compile, cwd=root, env=environment, timeout=90)
             if run.returncode == 0 and case.run:
                 command = list(case.run)
                 if command[0] == "eval.exe":
                     command[0] = str(root / "eval.exe")
-                run = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=15)
+                run = run_tool(command, cwd=root, env=environment, timeout=15)
         except (FileNotFoundError, subprocess.TimeoutExpired) as error:
             return False, str(error)
         return run.returncode == 0 and "PASS" in run.stdout, (run.stderr or run.stdout)[-900:]

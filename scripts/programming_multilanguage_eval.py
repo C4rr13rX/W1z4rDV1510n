@@ -11,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from programming_exec_env import benchmark_tool_env, run_tool
+
 
 @dataclass(frozen=True)
 class Case:
@@ -71,6 +73,7 @@ def train(endpoint: str, repeats: int) -> None:
 def execute(case: Case, code: str) -> tuple[bool, str]:
     with tempfile.TemporaryDirectory(prefix=f"wv-{case.language}-") as raw:
         work = Path(raw)
+        environment = benchmark_tool_env()
         if case.language == "csharp":
             (work / "Eval.csproj").write_text(
                 '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType>'
@@ -89,15 +92,15 @@ def execute(case: Case, code: str) -> tuple[bool, str]:
             source = code + case.harness
         (work / case.filename).write_text(source, encoding="utf-8")
         try:
-            first = subprocess.run(case.command, cwd=work, capture_output=True, text=True, timeout=30)
+            first = run_tool(case.command, cwd=work, env=environment, timeout=90)
             if first.returncode != 0:
                 return False, (first.stderr or first.stdout)[-400:]
             if case.language == "rust":
-                first = subprocess.run([str(work / "eval.exe")], cwd=work,
-                                       capture_output=True, text=True, timeout=5)
+                first = run_tool([str(work / "eval.exe")], cwd=work,
+                                 env=environment, timeout=5)
             elif case.language == "java":
-                first = subprocess.run(["java", "Main"], cwd=work,
-                                       capture_output=True, text=True, timeout=5)
+                first = run_tool(["java", "Main"], cwd=work,
+                                 env=environment, timeout=5)
             return first.returncode == 0 and "PASS" in first.stdout, (first.stderr or first.stdout)[-400:]
         except (subprocess.TimeoutExpired, FileNotFoundError) as error:
             return False, str(error)
