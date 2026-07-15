@@ -470,7 +470,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 progress_path: Path | None = None,
                 checkpoint_rows: int = 4096,
                 feature_policy: str = "auto",
-                durable_start_row: int | None = None) -> dict:
+                durable_start_row: int | None = None,
+                wal_durable: bool = False) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -586,8 +587,13 @@ def drive_one(script, repeats: int, project_root: Path,
                     if ok:
                         summary["posted_ok"] += len(episodes)
                         accepted_since_checkpoint += len(episodes)
+                        if wal_durable:
+                            # Bulk success is returned only after the server's
+                            # WAL flush succeeds, so this row is crash-durable.
+                            durable_next_row = batch_next_row
+                            accepted_since_checkpoint = 0
                         publish_progress()
-                        if (checkpoint_rows > 0
+                        if (not wal_durable and checkpoint_rows > 0
                                 and accepted_since_checkpoint >= checkpoint_rows):
                             make_durable()
                     else:
@@ -606,6 +612,9 @@ def drive_one(script, repeats: int, project_root: Path,
                 if ok:
                     summary["posted_ok"] += len(episodes)
                     accepted_since_checkpoint += len(episodes)
+                    if wal_durable:
+                        durable_next_row = batch_next_row
+                        accepted_since_checkpoint = 0
                     publish_progress()
                 else:
                     summary["posted_fail"] += len(episodes)
@@ -613,7 +622,8 @@ def drive_one(script, repeats: int, project_root: Path,
                         f"[{script.id}] final batch rejected at logical row "
                         f"{batch_next_row}: {err}"
                     )
-            if progress_path is not None and durable_next_row != batch_next_row:
+            if (not wal_durable and progress_path is not None
+                    and durable_next_row != batch_next_row):
                 make_durable()
             if verbose:
                 print(f"  [{script.id}] direct pretrain done in {time.time()-t0:.1f}s",
@@ -748,6 +758,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--durable-start-row", type=int,
                      help="last checkpointed logical row when resuming from "
                           "a newer RAM offset after a driver-only failure")
+    p.add_argument("--wal-durable", action="store_true",
+                     help="advance durable progress after each acknowledged "
+                          "bulk WAL flush instead of snapshotting")
     # Stage 16: --burst is now the DEFAULT.  Use --epoch-interleaved to
     # force the legacy schedule (mainly for comparison / regression).
     grp = p.add_mutually_exclusive_group()
@@ -822,7 +835,8 @@ def main(argv: list[str] | None = None) -> int:
                             progress_path=args.progress_path,
                             checkpoint_rows=args.checkpoint_rows,
                             feature_policy=args.feature_policy,
-                            durable_start_row=args.durable_start_row)
+                            durable_start_row=args.durable_start_row,
+                            wal_durable=args.wal_durable)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",

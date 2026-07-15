@@ -160,6 +160,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path) -> int:
         "--durable-start-row", str(durable),
         "--batch-size", str(args.batch_size),
         "--checkpoint-rows", str(args.checkpoint_rows),
+        "--wal-durable",
         "--feature-policy", "auto",
         "--midcheck-rows", "0",
         "--no-sleep-between",
