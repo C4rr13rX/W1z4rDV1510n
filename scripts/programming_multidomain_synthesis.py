@@ -112,7 +112,7 @@ PREMISES = (
             "            self.failures += 1\n"
             "            if self.failures >= 2:\n                self.circuit_open = True\n"
             "            raise\n"),
-    Premise("atomic_transaction", "an all-or-nothing atomic balance transaction", "transaction", ("circuit_guard",),
+    Premise("atomic_transaction", "an all-or-nothing database transaction for balances", "transaction", ("circuit_guard",),
             "        before = copy.deepcopy(self.balances)\n"
             "        try:\n"
             "            amount = command['amount']\n"

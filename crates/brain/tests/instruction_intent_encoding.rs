@@ -636,6 +636,34 @@ fn explicit_no_retry_is_mutually_exclusive_with_positive_retry_intent() {
 }
 
 #[test]
+fn multidomain_synthesis_prompt_exposes_every_required_feature_path() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Build a Python project class integrating strict input validation, default-deny authorization, schema migration, recursive secret redaction, correlated structured JSON logging, a cooldown circuit breaker, bounded async retry after transient failure, idempotent command replay, optimistic concurrency with expected version, duplicate-work deduplication, an all-or-nothing database transaction for balances, a transactional outbox event.",
+    );
+    for expected in [
+        "intent:LANGUAGE:PYTHON",
+        "intent:ENTERPRISE:INPUT_VALIDATION",
+        "intent:SECURITY:AUTHORIZATION",
+        "intent:PERSISTENCE:SCHEMA_MIGRATION",
+        "intent:ENTERPRISE:SECRET_REDACTION",
+        "intent:OBSERVABILITY:CORRELATED_LOGGING",
+        "intent:RESILIENCE:CIRCUIT_BREAKER",
+        "intent:ENTERPRISE:BOUNDED_RETRY",
+        "intent:RESILIENCE:ASYNC_RETRY",
+        "intent:API:IDEMPOTENT_COMMAND",
+        "intent:STATE:OPTIMISTIC_CONCURRENCY",
+        "intent:CONCURRENCY:DEDUPLICATION",
+        "intent:PERSISTENCE:ATOMIC_TRANSACTION",
+        "intent:INTEGRATION:TRANSACTIONAL_OUTBOX",
+    ] {
+        assert!(features.iter().any(|feature| feature == expected), "{expected}");
+    }
+}
+
+#[test]
 fn semantic_stress_phrases_preserve_enterprise_behaviors() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
