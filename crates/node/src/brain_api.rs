@@ -1314,6 +1314,73 @@ fn has_programming_language_intent(labels: &[String]) -> bool {
     labels.iter().any(|label| label.contains(":LANGUAGE:"))
 }
 
+/// Permit fuzzy sensory recall across a paraphrase only when the recalled
+/// action is visibly compatible with the requested programming language.
+/// This preserves atom-grounded code generalization without reopening the
+/// cross-domain path that returned natural-language math answers for novel
+/// TypeScript requests.
+fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
+    if is_complete_file_manifest(bytes) {
+        return true;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim_start();
+    let has = |needles: &[&str]| needles.iter().any(|needle| {
+        trimmed.starts_with(needle) || text.contains(&format!("\n{needle}"))
+    });
+    labels.iter().any(|label| {
+        let Some(language) = label.split(":LANGUAGE:").nth(1) else {
+            return false;
+        };
+        let language = language.split(':').next().unwrap_or(language);
+        match language {
+            "PYTHON" => has(&["def ", "class ", "from ", "import ", "@", "```python"]),
+            "TYPESCRIPT" => has(&[
+                "export ", "import ", "interface ", "type ", "class ",
+                "function ", "const ", "let ", "```typescript", "```ts",
+            ]),
+            "JAVASCRIPT" => has(&[
+                "export ", "import ", "class ", "function ", "const ", "let ",
+                "```javascript", "```js",
+            ]),
+            "RUST" => has(&["fn ", "pub ", "use ", "struct ", "enum ", "impl ", "```rust"]),
+            "GO" => has(&["package ", "func ", "import ", "type ", "```go"]),
+            "JAVA" => has(&["package ", "import ", "public class ", "class ", "interface ", "```java"]),
+            "CSHARP" | "C_SHARP" => has(&["using ", "namespace ", "public class ", "class ", "```csharp", "```cs"]),
+            "C" | "CPP" | "CPLUSPLUS" => has(&["#include", "int main", "void ", "struct ", "```c", "```cpp"]),
+            "RUBY" => has(&["def ", "class ", "module ", "require ", "```ruby"]),
+            "PHP" => has(&["<?php", "namespace ", "function ", "class ", "```php"]),
+            "KOTLIN" => has(&["package ", "import ", "fun ", "class ", "data class ", "```kotlin"]),
+            "SWIFT" => has(&["import ", "func ", "struct ", "class ", "enum ", "```swift"]),
+            "SQL" => has(&["SELECT ", "CREATE ", "INSERT ", "UPDATE ", "WITH ", "```sql"]),
+            "HTML" => has(&["<!DOCTYPE", "<!doctype", "<html", "```html"]),
+            "SHELL" | "BASH" => has(&["#!/bin/", "set -", "function ", "```bash", "```sh"]),
+            _ => false,
+        }
+    })
+}
+
+/// A ranked language+behavior binding may hold a complete single-file source
+/// response rather than a JSON project manifest. Admit it only for exactly
+/// one requested language and only when the response is language-shaped.
+fn single_language_ranked_source(
+    labels: &[String],
+    candidates: &[Vec<u8>],
+) -> Option<Vec<u8>> {
+    (labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .count()
+        == 1)
+        .then(|| {
+            candidates
+                .iter()
+                .find(|candidate| programming_response_compatible(labels, candidate))
+                .cloned()
+        })
+        .flatten()
+}
+
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
@@ -1797,6 +1864,13 @@ async fn h_brain_chat(
     let programming_language_intent = has_programming_language_intent(
         &diagnostic_intent_labels,
     );
+    let ranked_single_source = single_language_ranked_source(
+        &diagnostic_intent_labels,
+        &feature_candidates,
+    );
+    let raw_programming_compatible = raw_trained.as_ref().is_some_and(|candidate| {
+        programming_response_compatible(&diagnostic_intent_labels, candidate)
+    });
     let composed = merge_grounded_code_fragments(&feature_candidates)
         .or_else(|| merge_grounded_file_manifests(&feature_candidates));
     let exact_is_composition_prerequisite = exact_feature
@@ -1825,7 +1899,14 @@ async fn h_brain_chat(
         // This is the normal path for a paraphrase that omits one constraint
         // from a learned single-language project episode.
         ranked_single_manifest
-    } else if raw_trained.is_some() && !programming_language_intent {
+    } else if ranked_single_source.is_some() {
+        // Ranked sparse intent has independently grounded the requested
+        // language and behavior. Plain single-file source is valid here as
+        // long as its shape agrees with that language.
+        ranked_single_source
+    } else if raw_trained.is_some()
+        && (!programming_language_intent || raw_programming_compatible)
+    {
         // Fuzzy raw recall is valid for ordinary same-domain retrieval, but
         // a recognized code-language request must be supported by its
         // derived feature bindings. Otherwise a recently trained reasoning
@@ -1966,6 +2047,7 @@ async fn h_brain_chat(
             "exact_complete_manifest": diagnostic_exact_manifest,
             "raw_fallback_inhibited": programming_language_intent
                 && !raw_is_exact
+                && !raw_programming_compatible
                 && trained_decode.is_none(),
         },
     }))
@@ -2890,6 +2972,43 @@ mod tests {
         assert!(!has_programming_language_intent(&[
             "instruction_intent:MATH:ARITHMETIC".to_string(),
         ]));
+    }
+
+    #[test]
+    fn programming_raw_fallback_requires_language_compatible_source() {
+        let python = vec!["instruction_intent:LANGUAGE:PYTHON".to_string()];
+        assert!(programming_response_compatible(
+            &python,
+            b"def avg_list(values):\n    return sum(values) / len(values) if values else 0\n",
+        ));
+        assert!(!programming_response_compatible(
+            &python,
+            b"The construction cost is 216 dollars.",
+        ));
+
+        let typescript = vec![
+            "instruction_intent:LANGUAGE:TYPESCRIPT".to_string(),
+        ];
+        assert!(programming_response_compatible(
+            &typescript,
+            b"export class Integrator {}",
+        ));
+        assert!(!programming_response_compatible(
+            &typescript,
+            b"The construction cost is 216 dollars.",
+        ));
+
+        let python_source = b"def avg_list(values):\n    return 0\n".to_vec();
+        assert_eq!(
+            single_language_ranked_source(&python, &[python_source.clone()]),
+            Some(python_source.clone())
+        );
+        let mut polyglot = python;
+        polyglot.push("instruction_intent:LANGUAGE:RUST".to_string());
+        assert_eq!(
+            single_language_ranked_source(&polyglot, &[python_source]),
+            None
+        );
     }
 
     #[test]

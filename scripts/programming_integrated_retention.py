@@ -78,6 +78,27 @@ def debug_eval(endpoint: str, output: Path) -> dict:
     return json.loads(output.read_text(encoding="utf-8"))
 
 
+def integrated_retention_passed(report: dict) -> bool:
+    """Require every protected foundation, execution, and transfer result."""
+    after = report.get("after_debug") or {}
+    foundation = after.get("foundation") or {}
+    python = (after.get("python") or {}).get("summary") or {}
+    debug = after.get("debug") or {}
+    return (
+        foundation.get("toddler") == foundation.get("toddler_total")
+        and foundation.get("k12") == foundation.get("k12_total")
+        and foundation.get("oov") == foundation.get("oov_total")
+        and bool(python)
+        and all(
+            group.get("executes") == group.get("count")
+            and group.get("syntax_valid") == group.get("count")
+            for group in python.values()
+        )
+        and bool(debug)
+        and all(group.get("passed") == group.get("total") for group in debug.values())
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:18600")
@@ -122,6 +143,7 @@ def main() -> int:
              "stats": request(args.endpoint, "/brain/stats")}
     checkpoint = None if args.no_checkpoint else request(args.endpoint, "/brain/checkpoint", {})
     report = {"before_debug": before, "after_debug": after, "checkpoint": checkpoint}
+    report["passed"] = integrated_retention_passed(report)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({"before": before["foundation"], "after": after["foundation"],
@@ -129,7 +151,7 @@ def main() -> int:
                       "python_after": after["python"]["summary"],
                       "debug": {key: {"passed": value["passed"], "total": value["total"]}
                                 for key, value in after["debug"].items()}}))
-    return 0
+    return 0 if report["passed"] else 1
 
 
 if __name__ == "__main__":

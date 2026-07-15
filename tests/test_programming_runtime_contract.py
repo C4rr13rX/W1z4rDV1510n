@@ -123,7 +123,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
     def test_code_intent_inhibits_cross_domain_raw_fallback(self) -> None:
         source = (ROOT / "crates/node/src/brain_api.rs").read_text(encoding="utf-8")
         self.assertIn("has_programming_language_intent", source)
-        self.assertIn("raw_trained.is_some() && !programming_language_intent", source)
+        self.assertIn("programming_response_compatible", source)
+        self.assertIn("!programming_language_intent || raw_programming_compatible", source)
         self.assertIn('"raw_fallback_inhibited"', source)
 
     def test_capstone_safety_rejects_prose_and_requires_kernel_boundaries(self) -> None:

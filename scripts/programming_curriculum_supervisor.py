@@ -19,6 +19,11 @@ from pathlib import Path
 
 import psutil
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from programming_integrated_retention import integrated_retention_passed
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -233,11 +238,18 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
         raise RuntimeError(
             f"{phase.name} midphase recall regression at {trained_rows}: {recall}"
         )
-    foundation = run_json_command([
+    foundation_path = runtime / f"{phase.name}.row-{trained_rows}.foundation.json"
+    run_json_command([
         sys.executable, "scripts/programming_integrated_retention.py",
         "--endpoint", args.endpoint, "--no-checkpoint",
-        "--output", str(runtime / f"{phase.name}.row-{trained_rows}.foundation.json"),
+        "--output", str(foundation_path),
     ], timeout=2 * 3600.0)
+    foundation = read_json(foundation_path)
+    if not integrated_retention_passed(foundation):
+        raise RuntimeError(
+            f"integrated retention regression after {phase.name} row "
+            f"{trained_rows}: {foundation}"
+        )
     enterprise = run_json_command([
         sys.executable, "scripts/programming_enterprise_retention.py",
         "--endpoint", args.endpoint,

@@ -15,6 +15,11 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from programming_integrated_retention import integrated_retention_passed
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -165,21 +170,7 @@ def run_retention(endpoint: str, output: Path) -> dict:
 
 
 def retention_passed(report: dict) -> bool:
-    after = report.get("after_debug") or {}
-    foundation = after.get("foundation") or {}
-    python = (after.get("python") or {}).get("summary") or {}
-    debug = after.get("debug") or {}
-    return (
-        foundation.get("toddler") == foundation.get("toddler_total")
-        and foundation.get("k12") == foundation.get("k12_total")
-        and foundation.get("oov") == foundation.get("oov_total")
-        and all(
-            group.get("executes") == group.get("count")
-            and group.get("syntax_valid") == group.get("count")
-            for group in python.values()
-        )
-        and all(group.get("passed") == group.get("total") for group in debug.values())
-    )
+    return integrated_retention_passed(report)
 
 
 def run_enterprise_retention(endpoint: str, output: Path) -> dict:
