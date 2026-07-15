@@ -136,6 +136,8 @@ GA fitness is meaningful only when all essential gates are components of the obj
 
 For very large corpora, a “block” must be bounded rather than an entire corpus phase. The current programming curriculum uses 4,096-row durable chunks. Each chunk ends in a snapshot, then runs distributed corpus recall (including the first and newest trained rows), complete foundational retention, and the strict enterprise battery before the next chunk is permitted. A checkpoint without a retention gate proves durability, not non-interference.
 
+Preserve the last accepted snapshot until the candidate chunk passes. The current supervisor creates an NTFS hard link to `brain.bin` before training, so guarding a multi-gigabyte brain requires no duplicate copy. Candidate checkpoint replacement gives `brain.bin` a new file identity while the hard link retains the accepted bytes. Delete the guard only after corpus, foundation, and enterprise gates all pass; retain it and stop training on failure. A recovery still requires coordinated node shutdown and WAL reset—never replace the live server's snapshot underneath it.
+
 “Pre-training” in Wizard Vision should mean accelerated construction of complete atom-grounded episodes and their derived simultaneous features. It must not mean replacing character/byte learning with an external token vocabulary.
 
 ## Procedure for configuring a new domain brain
@@ -166,6 +168,8 @@ For very large corpora, a “block” must be bounded rather than an entire corp
 | 2026-07-15 | Post-correction foundation retention remained toddler `32/32`, K-12 `16/16`, OOV `3/3`, Python execution `10/10`, and all debug transfer gates perfect. | Proven live | `runtime/benchmarks/integrated-retention-after-ranked-manifest.json` |
 | 2026-07-15 | Semantic feature coverage must be tested across equivalent action verbs and relational phrases, not only canonical keywords. Adding “develop” and behavior-equivalent authorization, replay, rollback, correlation, and redaction evidence raised strict semantic stress from trained `2/4`, held-out `1/4` to `4/4` and `4/4` without training held-out answers. | Proven live | `runtime/benchmarks/semantic-stress-strict-after-feature-sweep.json` |
 | 2026-07-15 | Multi-million-row phases require bounded train/checkpoint/gate cycles. The supervisor now limits direct pretraining to 4,096 durable rows, then blocks continuation on distributed corpus recall plus complete foundational and strict enterprise retention. | Operationally enforced | `scripts/programming_curriculum_supervisor.py` |
+| 2026-07-15 | The first bounded MathInstruct cycle reached durable row `188720`, recalled `32/32` distributed corpus samples, retained every foundation/debug/Python gate, and passed strict enterprise `11/11` with tick `207532 -> 207532`. | Proven live | `runtime/brains/programming-integrated-20260713/mathinstruct-domain-safe.row-188720.retention-gate.json` |
+| 2026-07-15 | Retain a hard-linked last-known-good snapshot across each candidate chunk and delete it only after gate acceptance. | Operationally enforced | `runtime/brains/programming-integrated-20260713/brain/brain.last-good.json` |
 
 ## Maintenance rule
 
