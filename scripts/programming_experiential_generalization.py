@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
 @dataclass(frozen=True)
 class Case:
     name: str
@@ -152,25 +154,82 @@ def train_experience(endpoint: str, case: Case, repeats: int) -> dict:
     return result
 
 
+def run_retention(endpoint: str, output: Path) -> dict:
+    run = subprocess.run([
+        sys.executable, str(ROOT / "scripts/programming_integrated_retention.py"),
+        "--endpoint", endpoint, "--no-checkpoint", "--output", str(output),
+    ], cwd=ROOT, capture_output=True, text=True, timeout=2 * 3600, check=False)
+    if run.returncode != 0 or not output.is_file():
+        raise RuntimeError(f"foundation retention failed: {run.stderr[-2000:]}")
+    return json.loads(output.read_text(encoding="utf-8"))
+
+
+def retention_passed(report: dict) -> bool:
+    after = report.get("after_debug") or {}
+    foundation = after.get("foundation") or {}
+    python = (after.get("python") or {}).get("summary") or {}
+    debug = after.get("debug") or {}
+    return (
+        foundation.get("toddler") == foundation.get("toddler_total")
+        and foundation.get("k12") == foundation.get("k12_total")
+        and foundation.get("oov") == foundation.get("oov_total")
+        and all(
+            group.get("executes") == group.get("count")
+            and group.get("syntax_valid") == group.get("count")
+            for group in python.values()
+        )
+        and all(group.get("passed") == group.get("total") for group in debug.values())
+    )
+
+
+def run_enterprise_retention(endpoint: str, output: Path) -> dict:
+    run = subprocess.run([
+        sys.executable, str(ROOT / "scripts/programming_enterprise_retention.py"),
+        "--endpoint", endpoint, "--output", str(output), "--suite-timeout", "900",
+    ], cwd=ROOT, capture_output=True, text=True, timeout=4 * 3600, check=False)
+    if run.returncode != 0 or not output.is_file():
+        raise RuntimeError(f"enterprise retention failed: {run.stderr[-2000:]}")
+    return json.loads(output.read_text(encoding="utf-8"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:18600")
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--repeats", type=int, default=6)
+    parser.add_argument("--skip-retention", action="store_true")
+    parser.add_argument("--enterprise-gate", action="store_true")
     parser.add_argument("--output", type=Path,
                         default=Path("runtime/benchmarks/experiential-generalization.json"))
     args = parser.parse_args()
 
+    retention_before = (
+        run_retention(args.endpoint, args.output.with_name("experience-foundation-before.json"))
+        if args.train and not args.skip_retention else None
+    )
     tick_before = request(args.endpoint, "/brain/stats", None).get("tick")
     baseline = predict(args.endpoint, EXPERIENCE)
     training = train_experience(args.endpoint, EXPERIENCE, args.repeats) if args.train else None
     learned = predict(args.endpoint, EXPERIENCE)
     transfer = predict(args.endpoint, HELDOUT)
     tick_after = request(args.endpoint, "/brain/stats", None).get("tick")
+    retention_after = (
+        run_retention(args.endpoint, args.output.with_name("experience-foundation-after.json"))
+        if args.train and not args.skip_retention else None
+    )
+    enterprise = (
+        run_enterprise_retention(
+            args.endpoint, args.output.with_name("experience-enterprise-after.json")
+        ) if args.train and args.enterprise_gate else None
+    )
+    retention_ok = (
+        True if retention_after is None else retention_passed(retention_after)
+    )
+    enterprise_ok = True if enterprise is None else bool(enterprise.get("passed"))
     passed = (
         learned["executes"] and transfer["executes"]
         if args.train else baseline["executes"] and transfer["executes"]
-    )
+    ) and retention_ok and enterprise_ok
     report = {
         "passed": passed,
         "mode": "train-and-transfer" if args.train else "read-only",
@@ -178,6 +237,11 @@ def main() -> int:
         "training": training,
         "learned_experience": learned,
         "heldout_transfer": transfer,
+        "retention_before": retention_before,
+        "retention_after": retention_after,
+        "retention_passed": retention_ok,
+        "enterprise_after": enterprise,
+        "enterprise_passed": enterprise_ok,
         "tick_before": tick_before,
         "tick_after": tick_after,
         "tick_delta": (tick_after - tick_before) if isinstance(tick_before, int) and isinstance(tick_after, int) else None,
@@ -188,6 +252,7 @@ def main() -> int:
     print(json.dumps({
         "passed": passed, "baseline": baseline["executes"],
         "learned": learned["executes"], "heldout_transfer": transfer["executes"],
+        "retention_passed": retention_ok, "enterprise_passed": enterprise_ok,
         "tick_delta": report["tick_delta"],
     }))
     return 0 if passed else 1

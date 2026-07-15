@@ -29,6 +29,7 @@ from scripts.programming_experiential_generalization import (
     EXPERIENCE,
     HELDOUT,
     execute as execute_experience,
+    retention_passed,
 )
 from scripts.train_programming_brain import (
     SEED_STAGES,
@@ -150,6 +151,21 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertNotEqual(EXPERIENCE.function, HELDOUT.function)
         self.assertNotEqual(EXPERIENCE.factor, HELDOUT.factor)
         self.assertNotEqual(EXPERIENCE.offset, HELDOUT.offset)
+
+    def test_experiential_admission_requires_all_protected_retention(self) -> None:
+        report = {"after_debug": {
+            "foundation": {"toddler": 32, "toddler_total": 32,
+                           "k12": 16, "k12_total": 16,
+                           "oov": 3, "oov_total": 3},
+            "python": {"summary": {
+                "trained": {"executes": 5, "syntax_valid": 5, "count": 5},
+                "novel": {"executes": 5, "syntax_valid": 5, "count": 5},
+            }},
+            "debug": {"transfer": {"passed": 4, "total": 4}},
+        }}
+        self.assertTrue(retention_passed(report))
+        report["after_debug"]["debug"]["transfer"]["passed"] = 3
+        self.assertFalse(retention_passed(report))
 
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
