@@ -47,7 +47,9 @@ The corpus supervisor then trains:
 8. four-way scientific Jupyter paraphrases;
 9. partial-context scientific Jupyter examples.
 
-Corpus processing is resumable, WAL-durable, snapshotted and retention-gated in 16,384-row blocks. Every small batch is flushed to the WAL before acknowledgement, so a full multi-gigabyte snapshot need not be rewritten four times inside one gate. Each block keeps a last-known-good snapshot and must pass distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and non-mutation checks before the next block starts. Batch size adapts downward when observed brain-lock time exceeds the configured ceiling.
+Corpus processing is resumable, WAL-durable, snapshotted and retention-gated in 16,384-row blocks. Every small batch is flushed to the WAL before acknowledgement, so a full multi-gigabyte snapshot need not be rewritten four times inside one gate. Each block keeps a last-known-good snapshot and must pass distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and non-mutation checks before the next block starts. Batch size adapts downward when observed brain-lock time exceeds the configured ceiling, and the safest measured size carries forward into later corpus phases.
+
+After the corpus curriculum, the trainer admits two experience gates. The first exercises an unseen environment rule through baseline failure, verified repair, successful execution, and held-out structural transfer. The second composes a never-trained class from twelve independently trained disciplines, executes it, causally ablates every premise, and tests a contradictory no-retry policy. Both mutations are transactionally guarded and must preserve foundation and enterprise retention before their checkpoints are accepted.
 
 ## Authoritative artifacts
 
@@ -59,6 +61,7 @@ The runtime contains:
 - `logs/*.log`: command-level execution logs;
 - `*.progress.json`: RAM and durable corpus offsets plus batch telemetry;
 - `*.retention-gate.json` and `*.completion-gate.json`: admission evidence;
+- `benchmarks/experiential-generalization.json` and `benchmarks/multidomain-synthesis.json`: post-corpus experience and causal-integration admission evidence;
 - `brain/brain.bin` and `brain/brain.wal`: persisted brain state;
 - `brain/*.last-good.*`: unresolved rollback state, present only while a candidate is under review.
 

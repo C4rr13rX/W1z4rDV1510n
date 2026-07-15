@@ -23,6 +23,7 @@ from scripts.programming_curriculum_supervisor import (
     phase_offsets,
     publish,
     responsive_batch_size,
+    runtime_responsive_batch_size,
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
 from scripts.programming_capstone_readiness import safe_manifest, structural_checks
@@ -370,6 +371,11 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('"--include-seed-corpora"', source)
         self.assertIn('"--repeats", str(phase.repeats)', source)
+        trainer = (ROOT / "scripts/train_programming_brain.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("programming_experiential_generalization.py", trainer)
+        self.assertIn("programming_multidomain_synthesis.py", trainer)
 
     def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
@@ -402,6 +408,16 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             ),
             21,
         )
+
+    def test_bulk_size_calibration_survives_phase_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            (runtime / "completed.progress.json").write_text(json.dumps({
+                "max_batch_size": 24, "max_batch_seconds": 16.0,
+            }), encoding="utf-8")
+            self.assertEqual(
+                runtime_responsive_batch_size(runtime, 32, {}, 8.0), 12
+            )
 
 
 if __name__ == "__main__":

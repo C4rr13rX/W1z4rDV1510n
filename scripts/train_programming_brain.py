@@ -236,7 +236,28 @@ def training_plan(args: argparse.Namespace) -> list[list[str]]:
             "--gate-rows", str(args.gate_rows),
             "--max-live-lock-seconds", str(args.max_live_lock_seconds),
         ])
+        commands.extend(experience_commands(args))
     return commands
+
+
+def experience_commands(args: argparse.Namespace) -> list[list[str]]:
+    benchmark_dir = args.runtime / "benchmarks"
+    return [
+        [
+            sys.executable,
+            str(ROOT / "scripts/programming_experiential_generalization.py"),
+            "--endpoint", args.endpoint, "--runtime", str(args.runtime),
+            "--train", "--enterprise-gate",
+            "--output", str(benchmark_dir / "experiential-generalization.json"),
+        ],
+        [
+            sys.executable,
+            str(ROOT / "scripts/programming_multidomain_synthesis.py"),
+            "--endpoint", args.endpoint, "--runtime", str(args.runtime),
+            "--train", "--enterprise-gate",
+            "--output", str(benchmark_dir / "multidomain-synthesis.json"),
+        ],
+    ]
 
 
 def main() -> int:
@@ -341,9 +362,23 @@ def main() -> int:
             atomic_json(state_path, state)
 
         if not args.seed_only and not state.get("corpus_curriculum_passed"):
-            supervisor = training_plan(args)[-1]
+            supervisor = training_plan(args)[-(len(experience_commands(args)) + 1)]
             run_logged(supervisor, runtime / "logs/curriculum-supervisor.log")
             state["corpus_curriculum_passed"] = True
+            state["updated_unix"] = time.time()
+            atomic_json(state_path, state)
+
+        if not args.seed_only and not state.get("experiential_admission_passed"):
+            command = experience_commands(args)[0]
+            run_logged(command, runtime / "logs/experiential-admission.log")
+            state["experiential_admission_passed"] = True
+            state["updated_unix"] = time.time()
+            atomic_json(state_path, state)
+
+        if not args.seed_only and not state.get("multidomain_admission_passed"):
+            command = experience_commands(args)[1]
+            run_logged(command, runtime / "logs/multidomain-admission.log")
+            state["multidomain_admission_passed"] = True
             state["updated_unix"] = time.time()
             atomic_json(state_path, state)
         print(f"[programming-train] complete: {runtime}")

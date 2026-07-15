@@ -94,6 +94,20 @@ def responsive_batch_size(configured: int, progress: dict,
     return max(1, min(configured, scaled))
 
 
+def runtime_responsive_batch_size(runtime: Path, configured: int,
+                                  progress: dict,
+                                  max_lock_seconds: float) -> int:
+    """Carry proven live-lock limits across corpus phase boundaries."""
+    candidates = [
+        responsive_batch_size(configured, read_json(path), max_lock_seconds)
+        for path in runtime.glob("*.progress.json")
+    ]
+    candidates.append(
+        responsive_batch_size(configured, progress, max_lock_seconds)
+    )
+    return min(candidates)
+
+
 def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
     """Hard-link the accepted snapshot until the next retention gate passes."""
     brain_dir = runtime / "brain"
@@ -295,8 +309,9 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         return 0
     stdout_path = runtime / f"{phase.name}.stdout.log"
     stderr_path = runtime / f"{phase.name}.stderr.log"
-    batch_size = responsive_batch_size(
-        args.batch_size, read_json(progress), args.max_live_lock_seconds
+    batch_size = runtime_responsive_batch_size(
+        runtime, args.batch_size, read_json(progress),
+        args.max_live_lock_seconds
     )
     command = [
         sys.executable, "-m", "tools.training_standard.drive_corpora_brain",
