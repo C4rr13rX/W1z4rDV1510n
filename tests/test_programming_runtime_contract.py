@@ -39,6 +39,7 @@ from scripts.programming_multidomain_synthesis import (
     DISCIPLINES,
     HEADER as MULTIDOMAIN_HEADER,
     PREMISES as MULTIDOMAIN_PREMISES,
+    PRIMARY_FEATURE,
     execute as execute_multidomain,
     execute_no_retry_contradiction,
     training_rows as multidomain_training_rows,
@@ -221,6 +222,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
     def test_multidomain_fixture_requires_twelve_independent_premises(self) -> None:
         self.assertEqual(len(DISCIPLINES), 12)
         self.assertEqual(len({premise.name for premise in DISCIPLINES}), 12)
+        self.assertEqual(set(PRIMARY_FEATURE), {premise.name for premise in DISCIPLINES})
         complete = "".join(
             premise.source for premise in MULTIDOMAIN_HEADER + MULTIDOMAIN_PREMISES
         )

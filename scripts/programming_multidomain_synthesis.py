@@ -148,6 +148,20 @@ ALTERNATIVE_PREMISES = (
 DISCIPLINES = tuple(
     p for p in PREMISES if p.name not in {"commit", "circuit_use"}
 )
+PRIMARY_FEATURE = {
+    "validation": "ENTERPRISE:INPUT_VALIDATION",
+    "authorization": "SECURITY:AUTHORIZATION",
+    "schema_migration": "PERSISTENCE:SCHEMA_MIGRATION",
+    "secret_redaction": "ENTERPRISE:SECRET_REDACTION",
+    "observability": "OBSERVABILITY:CORRELATED_LOGGING",
+    "circuit_breaker": "RESILIENCE:CIRCUIT_BREAKER",
+    "async_retry": "RESILIENCE:ASYNC_RETRY",
+    "idempotency": "API:IDEMPOTENT_COMMAND",
+    "optimistic_concurrency": "STATE:OPTIMISTIC_CONCURRENCY",
+    "deduplication": "CONCURRENCY:DEDUPLICATION",
+    "atomic_transaction": "PERSISTENCE:ATOMIC_TRANSACTION",
+    "transactional_outbox": "INTEGRATION:TRANSACTIONAL_OUTBOX",
+}
 
 
 def training_rows() -> list[tuple[str, str]]:
@@ -326,6 +340,11 @@ def main() -> int:
         premise.name: query(args.endpoint, synthesis_prompt(excluded=premise.name))
         for premise in DISCIPLINES
     }
+    for name, row in ablations.items():
+        labels = (row.get("intent_diagnostics") or {}).get("labels") or []
+        row["feature_removed"] = not any(
+            label.endswith(":" + PRIMARY_FEATURE[name]) for label in labels
+        )
     contradiction = query(args.endpoint, synthesis_prompt(contradiction=True))
     contradiction_pass, contradiction_detail = execute_no_retry_contradiction(
         contradiction["source"]
@@ -342,10 +361,24 @@ def main() -> int:
         args.endpoint, args.output.with_name("multidomain-enterprise-after.json")
     ) if args.train and args.enterprise_gate else None
 
-    ablations_pass = all(not row["executes"] for row in ablations.values())
+    ablations_pass = all(
+        not row["executes"] and row["feature_removed"]
+        for row in ablations.values()
+    )
+    contradiction_labels = (
+        contradiction.get("intent_diagnostics") or {}
+    ).get("labels") or []
+    contradiction_routed = (
+        any(label.endswith(":RESILIENCE:NO_RETRY") for label in contradiction_labels)
+        and not any(label.endswith(":RESILIENCE:ASYNC_RETRY")
+                    for label in contradiction_labels)
+        and not any(label.endswith(":ENTERPRISE:BOUNDED_RETRY")
+                    for label in contradiction_labels)
+    )
     retention_ok = retention_after is None or retention_passed(retention_after)
     enterprise_ok = enterprise is None or bool(enterprise.get("passed"))
     passed = full["executes"] and ablations_pass and contradiction_pass \
+        and contradiction_routed \
         and retention_ok and enterprise_ok
     report = {
         "passed": passed, "disciplines": [p.name for p in DISCIPLINES],
@@ -357,6 +390,7 @@ def main() -> int:
         "ablations": ablations, "ablations_passed": ablations_pass,
         "contradiction": contradiction,
         "contradiction_propagated": contradiction_pass,
+        "contradiction_routed": contradiction_routed,
         "retention_before": retention_before, "retention_after": retention_after,
         "retention_passed": retention_ok, "enterprise_after": enterprise,
         "enterprise_passed": enterprise_ok, "tick_before": tick_before,
@@ -380,6 +414,7 @@ def main() -> int:
         "passed": passed, "full_executes": full["executes"],
         "ablations_passed": ablations_pass,
         "contradiction_propagated": contradiction_pass,
+        "contradiction_routed": contradiction_routed,
         "retention_passed": retention_ok, "enterprise_passed": enterprise_ok,
         "tick_delta": report["tick_delta"],
     }))
