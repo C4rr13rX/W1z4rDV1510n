@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import hashlib
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -333,6 +334,20 @@ def deferred_intervals_path(runtime: Path) -> Path:
 
 def deferred_interval_id(phase: str, start_row: int, end_row: int) -> str:
     return f"{phase}:{start_row}:{end_row}"
+
+
+def preserve_deferred_base(runtime: Path, interval_id: str) -> Path:
+    """Keep the exact causal starting snapshot for later interval bisection."""
+    guard = runtime / "brain" / "brain.last-good.bin"
+    if not guard.is_file():
+        raise RuntimeError(f"cannot preserve deferred base without guard: {guard}")
+    digest = hashlib.sha256(interval_id.encode("utf-8")).hexdigest()[:16]
+    directory = runtime / "deferred" / digest
+    directory.mkdir(parents=True, exist_ok=True)
+    base = directory / "brain.base.bin"
+    if not base.exists():
+        os.link(guard, base)
+    return base
 
 
 def append_deferred_event(runtime: Path, event: dict) -> None:
@@ -704,6 +719,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         interval_id = deferred_interval_id(
                             phase.name, suspect_start, candidate_row
                         )
+                        base_snapshot = preserve_deferred_base(runtime, interval_id)
                         if not any(
                             row.get("interval_id") == interval_id
                             for row in unresolved_deferred_intervals(runtime)
@@ -714,6 +730,8 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                                 "phase": phase.name,
                                 "start_row": suspect_start,
                                 "end_row": candidate_row,
+                                "base_snapshot": str(base_snapshot),
+                                "base_row": int(last_good.get("row") or 0),
                                 "reason": "continuous_canary_failed",
                                 "error": str(exc),
                             })

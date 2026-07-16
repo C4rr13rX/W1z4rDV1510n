@@ -26,6 +26,7 @@ from scripts.programming_curriculum_supervisor import (
     deferred_interval_id,
     latest_passing_canary_row,
     phase_offsets,
+    preserve_deferred_base,
     publish,
     recall_command,
     restore_canary_quarantine,
@@ -82,6 +83,19 @@ from tools.training_standard.drive_corpora_brain import checkpoint_due, row_is_s
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_deferred_interval_preserves_exact_causal_base_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.bin"
+            guard.write_bytes(b"causal-base")
+            base = preserve_deferred_base(runtime, "phase:100:120")
+            self.assertTrue(base.samefile(guard))
+            guard.unlink()
+            guard.write_bytes(b"later-guard")
+            self.assertEqual(base.read_bytes(), b"causal-base")
+
     def test_deferred_ranges_skip_only_the_half_open_suspect_rows(self) -> None:
         ranges = ((10, 20), (30, 31))
         self.assertFalse(row_is_skipped(9, ranges))
