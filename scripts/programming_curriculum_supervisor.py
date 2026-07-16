@@ -966,6 +966,11 @@ def main() -> int:
         attached_start, _ = phase_offsets(
             runtime / f"{attach_phase.name}.progress.json"
         )
+        attach_recovered = False
+        next_attached_canary = (
+            ((attached_start // args.canary_rows) + 1) * args.canary_rows
+            if args.canary_rows > 0 else None
+        )
         publish(status_path, {"state": "attached", "pid": args.attach_pid,
                               "phase": attach_phase.name,
                               "ram_next_row": attached_start,
@@ -982,11 +987,38 @@ def main() -> int:
                 "durable_next_row": attached_durable,
                 "updated_unix": time.time(),
             })
+            if (next_attached_canary is not None
+                    and attached_durable >= next_attached_canary):
+                candidate_row = next_attached_canary
+                try:
+                    run_continuous_canary(
+                        args, attach_phase, runtime, candidate_row
+                    )
+                except (RuntimeError, subprocess.TimeoutExpired,
+                        json.JSONDecodeError) as exc:
+                    try:
+                        attached_process = psutil.Process(args.attach_pid)
+                        attached_process.terminate()
+                        attached_process.wait(timeout=30)
+                    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                        pass
+                    record_deferred_failure(
+                        runtime, attach_phase, candidate_row,
+                        attached_durable, str(exc),
+                        "attached_continuous_canary_failed",
+                    )
+                    if not perform_automatic_recovery(
+                            args, attach_phase, runtime, status_path):
+                        return 1
+                    attach_recovered = True
+                    break
+                while next_attached_canary <= attached_durable:
+                    next_attached_canary += args.canary_rows
             time.sleep(max(1.0, args.poll_seconds))
         attached_ram, attached_durable = phase_offsets(
             runtime / f"{attach_phase.name}.progress.json"
         )
-        if args.restart_node_after_attach:
+        if args.restart_node_after_attach and not attach_recovered:
             if attached_durable != attached_ram:
                 publish(status_path, {
                     "state": "attached_restart_refused",
@@ -1016,7 +1048,8 @@ def main() -> int:
                 "tick_housekeeping": "lazy",
                 "defer_promotion": True,
             })
-        if attached_ram > attached_start and attached_ram < attach_phase.rows:
+        if (not attach_recovered and attached_ram > attached_start
+                and attached_ram < attach_phase.rows):
             if attached_durable != attached_ram:
                 publish(status_path, {"state": "midphase_gate_failed",
                                       "phase": attach_phase.name,
