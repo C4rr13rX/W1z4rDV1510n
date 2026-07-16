@@ -1467,6 +1467,21 @@ fn single_language_ranked_source(labels: &[String], candidates: &[Vec<u8>]) -> O
         .flatten()
 }
 
+fn select_composed_artifact(
+    labels: &[String],
+    fragment_composition: Option<Vec<u8>>,
+    manifest_composition: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":ARTIFACT:PROJECT"))
+    {
+        manifest_composition.or(fragment_composition)
+    } else {
+        fragment_composition.or(manifest_composition)
+    }
+}
+
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
@@ -2197,8 +2212,11 @@ async fn h_brain_chat(
     let raw_programming_compatible = raw_trained.as_ref().is_some_and(|candidate| {
         programming_response_compatible(&diagnostic_intent_labels, candidate)
     });
-    let composed = merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt)
-        .or_else(|| merge_grounded_file_manifests(&feature_candidates));
+    let composed = select_composed_artifact(
+        &diagnostic_intent_labels,
+        merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt),
+        merge_grounded_file_manifests(&feature_candidates),
+    );
     let exact_is_composition_prerequisite = exact_feature
         .as_ref()
         .is_some_and(|exact| exact_fragment_has_grounded_dependents(exact, &feature_candidates));
@@ -3403,6 +3421,27 @@ mod tests {
         assert_eq!(
             single_language_ranked_manifest(&polyglot, &[manifest]),
             None
+        );
+    }
+
+    #[test]
+    fn explicit_project_prefers_complete_manifest_over_fragment_subgraph() {
+        let manifest =
+            br#"{"files":{"circuit.py":"class Circuit: pass\n","logs.py":"def log(): pass\n"}}"#
+                .to_vec();
+        let fragments = br#"{"files":{"unrelated.py":"class Old: pass\n"}}"#.to_vec();
+        let project = vec![
+            "intent:LANGUAGE:PYTHON".to_string(),
+            "intent:ARTIFACT:PROJECT".to_string(),
+        ];
+        assert_eq!(
+            select_composed_artifact(&project, Some(fragments.clone()), Some(manifest.clone())),
+            Some(manifest)
+        );
+        let component = vec!["intent:LANGUAGE:PYTHON".to_string()];
+        assert_eq!(
+            select_composed_artifact(&component, Some(fragments.clone()), None),
+            Some(fragments)
         );
     }
 

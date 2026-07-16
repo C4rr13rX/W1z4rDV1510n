@@ -24,6 +24,8 @@ from programming_experiential_generalization import (
 )
 from programming_multidomain_holdout import execute, holdout_prompt, query
 from programming_multidomain_synthesis import active_training_pids
+from programming_domain_transfer_holdout import query as query_domain_transfer, transfer_prompt
+from programming_state_contract_holdout import query as query_third_state_contract
 
 
 @dataclass(frozen=True)
@@ -329,6 +331,8 @@ def main() -> int:
     baseline = evaluate(args.endpoint)
     trained = train(args.endpoint, args.repeats) if args.train else None
     learned = evaluate(args.endpoint) if args.train else baseline
+    domain_transfer = query_domain_transfer(args.endpoint, transfer_prompt())
+    third_state_contract = query_third_state_contract(args.endpoint)
     tick_after = request(args.endpoint, "/brain/stats", None).get("tick")
     retention_after = run_retention(
         args.endpoint, args.output.with_name("parameterized-foundation-after.json")
@@ -338,7 +342,11 @@ def main() -> int:
     ) if args.train and args.enterprise_gate else None
     retention_ok = retention_after is None or retention_passed(retention_after)
     enterprise_ok = enterprise is None or bool(enterprise.get("passed"))
-    learned_ok = all(row["executes"] for row in learned.values())
+    learned_ok = (
+        all(row["executes"] for row in learned.values())
+        and domain_transfer["executes"]
+        and third_state_contract["executes"]
+    )
     final_sources = {row["source"] for row in learned.values()}
     trained_responses = {response for _, response in training_rows()}
     complete_artifact_was_unseen = all(
@@ -351,6 +359,8 @@ def main() -> int:
         "baseline": baseline,
         "training": trained,
         "learned": learned,
+        "domain_transfer": domain_transfer,
+        "third_state_contract": third_state_contract,
         "complete_artifact_was_unseen": complete_artifact_was_unseen,
         "retention_before": retention_before,
         "retention_after": retention_after,
