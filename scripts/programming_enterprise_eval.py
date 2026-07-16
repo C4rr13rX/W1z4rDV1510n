@@ -161,6 +161,10 @@ def main() -> int:
             passed, detail = executes(reply, case.assertions)
             results.append({"name": case.name, "kind": kind, "nonempty": bool(reply),
                             "exact": reply == case.response, "executes": passed,
+                            "decoder": result.get("decoder"),
+                            "reply": reply if not passed else None,
+                            "intent_diagnostics": (result.get("intent_diagnostics")
+                                                   if not passed else None),
                             "detail": "" if passed else detail})
     oov = []
     for prompt in OOV:

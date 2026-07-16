@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use axum::{
@@ -1109,9 +1110,11 @@ async fn h_pretrain_binding(
     }))
 }
 
-/// Bounded bulk form of `h_pretrain_binding`. Holding the brain lock across a
-/// small group removes HTTP and mutex overhead while preserving one tick and
-/// one independently addressable binding per episode.
+/// Bulk form of `h_pretrain_binding` with a bounded lock window. A request may
+/// carry many episodes to amortize HTTP/base64 overhead, but the live brain is
+/// released after every small ordered chunk so inference remains responsive.
+/// Episode order, one tick/binding per episode, and one WAL acknowledgement
+/// for the whole request are preserved.
 async fn h_pretrain_bindings(
     State(s): State<BrainApiState>,
     Json(req): Json<serde_json::Value>,
@@ -1146,14 +1149,32 @@ async fn h_pretrain_bindings(
         }
         decoded.push(frames);
     }
-    let mut brain = s.brain.lock().await;
-    let binding_ids: Vec<_> = decoded
-        .iter()
-        .map(|frames| brain.pretrain_binding_episode(frames))
-        .collect();
+    let lock_chunk_size = req
+        .get("lock_chunk_size")
+        .and_then(|value| value.as_u64())
+        .map(|value| value.clamp(1, 32) as usize)
+        .unwrap_or(12);
+    let mut binding_ids = Vec::with_capacity(decoded.len());
+    let mut max_lock_millis = 0.0_f64;
+    let mut tick_now = 0;
+    let mut store = None;
+    for chunk in decoded.chunks(lock_chunk_size) {
+        let mut brain = s.brain.lock().await;
+        let lock_started = Instant::now();
+        binding_ids.extend(
+            chunk
+                .iter()
+                .map(|frames| brain.pretrain_binding_episode(frames)),
+        );
+        tick_now = brain.fabric().current_tick();
+        store = Some(brain.store_clone());
+        max_lock_millis = max_lock_millis.max(lock_started.elapsed().as_secs_f64() * 1000.0);
+        drop(brain);
+        tokio::task::yield_now().await;
+    }
     let accepted = binding_ids.iter().filter(|id| id.is_some()).count();
     if accepted > 0 {
-        if let Err(error) = brain.store_clone().flush() {
+        if let Err(error) = store.expect("non-empty request has a store").flush() {
             return Json(json!({"error": format!("WAL flush failed: {}", error)}));
         }
     }
@@ -1161,7 +1182,9 @@ async fn h_pretrain_bindings(
         "ok": accepted == binding_ids.len(),
         "accepted": accepted,
         "binding_ids": binding_ids,
-        "tick_now": brain.fabric().current_tick(),
+        "tick_now": tick_now,
+        "lock_chunk_size": lock_chunk_size,
+        "max_lock_millis": max_lock_millis,
     }))
 }
 

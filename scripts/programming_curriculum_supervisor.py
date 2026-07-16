@@ -170,6 +170,17 @@ def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
     return json.loads(lines[-1])
 
 
+def append_health_event(runtime: Path, event: dict) -> None:
+    """Append an auditable candidate-boundary result without rewriting history."""
+    path = runtime / "curriculum-health.jsonl"
+    payload = dict(event)
+    payload.setdefault("updated_unix", time.time())
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
                    rows: int, samples: int) -> list[str]:
     """Accept deterministic answers supervised by any durable prior corpus."""
@@ -315,6 +326,52 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
     return report
 
 
+def run_continuous_canary(args: argparse.Namespace, phase: Phase,
+                          runtime: Path, trained_rows: int) -> dict:
+    """Fast read-only drift screen while the corpus worker keeps advancing."""
+    recall = run_json_command(
+        recall_command(args, phase, runtime, trained_rows, 8), timeout=900.0
+    )
+    if recall.get("accepted_trained_response") != recall.get("sampled"):
+        raise RuntimeError(f"continuous recall regression: {recall}")
+    foundation = run_json_command([
+        sys.executable, "scripts/programming_brain_eval.py",
+        "--endpoint", args.endpoint,
+    ], timeout=900.0)
+    for passed_key, total_key in (
+        ("toddler_exact", "toddler_total"),
+        ("k12_trained_answer", "k12_total"),
+        ("oov_honest", "oov_total"),
+    ):
+        if foundation.get(passed_key) != foundation.get(total_key):
+            raise RuntimeError(f"continuous foundation regression: {foundation}")
+    code = run_json_command([
+        sys.executable, "scripts/programming_code_eval.py",
+        "--endpoint", args.endpoint,
+    ], timeout=900.0)
+    for kind in ("trained", "novel_paraphrase"):
+        group = (code.get("summary") or {}).get(kind) or {}
+        if (group.get("executes") != group.get("count")
+                or group.get("syntax_valid") != group.get("count")):
+            raise RuntimeError(f"continuous code regression: {code}")
+    report = {
+        "kind": "continuous_canary", "phase": phase.name,
+        "trained_rows": trained_rows, "passed": True,
+        "recall": {
+            "accepted": recall.get("accepted_trained_response"),
+            "sampled": recall.get("sampled"),
+        },
+        "foundation": {
+            "toddler": foundation.get("toddler_exact"),
+            "k12": foundation.get("k12_trained_answer"),
+            "oov": foundation.get("oov_honest"),
+        },
+        "code": code.get("summary"),
+    }
+    append_health_event(runtime, report)
+    return report
+
+
 def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
               status_path: Path, block_target_row: int) -> int:
     progress = runtime / f"{phase.name}.progress.json"
@@ -323,8 +380,9 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         return 0
     stdout_path = runtime / f"{phase.name}.stdout.log"
     stderr_path = runtime / f"{phase.name}.stderr.log"
-    batch_size = runtime_responsive_batch_size(
-        runtime, args.batch_size, read_json(progress),
+    batch_size = args.batch_size
+    lock_chunk_size = runtime_responsive_batch_size(
+        runtime, args.lock_chunk_size, read_json(progress),
         args.max_live_lock_seconds
     )
     command = [
@@ -338,6 +396,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--limit-rows", str(max(0, block_target_row - ram)),
         "--durable-start-row", str(durable),
         "--batch-size", str(batch_size),
+        "--lock-chunk-size", str(lock_chunk_size),
         "--max-batch-seconds", str(args.max_live_lock_seconds),
         "--inter-post-sleep", str(args.inter_batch_yield_seconds),
         "--checkpoint-rows", str(args.checkpoint_rows),
@@ -348,6 +407,10 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--progress-path", str(progress),
     ]
     worker_pid_path = runtime / f"{phase.name}.pid"
+    next_canary = (
+        ((ram // args.canary_rows) + 1) * args.canary_rows
+        if args.canary_rows > 0 else None
+    )
     with stdout_path.open("a", encoding="utf-8") as stdout, \
             stderr_path.open("a", encoding="utf-8") as stderr:
         worker = subprocess.Popen(
@@ -363,9 +426,51 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                     "worker_pid": worker.pid, "ram_next_row": ram,
                     "durable_next_row": durable,
                     "batch_size": batch_size,
+                    "lock_chunk_size": lock_chunk_size,
                     "block_target_row": block_target_row,
                     "updated_unix": time.time(),
                 })
+                if (code is None and next_canary is not None
+                        and ram >= next_canary):
+                    candidate_row = ram
+                    publish(status_path, {
+                        "state": "continuous_canary", "phase": phase.name,
+                        "worker_pid": worker.pid, "ram_next_row": ram,
+                        "durable_next_row": durable,
+                        "canary_row": candidate_row,
+                        "block_target_row": block_target_row,
+                        "updated_unix": time.time(),
+                    })
+                    try:
+                        run_continuous_canary(
+                            args, phase, runtime, candidate_row
+                        )
+                    except (RuntimeError, subprocess.TimeoutExpired,
+                            json.JSONDecodeError) as exc:
+                        worker.terminate()
+                        try:
+                            worker.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            worker.kill()
+                            worker.wait(timeout=30)
+                        append_health_event(runtime, {
+                            "kind": "continuous_canary",
+                            "phase": phase.name,
+                            "trained_rows": candidate_row,
+                            "passed": False,
+                            "error": str(exc),
+                        })
+                        publish(status_path, {
+                            "state": "continuous_canary_failed",
+                            "phase": phase.name,
+                            "ram_next_row": candidate_row,
+                            "durable_next_row": durable,
+                            "error": str(exc),
+                            "updated_unix": time.time(),
+                        })
+                        return 86
+                    while next_canary <= candidate_row:
+                        next_canary += args.canary_rows
                 if code is not None:
                     return code
                 time.sleep(max(1.0, args.poll_seconds))
@@ -389,11 +494,16 @@ def main() -> int:
         help="gate the phase's current durable boundary and exit without training",
     )
     parser.add_argument("--poll-seconds", type=float, default=10.0)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.1)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--lock-chunk-size", type=int, default=12)
+    parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.0)
     parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)
-    parser.add_argument("--checkpoint-rows", type=int, default=16384)
-    parser.add_argument("--gate-rows", type=int, default=16384)
+    parser.add_argument("--checkpoint-rows", type=int, default=131072)
+    parser.add_argument("--gate-rows", type=int, default=131072)
+    parser.add_argument(
+        "--canary-rows", type=int, default=16384,
+        help="run fast read-only drift checks while training continues; 0 disables",
+    )
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument(
         "--corpus-root", type=Path,
@@ -562,6 +672,8 @@ def main() -> int:
             ram_after, durable_after = phase_offsets(
                 runtime / f"{phase.name}.progress.json"
             )
+            if code == 86:
+                return 1
             if code == 0 and ram_after >= phase.rows:
                 continue
             if code == 0 and ram_after > ram and durable_after == ram_after:

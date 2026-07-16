@@ -232,8 +232,10 @@ def training_plan(args: argparse.Namespace) -> list[list[str]]:
             "--endpoint", endpoint, "--runtime", str(args.runtime),
             "--corpus-root", str(args.corpus_root), "--include-seed-corpora",
             "--batch-size", str(args.batch_size),
+            "--lock-chunk-size", str(args.lock_chunk_size),
             "--checkpoint-rows", str(args.checkpoint_rows),
             "--gate-rows", str(args.gate_rows),
+            "--canary-rows", str(args.canary_rows),
             "--max-live-lock-seconds", str(args.max_live_lock_seconds),
         ])
         commands.extend(experience_commands(args))
@@ -278,9 +280,11 @@ def main() -> int:
                         default=ROOT / "brains/coding_debug.deployment.toml")
     parser.add_argument("--corpus-root", type=Path,
                         default=Path(r"D:\w1z4rdv1510n-data\training"))
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--checkpoint-rows", type=int, default=16384)
-    parser.add_argument("--gate-rows", type=int, default=16384)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--lock-chunk-size", type=int, default=12)
+    parser.add_argument("--checkpoint-rows", type=int, default=131072)
+    parser.add_argument("--gate-rows", type=int, default=131072)
+    parser.add_argument("--canary-rows", type=int, default=16384)
     parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)
     args = parser.parse_args()
     args.runtime = args.runtime.resolve()

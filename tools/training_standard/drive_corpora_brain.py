@@ -236,14 +236,18 @@ def post_pretrain_pair(prompt: str, response: str,
     return True, ""
 
 
-def post_pretrain_batch(episodes: list[dict]) -> tuple[bool, str]:
-    """Form up to 256 independent atom-grounded episodes in one request."""
+def post_pretrain_batch(episodes: list[dict],
+                        lock_chunk_size: int = 12) -> tuple[bool, str, float]:
+    """Form ordered episodes while bounding each server-side lock window."""
     ok, result = _post(
-        _path("/pretrain_bindings"), {"episodes": episodes}, timeout=300.0
+        _path("/pretrain_bindings"), {
+            "episodes": episodes,
+            "lock_chunk_size": lock_chunk_size,
+        }, timeout=300.0
     )
     if not ok or not isinstance(result, dict) or not result.get("ok"):
-        return False, f"pretrain-bindings: {result}"
-    return True, ""
+        return False, f"pretrain-bindings: {result}", 0.0
+    return True, "", float(result.get("max_lock_millis") or 0.0) / 1000.0
 
 
 def write_progress(path: Path, payload: dict) -> None:
@@ -472,6 +476,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 direct_pretrain: bool = False,
                 input_path: str = "",
                 batch_size: int = 16,
+                lock_chunk_size: int = 12,
                 progress_path: Path | None = None,
                 checkpoint_rows: int = 4096,
                 feature_policy: str = "auto",
@@ -539,6 +544,7 @@ def drive_one(script, repeats: int, project_root: Path,
         if direct_pretrain:
             episodes = []
             current_batch_size = batch_size
+            current_lock_chunk_size = lock_chunk_size
             previous_progress: dict = {}
             if progress_path is not None:
                 try:
@@ -569,7 +575,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 nonlocal last_batch_size, last_batch_seconds
                 nonlocal max_batch_size, max_batch_seconds
                 nonlocal batch_seconds_ema, timed_batches
-                nonlocal current_batch_size, adaptive_batch_reductions
+                nonlocal current_lock_chunk_size, adaptive_batch_reductions
                 last_batch_size = size
                 last_batch_seconds = elapsed
                 timed_batches += 1
@@ -585,8 +591,8 @@ def drive_one(script, repeats: int, project_root: Path,
                     scaled = max(
                         1, int(size * max_live_batch_seconds / elapsed)
                     )
-                    if scaled < current_batch_size:
-                        current_batch_size = scaled
+                    if scaled < current_lock_chunk_size:
+                        current_lock_chunk_size = scaled
                         adaptive_batch_reductions += 1
 
             def publish_progress() -> None:
@@ -604,6 +610,7 @@ def drive_one(script, repeats: int, project_root: Path,
                         "batch_seconds_ema": round(batch_seconds_ema, 4),
                         "timed_batches": timed_batches,
                         "current_batch_size": current_batch_size,
+                        "current_lock_chunk_size": current_lock_chunk_size,
                         "adaptive_batch_reductions": adaptive_batch_reductions,
                         "updated_unix": time.time(),
                     })
@@ -641,9 +648,12 @@ def drive_one(script, repeats: int, project_root: Path,
                 if len(episodes) >= current_batch_size:
                     submitted_count = len(episodes)
                     batch_started = time.monotonic()
-                    ok, err = post_pretrain_batch(episodes)
+                    ok, err, lock_seconds = post_pretrain_batch(
+                        episodes, current_lock_chunk_size
+                    )
                     record_batch_timing(
-                        submitted_count, time.monotonic() - batch_started
+                        min(submitted_count, current_lock_chunk_size),
+                        lock_seconds or (time.monotonic() - batch_started),
                     )
                     if ok:
                         summary["posted_ok"] += len(episodes)
@@ -678,9 +688,12 @@ def drive_one(script, repeats: int, project_root: Path,
             if episodes:
                 submitted_count = len(episodes)
                 batch_started = time.monotonic()
-                ok, err = post_pretrain_batch(episodes)
+                ok, err, lock_seconds = post_pretrain_batch(
+                    episodes, current_lock_chunk_size
+                )
                 record_batch_timing(
-                    submitted_count, time.monotonic() - batch_started
+                    min(submitted_count, current_lock_chunk_size),
+                    lock_seconds or (time.monotonic() - batch_started),
                 )
                 if ok:
                     summary["posted_ok"] += len(episodes)
@@ -820,6 +833,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-size", type=int, default=16,
                      help="direct-pretrain episodes per request (1..256); "
                           "smaller batches keep live inference responsive")
+    p.add_argument("--lock-chunk-size", type=int, default=12,
+                   help="maximum ordered episodes held under one server lock")
     p.add_argument("--max-batch-seconds", type=float, default=0.0,
                      help="adapt the direct-pretrain batch downward within a "
                           "run when an acknowledged batch exceeds this live-"
@@ -870,6 +885,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if not 1 <= args.batch_size <= 256:
         p.error("--batch-size must be between 1 and 256")
+    if not 1 <= args.lock_chunk_size <= 32:
+        p.error("--lock-chunk-size must be between 1 and 32")
     if args.durable_start_row is not None and not 0 <= args.durable_start_row <= args.start_row:
         p.error("--durable-start-row must be between 0 and --start-row")
 
@@ -911,6 +928,7 @@ def main(argv: list[str] | None = None) -> int:
                             direct_pretrain=args.direct_pretrain,
                             input_path=args.input_path,
                             batch_size=args.batch_size,
+                            lock_chunk_size=args.lock_chunk_size,
                             progress_path=args.progress_path,
                             checkpoint_rows=args.checkpoint_rows,
                             feature_policy=args.feature_policy,

@@ -382,22 +382,33 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn("guarded_block_target", source)
         self.assertIn("run_midphase_gate(args, phase, runtime, ram_after)", source)
         self.assertIn('"--no-checkpoint"', source)
-        self.assertIn('"--gate-rows", type=int, default=16384', source)
-        self.assertIn('"--checkpoint-rows", type=int, default=16384', source)
+        self.assertIn('"--gate-rows", type=int, default=131072', source)
+        self.assertIn('"--checkpoint-rows", type=int, default=131072', source)
 
     def test_dedicated_corpus_supervisor_preserves_live_inference_windows(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"--batch-size", type=int, default=32', source)
-        self.assertIn('"--inter-batch-yield-seconds", type=float, default=0.1', source)
+        self.assertIn('"--batch-size", type=int, default=256', source)
+        self.assertIn('"--inter-batch-yield-seconds", type=float, default=0.0', source)
         self.assertIn('"--max-batch-seconds", str(args.max_live_lock_seconds)', source)
         driver = (ROOT / "tools/training_standard/drive_corpora_brain.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("adaptive_batch_reductions", driver)
-        self.assertIn("current_batch_size = scaled", driver)
+        self.assertIn("current_lock_chunk_size = scaled", driver)
+        self.assertIn('"lock_chunk_size": lock_chunk_size', driver)
         self.assertIn('previous_progress.get("max_batch_seconds"', driver)
+
+    def test_continuous_canaries_quarantine_before_more_training_is_admitted(self) -> None:
+        source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("run_continuous_canary", source)
+        self.assertIn('"curriculum-health.jsonl"', source)
+        self.assertIn('"state": "continuous_canary_failed"', source)
+        self.assertIn("worker.terminate()", source)
+        self.assertIn("if code == 86:", source)
 
     def test_chunk_snapshot_guard_survives_until_explicit_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
