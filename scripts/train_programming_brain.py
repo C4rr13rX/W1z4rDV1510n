@@ -237,6 +237,8 @@ def training_plan(args: argparse.Namespace) -> list[list[str]]:
             "--gate-rows", str(args.gate_rows),
             "--canary-rows", str(args.canary_rows),
             "--max-live-lock-seconds", str(args.max_live_lock_seconds),
+            "--auto-quarantine-recovery",
+            "--node-bin", str(args.node_bin.resolve()),
         ])
         commands.extend(experience_commands(args))
     return commands

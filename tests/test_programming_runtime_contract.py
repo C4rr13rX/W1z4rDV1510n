@@ -659,6 +659,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("programming_experiential_generalization.py", trainer)
         self.assertIn("programming_multidomain_synthesis.py", trainer)
+        self.assertIn('"--auto-quarantine-recovery"', trainer)
+        self.assertIn('"--node-bin", str(args.node_bin.resolve())', trainer)
 
     def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
