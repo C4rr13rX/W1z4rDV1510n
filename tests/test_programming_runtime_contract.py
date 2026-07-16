@@ -28,6 +28,7 @@ from scripts.programming_curriculum_supervisor import (
     restore_canary_quarantine,
     responsive_batch_size,
     runtime_responsive_batch_size,
+    topology_delta,
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
 from scripts.programming_capstone_readiness import safe_manifest, structural_checks
@@ -77,6 +78,22 @@ from tools.training_standard.drive_corpora_brain import checkpoint_due
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_continuous_canary_attributes_concurrent_topology_growth(self) -> None:
+        self.assertEqual(
+            topology_delta(
+                {"tick": 10, "total_neurons": 20, "total_binding": 3},
+                {"tick": 14, "total_neurons": 25, "total_binding": 5},
+            ),
+            {
+                "tick": 4,
+                "pool_count": 0,
+                "total_neurons": 5,
+                "total_concepts": 0,
+                "total_binding": 2,
+                "total_terminals": 0,
+            },
+        )
+
     def test_standalone_server_honors_shared_brain_directory_precedence(self) -> None:
         source = (ROOT / "crates/node/src/bin/brain_server.rs").read_text(
             encoding="utf-8"

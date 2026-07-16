@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -244,6 +245,23 @@ def append_health_event(runtime: Path, event: dict) -> None:
         os.fsync(stream.fileno())
 
 
+def endpoint_json(endpoint: str, path: str, timeout: float = 30.0) -> dict:
+    request = urllib.request.Request(endpoint.rstrip("/") + path)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
+def topology_delta(before: dict, after: dict) -> dict:
+    fields = (
+        "tick", "pool_count", "total_neurons", "total_concepts",
+        "total_binding", "total_terminals",
+    )
+    return {
+        field: int(after.get(field, 0)) - int(before.get(field, 0))
+        for field in fields
+    }
+
+
 def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
                    rows: int, samples: int) -> list[str]:
     """Accept deterministic answers supervised by any durable prior corpus."""
@@ -392,6 +410,9 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
 def run_continuous_canary(args: argparse.Namespace, phase: Phase,
                           runtime: Path, trained_rows: int) -> dict:
     """Fast read-only drift screen while the corpus worker keeps advancing."""
+    progress_path = runtime / f"{phase.name}.progress.json"
+    rows_before = phase_offsets(progress_path)
+    stats_before = endpoint_json(args.endpoint, "/brain/stats")
     recall = run_json_command(
         recall_command(args, phase, runtime, trained_rows, 8), timeout=900.0
     )
@@ -417,6 +438,8 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
         if (group.get("executes") != group.get("count")
                 or group.get("syntax_valid") != group.get("count")):
             raise RuntimeError(f"continuous code regression: {code}")
+    stats_after = endpoint_json(args.endpoint, "/brain/stats")
+    rows_after = phase_offsets(progress_path)
     report = {
         "kind": "continuous_canary", "phase": phase.name,
         "trained_rows": trained_rows, "passed": True,
@@ -430,6 +453,15 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
             "oov": foundation.get("oov_honest"),
         },
         "code": code.get("summary"),
+        "concurrent_training": {
+            "ram_rows_before": rows_before[0],
+            "ram_rows_after": rows_after[0],
+            "durable_rows_before": rows_before[1],
+            "durable_rows_after": rows_after[1],
+        },
+        "topology_before": stats_before,
+        "topology_after": stats_after,
+        "topology_delta": topology_delta(stats_before, stats_after),
     }
     append_health_event(runtime, report)
     return report
