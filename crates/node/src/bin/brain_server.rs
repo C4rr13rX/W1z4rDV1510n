@@ -2374,7 +2374,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     eprintln!("[brain_server] starting (build with tick-prof eprintln + total_terminals counter)");
 
-    let data = data_dir();
+    // Honor the shared brain-directory precedence used by the embedded node.
+    // Training supervisors set W1Z4RD_NODE_BRAIN_DIR so node metadata and the
+    // multi-gigabyte brain checkpoint can live in separate directories.
+    let data = brain_api::default_node_brain_dir();
     std::fs::create_dir_all(&data).with_context(|| format!("mkdir {}", data.display()))?;
     let checkpoint_path = data.join("brain.bin");
 
@@ -2600,3 +2603,4 @@ async fn main() -> Result<()> {
         .context("axum serve")?;
     Ok(())
 }
+

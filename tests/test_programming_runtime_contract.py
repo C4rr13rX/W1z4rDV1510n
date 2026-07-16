@@ -75,6 +75,14 @@ from tools.training_standard.drive_corpora_brain import checkpoint_due
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_standalone_server_honors_shared_brain_directory_precedence(self) -> None:
+        source = (ROOT / "crates/node/src/bin/brain_server.rs").read_text(
+            encoding="utf-8"
+        )
+        main = source[source.index("async fn main()") :]
+        self.assertIn("brain_api::default_node_brain_dir()", main)
+        self.assertNotIn("let data = data_dir();", main)
+
     def test_wal_durable_training_still_bounds_snapshot_tail(self) -> None:
         self.assertFalse(checkpoint_due(4096, 4095))
         self.assertTrue(checkpoint_due(4096, 4096))
