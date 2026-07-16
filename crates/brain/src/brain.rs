@@ -3603,7 +3603,7 @@ impl Brain {
         // concepts can contain the same atom set after historical co-firing;
         // allowing their use count to beat a newer direct episode causes
         // unrelated actions to hijack an otherwise exact feature query.
-        let mut best: Option<(NeuronId, bool, u64)> = None;
+        let mut exact_candidates: Vec<(NeuronId, bool, u64)> = Vec::new();
         for binding_id in candidate_ids {
             let Some(binding) = bindings.get(binding_id) else {
                 continue;
@@ -3641,36 +3641,59 @@ impl Brain {
             {
                 continue;
             }
-            if best.is_none_or(|(_, best_direct, uses)| {
-                (direct_exact, binding.use_count) > (best_direct, uses)
-            }) {
-                best = Some((binding.id, direct_exact, binding.use_count));
-            }
+            exact_candidates.push((binding.id, direct_exact, binding.use_count));
         }
-        let binding = bindings.get(best?.0)?;
+        let strongest_directness = exact_candidates.iter().map(|(_, direct, _)| *direct).max()?;
         let target_handle = self.fabric.pool(target_pool)?;
         let target = target_handle.read();
-        let members: Vec<NeuronRef> = binding
-            .members
-            .iter()
-            .filter(|member| member.pool == target_pool)
-            .copied()
-            .collect();
-        let atoms: Vec<NeuronRef> = members
-            .iter()
-            .filter(|member| {
-                target
-                    .get(member.neuron)
-                    .is_some_and(|neuron| neuron.is_atom())
-            })
-            .copied()
-            .collect();
-        let bytes = if atoms.is_empty() {
-            target.decode_concept_members(&members)
-        } else {
-            target.decode_concept_members(&atoms)
-        };
-        (!bytes.is_empty()).then_some(bytes)
+        let mut decoded: Vec<(Vec<u8>, u64)> = Vec::new();
+        for (binding_id, _, uses) in exact_candidates
+            .into_iter()
+            .filter(|(_, direct, _)| *direct == strongest_directness)
+        {
+            let binding = bindings.get(binding_id)?;
+            let members: Vec<NeuronRef> = binding
+                .members
+                .iter()
+                .filter(|member| member.pool == target_pool)
+                .copied()
+                .collect();
+            let atoms: Vec<NeuronRef> = members
+                .iter()
+                .filter(|member| {
+                    target
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .copied()
+                .collect();
+            let bytes = if atoms.is_empty() {
+                target.decode_concept_members(&members)
+            } else {
+                target.decode_concept_members(&atoms)
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            if let Some((_, existing_uses)) = decoded
+                .iter_mut()
+                .find(|(existing, _)| *existing == bytes)
+            {
+                *existing_uses = (*existing_uses).max(uses);
+            } else {
+                decoded.push((bytes, uses));
+            }
+        }
+        // Sparse features describe a class of requests, not necessarily one
+        // unique artifact.  If the same complete feature set was wired to
+        // different targets, historical use_count cannot supply the missing
+        // prompt evidence.  Report ambiguity so the caller can defer to its
+        // raw character/context ranking instead of returning the most-used
+        // but potentially unrelated artifact.
+        if decoded.len() != 1 {
+            return None;
+        }
+        decoded.pop().map(|(bytes, _)| bytes)
     }
 
     /// Decode a learned target binding by similarity of overlapping character
