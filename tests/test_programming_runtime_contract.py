@@ -22,6 +22,7 @@ from scripts.programming_curriculum_supervisor import (
     assert_training_not_quarantined,
     ensure_last_good_guard,
     guarded_block_target,
+    latest_passing_canary_row,
     phase_offsets,
     publish,
     recall_command,
@@ -78,6 +79,34 @@ from tools.training_standard.drive_corpora_brain import checkpoint_due
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_quarantine_starts_after_latest_passing_canary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "curriculum-health.jsonl").write_text(
+                "\n".join((
+                    json.dumps({
+                        "kind": "continuous_canary", "phase": "corpus",
+                        "trained_rows": 120, "passed": True,
+                    }),
+                    "not-json",
+                    json.dumps({
+                        "kind": "continuous_canary", "phase": "other",
+                        "trained_rows": 180, "passed": True,
+                    }),
+                    json.dumps({
+                        "kind": "continuous_canary", "phase": "corpus",
+                        "trained_rows": 160, "passed": False,
+                    }),
+                    json.dumps({
+                        "kind": "continuous_canary", "phase": "corpus",
+                        "trained_rows": 140, "passed": True,
+                    }),
+                )) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(latest_passing_canary_row(runtime, "corpus", 100), 140)
+            self.assertEqual(latest_passing_canary_row(runtime, "missing", 100), 100)
+
     def test_continuous_canary_attributes_concurrent_topology_growth(self) -> None:
         self.assertEqual(
             topology_delta(

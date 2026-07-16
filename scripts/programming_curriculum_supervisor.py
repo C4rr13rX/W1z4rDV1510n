@@ -245,6 +245,28 @@ def append_health_event(runtime: Path, event: dict) -> None:
         os.fsync(stream.fileno())
 
 
+def latest_passing_canary_row(runtime: Path, phase: str, floor: int) -> int:
+    """Return the latest durable behavioral boundary known to be green."""
+    latest = floor
+    path = runtime / "curriculum-health.jsonl"
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                row = event.get("trained_rows")
+                if (event.get("kind") == "continuous_canary"
+                        and event.get("phase") == phase
+                        and event.get("passed") is True
+                        and isinstance(row, int)):
+                    latest = max(latest, row)
+    except (FileNotFoundError, OSError):
+        pass
+    return latest
+
+
 def endpoint_json(endpoint: str, path: str, timeout: float = 30.0) -> dict:
     request = urllib.request.Request(endpoint.rstrip("/") + path)
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -559,6 +581,14 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                             "state": "continuous_canary_failed",
                             "phase": phase.name,
                             "candidate_row": candidate_row,
+                            "suspect_start_row": latest_passing_canary_row(
+                                runtime,
+                                phase.name,
+                                int(read_json(
+                                    runtime / "brain" / "brain.last-good.json"
+                                ).get("row") or 0),
+                            ),
+                            "suspect_end_row": candidate_row,
                             "durable_next_row": durable,
                             "last_good": read_json(
                                 runtime / "brain" / "brain.last-good.json"
