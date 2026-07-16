@@ -245,6 +245,15 @@ def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
         "W1Z4RD_BRAIN_IDENTITY": str(identity),
         "W1Z4RD_BRAIN_PORT": str(parsed.port),
         "W1Z4RD_BRAIN_BIND": parsed.hostname,
+        # Eager housekeeping scans every terminal on every tick.  At corpus
+        # scale that made a mathematically routine decay pass consume >95% of
+        # training CPU.  Lazy decay applies the same compounded decay when a
+        # neuron is next touched, so it preserves the learning result without
+        # the O(total_terminals) scan.
+        "W1Z4RD_TICK_HOUSEKEEPING": "lazy",
+        # Promotion remains atom-grounded but is deferred to the end of the
+        # moment, avoiding repeated intermediate graph maintenance.
+        "W1Z4RD_DEFER_PROMOTION": "1",
     })
     if deployment.is_file():
         env["W1Z4RD_BRAIN_DEPLOYMENT"] = str(deployment)
