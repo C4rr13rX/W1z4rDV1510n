@@ -25,6 +25,7 @@ from scripts.programming_curriculum_supervisor import (
     phase_offsets,
     publish,
     recall_command,
+    restore_canary_quarantine,
     responsive_batch_size,
     runtime_responsive_batch_size,
 )
@@ -433,6 +434,44 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "restore the guarded snapshot"):
                 assert_training_not_quarantined(runtime)
+
+    def test_canary_quarantine_restore_rewinds_snapshot_wal_and_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.bin"
+            snapshot.write_bytes(b"accepted")
+            guard = brain / "brain.last-good.bin"
+            guard.hardlink_to(snapshot)
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus", "row": 100,
+            }), encoding="utf-8")
+            snapshot.unlink()
+            snapshot.write_bytes(b"rejected-candidate")
+            (brain / "brain.wal").write_bytes(b"rejected-wal")
+            progress = runtime / "corpus.progress.json"
+            progress.write_text(json.dumps({
+                "ram_next_row": 200, "durable_next_row": 200,
+                "max_batch_seconds": 7.0,
+            }), encoding="utf-8")
+            (runtime / "curriculum-canary-quarantine.json").write_text(
+                json.dumps({
+                    "phase": "corpus", "candidate_row": 200,
+                    "last_good": {"phase": "corpus", "row": 100},
+                }),
+                encoding="utf-8",
+            )
+            restored = restore_canary_quarantine(runtime)
+            self.assertEqual(restored["row"], 100)
+            self.assertEqual(snapshot.read_bytes(), b"accepted")
+            self.assertFalse((brain / "brain.wal").exists())
+            self.assertFalse(guard.exists())
+            self.assertFalse((runtime / "curriculum-canary-quarantine.json").exists())
+            rewound = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(rewound["ram_next_row"], 100)
+            self.assertEqual(rewound["durable_next_row"], 100)
+            self.assertEqual(rewound["max_batch_seconds"], 7.0)
 
     def test_chunk_snapshot_guard_survives_until_explicit_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -158,6 +158,55 @@ def assert_training_not_quarantined(runtime: Path) -> None:
         )
 
 
+def restore_canary_quarantine(runtime: Path) -> dict:
+    """Restore the accepted snapshot and ledger after a stopped-node failure."""
+    marker = canary_quarantine_path(runtime)
+    quarantine = read_json(marker)
+    if not quarantine:
+        raise RuntimeError(f"no continuous-canary quarantine exists: {marker}")
+    node_pid_path = runtime / "node.pid"
+    try:
+        node_pid = int(node_pid_path.read_text(encoding="ascii").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        node_pid = 0
+    if process_alive(node_pid):
+        raise RuntimeError(
+            f"brain server PID {node_pid} is still running; stop it before rollback"
+        )
+    last_good = quarantine.get("last_good") or read_json(
+        runtime / "brain" / "brain.last-good.json"
+    )
+    phase = str(last_good.get("phase") or quarantine.get("phase") or "")
+    row = last_good.get("row")
+    if not phase or not isinstance(row, int) or row < 0:
+        raise RuntimeError(f"quarantine lacks valid last-good phase/row: {quarantine}")
+    brain_dir = runtime / "brain"
+    snapshot = brain_dir / "brain.bin"
+    guard = brain_dir / "brain.last-good.bin"
+    if not guard.is_file():
+        raise RuntimeError(f"quarantine guard is missing: {guard}")
+    same_snapshot = snapshot.exists() and os.path.samefile(snapshot, guard)
+    if same_snapshot:
+        guard.unlink()
+    else:
+        snapshot.unlink(missing_ok=True)
+        os.replace(guard, snapshot)
+    (brain_dir / "brain.wal").unlink(missing_ok=True)
+    progress_path = runtime / f"{phase}.progress.json"
+    progress = read_json(progress_path)
+    progress.update({
+        "ram_next_row": row,
+        "durable_next_row": row,
+        "accepted_episodes": 0,
+        "restored_from_canary_quarantine": True,
+        "updated_unix": time.time(),
+    })
+    publish(progress_path, progress)
+    (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
+    marker.unlink()
+    return {"phase": phase, "row": row, "snapshot": str(snapshot)}
+
+
 def guarded_block_target(runtime: Path, phase: Phase, current_row: int,
                          gate_rows: int) -> int:
     """Keep one immutable retention boundary across worker/supervisor restarts."""
@@ -518,6 +567,10 @@ def main() -> int:
         "--gate-only-phase", default="",
         help="gate the phase's current durable boundary and exit without training",
     )
+    parser.add_argument(
+        "--restore-canary-quarantine", action="store_true",
+        help="with the brain server stopped, restore last-good state and rewind progress",
+    )
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lock-chunk-size", type=int, default=12)
@@ -540,6 +593,23 @@ def main() -> int:
         help="also train the canonical algorithms and GSM8K phases used by a fresh brain",
     )
     args = parser.parse_args()
+
+    runtime = args.runtime.resolve()
+    status_path = runtime / "curriculum-supervisor.status.json"
+    if args.restore_canary_quarantine:
+        try:
+            restored = restore_canary_quarantine(runtime)
+        except RuntimeError as exc:
+            publish(status_path, {
+                "state": "canary_restore_failed", "error": str(exc),
+                "updated_unix": time.time(),
+            })
+            return 1
+        publish(status_path, {
+            "state": "canary_restore_complete", **restored,
+            "updated_unix": time.time(),
+        })
+        return 0
 
     corpus_root = args.corpus_root.resolve()
     phases = [
@@ -572,9 +642,6 @@ def main() -> int:
     missing = [str(phase.corpus) for phase in phases if not phase.corpus.is_file()]
     if missing:
         parser.error("missing corpus files: " + ", ".join(missing))
-    runtime = args.runtime.resolve()
-    status_path = runtime / "curriculum-supervisor.status.json"
-
     if args.gate_only_phase:
         phase = next(
             (item for item in phases if item.name == args.gate_only_phase), None
