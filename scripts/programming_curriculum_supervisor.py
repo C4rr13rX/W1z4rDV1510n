@@ -954,6 +954,17 @@ def main() -> int:
                               "ram_next_row": attached_start,
                               "updated_unix": time.time()})
         while process_alive(args.attach_pid):
+            attached_ram, attached_durable = phase_offsets(
+                runtime / f"{attach_phase.name}.progress.json"
+            )
+            publish(status_path, {
+                "state": "attached",
+                "pid": args.attach_pid,
+                "phase": attach_phase.name,
+                "ram_next_row": attached_ram,
+                "durable_next_row": attached_durable,
+                "updated_unix": time.time(),
+            })
             time.sleep(max(1.0, args.poll_seconds))
         attached_ram, attached_durable = phase_offsets(
             runtime / f"{attach_phase.name}.progress.json"
@@ -976,14 +987,21 @@ def main() -> int:
                 run_midphase_gate(args, attach_phase, runtime, attached_ram)
             except (RuntimeError, subprocess.TimeoutExpired,
                     json.JSONDecodeError) as exc:
+                record_deferred_failure(
+                    runtime, attach_phase, attached_ram, attached_durable,
+                    str(exc), "attached_midphase_gate_failed",
+                )
                 publish(status_path, {"state": "midphase_gate_failed",
                                       "phase": attach_phase.name,
                                       "ram_next_row": attached_ram,
                                       "durable_next_row": attached_durable,
                                       "error": str(exc),
                                       "updated_unix": time.time()})
-                return 1
-            accept_last_good_guard(runtime)
+                if not perform_automatic_recovery(
+                        args, attach_phase, runtime, status_path):
+                    return 1
+            else:
+                accept_last_good_guard(runtime)
 
     assert_training_not_quarantined(runtime)
     for phase in phases:
