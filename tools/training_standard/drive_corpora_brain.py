@@ -94,6 +94,10 @@ def checkpoint_due(checkpoint_rows: int, accepted_since_checkpoint: int) -> bool
     """Whether the replay tail has reached its bounded snapshot window."""
     return checkpoint_rows > 0 and accepted_since_checkpoint >= checkpoint_rows
 
+
+def row_is_skipped(row: int, ranges: tuple[tuple[int, int], ...]) -> bool:
+    return any(begin <= row < end for begin, end in ranges)
+
 POOL_TEXT   = 1
 POOL_ACTION = 4
 POOL_ENVIRONMENT = 5
@@ -482,6 +486,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 feature_policy: str = "auto",
                 durable_start_row: int | None = None,
                 wal_durable: bool = False,
+                skip_ranges: tuple[tuple[int, int], ...] = (),
                 max_live_batch_seconds: float = 0.0) -> dict:
     """Drive one registry script's corpus through the brain.
 
@@ -509,6 +514,7 @@ def drive_one(script, repeats: int, project_root: Path,
         "pairs":       0,
         "posted_ok":   0,
         "posted_fail": 0,
+        "skipped_rows": 0,
         "repeats":     repeats,
         "burst":       burst,
         "smoke_ok":    None,
@@ -612,6 +618,7 @@ def drive_one(script, repeats: int, project_root: Path,
                         "current_batch_size": current_batch_size,
                         "current_lock_chunk_size": current_lock_chunk_size,
                         "adaptive_batch_reductions": adaptive_batch_reductions,
+                        "skipped_rows": summary["skipped_rows"],
                         "updated_unix": time.time(),
                     })
 
@@ -634,6 +641,11 @@ def drive_one(script, repeats: int, project_root: Path,
                 streamed_count += 1
                 summary["pairs"] += 1
                 logical_next_row = start_row + row_index + 1
+                logical_row = logical_next_row - 1
+                if row_is_skipped(logical_row, skip_ranges):
+                    summary["skipped_rows"] += 1
+                    batch_next_row = logical_next_row
+                    continue
                 prompt = (row.get("prompt") or row.get("question") or "").strip()
                 resp = (row.get("response") or row.get("answer") or "").strip()
                 if not prompt or not resp:
@@ -852,6 +864,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--durable-start-row", type=int,
                      help="last checkpointed logical row when resuming from "
                           "a newer RAM offset after a driver-only failure")
+    p.add_argument(
+        "--skip-range", action="append", default=[], metavar="START:END",
+        help="defer a zero-based logical half-open row range without training it; repeatable",
+    )
     p.add_argument("--wal-durable", action="store_true",
                      help="advance durable progress after each acknowledged "
                           "bulk WAL flush instead of snapshotting")
@@ -889,6 +905,16 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--lock-chunk-size must be between 1 and 32")
     if args.durable_start_row is not None and not 0 <= args.durable_start_row <= args.start_row:
         p.error("--durable-start-row must be between 0 and --start-row")
+    skip_ranges: list[tuple[int, int]] = []
+    for raw_range in args.skip_range:
+        try:
+            begin_text, end_text = raw_range.split(":", 1)
+            begin, end = int(begin_text), int(end_text)
+        except (ValueError, AttributeError):
+            p.error(f"invalid --skip-range {raw_range!r}; expected START:END")
+        if begin < 0 or end <= begin:
+            p.error(f"invalid --skip-range {raw_range!r}; require 0 <= START < END")
+        skip_ranges.append((begin, end))
 
     BRAIN_URL = args.brain.rstrip("/")
     # Mid-training benchmarks share the selected brain endpoint.  The runner
@@ -934,6 +960,7 @@ def main(argv: list[str] | None = None) -> int:
                             feature_policy=args.feature_policy,
                             durable_start_row=args.durable_start_row,
                             wal_durable=args.wal_durable,
+                            skip_ranges=tuple(skip_ranges),
                             max_live_batch_seconds=args.max_batch_seconds)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "

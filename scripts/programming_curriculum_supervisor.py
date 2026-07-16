@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -208,6 +209,65 @@ def restore_canary_quarantine(runtime: Path) -> dict:
     return {"phase": phase, "row": row, "snapshot": str(snapshot)}
 
 
+def stop_runtime_node(runtime: Path, timeout: float = 60.0) -> int:
+    pid_path = runtime / "node.pid"
+    try:
+        pid = int(pid_path.read_text(encoding="ascii").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        pid = 0
+    if not process_alive(pid):
+        return pid
+    process = psutil.Process(pid)
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except psutil.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=timeout)
+    return pid
+
+
+def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
+                       timeout: float = 900.0) -> subprocess.Popen:
+    executable = executable.resolve()
+    if not executable.is_file():
+        raise RuntimeError(f"brain server executable is missing: {executable}")
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
+        raise RuntimeError(f"automatic node recovery requires an HTTP host and port: {endpoint}")
+    identity = runtime / "brain" / "brain.identity.toml"
+    deployment = runtime / "brain.deployment.toml"
+    env = os.environ.copy()
+    env.update({
+        "W1Z4RDV1510N_DATA_DIR": str(runtime / "node"),
+        "W1Z4RD_NODE_BRAIN_DIR": str(runtime / "brain"),
+        "W1Z4RD_BRAIN_IDENTITY": str(identity),
+        "W1Z4RD_BRAIN_PORT": str(parsed.port),
+        "W1Z4RD_BRAIN_BIND": parsed.hostname,
+    })
+    if deployment.is_file():
+        env["W1Z4RD_BRAIN_DEPLOYMENT"] = str(deployment)
+    stdout = (runtime / "node-auto-recovery.stdout.log").open("ab")
+    stderr = (runtime / "node-auto-recovery.stderr.log").open("ab")
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    process = subprocess.Popen(
+        [str(executable)], cwd=ROOT, env=env, stdout=stdout, stderr=stderr,
+        creationflags=flags,
+    )
+    (runtime / "node.pid").write_text(f"{process.pid}\n", encoding="ascii")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"recovered brain server exited with {process.returncode}")
+        try:
+            endpoint_json(endpoint, "/brain/stats", timeout=2.0)
+            return process
+        except Exception:
+            time.sleep(1.0)
+    process.kill()
+    raise RuntimeError(f"recovered brain server did not become ready within {timeout}s")
+
+
 def guarded_block_target(runtime: Path, phase: Phase, current_row: int,
                          gate_rows: int) -> int:
     """Keep one immutable retention boundary across worker/supervisor restarts."""
@@ -267,6 +327,51 @@ def latest_passing_canary_row(runtime: Path, phase: str, floor: int) -> int:
     return latest
 
 
+def deferred_intervals_path(runtime: Path) -> Path:
+    return runtime / "curriculum-deferred-intervals.jsonl"
+
+
+def deferred_interval_id(phase: str, start_row: int, end_row: int) -> str:
+    return f"{phase}:{start_row}:{end_row}"
+
+
+def append_deferred_event(runtime: Path, event: dict) -> None:
+    payload = dict(event)
+    payload.setdefault("updated_unix", time.time())
+    path = deferred_intervals_path(runtime)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> list[dict]:
+    """Fold the append-only defer/resolve ledger into current obligations."""
+    current: dict[str, dict] = {}
+    try:
+        with deferred_intervals_path(runtime).open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                interval_id = event.get("interval_id")
+                if not isinstance(interval_id, str) or not interval_id:
+                    continue
+                if event.get("status") == "resolved":
+                    current.pop(interval_id, None)
+                elif event.get("status") == "deferred":
+                    current[interval_id] = event
+    except (FileNotFoundError, OSError):
+        pass
+    rows = list(current.values())
+    if phase is not None:
+        rows = [row for row in rows if row.get("phase") == phase]
+    return sorted(rows, key=lambda row: (
+        str(row.get("phase") or ""), int(row.get("start_row") or 0)
+    ))
+
+
 def endpoint_json(endpoint: str, path: str, timeout: float = 30.0) -> dict:
     request = urllib.request.Request(endpoint.rstrip("/") + path)
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -303,6 +408,11 @@ def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
             accepted.add(corpus.resolve())
     for corpus in sorted(accepted - {phase.corpus.resolve()}, key=str):
         command.extend(["--accepted-corpus", str(corpus)])
+    for interval in unresolved_deferred_intervals(runtime, phase.name):
+        command.extend([
+            "--skip-range",
+            f"{int(interval['start_row'])}:{int(interval['end_row'])}",
+        ])
     return command
 
 
@@ -523,6 +633,11 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--no-sleep-between",
         "--progress-path", str(progress),
     ]
+    for interval in unresolved_deferred_intervals(runtime, phase.name):
+        command.extend([
+            "--skip-range",
+            f"{int(interval['start_row'])}:{int(interval['end_row'])}",
+        ])
     worker_pid_path = runtime / f"{phase.name}.pid"
     next_canary = (
         ((ram // args.canary_rows) + 1) * args.canary_rows
@@ -586,6 +701,22 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                             "last_good": last_good,
                             "error": str(exc),
                         })
+                        interval_id = deferred_interval_id(
+                            phase.name, suspect_start, candidate_row
+                        )
+                        if not any(
+                            row.get("interval_id") == interval_id
+                            for row in unresolved_deferred_intervals(runtime)
+                        ):
+                            append_deferred_event(runtime, {
+                                "interval_id": interval_id,
+                                "status": "deferred",
+                                "phase": phase.name,
+                                "start_row": suspect_start,
+                                "end_row": candidate_row,
+                                "reason": "continuous_canary_failed",
+                                "error": str(exc),
+                            })
                         publish(canary_quarantine_path(runtime), {
                             "state": "continuous_canary_failed",
                             "phase": phase.name,
@@ -634,6 +765,14 @@ def main() -> int:
         "--restore-canary-quarantine", action="store_true",
         help="with the brain server stopped, restore last-good state and rewind progress",
     )
+    parser.add_argument(
+        "--auto-quarantine-recovery", action="store_true",
+        help="on canary failure, restart the node, rollback, defer the suspect range, and continue",
+    )
+    parser.add_argument(
+        "--node-bin", type=Path,
+        help="brain server executable required by --auto-quarantine-recovery",
+    )
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lock-chunk-size", type=int, default=12)
@@ -656,6 +795,8 @@ def main() -> int:
         help="also train the canonical algorithms and GSM8K phases used by a fresh brain",
     )
     args = parser.parse_args()
+    if args.auto_quarantine_recovery and args.node_bin is None:
+        parser.error("--auto-quarantine-recovery requires --node-bin")
 
     runtime = args.runtime.resolve()
     status_path = runtime / "curriculum-supervisor.status.json"
@@ -830,7 +971,35 @@ def main() -> int:
                 runtime / f"{phase.name}.progress.json"
             )
             if code == 86:
-                return 1
+                if not args.auto_quarantine_recovery:
+                    return 1
+                publish(status_path, {
+                    "state": "automatic_quarantine_recovery",
+                    "phase": phase.name,
+                    "ram_next_row": ram_after,
+                    "durable_next_row": durable_after,
+                    "updated_unix": time.time(),
+                })
+                try:
+                    stop_runtime_node(runtime)
+                    restored = restore_canary_quarantine(runtime)
+                    start_runtime_node(runtime, args.node_bin, args.endpoint)
+                except (RuntimeError, OSError, psutil.Error) as exc:
+                    publish(status_path, {
+                        "state": "automatic_quarantine_recovery_failed",
+                        "phase": phase.name,
+                        "error": str(exc),
+                        "updated_unix": time.time(),
+                    })
+                    return 1
+                append_health_event(runtime, {
+                    "kind": "automatic_quarantine_recovery",
+                    "phase": phase.name,
+                    "passed": True,
+                    "restored": restored,
+                })
+                restarts = 0
+                continue
             if code == 0 and ram_after >= phase.rows:
                 continue
             if code == 0 and ram_after > ram and durable_after == ram_after:
@@ -862,6 +1031,14 @@ def main() -> int:
                 return 1
             time.sleep(max(1.0, args.poll_seconds))
 
+    deferred = unresolved_deferred_intervals(runtime)
+    if deferred:
+        publish(status_path, {
+            "state": "deferred_intervals_pending",
+            "deferred_intervals": deferred,
+            "updated_unix": time.time(),
+        })
+        return 1
     publish(status_path, {"state": "all_complete", "updated_unix": time.time()})
     return 0
 

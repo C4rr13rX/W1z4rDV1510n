@@ -19,9 +19,11 @@ from scripts.programming_integrated_retention import mutation_enabled
 from scripts.programming_curriculum_supervisor import (
     Phase,
     accept_last_good_guard,
+    append_deferred_event,
     assert_training_not_quarantined,
     ensure_last_good_guard,
     guarded_block_target,
+    deferred_interval_id,
     latest_passing_canary_row,
     phase_offsets,
     publish,
@@ -30,6 +32,7 @@ from scripts.programming_curriculum_supervisor import (
     responsive_batch_size,
     runtime_responsive_batch_size,
     topology_delta,
+    unresolved_deferred_intervals,
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
 from scripts.programming_capstone_readiness import safe_manifest, structural_checks
@@ -75,10 +78,56 @@ from scripts.train_programming_brain import (
 )
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
 from scripts.programming_corpus_recall import accepted_responses, sample_window
-from tools.training_standard.drive_corpora_brain import checkpoint_due
+from tools.training_standard.drive_corpora_brain import checkpoint_due, row_is_skipped
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_deferred_ranges_skip_only_the_half_open_suspect_rows(self) -> None:
+        ranges = ((10, 20), (30, 31))
+        self.assertFalse(row_is_skipped(9, ranges))
+        self.assertTrue(row_is_skipped(10, ranges))
+        self.assertTrue(row_is_skipped(19, ranges))
+        self.assertFalse(row_is_skipped(20, ranges))
+        self.assertTrue(row_is_skipped(30, ranges))
+        self.assertFalse(row_is_skipped(31, ranges))
+
+    def test_deferred_interval_ledger_must_resolve_before_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            interval_id = deferred_interval_id("corpus", 100, 120)
+            append_deferred_event(runtime, {
+                "interval_id": interval_id,
+                "status": "deferred",
+                "phase": "corpus",
+                "start_row": 100,
+                "end_row": 120,
+            })
+            append_deferred_event(runtime, {
+                "interval_id": "other:1:2",
+                "status": "deferred",
+                "phase": "other",
+                "start_row": 1,
+                "end_row": 2,
+            })
+            self.assertEqual(
+                [row["interval_id"] for row in unresolved_deferred_intervals(runtime, "corpus")],
+                [interval_id],
+            )
+            append_deferred_event(runtime, {
+                "interval_id": interval_id,
+                "status": "resolved",
+                "phase": "corpus",
+            })
+            self.assertEqual(unresolved_deferred_intervals(runtime, "corpus"), [])
+            source = (ROOT / "scripts/programming_curriculum_supervisor.py").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn('"state": "deferred_intervals_pending"', source)
+            self.assertIn("stop_runtime_node(runtime)", source)
+            self.assertIn("restored = restore_canary_quarantine(runtime)", source)
+            self.assertIn("start_runtime_node(runtime, args.node_bin, args.endpoint)", source)
+            self.assertIn('"--skip-range"', source)
+
     def test_quarantine_starts_after_latest_passing_canary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
@@ -405,6 +454,9 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             probes, rows = sample_window(corpus, 2, 6, 3)
             self.assertEqual(rows, 6)
             self.assertEqual([row["prompt"] for row in probes], ["p2", "p4", "p7"])
+            probes, rows = sample_window(corpus, 2, 6, 3, ((3, 6),))
+            self.assertEqual(rows, 6)
+            self.assertEqual([row["prompt"] for row in probes], ["p2", "p6", "p7"])
 
     def test_corpus_recall_accepts_prior_durable_supervision(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -429,6 +481,14 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             command = recall_command(args, phase, runtime, 1, 1)
             self.assertIn("--accepted-corpus", command)
             self.assertIn(str(prior.resolve()), command)
+            append_deferred_event(runtime, {
+                "interval_id": deferred_interval_id("current", 0, 1),
+                "status": "deferred", "phase": "current",
+                "start_row": 0, "end_row": 1,
+            })
+            command = recall_command(args, phase, runtime, 1, 1)
+            self.assertIn("--skip-range", command)
+            self.assertIn("0:1", command)
 
     def test_direct_pretrain_is_chunked_between_retention_gates(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(

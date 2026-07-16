@@ -11,12 +11,31 @@ from pathlib import Path
 from programming_project_eval import request
 
 
+def merge_ranges(ranges: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
+    merged: list[list[int]] = []
+    for begin, end in sorted(ranges):
+        if merged and begin <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([begin, end])
+    return tuple((begin, end) for begin, end in merged)
+
+
 def sample_window(path: Path, start: int, count: int,
-                  sample_count: int) -> tuple[list[dict], int]:
+                  sample_count: int,
+                  skip_ranges: tuple[tuple[int, int], ...] = ()) -> tuple[list[dict], int]:
     """Select evenly distributed logical rows with O(sample_count) memory."""
     if count <= 0 or sample_count <= 0:
         return [], 0
-    target_count = min(count, sample_count)
+    skip_ranges = merge_ranges(skip_ranges)
+    excluded = sum(
+        max(0, min(start + count, end) - max(start, begin))
+        for begin, end in skip_ranges
+    )
+    eligible_count = max(0, count - excluded)
+    target_count = min(eligible_count, sample_count)
+    if target_count <= 0:
+        return [], 0
     if target_count == 1:
         targets = [0]
     else:
@@ -24,13 +43,14 @@ def sample_window(path: Path, start: int, count: int,
         # i*count/target_count leaves the final 1/N segment unprobed and can
         # miss a tail-only durability or interference failure.
         targets = [
-            (i * (count - 1)) // (target_count - 1)
+            (i * (eligible_count - 1)) // (target_count - 1)
             for i in range(target_count)
         ]
     target_cursor = 0
     probes: list[dict] = []
     valid = 0
     window_rows = 0
+    eligible = 0
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             try:
@@ -41,9 +61,13 @@ def sample_window(path: Path, start: int, count: int,
                 valid += 1
                 continue
             relative = valid - start
-            if target_cursor < len(targets) and relative == targets[target_cursor]:
+            skipped = any(begin <= valid < end for begin, end in skip_ranges)
+            if (not skipped and target_cursor < len(targets)
+                    and eligible == targets[target_cursor]):
                 probes.append(row)
                 target_cursor += 1
+            if not skipped:
+                eligible += 1
             valid += 1
             window_rows += 1
             if window_rows >= count:
@@ -77,6 +101,7 @@ def main() -> int:
     parser.add_argument("--start-row", type=int, default=0)
     parser.add_argument("--window-rows", type=int, default=100)
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument("--skip-range", action="append", default=[], metavar="START:END")
     parser.add_argument(
         "--accepted-corpus", action="append", type=Path, default=[],
         help="also accept supervised answers from this durably trained corpus",
@@ -84,8 +109,18 @@ def main() -> int:
     parser.add_argument("--syntax", choices=("python", "none"), default="python")
     args = parser.parse_args()
 
+    skip_ranges = []
+    for raw_range in args.skip_range:
+        try:
+            begin, end = (int(value) for value in raw_range.split(":", 1))
+        except (ValueError, AttributeError):
+            parser.error(f"invalid --skip-range {raw_range!r}; expected START:END")
+        if begin < 0 or end <= begin:
+            parser.error(f"invalid --skip-range {raw_range!r}")
+        skip_ranges.append((begin, end))
     probes, window_rows = sample_window(
-        args.corpus, args.start_row, args.window_rows, args.samples
+        args.corpus, args.start_row, args.window_rows, args.samples,
+        tuple(skip_ranges),
     )
     probe_prompts = {
         (row.get("prompt") or row.get("question") or "").strip()
