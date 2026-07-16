@@ -821,6 +821,10 @@ def main() -> int:
     parser.add_argument("--attach-pid", type=int, default=0)
     parser.add_argument("--attach-phase", default="")
     parser.add_argument(
+        "--restart-node-after-attach", action="store_true",
+        help="restart the node at the attached worker's durable boundary before gating",
+    )
+    parser.add_argument(
         "--gate-only-phase", default="",
         help="gate the phase's current durable boundary and exit without training",
     )
@@ -858,8 +862,12 @@ def main() -> int:
         help="also train the canonical algorithms and GSM8K phases used by a fresh brain",
     )
     args = parser.parse_args()
-    if args.auto_quarantine_recovery and args.node_bin is None:
-        parser.error("--auto-quarantine-recovery requires --node-bin")
+    if (args.auto_quarantine_recovery or args.restart_node_after_attach) \
+            and args.node_bin is None:
+        parser.error(
+            "--auto-quarantine-recovery and --restart-node-after-attach "
+            "require --node-bin"
+        )
 
     runtime = args.runtime.resolve()
     status_path = runtime / "curriculum-supervisor.status.json"
@@ -978,6 +986,36 @@ def main() -> int:
         attached_ram, attached_durable = phase_offsets(
             runtime / f"{attach_phase.name}.progress.json"
         )
+        if args.restart_node_after_attach:
+            if attached_durable != attached_ram:
+                publish(status_path, {
+                    "state": "attached_restart_refused",
+                    "phase": attach_phase.name,
+                    "ram_next_row": attached_ram,
+                    "durable_next_row": attached_durable,
+                    "error": "node restart requires an exact durable boundary",
+                    "updated_unix": time.time(),
+                })
+                return 1
+            try:
+                stop_runtime_node(runtime)
+                start_runtime_node(runtime, args.node_bin, args.endpoint)
+            except (RuntimeError, OSError, psutil.Error) as exc:
+                publish(status_path, {
+                    "state": "attached_restart_failed",
+                    "phase": attach_phase.name,
+                    "error": str(exc),
+                    "updated_unix": time.time(),
+                })
+                return 1
+            append_health_event(runtime, {
+                "kind": "attached_boundary_node_restart",
+                "phase": attach_phase.name,
+                "trained_rows": attached_ram,
+                "passed": True,
+                "tick_housekeeping": "lazy",
+                "defer_promotion": True,
+            })
         if attached_ram > attached_start and attached_ram < attach_phase.rows:
             if attached_durable != attached_ram:
                 publish(status_path, {"state": "midphase_gate_failed",
