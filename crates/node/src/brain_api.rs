@@ -2138,6 +2138,24 @@ async fn h_brain_chat(
             &turn_pools,
         )
     });
+    // Sparse LANGUAGE+BEHAVIOR labels identify an intent class, but several
+    // independently learned artifacts may legitimately share that class.
+    // Preserve the atom-stream evidence needed to disambiguate those targets:
+    // for a single-behavior request, rank actions by character motifs from the
+    // raw prompt. Richer requests remain on the multi-feature composition path.
+    let raw_motif_trained = composition_features
+        .as_ref()
+        .filter(|(_, labels)| labels.len() == 2)
+        .and_then(|_| {
+            brain.decode_best_binding_by_char_motifs_with_margin(
+                POOL_TEXT,
+                prompt.as_bytes(),
+                action_pool,
+                0.20,
+                0.025,
+            )
+        })
+        .map(|(bytes, _, _)| bytes);
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
@@ -2250,6 +2268,10 @@ async fn h_brain_chat(
         raw_trained.clone()
     } else if exact_complete_manifest.is_some() {
         exact_complete_manifest
+    } else if raw_motif_trained.as_ref().is_some_and(|candidate| {
+        programming_response_compatible(&diagnostic_intent_labels, candidate)
+    }) {
+        raw_motif_trained
     } else if exact_is_composition_prerequisite && composed.is_some() {
         composed
     } else if exact_feature
