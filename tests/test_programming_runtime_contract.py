@@ -19,6 +19,7 @@ from scripts.programming_integrated_retention import mutation_enabled
 from scripts.programming_curriculum_supervisor import (
     Phase,
     accept_last_good_guard,
+    assert_training_not_quarantined,
     ensure_last_good_guard,
     guarded_block_target,
     phase_offsets,
@@ -417,6 +418,21 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn('"state": "continuous_canary_failed"', source)
         self.assertIn("worker.terminate()", source)
         self.assertIn("if code == 86:", source)
+
+    def test_persisted_canary_quarantine_blocks_supervisor_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "curriculum-canary-quarantine.json").write_text(
+                json.dumps({
+                    "state": "continuous_canary_failed",
+                    "phase": "corpus",
+                    "candidate_row": 200,
+                    "last_good": {"row": 100},
+                }),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "restore the guarded snapshot"):
+                assert_training_not_quarantined(runtime)
 
     def test_chunk_snapshot_guard_survives_until_explicit_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

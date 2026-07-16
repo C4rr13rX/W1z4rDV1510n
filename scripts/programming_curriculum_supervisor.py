@@ -144,6 +144,20 @@ def accept_last_good_guard(runtime: Path) -> None:
     (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
 
 
+def canary_quarantine_path(runtime: Path) -> Path:
+    return runtime / "curriculum-canary-quarantine.json"
+
+
+def assert_training_not_quarantined(runtime: Path) -> None:
+    """Fail closed until a rejected interval is explicitly rolled back."""
+    quarantine = read_json(canary_quarantine_path(runtime))
+    if quarantine:
+        raise RuntimeError(
+            "unresolved continuous-canary quarantine; restore the guarded "
+            f"snapshot and progress ledger before training: {quarantine}"
+        )
+
+
 def guarded_block_target(runtime: Path, phase: Phase, current_row: int,
                          gate_rows: int) -> int:
     """Keep one immutable retention boundary across worker/supervisor restarts."""
@@ -460,6 +474,17 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                             "passed": False,
                             "error": str(exc),
                         })
+                        publish(canary_quarantine_path(runtime), {
+                            "state": "continuous_canary_failed",
+                            "phase": phase.name,
+                            "candidate_row": candidate_row,
+                            "durable_next_row": durable,
+                            "last_good": read_json(
+                                runtime / "brain" / "brain.last-good.json"
+                            ),
+                            "error": str(exc),
+                            "created_unix": time.time(),
+                        })
                         publish(status_path, {
                             "state": "continuous_canary_failed",
                             "phase": phase.name,
@@ -589,6 +614,7 @@ def main() -> int:
         return 0
 
     if args.attach_pid:
+        assert_training_not_quarantined(runtime)
         attach_phase = next(
             (phase for phase in phases if phase.name == args.attach_phase),
             next((phase for phase in phases
@@ -634,6 +660,7 @@ def main() -> int:
                 return 1
             accept_last_good_guard(runtime)
 
+    assert_training_not_quarantined(runtime)
     for phase in phases:
         restarts = 0
         while True:
