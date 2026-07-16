@@ -16,12 +16,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use w1z4rd_brain::{
-    AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding,
-    MmapWalStore, PoolConfig, Store, WalEvent,
-};
 use w1z4rd_brain::pool::Pool;
 use w1z4rd_brain::store::wal::WalReader;
+use w1z4rd_brain::{
+    AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MmapWalStore, PoolConfig, Store,
+    WalEvent,
+};
 
 fn tmpdir(test: &str) -> PathBuf {
     let pid = std::process::id();
@@ -29,8 +29,7 @@ fn tmpdir(test: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let d = std::env::temp_dir()
-        .join(format!("w1z4rd_brain_wal_wiring_{}_{}_{}", test, pid, nano));
+    let d = std::env::temp_dir().join(format!("w1z4rd_brain_wal_wiring_{}_{}_{}", test, pid, nano));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -52,8 +51,7 @@ fn build_brain_with_wal(data_dir: &std::path::Path) -> Brain {
     let mut pool_cfg = PoolConfig::defaults("text", 1);
     pool_cfg.recent_atoms_window = 16;
     pool_cfg.concept_emergence_threshold = 2;
-    let encoding: Box<dyn AtomEncoding> =
-        Box::new(BytePassthroughEncoding { prefix: "t" });
+    let encoding: Box<dyn AtomEncoding> = Box::new(BytePassthroughEncoding { prefix: "t" });
     let pool = Pool::new(pool_cfg, encoding);
     brain.fabric_mut().register_pool(pool);
 
@@ -91,14 +89,26 @@ fn wal_captures_atom_concept_and_tick_events_for_a_short_training_run() {
         *count.entry(ev.variant_name()).or_insert(0) += 1;
     }
 
-    assert!(count.get("PoolRegistered").copied().unwrap_or(0) >= 1,
-        "expected ≥1 PoolRegistered, got {:?}", count);
-    assert!(count.get("AtomCreated").copied().unwrap_or(0) >= 2,
-        "expected ≥2 AtomCreated (atoms a + b), got {:?}", count);
-    assert!(count.get("ConceptEmerged").copied().unwrap_or(0) >= 1,
-        "expected ≥1 ConceptEmerged after repeats, got {:?}", count);
-    assert!(count.get("TickAdvanced").copied().unwrap_or(0) >= 4,
-        "expected ≥4 TickAdvanced, got {:?}", count);
+    assert!(
+        count.get("PoolRegistered").copied().unwrap_or(0) >= 1,
+        "expected ≥1 PoolRegistered, got {:?}",
+        count
+    );
+    assert!(
+        count.get("AtomCreated").copied().unwrap_or(0) >= 2,
+        "expected ≥2 AtomCreated (atoms a + b), got {:?}",
+        count
+    );
+    assert!(
+        count.get("ConceptEmerged").copied().unwrap_or(0) >= 1,
+        "expected ≥1 ConceptEmerged after repeats, got {:?}",
+        count
+    );
+    assert!(
+        count.get("TickAdvanced").copied().unwrap_or(0) >= 4,
+        "expected ≥4 TickAdvanced, got {:?}",
+        count
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -123,9 +133,11 @@ fn checkpoint_flushes_snapshot_and_compacts_acknowledged_wal_tail() {
     let events: Vec<WalEvent> = WalReader::new(replay)
         .map(|r| r.expect("event ok"))
         .collect();
-    assert!(events.is_empty(),
+    assert!(
+        events.is_empty(),
         "checkpoint-compacted WAL must expose no recovery tail, events = {:?}",
-        events.iter().map(|e| e.variant_name()).collect::<Vec<_>>());
+        events.iter().map(|e| e.variant_name()).collect::<Vec<_>>()
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -138,8 +150,7 @@ fn noop_store_brain_produces_no_wal_file() {
     let mut brain = Brain::new(BrainConfig::default());
     let mut pool_cfg = PoolConfig::defaults("text", 1);
     pool_cfg.recent_atoms_window = 16;
-    let pool = Pool::new(pool_cfg,
-        Box::new(BytePassthroughEncoding { prefix: "t" }));
+    let pool = Pool::new(pool_cfg, Box::new(BytePassthroughEncoding { prefix: "t" }));
     brain.fabric_mut().register_pool(pool);
 
     // Observe + tick — nothing should land in the data dir since no store
@@ -152,8 +163,10 @@ fn noop_store_brain_produces_no_wal_file() {
     brain.store_clone().flush().expect("noop flush");
 
     // No WAL file should have been created.
-    assert!(!dir.join("brain.wal").exists(),
-        "NoopStore must not create brain.wal");
+    assert!(
+        !dir.join("brain.wal").exists(),
+        "NoopStore must not create brain.wal"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

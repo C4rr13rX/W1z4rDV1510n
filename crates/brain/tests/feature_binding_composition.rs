@@ -83,7 +83,10 @@ fn language_and_behavior_can_recall_one_extra_learned_constraint() {
     }
     .atomize(query);
     let decoded = brain.decode_ranked_feature_bindings(feature_pool, &labels, action_pool, 8);
-    assert_eq!(decoded.first().map(Vec::as_slice), Some(response.as_slice()));
+    assert_eq!(
+        decoded.first().map(Vec::as_slice),
+        Some(response.as_slice())
+    );
 }
 
 #[test]
@@ -168,7 +171,9 @@ fn close_richer_intent_class_integrates_subset_evidence() {
     );
     let intent_pool = brain.create_pool(
         PoolConfig::defaults("intent", 2),
-        Box::new(InstructionIntentEncoding { prefix: "intent".into() }),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
     );
     let routes: [(&[u8], &[u8]); 2] = [
         (
@@ -191,9 +196,20 @@ fn close_richer_intent_class_integrates_subset_evidence() {
     let (decoded, _, _) = brain
         .decode_best_binding_by_char_motifs_with_margin(raw_pool, query, intent_pool, 0.20, 0.0)
         .expect("a close richer intent should integrate the subset class");
-    let labels = InstructionIntentEncoding { prefix: "intent".into() }.atomize(&decoded);
-    assert!(labels.iter().any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
-    assert!(labels.iter().any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(&decoded);
+    assert!(
+        labels
+            .iter()
+            .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING")
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION")
+    );
 }
 
 #[test]
@@ -201,7 +217,9 @@ fn confirmed_outcome_promotes_repair_and_inhibits_failed_action_frame() {
     let mut brain = Brain::new(BrainConfig::default());
     let feature_pool = brain.create_pool(
         PoolConfig::defaults("intent", 1),
-        Box::new(InstructionIntentEncoding { prefix: "intent".into() }),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
     );
     let action_pool = brain.create_pool(
         PoolConfig::defaults("action", 2),
@@ -235,7 +253,10 @@ fn confirmed_outcome_promotes_repair_and_inhibits_failed_action_frame() {
         brain.observe(success_pool, b"PASS");
         brain.advance_tick();
     }
-    let labels = InstructionIntentEncoding { prefix: "intent".into() }.atomize(prompt);
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(prompt);
     let decoded = brain.decode_ranked_feature_bindings_with_outcomes(
         feature_pool,
         &labels,
@@ -253,7 +274,9 @@ fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
     let mut brain = Brain::new(BrainConfig::default());
     let feature_pool = brain.create_pool(
         PoolConfig::defaults("intent", 1),
-        Box::new(InstructionIntentEncoding { prefix: "intent".into() }),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
     );
     let action_pool = brain.create_pool(
         PoolConfig::defaults("action", 2),
@@ -261,7 +284,9 @@ fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
     );
     let context_pool = brain.create_pool(
         PoolConfig::defaults("environment", 5),
-        Box::new(BytePassthroughEncoding { prefix: "environment" }),
+        Box::new(BytePassthroughEncoding {
+            prefix: "environment",
+        }),
     );
     let intent = b"@intent:LANGUAGE:PYTHON\n@intent:MATH:AVERAGE\n@intent:GUARD:EMPTY_INPUT\n";
     let generic = b"def avg_list(xs):\n    return sum(xs) / len(xs) if xs else 0";
@@ -275,7 +300,10 @@ fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
         brain.observe(action_pool, contextual);
         brain.advance_tick();
     }
-    let labels = InstructionIntentEncoding { prefix: "intent".into() }.atomize(intent);
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(intent);
     let decoded = brain.decode_ranked_feature_bindings_with_context(
         feature_pool,
         &labels,

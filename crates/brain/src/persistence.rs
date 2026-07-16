@@ -43,13 +43,13 @@ use crate::pool::PoolConfig;
 /// object is stateless and is re-supplied at restore time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolSnapshot {
-    pub config:       PoolConfig,
-    pub neurons:      Vec<Neuron>,
-    pub label_to_id:  HashMap<String, NeuronId>,
+    pub config: PoolConfig,
+    pub neurons: Vec<Neuron>,
+    pub label_to_id: HashMap<String, NeuronId>,
     pub recent_atoms: VecDeque<NeuronId>,
     /// Map serialized as parallel vecs because HashMap<Vec<NeuronId>, u32>
     /// can hit serde corner cases when the key is itself a sequence.
-    pub sequences:    Vec<(Vec<NeuronId>, u32)>,
+    pub sequences: Vec<(Vec<NeuronId>, u32)>,
     /// Stage 17.4 step 5: cold-tier neuron offsets per
     /// [`ARCHITECTURE.md`] §17.4.  Maps `NeuronId → byte offset` into
     /// the pool's cold-tier file (`<data_dir>/cold/pool_{id}.cold`).
@@ -62,25 +62,25 @@ pub struct PoolSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FabricSnapshot {
-    pub config:      FabricConfig,
-    pub tick:        u64,
+    pub config: FabricConfig,
+    pub tick: u64,
     /// Order matters: pool ids are re-registered in this order so
     /// the cross-pool wiring on subsequent observations behaves
     /// identically across restore cycles.
-    pub pool_order:  Vec<PoolId>,
-    pub pools:       HashMap<PoolId, PoolSnapshot>,
+    pub pool_order: Vec<PoolId>,
+    pub pools: HashMap<PoolId, PoolSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EemSnapshot {
-    pub config:      EemConfig,
-    pub equations:   Vec<Equation>,
-    pub variables:   Vec<Variable>,
+    pub config: EemConfig,
+    pub equations: Vec<Equation>,
+    pub variables: Vec<Variable>,
     pub disciplines: Vec<Discipline>,
-    pub motifs:      Vec<Motif>,
+    pub motifs: Vec<Motif>,
     pub motif_links: Vec<(u32, Vec<u32>)>,
     #[serde(default)]
-    pub facts:       Vec<GroundedFact>,
+    pub facts: Vec<GroundedFact>,
     #[serde(default)]
     pub semantic_relations: Vec<crate::workspace::GroundedRelation>,
     #[serde(default)]
@@ -91,7 +91,7 @@ pub struct EemSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnnealerSnapshot {
-    pub config:  AnnealerConfig,
+    pub config: AnnealerConfig,
     pub history: HashMap<PoolId, VecDeque<HashMap<NeuronId, f32>>>,
 }
 
@@ -124,44 +124,46 @@ pub struct BrainSnapshot {
     /// `#[serde(default)]` returns 0 for pre-Stage-11 snapshots so
     /// `from_snapshot` can dispatch the right restore path.
     #[serde(default)]
-    pub format_version:             u32,
-    pub binding_pool_id:            PoolId,
+    pub format_version: u32,
+    pub binding_pool_id: PoolId,
     pub binding_emergence_threshold: u32,
     /// Two-tier emergence: tentative threshold (default 1).  Defaults
     /// to 1 on restore from older snapshots that didn't carry the
     /// field — matches `default_tentative_emergence_threshold()`.
     #[serde(default = "default_tentative_threshold_for_restore")]
     pub tentative_emergence_threshold: u32,
-    pub moment_history_window:       usize,
-    pub fabric:                     FabricSnapshot,
-    pub eem:                        EemSnapshot,
-    pub annealer:                   AnnealerSnapshot,
-    pub moment_history:             VecDeque<SerializableFingerprint>,
-    pub binding_recurrences:        Vec<(SerializableFingerprint, u32)>,
-    pub promoted_fingerprints:      Vec<(SerializableFingerprint, NeuronId)>,
+    pub moment_history_window: usize,
+    pub fabric: FabricSnapshot,
+    pub eem: EemSnapshot,
+    pub annealer: AnnealerSnapshot,
+    pub moment_history: VecDeque<SerializableFingerprint>,
+    pub binding_recurrences: Vec<(SerializableFingerprint, u32)>,
+    pub promoted_fingerprints: Vec<(SerializableFingerprint, NeuronId)>,
     /// Two-tier emergence: tentative-tier promotions.  Defaults to
     /// empty on restore from older snapshots.
     #[serde(default)]
-    pub tentative_promoted:         Vec<(SerializableFingerprint, NeuronId)>,
+    pub tentative_promoted: Vec<(SerializableFingerprint, NeuronId)>,
     /// Lifetime (non-decaying) recurrence count per fingerprint.
     /// Defaults to empty on restore — the brain will re-accumulate
     /// from subsequent observations.
     #[serde(default)]
-    pub lifetime_recurrences:       Vec<(SerializableFingerprint, u32)>,
+    pub lifetime_recurrences: Vec<(SerializableFingerprint, u32)>,
     /// Pressure-adjusted consolidated threshold at snapshot time.
     /// Zero on restore from older snapshots, which from_snapshot
     /// treats as "use `binding_emergence_threshold` instead".
     #[serde(default)]
-    pub current_threshold:          u32,
+    pub current_threshold: u32,
     /// Total non-empty-fingerprint observations since construction.
     #[serde(default)]
-    pub total_observations:         u64,
-    pub action_pool_id:             Option<PoolId>,
-    pub pending_actions:            Vec<(ActionId, ActionEvent)>,
-    pub next_action_id:             ActionId,
+    pub total_observations: u64,
+    pub action_pool_id: Option<PoolId>,
+    pub pending_actions: Vec<(ActionId, ActionEvent)>,
+    pub next_action_id: ActionId,
 }
 
-fn default_tentative_threshold_for_restore() -> u32 { 1 }
+fn default_tentative_threshold_for_restore() -> u32 {
+    1
+}
 
 /// Write a [`BrainSnapshot`] to `path` using bincode.
 ///
@@ -223,6 +225,5 @@ pub fn load_snapshot<P: AsRef<Path>>(path: P) -> io::Result<BrainSnapshot> {
     // primitive demands.
     let file = fs::File::open(path)?;
     let mut r = BufReader::with_capacity(256 * 1024, file);
-    bincode::deserialize_from(&mut r)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    bincode::deserialize_from(&mut r).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }

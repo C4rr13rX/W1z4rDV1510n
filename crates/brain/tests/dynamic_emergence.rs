@@ -15,9 +15,7 @@
 //! * Pressure feedback ratchets `current_threshold` up/down between
 //!   the configured band edges.
 
-use w1z4rd_brain::{
-    Brain, BrainConfig, BytePassthroughEncoding, PoolConfig,
-};
+use w1z4rd_brain::{Brain, BrainConfig, BytePassthroughEncoding, PoolConfig};
 
 fn build(cfg: BrainConfig) -> (Brain, u32, u32) {
     let mut brain = Brain::new(cfg);
@@ -50,12 +48,16 @@ fn tentative_tier_promotes_on_first_co_firing() {
     brain.observe(pb, b"Y");
     brain.advance_tick();
 
-    assert!(brain.tentative_binding_count() >= 1,
-        "first co-firing must produce at least one tentative binding");
-    assert_eq!(brain.consolidated_binding_count(), 0,
-        "consolidated tier must NOT trip on a single co-firing");
-    assert_eq!(brain.eem_fact_count(), 0,
-        "no EEM fact until consolidation");
+    assert!(
+        brain.tentative_binding_count() >= 1,
+        "first co-firing must produce at least one tentative binding"
+    );
+    assert_eq!(
+        brain.consolidated_binding_count(),
+        0,
+        "consolidated tier must NOT trip on a single co-firing"
+    );
+    assert_eq!(brain.eem_fact_count(), 0, "no EEM fact until consolidation");
 }
 
 #[test]
@@ -67,13 +69,20 @@ fn consolidation_upgrades_tentative_and_registers_eem_fact() {
         brain.observe(pb, b"V");
         brain.advance_tick();
     }
-    assert!(brain.consolidated_binding_count() >= 1,
-        "third recurrence must promote a consolidated binding");
-    assert_eq!(brain.tentative_binding_count(), 0,
+    assert!(
+        brain.consolidated_binding_count() >= 1,
+        "third recurrence must promote a consolidated binding"
+    );
+    assert_eq!(
+        brain.tentative_binding_count(),
+        0,
         "tentative tier should have been upgraded to consolidated, \
-         not left as a dangling duplicate");
-    assert!(brain.eem_fact_count() >= 1,
-        "consolidated promotion must register an EEM grounded fact");
+         not left as a dangling duplicate"
+    );
+    assert!(
+        brain.eem_fact_count() >= 1,
+        "consolidated promotion must register an EEM grounded fact"
+    );
 }
 
 #[test]
@@ -107,10 +116,13 @@ fn lifetime_count_promotes_sparse_schedule() {
             }
         }
     }
-    assert!(brain.consolidated_binding_count() >= 1,
+    assert!(
+        brain.consolidated_binding_count() >= 1,
         "sparse-schedule training must still consolidate via lifetime count; \
          tentative={} consolidated={}",
-        brain.tentative_binding_count(), brain.consolidated_binding_count());
+        brain.tentative_binding_count(),
+        brain.consolidated_binding_count()
+    );
 }
 
 #[test]
@@ -119,23 +131,31 @@ fn force_promote_tentative_picks_up_pending_fingerprints() {
     // auto-promote.  Then call force_promote_tentative manually —
     // it should pick up the lifetime-tracked fingerprint.
     let mut cfg = default_cfg();
-    cfg.tentative_emergence_threshold = u32::MAX;  // tentative tier off
-    cfg.binding_emergence_threshold = 5;           // consolidated needs 5
+    cfg.tentative_emergence_threshold = u32::MAX; // tentative tier off
+    cfg.binding_emergence_threshold = 5; // consolidated needs 5
     let (mut brain, pa, pb) = build(cfg);
     brain.observe(pa, b"P");
     brain.observe(pb, b"Q");
     brain.advance_tick();
-    assert_eq!(brain.tentative_binding_count(), 0,
-        "tentative tier was disabled — no auto-promotion expected");
+    assert_eq!(
+        brain.tentative_binding_count(),
+        0,
+        "tentative tier was disabled — no auto-promotion expected"
+    );
     let promoted = brain.force_promote_tentative(1);
-    assert!(!promoted.is_empty(),
-        "force_promote_tentative(1) must promote the lifetime-tracked fingerprint");
+    assert!(
+        !promoted.is_empty(),
+        "force_promote_tentative(1) must promote the lifetime-tracked fingerprint"
+    );
     assert!(brain.tentative_binding_count() >= 1);
 
     // Idempotent: second call must not double-promote.
     let again = brain.force_promote_tentative(1);
-    assert!(again.is_empty(),
-        "force_promote_tentative is idempotent; got {} extra promotions", again.len());
+    assert!(
+        again.is_empty(),
+        "force_promote_tentative is idempotent; got {} extra promotions",
+        again.len()
+    );
 }
 
 #[test]
@@ -144,9 +164,9 @@ fn pressure_feedback_lowers_threshold_when_density_below_band() {
     // the loop firing within a small test.
     let mut cfg = default_cfg();
     cfg.binding_emergence_threshold = 5;
-    cfg.tentative_emergence_threshold = u32::MAX;  // suppress tentative
-    cfg.pressure_band_low  = 0.5;   // require huge density to satisfy
-    cfg.pressure_band_high = 0.99;  // ceiling out of reach
+    cfg.tentative_emergence_threshold = u32::MAX; // suppress tentative
+    cfg.pressure_band_low = 0.5; // require huge density to satisfy
+    cfg.pressure_band_high = 0.99; // ceiling out of reach
     cfg.pressure_observation_grace = 4;
     cfg.pressure_threshold_max = 10;
     cfg.pressure_adjust_enabled = true;
@@ -164,10 +184,13 @@ fn pressure_feedback_lowers_threshold_when_density_below_band() {
         brain.advance_tick();
     }
     let after = brain.current_emergence_threshold();
-    assert!(after < starting,
-        "low density must ratchet threshold down; starting={} after={}", starting, after);
-    assert!(after >= 1,
-        "threshold has a floor of 1; got {}", after);
+    assert!(
+        after < starting,
+        "low density must ratchet threshold down; starting={} after={}",
+        starting,
+        after
+    );
+    assert!(after >= 1, "threshold has a floor of 1; got {}", after);
 }
 
 #[test]
@@ -175,10 +198,10 @@ fn pressure_feedback_is_disabled_when_flag_off() {
     let mut cfg = default_cfg();
     cfg.binding_emergence_threshold = 5;
     cfg.tentative_emergence_threshold = u32::MAX;
-    cfg.pressure_band_low  = 0.5;
+    cfg.pressure_band_low = 0.5;
     cfg.pressure_band_high = 0.99;
     cfg.pressure_observation_grace = 4;
-    cfg.pressure_adjust_enabled = false;  // locked
+    cfg.pressure_adjust_enabled = false; // locked
 
     let (mut brain, pa, pb) = build(cfg);
     let starting = brain.current_emergence_threshold();
@@ -188,8 +211,11 @@ fn pressure_feedback_is_disabled_when_flag_off() {
         brain.observe(pb, s.as_bytes());
         brain.advance_tick();
     }
-    assert_eq!(brain.current_emergence_threshold(), starting,
-        "disabled pressure loop must not move the threshold");
+    assert_eq!(
+        brain.current_emergence_threshold(),
+        starting,
+        "disabled pressure loop must not move the threshold"
+    );
 }
 
 #[test]
@@ -205,7 +231,10 @@ fn snapshot_roundtrip_preserves_tentative_and_lifetime_state() {
     let pre_consolidated = brain.consolidated_binding_count();
     let pre_obs = brain.total_observations();
     let pre_thr = brain.current_emergence_threshold();
-    assert!(pre_tentative >= 1, "precondition: tentative promotion happened");
+    assert!(
+        pre_tentative >= 1,
+        "precondition: tentative promotion happened"
+    );
 
     let snap = brain.snapshot();
     let mut encodings: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();

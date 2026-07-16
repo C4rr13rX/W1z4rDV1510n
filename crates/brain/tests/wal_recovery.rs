@@ -5,22 +5,22 @@
 //! replay the WAL events.  Confirms the reconstructed brain has the
 //! same neuron + concept structure as the original.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use w1z4rd_brain::{
-    AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MmapWalStore,
-    PoolConfig, Store,
-};
 use w1z4rd_brain::pool::Pool;
 use w1z4rd_brain::store::load_events_after_marker;
+use w1z4rd_brain::{
+    AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MmapWalStore, PoolConfig, Store,
+};
 
 fn tmpdir(test: &str) -> std::path::PathBuf {
     let pid = std::process::id();
     let nano = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let d = std::env::temp_dir()
-        .join(format!("w1z4rd_wal_recovery_{}_{}_{}", test, pid, nano));
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let d = std::env::temp_dir().join(format!("w1z4rd_wal_recovery_{}_{}_{}", test, pid, nano));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -30,8 +30,7 @@ fn build_brain_with_wal(dir: &std::path::Path) -> Brain {
     let mut pc = PoolConfig::defaults("text", 1);
     pc.recent_atoms_window = 8;
     pc.concept_emergence_threshold = 2;
-    let enc: Box<dyn AtomEncoding> =
-        Box::new(BytePassthroughEncoding { prefix: "t" });
+    let enc: Box<dyn AtomEncoding> = Box::new(BytePassthroughEncoding { prefix: "t" });
     let wal = MmapWalStore::open(dir).expect("wal open");
     let store: Arc<dyn Store> = Arc::new(wal);
     brain.set_store(store);
@@ -56,43 +55,53 @@ fn recovery_rebuilds_topology_from_wal_without_snapshot() {
 
         let p = brain.fabric().pool(1).unwrap();
         let p = p.read();
-        atoms_before    = p.iter_neurons().filter(|n| n.is_atom()).count();
+        atoms_before = p.iter_neurons().filter(|n| n.is_atom()).count();
         concepts_before = p.iter_neurons().filter(|n| !n.is_atom()).count();
-        tick_before     = brain.fabric().current_tick();
+        tick_before = brain.fabric().current_tick();
         // Brain dropped here — no bincode snapshot written.
     }
 
     // ---- Fresh brain, replay WAL events ----
     let events = load_events_after_marker(&dir).expect("load events");
-    assert!(!events.is_empty(),
-        "WAL should have events from the original training");
+    assert!(
+        !events.is_empty(),
+        "WAL should have events from the original training"
+    );
 
     let mut recovered = Brain::new(BrainConfig::default());
     let mut pc = PoolConfig::defaults("text", 1);
     pc.recent_atoms_window = 8;
     pc.concept_emergence_threshold = 2;
-    let enc: Box<dyn AtomEncoding> =
-        Box::new(BytePassthroughEncoding { prefix: "t" });
+    let enc: Box<dyn AtomEncoding> = Box::new(BytePassthroughEncoding { prefix: "t" });
     recovered.fabric_mut().register_pool(Pool::new(pc, enc));
 
     let stats = recovered.apply_wal_events(&events);
-    assert!(stats.events_total > 0,
-        "should have applied at least one event");
+    assert!(
+        stats.events_total > 0,
+        "should have applied at least one event"
+    );
 
     let p = recovered.fabric().pool(1).unwrap();
     let p = p.read();
-    let atoms_after    = p.iter_neurons().filter(|n| n.is_atom()).count();
+    let atoms_after = p.iter_neurons().filter(|n| n.is_atom()).count();
     let concepts_after = p.iter_neurons().filter(|n| !n.is_atom()).count();
     drop(p);
 
-    assert_eq!(atoms_after, atoms_before,
+    assert_eq!(
+        atoms_after, atoms_before,
         "recovered atom count mismatch: {} vs {}",
-        atoms_after, atoms_before);
-    assert_eq!(concepts_after, concepts_before,
+        atoms_after, atoms_before
+    );
+    assert_eq!(
+        concepts_after, concepts_before,
         "recovered concept count mismatch: {} vs {}",
-        concepts_after, concepts_before);
-    assert_eq!(recovered.fabric().current_tick(), tick_before,
-        "recovered tick should match original");
+        concepts_after, concepts_before
+    );
+    assert_eq!(
+        recovered.fabric().current_tick(),
+        tick_before,
+        "recovered tick should match original"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -121,10 +130,15 @@ fn load_events_after_marker_returns_only_post_marker_events() {
     // marker events (atom 'a', concept 'aa' if it emerged) should NOT
     // appear.  Sanity: should have at least the 3 TickAdvanced from
     // post-marker observations + any AtomCreated for 'b'.
-    let ticks_post = events.iter()
+    let ticks_post = events
+        .iter()
         .filter(|e| matches!(e, w1z4rd_brain::WalEvent::TickAdvanced { .. }))
         .count();
-    assert!(ticks_post >= 3, "expected ≥3 post-marker ticks, got {}", ticks_post);
+    assert!(
+        ticks_post >= 3,
+        "expected ≥3 post-marker ticks, got {}",
+        ticks_post
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -150,13 +164,20 @@ fn post_checkpoint_direct_bindings_are_queryable_after_wal_replay() {
         brain.set_store(store);
         brain.checkpoint(&checkpoint).unwrap();
         for (prompt, response) in [
-            (b"write alpha".as_slice(), b"def alpha(): return 1".as_slice()),
+            (
+                b"write alpha".as_slice(),
+                b"def alpha(): return 1".as_slice(),
+            ),
             (b"write beta".as_slice(), b"def beta(): return 2".as_slice()),
         ] {
-            assert!(brain.pretrain_binding_episode(&[
-                (input, prompt.to_vec()),
-                (output, response.to_vec()),
-            ]).is_some());
+            assert!(
+                brain
+                    .pretrain_binding_episode(&[
+                        (input, prompt.to_vec()),
+                        (output, response.to_vec()),
+                    ])
+                    .is_some()
+            );
         }
         brain.store_clone().flush().unwrap();
     }
@@ -171,7 +192,10 @@ fn post_checkpoint_direct_bindings_are_queryable_after_wal_replay() {
     recovered.apply_wal_events(&events);
 
     for (prompt, response) in [
-        (b"write alpha".as_slice(), b"def alpha(): return 1".as_slice()),
+        (
+            b"write alpha".as_slice(),
+            b"def alpha(): return 1".as_slice(),
+        ),
         (b"write beta".as_slice(), b"def beta(): return 2".as_slice()),
     ] {
         recovered.activate_for_prediction(input, prompt);
@@ -191,7 +215,10 @@ fn post_checkpoint_direct_bindings_are_queryable_after_wal_replay() {
     let (mut restored_again, missing) = Brain::restore(&recovered_checkpoint, encodings).unwrap();
     assert!(missing.is_empty());
     for (prompt, response) in [
-        (b"write alpha".as_slice(), b"def alpha(): return 1".as_slice()),
+        (
+            b"write alpha".as_slice(),
+            b"def alpha(): return 1".as_slice(),
+        ),
         (b"write beta".as_slice(), b"def beta(): return 2".as_slice()),
     ] {
         restored_again.activate_for_prediction(input, prompt);
