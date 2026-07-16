@@ -570,29 +570,30 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         except subprocess.TimeoutExpired:
                             worker.kill()
                             worker.wait(timeout=30)
+                        last_good = read_json(
+                            runtime / "brain" / "brain.last-good.json"
+                        )
+                        suspect_start = latest_passing_canary_row(
+                            runtime, phase.name, int(last_good.get("row") or 0)
+                        )
                         append_health_event(runtime, {
                             "kind": "continuous_canary",
                             "phase": phase.name,
                             "trained_rows": candidate_row,
                             "passed": False,
+                            "suspect_start_row": suspect_start,
+                            "suspect_end_row": candidate_row,
+                            "last_good": last_good,
                             "error": str(exc),
                         })
                         publish(canary_quarantine_path(runtime), {
                             "state": "continuous_canary_failed",
                             "phase": phase.name,
                             "candidate_row": candidate_row,
-                            "suspect_start_row": latest_passing_canary_row(
-                                runtime,
-                                phase.name,
-                                int(read_json(
-                                    runtime / "brain" / "brain.last-good.json"
-                                ).get("row") or 0),
-                            ),
+                            "suspect_start_row": suspect_start,
                             "suspect_end_row": candidate_row,
                             "durable_next_row": durable,
-                            "last_good": read_json(
-                                runtime / "brain" / "brain.last-good.json"
-                            ),
+                            "last_good": last_good,
                             "error": str(exc),
                             "created_unix": time.time(),
                         })

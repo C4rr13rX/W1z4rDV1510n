@@ -463,6 +463,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn("run_continuous_canary", source)
         self.assertIn('"curriculum-health.jsonl"', source)
         self.assertIn('"state": "continuous_canary_failed"', source)
+        self.assertIn('"suspect_start_row": suspect_start', source)
+        self.assertIn('"suspect_end_row": candidate_row', source)
         self.assertIn("worker.terminate()", source)
         self.assertIn("if code == 86:", source)
 
@@ -508,12 +510,19 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
+            health = runtime / "curriculum-health.jsonl"
+            health.write_text(json.dumps({
+                "passed": False,
+                "suspect_start_row": 120,
+                "suspect_end_row": 200,
+            }) + "\n", encoding="utf-8")
             restored = restore_canary_quarantine(runtime)
             self.assertEqual(restored["row"], 100)
             self.assertEqual(snapshot.read_bytes(), b"accepted")
             self.assertFalse((brain / "brain.wal").exists())
             self.assertFalse(guard.exists())
             self.assertFalse((runtime / "curriculum-canary-quarantine.json").exists())
+            self.assertIn('"suspect_start_row": 120', health.read_text(encoding="utf-8"))
             rewound = json.loads(progress.read_text(encoding="utf-8"))
             self.assertEqual(rewound["ram_next_row"], 100)
             self.assertEqual(rewound["durable_next_row"], 100)
