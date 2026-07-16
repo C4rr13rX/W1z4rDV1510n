@@ -140,6 +140,9 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertIn("stop_runtime_node(runtime)", source)
             self.assertIn("restored = restore_canary_quarantine(runtime)", source)
             self.assertIn("start_runtime_node(runtime, args.node_bin, args.endpoint)", source)
+            self.assertIn('"W1Z4RD_TICK_HOUSEKEEPING": "lazy"', source)
+            self.assertIn('"W1Z4RD_DEFER_PROMOTION": "1"', source)
+            self.assertIn("args.restart_node_after_attach", source)
             self.assertIn('"--skip-range"', source)
 
     def test_quarantine_starts_after_latest_passing_canary(self) -> None:
