@@ -29,6 +29,7 @@ pub mod merkle;
 pub mod neuron_store;
 pub mod recovery;
 pub mod wal;
+pub mod wbrain_store;
 
 pub use bloom::CountingBloom;
 pub use cold::ColdTier;
@@ -42,3 +43,4 @@ pub use neuron_store::{
 };
 pub use recovery::{RecoveryStats, load_events_after_marker, replay_into_brain};
 pub use wal::{MmapWalStore, NoopStore, Store};
+pub use wbrain_store::{WbrainFile, WbrainNeuronStore};

@@ -1,0 +1,361 @@
+//! Working-set cache over a single random-access `.wbrain` container.
+//!
+//! This is the pool-facing storage layer. A neuron lookup wakes exactly one
+//! record on a cache miss; `sleep_neuron` writes that neuron and removes it
+//! from RAM. The compact offset/label maps remain resident so startup and
+//! initial routing never require whole-brain hydration.
+
+use ahash::AHashMap;
+use parking_lot::{Mutex, RwLock};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::neuron::{Neuron, NeuronId, PoolId};
+use crate::store::NeuronStore;
+use crate::store::container::{BrainContainer, BrainContainerManifest, PoolContainerManifest};
+
+/// One open `.wbrain` file shared by every pool in a brain.
+pub struct WbrainFile {
+    container: Mutex<BrainContainer>,
+    pools: RwLock<AHashMap<PoolId, Arc<WbrainNeuronStore>>>,
+    generation: AtomicU64,
+    tick: AtomicU64,
+    brain_metadata: RwLock<Vec<u8>>,
+}
+
+impl WbrainFile {
+    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Arc<Self>> {
+        let container = BrainContainer::open(path)?;
+        let manifest = container.manifest().cloned();
+        let generation = manifest.as_ref().map_or(0, |m| m.generation);
+        let tick = manifest.as_ref().map_or(0, |m| m.tick);
+        let brain_metadata = manifest
+            .as_ref()
+            .map_or_else(Vec::new, |m| m.brain_metadata.clone());
+        let file = Arc::new(Self {
+            container: Mutex::new(container),
+            pools: RwLock::new(AHashMap::new()),
+            generation: AtomicU64::new(generation),
+            tick: AtomicU64::new(tick),
+            brain_metadata: RwLock::new(brain_metadata),
+        });
+        if let Some(manifest) = manifest {
+            for pool in manifest.pools {
+                let store = Arc::new(WbrainNeuronStore::from_manifest(file.clone(), pool));
+                file.pools.write().insert(store.pool_id(), store);
+            }
+        }
+        Ok(file)
+    }
+
+    pub fn pool(self: &Arc<Self>, pool_id: PoolId) -> Arc<WbrainNeuronStore> {
+        if let Some(store) = self.pools.read().get(&pool_id) {
+            return store.clone();
+        }
+        let mut pools = self.pools.write();
+        pools
+            .entry(pool_id)
+            .or_insert_with(|| Arc::new(WbrainNeuronStore::empty(self.clone(), pool_id)))
+            .clone()
+    }
+
+    pub fn set_tick(&self, tick: u64) {
+        self.tick.store(tick, Ordering::Release);
+    }
+
+    pub fn set_brain_metadata(&self, metadata: Vec<u8>) {
+        *self.brain_metadata.write() = metadata;
+    }
+
+    /// Publish all compact routing state. Neuron bodies were already appended
+    /// individually by `put`/`sleep_neuron`, so this operation is independent
+    /// of total neuron payload size.
+    pub fn commit_manifest(&self) -> std::io::Result<u64> {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut pools: Vec<_> = self
+            .pools
+            .read()
+            .values()
+            .map(|store| store.manifest())
+            .collect();
+        pools.sort_by_key(|pool| pool.pool_id);
+        let manifest = BrainContainerManifest {
+            generation,
+            tick: self.tick.load(Ordering::Acquire),
+            brain_metadata: self.brain_metadata.read().clone(),
+            pools,
+        };
+        self.container.lock().commit_manifest(manifest)?;
+        Ok(generation)
+    }
+
+    pub fn flush(&self) -> std::io::Result<()> {
+        self.container.lock().flush()
+    }
+}
+
+/// NeuronStore scoped to one pool inside a shared `.wbrain` file.
+pub struct WbrainNeuronStore {
+    file: Arc<WbrainFile>,
+    pool_id: PoolId,
+    offsets: RwLock<Vec<Option<u64>>>,
+    labels: RwLock<AHashMap<String, NeuronId>>,
+    pool_metadata: RwLock<Vec<u8>>,
+    working_set: RwLock<AHashMap<NeuronId, Neuron>>,
+    page_ins: AtomicU64,
+    page_outs: AtomicU64,
+    read_errors: AtomicU64,
+    write_errors: AtomicU64,
+}
+
+impl WbrainNeuronStore {
+    fn empty(file: Arc<WbrainFile>, pool_id: PoolId) -> Self {
+        Self {
+            file,
+            pool_id,
+            offsets: RwLock::new(Vec::new()),
+            labels: RwLock::new(AHashMap::new()),
+            pool_metadata: RwLock::new(Vec::new()),
+            working_set: RwLock::new(AHashMap::new()),
+            page_ins: AtomicU64::new(0),
+            page_outs: AtomicU64::new(0),
+            read_errors: AtomicU64::new(0),
+            write_errors: AtomicU64::new(0),
+        }
+    }
+
+    fn from_manifest(file: Arc<WbrainFile>, manifest: PoolContainerManifest) -> Self {
+        let mut labels = AHashMap::new();
+        labels.extend(manifest.labels);
+        Self {
+            file,
+            pool_id: manifest.pool_id,
+            offsets: RwLock::new(manifest.neuron_offsets),
+            labels: RwLock::new(labels),
+            pool_metadata: RwLock::new(manifest.pool_metadata),
+            working_set: RwLock::new(AHashMap::new()),
+            page_ins: AtomicU64::new(0),
+            page_outs: AtomicU64::new(0),
+            read_errors: AtomicU64::new(0),
+            write_errors: AtomicU64::new(0),
+        }
+    }
+
+    pub fn pool_id(&self) -> PoolId {
+        self.pool_id
+    }
+
+    pub fn label_to_id(&self, label: &str) -> Option<NeuronId> {
+        self.labels.read().get(label).copied()
+    }
+
+    pub fn set_pool_metadata(&self, metadata: Vec<u8>) {
+        *self.pool_metadata.write() = metadata;
+    }
+
+    pub fn resident_count(&self) -> usize {
+        self.working_set.read().len()
+    }
+
+    pub fn known_count(&self) -> usize {
+        self.offsets
+            .read()
+            .iter()
+            .filter(|offset| offset.is_some())
+            .count()
+    }
+
+    pub fn page_ins(&self) -> u64 {
+        self.page_ins.load(Ordering::Relaxed)
+    }
+
+    pub fn page_outs(&self) -> u64 {
+        self.page_outs.load(Ordering::Relaxed)
+    }
+
+    /// Persist the current neuron body and remove only that neuron from RAM.
+    pub fn sleep_neuron(&self, id: NeuronId) -> std::io::Result<bool> {
+        let neuron = match self.working_set.write().remove(&id) {
+            Some(neuron) => neuron,
+            None => return Ok(false),
+        };
+        match self.append_record(&neuron) {
+            Ok(()) => {
+                self.page_outs.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            }
+            Err(error) => {
+                // A failed write must not discard the only current copy.
+                self.working_set.write().insert(id, neuron);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn sleep_all(&self) -> std::io::Result<usize> {
+        let ids: Vec<_> = self.working_set.read().keys().copied().collect();
+        let mut slept = 0;
+        for id in ids {
+            if self.sleep_neuron(id)? {
+                slept += 1;
+            }
+        }
+        Ok(slept)
+    }
+
+    fn append_record(&self, neuron: &Neuron) -> std::io::Result<()> {
+        let offset = self
+            .file
+            .container
+            .lock()
+            .append_neuron(self.pool_id, neuron)?;
+        let mut offsets = self.offsets.write();
+        let index = neuron.id as usize;
+        if offsets.len() <= index {
+            offsets.resize(index + 1, None);
+        }
+        offsets[index] = Some(offset);
+        self.labels.write().insert(neuron.label.clone(), neuron.id);
+        Ok(())
+    }
+
+    fn manifest(&self) -> PoolContainerManifest {
+        let offsets = self.offsets.read().clone();
+        let mut labels: Vec<_> = self
+            .labels
+            .read()
+            .iter()
+            .map(|(label, id)| (label.clone(), *id))
+            .collect();
+        labels.sort_by(|a, b| a.0.cmp(&b.0));
+        PoolContainerManifest {
+            pool_id: self.pool_id,
+            neuron_count: offsets.len() as u32,
+            neuron_offsets: offsets,
+            labels,
+            pool_metadata: self.pool_metadata.read().clone(),
+        }
+    }
+}
+
+impl NeuronStore for WbrainNeuronStore {
+    fn get(&self, id: NeuronId) -> Option<Neuron> {
+        if let Some(neuron) = self.working_set.read().get(&id) {
+            return Some(neuron.clone());
+        }
+        let offset = self.offsets.read().get(id as usize).copied().flatten()?;
+        let result = self.file.container.lock().read_neuron_at(offset);
+        match result {
+            Ok((pool_id, neuron)) if pool_id == self.pool_id && neuron.id == id => {
+                self.working_set.write().insert(id, neuron.clone());
+                self.page_ins.fetch_add(1, Ordering::Relaxed);
+                Some(neuron)
+            }
+            Ok(_) | Err(_) => {
+                self.read_errors.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    fn put(&self, id: NeuronId, mut neuron: Neuron) {
+        neuron.id = id;
+        self.working_set.write().insert(id, neuron.clone());
+        if self.append_record(&neuron).is_err() {
+            self.write_errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn delete(&self, id: NeuronId) {
+        self.working_set.write().remove(&id);
+        if let Some(offset) = self.offsets.write().get_mut(id as usize) {
+            *offset = None;
+        }
+        self.labels.write().retain(|_, known_id| *known_id != id);
+    }
+
+    fn iter_ids<'a>(&'a self) -> Box<dyn Iterator<Item = NeuronId> + 'a> {
+        let ids: Vec<_> = self
+            .offsets
+            .read()
+            .iter()
+            .enumerate()
+            .filter_map(|(id, offset)| offset.map(|_| id as NeuronId))
+            .collect();
+        Box::new(ids.into_iter())
+    }
+
+    fn len(&self) -> usize {
+        self.known_count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::neuron::NeuronKind;
+
+    fn tmpfile(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "w1z4rd_store_{name}_{}_{}.wbrain",
+            std::process::id(),
+            nonce
+        ))
+    }
+
+    #[test]
+    fn reopen_starts_empty_and_pages_only_requested_neuron() {
+        let path = tmpfile("scope");
+        {
+            let file = WbrainFile::open(&path).unwrap();
+            let pool = file.pool(7);
+            for id in 0..3 {
+                pool.put(
+                    id,
+                    Neuron::new_atom(id, format!("atom:{id}"), NeuronKind::Excitatory, 1),
+                );
+            }
+            assert_eq!(pool.sleep_all().unwrap(), 3);
+            assert_eq!(pool.resident_count(), 0);
+            file.commit_manifest().unwrap();
+            file.flush().unwrap();
+        }
+
+        let reopened = WbrainFile::open(&path).unwrap();
+        let pool = reopened.pool(7);
+        assert_eq!(pool.known_count(), 3);
+        assert_eq!(pool.resident_count(), 0);
+        assert_eq!(pool.get(1).unwrap().label, "atom:1");
+        assert_eq!(pool.resident_count(), 1);
+        assert_eq!(pool.page_ins(), 1);
+        assert_eq!(pool.label_to_id("atom:2"), Some(2));
+        assert_eq!(pool.resident_count(), 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn sleep_serializes_each_resident_neuron_independently() {
+        let path = tmpfile("sleep");
+        let file = WbrainFile::open(&path).unwrap();
+        let pool = file.pool(2);
+        pool.put(
+            0,
+            Neuron::new_atom(0, "zero".into(), NeuronKind::Excitatory, 1),
+        );
+        pool.put(
+            1,
+            Neuron::new_atom(1, "one".into(), NeuronKind::Excitatory, 1),
+        );
+        assert_eq!(pool.resident_count(), 2);
+        assert!(pool.sleep_neuron(0).unwrap());
+        assert_eq!(pool.resident_count(), 1);
+        assert_eq!(pool.get(0).unwrap().label, "zero");
+        assert_eq!(pool.resident_count(), 2);
+        std::fs::remove_file(path).ok();
+    }
+}
