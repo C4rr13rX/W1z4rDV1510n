@@ -269,7 +269,14 @@ impl Store for MmapWalStore {
         // appends the post-checkpoint recovery tail.
         inner.writer.get_mut().set_len(8)?;
         inner.writer.seek(SeekFrom::Start(8))?;
-        inner.writer.get_ref().sync_all()?;
+        // Do not issue another full-file sync after truncation.  The WAL was
+        // flushed above and the checkpoint itself was already fsynced and
+        // atomically installed before compaction began.  On Windows,
+        // `sync_all` on this still-open, just-truncated file can block
+        // indefinitely: the snapshot is durable and the WAL is already down
+        // to its header, but the checkpoint request keeps the brain mutex
+        // forever.  A crash before a later WAL flush can only leave redundant
+        // replay data; it cannot invalidate or outrun the durable snapshot.
         inner.bytes = 8;
         Ok(())
     }
