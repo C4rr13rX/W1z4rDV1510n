@@ -51,22 +51,29 @@
 //!   garbage (compaction territory).
 
 use parking_lot::Mutex;
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::neuron::Neuron;
+use crate::neuron::{Neuron, NeuronId};
 
 /// Append-only cold-tier file for one pool.  Owns the writer handle;
 /// readers open their own handles via the path.
 pub struct ColdTier {
-    path:   PathBuf,
+    path: PathBuf,
     writer: Arc<Mutex<ColdWriter>>,
+    /// Durable neuron-id → latest-record offset index.  This sidecar is
+    /// deliberately independent of `brain.bin`: a process must be able to
+    /// locate a sleeping neuron before deserialising the brain that owns it.
+    offsets: Arc<RwLock<HashMap<NeuronId, u64>>>,
 }
 
 struct ColdWriter {
-    file:  File,
+    file: File,
+    index: File,
     /// Current file length in bytes — also the next-append offset.
     /// Tracked manually so we don't pay a seek() on every evict.
     bytes: u64,
@@ -80,16 +87,82 @@ impl ColdTier {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = OpenOptions::new()
-            .read(true).write(true).create(true)
+            .read(true)
+            .write(true)
+            .create(true)
             .open(&path)?;
         let bytes = file.seek(SeekFrom::End(0))?;
+        let index_path = Self::index_path_for(&path);
+        let mut index = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&index_path)?;
+        let offsets = Self::load_index(&mut index)?;
+        index.seek(SeekFrom::End(0))?;
         Ok(Self {
             path,
-            writer: Arc::new(Mutex::new(ColdWriter { file, bytes })),
+            writer: Arc::new(Mutex::new(ColdWriter { file, index, bytes })),
+            offsets: Arc::new(RwLock::new(offsets)),
         })
     }
 
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Path of the compact append-only offset index belonging to a cold tier.
+    /// Records are fixed-width `(neuron_id: u32, offset: u64)` little-endian
+    /// pairs. Repeated ids are expected; the last complete record wins.
+    pub fn index_path(&self) -> PathBuf {
+        Self::index_path_for(&self.path)
+    }
+
+    fn index_path_for(path: &Path) -> PathBuf {
+        let mut os = path.as_os_str().to_os_string();
+        os.push(".idx");
+        PathBuf::from(os)
+    }
+
+    fn load_index(index: &mut File) -> io::Result<HashMap<NeuronId, u64>> {
+        index.seek(SeekFrom::Start(0))?;
+        let len = index.metadata()?.len();
+        const RECORD_BYTES: u64 = 12;
+        if len % RECORD_BYTES != 0 {
+            // A crash can leave only the final index record torn. The neuron
+            // body is fsynced first, so discarding that incomplete routing
+            // record is safe; the next write or recovery scan can re-index it.
+            index.set_len(len - (len % RECORD_BYTES))?;
+        }
+        let mut offsets = HashMap::new();
+        let mut record = [0u8; RECORD_BYTES as usize];
+        loop {
+            match index.read_exact(&mut record) {
+                Ok(()) => {
+                    let id = u32::from_le_bytes(record[0..4].try_into().unwrap());
+                    let offset = u64::from_le_bytes(record[4..12].try_into().unwrap());
+                    offsets.insert(id, offset);
+                }
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(offsets)
+    }
+
+    /// Latest on-disk record offset for `id`, without deserialising a neuron.
+    pub fn offset_for(&self, id: NeuronId) -> Option<u64> {
+        self.offsets.read().get(&id).copied()
+    }
+
+    /// Compact routing snapshot used by lazy pool manifests.
+    pub fn offset_snapshot(&self) -> Vec<(NeuronId, u64)> {
+        self.offsets
+            .read()
+            .iter()
+            .map(|(&id, &offset)| (id, offset))
+            .collect()
+    }
 
     /// Append a serialised neuron and return the offset where the
     /// length-prefix begins.  Caller stores this offset in its index.
@@ -112,6 +185,12 @@ impl ColdTier {
         w.file.write_all(&body)?;
         w.file.sync_data()?;
         w.bytes += 4 + body.len() as u64;
+        // The data record reaches stable storage before its routing record.
+        // Therefore an index entry can never point at an uncommitted neuron.
+        w.index.write_all(&neuron.id.to_le_bytes())?;
+        w.index.write_all(&offset.to_le_bytes())?;
+        w.index.sync_data()?;
+        self.offsets.write().insert(neuron.id, offset);
         Ok(offset)
     }
 
@@ -127,14 +206,15 @@ impl ColdTier {
         if body_len > 16 * 1024 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("cold record length {} > 16 MB cap at offset {}",
-                    body_len, offset),
+                format!(
+                    "cold record length {} > 16 MB cap at offset {}",
+                    body_len, offset
+                ),
             ));
         }
         let mut body = vec![0u8; body_len];
         f.read_exact(&mut body)?;
-        bincode::deserialize(&body)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        bincode::deserialize(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Total bytes written.  Used by /stats + the StorageControlState
@@ -148,6 +228,8 @@ impl ColdTier {
         let mut w = self.writer.lock();
         w.file.flush()?;
         w.file.sync_all()?;
+        w.index.flush()?;
+        w.index.sync_all()?;
         Ok(())
     }
 }
@@ -161,9 +243,9 @@ mod tests {
         let pid = std::process::id();
         let nano = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap().as_nanos();
-        let d = std::env::temp_dir()
-            .join(format!("w1z4rd_cold_{}_{}_{}", test, pid, nano));
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("w1z4rd_cold_{}_{}_{}", test, pid, nano));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -197,9 +279,7 @@ mod tests {
         let cold = ColdTier::open(dir.join("pool.cold")).unwrap();
         let mut offsets = Vec::new();
         for i in 0..20u32 {
-            let n = Neuron::new_atom(
-                i, format!("t:n{i}"), NeuronKind::Excitatory, i as u64,
-            );
+            let n = Neuron::new_atom(i, format!("t:n{i}"), NeuronKind::Excitatory, i as u64);
             offsets.push(cold.append_neuron(&n).unwrap());
         }
         for (i, off) in offsets.iter().enumerate() {
@@ -218,9 +298,7 @@ mod tests {
         {
             let cold = ColdTier::open(&path).unwrap();
             for i in 0..5u32 {
-                let n = Neuron::new_atom(
-                    i, format!("t:{i}"), NeuronKind::Excitatory, 0,
-                );
+                let n = Neuron::new_atom(i, format!("t:{i}"), NeuronKind::Excitatory, 0);
                 written_offs.push(cold.append_neuron(&n).unwrap());
             }
             cold.flush().unwrap();
@@ -228,16 +306,85 @@ mod tests {
         // Reopen — bytes counter must advance past existing length so
         // new appends don't overwrite old data.
         let cold = ColdTier::open(&path).unwrap();
-        let next = cold.append_neuron(&Neuron::new_atom(
-            99, "t:reopen".into(), NeuronKind::Excitatory, 0,
-        )).unwrap();
-        assert!(next > *written_offs.last().unwrap(),
-            "reopen append offset must exceed last prior offset");
+        for (i, off) in written_offs.iter().enumerate() {
+            assert_eq!(cold.offset_for(i as u32), Some(*off));
+        }
+        let next = cold
+            .append_neuron(&Neuron::new_atom(
+                99,
+                "t:reopen".into(),
+                NeuronKind::Excitatory,
+                0,
+            ))
+            .unwrap();
+        assert!(
+            next > *written_offs.last().unwrap(),
+            "reopen append offset must exceed last prior offset"
+        );
         // Existing records must still be readable at their original offsets.
         for (i, off) in written_offs.iter().enumerate() {
             let restored = cold.read_neuron(*off).unwrap();
             assert_eq!(restored.id, i as u32);
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn latest_index_record_wins_without_reading_neuron_bodies() {
+        let dir = tmpdir("index_latest");
+        let path = dir.join("pool.cold");
+        let cold = ColdTier::open(&path).unwrap();
+        let first = cold
+            .append_neuron(&Neuron::new_atom(
+                7,
+                "t:first".into(),
+                NeuronKind::Excitatory,
+                0,
+            ))
+            .unwrap();
+        let second = cold
+            .append_neuron(&Neuron::new_atom(
+                7,
+                "t:second".into(),
+                NeuronKind::Excitatory,
+                1,
+            ))
+            .unwrap();
+        assert!(second > first);
+        drop(cold);
+
+        let reopened = ColdTier::open(&path).unwrap();
+        assert_eq!(reopened.offset_for(7), Some(second));
+        let restored = reopened.read_neuron(second).unwrap();
+        assert_eq!(restored.label, "t:second");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn torn_final_index_record_is_discarded_on_open() {
+        let dir = tmpdir("index_torn");
+        let path = dir.join("pool.cold");
+        let cold = ColdTier::open(&path).unwrap();
+        let offset = cold
+            .append_neuron(&Neuron::new_atom(
+                3,
+                "t:stable".into(),
+                NeuronKind::Excitatory,
+                0,
+            ))
+            .unwrap();
+        let index_path = cold.index_path();
+        drop(cold);
+
+        {
+            let mut index = OpenOptions::new().append(true).open(&index_path).unwrap();
+            index.write_all(&99u32.to_le_bytes()[..2]).unwrap();
+            index.sync_all().unwrap();
+        }
+        let reopened = ColdTier::open(&path).unwrap();
+        assert_eq!(reopened.offset_for(3), Some(offset));
+        assert_eq!(reopened.offset_for(99), None);
+        assert_eq!(std::fs::metadata(index_path).unwrap().len() % 12, 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

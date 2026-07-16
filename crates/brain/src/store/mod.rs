@@ -20,24 +20,25 @@
 //! 17.8 (self-tuning) all build on top of this module; none of them touch
 //! the existing Pool API yet.
 
-pub mod event;
-pub mod wal;
-pub mod recovery;
 pub mod bloom;
-pub mod merkle;
-pub mod control;
 pub mod cold;
+pub mod container;
+pub mod control;
+pub mod event;
+pub mod merkle;
 pub mod neuron_store;
+pub mod recovery;
+pub mod wal;
 
-pub use event::{TerminalDelta, WalEvent};
-pub use wal::{MmapWalStore, NoopStore, Store};
-pub use recovery::{RecoveryStats, load_events_after_marker, replay_into_brain};
 pub use bloom::CountingBloom;
-pub use merkle::{PoolRoot, compute_pool_root};
-pub use control::{StorageConfig, StorageControlState};
 pub use cold::ColdTier;
+pub use container::{BrainContainer, BrainContainerManifest, PoolContainerManifest};
+pub use control::{StorageConfig, StorageControlState};
+pub use event::{TerminalDelta, WalEvent};
+pub use merkle::{PoolRoot, compute_pool_root};
 pub use neuron_store::{
-    CapacityWeightedPlacement, ColdDiskStore, ConsistentHashPlacement,
-    HebbianClusteredPlacement, NeuronStore, NodeId, PlacementPolicy,
-    RamStore, RemoteNodeStore, RemoteTransport, TieredStore,
+    CapacityWeightedPlacement, ColdDiskStore, ConsistentHashPlacement, HebbianClusteredPlacement,
+    NeuronStore, NodeId, PlacementPolicy, RamStore, RemoteNodeStore, RemoteTransport, TieredStore,
 };
+pub use recovery::{RecoveryStats, load_events_after_marker, replay_into_brain};
+pub use wal::{MmapWalStore, NoopStore, Store};
