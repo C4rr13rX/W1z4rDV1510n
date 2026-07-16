@@ -387,6 +387,54 @@ def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> li
     ))
 
 
+def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
+                            durable_row: int, error: str, reason: str) -> dict:
+    """Persist one failed interval before any rollback can erase its evidence."""
+    last_good = read_json(runtime / "brain" / "brain.last-good.json")
+    suspect_start = latest_passing_canary_row(
+        runtime, phase.name, int(last_good.get("row") or 0)
+    )
+    interval_id = deferred_interval_id(phase.name, suspect_start, candidate_row)
+    base_snapshot = preserve_deferred_base(runtime, interval_id)
+    event = {
+        "interval_id": interval_id,
+        "phase": phase.name,
+        "start_row": suspect_start,
+        "end_row": candidate_row,
+        "base_snapshot": str(base_snapshot),
+        "base_row": int(last_good.get("row") or 0),
+        "reason": reason,
+        "error": error,
+    }
+    append_health_event(runtime, {
+        "kind": reason,
+        "phase": phase.name,
+        "trained_rows": candidate_row,
+        "passed": False,
+        "suspect_start_row": suspect_start,
+        "suspect_end_row": candidate_row,
+        "last_good": last_good,
+        "error": error,
+    })
+    if not any(
+        row.get("interval_id") == interval_id
+        for row in unresolved_deferred_intervals(runtime)
+    ):
+        append_deferred_event(runtime, {**event, "status": "deferred"})
+    publish(canary_quarantine_path(runtime), {
+        "state": reason,
+        "candidate_row": candidate_row,
+        "suspect_start_row": suspect_start,
+        "suspect_end_row": candidate_row,
+        "durable_next_row": durable_row,
+        "last_good": last_good,
+        "error": error,
+        "created_unix": time.time(),
+        **event,
+    })
+    return event
+
+
 def endpoint_json(endpoint: str, path: str, timeout: float = 30.0) -> dict:
     request = urllib.request.Request(endpoint.rstrip("/") + path)
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -700,52 +748,10 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         except subprocess.TimeoutExpired:
                             worker.kill()
                             worker.wait(timeout=30)
-                        last_good = read_json(
-                            runtime / "brain" / "brain.last-good.json"
+                        record_deferred_failure(
+                            runtime, phase, candidate_row, durable, str(exc),
+                            "continuous_canary_failed",
                         )
-                        suspect_start = latest_passing_canary_row(
-                            runtime, phase.name, int(last_good.get("row") or 0)
-                        )
-                        append_health_event(runtime, {
-                            "kind": "continuous_canary",
-                            "phase": phase.name,
-                            "trained_rows": candidate_row,
-                            "passed": False,
-                            "suspect_start_row": suspect_start,
-                            "suspect_end_row": candidate_row,
-                            "last_good": last_good,
-                            "error": str(exc),
-                        })
-                        interval_id = deferred_interval_id(
-                            phase.name, suspect_start, candidate_row
-                        )
-                        base_snapshot = preserve_deferred_base(runtime, interval_id)
-                        if not any(
-                            row.get("interval_id") == interval_id
-                            for row in unresolved_deferred_intervals(runtime)
-                        ):
-                            append_deferred_event(runtime, {
-                                "interval_id": interval_id,
-                                "status": "deferred",
-                                "phase": phase.name,
-                                "start_row": suspect_start,
-                                "end_row": candidate_row,
-                                "base_snapshot": str(base_snapshot),
-                                "base_row": int(last_good.get("row") or 0),
-                                "reason": "continuous_canary_failed",
-                                "error": str(exc),
-                            })
-                        publish(canary_quarantine_path(runtime), {
-                            "state": "continuous_canary_failed",
-                            "phase": phase.name,
-                            "candidate_row": candidate_row,
-                            "suspect_start_row": suspect_start,
-                            "suspect_end_row": candidate_row,
-                            "durable_next_row": durable,
-                            "last_good": last_good,
-                            "error": str(exc),
-                            "created_unix": time.time(),
-                        })
                         publish(status_path, {
                             "state": "continuous_canary_failed",
                             "phase": phase.name,
@@ -767,6 +773,36 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                     worker_pid_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def perform_automatic_recovery(args: argparse.Namespace, phase: Phase,
+                               runtime: Path, status_path: Path) -> bool:
+    if not args.auto_quarantine_recovery:
+        return False
+    publish(status_path, {
+        "state": "automatic_quarantine_recovery",
+        "phase": phase.name,
+        "updated_unix": time.time(),
+    })
+    try:
+        stop_runtime_node(runtime)
+        restored = restore_canary_quarantine(runtime)
+        start_runtime_node(runtime, args.node_bin, args.endpoint)
+    except (RuntimeError, OSError, psutil.Error) as exc:
+        publish(status_path, {
+            "state": "automatic_quarantine_recovery_failed",
+            "phase": phase.name,
+            "error": str(exc),
+            "updated_unix": time.time(),
+        })
+        return False
+    append_health_event(runtime, {
+        "kind": "automatic_quarantine_recovery",
+        "phase": phase.name,
+        "passed": True,
+        "restored": restored,
+    })
+    return True
 
 
 def main() -> int:
@@ -964,10 +1000,18 @@ def main() -> int:
                         run_completion_gate(args, phase, runtime)
                     except (RuntimeError, subprocess.TimeoutExpired,
                             json.JSONDecodeError) as exc:
+                        record_deferred_failure(
+                            runtime, phase, ram, durable, str(exc),
+                            "completion_gate_failed",
+                        )
                         publish(status_path, {"state": "gate_failed",
                                               "phase": phase.name,
                                               "error": str(exc),
                                               "updated_unix": time.time()})
+                        if perform_automatic_recovery(
+                                args, phase, runtime, status_path):
+                            restarts = 0
+                            continue
                         return 1
                 publish(status_path, {"state": "complete", "phase": phase.name,
                                       "ram_next_row": ram,
@@ -989,35 +1033,11 @@ def main() -> int:
                 runtime / f"{phase.name}.progress.json"
             )
             if code == 86:
-                if not args.auto_quarantine_recovery:
-                    return 1
-                publish(status_path, {
-                    "state": "automatic_quarantine_recovery",
-                    "phase": phase.name,
-                    "ram_next_row": ram_after,
-                    "durable_next_row": durable_after,
-                    "updated_unix": time.time(),
-                })
-                try:
-                    stop_runtime_node(runtime)
-                    restored = restore_canary_quarantine(runtime)
-                    start_runtime_node(runtime, args.node_bin, args.endpoint)
-                except (RuntimeError, OSError, psutil.Error) as exc:
-                    publish(status_path, {
-                        "state": "automatic_quarantine_recovery_failed",
-                        "phase": phase.name,
-                        "error": str(exc),
-                        "updated_unix": time.time(),
-                    })
-                    return 1
-                append_health_event(runtime, {
-                    "kind": "automatic_quarantine_recovery",
-                    "phase": phase.name,
-                    "passed": True,
-                    "restored": restored,
-                })
-                restarts = 0
-                continue
+                if perform_automatic_recovery(
+                        args, phase, runtime, status_path):
+                    restarts = 0
+                    continue
+                return 1
             if code == 0 and ram_after >= phase.rows:
                 continue
             if code == 0 and ram_after > ram and durable_after == ram_after:
@@ -1030,12 +1050,20 @@ def main() -> int:
                     run_midphase_gate(args, phase, runtime, ram_after)
                 except (RuntimeError, subprocess.TimeoutExpired,
                         json.JSONDecodeError) as exc:
+                    record_deferred_failure(
+                        runtime, phase, ram_after, durable_after, str(exc),
+                        "midphase_gate_failed",
+                    )
                     publish(status_path, {"state": "midphase_gate_failed",
                                           "phase": phase.name,
                                           "ram_next_row": ram_after,
                                           "durable_next_row": durable_after,
                                           "error": str(exc),
                                           "updated_unix": time.time()})
+                    if perform_automatic_recovery(
+                            args, phase, runtime, status_path):
+                        restarts = 0
+                        continue
                     return 1
                 accept_last_good_guard(runtime)
                 continue
