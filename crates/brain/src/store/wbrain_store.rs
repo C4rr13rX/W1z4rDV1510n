@@ -204,6 +204,22 @@ impl WbrainNeuronStore {
         Ok(slept)
     }
 
+    /// Persist a neuron without admitting a duplicate copy to this store's
+    /// working-set cache. Pool owns the live copy until it replaces that copy
+    /// with its compact sleeping slot.
+    pub fn persist_sleeping(&self, neuron: &Neuron) -> std::io::Result<()> {
+        self.append_record(neuron)?;
+        self.working_set.write().remove(&neuron.id);
+        self.page_outs.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Drop the store's cache copy after Pool has installed the paged-in
+    /// neuron in its own live slot. There must be exactly one resident body.
+    pub fn release_cached(&self, id: NeuronId) {
+        self.working_set.write().remove(&id);
+    }
+
     fn append_record(&self, neuron: &Neuron) -> std::io::Result<()> {
         let offset = self
             .file
@@ -295,6 +311,7 @@ impl NeuronStore for WbrainNeuronStore {
 mod tests {
     use super::*;
     use crate::neuron::NeuronKind;
+    use crate::pool::{BytePassthroughEncoding, Pool, PoolConfig};
 
     fn tmpfile(name: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -356,6 +373,33 @@ mod tests {
         assert_eq!(pool.resident_count(), 1);
         assert_eq!(pool.get(0).unwrap().label, "zero");
         assert_eq!(pool.resident_count(), 2);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn pool_idle_serializes_atoms_and_pages_only_requested_id() {
+        let path = tmpfile("pool-idle");
+        let file = WbrainFile::open(&path).unwrap();
+        let store = file.pool(3);
+        let config = PoolConfig::defaults("test", 3);
+        let mut pool = Pool::new(
+            config,
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+        );
+        pool.set_wbrain_store(store.clone());
+        let ids = pool.ensure_frame_atoms_for_pretrain(b"abc", 1);
+        assert_eq!(ids.len(), 3);
+
+        assert_eq!(pool.serialize_all_neurons_for_idle().unwrap(), 3);
+        assert_eq!(pool.live_count(), 0);
+        assert_eq!(store.resident_count(), 0);
+
+        pool.ensure_loaded(ids[1]).unwrap();
+        assert_eq!(pool.live_count(), 1);
+        assert_eq!(pool.get(ids[1]).unwrap().label, "byte:Yg");
+        assert_eq!(store.resident_count(), 0);
         std::fs::remove_file(path).ok();
     }
 }

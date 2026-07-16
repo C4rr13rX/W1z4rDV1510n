@@ -15,7 +15,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
-use crate::store::{ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore, WalEvent};
+use crate::store::{
+    ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore, WalEvent,
+    WbrainNeuronStore,
+};
 
 /// Encode/decode contract per spec §3.1.  Each pool ships with one of these
 /// declaring how raw sensor frames decompose into atom labels and how an
@@ -986,6 +989,12 @@ pub struct Pool {
     /// the brain transparently use storage from multiple hosts.
     tiered_store: Option<Arc<TieredStore>>,
 
+    /// Single-file neuron-addressable backing store. Unlike the legacy cold
+    /// tier, this is authoritative for every neuron kind, including atoms.
+    /// The in-memory `neurons` vector then contains either the one live body
+    /// or a compact routing slot for that stable id.
+    wbrain_store: Option<Arc<WbrainNeuronStore>>,
+
     /// Disk offsets for currently-evicted neurons.  An ID in this map
     /// is one whose in-RAM slot has been zeroed out (terminals + members
     /// cleared) and whose authoritative state lives at this byte offset
@@ -1082,6 +1091,7 @@ impl Pool {
             bloom: CountingBloom::with_expected_capacity(100_000),
             cold_tier: None,
             tiered_store: None,
+            wbrain_store: None,
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
         }
@@ -1106,6 +1116,14 @@ impl Pool {
     /// Page-in reads via `tiered_store.get(id)`.
     pub fn set_tiered_store(&mut self, store: Arc<TieredStore>) {
         self.tiered_store = Some(store);
+    }
+
+    pub fn set_wbrain_store(&mut self, store: Arc<WbrainNeuronStore>) {
+        self.wbrain_store = Some(store);
+    }
+
+    pub fn has_wbrain_store(&self) -> bool {
+        self.wbrain_store.is_some()
     }
 
     /// Stage 18.12 step 4b — diagnostic: true when this pool has a
@@ -1139,7 +1157,7 @@ impl Pool {
     /// scanning so it doesn't spam evict_errors when the brain spun
     /// up without storage configured.
     pub fn has_storage_tier(&self) -> bool {
-        self.cold_tier.is_some() || self.tiered_store.is_some()
+        self.cold_tier.is_some() || self.tiered_store.is_some() || self.wbrain_store.is_some()
     }
 
     /// Stage 17.4 — number of currently-evicted neurons.  Diagnostic +
@@ -1171,7 +1189,7 @@ impl Pool {
         // Stage 18.12 step 4b: prefer the tiered store when both are
         // present (the §18 distributed path).  Fall back to the
         // §17.4 cold-tier path when only that's attached.
-        if self.tiered_store.is_none() && self.cold_tier.is_none() {
+        if self.wbrain_store.is_none() && self.tiered_store.is_none() && self.cold_tier.is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "no tiered_store or cold_tier attached to this pool",
@@ -1180,16 +1198,24 @@ impl Pool {
         let Some(n) = self.neurons.get(id as usize) else {
             return Ok(false);
         };
-        // Refuse to evict atoms — they are the substrate's smallest,
-        // most fundamental unit; their RAM cost is minimal (no terminals
-        // typically) and the cost of paging them back in on every byte
-        // is unbearable.  Bindings (members empty + concept) also stay.
-        if n.is_atom() {
+        // Legacy cold storage retained atoms permanently. A .wbrain store is
+        // neuron-addressable and therefore sleeps atoms as required by the
+        // brain lifecycle; legacy deployments keep their old behavior.
+        if n.is_atom() && self.wbrain_store.is_none() {
             return Ok(false);
         }
 
-        // Choose backend: tiered_store wins when both are attached.
-        let used_tiered = if let Some(store) = self.tiered_store.clone() {
+        // Choose backend: the single-file local store is authoritative when
+        // attached, followed by the distributed and legacy paths.
+        let used_wbrain = if let Some(store) = self.wbrain_store.clone() {
+            store.persist_sleeping(n)?;
+            true
+        } else {
+            false
+        };
+        let used_tiered = if used_wbrain {
+            false
+        } else if let Some(store) = self.tiered_store.clone() {
             store.put(id, n.clone());
             true
         } else {
@@ -1255,7 +1281,16 @@ impl Pool {
         // It routes through local cold disk OR a remote peer depending
         // on the placement policy.  When absent, fall back to the
         // §17.4 cold-tier + cold_offsets path.
-        let restored: Neuron = if let Some(store) = self.tiered_store.clone() {
+        let restored: Neuron = if let Some(store) = self.wbrain_store.clone() {
+            let neuron = store.get(id).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(".wbrain store has no neuron id {}", id),
+                )
+            })?;
+            store.release_cached(id);
+            neuron
+        } else if let Some(store) = self.tiered_store.clone() {
             match store.get(id) {
                 Some(n) => n,
                 None => {
@@ -1355,6 +1390,25 @@ impl Pool {
             self.page_in_neuron(id)?;
         }
         Ok(())
+    }
+
+    /// Serialize every live neuron after maintenance has completed. This is
+    /// the explicit idle/sleep boundary: no salience or age policy applies,
+    /// because the knowledge is retained on SSD rather than pruned.
+    pub fn serialize_all_neurons_for_idle(&mut self) -> std::io::Result<usize> {
+        if self.wbrain_store.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "idle serialization requires a .wbrain store",
+            ));
+        }
+        let mut serialized = 0;
+        for id in 0..self.neurons.len() as NeuronId {
+            if self.evict_neuron(id)? {
+                serialized += 1;
+            }
+        }
+        Ok(serialized)
     }
 
     /// Stage 17.9 — recovery-time atom creation.  Inserts a neuron at
@@ -2098,6 +2152,7 @@ impl Pool {
             // the data_dir isn't known at Pool construction time.
             cold_tier: None,
             tiered_store: None, // §18.12 step 4b
+            wbrain_store: None,
             cold_offsets: snap.cold_offsets.iter().copied().collect(),
             evicted: snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
         };

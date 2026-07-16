@@ -551,6 +551,8 @@ pub struct SelfTestReport {
 pub struct Brain {
     fabric: Fabric,
     config: BrainConfig,
+    /// Open neuron-addressable container for the demand-paged lifecycle.
+    wbrain_file: Option<std::sync::Arc<crate::store::WbrainFile>>,
     binding_pool_id: PoolId,
     /// Fingerprint history.  Bounded by `moment_history_window`.
     moment_history: VecDeque<MomentFingerprint>,
@@ -779,6 +781,7 @@ impl Brain {
         Self {
             fabric,
             config,
+            wbrain_file: None,
             binding_pool_id,
             moment_history: VecDeque::with_capacity(window),
             binding_recurrences: AHashMap::new(),
@@ -1095,7 +1098,11 @@ impl Brain {
     /// Register a sensor pool.  The caller supplies the atomization
     /// contract via [`AtomEncoding`].  Returns the assigned pool id.
     pub fn create_pool(&mut self, config: PoolConfig, encoding: Box<dyn AtomEncoding>) -> PoolId {
-        let pool = Pool::new(config, encoding);
+        let pool_id = config.id;
+        let mut pool = Pool::new(config, encoding);
+        if let Some(file) = &self.wbrain_file {
+            pool.set_wbrain_store(file.pool(pool_id));
+        }
         self.fabric.register_pool(pool)
     }
 
@@ -6323,6 +6330,45 @@ impl Brain {
         attached
     }
 
+    /// Attach every pool to one neuron-addressable `.wbrain` container.
+    /// Existing neurons remain live until the explicit idle transition.
+    pub fn attach_wbrain<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> std::io::Result<usize> {
+        let file = crate::store::WbrainFile::open(path)?;
+        let mut attached = 0;
+        for pid in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pid) {
+                pool.write().set_wbrain_store(file.pool(pid));
+                attached += 1;
+            }
+        }
+        self.wbrain_file = Some(file);
+        Ok(attached)
+    }
+
+    /// Run the final sleep transition after maintenance: serialize every live
+    /// neuron independently and publish the compact routing manifest.
+    pub fn serialize_all_neurons_for_idle(&self) -> std::io::Result<usize> {
+        let file = self.wbrain_file.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "brain has no .wbrain container attached",
+            )
+        })?;
+        let mut serialized = 0;
+        for pid in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pid) {
+                serialized += pool.write().serialize_all_neurons_for_idle()?;
+            }
+        }
+        file.set_tick(self.fabric.current_tick());
+        file.commit_manifest()?;
+        file.flush()?;
+        Ok(serialized)
+    }
+
     /// Stage 17.4 full — run one eviction pass per
     /// [`ARCHITECTURE.md`] §17.4.  Walks each pool, identifies concept
     /// neurons with low `salience_ema` AND staleness past `min_stale_ticks`,
@@ -6627,6 +6673,7 @@ impl Brain {
         let mut brain = Self {
             fabric,
             config,
+            wbrain_file: None,
             binding_pool_id: snap.binding_pool_id,
             moment_history,
             binding_recurrences,
