@@ -32,6 +32,18 @@ fn read_value<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<T> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+fn skip_bincode_string<R: Read>(reader: &mut R) -> io::Result<()> {
+    let byte_count: u64 = read_value(reader)?;
+    let copied = io::copy(&mut reader.take(byte_count), &mut io::sink())?;
+    if copied != byte_count {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("legacy string declared {byte_count} bytes but only {copied} remained"),
+        ));
+    }
+    Ok(())
+}
+
 fn persisted(fingerprint: SerializableFingerprint) -> PersistedMomentFingerprint {
     PersistedMomentFingerprint {
         pairs: fingerprint.pairs,
@@ -115,7 +127,7 @@ fn stream_pool<R: Read>(
 
     let label_count: u64 = read_value(reader)?;
     for _ in 0..label_count {
-        let _: String = read_value(reader)?;
+        skip_bincode_string(reader)?;
         let _: NeuronId = read_value(reader)?;
     }
     let recent_atoms: VecDeque<NeuronId> = read_value(reader)?;
