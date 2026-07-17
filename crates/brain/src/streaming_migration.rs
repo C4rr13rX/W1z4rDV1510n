@@ -136,27 +136,52 @@ fn stream_sequence_ledger<R: Read>(
     pool_id: PoolId,
 ) -> io::Result<AuxiliaryRecordRef> {
     let sequence_count: u64 = read_value(reader)?;
+    const LEDGER_MAGIC: &[u8; 8] = b"W1ZSEQ01";
+    const MAX_BUCKETS: u64 = 4 * 1024 * 1024;
+    let desired_buckets = sequence_count
+        .saturating_mul(2)
+        .max(1)
+        .next_power_of_two();
+    let bucket_count = desired_buckets.min(MAX_BUCKETS);
     file.append_auxiliary(
         pool_id,
         LEGACY_SEQUENCE_LEDGER_KIND,
         |writer| -> io::Result<()> {
+            let body_start = writer.stream_position()?;
+            writer.write_all(LEDGER_MAGIC)?;
             writer.write_all(&sequence_count.to_le_bytes())?;
+            writer.write_all(&bucket_count.to_le_bytes())?;
+            let zeroes = [0_u8; DISCARD_BUFFER_BYTES];
+            let mut bucket_bytes = bucket_count * 8;
+            while bucket_bytes > 0 {
+                let n = usize::try_from(bucket_bytes.min(zeroes.len() as u64)).unwrap();
+                writer.write_all(&zeroes[..n])?;
+                bucket_bytes -= n as u64;
+            }
             let mut buffer = [0_u8; DISCARD_BUFFER_BYTES];
             let mut since_memory_check = 0_u64;
             for _ in 0..sequence_count {
                 let member_count: u64 = read_value(reader)?;
+                let member_count_u32 = u32::try_from(member_count).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "legacy sequence is too long")
+                })?;
                 let member_bytes = member_count.checked_mul(4).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         "legacy sequence member byte count overflow",
                     )
                 })?;
-                writer.write_all(&member_count.to_le_bytes())?;
+                let record_relative = writer.stream_position()? - body_start;
+                writer.write_all(&0_u64.to_le_bytes())?;
+                writer.write_all(&0_u64.to_le_bytes())?;
+                writer.write_all(&member_count_u32.to_le_bytes())?;
+                let mut hasher = blake3::Hasher::new();
                 let mut remaining = member_bytes;
                 while remaining > 0 {
                     let requested = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
                     reader.read_exact(&mut buffer[..requested])?;
                     writer.write_all(&buffer[..requested])?;
+                    hasher.update(&buffer[..requested]);
                     remaining -= requested as u64;
                     since_memory_check += requested as u64;
                     if since_memory_check >= DISCARD_MEMORY_CHECK_BYTES {
@@ -166,6 +191,20 @@ fn stream_sequence_ledger<R: Read>(
                 }
                 let recurrence: u32 = read_value(reader)?;
                 writer.write_all(&recurrence.to_le_bytes())?;
+                let end = writer.stream_position()?;
+                let hash_raw = hasher.finalize();
+                let hash = u64::from_le_bytes(hash_raw.as_bytes()[..8].try_into().unwrap());
+                let bucket = hash & (bucket_count - 1);
+                let bucket_relative = 24 + bucket * 8;
+                writer.seek(io::SeekFrom::Start(body_start + bucket_relative))?;
+                let mut old_head = [0_u8; 8];
+                writer.read_exact(&mut old_head)?;
+                writer.seek(io::SeekFrom::Start(body_start + record_relative))?;
+                writer.write_all(&old_head)?;
+                writer.write_all(&hash.to_le_bytes())?;
+                writer.seek(io::SeekFrom::Start(body_start + bucket_relative))?;
+                writer.write_all(&(record_relative + 1).to_le_bytes())?;
+                writer.seek(io::SeekFrom::Start(end))?;
             }
             Ok(())
         },
@@ -596,6 +635,55 @@ mod tests {
         assert!(missing.is_empty());
         assert_eq!(restored.stats().total_neurons, 6);
         assert_eq!(restored.stats().evicted_neurons, 6);
+
+        std::fs::remove_file(legacy).ok();
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn migrated_sequence_recurrence_is_looked_up_without_hydrating_the_ledger() {
+        let legacy = tmpfile("sequence-ledger-source", "bin");
+        let destination = tmpfile("sequence-ledger-destination", "wbrain");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            brain.create_pool(
+                PoolConfig::defaults("frames", 9),
+                Box::new(BytePassthroughEncoding {
+                    prefix: "frame".into(),
+                }),
+            );
+            let pool = brain.fabric().pool(9).unwrap();
+            let first = pool
+                .write()
+                .ensure_frame_concept_for_pretrain(b"cold-ledger-frame", 1);
+            assert!(first.len() > 1);
+            brain.checkpoint(&legacy).unwrap();
+        }
+
+        migrate(&legacy, &destination).unwrap();
+        let mut encodings: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();
+        encodings.insert(
+            binding_pool_id,
+            Box::new(BytePassthroughEncoding {
+                prefix: "bind".into(),
+            }),
+        );
+        encodings.insert(
+            9,
+            Box::new(BytePassthroughEncoding {
+                prefix: "frame".into(),
+            }),
+        );
+        let (restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        let pool = restored.fabric().pool(9).unwrap();
+        let promoted = pool
+            .write()
+            .ensure_frame_concept_for_pretrain(b"cold-ledger-frame", 2);
+        assert_eq!(promoted.len(), 1);
+        assert!(!pool.write().get(promoted[0]).unwrap().is_atom());
 
         std::fs::remove_file(legacy).ok();
         std::fs::remove_file(destination).ok();

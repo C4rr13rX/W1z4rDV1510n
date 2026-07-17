@@ -280,6 +280,51 @@ impl BrainContainer {
         Ok(body)
     }
 
+    /// Read a bounded slice from an auxiliary body without hydrating the
+    /// complete record. `relative_offset` is measured from the body start.
+    pub fn read_auxiliary_exact(
+        &mut self,
+        reference: AuxiliaryRecordRef,
+        relative_offset: u64,
+        body: &mut [u8],
+    ) -> io::Result<()> {
+        let end = relative_offset
+            .checked_add(body.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "auxiliary read overflow"))?;
+        if end > reference.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "auxiliary read exceeds record body",
+            ));
+        }
+        self.file
+            .seek(SeekFrom::Start(reference.offset + 24 + relative_offset))?;
+        self.file.read_exact(body)
+    }
+
+    /// Update a bounded slice of an auxiliary body in place. Auxiliary
+    /// ledgers use this for small counters and bucket roots; neuron records
+    /// remain append-only.
+    pub fn write_auxiliary_exact(
+        &mut self,
+        reference: AuxiliaryRecordRef,
+        relative_offset: u64,
+        body: &[u8],
+    ) -> io::Result<()> {
+        let end = relative_offset
+            .checked_add(body.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "auxiliary write overflow"))?;
+        if end > reference.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "auxiliary write exceeds record body",
+            ));
+        }
+        self.file
+            .seek(SeekFrom::Start(reference.offset + 24 + relative_offset))?;
+        self.file.write_all(body)
+    }
+
     /// Make a manifest current only after its complete body is durable.
     pub fn commit_manifest(&mut self, manifest: BrainContainerManifest) -> io::Result<()> {
         let body = bincode::serialize(&manifest)

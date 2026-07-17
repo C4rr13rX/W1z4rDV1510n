@@ -2127,9 +2127,17 @@ impl Pool {
             return vec![id];
         }
 
-        let recurrence = self.sequences.entry(sequence.clone()).or_insert(0);
-        *recurrence = recurrence.saturating_add(1);
-        if *recurrence < 2 {
+        let recurrence = match self.increment_sequence_recurrence(&sequence) {
+            Ok(recurrence) => recurrence,
+            Err(error) => {
+                eprintln!(
+                    "refusing concept promotion because cold recurrence lookup failed in pool {}: {error}",
+                    self.config.id
+                );
+                return sequence;
+            }
+        };
+        if recurrence < 2 {
             return sequence;
         }
 
@@ -2148,6 +2156,103 @@ impl Pool {
             self.concept_multiset_to_id.entry(sequence).or_insert(id);
         }
         vec![id]
+    }
+
+    fn legacy_sequence_recurrence(
+        &self,
+        sequence: &[NeuronId],
+    ) -> std::io::Result<Option<u32>> {
+        const LEDGER_MAGIC: &[u8; 8] = b"W1ZSEQ01";
+        let Some(reference) = self.legacy_sequence_ledger else {
+            return Ok(None);
+        };
+        let store = self.wbrain_store.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cold sequence ledger has no .wbrain store",
+            )
+        })?;
+        let mut header = [0_u8; 24];
+        store.read_auxiliary_exact(reference, 0, &mut header)?;
+        if &header[..8] != LEDGER_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported cold sequence ledger",
+            ));
+        }
+        let bucket_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        if bucket_count == 0 || !bucket_count.is_power_of_two() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid cold sequence bucket count",
+            ));
+        }
+        let mut hasher = blake3::Hasher::new();
+        for id in sequence {
+            hasher.update(&id.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let hash = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
+        let bucket = hash & (bucket_count - 1);
+        let mut raw = [0_u8; 8];
+        store.read_auxiliary_exact(reference, 24 + bucket * 8, &mut raw)?;
+        let mut link = u64::from_le_bytes(raw);
+        let mut traversed = 0_u64;
+        while link != 0 {
+            traversed += 1;
+            if traversed > 1_000_000 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "cold sequence chain cycle",
+                ));
+            }
+            let record = link - 1;
+            let mut record_header = [0_u8; 20];
+            store.read_auxiliary_exact(reference, record, &mut record_header)?;
+            let next = u64::from_le_bytes(record_header[..8].try_into().unwrap());
+            let record_hash = u64::from_le_bytes(record_header[8..16].try_into().unwrap());
+            let member_count =
+                u32::from_le_bytes(record_header[16..20].try_into().unwrap()) as usize;
+            if record_hash == hash && member_count == sequence.len() {
+                let mut matches = true;
+                let mut member_raw = [0_u8; 4];
+                for (index, expected) in sequence.iter().enumerate() {
+                    store.read_auxiliary_exact(
+                        reference,
+                        record + 20 + (index as u64) * 4,
+                        &mut member_raw,
+                    )?;
+                    if u32::from_le_bytes(member_raw) != *expected {
+                        matches = false;
+                        break;
+                    }
+                }
+                if matches {
+                    store.read_auxiliary_exact(
+                        reference,
+                        record + 20 + (member_count as u64) * 4,
+                        &mut member_raw,
+                    )?;
+                    return Ok(Some(u32::from_le_bytes(member_raw)));
+                }
+            }
+            link = next;
+        }
+        Ok(None)
+    }
+
+    fn increment_sequence_recurrence(
+        &mut self,
+        sequence: &SequenceFingerprint,
+    ) -> std::io::Result<u32> {
+        if let Some(count) = self.sequences.get_mut(sequence) {
+            *count = count.saturating_add(1);
+            return Ok(*count);
+        }
+        let old = self.legacy_sequence_recurrence(sequence)?.unwrap_or(0);
+        let next = old.saturating_add(1);
+        self.sequences.insert(sequence.clone(), next);
+        Ok(next)
     }
 
     /// Remove query-local activation while preserving all learned neurons,
@@ -3026,10 +3131,13 @@ impl Pool {
         for len in 2..=max_len {
             let start = buf_len - len;
             let run: SequenceFingerprint = self.recent_atoms.iter().skip(start).copied().collect();
-            let count = self.sequences.entry(run.clone()).or_insert(0);
-            *count = count.saturating_add(1);
-            if *count == threshold {
-                to_promote.push(run);
+            match self.increment_sequence_recurrence(&run) {
+                Ok(count) if count == threshold => to_promote.push(run),
+                Ok(_) => {}
+                Err(error) => eprintln!(
+                    "refusing concept emergence because cold recurrence lookup failed in pool {}: {error}",
+                    self.config.id
+                ),
             }
         }
 

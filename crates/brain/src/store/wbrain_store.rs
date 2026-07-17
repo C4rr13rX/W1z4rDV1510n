@@ -127,6 +127,28 @@ impl WbrainFile {
     pub fn read_auxiliary(&self, reference: AuxiliaryRecordRef) -> std::io::Result<Vec<u8>> {
         self.container.lock().read_auxiliary(reference)
     }
+
+    pub fn read_auxiliary_exact(
+        &self,
+        reference: AuxiliaryRecordRef,
+        relative_offset: u64,
+        body: &mut [u8],
+    ) -> std::io::Result<()> {
+        self.container
+            .lock()
+            .read_auxiliary_exact(reference, relative_offset, body)
+    }
+
+    pub fn write_auxiliary_exact(
+        &self,
+        reference: AuxiliaryRecordRef,
+        relative_offset: u64,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        self.container
+            .lock()
+            .write_auxiliary_exact(reference, relative_offset, body)
+    }
 }
 
 /// NeuronStore scoped to one pool inside a shared `.wbrain` file.
@@ -159,6 +181,26 @@ impl WbrainNeuronStore {
             read_errors: AtomicU64::new(0),
             write_errors: AtomicU64::new(0),
         }
+    }
+
+    pub fn read_auxiliary_exact(
+        &self,
+        reference: AuxiliaryRecordRef,
+        relative_offset: u64,
+        body: &mut [u8],
+    ) -> std::io::Result<()> {
+        self.file
+            .read_auxiliary_exact(reference, relative_offset, body)
+    }
+
+    pub fn write_auxiliary_exact(
+        &self,
+        reference: AuxiliaryRecordRef,
+        relative_offset: u64,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        self.file
+            .write_auxiliary_exact(reference, relative_offset, body)
     }
 
     fn from_manifest(file: Arc<WbrainFile>, manifest: PoolContainerManifest) -> Self {
