@@ -107,6 +107,12 @@ pub struct Neuron {
     pub id:                   NeuronId,
     pub label:                String,
     pub kind:                 NeuronKind,
+    /// Runtime identity bit that lets a serialized concept release its member
+    /// payload while asleep without masquerading as an atom. It is skipped in
+    /// legacy bincode snapshots: loaded concepts still identify themselves by
+    /// their nonempty members, and constructors set it for new concepts.
+    #[serde(skip)]
+    concept_identity:         bool,
     /// Empty for atoms.  Non-empty for concepts.  Order matters: it's the
     /// firing-order of the concept's constituent atoms/concepts as
     /// observed at promotion time.  Spec §1.1 — position is encoded by
@@ -198,6 +204,7 @@ impl Neuron {
             id,
             label,
             kind,
+            concept_identity: false,
             members: Vec::new(),
             terminals: Vec::new(),
             born_tick: tick,
@@ -224,6 +231,7 @@ impl Neuron {
             id,
             label,
             kind,
+            concept_identity: true,
             members,
             terminals: Vec::new(),
             born_tick: tick,
@@ -273,7 +281,18 @@ impl Neuron {
     /// True for atoms (no members), false for concepts of any kind.
     #[inline]
     pub fn is_atom(&self) -> bool {
-        self.members.is_empty()
+        !self.concept_identity && self.members.is_empty()
+    }
+
+    /// Release concept membership after its complete body is durable. The
+    /// identity bit keeps atom/concept routing correct until page-in restores
+    /// the exact member sequence.
+    pub(crate) fn release_members_for_sleep(&mut self) {
+        if !self.members.is_empty() {
+            self.concept_identity = true;
+            self.members.clear();
+            self.members.shrink_to_fit();
+        }
     }
 
     /// True for binding concepts (members span more than one pool).  This

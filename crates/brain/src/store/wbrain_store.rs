@@ -510,6 +510,34 @@ mod tests {
     }
 
     #[test]
+    fn sleeping_concept_releases_members_without_losing_identity() {
+        let path = tmpfile("concept-member-sleep");
+        let file = WbrainFile::open(&path).unwrap();
+        let store = file.pool(3);
+        let mut pool = Pool::new(
+            PoolConfig::defaults("test", 3),
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+        );
+        pool.set_wbrain_store(store);
+        pool.ensure_frame_concept_for_pretrain(b"sleeping concept", 1);
+        let concept = pool.ensure_frame_concept_for_pretrain(b"sleeping concept", 2)[0];
+        assert!(!pool.get(concept).unwrap().is_atom());
+        assert!(!pool.get(concept).unwrap().members.is_empty());
+
+        pool.serialize_all_neurons_for_idle().unwrap();
+        let asleep = pool.get(concept).unwrap();
+        assert!(!asleep.is_atom());
+        assert!(asleep.members.is_empty());
+
+        pool.ensure_loaded(concept).unwrap();
+        assert!(!pool.get(concept).unwrap().is_atom());
+        assert!(!pool.get(concept).unwrap().members.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn pool_reopens_from_compact_metadata_with_zero_live_neurons() {
         let path = tmpfile("pool-reopen");
         let ids = {

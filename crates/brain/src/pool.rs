@@ -1264,19 +1264,18 @@ impl Pool {
             false
         };
 
-        // Zero the memory-heavy bits in place; preserve id, label,
-        // kind, born_tick, MEMBERS, salience, use_count.  Members must
-        // stay (clearing them would flip is_atom() to true and corrupt
-        // sleep_prune / decode semantics).  Members are typically a
-        // handful of NeuronRefs per concept — cheap.  The big memory
-        // consumer is `terminals`, which we shed entirely; on page-in
-        // those come back from disk OR from a remote peer.
+        // Zero the memory-heavy payload in place. Concept identity is an
+        // independent runtime bit, so `.wbrain` neurons can release members
+        // as well as terminals without masquerading as atoms while asleep.
         let n = self.neurons.get_mut(id as usize).unwrap();
         let dropped = n.terminals.len();
         n.terminals.clear();
         n.terminals.shrink_to_fit();
         n.terminal_idx.clear();
         n.terminal_idx.shrink_to_fit();
+        if used_wbrain {
+            n.release_members_for_sleep();
+        }
         n.prediction_error_ema = 0.0;
         self.total_terminals = self.total_terminals.saturating_sub(dropped);
         // Salience/EMA stay in RAM — they're the signal eviction policy
@@ -1593,7 +1592,7 @@ impl Pool {
                 .unwrap_or(NeuronKind::Excitatory);
             let born_tick = metadata.born_ticks.get(id).copied().unwrap_or(0);
             let label = std::mem::take(&mut labels_by_id[id]);
-            let neuron = if metadata.concept_slots.get(id).copied().unwrap_or(false) {
+            let mut neuron = if metadata.concept_slots.get(id).copied().unwrap_or(false) {
                 // The sentinel preserves concept identity for compact scans.
                 // page_in_neuron replaces it before members are interpreted.
                 Neuron::new_concept(
@@ -1606,6 +1605,7 @@ impl Pool {
             } else {
                 Neuron::new_atom(neuron_id, label, kind, born_tick)
             };
+            neuron.release_members_for_sleep();
             neurons.push(neuron);
         }
         let mut bloom = CountingBloom::with_expected_capacity(label_to_id.len().max(100_000));
