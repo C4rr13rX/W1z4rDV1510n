@@ -341,7 +341,7 @@ impl NeuronStore for WbrainNeuronStore {
 mod tests {
     use super::*;
     use crate::brain::{Brain, BrainConfig};
-    use crate::neuron::NeuronKind;
+    use crate::neuron::{NeuronKind, NeuronRef, Terminal};
     use crate::pool::{BytePassthroughEncoding, Pool, PoolConfig};
 
     fn tmpfile(name: &str) -> std::path::PathBuf {
@@ -492,10 +492,8 @@ mod tests {
             assert_eq!(brain.serialize_all_neurons_for_idle().unwrap(), 3);
         }
 
-        let mut encodings: std::collections::HashMap<
-            PoolId,
-            Box<dyn crate::pool::AtomEncoding>,
-        > = std::collections::HashMap::new();
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
         encodings.insert(
             binding_pool_id,
             Box::new(BytePassthroughEncoding {
@@ -542,10 +540,8 @@ mod tests {
         let source_bytes = std::fs::metadata(&legacy).unwrap().len();
 
         let encodings = || {
-            let mut map: std::collections::HashMap<
-                PoolId,
-                Box<dyn crate::pool::AtomEncoding>,
-            > = std::collections::HashMap::new();
+            let mut map: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+                std::collections::HashMap::new();
             map.insert(
                 binding_pool_id,
                 Box::new(BytePassthroughEncoding {
@@ -560,16 +556,150 @@ mod tests {
             );
             map
         };
-        let (serialized, missing) =
-            Brain::migrate_legacy_checkpoint(&legacy, &destination, encodings()).unwrap();
+        let serialized = Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination).unwrap();
         assert_eq!(serialized, 3);
-        assert!(missing.is_empty());
         assert_eq!(std::fs::metadata(&legacy).unwrap().len(), source_bytes);
 
         let (restored, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
         assert_eq!(restored.stats().evicted_neurons, 3);
         assert_eq!(restored.stats().resident_terminals, 0);
+        std::fs::remove_file(legacy).ok();
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn streaming_migration_overlays_authoritative_cold_neuron_records() {
+        let root = tmpfile("legacy-cold-root").with_extension("");
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = root.join("brain.bin");
+        let destination = root.join("brain.wbrain");
+        let binding_pool_id;
+        let concept_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            brain.create_pool(
+                PoolConfig::defaults("bytes", 3),
+                Box::new(BytePassthroughEncoding {
+                    prefix: "byte".into(),
+                }),
+            );
+            let pool = brain.fabric().pool(3).unwrap();
+            {
+                let mut pool = pool.write();
+                pool.ensure_frame_concept_for_pretrain(b"cold concept", 1);
+                let promoted = pool.ensure_frame_concept_for_pretrain(b"cold concept", 2);
+                concept_id = promoted[0];
+                assert!(!pool.get(concept_id).unwrap().is_atom());
+                pool.get_mut(concept_id)
+                    .unwrap()
+                    .terminals
+                    .push(Terminal::new(NeuronRef::new(3, 0), 0.75, 2));
+            }
+            assert_eq!(brain.attach_cold_tiers(&root), 2);
+            assert!(pool.write().evict_neuron(concept_id).unwrap());
+            assert!(pool.read().get(concept_id).unwrap().members.len() > 1);
+            assert!(pool.read().get(concept_id).unwrap().terminals.is_empty());
+            brain.checkpoint(&legacy).unwrap();
+        }
+
+        Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination).unwrap();
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
+        encodings.insert(
+            binding_pool_id,
+            Box::new(BytePassthroughEncoding {
+                prefix: "bind".into(),
+            }),
+        );
+        encodings.insert(
+            3,
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+        );
+        let (restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        let pool = restored.fabric().pool(3).unwrap();
+        assert_eq!(pool.read().live_count(), 0);
+        pool.write().ensure_loaded(concept_id).unwrap();
+        let pool = pool.read();
+        let concept = pool.get(concept_id).unwrap();
+        assert!(!concept.is_atom());
+        assert!(concept.members.len() > 1);
+        assert_eq!(concept.terminals.len(), 1);
+        assert_eq!(concept.terminals[0].target, NeuronRef::new(3, 0));
+
+        drop(pool);
+        drop(restored);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn streaming_migration_rebuilds_binding_indexes_with_bounded_working_set() {
+        let legacy = tmpfile("legacy-binding-source").with_extension("bin");
+        let destination = tmpfile("legacy-binding-migrated");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            for (id, name, prefix) in [(3, "prompt", "p"), (4, "answer", "a")] {
+                brain.create_pool(
+                    PoolConfig::defaults(name, id),
+                    Box::new(BytePassthroughEncoding {
+                        prefix: prefix.into(),
+                    }),
+                );
+            }
+            assert!(
+                brain
+                    .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
+                    .is_some()
+            );
+            brain.checkpoint(&legacy).unwrap();
+        }
+        let encodings = || {
+            let mut map: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+                std::collections::HashMap::new();
+            for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a")] {
+                map.insert(
+                    id,
+                    Box::new(BytePassthroughEncoding {
+                        prefix: prefix.into(),
+                    }),
+                );
+            }
+            map
+        };
+
+        Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination).unwrap();
+        let (mut migrated, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(migrated.rebuild_binding_indexes_bounded().unwrap(), 1);
+        migrated.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(
+            migrated.stats().evicted_neurons,
+            migrated.stats().total_neurons
+        );
+        drop(migrated);
+
+        let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
+        assert!(missing.is_empty());
+        restored.activate_for_prediction(3, b"hello");
+        assert_eq!(
+            restored
+                .decode_best_trained_binding_multi(&[3], 4)
+                .as_deref(),
+            Some(b"world".as_slice())
+        );
+        restored.clear_prediction_activation();
+        restored.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(
+            restored.stats().evicted_neurons,
+            restored.stats().total_neurons
+        );
+
         std::fs::remove_file(legacy).ok();
         std::fs::remove_file(destination).ok();
     }
@@ -602,10 +732,8 @@ mod tests {
             brain.attach_wbrain(&path).unwrap();
             brain.serialize_all_neurons_for_idle().unwrap();
         }
-        let mut encodings: std::collections::HashMap<
-            PoolId,
-            Box<dyn crate::pool::AtomEncoding>,
-        > = std::collections::HashMap::new();
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
         for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a"), (5, "n")] {
             encodings.insert(
                 id,

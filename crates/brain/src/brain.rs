@@ -9,6 +9,8 @@
 //! `integrate` from, with every output carrying a [`GroundingReport`].
 //! That's the answer contract.
 
+#[path = "streaming_migration.rs"]
+mod streaming_migration;
 #[path = "wbrain_metadata.rs"]
 mod wbrain_metadata;
 
@@ -583,8 +585,7 @@ pub struct Brain {
     /// grow linearly with the curriculum.  This derived (non-persisted) index
     /// narrows exact episodic recall to bindings that contain the observed
     /// query sequence and requested target pool.  It is rebuilt on restore.
-    binding_sequence_index:
-        AHashMap<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>,
+    binding_sequence_index: AHashMap<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>,
     /// Inverted access from a raw feature atom to bindings containing that
     /// atom either directly or beneath a collapsed feature concept. Derived
     /// from the atom substrate and rebuilt on restore.
@@ -1153,10 +1154,7 @@ impl Brain {
     /// one reusable atom-grounded concept so paraphrases do not duplicate a
     /// long response membership vector. Repeated live experience can still
     /// grow higher mini-columns later through `observe`.
-    pub fn pretrain_binding_episode(
-        &mut self,
-        frames: &[(PoolId, Vec<u8>)],
-    ) -> Option<NeuronId> {
+    pub fn pretrain_binding_episode(&mut self, frames: &[(PoolId, Vec<u8>)]) -> Option<NeuronId> {
         let now = self.fabric.current_tick();
         let mut fired: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         for (pool_id, frame) in frames {
@@ -1237,19 +1235,19 @@ impl Brain {
             let mut fingerprint = MomentFingerprint::from_fabric_moment(&moment.fired);
             if let Some(fingerprint) = fingerprint.as_mut() {
                 for (pid, sequence) in &mut fingerprint.members_per_pool {
-                if *pid == self.binding_pool_id {
-                    continue;
+                    if *pid == self.binding_pool_id {
+                        continue;
+                    }
+                    if let Some(pool) = self.fabric.pool(*pid) {
+                        let pool = pool.read();
+                        let mut concepts: Vec<NeuronId> = pool
+                            .currently_firing()
+                            .filter(|nid| pool.get(*nid).is_some_and(|n| !n.is_atom()))
+                            .collect();
+                        concepts.sort_unstable();
+                        sequence.extend(concepts);
+                    }
                 }
-                if let Some(pool) = self.fabric.pool(*pid) {
-                    let pool = pool.read();
-                    let mut concepts: Vec<NeuronId> = pool
-                        .currently_firing()
-                        .filter(|nid| pool.get(*nid).is_some_and(|n| !n.is_atom()))
-                        .collect();
-                    concepts.sort_unstable();
-                    sequence.extend(concepts);
-                }
-            }
             }
             fingerprint
         };
@@ -1718,7 +1716,10 @@ impl Brain {
                 let pool = pool.read();
                 let refs: Vec<NeuronRef> = sequence
                     .iter()
-                    .map(|&neuron| NeuronRef { pool: query_pool, neuron })
+                    .map(|&neuron| NeuronRef {
+                        pool: query_pool,
+                        neuron,
+                    })
                     .collect();
                 let frame = pool.decode_concept_members(&refs);
                 for motif in normalized_char_motifs(&frame) {
@@ -1749,6 +1750,50 @@ impl Brain {
         for (id, members) in bindings {
             self.index_binding_members(id, &members);
         }
+    }
+
+    /// Rebuild the derived binding lookup indexes while keeping neuron
+    /// payload memory proportional to one binding tree rather than the whole
+    /// brain. This is used after streaming conversion of legacy checkpoints,
+    /// whose positional format predates these derived indexes.
+    pub fn rebuild_binding_indexes_bounded(&mut self) -> std::io::Result<usize> {
+        self.binding_sequence_index.clear();
+        self.binding_feature_atom_index.clear();
+        self.binding_motif_index.clear();
+        for pool_id in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pool_id) {
+                pool.write().rebuild_concept_indexes_bounded()?;
+            }
+        }
+        let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) else {
+            return Ok(0);
+        };
+        let binding_ids: Vec<NeuronId> = binding_pool
+            .read()
+            .iter_neurons()
+            .filter(|neuron| !neuron.is_atom())
+            .map(|neuron| neuron.id)
+            .collect();
+
+        for &binding_id in &binding_ids {
+            let members = {
+                let mut pool = binding_pool.write();
+                pool.ensure_loaded(binding_id)?;
+                pool.get(binding_id)
+                    .map(|neuron| neuron.members.clone())
+                    .unwrap_or_default()
+            };
+            self.index_binding_members(binding_id, &members);
+
+            // `index_binding_members` recursively pages only this binding's
+            // member trees. Return that working set to SSD before proceeding.
+            for pool_id in self.fabric.pool_ids() {
+                if let Some(pool) = self.fabric.pool(pool_id) {
+                    pool.write().serialize_all_neurons_for_idle()?;
+                }
+            }
+        }
+        Ok(binding_ids.len())
     }
 
     /// Raw read of a pool's current activation map.  No interpretation,
@@ -3058,11 +3103,7 @@ impl Brain {
     /// Whether the current ordered atom sequence has a directly observed
     /// binding to `target_pool`.  This exposes evidence provenance to the API
     /// router without decoding or scanning the binding pool.
-    pub fn has_exact_trained_binding(
-        &self,
-        query_pool: PoolId,
-        target_pool: PoolId,
-    ) -> bool {
+    pub fn has_exact_trained_binding(&self, query_pool: PoolId, target_pool: PoolId) -> bool {
         let Some(pool) = self.fabric.pool(query_pool) else {
             return false;
         };
@@ -3279,9 +3320,9 @@ impl Brain {
                 }
             }
             let sequence = pool.last_observed_sequence().to_vec();
-            if let Some(ids) =
-                self.binding_sequence_index
-                    .get(&(*pool_id, target_pool, sequence))
+            if let Some(ids) = self
+                .binding_sequence_index
+                .get(&(*pool_id, target_pool, sequence))
             {
                 binding_ids.extend(ids.iter().copied());
             }
@@ -3512,12 +3553,10 @@ impl Brain {
             if target_size == 0 {
                 continue;
             }
-            let has_success = success_pool.is_some_and(|pool| {
-                binding.members.iter().any(|member| member.pool == pool)
-            });
-            let has_failure = failure_pool.is_some_and(|pool| {
-                binding.members.iter().any(|member| member.pool == pool)
-            });
+            let has_success = success_pool
+                .is_some_and(|pool| binding.members.iter().any(|member| member.pool == pool));
+            let has_failure = failure_pool
+                .is_some_and(|pool| binding.members.iter().any(|member| member.pool == pool));
             let outcome = if has_success {
                 1
             } else if has_failure {
@@ -3540,10 +3579,8 @@ impl Brain {
             None => return Vec::new(),
         };
         let target = target_handle.read();
-        let mut aggregated: std::collections::HashMap<
-            Vec<u8>,
-            (i32, usize, u64, usize, NeuronId),
-        > = std::collections::HashMap::new();
+        let mut aggregated: std::collections::HashMap<Vec<u8>, (i32, usize, u64, usize, NeuronId)> =
+            std::collections::HashMap::new();
         for (binding_id, hits, use_count, target_size, outcome) in ranked {
             let Some(binding) = bindings.get(binding_id) else {
                 continue;
@@ -3571,13 +3608,22 @@ impl Brain {
             if bytes.is_empty() {
                 continue;
             }
-            let entry = aggregated
-                .entry(bytes)
-                .or_insert((0, hits, use_count, target_size, binding_id));
+            let entry =
+                aggregated
+                    .entry(bytes)
+                    .or_insert((0, hits, use_count, target_size, binding_id));
             entry.0 += outcome;
-            if (hits, use_count, std::cmp::Reverse(target_size), std::cmp::Reverse(binding_id))
-                > (entry.1, entry.2, std::cmp::Reverse(entry.3), std::cmp::Reverse(entry.4))
-            {
+            if (
+                hits,
+                use_count,
+                std::cmp::Reverse(target_size),
+                std::cmp::Reverse(binding_id),
+            ) > (
+                entry.1,
+                entry.2,
+                std::cmp::Reverse(entry.3),
+                std::cmp::Reverse(entry.4),
+            ) {
                 entry.1 = hits;
                 entry.2 = use_count;
                 entry.3 = target_size;
@@ -3710,7 +3756,10 @@ impl Brain {
             }
             exact_candidates.push((binding.id, direct_exact, binding.use_count));
         }
-        let strongest_directness = exact_candidates.iter().map(|(_, direct, _)| *direct).max()?;
+        let strongest_directness = exact_candidates
+            .iter()
+            .map(|(_, direct, _)| *direct)
+            .max()?;
         let target_handle = self.fabric.pool(target_pool)?;
         let target = target_handle.read();
         let mut decoded: Vec<(Vec<u8>, u64)> = Vec::new();
@@ -3742,9 +3791,8 @@ impl Brain {
             if bytes.is_empty() {
                 continue;
             }
-            if let Some((_, existing_uses)) = decoded
-                .iter_mut()
-                .find(|(existing, _)| *existing == bytes)
+            if let Some((_, existing_uses)) =
+                decoded.iter_mut().find(|(existing, _)| *existing == bytes)
             {
                 *existing_uses = (*existing_uses).max(uses);
             } else {
@@ -6011,14 +6059,10 @@ impl Brain {
             eem: crate::persistence::EemSnapshot,
             annealer: crate::persistence::AnnealerSnapshot,
             moment_history: VecDeque<crate::persistence::SerializableFingerprint>,
-            binding_recurrences:
-                Vec<(crate::persistence::SerializableFingerprint, u32)>,
-            promoted_fingerprints:
-                Vec<(crate::persistence::SerializableFingerprint, NeuronId)>,
-            tentative_promoted:
-                Vec<(crate::persistence::SerializableFingerprint, NeuronId)>,
-            lifetime_recurrences:
-                Vec<(crate::persistence::SerializableFingerprint, u32)>,
+            binding_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)>,
+            promoted_fingerprints: Vec<(crate::persistence::SerializableFingerprint, NeuronId)>,
+            tentative_promoted: Vec<(crate::persistence::SerializableFingerprint, NeuronId)>,
+            lifetime_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)>,
             current_threshold: u32,
             total_observations: u64,
             action_pool_id: Option<PoolId>,
@@ -6026,10 +6070,8 @@ impl Brain {
             next_action_id: ActionId,
         }
 
-        let fingerprint = |f: &MomentFingerprint| {
-            crate::persistence::SerializableFingerprint {
-                pairs: f.pairs.clone(),
-            }
+        let fingerprint = |f: &MomentFingerprint| crate::persistence::SerializableFingerprint {
+            pairs: f.pairs.clone(),
         };
         let borrowed = BrainSnapshotRef {
             format_version: crate::persistence::CURRENT_SNAPSHOT_VERSION,
@@ -6392,10 +6434,7 @@ impl Brain {
 
     /// Attach every pool to one neuron-addressable `.wbrain` container.
     /// Existing neurons remain live until the explicit idle transition.
-    pub fn attach_wbrain<P: AsRef<std::path::Path>>(
-        &mut self,
-        path: P,
-    ) -> std::io::Result<usize> {
+    pub fn attach_wbrain<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<usize> {
         let file = crate::store::WbrainFile::open(path)?;
         let mut attached = 0;
         for pid in self.fabric.pool_ids() {
@@ -6408,10 +6447,7 @@ impl Brain {
         Ok(attached)
     }
 
-    fn stage_wbrain_brain_metadata(
-        &self,
-        file: &crate::store::WbrainFile,
-    ) -> std::io::Result<()> {
+    fn stage_wbrain_brain_metadata(&self, file: &crate::store::WbrainFile) -> std::io::Result<()> {
         use self::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
         let persist = |fingerprint: &MomentFingerprint| PersistedMomentFingerprint {
             pairs: fingerprint.pairs.clone(),
@@ -6849,12 +6885,11 @@ impl Brain {
         let file = crate::store::WbrainFile::open(path)?;
         let metadata: WbrainBrainMetadata = bincode::deserialize(&file.brain_metadata())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let restore_fingerprint =
-            |fingerprint: PersistedMomentFingerprint| MomentFingerprint {
-                pairs: fingerprint.pairs,
-                ordered_per_pool: fingerprint.ordered_per_pool,
-                members_per_pool: fingerprint.members_per_pool,
-            };
+        let restore_fingerprint = |fingerprint: PersistedMomentFingerprint| MomentFingerprint {
+            pairs: fingerprint.pairs,
+            ordered_per_pool: fingerprint.ordered_per_pool,
+            members_per_pool: fingerprint.members_per_pool,
+        };
         let mut fabric = Fabric::new(metadata.config.fabric.clone());
         let mut missing = Vec::new();
         for pool_id in file.pool_ids() {
@@ -6898,10 +6933,7 @@ impl Brain {
                 .map(|(fingerprint, id)| (restore_fingerprint(fingerprint), id))
                 .collect(),
             binding_sequence_index: metadata.binding_sequence_index.into_iter().collect(),
-            binding_feature_atom_index: metadata
-                .binding_feature_atom_index
-                .into_iter()
-                .collect(),
+            binding_feature_atom_index: metadata.binding_feature_atom_index.into_iter().collect(),
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
             total_observations: metadata.total_observations,
             current_threshold: metadata.current_threshold,
@@ -6938,6 +6970,18 @@ impl Brain {
         brain.attach_wbrain(wbrain_path)?;
         let serialized = brain.serialize_all_neurons_for_idle()?;
         Ok((serialized, missing))
+    }
+
+    /// Bounded-memory legacy conversion. Unlike `migrate_legacy_checkpoint`,
+    /// this never constructs a resident Brain and reads one neuron at a time.
+    pub fn migrate_legacy_checkpoint_streaming<
+        P: AsRef<std::path::Path>,
+        Q: AsRef<std::path::Path>,
+    >(
+        legacy_path: P,
+        wbrain_path: Q,
+    ) -> std::io::Result<usize> {
+        streaming_migration::migrate(legacy_path.as_ref(), wbrain_path.as_ref())
     }
 
     /// Load a brain from `path`.  Convenience wrapper over

@@ -856,6 +856,17 @@ struct WbrainPoolMetadata {
     total_terminals: usize,
 }
 
+pub(crate) struct StreamedPoolMetadata {
+    pub config: PoolConfig,
+    pub recent_atoms: VecDeque<NeuronId>,
+    pub sequences: Vec<(SequenceFingerprint, u32)>,
+    pub concept_sequence_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
+    pub neuron_kinds: Vec<NeuronKind>,
+    pub concept_slots: Vec<bool>,
+    pub born_ticks: Vec<u64>,
+    pub total_terminals: usize,
+}
+
 pub struct Pool {
     pub config: PoolConfig,
     encoding: Box<dyn AtomEncoding>,
@@ -1461,6 +1472,78 @@ impl Pool {
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         store.set_pool_metadata(bytes);
         Ok(())
+    }
+
+    pub(crate) fn stage_streamed_wbrain_metadata(
+        store: &WbrainNeuronStore,
+        metadata: StreamedPoolMetadata,
+    ) -> std::io::Result<()> {
+        let metadata = WbrainPoolMetadata {
+            config: metadata.config,
+            recent_atoms: metadata.recent_atoms,
+            sequences: metadata.sequences,
+            concept_multiset_to_id: Vec::new(),
+            concept_sequence_to_id: metadata.concept_sequence_to_id,
+            neuron_kinds: metadata.neuron_kinds,
+            concept_slots: metadata.concept_slots,
+            born_ticks: metadata.born_ticks,
+            total_terminals: metadata.total_terminals,
+        };
+        let bytes = bincode::serialize(&metadata)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        store.set_pool_metadata(bytes);
+        Ok(())
+    }
+
+    /// Rebuild the two derived concept-deduplication indexes without keeping
+    /// every concept body resident. Legacy snapshots did not persist these
+    /// indexes, so a streaming conversion reconstructs one local concept tree
+    /// at a time and returns it to sleep before advancing.
+    pub(crate) fn rebuild_concept_indexes_bounded(&mut self) -> std::io::Result<usize> {
+        self.concept_multiset_to_id.clear();
+        self.concept_sequence_to_id.clear();
+        let concept_ids: Vec<NeuronId> = self
+            .neurons
+            .iter()
+            .filter(|neuron| !neuron.is_atom())
+            .map(|neuron| neuron.id)
+            .collect();
+
+        for &concept_id in &concept_ids {
+            let mut pending = vec![concept_id];
+            let mut visited = AHashSet::new();
+            while let Some(id) = pending.pop() {
+                if !visited.insert(id) {
+                    continue;
+                }
+                self.ensure_loaded(id)?;
+                if let Some(neuron) = self.neurons.get(id as usize) {
+                    pending.extend(
+                        neuron
+                            .members
+                            .iter()
+                            .filter(|member| member.pool == self.config.id)
+                            .map(|member| member.neuron),
+                    );
+                }
+            }
+            let member_ids: Vec<NeuronId> = self.neurons[concept_id as usize]
+                .members
+                .iter()
+                .filter(|member| member.pool == self.config.id)
+                .map(|member| member.neuron)
+                .collect();
+            if let Some(leaves) = self.expand_to_atom_leaves_bounded(&member_ids, 512) {
+                self.concept_multiset_to_id
+                    .entry(leaves)
+                    .or_insert(concept_id);
+            }
+            self.concept_sequence_to_id
+                .entry(member_ids)
+                .or_insert(concept_id);
+            self.serialize_all_neurons_for_idle()?;
+        }
+        Ok(concept_ids.len())
     }
 
     /// Rebuild only the compact pool address space. Every neuron body remains

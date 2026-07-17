@@ -13,15 +13,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post},
-    Json, Router,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -441,15 +441,34 @@ pub fn migrate_legacy_brain_container(data_dir: &Path) -> Result<usize> {
             destination.display()
         );
     }
-    let identity = configured_identity(data_dir)?;
-    let (serialized, missing) = Brain::migrate_legacy_checkpoint(
-        &legacy,
-        &destination,
-        restore_encodings(identity.as_ref())?,
-    )?;
-    if !missing.is_empty() {
+    let serialized = match Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination) {
+        Ok(count) => count,
+        Err(error) => {
+            let _ = std::fs::remove_file(&destination);
+            return Err(error.into());
+        }
+    };
+    if serialized == 0 {
         let _ = std::fs::remove_file(&destination);
-        anyhow::bail!("migration missing encodings for pools {:?}", missing);
+        anyhow::bail!("migration produced no neurons");
+    }
+    let finalize = || -> Result<()> {
+        let identity = configured_identity(data_dir)?;
+        let (mut migrated, missing) =
+            Brain::restore_wbrain(&destination, restore_encodings(identity.as_ref())?)?;
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "migration requires encodings for missing pools {:?}; set W1Z4RD_BRAIN_IDENTITY",
+                missing
+            );
+        }
+        migrated.rebuild_binding_indexes_bounded()?;
+        migrated.serialize_all_neurons_for_idle()?;
+        Ok(())
+    };
+    if let Err(error) = finalize() {
+        let _ = std::fs::remove_file(&destination);
+        return Err(error);
     }
     Ok(serialized)
 }
@@ -3436,34 +3455,42 @@ mod tests {
             value["files"]["service.py"],
             "class NovelCoordinator:\n    def ready(self):\n        return True\n"
         );
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &candidates,
-            "Create a Python service without a specified class name.",
-        )
-        .is_none());
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &candidates,
-            "Create a Python class named 7Invalid.",
-        )
-        .is_none());
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &candidates,
+                "Create a Python service without a specified class name.",
+            )
+            .is_none()
+        );
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &candidates,
+                "Create a Python class named 7Invalid.",
+            )
+            .is_none()
+        );
         let unknown_kind = vec![
             br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"unbounded_text"},"source":"class {{CLASS_NAME}}:\n"}}"#.to_vec(),
             candidates[1].clone(),
         ];
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &unknown_kind,
-            "Create a Python class named SafeName with a method named ready.",
-        )
-        .is_none());
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &unknown_kind,
+                "Create a Python class named SafeName with a method named ready.",
+            )
+            .is_none()
+        );
         let unresolved = vec![
             br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"python_class_named"},"source":"class {{CLASS_NAME}}:\n    value = '{{UNDECLARED}}'\n"}}"#.to_vec(),
             candidates[1].clone(),
         ];
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &unresolved,
-            "Create a Python class named SafeName with a method named ready.",
-        )
-        .is_none());
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &unresolved,
+                "Create a Python class named SafeName with a method named ready.",
+            )
+            .is_none()
+        );
     }
 
     #[test]
