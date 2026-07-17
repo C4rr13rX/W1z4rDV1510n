@@ -624,6 +624,11 @@ mod tests {
         let awake = restored.stats().total_neurons - restored.stats().evicted_neurons;
         assert!(awake > 0);
         assert!(awake < asleep, "inference must not hydrate the whole brain");
+        restored.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(
+            restored.stats().evicted_neurons,
+            restored.stats().total_neurons
+        );
         std::fs::remove_file(path).ok();
     }
 }

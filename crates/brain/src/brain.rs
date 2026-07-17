@@ -6500,6 +6500,10 @@ impl Brain {
         Ok(serialized)
     }
 
+    pub fn uses_wbrain_storage(&self) -> bool {
+        self.wbrain_file.is_some()
+    }
+
     /// Stage 17.4 full — run one eviction pass per
     /// [`ARCHITECTURE.md`] §17.4.  Walks each pool, identifies concept
     /// neurons with low `salience_ema` AND staleness past `min_stale_ticks`,

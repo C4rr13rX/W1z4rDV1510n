@@ -2812,9 +2812,24 @@ async fn h_sleep(
     for pid in brain.fabric().pool_ids() {
         brain.sleep_pool_housekeeping(pid);
     }
+    let neurons_serialized = if brain.uses_wbrain_storage() {
+        match brain.serialize_all_neurons_for_idle() {
+            Ok(count) => count,
+            Err(error) => {
+                return Json(json!({
+                    "error": format!("idle neuron serialization failed: {}", error),
+                    "promotions_drained": promotions,
+                    "concepts_pruned": pruned,
+                }));
+            }
+        }
+    } else {
+        0
+    };
     Json(json!({
         "promotions_drained": promotions,
         "concepts_pruned":    pruned,
+        "neurons_serialized": neurons_serialized,
         "tick_now":           brain.fabric().current_tick(),
     }))
 }
@@ -2826,7 +2841,12 @@ async fn h_checkpoint(State(s): State<BrainApiState>) -> Json<serde_json::Value>
         return Json(json!({ "ok": false, "error": format!("mkdir {}: {}", dir.display(), e) }));
     }
     let brain = s.brain.lock().await;
-    match brain.checkpoint(&path) {
+    let result = if brain.uses_wbrain_storage() {
+        brain.serialize_all_neurons_for_idle().map(|_| ())
+    } else {
+        brain.checkpoint(&path)
+    };
+    match result {
         Ok(()) => Json(json!({
             "ok": true,
             "path": path.display().to_string(),
