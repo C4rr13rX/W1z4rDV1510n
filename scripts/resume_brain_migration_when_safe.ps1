@@ -2,7 +2,8 @@ param(
     [string]$BrainDir = "runtime/brains/programming-integrated-20260713/brain",
     [int]$RequiredAvailableMb = 8192,
     [int]$StableSamples = 3,
-    [int]$PollSeconds = 15
+    [int]$PollSeconds = 15,
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,23 +48,25 @@ try {
             continue
         }
 
-        Write-AdmissionLog ("admitted build after {0} stable samples; available_mb={1:N0}" -f $stable, $available)
-        Push-Location $repo
-        try {
-            & (Join-Path $repo "scripts/run_cargo_bounded.ps1") `
-                -CargoArgs @("build", "-p", "w1z4rdv1510n-node", "--bin", "w1z4rd_brain_migrate") `
-                *>> $log
-            if ($LASTEXITCODE -ne 0) {
-                Write-AdmissionLog "bounded build returned $LASTEXITCODE; returning to admission wait"
+        Write-AdmissionLog ("admitted migration after {0} stable samples; available_mb={1:N0}" -f $stable, $available)
+        if (-not $SkipBuild) {
+            Push-Location $repo
+            try {
+                & (Join-Path $repo "scripts/run_cargo_bounded.ps1") `
+                    -CargoArgs @("build", "-p", "w1z4rdv1510n-node", "--bin", "w1z4rd_brain_migrate") `
+                    *>> $log
+                if ($LASTEXITCODE -ne 0) {
+                    Write-AdmissionLog "bounded build returned $LASTEXITCODE; returning to admission wait"
+                    $stable = 0
+                    continue
+                }
+            } catch {
+                Write-AdmissionLog "bounded build refused: $($_.Exception.Message)"
                 $stable = 0
                 continue
+            } finally {
+                Pop-Location
             }
-        } catch {
-            Write-AdmissionLog "bounded build refused: $($_.Exception.Message)"
-            $stable = 0
-            continue
-        } finally {
-            Pop-Location
         }
 
         $exe = Join-Path $repo "target/debug/w1z4rd_brain_migrate.exe"
