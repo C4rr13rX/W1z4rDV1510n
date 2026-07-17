@@ -24,12 +24,12 @@ input. It is architecture work, not brain-configuration advice.
 | `brain.rs:971` | locked-terminal count | Persisted counter updated with terminal mutations |
 | `brain.rs:1746` | rebuild binding indexes | Bounded sequential maintenance pass only |
 | `brain.rs:1773` | bounded binding-index rebuild | Bounded sequential maintenance pass; never startup inference |
-| `brain.rs:2195` | best binding during inference | Input-keyed binding candidate index |
+| `brain.rs:2195` | best binding during inference | Routed through sequence, feature, and active-terminal candidates |
 | `brain.rs:2775` | fallback binding candidates | Remove full-scan fallback; union exact, feature, and motif indexes |
 | `brain.rs:3188` | ordered binding match | Input-keyed sequence/feature candidate index |
 | `brain.rs:4009` | binding match | Input-keyed feature candidate index |
-| `brain.rs:4054` | identify query concepts | Current firing set plus compact per-ID kind bit |
-| `brain.rs:4135` | binding concept match | Input-keyed concept/member index |
+| `brain.rs:4054` | identify query concepts | Uses only the current firing set and compact sleeping-slot identity |
+| `brain.rs:4135` | binding concept match | Routed through feature and active-terminal candidates |
 | `brain.rs:4228` | rank active neurons | Current activation IDs only; page members for active concepts |
 | `brain.rs:5585` | analogy integration | Explicit bounded maintenance stream |
 | `brain.rs:6303` | cluster export | Explicit diagnostic stream with limit/cursor |
@@ -60,6 +60,16 @@ the eight narrowest motif lists, pages those bindings and their named member
 trees, and returns the routed set instead of discarding it. This removes the
 second inference-time whole-binding-pool scan. It is covered by the same
 successful scoped lazy-recall gate in run `29616946268`.
+
+The grounding decoder and both `best_binding_match` confidence tiers now share
+the same input-routed candidate resolver. It unions exact ordered-sequence
+postings, feature-atom postings, and binding terminals reachable from the
+currently firing query neurons, pages only those binding bodies, and returns
+honest OOV when the union is empty. Concept-tier classification now separates
+atoms from concepts by inspecting only the current firing IDs; it no longer
+constructs a whole-pool concept set. The lazy restore fixture sleeps the entire
+brain independently before confidence matching and grounded integration to
+prove both paths can restore the trained binding without a binding-pool scan.
 
 ## Resident structures still violating the invariant
 

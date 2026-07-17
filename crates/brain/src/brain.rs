@@ -1811,6 +1811,83 @@ impl Brain {
         out
     }
 
+    /// Resolve only bindings reachable from the current query state.
+    ///
+    /// Exact ordered-sequence postings preserve directly trained episodes,
+    /// feature-atom postings cover structural/paraphrased matches, and live
+    /// member terminals preserve concept-layer routes. An empty result is an
+    /// honest OOV result; inference must never turn it into a whole binding
+    /// pool scan.
+    fn routed_binding_candidates(
+        &self,
+        query_pool: PoolId,
+        target_pool: Option<PoolId>,
+    ) -> Vec<NeuronId> {
+        let Some(query_handle) = self.fabric.pool(query_pool) else {
+            return Vec::new();
+        };
+        let (firing, sequence, terminal_routes) = {
+            let query = query_handle.read();
+            let firing: Vec<NeuronId> = query.currently_firing().collect();
+            let mut terminal_routes = Vec::new();
+            for neuron_id in &firing {
+                if let Some(neuron) = query.get(*neuron_id) {
+                    terminal_routes.extend(
+                        neuron
+                            .terminals
+                            .iter()
+                            .filter(|terminal| terminal.target.pool == self.binding_pool_id)
+                            .map(|terminal| terminal.target.neuron),
+                    );
+                }
+            }
+            (
+                firing,
+                query.last_observed_sequence().to_vec(),
+                terminal_routes,
+            )
+        };
+
+        let mut candidates = ahash::AHashSet::new();
+        candidates.extend(terminal_routes);
+        for neuron_id in firing {
+            if let Some(postings) = self
+                .binding_feature_atom_index
+                .get(&(query_pool, neuron_id))
+            {
+                candidates.extend(postings.iter().copied());
+            }
+        }
+        if let Some(target_pool) = target_pool.filter(|_| !sequence.is_empty()) {
+            if let Some(postings) =
+                self.binding_sequence_index
+                    .get(&(query_pool, target_pool, sequence))
+            {
+                candidates.extend(postings.iter().copied());
+            }
+        }
+
+        let mut ids: Vec<NeuronId> = candidates.into_iter().collect();
+        ids.sort_unstable();
+        if let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) {
+            let mut bindings = binding_handle.write();
+            ids.retain(|binding_id| match bindings.ensure_loaded(*binding_id) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        "binding page-in failed for routed neuron {}: {}",
+                        binding_id,
+                        error
+                    );
+                    false
+                }
+            });
+        } else {
+            ids.clear();
+        }
+        ids
+    }
+
     /// Produce an [`AnswerWithGrounding`] by propagating from
     /// `query_pool`'s currently-firing state and reading the resulting
     /// activation in `target_pool`.  Every output carries a
@@ -2190,9 +2267,14 @@ impl Brain {
                 if q_atoms.is_empty() {
                     (None, 0.0, ahash::AHashSet::new())
                 } else if let Some(bp) = self.fabric.pool(bpid) {
+                    let candidate_ids =
+                        self.routed_binding_candidates(query_pool, Some(target_pool));
                     let bp_read = bp.read();
                     let mut best: Option<(NeuronId, f32)> = None;
-                    for n in bp_read.iter_neurons() {
+                    for n in candidate_ids
+                        .iter()
+                        .filter_map(|binding_id| bp_read.get(*binding_id))
+                    {
                         if n.is_atom() {
                             continue;
                         }
@@ -4119,9 +4201,13 @@ impl Brain {
             Some(p) => p,
             None => return BindingMatch::NONE,
         };
+        let candidate_ids = self.routed_binding_candidates(query_pool, None);
         let bp_read = bp.read();
         let mut best = BindingMatch::NONE;
-        for n in bp_read.iter_neurons() {
+        for n in candidate_ids
+            .iter()
+            .filter_map(|binding_id| bp_read.get(*binding_id))
+        {
             if n.is_atom() {
                 continue;
             }
@@ -4151,7 +4237,6 @@ impl Brain {
 
     fn best_binding_match_concept_tier(&self, query_pool: PoolId) -> BindingMatch {
         // Pre-collect:
-        //   - `query_concept_set` — every concept neuron id in query pool
         //   - `firing_concepts`   — concepts that are currently firing
         //   - `firing_atoms`      — atoms that are currently firing
         //   - `concept_member_atoms` — atoms that are members of any
@@ -4159,27 +4244,22 @@ impl Brain {
         //                              ARCHITECTURE.md, these are
         //                              concept-LAYER evidence not
         //                              atom-LAYER noise)
-        let (query_concept_set, firing_concepts, firing_atoms, concept_member_atoms, firing_total) = {
+        let (firing_concepts, firing_atoms, concept_member_atoms, firing_total) = {
             let qp = match self.fabric.pool(query_pool) {
                 Some(p) => p,
                 None => return BindingMatch::NONE,
             };
             let q = qp.read();
-            let concept_set: ahash::AHashSet<NeuronId> = q
-                .iter_neurons()
-                .filter(|n| !n.is_atom())
-                .map(|n| n.id)
-                .collect();
             let firing: Vec<NeuronId> = q.currently_firing().collect();
             let firing_concepts: ahash::AHashSet<NeuronId> = firing
                 .iter()
                 .copied()
-                .filter(|nid| concept_set.contains(nid))
+                .filter(|nid| q.get(*nid).is_some_and(|neuron| !neuron.is_atom()))
                 .collect();
             let firing_atoms: ahash::AHashSet<NeuronId> = firing
                 .iter()
                 .copied()
-                .filter(|nid| !concept_set.contains(nid))
+                .filter(|nid| q.get(*nid).is_some_and(|neuron| neuron.is_atom()))
                 .collect();
             // Atoms that belong to a firing concept's member set.  When a
             // concept collapses from its constituent atoms during
@@ -4198,7 +4278,6 @@ impl Brain {
                 }
             }
             (
-                concept_set,
                 firing_concepts,
                 firing_atoms,
                 concept_member_atoms,
@@ -4245,9 +4324,18 @@ impl Brain {
             Some(p) => p,
             None => return BindingMatch::NONE,
         };
+        let candidate_ids = self.routed_binding_candidates(query_pool, None);
+        let query_handle = match self.fabric.pool(query_pool) {
+            Some(pool) => pool,
+            None => return BindingMatch::NONE,
+        };
+        let query = query_handle.read();
         let bp_read = bp.read();
         let mut best = BindingMatch::NONE;
-        for n in bp_read.iter_neurons() {
+        for n in candidate_ids
+            .iter()
+            .filter_map(|binding_id| bp_read.get(*binding_id))
+        {
             if n.is_atom() {
                 continue;
             }
@@ -4256,7 +4344,7 @@ impl Brain {
                 .iter()
                 .filter(|m| m.pool == query_pool)
                 .map(|m| m.neuron)
-                .filter(|nid| query_concept_set.contains(nid))
+                .filter(|nid| query.get(*nid).is_some_and(|neuron| !neuron.is_atom()))
                 .collect();
             if bind_concepts.is_empty() {
                 continue;

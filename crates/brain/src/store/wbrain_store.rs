@@ -839,11 +839,15 @@ mod tests {
                 Box::new(BytePassthroughEncoding { prefix: "n".into() }),
             );
             brain.observe(5, b"unrelated-neurons");
-            assert!(
-                brain
-                    .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
-                    .is_some()
-            );
+            for _ in 0..2 {
+                assert!(
+                    brain
+                        .pretrain_binding_episode(
+                            &[(3, b"hello".to_vec()), (4, b"world".to_vec()),]
+                        )
+                        .is_some()
+                );
+            }
             brain.attach_wbrain(&path).unwrap();
             brain.serialize_all_neurons_for_idle().unwrap();
         }
@@ -860,6 +864,22 @@ mod tests {
         let (mut restored, missing) = Brain::restore_wbrain(&path, encodings).unwrap();
         assert!(missing.is_empty());
         let asleep = restored.stats().evicted_neurons;
+
+        restored.activate_for_prediction(3, b"hello");
+        let binding_match = restored.best_binding_match_v2(3);
+        restored.clear_prediction_activation();
+        assert!(
+            binding_match.score() > 0.0,
+            "confidence routing must page the trained binding instead of scanning sleeping slots"
+        );
+        restored.serialize_all_neurons_for_idle().unwrap();
+
+        restored.activate_for_prediction(3, b"hello");
+        let grounded = restored.integrate(3, 4);
+        restored.clear_prediction_activation();
+        assert_eq!(grounded.answer.as_deref(), Some(b"world".as_slice()));
+        restored.serialize_all_neurons_for_idle().unwrap();
+
         restored.activate_for_prediction(3, b"hello");
         let single_answer = restored.decode_best_trained_binding(3, 4);
         assert_eq!(single_answer.as_deref(), Some(b"world".as_slice()));
