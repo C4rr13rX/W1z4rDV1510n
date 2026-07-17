@@ -68,6 +68,16 @@ impl WbrainFile {
         *self.brain_metadata.write() = metadata;
     }
 
+    pub fn brain_metadata(&self) -> Vec<u8> {
+        self.brain_metadata.read().clone()
+    }
+
+    pub fn pool_ids(&self) -> Vec<PoolId> {
+        let mut ids: Vec<_> = self.pools.read().keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Publish all compact routing state. Neuron bodies were already appended
     /// individually by `put`/`sleep_neuron`, so this operation is independent
     /// of total neuron payload size.
@@ -154,6 +164,18 @@ impl WbrainNeuronStore {
         *self.pool_metadata.write() = metadata;
     }
 
+    pub fn pool_metadata(&self) -> Vec<u8> {
+        self.pool_metadata.read().clone()
+    }
+
+    pub fn labels_snapshot(&self) -> Vec<(String, NeuronId)> {
+        self.labels
+            .read()
+            .iter()
+            .map(|(label, id)| (label.clone(), *id))
+            .collect()
+    }
+
     pub fn resident_count(&self) -> usize {
         self.working_set.read().len()
     }
@@ -164,6 +186,10 @@ impl WbrainNeuronStore {
             .iter()
             .filter(|offset| offset.is_some())
             .count()
+    }
+
+    pub fn slot_count(&self) -> usize {
+        self.offsets.read().len()
     }
 
     pub fn page_ins(&self) -> u64 {
@@ -399,6 +425,46 @@ mod tests {
         pool.ensure_loaded(ids[1]).unwrap();
         assert_eq!(pool.live_count(), 1);
         assert_eq!(pool.get(ids[1]).unwrap().label, "byte:Yg");
+        assert_eq!(store.resident_count(), 0);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn pool_reopens_from_compact_metadata_with_zero_live_neurons() {
+        let path = tmpfile("pool-reopen");
+        let ids = {
+            let file = WbrainFile::open(&path).unwrap();
+            let store = file.pool(3);
+            let mut pool = Pool::new(
+                PoolConfig::defaults("test", 3),
+                Box::new(BytePassthroughEncoding {
+                    prefix: "byte".into(),
+                }),
+            );
+            pool.set_wbrain_store(store);
+            let ids = pool.ensure_frame_atoms_for_pretrain(b"abc", 1);
+            pool.stage_wbrain_metadata().unwrap();
+            pool.serialize_all_neurons_for_idle().unwrap();
+            file.commit_manifest().unwrap();
+            file.flush().unwrap();
+            ids
+        };
+
+        let reopened = WbrainFile::open(&path).unwrap();
+        let store = reopened.pool(3);
+        let mut pool = Pool::from_wbrain_store(
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+            store.clone(),
+        )
+        .unwrap();
+        assert_eq!(pool.neuron_count(), 3);
+        assert_eq!(pool.live_count(), 0);
+        assert_eq!(store.resident_count(), 0);
+        pool.ensure_loaded(ids[2]).unwrap();
+        assert_eq!(pool.live_count(), 1);
+        assert_eq!(pool.get(ids[2]).unwrap().label, "byte:Yw");
         assert_eq!(store.resident_count(), 0);
         std::fs::remove_file(path).ok();
     }

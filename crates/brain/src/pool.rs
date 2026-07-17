@@ -843,6 +843,19 @@ impl PoolConfig {
 /// (the concept neuron now carries the identity).
 type SequenceFingerprint = Vec<NeuronId>;
 
+#[derive(Serialize, serde::Deserialize)]
+struct WbrainPoolMetadata {
+    config: PoolConfig,
+    recent_atoms: VecDeque<NeuronId>,
+    sequences: Vec<(SequenceFingerprint, u32)>,
+    concept_multiset_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
+    concept_sequence_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
+    neuron_kinds: Vec<NeuronKind>,
+    concept_slots: Vec<bool>,
+    born_ticks: Vec<u64>,
+    total_terminals: usize,
+}
+
 pub struct Pool {
     pub config: PoolConfig,
     encoding: Box<dyn AtomEncoding>,
@@ -1409,6 +1422,121 @@ impl Pool {
             }
         }
         Ok(serialized)
+    }
+
+    /// Store the compact address-space and routing state needed to reopen this
+    /// pool without deserializing any neuron body.
+    pub fn stage_wbrain_metadata(&self) -> std::io::Result<()> {
+        let store = self.wbrain_store.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Unsupported, "pool has no .wbrain store")
+        })?;
+        let metadata = WbrainPoolMetadata {
+            config: self.config.clone(),
+            recent_atoms: self.recent_atoms.clone(),
+            sequences: self
+                .sequences
+                .iter()
+                .map(|(sequence, count)| (sequence.clone(), *count))
+                .collect(),
+            concept_multiset_to_id: self
+                .concept_multiset_to_id
+                .iter()
+                .map(|(sequence, id)| (sequence.clone(), *id))
+                .collect(),
+            concept_sequence_to_id: self
+                .concept_sequence_to_id
+                .iter()
+                .map(|(sequence, id)| (sequence.clone(), *id))
+                .collect(),
+            neuron_kinds: self.neurons.iter().map(|neuron| neuron.kind).collect(),
+            concept_slots: self
+                .neurons
+                .iter()
+                .map(|neuron| !neuron.is_atom())
+                .collect(),
+            born_ticks: self.neurons.iter().map(|neuron| neuron.born_tick).collect(),
+            total_terminals: self.total_terminals,
+        };
+        let bytes = bincode::serialize(&metadata)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        store.set_pool_metadata(bytes);
+        Ok(())
+    }
+
+    /// Rebuild only the compact pool address space. Every neuron body remains
+    /// asleep in `.wbrain` until its stable id is explicitly requested.
+    pub fn from_wbrain_store(
+        encoding: Box<dyn AtomEncoding>,
+        store: Arc<WbrainNeuronStore>,
+    ) -> std::io::Result<Self> {
+        let metadata: WbrainPoolMetadata = bincode::deserialize(&store.pool_metadata())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let mut labels_by_id = vec![String::new(); store.slot_count()];
+        let mut label_to_id = AHashMap::new();
+        for (label, id) in store.labels_snapshot() {
+            if let Some(slot) = labels_by_id.get_mut(id as usize) {
+                *slot = label.clone();
+            }
+            label_to_id.insert(label, id);
+        }
+        let mut neurons = Vec::with_capacity(store.slot_count());
+        for id in 0..store.slot_count() {
+            let neuron_id = id as NeuronId;
+            let kind = metadata
+                .neuron_kinds
+                .get(id)
+                .copied()
+                .unwrap_or(NeuronKind::Excitatory);
+            let born_tick = metadata.born_ticks.get(id).copied().unwrap_or(0);
+            let label = std::mem::take(&mut labels_by_id[id]);
+            let neuron = if metadata.concept_slots.get(id).copied().unwrap_or(false) {
+                // The sentinel preserves concept identity for compact scans.
+                // page_in_neuron replaces it before members are interpreted.
+                Neuron::new_concept(
+                    neuron_id,
+                    label,
+                    kind,
+                    vec![NeuronRef::new(metadata.config.id, neuron_id)],
+                    born_tick,
+                )
+            } else {
+                Neuron::new_atom(neuron_id, label, kind, born_tick)
+            };
+            neurons.push(neuron);
+        }
+        let mut bloom = CountingBloom::with_expected_capacity(label_to_id.len().max(100_000));
+        for label in label_to_id.keys() {
+            bloom.insert(label);
+        }
+        let evicted = (0..neurons.len() as NeuronId).collect();
+        Ok(Self {
+            config: metadata.config,
+            encoding,
+            neurons,
+            label_to_id,
+            concept_multiset_to_id: metadata.concept_multiset_to_id.into_iter().collect(),
+            concept_sequence_to_id: metadata.concept_sequence_to_id.into_iter().collect(),
+            recent_atoms: metadata.recent_atoms,
+            sequences: metadata.sequences.into_iter().collect(),
+            currently_firing: AHashSet::new(),
+            activation: AHashMap::new(),
+            recent_surprise: 1.0,
+            last_observed_sequence: Vec::new(),
+            firing_rate_ema: 0.0,
+            concept_count_ema: 0.0,
+            terminal_count_ema: 0.0,
+            total_terminals: 0,
+            pending_promotions: Vec::new(),
+            domain_for_new: 0,
+            store: Arc::new(NoopStore),
+            bloom,
+            cold_tier: None,
+            tiered_store: None,
+            wbrain_store: Some(store),
+            cold_offsets: AHashMap::new(),
+            evicted,
+            decode_precision_ema: 0.0,
+        })
     }
 
     /// Stage 17.9 — recovery-time atom creation.  Inserts a neuron at

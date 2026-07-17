@@ -172,7 +172,7 @@ impl BindingMatch {
 /// times within the history window, the brain births a binding concept
 /// in the binding pool whose members reference every neuron in the
 /// signature.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct MomentFingerprint {
     /// Sorted (pool, neuron) pairs used as the dedup key for
     /// recurring-fingerprint emergence detection.
@@ -6360,7 +6360,9 @@ impl Brain {
         let mut serialized = 0;
         for pid in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pid) {
-                serialized += pool.write().serialize_all_neurons_for_idle()?;
+                let mut pool = pool.write();
+                pool.stage_wbrain_metadata()?;
+                serialized += pool.serialize_all_neurons_for_idle()?;
             }
         }
         file.set_tick(self.fabric.current_tick());
