@@ -861,6 +861,12 @@ mod tests {
         assert!(missing.is_empty());
         let asleep = restored.stats().evicted_neurons;
         restored.activate_for_prediction(3, b"hello");
+        let single_answer = restored.decode_best_trained_binding(3, 4);
+        assert_eq!(single_answer.as_deref(), Some(b"world".as_slice()));
+        restored.clear_prediction_activation();
+        restored.serialize_all_neurons_for_idle().unwrap();
+
+        restored.activate_for_prediction(3, b"hello");
         let answer = restored.decode_best_trained_binding_multi(&[3], 4);
         restored.clear_prediction_activation();
         assert_eq!(answer.as_deref(), Some(b"world".as_slice()));

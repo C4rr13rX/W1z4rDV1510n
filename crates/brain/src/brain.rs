@@ -2760,23 +2760,96 @@ impl Brain {
             .map(|p| p.read().last_observed_sequence().to_vec())
             .unwrap_or_default();
 
-        // Walk binding-pool concepts, score each.
-        let bp = self.fabric.pool(bpid)?;
-        let bp_read = bp.read();
+        // Route to a bounded candidate set before touching the binding pool.
+        // A missing exact key must not fall back to scanning every sleeping
+        // binding: combine exact sequence, flattened feature atoms, and
+        // character motifs reachable from this query instead.
         let exact_candidates = if query_seq.is_empty() {
             None
         } else {
             self.binding_sequence_index
                 .get(&(query_pool, target_pool, query_seq.clone()))
         };
-        let candidate_ids: Vec<NeuronId> = match exact_candidates {
-            Some(ids) => ids.clone(),
-            None => bp_read
-                .iter_neurons()
-                .filter(|n| !n.is_atom())
-                .map(|n| n.id)
-                .collect(),
-        };
+        let mut candidate_set = ahash::AHashSet::new();
+        if let Some(ids) = exact_candidates {
+            candidate_set.extend(ids.iter().copied());
+        }
+        let mut routing_atoms = q_atoms.clone();
+        if !q_concepts.is_empty() {
+            if let Some(query_handle) = self.fabric.pool(query_pool) {
+                let query = query_handle.read();
+                let mut pending: Vec<NeuronId> = q_concepts.iter().copied().collect();
+                let mut visited = ahash::AHashSet::new();
+                while let Some(id) = pending.pop() {
+                    if !visited.insert(id) {
+                        continue;
+                    }
+                    let Some(neuron) = query.get(id) else {
+                        continue;
+                    };
+                    if neuron.is_atom() {
+                        routing_atoms.insert(id);
+                    } else {
+                        pending.extend(
+                            neuron
+                                .members
+                                .iter()
+                                .filter(|member| member.pool == query_pool)
+                                .map(|member| member.neuron),
+                        );
+                    }
+                }
+            }
+        }
+        for atom in &routing_atoms {
+            if let Some(ids) = self.binding_feature_atom_index.get(&(query_pool, *atom)) {
+                candidate_set.extend(ids.iter().copied());
+            }
+        }
+        if !query_seq.is_empty() {
+            if let Some(query_handle) = self.fabric.pool(query_pool) {
+                let query = query_handle.read();
+                let refs: Vec<NeuronRef> = query_seq
+                    .iter()
+                    .map(|&neuron| NeuronRef {
+                        pool: query_pool,
+                        neuron,
+                    })
+                    .collect();
+                let frame = query.decode_concept_members(&refs);
+                let motifs = normalized_char_motifs(&frame);
+                let mut postings: Vec<&Vec<NeuronId>> = motifs
+                    .iter()
+                    .filter_map(|motif| self.binding_motif_index.get(&(query_pool, *motif)))
+                    .collect();
+                postings.sort_unstable_by_key(|ids| ids.len());
+                for ids in postings.into_iter().take(8) {
+                    candidate_set.extend(ids.iter().copied());
+                }
+            }
+        }
+        if candidate_set.is_empty() {
+            return None;
+        }
+        let mut candidate_ids: Vec<NeuronId> = candidate_set.into_iter().collect();
+        candidate_ids.sort_unstable();
+
+        // Wake only the routed binding bodies. Their member payload is absent
+        // while idle and must be present before scoring.
+        let bp = self.fabric.pool(bpid)?;
+        {
+            let mut bindings = bp.write();
+            for &binding_id in &candidate_ids {
+                if let Err(error) = bindings.ensure_loaded(binding_id) {
+                    tracing::warn!(
+                        "binding candidate page-in failed for {}: {}",
+                        binding_id,
+                        error
+                    );
+                }
+            }
+        }
+        let bp_read = bp.read();
         // (binding_id, score, target_member_count, has_concept_match, seq_match)
         let mut best: Option<(NeuronId, f32, usize, bool, bool)> = None;
         for binding_id in candidate_ids {

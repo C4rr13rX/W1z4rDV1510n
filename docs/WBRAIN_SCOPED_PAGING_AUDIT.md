@@ -43,6 +43,16 @@ input. It is architecture work, not brain-configuration advice.
 Line numbers describe commit `cef923e` and should be refreshed after related
 edits.
 
+### First routed path
+
+`decode_best_trained_binding_with_context` no longer uses its whole-binding-pool
+fallback. It unions exact sequence postings, flattened feature-atom postings,
+and the eight narrowest character-motif posting lists, then pages only those
+binding bodies before scoring. The lazy-restore fixture now exercises this
+single-pool path as well as the existing multi-pool path. This implementation
+is pending executable verification because it was written while the host had
+less than 1 GiB available RAM.
+
 ## Resident structures still violating the invariant
 
 1. `Pool.neurons: Vec<Neuron>` creates one full Rust object for every sleeping
