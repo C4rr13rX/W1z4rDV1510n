@@ -5,9 +5,8 @@ param(
     [int]$BuildJobs = 1
 )
 
-$available = (
-    Get-Counter '\Memory\Available MBytes' -ErrorAction Stop
-).CounterSamples[0].CookedValue
+. (Join-Path $PSScriptRoot "windows_memory.ps1")
+$available = Get-WizardAvailableMemoryMb
 
 if ($available -lt $MinimumAvailableMb) {
     throw "Refusing cargo: only $([math]::Round($available)) MB available; minimum is $MinimumAvailableMb MB."

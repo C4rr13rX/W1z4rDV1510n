@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows_memory.ps1")
 $pidPath = [System.IO.Path]::GetFullPath($PidFile)
 if (-not (Test-Path -LiteralPath $pidPath)) {
     throw "Migration PID file not found: $pidPath"
@@ -58,9 +59,7 @@ try {
             [void][WizardWorkingSet]::EmptyWorkingSet($process.Handle)
             $lastTrim = $now
         }
-        $availableMb = (
-            Get-Counter "\Memory\Available MBytes" -ErrorAction Stop
-        ).CounterSamples[0].CookedValue
+        $availableMb = Get-WizardAvailableMemoryMb
         $privateMb = $process.PrivateMemorySize64 / 1MB
         if ($AbortPrivateMb -gt 0 -and $privateMb -ge $AbortPrivateMb) {
             if ($LogPath) {

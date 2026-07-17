@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows_memory.ps1")
 $repo = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $brain = [System.IO.Path]::GetFullPath((Join-Path $repo $BrainDir))
 $source = Join-Path $brain "brain.bin"
@@ -37,7 +38,7 @@ try {
             }
         }
 
-        $available = (Get-Counter "\Memory\Available MBytes" -MaxSamples 1).CounterSamples[0].CookedValue
+        $available = Get-WizardAvailableMemoryMb
         if ($available -ge $RequiredAvailableMb) {
             $stable += 1
         } else {
