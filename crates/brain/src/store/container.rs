@@ -19,6 +19,13 @@ const SLOT_A: u64 = 16;
 const SLOT_B: u64 = SLOT_A + SLOT_BYTES;
 const NEURON_RECORD: &[u8; 8] = b"W1ZNEUR1";
 const MANIFEST_RECORD: &[u8; 8] = b"W1ZMANI1";
+const AUXILIARY_RECORD: &[u8; 8] = b"W1ZAUX01";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuxiliaryRecordRef {
+    pub offset: u64,
+    pub len: u64,
+}
 
 /// Compact state allowed to remain resident while neuron bodies sleep.
 /// Opaque metadata lets the brain layer persist topology and pool routing
@@ -218,6 +225,61 @@ impl BrainContainer {
         Ok((pool, neuron))
     }
 
+    pub fn append_auxiliary<F>(
+        &mut self,
+        pool: PoolId,
+        kind: u32,
+        write_body: F,
+    ) -> io::Result<AuxiliaryRecordRef>
+    where
+        F: FnOnce(&mut File) -> io::Result<()>,
+    {
+        let offset = self.file.seek(SeekFrom::End(0))?;
+        self.file.write_all(AUXILIARY_RECORD)?;
+        self.file.write_all(&pool.to_le_bytes())?;
+        self.file.write_all(&kind.to_le_bytes())?;
+        self.file.write_all(&0_u64.to_le_bytes())?;
+        let body_offset = self.file.stream_position()?;
+        write_body(&mut self.file)?;
+        let end = self.file.stream_position()?;
+        let len = end.checked_sub(body_offset).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "auxiliary record moved backwards",
+            )
+        })?;
+        self.file.seek(SeekFrom::Start(offset + 16))?;
+        self.file.write_all(&len.to_le_bytes())?;
+        self.file.seek(SeekFrom::Start(end))?;
+        Ok(AuxiliaryRecordRef { offset, len })
+    }
+
+    pub fn read_auxiliary(&mut self, reference: AuxiliaryRecordRef) -> io::Result<Vec<u8>> {
+        self.file.seek(SeekFrom::Start(reference.offset))?;
+        let mut marker = [0_u8; 8];
+        let mut pool = [0_u8; 4];
+        let mut kind = [0_u8; 4];
+        let mut len = [0_u8; 8];
+        self.file.read_exact(&mut marker)?;
+        self.file.read_exact(&mut pool)?;
+        self.file.read_exact(&mut kind)?;
+        self.file.read_exact(&mut len)?;
+        if &marker != AUXILIARY_RECORD || u64::from_le_bytes(len) != reference.len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "auxiliary record header mismatch",
+            ));
+        }
+        let mut body = vec![
+            0_u8;
+            usize::try_from(reference.len).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "auxiliary record too large")
+            })?
+        ];
+        self.file.read_exact(&mut body)?;
+        Ok(body)
+    }
+
     /// Make a manifest current only after its complete body is durable.
     pub fn commit_manifest(&mut self, manifest: BrainContainerManifest) -> io::Result<()> {
         let body = bincode::serialize(&manifest)
@@ -317,6 +379,25 @@ mod tests {
         let reopened = BrainContainer::open(&path).unwrap();
         assert_eq!(reopened.manifest().unwrap().generation, 2);
         assert_eq!(reopened.manifest().unwrap().tick, 99);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn auxiliary_record_streams_without_buffering_its_body() {
+        let path = tmpfile("auxiliary");
+        let reference;
+        {
+            let mut container = BrainContainer::open(&path).unwrap();
+            reference = container
+                .append_auxiliary(7, 11, |writer| writer.write_all(b"cold-routing-ledger"))
+                .unwrap();
+            assert_eq!(reference.len, 19);
+        }
+        let mut reopened = BrainContainer::open(&path).unwrap();
+        assert_eq!(
+            reopened.read_auxiliary(reference).unwrap(),
+            b"cold-routing-ledger"
+        );
         std::fs::remove_file(path).ok();
     }
 }

@@ -432,27 +432,102 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
 pub fn migrate_legacy_brain_container(data_dir: &Path) -> Result<usize> {
     let legacy = data_dir.join("brain.bin");
     let destination = data_dir.join("brain.wbrain");
+    let raw_marker = data_dir.join("brain.wbrain.raw-running");
+    let finalize_marker = data_dir.join("brain.wbrain.finalize-pending");
     if !legacy.is_file() {
         anyhow::bail!("legacy checkpoint not found: {}", legacy.display());
     }
-    if destination.exists() {
+    let legacy_bytes = std::fs::metadata(&legacy)?.len();
+    let marker_value = legacy_bytes.to_string();
+    let marker_matches = |path: &Path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .is_some_and(|value| value.trim() == marker_value)
+    };
+    let write_marker = |path: &Path| -> Result<()> {
+        use std::io::Write;
+        let mut marker = std::fs::File::create(path)?;
+        marker.write_all(marker_value.as_bytes())?;
+        marker.sync_all()?;
+        Ok(())
+    };
+
+    let mut finalize_pending = marker_matches(&finalize_marker);
+    if finalize_pending && !destination.exists() {
+        std::fs::remove_file(&finalize_marker)?;
+        finalize_pending = false;
+    }
+    let resumable_raw = destination.exists()
+        && Brain::legacy_migration_is_resumable(&legacy, &destination);
+    let raw_complete =
+        destination.exists() && Brain::legacy_migration_raw_is_complete(&destination);
+    if marker_matches(&raw_marker) && raw_complete {
+        // Raw conversion committed its final manifest before the process could
+        // publish the next stage marker. Preserve it and continue finalizing.
+        write_marker(&finalize_marker)?;
+        std::fs::remove_file(&raw_marker)?;
+        finalize_pending = true;
+    }
+    if raw_complete && !finalize_pending {
         anyhow::bail!(
-            "refusing to overwrite existing container: {}",
+            "refusing to finalize an existing container without a matching migration marker: {}",
             destination.display()
         );
     }
-    let serialized = match Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination) {
-        Ok(count) => count,
-        Err(error) => {
-            let _ = std::fs::remove_file(&destination);
-            return Err(error.into());
+    if destination.exists() && !resumable_raw && !raw_complete && !finalize_pending {
+        if marker_matches(&raw_marker) {
+            // The process died before publishing its first complete pool.
+            // No manifest points at the appended tail, so restart cleanly.
+            std::fs::remove_file(&destination)?;
+        } else {
+            anyhow::bail!(
+                "refusing to overwrite complete or unrecognized container: {}",
+                destination.display()
+            );
+        }
+    }
+    if !finalize_pending {
+        if raw_marker.exists() && !marker_matches(&raw_marker) {
+            anyhow::bail!(
+                "raw migration marker does not match the legacy checkpoint: {}",
+                raw_marker.display()
+            );
+        }
+        write_marker(&raw_marker)?;
+    }
+
+    let serialized = if finalize_pending {
+        None
+    } else {
+        match Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination) {
+            Ok(count) => {
+                write_marker(&finalize_marker)?;
+                std::fs::remove_file(&raw_marker)?;
+                finalize_pending = true;
+                Some(count)
+            }
+            Err(error) => {
+                if !Brain::legacy_migration_is_resumable(&legacy, &destination) {
+                    let _ = std::fs::remove_file(&destination);
+                    let _ = std::fs::remove_file(&raw_marker);
+                }
+                return Err(error.into());
+            }
         }
     };
-    if serialized == 0 {
+
+    if !finalize_pending {
+        anyhow::bail!(
+            "migration did not reach its durable finalization stage at {}",
+            finalize_marker.display()
+        );
+    }
+    if serialized == Some(0) {
         let _ = std::fs::remove_file(&destination);
+        let _ = std::fs::remove_file(&finalize_marker);
         anyhow::bail!("migration produced no neurons");
     }
-    let finalize = || -> Result<()> {
+    let finalize = || -> Result<usize> {
         let identity = configured_identity(data_dir)?;
         let (mut migrated, missing) =
             Brain::restore_wbrain(&destination, restore_encodings(identity.as_ref())?)?;
@@ -464,13 +539,14 @@ pub fn migrate_legacy_brain_container(data_dir: &Path) -> Result<usize> {
         }
         migrated.rebuild_binding_indexes_bounded()?;
         migrated.serialize_all_neurons_for_idle()?;
-        Ok(())
+        Ok(migrated.stats().total_neurons)
     };
-    if let Err(error) = finalize() {
-        let _ = std::fs::remove_file(&destination);
-        return Err(error);
+    let finalized_count = finalize()?;
+    std::fs::remove_file(&finalize_marker)?;
+    if raw_marker.exists() {
+        std::fs::remove_file(&raw_marker)?;
     }
-    Ok(serialized)
+    Ok(serialized.unwrap_or(finalized_count))
 }
 
 /// Create the shared state used by the brain router.  Caller wraps
@@ -3337,6 +3413,52 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_raw_migration_promotes_stale_raw_stage_without_reconversion() {
+        let unique = format!(
+            "w1z4rd_finalize_resume_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let mut brain = build_default_brain().unwrap();
+        brain.observe(POOL_TEXT, b"abc");
+        brain.checkpoint(data_dir.join("brain.bin")).unwrap();
+
+        let first_count = migrate_legacy_brain_container(&data_dir).unwrap();
+        let destination = data_dir.join("brain.wbrain");
+        let first_bytes = std::fs::metadata(&destination).unwrap().len();
+        assert!(!data_dir.join("brain.wbrain.raw-running").exists());
+        assert!(!data_dir.join("brain.wbrain.finalize-pending").exists());
+        assert!(migrate_legacy_brain_container(&data_dir).is_err());
+        assert_eq!(
+            std::fs::metadata(&destination).unwrap().len(),
+            first_bytes,
+            "an unmarked complete container must never be deleted or reconverted",
+        );
+
+        let legacy_bytes = std::fs::metadata(data_dir.join("brain.bin")).unwrap().len();
+        std::fs::write(
+            data_dir.join("brain.wbrain.raw-running"),
+            legacy_bytes.to_string(),
+        )
+        .unwrap();
+        let resumed_count = migrate_legacy_brain_container(&data_dir).unwrap();
+
+        assert_eq!(resumed_count, first_count);
+        assert!(
+            std::fs::metadata(&destination).unwrap().len() >= first_bytes,
+            "finalization may append a newer manifest but must not reconvert or truncate neurons",
+        );
+        assert!(!data_dir.join("brain.wbrain.raw-running").exists());
+        assert!(!data_dir.join("brain.wbrain.finalize-pending").exists());
+        std::fs::remove_dir_all(data_dir).ok();
+    }
 
     #[test]
     fn configured_identity_persists_and_reloads_without_process_environment() {

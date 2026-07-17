@@ -21,6 +21,7 @@
 # ── Machine-specific launcher scripts ─────────────────────────────────────────
 *.bat
 *.ps1
+!scripts/monitor_migration_memory.ps1
 
 # ── Node / runtime config (generated per machine) ─────────────────────────────
 /node_config.json

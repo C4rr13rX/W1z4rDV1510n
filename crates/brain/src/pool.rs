@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
 use crate::store::{
-    ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore, WalEvent,
-    WbrainNeuronStore,
+    AuxiliaryRecordRef, ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore,
+    WalEvent, WbrainNeuronStore,
 };
 
 /// Encode/decode contract per spec §3.1.  Each pool ships with one of these
@@ -848,6 +848,7 @@ struct WbrainPoolMetadata {
     config: PoolConfig,
     recent_atoms: VecDeque<NeuronId>,
     sequences: Vec<(SequenceFingerprint, u32)>,
+    legacy_sequence_ledger: Option<AuxiliaryRecordRef>,
     concept_multiset_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
     concept_sequence_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
     neuron_kinds: Vec<NeuronKind>,
@@ -860,6 +861,7 @@ pub(crate) struct StreamedPoolMetadata {
     pub config: PoolConfig,
     pub recent_atoms: VecDeque<NeuronId>,
     pub sequences: Vec<(SequenceFingerprint, u32)>,
+    pub legacy_sequence_ledger: Option<AuxiliaryRecordRef>,
     pub concept_sequence_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
     pub neuron_kinds: Vec<NeuronKind>,
     pub concept_slots: Vec<bool>,
@@ -902,6 +904,10 @@ pub struct Pool {
     /// Per-sequence recurrence count.  Concept emergence fires when a
     /// sequence's count crosses the threshold.
     sequences: AHashMap<SequenceFingerprint, u32>,
+    /// Cold, exact legacy recurrence state retained inside `.wbrain`.
+    /// Lookups are routed through the on-disk index rather than hydrating
+    /// every historical candidate sequence at startup.
+    legacy_sequence_ledger: Option<AuxiliaryRecordRef>,
     /// IDs of neurons currently firing (activation > min_activation).
     /// Rebuilt every observe call.  Read by the Fabric for the moment
     /// buffer and cross-pool wiring.
@@ -1097,6 +1103,7 @@ impl Pool {
             concept_sequence_to_id: AHashMap::new(),
             recent_atoms: VecDeque::with_capacity(window),
             sequences: AHashMap::new(),
+            legacy_sequence_ledger: None,
             currently_firing: AHashSet::new(),
             activation: AHashMap::new(),
             recent_surprise: 1.0,
@@ -1452,6 +1459,7 @@ impl Pool {
                 .iter()
                 .map(|(sequence, count)| (sequence.clone(), *count))
                 .collect(),
+            legacy_sequence_ledger: self.legacy_sequence_ledger,
             concept_multiset_to_id: self
                 .concept_multiset_to_id
                 .iter()
@@ -1485,6 +1493,7 @@ impl Pool {
             config: metadata.config,
             recent_atoms: metadata.recent_atoms,
             sequences: metadata.sequences,
+            legacy_sequence_ledger: metadata.legacy_sequence_ledger,
             concept_multiset_to_id: Vec::new(),
             concept_sequence_to_id: metadata.concept_sequence_to_id,
             neuron_kinds: metadata.neuron_kinds,
@@ -1604,6 +1613,7 @@ impl Pool {
             concept_sequence_to_id: metadata.concept_sequence_to_id.into_iter().collect(),
             recent_atoms: metadata.recent_atoms,
             sequences: metadata.sequences.into_iter().collect(),
+            legacy_sequence_ledger: metadata.legacy_sequence_ledger,
             currently_firing: AHashSet::new(),
             activation: AHashMap::new(),
             recent_surprise: 1.0,
@@ -2351,6 +2361,7 @@ impl Pool {
             concept_sequence_to_id: AHashMap::new(),
             recent_atoms: snap.recent_atoms,
             sequences,
+            legacy_sequence_ledger: None,
             currently_firing: AHashSet::new(),
             activation: AHashMap::new(),
             recent_surprise: 1.0,

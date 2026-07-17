@@ -6988,6 +6988,26 @@ impl Brain {
         streaming_migration::migrate(legacy_path.as_ref(), wbrain_path.as_ref())
     }
 
+    /// True when an incomplete `.wbrain` contains a durable migration
+    /// boundary that matches the legacy checkpoint and can be resumed.
+    pub fn legacy_migration_is_resumable<
+        P: AsRef<std::path::Path>,
+        Q: AsRef<std::path::Path>,
+    >(
+        legacy_path: P,
+        wbrain_path: Q,
+    ) -> bool {
+        streaming_migration::is_resumable(legacy_path.as_ref(), wbrain_path.as_ref())
+    }
+
+    /// True when raw neuron conversion and its final brain metadata are
+    /// complete, even if derived-index finalization has not yet finished.
+    pub fn legacy_migration_raw_is_complete<P: AsRef<std::path::Path>>(
+        wbrain_path: P,
+    ) -> bool {
+        streaming_migration::is_raw_complete(wbrain_path.as_ref())
+    }
+
     /// Load a brain from `path`.  Convenience wrapper over
     /// `persistence::load_snapshot()` + `from_snapshot()`.
     pub fn restore<P: AsRef<std::path::Path>>(

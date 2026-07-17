@@ -4,10 +4,10 @@
 //! field, deserialize one neuron at a time, and immediately append that
 //! neuron to the destination container.
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek};
+use std::io::{self, BufReader, Read, Seek, Write};
 use std::path::Path;
 use sysinfo::System;
 
@@ -15,7 +15,7 @@ use crate::action::{ActionEvent, ActionId};
 use crate::neuron::{Neuron, NeuronId, PoolId};
 use crate::persistence::{AnnealerSnapshot, EemSnapshot, SerializableFingerprint};
 use crate::pool::{Pool, PoolConfig, StreamedPoolMetadata};
-use crate::store::{ColdTier, WbrainFile};
+use crate::store::{AuxiliaryRecordRef, ColdTier, NeuronStore, WbrainFile};
 
 use super::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
 use super::{
@@ -28,6 +28,17 @@ const MIGRATION_MIN_AVAILABLE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MEMORY_CHECK_INTERVAL: u64 = 16_384;
 const DISCARD_BUFFER_BYTES: usize = 64 * 1024;
 const DISCARD_MEMORY_CHECK_BYTES: u64 = 64 * 1024 * 1024;
+const MIGRATION_PROGRESS_MAGIC: &[u8; 8] = b"W1ZMIGR1";
+const LEGACY_SEQUENCE_LEDGER_KIND: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationProgress {
+    legacy_bytes: u64,
+    legacy_tick: u64,
+    pool_count: u64,
+    completed_pools: u64,
+    source_offset: u64,
+}
 
 fn read_value<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<T> {
     bincode::deserialize_from(reader)
@@ -99,12 +110,115 @@ fn skip_bincode_string<R: Read>(reader: &mut R, system: &mut System) -> io::Resu
     Ok(())
 }
 
+fn read_recent_atoms<R: Read>(
+    reader: &mut R,
+    configured_window: usize,
+) -> io::Result<VecDeque<NeuronId>> {
+    let count: u64 = read_value(reader)?;
+    let hard_limit = configured_window.max(1_048_576) as u64;
+    if count > hard_limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("legacy recent-atom count {count} exceeds safe limit {hard_limit}"),
+        ));
+    }
+    let mut recent = VecDeque::with_capacity(count as usize);
+    for _ in 0..count {
+        recent.push_back(read_value(reader)?);
+    }
+    Ok(recent)
+}
+
+fn stream_sequence_ledger<R: Read>(
+    reader: &mut R,
+    system: &mut System,
+    file: &std::sync::Arc<WbrainFile>,
+    pool_id: PoolId,
+) -> io::Result<AuxiliaryRecordRef> {
+    let sequence_count: u64 = read_value(reader)?;
+    file.append_auxiliary(
+        pool_id,
+        LEGACY_SEQUENCE_LEDGER_KIND,
+        |writer| -> io::Result<()> {
+            writer.write_all(&sequence_count.to_le_bytes())?;
+            let mut buffer = [0_u8; DISCARD_BUFFER_BYTES];
+            let mut since_memory_check = 0_u64;
+            for _ in 0..sequence_count {
+                let member_count: u64 = read_value(reader)?;
+                let member_bytes = member_count.checked_mul(4).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "legacy sequence member byte count overflow",
+                    )
+                })?;
+                writer.write_all(&member_count.to_le_bytes())?;
+                let mut remaining = member_bytes;
+                while remaining > 0 {
+                    let requested = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
+                    reader.read_exact(&mut buffer[..requested])?;
+                    writer.write_all(&buffer[..requested])?;
+                    remaining -= requested as u64;
+                    since_memory_check += requested as u64;
+                    if since_memory_check >= DISCARD_MEMORY_CHECK_BYTES {
+                        require_memory_floor(system, "while streaming legacy sequence state")?;
+                        since_memory_check = 0;
+                    }
+                }
+                let recurrence: u32 = read_value(reader)?;
+                writer.write_all(&recurrence.to_le_bytes())?;
+            }
+            Ok(())
+        },
+    )
+}
+
 fn persisted(fingerprint: SerializableFingerprint) -> PersistedMomentFingerprint {
     PersistedMomentFingerprint {
         pairs: fingerprint.pairs,
         ordered_per_pool: Vec::new(),
         members_per_pool: Vec::new(),
     }
+}
+
+fn encode_progress(progress: &MigrationProgress) -> io::Result<Vec<u8>> {
+    let encoded = bincode::serialize(progress)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut bytes = Vec::with_capacity(MIGRATION_PROGRESS_MAGIC.len() + encoded.len());
+    bytes.extend_from_slice(MIGRATION_PROGRESS_MAGIC);
+    bytes.extend_from_slice(&encoded);
+    Ok(bytes)
+}
+
+fn decode_progress(bytes: &[u8]) -> io::Result<Option<MigrationProgress>> {
+    let Some(encoded) = bytes.strip_prefix(MIGRATION_PROGRESS_MAGIC) else {
+        return Ok(None);
+    };
+    bincode::deserialize(encoded)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub(super) fn is_resumable(legacy_path: &Path, destination: &Path) -> bool {
+    let Ok(legacy_bytes) = std::fs::metadata(legacy_path).map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let Ok(file) = WbrainFile::open(destination) else {
+        return false;
+    };
+    decode_progress(&file.brain_metadata())
+        .ok()
+        .flatten()
+        .is_some_and(|progress| progress.legacy_bytes == legacy_bytes)
+}
+
+pub(super) fn is_raw_complete(destination: &Path) -> bool {
+    let Ok(file) = WbrainFile::open(destination) else {
+        return false;
+    };
+    let metadata = file.brain_metadata();
+    decode_progress(&metadata).ok().flatten().is_none()
+        && bincode::deserialize::<WbrainBrainMetadata>(&metadata).is_ok()
+        && !file.pool_ids().is_empty()
 }
 
 fn stream_pool<R: Read>(
@@ -180,17 +294,25 @@ fn stream_pool<R: Read>(
         &mut system,
         &format!("after discarding pool {} legacy labels", config.id),
     )?;
-    let recent_atoms: VecDeque<NeuronId> = read_value(reader)?;
-    let sequences: Vec<(Vec<NeuronId>, u32)> = read_value(reader)?;
-    let cold_offsets: Vec<(NeuronId, u64)> = read_value(reader)?;
+    let recent_atoms = read_recent_atoms(reader, config.recent_atoms_window)?;
+    let legacy_sequence_ledger = stream_sequence_ledger(reader, &mut system, file, config.id)?;
+    let cold_offset_count: u64 = read_value(reader)?;
 
-    if !cold_offsets.is_empty() {
+    if cold_offset_count > 0 {
         let cold = ColdTier::open(
             legacy_dir
                 .join("cold")
                 .join(format!("pool_{}.cold", config.id)),
         )?;
-        for (id, offset) in cold_offsets {
+        for index in 0..cold_offset_count {
+            if index % MEMORY_CHECK_INTERVAL == 0 {
+                require_memory_floor(
+                    &mut system,
+                    &format!("while overlaying pool {} cold offsets", config.id),
+                )?;
+            }
+            let id: NeuronId = read_value(reader)?;
+            let offset: u64 = read_value(reader)?;
             let neuron = cold.read_neuron(offset)?;
             if neuron.id != id {
                 return Err(io::Error::new(
@@ -200,6 +322,10 @@ fn stream_pool<R: Read>(
                         config.id, id, neuron.id
                     ),
                 ));
+            }
+            if let Some(previous) = store.get(id) {
+                total_terminals = total_terminals.saturating_sub(previous.terminals.len());
+                store.release_cached(id);
             }
             total_terminals = total_terminals.saturating_add(neuron.terminals.len());
             store.persist_sleeping(&neuron)?;
@@ -211,7 +337,8 @@ fn stream_pool<R: Read>(
         StreamedPoolMetadata {
             config,
             recent_atoms,
-            sequences,
+            sequences: Vec::new(),
+            legacy_sequence_ledger: Some(legacy_sequence_ledger),
             concept_sequence_to_id,
             neuron_kinds,
             concept_slots,
@@ -223,7 +350,9 @@ fn stream_pool<R: Read>(
 
 pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usize> {
     let legacy = File::open(legacy_path)?;
+    let legacy_bytes = legacy.metadata()?.len();
     let mut reader = BufReader::with_capacity(1024 * 1024, legacy);
+    let destination_existed = destination.exists();
     let file = WbrainFile::open(destination)?;
 
     let _format_version: u32 = read_value(&mut reader)?;
@@ -236,10 +365,58 @@ pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usiz
     let tick: u64 = read_value(&mut reader)?;
     let _pool_order: Vec<PoolId> = read_value(&mut reader)?;
     let pool_count: u64 = read_value(&mut reader)?;
+    let initial_pool_offset = reader.stream_position()?;
+    let progress = decode_progress(&file.brain_metadata())?;
+    let (completed_pools, source_offset) = match progress {
+        Some(progress)
+            if progress.legacy_bytes == legacy_bytes
+                && progress.legacy_tick == tick
+                && progress.pool_count == pool_count
+                && progress.completed_pools <= pool_count
+                && progress.source_offset >= initial_pool_offset
+                && progress.source_offset <= legacy_bytes =>
+        {
+            (progress.completed_pools, progress.source_offset)
+        }
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "existing migration progress does not match the legacy checkpoint",
+            ));
+        }
+        None if destination_existed => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "existing .wbrain is complete or is not a resumable migration",
+            ));
+        }
+        None => {
+            file.set_tick(tick);
+            file.set_brain_metadata(encode_progress(&MigrationProgress {
+                legacy_bytes,
+                legacy_tick: tick,
+                pool_count,
+                completed_pools: 0,
+                source_offset: initial_pool_offset,
+            })?);
+            file.commit_manifest()?;
+            (0, initial_pool_offset)
+        }
+    };
+    reader.seek(std::io::SeekFrom::Start(source_offset))?;
     let legacy_dir = legacy_path.parent().unwrap_or_else(|| Path::new("."));
-    for _ in 0..pool_count {
+    for completed in completed_pools..pool_count {
         let pool_id: PoolId = read_value(&mut reader)?;
         stream_pool(&mut reader, legacy_dir, &file, pool_id, binding_pool_id)?;
+        let next_source_offset = reader.stream_position()?;
+        file.set_brain_metadata(encode_progress(&MigrationProgress {
+            legacy_bytes,
+            legacy_tick: tick,
+            pool_count,
+            completed_pools: completed + 1,
+            source_offset: next_source_offset,
+        })?);
+        file.commit_manifest()?;
     }
 
     let eem: EemSnapshot = read_value(&mut reader)?;
@@ -323,4 +500,104 @@ pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usiz
         .into_iter()
         .map(|pool_id| file.pool(pool_id).known_count())
         .sum())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::{AtomEncoding, BytePassthroughEncoding};
+    use crate::{Brain, BrainConfig};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn tmpfile(name: &str, extension: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("w1z4rd_{name}_{}_{}", std::process::id(), nonce))
+            .with_extension(extension)
+    }
+
+    #[test]
+    fn migration_resumes_from_a_durable_pool_boundary() {
+        let legacy = tmpfile("resume-source", "bin");
+        let destination = tmpfile("resume-destination", "wbrain");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            for (id, name, prefix, bytes) in [
+                (3, "left", "l", b"abc".as_slice()),
+                (4, "right", "r", b"xyz".as_slice()),
+            ] {
+                brain.create_pool(
+                    PoolConfig::defaults(name, id),
+                    Box::new(BytePassthroughEncoding {
+                        prefix: prefix.into(),
+                    }),
+                );
+                brain.observe(id, bytes);
+            }
+            brain.checkpoint(&legacy).unwrap();
+        }
+
+        let legacy_bytes = std::fs::metadata(&legacy).unwrap().len();
+        let mut reader = BufReader::new(File::open(&legacy).unwrap());
+        let _: u32 = read_value(&mut reader).unwrap();
+        let parsed_binding_pool_id: PoolId = read_value(&mut reader).unwrap();
+        let _: u32 = read_value(&mut reader).unwrap();
+        let _: u32 = read_value(&mut reader).unwrap();
+        let _: usize = read_value(&mut reader).unwrap();
+        let _: crate::fabric::FabricConfig = read_value(&mut reader).unwrap();
+        let tick: u64 = read_value(&mut reader).unwrap();
+        let _: Vec<PoolId> = read_value(&mut reader).unwrap();
+        let pool_count: u64 = read_value(&mut reader).unwrap();
+        let first_pool_id: PoolId = read_value(&mut reader).unwrap();
+        let file = WbrainFile::open(&destination).unwrap();
+        stream_pool(
+            &mut reader,
+            legacy.parent().unwrap(),
+            &file,
+            first_pool_id,
+            parsed_binding_pool_id,
+        )
+        .unwrap();
+        let source_offset = reader.stream_position().unwrap();
+        file.set_tick(tick);
+        file.set_brain_metadata(
+            encode_progress(&MigrationProgress {
+                legacy_bytes,
+                legacy_tick: tick,
+                pool_count,
+                completed_pools: 1,
+                source_offset,
+            })
+            .unwrap(),
+        );
+        file.commit_manifest().unwrap();
+        drop(file);
+
+        assert!(is_resumable(&legacy, &destination));
+        assert_eq!(migrate(&legacy, &destination).unwrap(), 6);
+        assert!(!is_resumable(&legacy, &destination));
+
+        let mut encodings: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();
+        for (id, prefix) in [(binding_pool_id, "bind"), (3, "l"), (4, "r")] {
+            encodings.insert(
+                id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let (restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(restored.stats().total_neurons, 6);
+        assert_eq!(restored.stats().evicted_neurons, 6);
+
+        std::fs::remove_file(legacy).ok();
+        std::fs::remove_file(destination).ok();
+    }
 }

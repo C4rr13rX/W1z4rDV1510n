@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::neuron::{Neuron, NeuronId, PoolId};
 use crate::store::NeuronStore;
-use crate::store::container::{BrainContainer, BrainContainerManifest, PoolContainerManifest};
+use crate::store::container::{
+    AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
+};
 
 /// One open `.wbrain` file shared by every pool in a brain.
 pub struct WbrainFile {
@@ -106,6 +108,24 @@ impl WbrainFile {
 
     pub fn flush(&self) -> std::io::Result<()> {
         self.container.lock().flush()
+    }
+
+    pub fn append_auxiliary<F>(
+        &self,
+        pool_id: PoolId,
+        kind: u32,
+        write_body: F,
+    ) -> std::io::Result<AuxiliaryRecordRef>
+    where
+        F: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    {
+        self.container
+            .lock()
+            .append_auxiliary(pool_id, kind, write_body)
+    }
+
+    pub fn read_auxiliary(&self, reference: AuxiliaryRecordRef) -> std::io::Result<Vec<u8>> {
+        self.container.lock().read_auxiliary(reference)
     }
 }
 

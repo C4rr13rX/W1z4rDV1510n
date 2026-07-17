@@ -33,7 +33,9 @@ pub mod wbrain_store;
 
 pub use bloom::CountingBloom;
 pub use cold::ColdTier;
-pub use container::{BrainContainer, BrainContainerManifest, PoolContainerManifest};
+pub use container::{
+    AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
+};
 pub use control::{StorageConfig, StorageControlState};
 pub use event::{TerminalDelta, WalEvent};
 pub use merkle::{PoolRoot, compute_pool_root};
