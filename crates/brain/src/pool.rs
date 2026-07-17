@@ -1365,6 +1365,9 @@ impl Pool {
         // Terminals grown while evicted are already in the pool gauge;
         // only the net growth from restoring the cold copy gets added.
         let live_before = slot.terminals.len();
+        slot.label = restored.label;
+        slot.kind = restored.kind;
+        slot.born_tick = restored.born_tick;
         if slot.terminals.is_empty() {
             slot.terminals = restored.terminals;
         } else {

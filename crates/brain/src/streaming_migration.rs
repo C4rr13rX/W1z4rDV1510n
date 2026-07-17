@@ -5,7 +5,7 @@
 //! neuron to the destination container.
 
 use serde::de::DeserializeOwned;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
 use std::path::Path;
@@ -45,6 +45,7 @@ fn stream_pool<R: Read>(
     legacy_dir: &Path,
     file: &std::sync::Arc<WbrainFile>,
     expected_pool_id: PoolId,
+    binding_pool_id: PoolId,
 ) -> io::Result<()> {
     let config: PoolConfig = read_value(reader)?;
     if config.id != expected_pool_id {
@@ -60,6 +61,7 @@ fn stream_pool<R: Read>(
     let capacity = usize::try_from(neuron_count)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "neuron count exceeds usize"))?;
     let store = file.pool(config.id);
+    store.set_index_concept_labels(config.id == binding_pool_id);
     let mut neuron_kinds = Vec::with_capacity(capacity);
     let mut concept_slots = Vec::with_capacity(capacity);
     let mut born_ticks = Vec::with_capacity(capacity);
@@ -111,7 +113,11 @@ fn stream_pool<R: Read>(
         store.persist_sleeping(&neuron)?;
     }
 
-    let _label_to_id: HashMap<String, NeuronId> = read_value(reader)?;
+    let label_count: u64 = read_value(reader)?;
+    for _ in 0..label_count {
+        let _: String = read_value(reader)?;
+        let _: NeuronId = read_value(reader)?;
+    }
     let recent_atoms: VecDeque<NeuronId> = read_value(reader)?;
     let sequences: Vec<(Vec<NeuronId>, u32)> = read_value(reader)?;
     let cold_offsets: Vec<(NeuronId, u64)> = read_value(reader)?;
@@ -171,7 +177,13 @@ pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usiz
     let legacy_dir = legacy_path.parent().unwrap_or_else(|| Path::new("."));
     for _ in 0..pool_count {
         let pool_id: PoolId = read_value(&mut reader)?;
-        stream_pool(&mut reader, legacy_dir, &file, pool_id)?;
+        stream_pool(
+            &mut reader,
+            legacy_dir,
+            &file,
+            pool_id,
+            binding_pool_id,
+        )?;
     }
 
     let eem: EemSnapshot = read_value(&mut reader)?;

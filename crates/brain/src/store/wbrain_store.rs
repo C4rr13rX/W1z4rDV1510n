@@ -9,7 +9,7 @@ use ahash::AHashMap;
 use parking_lot::{Mutex, RwLock};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::neuron::{Neuron, NeuronId, PoolId};
 use crate::store::NeuronStore;
@@ -117,6 +117,7 @@ pub struct WbrainNeuronStore {
     labels: RwLock<AHashMap<String, NeuronId>>,
     pool_metadata: RwLock<Vec<u8>>,
     working_set: RwLock<AHashMap<NeuronId, Neuron>>,
+    index_concept_labels: AtomicBool,
     page_ins: AtomicU64,
     page_outs: AtomicU64,
     read_errors: AtomicU64,
@@ -132,6 +133,7 @@ impl WbrainNeuronStore {
             labels: RwLock::new(AHashMap::new()),
             pool_metadata: RwLock::new(Vec::new()),
             working_set: RwLock::new(AHashMap::new()),
+            index_concept_labels: AtomicBool::new(false),
             page_ins: AtomicU64::new(0),
             page_outs: AtomicU64::new(0),
             read_errors: AtomicU64::new(0),
@@ -149,6 +151,7 @@ impl WbrainNeuronStore {
             labels: RwLock::new(labels),
             pool_metadata: RwLock::new(manifest.pool_metadata),
             working_set: RwLock::new(AHashMap::new()),
+            index_concept_labels: AtomicBool::new(false),
             page_ins: AtomicU64::new(0),
             page_outs: AtomicU64::new(0),
             read_errors: AtomicU64::new(0),
@@ -158,6 +161,14 @@ impl WbrainNeuronStore {
 
     pub fn pool_id(&self) -> PoolId {
         self.pool_id
+    }
+
+    /// Binding concepts use their stable composite labels as a dedup key.
+    /// Other concepts are routed by sequence/member indexes and keep their
+    /// labels inside their neuron records, avoiding a multi-gigabyte resident
+    /// duplicate label map.
+    pub fn set_index_concept_labels(&self, enabled: bool) {
+        self.index_concept_labels.store(enabled, Ordering::Release);
     }
 
     pub fn label_to_id(&self, label: &str) -> Option<NeuronId> {
@@ -262,7 +273,9 @@ impl WbrainNeuronStore {
             offsets.resize(index + 1, None);
         }
         offsets[index] = Some(offset);
-        self.labels.write().insert(neuron.label.clone(), neuron.id);
+        if neuron.is_atom() || self.index_concept_labels.load(Ordering::Acquire) {
+            self.labels.write().insert(neuron.label.clone(), neuron.id);
+        }
         Ok(())
     }
 
@@ -576,6 +589,7 @@ mod tests {
         let destination = root.join("brain.wbrain");
         let binding_pool_id;
         let concept_id;
+        let concept_label;
         {
             let mut brain = Brain::new(BrainConfig::default());
             binding_pool_id = brain.binding_pool_id();
@@ -592,6 +606,7 @@ mod tests {
                 let promoted = pool.ensure_frame_concept_for_pretrain(b"cold concept", 2);
                 concept_id = promoted[0];
                 assert!(!pool.get(concept_id).unwrap().is_atom());
+                concept_label = pool.get(concept_id).unwrap().label.clone();
                 pool.get_mut(concept_id)
                     .unwrap()
                     .terminals
@@ -605,6 +620,9 @@ mod tests {
         }
 
         Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination).unwrap();
+        let file = WbrainFile::open(&destination).unwrap();
+        assert_eq!(file.pool(3).label_to_id(&concept_label), None);
+        drop(file);
         let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
             std::collections::HashMap::new();
         encodings.insert(
@@ -627,6 +645,7 @@ mod tests {
         let pool = pool.read();
         let concept = pool.get(concept_id).unwrap();
         assert!(!concept.is_atom());
+        assert_eq!(concept.label, concept_label);
         assert!(concept.members.len() > 1);
         assert_eq!(concept.terminals.len(), 1);
         assert_eq!(concept.terminals[0].target, NeuronRef::new(3, 0));
@@ -641,6 +660,7 @@ mod tests {
         let legacy = tmpfile("legacy-binding-source").with_extension("bin");
         let destination = tmpfile("legacy-binding-migrated");
         let binding_pool_id;
+        let trained_binding_id;
         {
             let mut brain = Brain::new(BrainConfig::default());
             binding_pool_id = brain.binding_pool_id();
@@ -652,11 +672,9 @@ mod tests {
                     }),
                 );
             }
-            assert!(
-                brain
-                    .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
-                    .is_some()
-            );
+            trained_binding_id = brain
+                .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
+                .unwrap();
             brain.checkpoint(&legacy).unwrap();
         }
         let encodings = || {
@@ -677,6 +695,13 @@ mod tests {
         let (mut migrated, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
         assert_eq!(migrated.rebuild_binding_indexes_bounded().unwrap(), 1);
+        assert_eq!(
+            migrated
+                .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
+                .unwrap(),
+            trained_binding_id,
+            "binding labels must remain indexed for idempotent live training",
+        );
         migrated.serialize_all_neurons_for_idle().unwrap();
         assert_eq!(
             migrated.stats().evicted_neurons,

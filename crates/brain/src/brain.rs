@@ -6439,7 +6439,9 @@ impl Brain {
         let mut attached = 0;
         for pid in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pid) {
-                pool.write().set_wbrain_store(file.pool(pid));
+                let store = file.pool(pid);
+                store.set_index_concept_labels(pid == self.binding_pool_id);
+                pool.write().set_wbrain_store(store);
                 attached += 1;
             }
         }
@@ -6897,7 +6899,9 @@ impl Brain {
                 missing.push(pool_id);
                 continue;
             };
-            let pool = Pool::from_wbrain_store(encoding, file.pool(pool_id))?;
+            let store = file.pool(pool_id);
+            store.set_index_concept_labels(pool_id == metadata.binding_pool_id);
+            let pool = Pool::from_wbrain_store(encoding, store)?;
             fabric.register_pool(pool);
         }
         fabric.set_tick(file.tick());
