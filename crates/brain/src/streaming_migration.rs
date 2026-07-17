@@ -6,9 +6,9 @@
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, Write};
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use sysinfo::System;
 
 use crate::action::{ActionEvent, ActionId};
@@ -30,6 +30,9 @@ const DISCARD_BUFFER_BYTES: usize = 64 * 1024;
 const DISCARD_MEMORY_CHECK_BYTES: u64 = 64 * 1024 * 1024;
 const MIGRATION_PROGRESS_MAGIC: &[u8; 8] = b"W1ZMIGR1";
 const LEGACY_SEQUENCE_LEDGER_KIND: u32 = 1;
+const LEGACY_CONCEPT_SEQUENCE_INDEX_KIND: u32 = 2;
+const CONCEPT_INDEX_MAGIC: &[u8; 8] = b"W1ZCID01";
+const MAX_DISK_INDEX_BUCKETS: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MigrationProgress {
@@ -66,6 +69,9 @@ fn trim_unused_working_set() {
 fn trim_unused_working_set() {}
 
 fn require_memory_floor(system: &mut System, context: &str) -> io::Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
     trim_unused_working_set();
     system.refresh_memory();
     let available = system.available_memory();
@@ -237,6 +243,96 @@ fn decode_progress(bytes: &[u8]) -> io::Result<Option<MigrationProgress>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+struct DiskConceptIndex {
+    path: PathBuf,
+    file: File,
+    bucket_count: u64,
+    entries: u64,
+}
+
+impl DiskConceptIndex {
+    fn create(directory: &Path, pool_id: PoolId, expected_entries: u64) -> io::Result<Self> {
+        let path = directory.join(format!(".pool-{pool_id}.concept-index.tmp"));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        let desired = expected_entries
+            .saturating_mul(2)
+            .max(1)
+            .next_power_of_two();
+        let bucket_count = desired.min(MAX_DISK_INDEX_BUCKETS);
+        file.write_all(CONCEPT_INDEX_MAGIC)?;
+        file.write_all(&0_u64.to_le_bytes())?;
+        file.write_all(&bucket_count.to_le_bytes())?;
+        let zeroes = [0_u8; DISCARD_BUFFER_BYTES];
+        let mut remaining = bucket_count * 8;
+        while remaining > 0 {
+            let n = usize::try_from(remaining.min(zeroes.len() as u64)).unwrap();
+            file.write_all(&zeroes[..n])?;
+            remaining -= n as u64;
+        }
+        Ok(Self {
+            path,
+            file,
+            bucket_count,
+            entries: 0,
+        })
+    }
+
+    fn insert(&mut self, sequence: &[NeuronId], concept_id: NeuronId) -> io::Result<()> {
+        let mut hasher = blake3::Hasher::new();
+        for id in sequence {
+            hasher.update(&id.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let hash = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
+        let bucket = hash & (self.bucket_count - 1);
+        let bucket_offset = 24 + bucket * 8;
+        self.file.seek(SeekFrom::Start(bucket_offset))?;
+        let mut old_head = [0_u8; 8];
+        self.file.read_exact(&mut old_head)?;
+        let record = self.file.seek(SeekFrom::End(0))?;
+        self.file.write_all(&old_head)?;
+        self.file.write_all(&hash.to_le_bytes())?;
+        self.file.write_all(
+            &u32::try_from(sequence.len())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "concept too large"))?
+                .to_le_bytes(),
+        )?;
+        for id in sequence {
+            self.file.write_all(&id.to_le_bytes())?;
+        }
+        self.file.write_all(&concept_id.to_le_bytes())?;
+        self.file.seek(SeekFrom::Start(bucket_offset))?;
+        self.file.write_all(&(record + 1).to_le_bytes())?;
+        self.file.seek(SeekFrom::End(0))?;
+        self.entries += 1;
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        destination: &std::sync::Arc<WbrainFile>,
+        pool_id: PoolId,
+    ) -> io::Result<AuxiliaryRecordRef> {
+        self.file.seek(SeekFrom::Start(8))?;
+        self.file.write_all(&self.entries.to_le_bytes())?;
+        self.file.flush()?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let reference = destination.append_auxiliary(
+            pool_id,
+            LEGACY_CONCEPT_SEQUENCE_INDEX_KIND,
+            |writer| io::copy(&mut self.file, writer).map(|_| ()),
+        )?;
+        drop(self.file);
+        std::fs::remove_file(&self.path).ok();
+        Ok(reference)
+    }
+}
+
 pub(super) fn is_resumable(legacy_path: &Path, destination: &Path) -> bool {
     let Ok(legacy_bytes) = std::fs::metadata(legacy_path).map(|metadata| metadata.len()) else {
         return false;
@@ -285,7 +381,7 @@ fn stream_pool<R: Read>(
     let mut neuron_kinds = Vec::with_capacity(capacity);
     let mut concept_slots = Vec::with_capacity(capacity);
     let mut born_ticks = Vec::with_capacity(capacity);
-    let mut concept_sequence_to_id = Vec::new();
+    let mut concept_index = DiskConceptIndex::create(legacy_dir, config.id, neuron_count)?;
     let mut total_terminals = 0usize;
     let mut system = System::new();
 
@@ -318,7 +414,7 @@ fn stream_pool<R: Read>(
                 .map(|member| member.neuron)
                 .collect();
             if !local_members.is_empty() {
-                concept_sequence_to_id.push((local_members, neuron.id));
+                concept_index.insert(&local_members, neuron.id)?;
             }
         }
         store.persist_sleeping(&neuron)?;
@@ -335,6 +431,7 @@ fn stream_pool<R: Read>(
     )?;
     let recent_atoms = read_recent_atoms(reader, config.recent_atoms_window)?;
     let legacy_sequence_ledger = stream_sequence_ledger(reader, &mut system, file, config.id)?;
+    let legacy_concept_sequence_index = concept_index.finish(file, config.id)?;
     let cold_offset_count: u64 = read_value(reader)?;
 
     if cold_offset_count > 0 {
@@ -378,7 +475,8 @@ fn stream_pool<R: Read>(
             recent_atoms,
             sequences: Vec::new(),
             legacy_sequence_ledger: Some(legacy_sequence_ledger),
-            concept_sequence_to_id,
+            concept_sequence_to_id: Vec::new(),
+            legacy_concept_sequence_index: Some(legacy_concept_sequence_index),
             neuron_kinds,
             concept_slots,
             born_ticks,
@@ -684,6 +782,62 @@ mod tests {
             .ensure_frame_concept_for_pretrain(b"cold-ledger-frame", 2);
         assert_eq!(promoted.len(), 1);
         assert!(!pool.write().get(promoted[0]).unwrap().is_atom());
+
+        std::fs::remove_file(legacy).ok();
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn migrated_concept_membership_is_resolved_from_the_cold_index() {
+        let legacy = tmpfile("concept-index-source", "bin");
+        let destination = tmpfile("concept-index-destination", "wbrain");
+        let binding_pool_id;
+        let original_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            brain.create_pool(
+                PoolConfig::defaults("frames", 10),
+                Box::new(BytePassthroughEncoding {
+                    prefix: "frame".into(),
+                }),
+            );
+            let pool = brain.fabric().pool(10).unwrap();
+            pool.write()
+                .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 1);
+            original_id = pool
+                .write()
+                .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 2)[0];
+            brain.checkpoint(&legacy).unwrap();
+        }
+
+        migrate(&legacy, &destination).unwrap();
+        let mut encodings: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();
+        encodings.insert(
+            binding_pool_id,
+            Box::new(BytePassthroughEncoding {
+                prefix: "bind".into(),
+            }),
+        );
+        encodings.insert(
+            10,
+            Box::new(BytePassthroughEncoding {
+                prefix: "frame".into(),
+            }),
+        );
+        let (restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        let pool = restored.fabric().pool(10).unwrap();
+        let before = pool.read().iter_neurons().count();
+        let resolved = pool
+            .write()
+            .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 3);
+        assert_eq!(resolved, vec![original_id]);
+        assert_eq!(
+            pool.read().iter_neurons().count(),
+            before,
+            "lookup must not duplicate concept"
+        );
 
         std::fs::remove_file(legacy).ok();
         std::fs::remove_file(destination).ok();

@@ -851,6 +851,7 @@ struct WbrainPoolMetadata {
     legacy_sequence_ledger: Option<AuxiliaryRecordRef>,
     concept_multiset_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
     concept_sequence_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
+    legacy_concept_sequence_index: Option<AuxiliaryRecordRef>,
     neuron_kinds: Vec<NeuronKind>,
     concept_slots: Vec<bool>,
     born_ticks: Vec<u64>,
@@ -863,6 +864,7 @@ pub(crate) struct StreamedPoolMetadata {
     pub sequences: Vec<(SequenceFingerprint, u32)>,
     pub legacy_sequence_ledger: Option<AuxiliaryRecordRef>,
     pub concept_sequence_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
+    pub legacy_concept_sequence_index: Option<AuxiliaryRecordRef>,
     pub neuron_kinds: Vec<NeuronKind>,
     pub concept_slots: Vec<bool>,
     pub born_ticks: Vec<u64>,
@@ -898,6 +900,10 @@ pub struct Pool {
     /// (Pool::from_snapshot), then maintained in lockstep with
     /// `label_to_id` on every promote_to_concept.
     concept_sequence_to_id: AHashMap<Vec<NeuronId>, NeuronId>,
+    /// Exact ordered concept membership retained as a disk hash index for
+    /// migrated brains. Only concepts created or touched after reopening
+    /// enter the live map above.
+    legacy_concept_sequence_index: Option<AuxiliaryRecordRef>,
     /// Streaming buffer of recently-fired atom/concept IDs.  Drives concept
     /// emergence.  Bounded by `config.recent_atoms_window`.
     recent_atoms: VecDeque<NeuronId>,
@@ -1101,6 +1107,7 @@ impl Pool {
             label_to_id: AHashMap::new(),
             concept_multiset_to_id: AHashMap::new(),
             concept_sequence_to_id: AHashMap::new(),
+            legacy_concept_sequence_index: None,
             recent_atoms: VecDeque::with_capacity(window),
             sequences: AHashMap::new(),
             legacy_sequence_ledger: None,
@@ -1470,6 +1477,7 @@ impl Pool {
                 .iter()
                 .map(|(sequence, id)| (sequence.clone(), *id))
                 .collect(),
+            legacy_concept_sequence_index: self.legacy_concept_sequence_index,
             neuron_kinds: self.neurons.iter().map(|neuron| neuron.kind).collect(),
             concept_slots: self
                 .neurons
@@ -1496,6 +1504,7 @@ impl Pool {
             legacy_sequence_ledger: metadata.legacy_sequence_ledger,
             concept_multiset_to_id: Vec::new(),
             concept_sequence_to_id: metadata.concept_sequence_to_id,
+            legacy_concept_sequence_index: metadata.legacy_concept_sequence_index,
             neuron_kinds: metadata.neuron_kinds,
             concept_slots: metadata.concept_slots,
             born_ticks: metadata.born_ticks,
@@ -1611,6 +1620,7 @@ impl Pool {
             label_to_id,
             concept_multiset_to_id: metadata.concept_multiset_to_id.into_iter().collect(),
             concept_sequence_to_id: metadata.concept_sequence_to_id.into_iter().collect(),
+            legacy_concept_sequence_index: metadata.legacy_concept_sequence_index,
             recent_atoms: metadata.recent_atoms,
             sequences: metadata.sequences.into_iter().collect(),
             legacy_sequence_ledger: metadata.legacy_sequence_ledger,
@@ -1996,7 +2006,7 @@ impl Pool {
                 let mut matched: Option<(usize, NeuronId)> = None;
                 for len in (2..=max_len).rev() {
                     let start = stack.len() - len;
-                    if let Some(&cid) = self.concept_sequence_to_id.get(&stack[start..]) {
+                    if let Some(cid) = self.concept_id_for_sequence(&stack[start..]) {
                         matched = Some((len, cid));
                         break;
                     }
@@ -2119,7 +2129,7 @@ impl Pool {
         if sequence.is_empty() {
             return Vec::new();
         }
-        if let Some(&id) = self.concept_sequence_to_id.get(&sequence) {
+        if let Some(id) = self.concept_id_for_sequence(&sequence) {
             if let Some(neuron) = self.neurons.get_mut(id as usize) {
                 neuron.use_count = neuron.use_count.saturating_add(1);
                 neuron.last_fired_tick = tick;
@@ -2214,20 +2224,16 @@ impl Pool {
             let member_count =
                 u32::from_le_bytes(record_header[16..20].try_into().unwrap()) as usize;
             if record_hash == hash && member_count == sequence.len() {
-                let mut matches = true;
-                let mut member_raw = [0_u8; 4];
-                for (index, expected) in sequence.iter().enumerate() {
-                    store.read_auxiliary_exact(
-                        reference,
-                        record + 20 + (index as u64) * 4,
-                        &mut member_raw,
-                    )?;
-                    if u32::from_le_bytes(member_raw) != *expected {
-                        matches = false;
-                        break;
-                    }
-                }
+                let mut encoded_members = vec![0_u8; member_count * 4];
+                store.read_auxiliary_exact(reference, record + 20, &mut encoded_members)?;
+                let matches = encoded_members
+                    .chunks_exact(4)
+                    .zip(sequence)
+                    .all(|(raw, expected)| {
+                        u32::from_le_bytes(raw.try_into().unwrap()) == *expected
+                    });
                 if matches {
+                    let mut member_raw = [0_u8; 4];
                     store.read_auxiliary_exact(
                         reference,
                         record + 20 + (member_count as u64) * 4,
@@ -2239,6 +2245,98 @@ impl Pool {
             link = next;
         }
         Ok(None)
+    }
+
+    fn legacy_concept_id(&self, sequence: &[NeuronId]) -> std::io::Result<Option<NeuronId>> {
+        const INDEX_MAGIC: &[u8; 8] = b"W1ZCID01";
+        let Some(reference) = self.legacy_concept_sequence_index else {
+            return Ok(None);
+        };
+        let store = self.wbrain_store.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cold concept index has no .wbrain store",
+            )
+        })?;
+        let mut header = [0_u8; 24];
+        store.read_auxiliary_exact(reference, 0, &mut header)?;
+        if &header[..8] != INDEX_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported cold concept index",
+            ));
+        }
+        let bucket_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        if bucket_count == 0 || !bucket_count.is_power_of_two() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid cold concept bucket count",
+            ));
+        }
+        let mut hasher = blake3::Hasher::new();
+        for id in sequence {
+            hasher.update(&id.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let hash = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
+        let bucket = hash & (bucket_count - 1);
+        let mut raw = [0_u8; 8];
+        store.read_auxiliary_exact(reference, 24 + bucket * 8, &mut raw)?;
+        let mut link = u64::from_le_bytes(raw);
+        let mut traversed = 0_u64;
+        while link != 0 {
+            traversed += 1;
+            if traversed > 1_000_000 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "cold concept chain cycle",
+                ));
+            }
+            let record = link - 1;
+            let mut record_header = [0_u8; 20];
+            store.read_auxiliary_exact(reference, record, &mut record_header)?;
+            let next = u64::from_le_bytes(record_header[..8].try_into().unwrap());
+            let record_hash = u64::from_le_bytes(record_header[8..16].try_into().unwrap());
+            let member_count =
+                u32::from_le_bytes(record_header[16..20].try_into().unwrap()) as usize;
+            if record_hash == hash && member_count == sequence.len() {
+                let mut encoded_members = vec![0_u8; member_count * 4];
+                store.read_auxiliary_exact(reference, record + 20, &mut encoded_members)?;
+                let matches = encoded_members
+                    .chunks_exact(4)
+                    .zip(sequence)
+                    .all(|(raw, expected)| {
+                        u32::from_le_bytes(raw.try_into().unwrap()) == *expected
+                    });
+                if matches {
+                    let mut member_raw = [0_u8; 4];
+                    store.read_auxiliary_exact(
+                        reference,
+                        record + 20 + (member_count as u64) * 4,
+                        &mut member_raw,
+                    )?;
+                    return Ok(Some(u32::from_le_bytes(member_raw)));
+                }
+            }
+            link = next;
+        }
+        Ok(None)
+    }
+
+    fn concept_id_for_sequence(&self, sequence: &[NeuronId]) -> Option<NeuronId> {
+        if let Some(id) = self.concept_sequence_to_id.get(sequence) {
+            return Some(*id);
+        }
+        match self.legacy_concept_id(sequence) {
+            Ok(id) => id,
+            Err(error) => {
+                eprintln!(
+                    "cold concept lookup failed in pool {}: {error}",
+                    self.config.id
+                );
+                None
+            }
+        }
     }
 
     fn increment_sequence_recurrence(
@@ -2464,6 +2562,7 @@ impl Pool {
             label_to_id,
             concept_multiset_to_id: AHashMap::new(),
             concept_sequence_to_id: AHashMap::new(),
+            legacy_concept_sequence_index: None,
             recent_atoms: snap.recent_atoms,
             sequences,
             legacy_sequence_ledger: None,
@@ -2778,7 +2877,7 @@ impl Pool {
             let start = buf_len - len;
             probe.clear();
             probe.extend(self.recent_atoms.iter().skip(start).copied());
-            if let Some(&cid) = self.concept_sequence_to_id.get(&probe) {
+            if let Some(cid) = self.concept_id_for_sequence(&probe) {
                 if let Some(n) = self.neurons.get(cid as usize) {
                     if !n.is_atom() {
                         found = Some((len, cid));
@@ -3225,7 +3324,7 @@ impl Pool {
         // Exact immediate structure is a bounded deterministic duplicate
         // guard even when the flattened atom ancestry is intentionally too
         // large to materialise.
-        if self.concept_sequence_to_id.contains_key(&members) {
+        if self.concept_id_for_sequence(&members).is_some() {
             return;
         }
         let leaves_seq = self.expand_to_atom_leaves_bounded(&members, 512);
