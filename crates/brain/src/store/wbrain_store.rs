@@ -64,6 +64,10 @@ impl WbrainFile {
         self.tick.store(tick, Ordering::Release);
     }
 
+    pub fn tick(&self) -> u64 {
+        self.tick.load(Ordering::Acquire)
+    }
+
     pub fn set_brain_metadata(&self, metadata: Vec<u8>) {
         *self.brain_metadata.write() = metadata;
     }
@@ -336,6 +340,7 @@ impl NeuronStore for WbrainNeuronStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brain::{Brain, BrainConfig};
     use crate::neuron::NeuronKind;
     use crate::pool::{BytePassthroughEncoding, Pool, PoolConfig};
 
@@ -466,6 +471,159 @@ mod tests {
         assert_eq!(pool.live_count(), 1);
         assert_eq!(pool.get(ids[2]).unwrap().label, "byte:Yw");
         assert_eq!(store.resident_count(), 0);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn whole_brain_reopens_without_deserializing_neuron_bodies() {
+        let path = tmpfile("brain-reopen");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            brain.create_pool(
+                PoolConfig::defaults("bytes", 3),
+                Box::new(BytePassthroughEncoding {
+                    prefix: "byte".into(),
+                }),
+            );
+            brain.observe(3, b"abc");
+            brain.attach_wbrain(&path).unwrap();
+            assert_eq!(brain.serialize_all_neurons_for_idle().unwrap(), 3);
+        }
+
+        let mut encodings: std::collections::HashMap<
+            PoolId,
+            Box<dyn crate::pool::AtomEncoding>,
+        > = std::collections::HashMap::new();
+        encodings.insert(
+            binding_pool_id,
+            Box::new(BytePassthroughEncoding {
+                prefix: "bind".into(),
+            }),
+        );
+        encodings.insert(
+            3,
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+        );
+        let (restored, missing) = Brain::restore_wbrain(&path, encodings).unwrap();
+        assert!(missing.is_empty());
+        let stats = restored.stats();
+        assert_eq!(stats.total_neurons, 3);
+        assert_eq!(stats.evicted_neurons, 3);
+        assert_eq!(stats.resident_terminals, 0);
+        let pool = restored.fabric().pool(3).unwrap();
+        let mut pool = pool.write();
+        let id = pool.label_to_id("byte:Yg").unwrap();
+        pool.ensure_loaded(id).unwrap();
+        assert_eq!(pool.live_count(), 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_migration_preserves_source_and_produces_lazy_container() {
+        let legacy = tmpfile("legacy-source").with_extension("bin");
+        let destination = tmpfile("legacy-migrated");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            brain.create_pool(
+                PoolConfig::defaults("bytes", 3),
+                Box::new(BytePassthroughEncoding {
+                    prefix: "byte".into(),
+                }),
+            );
+            brain.observe(3, b"abc");
+            brain.checkpoint(&legacy).unwrap();
+        }
+        let source_bytes = std::fs::metadata(&legacy).unwrap().len();
+
+        let encodings = || {
+            let mut map: std::collections::HashMap<
+                PoolId,
+                Box<dyn crate::pool::AtomEncoding>,
+            > = std::collections::HashMap::new();
+            map.insert(
+                binding_pool_id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: "bind".into(),
+                }),
+            );
+            map.insert(
+                3,
+                Box::new(BytePassthroughEncoding {
+                    prefix: "byte".into(),
+                }),
+            );
+            map
+        };
+        let (serialized, missing) =
+            Brain::migrate_legacy_checkpoint(&legacy, &destination, encodings()).unwrap();
+        assert_eq!(serialized, 3);
+        assert!(missing.is_empty());
+        assert_eq!(std::fs::metadata(&legacy).unwrap().len(), source_bytes);
+
+        let (restored, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(restored.stats().evicted_neurons, 3);
+        assert_eq!(restored.stats().resident_terminals, 0);
+        std::fs::remove_file(legacy).ok();
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn lazy_restore_pages_binding_scope_and_preserves_recall() {
+        let path = tmpfile("lazy-recall");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            for (id, name, prefix) in [(3, "prompt", "p"), (4, "answer", "a")] {
+                brain.create_pool(
+                    PoolConfig::defaults(name, id),
+                    Box::new(BytePassthroughEncoding {
+                        prefix: prefix.into(),
+                    }),
+                );
+            }
+            brain.create_pool(
+                PoolConfig::defaults("unrelated", 5),
+                Box::new(BytePassthroughEncoding { prefix: "n".into() }),
+            );
+            brain.observe(5, b"unrelated-neurons");
+            assert!(
+                brain
+                    .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
+                    .is_some()
+            );
+            brain.attach_wbrain(&path).unwrap();
+            brain.serialize_all_neurons_for_idle().unwrap();
+        }
+        let mut encodings: std::collections::HashMap<
+            PoolId,
+            Box<dyn crate::pool::AtomEncoding>,
+        > = std::collections::HashMap::new();
+        for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a"), (5, "n")] {
+            encodings.insert(
+                id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let (mut restored, missing) = Brain::restore_wbrain(&path, encodings).unwrap();
+        assert!(missing.is_empty());
+        let asleep = restored.stats().evicted_neurons;
+        restored.activate_for_prediction(3, b"hello");
+        let answer = restored.decode_best_trained_binding_multi(&[3], 4);
+        restored.clear_prediction_activation();
+        assert_eq!(answer.as_deref(), Some(b"world".as_slice()));
+        let awake = restored.stats().total_neurons - restored.stats().evicted_neurons;
+        assert!(awake > 0);
+        assert!(awake < asleep, "inference must not hydrate the whole brain");
         std::fs::remove_file(path).ok();
     }
 }

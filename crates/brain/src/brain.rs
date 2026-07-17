@@ -9,6 +9,9 @@
 //! `integrate` from, with every output carrying a [`GroundingReport`].
 //! That's the answer contract.
 
+#[path = "wbrain_metadata.rs"]
+mod wbrain_metadata;
+
 use ahash::AHashMap;
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -3076,7 +3079,7 @@ impl Brain {
     /// integrated multi-stream moment rather than an average dominated by one
     /// text channel.
     pub fn decode_best_trained_binding_multi(
-        &self,
+        &mut self,
         query_pools: &[PoolId],
         target_pool: PoolId,
     ) -> Option<Vec<u8>> {
@@ -3090,6 +3093,7 @@ impl Brain {
         if query_ids.is_empty() {
             return None;
         }
+        self.hydrate_active_binding_scope(&query_ids, target_pool);
         let min_pool_score = std::env::var("BRAIN_MULTI_MIN_POOL_SCORE")
             .ok()
             .and_then(|value| value.parse::<f32>().ok())
@@ -3251,6 +3255,62 @@ impl Brain {
             target.decode_concept_members(&atoms)
         };
         if bytes.is_empty() { None } else { Some(bytes) }
+    }
+
+    /// Wake only bindings reachable from the active query atoms or their
+    /// exact sequence index, then wake the member trees those bindings name.
+    /// Sleeping placeholders outside this scope remain serialized.
+    fn hydrate_active_binding_scope(&mut self, query_pools: &[PoolId], target_pool: PoolId) {
+        let mut binding_ids = ahash::AHashSet::new();
+        for pool_id in query_pools {
+            let Some(pool_handle) = self.fabric.pool(*pool_id) else {
+                continue;
+            };
+            let pool = pool_handle.read();
+            for neuron_id in pool.currently_firing() {
+                if let Some(neuron) = pool.get(neuron_id) {
+                    binding_ids.extend(
+                        neuron
+                            .terminals
+                            .iter()
+                            .filter(|terminal| terminal.target.pool == self.binding_pool_id)
+                            .map(|terminal| terminal.target.neuron),
+                    );
+                }
+            }
+            let sequence = pool.last_observed_sequence().to_vec();
+            if let Some(ids) =
+                self.binding_sequence_index
+                    .get(&(*pool_id, target_pool, sequence))
+            {
+                binding_ids.extend(ids.iter().copied());
+            }
+        }
+        let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) else {
+            return;
+        };
+        let mut members_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        {
+            let mut bindings = binding_handle.write();
+            for binding_id in binding_ids {
+                if bindings.ensure_loaded(binding_id).is_err() {
+                    continue;
+                }
+                if let Some(binding) = bindings.get(binding_id) {
+                    for member in &binding.members {
+                        members_by_pool
+                            .entry(member.pool)
+                            .or_default()
+                            .push(member.neuron);
+                    }
+                }
+            }
+        }
+        for (pool_id, roots) in members_by_pool {
+            if let Some(pool) = self.fabric.pool(pool_id) {
+                ensure_neuron_trees_loaded(&mut pool.write(), &roots);
+            }
+        }
     }
 
     /// Rank learned actions whose feature atoms are fully covered by a larger
@@ -6348,6 +6408,74 @@ impl Brain {
         Ok(attached)
     }
 
+    fn stage_wbrain_brain_metadata(
+        &self,
+        file: &crate::store::WbrainFile,
+    ) -> std::io::Result<()> {
+        use self::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
+        let persist = |fingerprint: &MomentFingerprint| PersistedMomentFingerprint {
+            pairs: fingerprint.pairs.clone(),
+            ordered_per_pool: fingerprint.ordered_per_pool.clone(),
+            members_per_pool: fingerprint.members_per_pool.clone(),
+        };
+        let metadata = WbrainBrainMetadata {
+            config: self.config.clone(),
+            binding_pool_id: self.binding_pool_id,
+            moment_history: self.moment_history.iter().map(persist).collect(),
+            binding_recurrences: self
+                .binding_recurrences
+                .iter()
+                .map(|(fingerprint, count)| (persist(fingerprint), *count))
+                .collect(),
+            lifetime_recurrences: self
+                .lifetime_recurrences
+                .iter()
+                .map(|(fingerprint, count)| (persist(fingerprint), *count))
+                .collect(),
+            tentative_promoted: self
+                .tentative_promoted
+                .iter()
+                .map(|(fingerprint, id)| (persist(fingerprint), *id))
+                .collect(),
+            promoted_fingerprints: self
+                .promoted_fingerprints
+                .iter()
+                .map(|(fingerprint, id)| (persist(fingerprint), *id))
+                .collect(),
+            binding_sequence_index: self
+                .binding_sequence_index
+                .iter()
+                .map(|(key, ids)| (key.clone(), ids.clone()))
+                .collect(),
+            binding_feature_atom_index: self
+                .binding_feature_atom_index
+                .iter()
+                .map(|(key, ids)| (*key, ids.clone()))
+                .collect(),
+            binding_motif_index: self
+                .binding_motif_index
+                .iter()
+                .map(|(key, ids)| (*key, ids.clone()))
+                .collect(),
+            total_observations: self.total_observations,
+            current_threshold: self.current_threshold,
+            last_pressure_check_obs: self.last_pressure_check_obs,
+            action_pool_id: self.action_pool_id,
+            pending_actions: self
+                .pending_actions
+                .iter()
+                .map(|(id, event)| (*id, event.clone()))
+                .collect(),
+            next_action_id: self.next_action_id,
+            eem: self.eem.snapshot(),
+            annealer: self.annealer.snapshot(),
+        };
+        let bytes = bincode::serialize(&metadata)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        file.set_brain_metadata(bytes);
+        Ok(())
+    }
+
     /// Run the final sleep transition after maintenance: serialize every live
     /// neuron independently and publish the compact routing manifest.
     pub fn serialize_all_neurons_for_idle(&self) -> std::io::Result<usize> {
@@ -6357,6 +6485,7 @@ impl Brain {
                 "brain has no .wbrain container attached",
             )
         })?;
+        self.stage_wbrain_brain_metadata(file)?;
         let mut serialized = 0;
         for pid in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pid) {
@@ -6704,6 +6833,107 @@ impl Brain {
         };
         brain.rebuild_binding_sequence_index();
         (brain, missing)
+    }
+
+    /// Open a brain directly from its compact `.wbrain` manifest. Pool
+    /// address spaces are rebuilt, but every neuron body remains asleep.
+    pub fn restore_wbrain<P: AsRef<std::path::Path>>(
+        path: P,
+        mut encodings: std::collections::HashMap<PoolId, Box<dyn AtomEncoding>>,
+    ) -> std::io::Result<(Self, Vec<PoolId>)> {
+        use self::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
+        let file = crate::store::WbrainFile::open(path)?;
+        let metadata: WbrainBrainMetadata = bincode::deserialize(&file.brain_metadata())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let restore_fingerprint =
+            |fingerprint: PersistedMomentFingerprint| MomentFingerprint {
+                pairs: fingerprint.pairs,
+                ordered_per_pool: fingerprint.ordered_per_pool,
+                members_per_pool: fingerprint.members_per_pool,
+            };
+        let mut fabric = Fabric::new(metadata.config.fabric.clone());
+        let mut missing = Vec::new();
+        for pool_id in file.pool_ids() {
+            let Some(encoding) = encodings.remove(&pool_id) else {
+                missing.push(pool_id);
+                continue;
+            };
+            let pool = Pool::from_wbrain_store(encoding, file.pool(pool_id))?;
+            fabric.register_pool(pool);
+        }
+        fabric.set_tick(file.tick());
+
+        let brain = Self {
+            fabric,
+            config: metadata.config,
+            wbrain_file: Some(file),
+            binding_pool_id: metadata.binding_pool_id,
+            moment_history: metadata
+                .moment_history
+                .into_iter()
+                .map(restore_fingerprint)
+                .collect(),
+            binding_recurrences: metadata
+                .binding_recurrences
+                .into_iter()
+                .map(|(fingerprint, count)| (restore_fingerprint(fingerprint), count))
+                .collect(),
+            lifetime_recurrences: metadata
+                .lifetime_recurrences
+                .into_iter()
+                .map(|(fingerprint, count)| (restore_fingerprint(fingerprint), count))
+                .collect(),
+            tentative_promoted: metadata
+                .tentative_promoted
+                .into_iter()
+                .map(|(fingerprint, id)| (restore_fingerprint(fingerprint), id))
+                .collect(),
+            promoted_fingerprints: metadata
+                .promoted_fingerprints
+                .into_iter()
+                .map(|(fingerprint, id)| (restore_fingerprint(fingerprint), id))
+                .collect(),
+            binding_sequence_index: metadata.binding_sequence_index.into_iter().collect(),
+            binding_feature_atom_index: metadata
+                .binding_feature_atom_index
+                .into_iter()
+                .collect(),
+            binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
+            total_observations: metadata.total_observations,
+            current_threshold: metadata.current_threshold,
+            last_pressure_check_obs: metadata.last_pressure_check_obs,
+            action_pool_id: metadata.action_pool_id,
+            pending_actions: metadata.pending_actions.into_iter().collect(),
+            next_action_id: metadata.next_action_id,
+            emitted_this_tick: ahash::AHashSet::new(),
+            eem: crate::eem::Eem::from_snapshot(metadata.eem),
+            annealer: crate::annealer::Annealer::from_snapshot(metadata.annealer),
+            network: NetworkState::new(""),
+            qa_db: QaDatabase::new(4096),
+            recent_frames: AHashMap::new(),
+            tuning: TuningState::default(),
+            feedback_loops: Vec::new(),
+            delayed_feedback: Vec::new(),
+            feedback_events_emitted: 0,
+        };
+        Ok((brain, missing))
+    }
+
+    /// One-time conversion from the legacy monolithic snapshot. The source
+    /// file is read-only and left untouched; the destination is a separate
+    /// `.wbrain` container whose neurons are individually addressable.
+    pub fn migrate_legacy_checkpoint<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+        legacy_path: P,
+        wbrain_path: Q,
+        encodings: std::collections::HashMap<PoolId, Box<dyn AtomEncoding>>,
+    ) -> std::io::Result<(usize, Vec<PoolId>)> {
+        let (mut brain, missing) = Self::restore(legacy_path, encodings)?;
+        if !missing.is_empty() {
+            return Ok((0, missing));
+        }
+        brain.attach_wbrain(wbrain_path)?;
+        let serialized = brain.serialize_all_neurons_for_idle()?;
+        Ok((serialized, missing))
     }
 
     /// Load a brain from `path`.  Convenience wrapper over

@@ -258,6 +258,36 @@ fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
     Box::new(BytePassthroughEncoding { prefix: leaked })
 }
 
+fn restore_encodings(
+    identity: Option<&BrainIdentitySpec>,
+) -> Result<HashMap<PoolId, Box<dyn AtomEncoding>>> {
+    let mut encodings: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();
+    encodings.insert(POOL_BINDING, leaked_encoding("bind"));
+    if let Some(spec) = identity {
+        let registry = PoolPrototypeRegistry::with_defaults();
+        for pool in &spec.pools {
+            let encoding = registry
+                .build(&pool.prototype, &pool.atom_encoding_prefix)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown pool prototype '{}' while restoring pool {} ({})",
+                        pool.prototype,
+                        pool.id,
+                        pool.name
+                    )
+                })?;
+            encodings.insert(pool.id, encoding);
+        }
+    } else {
+        encodings.insert(POOL_TEXT, leaked_encoding("t"));
+        encodings.insert(POOL_IMAGE, leaked_encoding("i"));
+        encodings.insert(POOL_AUDIO, leaked_encoding("a"));
+        encodings.insert(POOL_ACTION, leaked_encoding("act"));
+        encodings.insert(POOL_TURN, leaked_encoding("turn"));
+    }
+    Ok(encodings)
+}
+
 /// Load a brain from `<data_dir>/brain.bin` if it exists, else build a
 /// fresh one with the default topology. Replays the WAL tail after the most
 /// recent snapshot marker, then attaches the same WAL for all future
@@ -265,33 +295,26 @@ fn leaked_encoding(prefix: &str) -> Box<dyn AtomEncoding> {
 /// and merged-node modes obey the same durability contract.
 pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let checkpoint = data_dir.join("brain.bin");
+    let wbrain = data_dir.join("brain.wbrain");
     let identity = configured_identity(data_dir)?;
-    let mut brain = if checkpoint.exists() {
-        let mut encs: HashMap<PoolId, Box<dyn AtomEncoding>> = HashMap::new();
-        encs.insert(POOL_BINDING, leaked_encoding("bind"));
-        if let Some(spec) = &identity {
-            let registry = PoolPrototypeRegistry::with_defaults();
-            for pool in &spec.pools {
-                let encoding = registry
-                    .build(&pool.prototype, &pool.atom_encoding_prefix)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "unknown pool prototype '{}' while restoring pool {} ({})",
-                            pool.prototype,
-                            pool.id,
-                            pool.name
-                        )
-                    })?;
-                encs.insert(pool.id, encoding);
+    let mut brain = if wbrain.exists() {
+        match Brain::restore_wbrain(&wbrain, restore_encodings(identity.as_ref())?) {
+            Ok((_brain, missing)) if !missing.is_empty() => {
+                anyhow::bail!(
+                    "container {} requires encodings for missing pools {:?}; set W1Z4RD_BRAIN_IDENTITY",
+                    wbrain.display(),
+                    missing
+                );
             }
-        } else {
-            encs.insert(POOL_TEXT, leaked_encoding("t"));
-            encs.insert(POOL_IMAGE, leaked_encoding("i"));
-            encs.insert(POOL_AUDIO, leaked_encoding("a"));
-            encs.insert(POOL_ACTION, leaked_encoding("act"));
-            encs.insert(POOL_TURN, leaked_encoding("turn"));
+            Ok((brain, _missing)) => brain,
+            Err(error) => anyhow::bail!(
+                "neuron-addressable restore failed at {}: {}",
+                wbrain.display(),
+                error
+            ),
         }
-        match Brain::restore(&checkpoint, encs) {
+    } else if checkpoint.exists() {
+        match Brain::restore(&checkpoint, restore_encodings(identity.as_ref())?) {
             Ok((_brain, missing)) if !missing.is_empty() => {
                 anyhow::bail!(
                     "checkpoint {} requires encodings for missing pools {:?}; set W1Z4RD_BRAIN_IDENTITY to the brain's identity file",
@@ -401,6 +424,34 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
         }
     }
     Ok(brain)
+}
+
+/// Convert the existing checkpoint without deleting or replacing it. This is
+/// intentionally separate from normal startup so a large one-time legacy
+/// hydration can be scheduled and monitored explicitly.
+pub fn migrate_legacy_brain_container(data_dir: &Path) -> Result<usize> {
+    let legacy = data_dir.join("brain.bin");
+    let destination = data_dir.join("brain.wbrain");
+    if !legacy.is_file() {
+        anyhow::bail!("legacy checkpoint not found: {}", legacy.display());
+    }
+    if destination.exists() {
+        anyhow::bail!(
+            "refusing to overwrite existing container: {}",
+            destination.display()
+        );
+    }
+    let identity = configured_identity(data_dir)?;
+    let (serialized, missing) = Brain::migrate_legacy_checkpoint(
+        &legacy,
+        &destination,
+        restore_encodings(identity.as_ref())?,
+    )?;
+    if !missing.is_empty() {
+        let _ = std::fs::remove_file(&destination);
+        anyhow::bail!("migration missing encodings for pools {:?}", missing);
+    }
+    Ok(serialized)
 }
 
 /// Create the shared state used by the brain router.  Caller wraps

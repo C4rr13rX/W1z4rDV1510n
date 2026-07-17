@@ -1876,6 +1876,10 @@ impl Pool {
             .filter_map(|label| self.label_to_id.get(&label).copied())
             .collect();
         for &id in &fired {
+            if let Err(error) = self.ensure_loaded(id) {
+                tracing::warn!("prediction page-in failed for neuron {}: {}", id, error);
+                continue;
+            }
             self.activation.insert(id, 1.0);
             self.currently_firing.insert(id);
         }
@@ -1902,6 +1906,10 @@ impl Pool {
                     }
                 }
                 let Some((len, cid)) = matched else { break };
+                if let Err(error) = self.ensure_loaded(cid) {
+                    tracing::warn!("prediction concept page-in failed for {}: {}", cid, error);
+                    break;
+                }
                 stack.truncate(stack.len() - len);
                 stack.push(cid);
                 self.activation.insert(cid, 1.0);
@@ -2848,6 +2856,9 @@ impl Pool {
 
     fn ensure_atom(&mut self, label: String, tick: u64) -> NeuronId {
         if let Some(&id) = self.label_to_id.get(&label) {
+            if let Err(error) = self.ensure_loaded(id) {
+                tracing::warn!("training page-in failed for atom {}: {}", id, error);
+            }
             return id;
         }
         let id = self.neurons.len() as NeuronId;

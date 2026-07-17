@@ -34,5 +34,9 @@ void                 = "1.0"   # uninhabited type used by libp2p protocol event 
 name = "w1z4rd_brain_server"
 path = "src/bin/brain_server.rs"
 
+[[bin]]
+name = "w1z4rd_brain_migrate"
+path = "src/bin/brain_migrate.rs"
+
 [dev-dependencies]
 tempfile = "3.10"
