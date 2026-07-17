@@ -53,6 +53,14 @@ single-pool path as well as the existing multi-pool path. This implementation
 is pending executable verification because it was written while the host had
 less than 1 GiB available RAM.
 
+`decode_best_trained_binding_multi` now preserves the candidate IDs produced by
+its hydration phase and scores only those IDs. The hydration phase combines
+active-neuron terminals, exact sequence postings, feature-atom postings, and
+the eight narrowest motif lists, pages those bindings and their named member
+trees, and returns the routed set instead of discarding it. This removes the
+second inference-time whole-binding-pool scan and is also pending executable
+verification.
+
 ## Resident structures still violating the invariant
 
 1. `Pool.neurons: Vec<Neuron>` creates one full Rust object for every sleeping

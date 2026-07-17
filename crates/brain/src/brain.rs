@@ -3207,7 +3207,11 @@ impl Brain {
         if query_ids.is_empty() {
             return None;
         }
-        self.hydrate_active_binding_scope(&query_ids, target_pool);
+        let candidate_binding_ids =
+            self.hydrate_active_binding_scope(&query_ids, target_pool);
+        if candidate_binding_ids.is_empty() {
+            return None;
+        }
         let min_pool_score = std::env::var("BRAIN_MULTI_MIN_POOL_SCORE")
             .ok()
             .and_then(|value| value.parse::<f32>().ok())
@@ -3258,7 +3262,13 @@ impl Brain {
         let bindings = binding_handle.read();
         // binding id, exact-sequence pool count, joint score, target size
         let mut best: Option<(NeuronId, usize, f32, usize)> = None;
-        for binding in bindings.iter_neurons().filter(|n| !n.is_atom()) {
+        for binding_id in candidate_binding_ids {
+            let Some(binding) = bindings.get(binding_id) else {
+                continue;
+            };
+            if binding.is_atom() {
+                continue;
+            }
             let target_members: Vec<NeuronRef> = binding
                 .members
                 .iter()
@@ -3374,7 +3384,11 @@ impl Brain {
     /// Wake only bindings reachable from the active query atoms or their
     /// exact sequence index, then wake the member trees those bindings name.
     /// Sleeping placeholders outside this scope remain serialized.
-    fn hydrate_active_binding_scope(&mut self, query_pools: &[PoolId], target_pool: PoolId) {
+    fn hydrate_active_binding_scope(
+        &mut self,
+        query_pools: &[PoolId],
+        target_pool: PoolId,
+    ) -> Vec<NeuronId> {
         let mut binding_ids = ahash::AHashSet::new();
         for pool_id in query_pools {
             let Some(pool_handle) = self.fabric.pool(*pool_id) else {
@@ -3383,6 +3397,13 @@ impl Brain {
             let pool = pool_handle.read();
             for neuron_id in pool.currently_firing() {
                 if let Some(neuron) = pool.get(neuron_id) {
+                    if neuron.is_atom() {
+                        if let Some(ids) =
+                            self.binding_feature_atom_index.get(&(*pool_id, neuron_id))
+                        {
+                            binding_ids.extend(ids.iter().copied());
+                        }
+                    }
                     binding_ids.extend(
                         neuron
                             .terminals
@@ -3399,14 +3420,34 @@ impl Brain {
             {
                 binding_ids.extend(ids.iter().copied());
             }
+            let refs: Vec<NeuronRef> = pool
+                .last_observed_sequence()
+                .iter()
+                .map(|&neuron| NeuronRef {
+                    pool: *pool_id,
+                    neuron,
+                })
+                .collect();
+            let frame = pool.decode_concept_members(&refs);
+            let motifs = normalized_char_motifs(&frame);
+            let mut postings: Vec<&Vec<NeuronId>> = motifs
+                .iter()
+                .filter_map(|motif| self.binding_motif_index.get(&(*pool_id, *motif)))
+                .collect();
+            postings.sort_unstable_by_key(|ids| ids.len());
+            for ids in postings.into_iter().take(8) {
+                binding_ids.extend(ids.iter().copied());
+            }
         }
         let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) else {
-            return;
+            return Vec::new();
         };
+        let mut routed_ids: Vec<NeuronId> = binding_ids.into_iter().collect();
+        routed_ids.sort_unstable();
         let mut members_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         {
             let mut bindings = binding_handle.write();
-            for binding_id in binding_ids {
+            for &binding_id in &routed_ids {
                 if bindings.ensure_loaded(binding_id).is_err() {
                     continue;
                 }
@@ -3425,6 +3466,7 @@ impl Brain {
                 ensure_neuron_trees_loaded(&mut pool.write(), &roots);
             }
         }
+        routed_ids
     }
 
     /// Rank learned actions whose feature atoms are fully covered by a larger
