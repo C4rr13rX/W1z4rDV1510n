@@ -6203,6 +6203,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tower-http 0.5.2",
