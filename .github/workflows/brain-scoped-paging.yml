@@ -1,0 +1,41 @@
+name: Brain scoped paging
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/brain/**"
+      - "crates/node/src/brain_api.rs"
+      - "crates/node/src/bin/brain_migrate.rs"
+      - ".github/workflows/brain-scoped-paging.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brain-scoped-paging-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scoped-paging:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify streaming migration
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain streaming_migration --lib
+      - name: Verify sleeping concept payload release
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain sleeping_concept_releases_members_without_losing_identity --lib
+      - name: Verify scoped lazy recall
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain lazy_restore_pages_binding_scope_and_preserves_recall --lib
+      - name: Verify node migration stage recovery
+        shell: pwsh
+        run: cargo test -p w1z4rdv1510n-node completed_raw_migration_promotes_stale_raw_stage_without_reconversion
