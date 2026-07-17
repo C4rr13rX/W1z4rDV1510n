@@ -22,6 +22,7 @@
 *.bat
 *.ps1
 !scripts/monitor_migration_memory.ps1
+!scripts/resume_brain_migration_when_safe.ps1
 
 # ── Node / runtime config (generated per machine) ─────────────────────────────
 /node_config.json
