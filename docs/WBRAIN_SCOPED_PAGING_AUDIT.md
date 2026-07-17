@@ -49,17 +49,17 @@ edits.
 fallback. It unions exact sequence postings, flattened feature-atom postings,
 and the eight narrowest character-motif posting lists, then pages only those
 binding bodies before scoring. The lazy-restore fixture now exercises this
-single-pool path as well as the existing multi-pool path. This implementation
-is pending executable verification because it was written while the host had
-less than 1 GiB available RAM.
+single-pool path as well as the existing multi-pool path. GitHub Actions run
+`29616946268` passed the streaming migration, sleeping payload, scoped lazy
+recall, and node migration-stage recovery gates on Windows.
 
 `decode_best_trained_binding_multi` now preserves the candidate IDs produced by
 its hydration phase and scores only those IDs. The hydration phase combines
 active-neuron terminals, exact sequence postings, feature-atom postings, and
 the eight narrowest motif lists, pages those bindings and their named member
 trees, and returns the routed set instead of discarding it. This removes the
-second inference-time whole-binding-pool scan and is also pending executable
-verification.
+second inference-time whole-binding-pool scan. It is covered by the same
+successful scoped lazy-recall gate in run `29616946268`.
 
 ## Resident structures still violating the invariant
 
