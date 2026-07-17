@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
 use std::path::Path;
+use sysinfo::System;
 
 use crate::action::{ActionEvent, ActionId};
 use crate::neuron::{Neuron, NeuronId, PoolId};
@@ -22,6 +23,9 @@ use super::{
     default_pressure_band_high, default_pressure_band_low, default_pressure_observation_grace,
     default_pressure_threshold_max,
 };
+
+const MIGRATION_MIN_AVAILABLE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MEMORY_CHECK_INTERVAL: u64 = 16_384;
 
 fn read_value<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<T> {
     bincode::deserialize_from(reader)
@@ -61,8 +65,24 @@ fn stream_pool<R: Read>(
     let mut born_ticks = Vec::with_capacity(capacity);
     let mut concept_sequence_to_id = Vec::new();
     let mut total_terminals = 0usize;
+    let mut system = System::new();
 
     for expected_id in 0..neuron_count {
+        if expected_id % MEMORY_CHECK_INTERVAL == 0 {
+            system.refresh_memory();
+            let available = system.available_memory();
+            if available < MIGRATION_MIN_AVAILABLE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!(
+                        "streaming migration stopped at pool {} neuron {}: {:.2} GiB available is below the 4 GiB runtime floor",
+                        config.id,
+                        expected_id,
+                        available as f64 / 1024_f64.powi(3),
+                    ),
+                ));
+            }
+        }
         let neuron: Neuron = read_value(reader)?;
         if neuron.id as u64 != expected_id {
             return Err(io::Error::new(
