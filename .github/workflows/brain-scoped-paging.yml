@@ -39,3 +39,13 @@ jobs:
       - name: Verify node migration stage recovery
         shell: pwsh
         run: cargo test -p w1z4rdv1510n-node completed_raw_migration_promotes_stale_raw_stage_without_reconversion
+      - name: Build migration executable
+        shell: pwsh
+        run: cargo build -p w1z4rdv1510n-node --bin w1z4rd_brain_migrate
+      - name: Publish exact-commit migration executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: w1z4rd-brain-migrate-${{ github.sha }}
+          path: target/debug/w1z4rd_brain_migrate.exe
+          if-no-files-found: error
+          retention-days: 3
