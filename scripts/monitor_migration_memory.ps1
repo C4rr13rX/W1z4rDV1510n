@@ -5,6 +5,7 @@ param(
     [int]$TrimIntervalSeconds = 30,
     [int]$PauseAvailableMb = 4608,
     [int]$ResumeAvailableMb = 5120,
+    [int]$AbortPrivateMb = 8192,
     [string]$LogPath = ""
 )
 
@@ -60,6 +61,16 @@ try {
         $availableMb = (
             Get-Counter "\Memory\Available MBytes" -ErrorAction Stop
         ).CounterSamples[0].CookedValue
+        $privateMb = $process.PrivateMemorySize64 / 1MB
+        if ($AbortPrivateMb -gt 0 -and $privateMb -ge $AbortPrivateMb) {
+            if ($LogPath) {
+                $line = "{0:o} pid={1} state=aborted private_limit_mb={2:N0} working_set_mb={3:N0} private_mb={4:N0} available_mb={5:N0}" -f `
+                    $now, $migrationPid, $AbortPrivateMb, ($process.WorkingSet64 / 1MB), $privateMb, $availableMb
+                Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
+            }
+            Stop-Process -Id $migrationPid -Force
+            break
+        }
         $stateChanged = $false
         if (-not $suspended -and $availableMb -le $PauseAvailableMb) {
             $status = [WizardWorkingSet]::NtSuspendProcess($process.Handle)
@@ -82,8 +93,8 @@ try {
             $stateChanged -or ($now - $lastLog).TotalSeconds -ge 60
         )) {
             $state = if ($suspended) { "paused" } else { "running" }
-            $line = "{0:o} pid={1} state={2} working_set_mb={3:N0} available_mb={4:N0}" -f `
-                $now, $migrationPid, $state, ($process.WorkingSet64 / 1MB), $availableMb
+            $line = "{0:o} pid={1} state={2} working_set_mb={3:N0} private_mb={4:N0} available_mb={5:N0}" -f `
+                $now, $migrationPid, $state, ($process.WorkingSet64 / 1MB), $privateMb, $availableMb
             Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
             $lastLog = $now
         }
