@@ -26,20 +26,75 @@ use super::{
 
 const MIGRATION_MIN_AVAILABLE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MEMORY_CHECK_INTERVAL: u64 = 16_384;
+const DISCARD_BUFFER_BYTES: usize = 64 * 1024;
+const DISCARD_MEMORY_CHECK_BYTES: u64 = 64 * 1024 * 1024;
 
 fn read_value<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<T> {
     bincode::deserialize_from(reader)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn skip_bincode_string<R: Read>(reader: &mut R) -> io::Result<()> {
-    let byte_count: u64 = read_value(reader)?;
-    let copied = io::copy(&mut reader.take(byte_count), &mut io::sink())?;
-    if copied != byte_count {
+#[cfg(windows)]
+fn trim_unused_working_set() {
+    #[link(name = "psapi")]
+    unsafe extern "system" {
+        fn EmptyWorkingSet(process: *mut std::ffi::c_void) -> i32;
+    }
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    }
+
+    // This only evicts currently unused pages from this process's working set;
+    // live allocations remain addressable and are faulted back if needed.
+    unsafe {
+        EmptyWorkingSet(GetCurrentProcess());
+    }
+}
+
+#[cfg(not(windows))]
+fn trim_unused_working_set() {}
+
+fn require_memory_floor(system: &mut System, context: &str) -> io::Result<()> {
+    trim_unused_working_set();
+    system.refresh_memory();
+    let available = system.available_memory();
+    if available < MIGRATION_MIN_AVAILABLE_BYTES {
         return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            format!("legacy string declared {byte_count} bytes but only {copied} remained"),
+            io::ErrorKind::OutOfMemory,
+            format!(
+                "streaming migration stopped {context}: {:.2} GiB available is below the 4 GiB runtime floor",
+                available as f64 / 1024_f64.powi(3),
+            ),
         ));
+    }
+    Ok(())
+}
+
+fn skip_bincode_string<R: Read>(reader: &mut R, system: &mut System) -> io::Result<()> {
+    let byte_count: u64 = read_value(reader)?;
+    let mut remaining = byte_count;
+    let mut since_memory_check = 0_u64;
+    let mut buffer = [0_u8; DISCARD_BUFFER_BYTES];
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
+        reader.read_exact(&mut buffer[..requested]).map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "legacy string declared {byte_count} bytes but ended with {remaining} unread"
+                    ),
+                )
+            } else {
+                error
+            }
+        })?;
+        remaining -= requested as u64;
+        since_memory_check += requested as u64;
+        if since_memory_check >= DISCARD_MEMORY_CHECK_BYTES {
+            require_memory_floor(system, "while discarding legacy label bytes")?;
+            since_memory_check = 0;
+        }
     }
     Ok(())
 }
@@ -83,19 +138,10 @@ fn stream_pool<R: Read>(
 
     for expected_id in 0..neuron_count {
         if expected_id % MEMORY_CHECK_INTERVAL == 0 {
-            system.refresh_memory();
-            let available = system.available_memory();
-            if available < MIGRATION_MIN_AVAILABLE_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
-                    format!(
-                        "streaming migration stopped at pool {} neuron {}: {:.2} GiB available is below the 4 GiB runtime floor",
-                        config.id,
-                        expected_id,
-                        available as f64 / 1024_f64.powi(3),
-                    ),
-                ));
-            }
+            require_memory_floor(
+                &mut system,
+                &format!("at pool {} neuron {}", config.id, expected_id),
+            )?;
         }
         let neuron: Neuron = read_value(reader)?;
         if neuron.id as u64 != expected_id {
@@ -127,9 +173,13 @@ fn stream_pool<R: Read>(
 
     let label_count: u64 = read_value(reader)?;
     for _ in 0..label_count {
-        skip_bincode_string(reader)?;
+        skip_bincode_string(reader, &mut system)?;
         let _: NeuronId = read_value(reader)?;
     }
+    require_memory_floor(
+        &mut system,
+        &format!("after discarding pool {} legacy labels", config.id),
+    )?;
     let recent_atoms: VecDeque<NeuronId> = read_value(reader)?;
     let sequences: Vec<(Vec<NeuronId>, u32)> = read_value(reader)?;
     let cold_offsets: Vec<(NeuronId, u64)> = read_value(reader)?;
@@ -189,13 +239,7 @@ pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usiz
     let legacy_dir = legacy_path.parent().unwrap_or_else(|| Path::new("."));
     for _ in 0..pool_count {
         let pool_id: PoolId = read_value(&mut reader)?;
-        stream_pool(
-            &mut reader,
-            legacy_dir,
-            &file,
-            pool_id,
-            binding_pool_id,
-        )?;
+        stream_pool(&mut reader, legacy_dir, &file, pool_id, binding_pool_id)?;
     }
 
     let eem: EemSnapshot = read_value(&mut reader)?;
