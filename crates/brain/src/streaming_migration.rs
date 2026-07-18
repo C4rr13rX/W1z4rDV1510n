@@ -828,13 +828,13 @@ mod tests {
         let (restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
         assert!(missing.is_empty());
         let pool = restored.fabric().pool(10).unwrap();
-        let before = pool.read().iter_neurons().count();
+        let before = pool.read().neuron_count();
         let resolved = pool
             .write()
             .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 3);
         assert_eq!(resolved, vec![original_id]);
         assert_eq!(
-            pool.read().iter_neurons().count(),
+            pool.read().neuron_count(),
             before,
             "lookup must not duplicate concept"
         );

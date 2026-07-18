@@ -71,18 +71,25 @@ constructs a whole-pool concept set. The lazy restore fixture sleeps the entire
 brain independently before confidence matching and grounded integration to
 prove both paths can restore the trained binding without a binding-pool scan.
 
+### Neuron body slots
+
+`Pool.neurons` now uses stable nullable body slots. A dense legacy brain stores
+one boxed `Neuron` per occupied ID; an idle `.wbrain` pool stores `None` at
+every sleeping ID and allocates a body only after `ensure_loaded(id)` reads
+that exact record. Returning to idle persists and drops the box rather than
+retaining a zeroed `Neuron` sentinel. Compact kind, concept-identity, and birth
+metadata remain separate from the body so counts and routing do not require
+hydration.
+
 ## Resident structures still violating the invariant
 
-1. `Pool.neurons: Vec<Neuron>` creates one full Rust object for every sleeping
-   ID. Terminal and member heaps can now be released, but the fixed object
-   remains.
-2. `PoolContainerManifest.neuron_offsets: Vec<Option<u64>>` hydrates the entire
+1. `PoolContainerManifest.neuron_offsets: Vec<Option<u64>>` hydrates the entire
    address table.
-3. `WbrainPoolMetadata.neuron_kinds`, `concept_slots`, and `born_ticks` hydrate
+2. `WbrainPoolMetadata.neuron_kinds`, `concept_slots`, and `born_ticks` hydrate
    parallel full-pool vectors.
-4. `Brain.binding_sequence_index`, `binding_feature_atom_index`, and
+3. `Brain.binding_sequence_index`, `binding_feature_atom_index`, and
    `binding_motif_index` are rebuilt and restored as complete resident maps.
-5. Several inference paths still use whole-binding-pool scans when an exact
+4. Several inference paths still use whole-binding-pool scans when an exact
    index key is absent.
 
 ## Implementation order
@@ -92,8 +99,9 @@ prove both paths can restore the trained binding without a binding-pool scan.
    preferable to waking an unrelated entire brain.
 2. Move the three binding indexes into `.wbrain` disk hash records with compact
    root directories and request-local result vectors.
-3. Replace `Vec<Neuron>` with stable compact slots plus a resident-neuron map.
-   `ensure_loaded(id)` inserts one body; idle serialization removes it.
+3. Replace `Vec<Neuron>` with stable compact slots plus request-scoped resident
+   bodies. `ensure_loaded(id)` inserts one body; idle serialization removes it.
+   **Implemented; remote persistence and inference gates pending.**
 4. Move offset and kind/concept/born metadata to paged fixed-width tables.
 5. Convert diagnostic APIs to bounded cursor streams.
 6. Run cold/warm latency, bytes-read, awakened-neuron, peak-RAM, and

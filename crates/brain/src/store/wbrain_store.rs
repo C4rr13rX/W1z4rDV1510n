@@ -527,9 +527,10 @@ mod tests {
         assert!(!pool.get(concept).unwrap().members.is_empty());
 
         pool.serialize_all_neurons_for_idle().unwrap();
-        let asleep = pool.get(concept).unwrap();
-        assert!(!asleep.is_atom());
-        assert!(asleep.members.is_empty());
+        assert!(
+            pool.get(concept).is_none(),
+            "a sleeping neuron must not retain an in-memory sentinel body"
+        );
 
         pool.ensure_loaded(concept).unwrap();
         assert!(!pool.get(concept).unwrap().is_atom());

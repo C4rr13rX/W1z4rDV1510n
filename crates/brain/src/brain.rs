@@ -887,7 +887,7 @@ impl Brain {
             .filter_map(|pid| self.fabric.pool(pid))
             .map(|p| {
                 let r = p.read();
-                r.iter_neurons().filter(|n| !n.is_atom()).count()
+                r.concept_count()
             })
             .sum();
         let locked = self.locked_terminal_count();
