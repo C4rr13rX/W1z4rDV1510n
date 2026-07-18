@@ -4244,7 +4244,7 @@ impl Brain {
         //                              ARCHITECTURE.md, these are
         //                              concept-LAYER evidence not
         //                              atom-LAYER noise)
-        let (firing_concepts, firing_atoms, concept_member_atoms, firing_total) = {
+        let (firing_concepts, concept_member_atoms, firing_total) = {
             let qp = match self.fabric.pool(query_pool) {
                 Some(p) => p,
                 None => return BindingMatch::NONE,
@@ -4277,12 +4277,7 @@ impl Brain {
                     }
                 }
             }
-            (
-                firing_concepts,
-                firing_atoms,
-                concept_member_atoms,
-                firing.len(),
-            )
+            (firing_concepts, concept_member_atoms, firing.len())
         };
 
         if firing_concepts.is_empty() || firing_total == 0 {

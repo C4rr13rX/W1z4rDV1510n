@@ -839,7 +839,9 @@ mod tests {
                 Box::new(BytePassthroughEncoding { prefix: "n".into() }),
             );
             brain.observe(5, b"unrelated-neurons");
-            for _ in 0..2 {
+            // The first episode creates the binding; two subsequent
+            // reinforcements satisfy integrate()'s trained-pathway gate.
+            for _ in 0..3 {
                 assert!(
                     brain
                         .pretrain_binding_episode(
