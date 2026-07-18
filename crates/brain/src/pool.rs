@@ -78,10 +78,6 @@ impl NeuronSlots {
         self.slots.len()
     }
 
-    fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
     fn resident_count(&self) -> usize {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
@@ -2099,6 +2095,9 @@ impl Pool {
     }
     pub fn concept_count(&self) -> usize {
         self.neurons.concept_count()
+    }
+    pub(crate) fn concept_ids(&self) -> impl Iterator<Item = NeuronId> + '_ {
+        self.neurons.concept_ids()
     }
     /// Number of neuron slots (including evicted ones whose terminals
     /// have been shed).  Tier orchestrator uses this for round-robin

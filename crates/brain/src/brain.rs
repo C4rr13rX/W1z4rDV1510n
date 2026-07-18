@@ -1768,12 +1768,7 @@ impl Brain {
         let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) else {
             return Ok(0);
         };
-        let binding_ids: Vec<NeuronId> = binding_pool
-            .read()
-            .iter_neurons()
-            .filter(|neuron| !neuron.is_atom())
-            .map(|neuron| neuron.id)
-            .collect();
+        let binding_ids: Vec<NeuronId> = binding_pool.read().concept_ids().collect();
 
         for &binding_id in &binding_ids {
             let members = {

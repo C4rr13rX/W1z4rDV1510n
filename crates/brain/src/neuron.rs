@@ -284,17 +284,6 @@ impl Neuron {
         !self.concept_identity && self.members.is_empty()
     }
 
-    /// Release concept membership after its complete body is durable. The
-    /// identity bit keeps atom/concept routing correct until page-in restores
-    /// the exact member sequence.
-    pub(crate) fn release_members_for_sleep(&mut self) {
-        if !self.members.is_empty() {
-            self.concept_identity = true;
-            self.members.clear();
-            self.members.shrink_to_fit();
-        }
-    }
-
     /// True for binding concepts (members span more than one pool).  This
     /// distinguishes within-pool hierarchical concepts from cross-pool
     /// bindings using the same struct.
