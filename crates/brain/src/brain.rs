@@ -3152,9 +3152,6 @@ impl Brain {
 
         let (bnid, winning_score, _, _, _) = best?;
         let bnode = bp_read.get(bnid)?;
-        // Decode the binding's target-pool members.
-        let target_handle = self.fabric.pool(target_pool)?;
-        let t = target_handle.read();
         // A promoted binding can contain both the ordered target atoms and
         // concepts that collapsed from those same atoms in the training
         // moment.  Recursively decoding both serializes the leaves twice
@@ -3171,6 +3168,21 @@ impl Brain {
         if target_members.is_empty() {
             return None;
         }
+        // Keep the winner's complete participation set before releasing the
+        // binding-pool read lock. Target bodies are independently asleep and
+        // must be paged by the exact member IDs named by this binding.
+        let all_winner_members: Vec<NeuronRef> = bnode.members.clone();
+        drop(bp_read);
+
+        let target_handle = self.fabric.pool(target_pool)?;
+        {
+            let roots: Vec<NeuronId> = target_members
+                .iter()
+                .map(|member| member.neuron)
+                .collect();
+            ensure_neuron_trees_loaded(&mut target_handle.write(), &roots);
+        }
+        let t = target_handle.read();
         let target_atoms: Vec<NeuronRef> = target_members
             .iter()
             .filter(|m| t.get(m.neuron).is_some_and(|n| n.is_atom()))
@@ -3185,9 +3197,7 @@ impl Brain {
         // every pool, not just target).  These are the neurons that
         // participated in this successful decode and should receive the
         // reward-modulated salience bump.
-        let all_winner_members: Vec<NeuronRef> = bnode.members.clone();
         drop(t);
-        drop(bp_read);
 
         // Feedback: record this decode's score into the query pool's
         // decode_precision_ema so DecodePrecisionEma ControlSignal
