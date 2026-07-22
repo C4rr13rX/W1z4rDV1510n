@@ -135,6 +135,49 @@ reopen, old-and-new concept deduplication, and a recurrence whose first
 observation occurs before sleep and whose second observation promotes the
 concept after reopen.
 
+Full-scale version-4 migration then exposed the next fixed-state violation
+after every neuron pool had finished streaming. The generated container had
+reached 14,284,366,402 bytes while the migration worker stayed near 6--9 MiB
+private memory during ordinary pool streaming. It crossed and published every
+durable pool boundary. After the final pool, private memory rose above 3 GiB
+without further destination growth. Stage-level source-position diagnostics
+isolated the growth to legacy tentative-fingerprint deserialization at source
+byte 8,721,657,890; the serialized vector contains 403,535 fingerprints. The
+equation environment, annealer history, moment history, binding recurrence,
+and promoted-fingerprint fields had already completed. The worker was stopped
+without deleting the published pool manifests or modifying the
+13,648,877,763-byte source checkpoint.
+
+Fingerprint lifetime counts and tentative/consolidated binding identities now
+use immutable POST generations in the existing version-4 auxiliary directory.
+Migration reads and decodes one legacy fingerprint at a time and writes it
+directly to the posting builder, so neither the 403,535-entry tentative tier
+nor the lifetime map becomes a resident `Vec` or `HashMap`. Current training
+and promotion queries use an encoded identity made from the sorted pool/neuron
+pairs plus per-pool firing order. Legacy bincode snapshots predate order
+persistence, so migrated records retain their canonical pair identity with an
+explicit empty-order suffix. A live ordered episode first checks its full key
+and then that legacy key, combining the preserved count or binding identity
+without conflating two newly learned temporal sequences. Scalar tier counts
+are stored separately so pressure control and statistics do not hydrate keys.
+Live changes remain in a small overlay and are flushed and cleared at idle.
+
+Failure-feedback maintenance also remains bounded: `force_promote_tentative`
+sequentially scans only lifetime-prefixed records, decodes one key, and either
+promotes or discards it before reading the next. Newest generations are read
+first and disk-backed tier lookups make older duplicate generations
+idempotent. It does not invent temporal order for a pair-only legacy lifetime
+record; that count participates when the next real ordered episode arrives. A
+migration regression proves zero resident fingerprint entries, stable binding
+identity through live learning and reopen, and exact recall. A second
+regression proves that a lifetime recurrence in the current `.wbrain` format
+can promote from disk, cannot promote twice, and returns to zero resident
+fingerprint entries after sleep. A third proves that a pair-only migrated
+count joins the next fully ordered live episode and produces correct target
+recall. The full brain suite passes 76 tests and every node target passes after
+this change. The resumed full-scale migration remains the final empirical
+peak-memory gate for this field.
+
 ## Resident structures still violating the invariant
 
 1. A feature shared by an extreme number of bindings can still produce a large
@@ -162,8 +205,10 @@ concept after reopen.
    **Implemented in container version 2.**
 5. Move historical labels to disk and preserve post-migration neurogenesis.
    **Implemented in container version 3.**
-6. Convert diagnostic APIs to bounded cursor streams.
-7. Run cold/warm latency, bytes-read, awakened-neuron, peak-RAM, and
+6. Move fingerprint recurrence and promotion state to disk without changing
+   the version-4 format. **Implemented; full-scale continuation pending.**
+7. Convert diagnostic APIs to bounded cursor streams.
+8. Run cold/warm latency, bytes-read, awakened-neuron, peak-RAM, and
    return-to-sleep gates before resuming corpus training.
 
 ## Admission rule

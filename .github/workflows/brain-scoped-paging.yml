@@ -39,6 +39,15 @@ jobs:
       - name: Verify recurrence survives sleep without resident ledger
         shell: pwsh
         run: cargo test -p w1z4rd-brain sequence_recurrence_crosses_sleep_without_a_resident_ledger --lib
+      - name: Verify fingerprint state migrates and remains disk paged
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain streaming_migration_rebuilds_binding_indexes_with_bounded_working_set --lib
+      - name: Verify historical recurrence promotes without map hydration
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain paged_lifetime_recurrence_can_force_promote_without_rehydrating_map --lib
+      - name: Verify migrated pair history joins ordered live experience
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain migrated_pair_only_recurrence_joins_next_ordered_episode --lib
       - name: Verify scoped lazy recall
         shell: pwsh
         run: cargo test -p w1z4rd-brain lazy_restore_pages_binding_scope_and_preserves_recall --lib

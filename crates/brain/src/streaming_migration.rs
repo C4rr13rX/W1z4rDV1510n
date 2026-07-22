@@ -15,14 +15,17 @@ use crate::action::{ActionEvent, ActionId};
 use crate::neuron::{Neuron, NeuronId, PoolId};
 use crate::persistence::{AnnealerSnapshot, EemSnapshot, SerializableFingerprint};
 use crate::pool::{Pool, PoolConfig, StreamedPoolMetadata};
+use crate::store::posting_index::PostingIndexBuilder;
 use crate::store::wbrain_store::{LABEL_INDEX_HEADER_BYTES, LABEL_INDEX_KIND, LABEL_INDEX_MAGIC};
 use crate::store::{AuxiliaryRecordRef, ColdTier, NeuronStore, WbrainFile};
 
 use super::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
 use super::{
-    BrainConfig, default_min_atom_score, default_pressure_adjust_enabled,
+    BrainConfig, FINGERPRINT_LIFETIME_KEY, FINGERPRINT_PROMOTED_COUNT_KEY,
+    FINGERPRINT_PROMOTED_KEY, FINGERPRINT_STATE_MARKER_KEY, FINGERPRINT_TENTATIVE_COUNT_KEY,
+    FINGERPRINT_TENTATIVE_KEY, default_min_atom_score, default_pressure_adjust_enabled,
     default_pressure_band_high, default_pressure_band_low, default_pressure_observation_grace,
-    default_pressure_threshold_max,
+    default_pressure_threshold_max, encode_fingerprint_posting_key,
 };
 
 const MIGRATION_MIN_AVAILABLE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -47,6 +50,54 @@ struct MigrationProgress {
 fn read_value<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<T> {
     bincode::deserialize_from(reader)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn read_legacy_fingerprint<R: Read>(reader: &mut R) -> io::Result<SerializableFingerprint> {
+    let pair_count: u64 = read_value(reader)?;
+    let capacity = usize::try_from(pair_count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy fingerprint pair count exceeds address space",
+        )
+    })?;
+    let mut pairs = Vec::new();
+    pairs.try_reserve_exact(capacity).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            format!("cannot allocate one legacy fingerprint with {pair_count} pairs: {error}"),
+        )
+    })?;
+    for _ in 0..pair_count {
+        let pool: PoolId = read_value(reader)?;
+        let neuron: NeuronId = read_value(reader)?;
+        pairs.push((pool, neuron));
+    }
+    Ok(SerializableFingerprint { pairs })
+}
+
+fn stream_fingerprint_values<R: Read>(
+    reader: &mut R,
+    builder: &mut PostingIndexBuilder,
+    kind: u8,
+    count: u64,
+    context: &str,
+) -> io::Result<()> {
+    let mut system = System::new();
+    for index in 0..count {
+        if index % MEMORY_CHECK_INTERVAL == 0 {
+            require_memory_floor(
+                &mut system,
+                &format!("while streaming {context} entry {index} of {count}"),
+            )?;
+        }
+        let fingerprint = read_legacy_fingerprint(reader)?;
+        let value: u32 = read_value(reader)?;
+        builder.insert(
+            &encode_fingerprint_posting_key(kind, &fingerprint.pairs, &[]),
+            value,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -643,13 +694,108 @@ pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usiz
         file.commit_manifest()?;
     }
 
-    let eem: EemSnapshot = read_value(&mut reader)?;
-    let annealer: AnnealerSnapshot = read_value(&mut reader)?;
-    let moment_history: VecDeque<SerializableFingerprint> = read_value(&mut reader)?;
-    let binding_recurrences: Vec<(SerializableFingerprint, u32)> = read_value(&mut reader)?;
-    let promoted_fingerprints: Vec<(SerializableFingerprint, NeuronId)> = read_value(&mut reader)?;
-    let tentative_promoted: Vec<(SerializableFingerprint, NeuronId)> = read_value(&mut reader)?;
-    let lifetime_recurrences: Vec<(SerializableFingerprint, u32)> = read_value(&mut reader)?;
+    macro_rules! read_brain_state {
+        ($label:literal, $ty:ty) => {{
+            eprintln!(
+                "streaming migration: reading {} at source byte {}",
+                $label,
+                reader.stream_position()?
+            );
+            let value: $ty = read_value(&mut reader)?;
+            eprintln!(
+                "streaming migration: completed {} at source byte {}",
+                $label,
+                reader.stream_position()?
+            );
+            value
+        }};
+    }
+    let eem = read_brain_state!("equation environment", EemSnapshot);
+    let annealer = read_brain_state!("annealer history", AnnealerSnapshot);
+    let moment_history = read_brain_state!("moment history", VecDeque<SerializableFingerprint>);
+    let binding_recurrences = read_brain_state!(
+        "binding recurrence map",
+        Vec<(SerializableFingerprint, u32)>
+    );
+    let promoted_fingerprints = read_brain_state!(
+        "promoted fingerprint map",
+        Vec<(SerializableFingerprint, NeuronId)>
+    );
+    eprintln!(
+        "streaming migration: reading tentative fingerprint map at source byte {}",
+        reader.stream_position()?
+    );
+    let tentative_count: u64 = read_value(&mut reader)?;
+    let tier_entry_count = tentative_count
+        .saturating_add(promoted_fingerprints.len() as u64)
+        .saturating_add(3);
+    let mut fingerprint_indexes = Vec::new();
+    if tentative_count > 0 || !promoted_fingerprints.is_empty() {
+        let mut tier_builder =
+            PostingIndexBuilder::create(legacy_dir, binding_pool_id, tier_entry_count)?;
+        tier_builder.insert(FINGERPRINT_STATE_MARKER_KEY, 1)?;
+        tier_builder.insert(
+            FINGERPRINT_TENTATIVE_COUNT_KEY,
+            u32::try_from(tentative_count).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "tentative fingerprint count exceeds u32",
+                )
+            })?,
+        )?;
+        tier_builder.insert(
+            FINGERPRINT_PROMOTED_COUNT_KEY,
+            u32::try_from(promoted_fingerprints.len()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "promoted fingerprint count exceeds u32",
+                )
+            })?,
+        )?;
+        for (fingerprint, id) in &promoted_fingerprints {
+            tier_builder.insert(
+                &encode_fingerprint_posting_key(FINGERPRINT_PROMOTED_KEY, &fingerprint.pairs, &[]),
+                *id,
+            )?;
+        }
+        stream_fingerprint_values(
+            &mut reader,
+            &mut tier_builder,
+            FINGERPRINT_TENTATIVE_KEY,
+            tentative_count,
+            "tentative fingerprints",
+        )?;
+        fingerprint_indexes.push(tier_builder.finish(&file, binding_pool_id)?);
+    }
+    eprintln!(
+        "streaming migration: completed tentative fingerprint map at source byte {}",
+        reader.stream_position()?
+    );
+    eprintln!(
+        "streaming migration: reading lifetime recurrence map at source byte {}",
+        reader.stream_position()?
+    );
+    let lifetime_count: u64 = read_value(&mut reader)?;
+    if lifetime_count > 0 {
+        let mut lifetime_builder = PostingIndexBuilder::create(
+            legacy_dir,
+            binding_pool_id,
+            lifetime_count.saturating_add(1),
+        )?;
+        lifetime_builder.insert(FINGERPRINT_STATE_MARKER_KEY, 1)?;
+        stream_fingerprint_values(
+            &mut reader,
+            &mut lifetime_builder,
+            FINGERPRINT_LIFETIME_KEY,
+            lifetime_count,
+            "lifetime recurrences",
+        )?;
+        fingerprint_indexes.push(lifetime_builder.finish(&file, binding_pool_id)?);
+    }
+    eprintln!(
+        "streaming migration: completed lifetime recurrence map at source byte {}",
+        reader.stream_position()?
+    );
     let current_threshold: u32 = read_value(&mut reader)?;
     let total_observations: u64 = read_value(&mut reader)?;
     let action_pool_id: Option<PoolId> = read_value(&mut reader)?;
@@ -679,22 +825,13 @@ pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usiz
             .into_iter()
             .map(|(fingerprint, count)| (persisted(fingerprint), count))
             .collect(),
-        lifetime_recurrences: lifetime_recurrences
-            .into_iter()
-            .map(|(fingerprint, count)| (persisted(fingerprint), count))
-            .collect(),
-        tentative_promoted: tentative_promoted
-            .into_iter()
-            .map(|(fingerprint, id)| (persisted(fingerprint), id))
-            .collect(),
-        promoted_fingerprints: promoted_fingerprints
-            .into_iter()
-            .map(|(fingerprint, id)| (persisted(fingerprint), id))
-            .collect(),
+        lifetime_recurrences: Vec::new(),
+        tentative_promoted: Vec::new(),
+        promoted_fingerprints: Vec::new(),
         binding_sequence_index: Vec::new(),
         binding_feature_atom_index: Vec::new(),
         binding_motif_index: Vec::new(),
-        binding_posting_indexes: Vec::new(),
+        binding_posting_indexes: fingerprint_indexes,
         total_observations,
         current_threshold,
         last_pressure_check_obs: total_observations,

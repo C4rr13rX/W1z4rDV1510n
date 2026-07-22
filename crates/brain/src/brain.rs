@@ -67,6 +67,89 @@ enum BindingPostingKey {
     Motif(PoolId, [u8; 3]),
 }
 
+pub(crate) const FINGERPRINT_LIFETIME_KEY: u8 = 16;
+pub(crate) const FINGERPRINT_TENTATIVE_KEY: u8 = 17;
+pub(crate) const FINGERPRINT_PROMOTED_KEY: u8 = 18;
+pub(crate) const FINGERPRINT_TENTATIVE_COUNT_KEY: &[u8] = &[19];
+pub(crate) const FINGERPRINT_PROMOTED_COUNT_KEY: &[u8] = &[20];
+pub(crate) const FINGERPRINT_STATE_MARKER_KEY: &[u8] = &[21];
+
+pub(crate) fn encode_fingerprint_posting_key(
+    kind: u8,
+    pairs: &[(PoolId, NeuronId)],
+    ordered_per_pool: &[(PoolId, Vec<NeuronId>)],
+) -> Vec<u8> {
+    let pair_bytes = pairs.len().saturating_mul(8);
+    let ordered_bytes = ordered_per_pool.iter().fold(0usize, |total, (_, ids)| {
+        total
+            .saturating_add(8)
+            .saturating_add(ids.len().saturating_mul(4))
+    });
+    let mut out = Vec::with_capacity(
+        1usize
+            .saturating_add(4)
+            .saturating_add(pair_bytes)
+            .saturating_add(4)
+            .saturating_add(ordered_bytes),
+    );
+    out.push(kind);
+    out.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+    for (pool, neuron) in pairs {
+        out.extend_from_slice(&pool.to_le_bytes());
+        out.extend_from_slice(&neuron.to_le_bytes());
+    }
+    out.extend_from_slice(&(ordered_per_pool.len() as u32).to_le_bytes());
+    for (pool, ids) in ordered_per_pool {
+        out.extend_from_slice(&pool.to_le_bytes());
+        out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+        for id in ids {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+    }
+    out
+}
+
+fn decode_fingerprint_posting_key(key: &[u8], expected_kind: u8) -> Option<MomentFingerprint> {
+    fn take_u32(key: &[u8], at: &mut usize) -> Option<u32> {
+        let end = at.checked_add(4)?;
+        let value = u32::from_le_bytes(key.get(*at..end)?.try_into().ok()?);
+        *at = end;
+        Some(value)
+    }
+
+    if key.first().copied()? != expected_kind {
+        return None;
+    }
+    let mut at = 1usize;
+    let pair_count = usize::try_from(take_u32(key, &mut at)?).ok()?;
+    let mut pairs = Vec::new();
+    pairs.try_reserve_exact(pair_count).ok()?;
+    for _ in 0..pair_count {
+        pairs.push((take_u32(key, &mut at)?, take_u32(key, &mut at)?));
+    }
+    let pool_count = usize::try_from(take_u32(key, &mut at)?).ok()?;
+    let mut ordered_per_pool = Vec::new();
+    ordered_per_pool.try_reserve_exact(pool_count).ok()?;
+    for _ in 0..pool_count {
+        let pool = take_u32(key, &mut at)?;
+        let id_count = usize::try_from(take_u32(key, &mut at)?).ok()?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(id_count).ok()?;
+        for _ in 0..id_count {
+            ids.push(take_u32(key, &mut at)?);
+        }
+        ordered_per_pool.push((pool, ids));
+    }
+    if at != key.len() {
+        return None;
+    }
+    Some(MomentFingerprint {
+        pairs,
+        members_per_pool: ordered_per_pool.clone(),
+        ordered_per_pool,
+    })
+}
+
 impl BindingPostingKey {
     fn encode(&self) -> Vec<u8> {
         match self {
@@ -619,6 +702,11 @@ pub struct Brain {
     /// "Consolidated" tier promotion — these have an EEM grounded
     /// fact and have been gossiped to peers.
     promoted_fingerprints: AHashMap<MomentFingerprint, NeuronId>,
+    /// Persisted tier cardinalities include disk generations plus the live
+    /// overlay. They keep pressure/statistics exact without hydrating every
+    /// historical fingerprint key.
+    tentative_binding_count_total: usize,
+    consolidated_binding_count_total: usize,
     /// Exact ordered-sequence retrieval index.  Trained prompt lookup used
     /// to scan every binding and every member on each decode, making latency
     /// grow linearly with the curriculum.  This derived (non-persisted) index
@@ -835,6 +923,8 @@ impl Brain {
             lifetime_recurrences: AHashMap::new(),
             tentative_promoted: AHashMap::new(),
             promoted_fingerprints: AHashMap::new(),
+            tentative_binding_count_total: 0,
+            consolidated_binding_count_total: 0,
             binding_sequence_index: AHashMap::new(),
             binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
@@ -1217,17 +1307,9 @@ impl Brain {
         }
         let fingerprint = MomentFingerprint::from_fabric_moment(&fired)?;
         self.total_observations = self.total_observations.saturating_add(1);
-        let count = self
-            .lifetime_recurrences
-            .entry(fingerprint.clone())
-            .or_insert(0);
-        *count = count.saturating_add(1);
+        self.increment_lifetime_recurrence(&fingerprint);
 
-        let existing = self
-            .promoted_fingerprints
-            .get(&fingerprint)
-            .copied()
-            .or_else(|| self.tentative_promoted.get(&fingerprint).copied());
+        let existing = self.existing_binding_id(&fingerprint);
         let id = if let Some(id) = existing {
             if let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) {
                 if let Some(neuron) = binding_pool.write().get_mut(id) {
@@ -1239,6 +1321,8 @@ impl Brain {
         } else {
             let id = self.promote_binding_concept(&fingerprint)?;
             self.tentative_promoted.insert(fingerprint, id);
+            self.tentative_binding_count_total =
+                self.tentative_binding_count_total.saturating_add(1);
             id
         };
 
@@ -1406,9 +1490,7 @@ impl Brain {
         *win_count = win_count.saturating_add(1);
         let windowed = *win_count;
 
-        let life_count = self.lifetime_recurrences.entry(fp.clone()).or_insert(0);
-        *life_count = life_count.saturating_add(1);
-        let lifetime = *life_count;
+        let lifetime = self.increment_lifetime_recurrence(&fp);
 
         self.total_observations = self.total_observations.saturating_add(1);
 
@@ -1421,11 +1503,7 @@ impl Brain {
         // times).  Without this, all bindings score by atom precision
         // (uniformly 1.0 for full overlap) and the decoder's smaller-
         // target-count tiebreak arbitrarily picks shorter category names.
-        let existing_bid: Option<NeuronId> = self
-            .promoted_fingerprints
-            .get(&fp)
-            .copied()
-            .or_else(|| self.tentative_promoted.get(&fp).copied());
+        let existing_bid = self.existing_binding_id(&fp);
         if let Some(bid) = existing_bid {
             let now = self.fabric.current_tick();
             if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
@@ -1449,8 +1527,8 @@ impl Brain {
 
         let tentative_thr = self.config.tentative_emergence_threshold;
         let consolidated_thr = self.current_threshold;
-        let already_tentative = self.tentative_promoted.contains_key(&fp);
-        let already_consolidated = self.promoted_fingerprints.contains_key(&fp);
+        let already_tentative = self.tentative_binding_id(&fp).is_some();
+        let already_consolidated = self.promoted_binding_id(&fp).is_some();
 
         // Tier 1: tentative promotion.  Cheap — creates a binding
         // neuron in the binding pool but no EEM fact and no gossip.
@@ -1463,6 +1541,8 @@ impl Brain {
         {
             if let Some(id) = self.promote_binding_concept(&fp) {
                 self.tentative_promoted.insert(fp.clone(), id);
+                self.tentative_binding_count_total =
+                    self.tentative_binding_count_total.saturating_add(1);
             }
         }
 
@@ -1470,7 +1550,10 @@ impl Brain {
         // fact and gossips the motif.  Upgrades the tentative-tier
         // binding (reuses its neuron id) when one exists.
         if !already_consolidated && effective_count >= consolidated_thr {
-            let upgrade_id = self.tentative_promoted.remove(&fp);
+            let upgrade_id = self
+                .tentative_promoted
+                .remove(&fp)
+                .or_else(|| self.fingerprint_scalar(FINGERPRINT_TENTATIVE_KEY, &fp));
             let id = match upgrade_id {
                 Some(id) => Some(id),
                 None => self.promote_binding_concept(&fp),
@@ -1486,6 +1569,12 @@ impl Brain {
                 });
                 self.eem.register_fact(id, fp.pairs.clone());
                 self.promoted_fingerprints.insert(fp, id);
+                if upgrade_id.is_some() {
+                    self.tentative_binding_count_total =
+                        self.tentative_binding_count_total.saturating_sub(1);
+                }
+                self.consolidated_binding_count_total =
+                    self.consolidated_binding_count_total.saturating_add(1);
             }
         }
 
@@ -1511,7 +1600,8 @@ impl Brain {
         if self.total_observations == 0 {
             return 0.0;
         }
-        let total_bindings = self.tentative_promoted.len() + self.promoted_fingerprints.len();
+        let total_bindings =
+            self.tentative_binding_count_total + self.consolidated_binding_count_total;
         (total_bindings as f32) / (self.total_observations as f32)
     }
 
@@ -1548,8 +1638,7 @@ impl Brain {
             .iter()
             .filter(|&(_, c)| *c >= min_count)
             .filter(|&(fp, _)| {
-                !self.tentative_promoted.contains_key(fp)
-                    && !self.promoted_fingerprints.contains_key(fp)
+                self.tentative_binding_id(fp).is_none() && self.promoted_binding_id(fp).is_none()
             })
             .map(|(fp, _)| fp.clone())
             .collect();
@@ -1557,7 +1646,61 @@ impl Brain {
         for fp in candidates {
             if let Some(id) = self.promote_binding_concept(&fp) {
                 self.tentative_promoted.insert(fp, id);
+                self.tentative_binding_count_total =
+                    self.tentative_binding_count_total.saturating_add(1);
                 out.push(id);
+            }
+        }
+
+        // Historical recurrence state is paged. Scan one immutable posting
+        // generation and one fingerprint key at a time instead of hydrating
+        // the corpus-sized recurrence map. Newest generations are visited
+        // first; tier lookups make duplicate keys across deltas idempotent.
+        let Some(file) = self.wbrain_file.clone() else {
+            return out;
+        };
+        let store = file.pool(self.binding_pool_id);
+        let references = self.binding_posting_indexes.clone();
+        for reference in references.into_iter().rev() {
+            let result = crate::store::posting_index::scan_prefix(
+                &store,
+                reference,
+                &[FINGERPRINT_LIFETIME_KEY],
+                |key, count| {
+                    if count < min_count {
+                        return Ok(());
+                    }
+                    let Some(fp) = decode_fingerprint_posting_key(key, FINGERPRINT_LIFETIME_KEY)
+                    else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid lifetime fingerprint posting key",
+                        ));
+                    };
+                    // Pair-only legacy snapshots did not retain temporal
+                    // order. Promoting those records in isolation would
+                    // invent an order; their persisted count is instead
+                    // folded into the next live, fully ordered episode.
+                    if fp.ordered_per_pool.is_empty() {
+                        return Ok(());
+                    }
+                    if self.tentative_binding_id(&fp).is_some()
+                        || self.promoted_binding_id(&fp).is_some()
+                    {
+                        return Ok(());
+                    }
+                    if let Some(id) = self.promote_binding_concept(&fp) {
+                        self.tentative_promoted.insert(fp, id);
+                        self.tentative_binding_count_total =
+                            self.tentative_binding_count_total.saturating_add(1);
+                        out.push(id);
+                    }
+                    Ok(())
+                },
+            );
+            if let Err(error) = result {
+                tracing::warn!("fingerprint recurrence scan failed: {}", error);
+                break;
             }
         }
         out
@@ -1566,12 +1709,12 @@ impl Brain {
     /// Number of bindings in the tentative tier (binding-pool neuron
     /// exists, no EEM fact registered yet).
     pub fn tentative_binding_count(&self) -> usize {
-        self.tentative_promoted.len()
+        self.tentative_binding_count_total
     }
 
     /// Number of bindings in the consolidated tier (EEM fact registered).
     pub fn consolidated_binding_count(&self) -> usize {
-        self.promoted_fingerprints.len()
+        self.consolidated_binding_count_total
     }
 
     /// Current pressure-adjusted consolidated emergence threshold.
@@ -1823,6 +1966,81 @@ impl Brain {
         out
     }
 
+    fn disk_scalar(&self, encoded_key: &[u8]) -> Option<u32> {
+        let file = self.wbrain_file.as_ref()?;
+        let store = file.pool(self.binding_pool_id);
+        for reference in self.binding_posting_indexes.iter().rev() {
+            match crate::store::posting_index::lookup(&store, *reference, encoded_key, 1) {
+                Ok(values) => {
+                    if let Some(value) = values.into_iter().next() {
+                        return Some(value);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("fingerprint state lookup failed: {}", error);
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    fn fingerprint_scalar(&self, kind: u8, fingerprint: &MomentFingerprint) -> Option<u32> {
+        let key =
+            encode_fingerprint_posting_key(kind, &fingerprint.pairs, &fingerprint.ordered_per_pool);
+        self.disk_scalar(&key).or_else(|| {
+            if fingerprint.ordered_per_pool.is_empty() {
+                return None;
+            }
+            // Legacy bincode checkpoints persisted only the canonical pair
+            // signature. Their migrated records use an empty order suffix;
+            // the next live episode supplies exact temporal order if the
+            // historical count causes a new promotion.
+            self.disk_scalar(&encode_fingerprint_posting_key(
+                kind,
+                &fingerprint.pairs,
+                &[],
+            ))
+        })
+    }
+
+    fn lifetime_recurrence(&self, fingerprint: &MomentFingerprint) -> u32 {
+        self.lifetime_recurrences
+            .get(fingerprint)
+            .copied()
+            .or_else(|| self.fingerprint_scalar(FINGERPRINT_LIFETIME_KEY, fingerprint))
+            .unwrap_or(0)
+    }
+
+    fn increment_lifetime_recurrence(&mut self, fingerprint: &MomentFingerprint) -> u32 {
+        if let Some(count) = self.lifetime_recurrences.get_mut(fingerprint) {
+            *count = count.saturating_add(1);
+            return *count;
+        }
+        let next = self.lifetime_recurrence(fingerprint).saturating_add(1);
+        self.lifetime_recurrences.insert(fingerprint.clone(), next);
+        next
+    }
+
+    fn tentative_binding_id(&self, fingerprint: &MomentFingerprint) -> Option<NeuronId> {
+        self.tentative_promoted
+            .get(fingerprint)
+            .copied()
+            .or_else(|| self.fingerprint_scalar(FINGERPRINT_TENTATIVE_KEY, fingerprint))
+    }
+
+    fn promoted_binding_id(&self, fingerprint: &MomentFingerprint) -> Option<NeuronId> {
+        self.promoted_fingerprints
+            .get(fingerprint)
+            .copied()
+            .or_else(|| self.fingerprint_scalar(FINGERPRINT_PROMOTED_KEY, fingerprint))
+    }
+
+    fn existing_binding_id(&self, fingerprint: &MomentFingerprint) -> Option<NeuronId> {
+        self.promoted_binding_id(fingerprint)
+            .or_else(|| self.tentative_binding_id(fingerprint))
+    }
+
     fn binding_sequence_postings(
         &self,
         query: PoolId,
@@ -1849,10 +2067,8 @@ impl Brain {
             .get(&(pool, neuron))
             .cloned()
             .unwrap_or_default();
-        for id in self.disk_binding_postings(
-            &BindingPostingKey::Feature(pool, neuron),
-            usize::MAX,
-        ) {
+        for id in self.disk_binding_postings(&BindingPostingKey::Feature(pool, neuron), usize::MAX)
+        {
             append_binding_posting(&mut out, id, usize::MAX);
         }
         out
@@ -1874,13 +2090,21 @@ impl Brain {
         let Some(file) = self.wbrain_file.as_ref() else {
             return Ok(());
         };
-        let expected = self
+        let binding_entries = self
             .binding_sequence_index
             .values()
             .chain(self.binding_feature_atom_index.values())
             .chain(self.binding_motif_index.values())
             .map(Vec::len)
             .sum::<usize>();
+        let fingerprint_entries = self
+            .lifetime_recurrences
+            .len()
+            .saturating_add(self.tentative_promoted.len())
+            .saturating_add(self.promoted_fingerprints.len());
+        let expected = binding_entries
+            .saturating_add(fingerprint_entries)
+            .saturating_add(usize::from(fingerprint_entries > 0) * 3);
         if expected == 0 {
             return Ok(());
         }
@@ -1912,11 +2136,65 @@ impl Brain {
                 builder.insert(&key, *id)?;
             }
         }
+        if fingerprint_entries > 0 {
+            builder.insert(FINGERPRINT_STATE_MARKER_KEY, 1)?;
+            builder.insert(
+                FINGERPRINT_TENTATIVE_COUNT_KEY,
+                u32::try_from(self.tentative_binding_count_total).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "tentative binding count exceeds u32",
+                    )
+                })?,
+            )?;
+            builder.insert(
+                FINGERPRINT_PROMOTED_COUNT_KEY,
+                u32::try_from(self.consolidated_binding_count_total).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "consolidated binding count exceeds u32",
+                    )
+                })?,
+            )?;
+            for (fingerprint, count) in &self.lifetime_recurrences {
+                builder.insert(
+                    &encode_fingerprint_posting_key(
+                        FINGERPRINT_LIFETIME_KEY,
+                        &fingerprint.pairs,
+                        &fingerprint.ordered_per_pool,
+                    ),
+                    *count,
+                )?;
+            }
+            for (fingerprint, id) in &self.tentative_promoted {
+                builder.insert(
+                    &encode_fingerprint_posting_key(
+                        FINGERPRINT_TENTATIVE_KEY,
+                        &fingerprint.pairs,
+                        &fingerprint.ordered_per_pool,
+                    ),
+                    *id,
+                )?;
+            }
+            for (fingerprint, id) in &self.promoted_fingerprints {
+                builder.insert(
+                    &encode_fingerprint_posting_key(
+                        FINGERPRINT_PROMOTED_KEY,
+                        &fingerprint.pairs,
+                        &fingerprint.ordered_per_pool,
+                    ),
+                    *id,
+                )?;
+            }
+        }
         let reference = builder.finish(file, self.binding_pool_id)?;
         self.binding_posting_indexes.push(reference);
         self.binding_sequence_index.clear();
         self.binding_feature_atom_index.clear();
         self.binding_motif_index.clear();
+        self.lifetime_recurrences.clear();
+        self.tentative_promoted.clear();
+        self.promoted_fingerprints.clear();
         Ok(())
     }
 
@@ -1998,7 +2276,11 @@ impl Brain {
             }
         }
         let reference = builder.finish(&file, self.binding_pool_id)?;
-        self.binding_posting_indexes.clear();
+        let store = file.pool(self.binding_pool_id);
+        self.binding_posting_indexes.retain(|existing| {
+            crate::store::posting_index::lookup(&store, *existing, FINGERPRINT_STATE_MARKER_KEY, 1)
+                .is_ok_and(|values| !values.is_empty())
+        });
         self.binding_posting_indexes.push(reference);
         Ok(rebuilt)
     }
@@ -3374,10 +3656,7 @@ impl Brain {
 
         let target_handle = self.fabric.pool(target_pool)?;
         {
-            let roots: Vec<NeuronId> = target_members
-                .iter()
-                .map(|member| member.neuron)
-                .collect();
+            let roots: Vec<NeuronId> = target_members.iter().map(|member| member.neuron).collect();
             ensure_neuron_trees_loaded(&mut target_handle.write(), &roots);
         }
         let t = target_handle.read();
@@ -3492,8 +3771,7 @@ impl Brain {
         if query_ids.is_empty() {
             return None;
         }
-        let candidate_binding_ids =
-            self.hydrate_active_binding_scope(&query_ids, target_pool);
+        let candidate_binding_ids = self.hydrate_active_binding_scope(&query_ids, target_pool);
         if candidate_binding_ids.is_empty() {
             return None;
         }
@@ -6957,6 +7235,32 @@ impl Brain {
         (overlay_entries, self.binding_posting_indexes.len())
     }
 
+    pub fn fingerprint_state_residency(&self) -> (usize, usize) {
+        let overlay_entries = self
+            .lifetime_recurrences
+            .len()
+            .saturating_add(self.tentative_promoted.len())
+            .saturating_add(self.promoted_fingerprints.len());
+        let disk_generations = self
+            .binding_posting_indexes
+            .iter()
+            .filter(|reference| {
+                let Some(file) = self.wbrain_file.as_ref() else {
+                    return false;
+                };
+                let store = file.pool(self.binding_pool_id);
+                crate::store::posting_index::lookup(
+                    &store,
+                    **reference,
+                    FINGERPRINT_STATE_MARKER_KEY,
+                    1,
+                )
+                .is_ok_and(|values| !values.is_empty())
+            })
+            .count();
+        (overlay_entries, disk_generations)
+    }
+
     /// Stage 17.4 full — run one eviction pass per
     /// [`ARCHITECTURE.md`] §17.4.  Walks each pool, identifies concept
     /// neurons with low `salience_ema` AND staleness past `min_stale_ticks`,
@@ -7258,6 +7562,8 @@ impl Brain {
         } else {
             snap.current_threshold
         };
+        let tentative_binding_count_total = tentative_promoted.len();
+        let consolidated_binding_count_total = promoted_fingerprints.len();
         let mut brain = Self {
             fabric,
             config,
@@ -7268,6 +7574,8 @@ impl Brain {
             lifetime_recurrences,
             tentative_promoted,
             promoted_fingerprints,
+            tentative_binding_count_total,
+            consolidated_binding_count_total,
             binding_sequence_index: AHashMap::new(),
             binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
@@ -7322,7 +7630,9 @@ impl Brain {
         }
         fabric.set_tick(file.tick());
 
-        let brain = Self {
+        let tentative_binding_count_total = metadata.tentative_promoted.len();
+        let consolidated_binding_count_total = metadata.promoted_fingerprints.len();
+        let mut brain = Self {
             fabric,
             config: metadata.config,
             wbrain_file: Some(file),
@@ -7352,6 +7662,8 @@ impl Brain {
                 .into_iter()
                 .map(|(fingerprint, id)| (restore_fingerprint(fingerprint), id))
                 .collect(),
+            tentative_binding_count_total,
+            consolidated_binding_count_total,
             binding_sequence_index: metadata.binding_sequence_index.into_iter().collect(),
             binding_feature_atom_index: metadata.binding_feature_atom_index.into_iter().collect(),
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
@@ -7373,6 +7685,12 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
         };
+        if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
+            brain.tentative_binding_count_total = count as usize;
+        }
+        if let Some(count) = brain.disk_scalar(FINGERPRINT_PROMOTED_COUNT_KEY) {
+            brain.consolidated_binding_count_total = count as usize;
+        }
         Ok((brain, missing))
     }
 
@@ -7407,10 +7725,7 @@ impl Brain {
 
     /// True when an incomplete `.wbrain` contains a durable migration
     /// boundary that matches the legacy checkpoint and can be resumed.
-    pub fn legacy_migration_is_resumable<
-        P: AsRef<std::path::Path>,
-        Q: AsRef<std::path::Path>,
-    >(
+    pub fn legacy_migration_is_resumable<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
         legacy_path: P,
         wbrain_path: Q,
     ) -> bool {
@@ -7419,9 +7734,7 @@ impl Brain {
 
     /// True when raw neuron conversion and its final brain metadata are
     /// complete, even if derived-index finalization has not yet finished.
-    pub fn legacy_migration_raw_is_complete<P: AsRef<std::path::Path>>(
-        wbrain_path: P,
-    ) -> bool {
+    pub fn legacy_migration_raw_is_complete<P: AsRef<std::path::Path>>(wbrain_path: P) -> bool {
         streaming_migration::is_raw_complete(wbrain_path.as_ref())
     }
 
@@ -7447,8 +7760,8 @@ impl Brain {
             evicted_neurons: 0,
             binding_pool_id: self.binding_pool_id,
             fingerprints_window: self.moment_history.len(),
-            tentative_bindings: self.tentative_promoted.len(),
-            consolidated_bindings: self.promoted_fingerprints.len(),
+            tentative_bindings: self.tentative_binding_count_total,
+            consolidated_bindings: self.consolidated_binding_count_total,
             current_threshold: self.current_threshold,
             total_observations: self.total_observations,
             binding_pressure: self.binding_pressure(),

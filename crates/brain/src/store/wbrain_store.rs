@@ -1529,7 +1529,9 @@ mod tests {
         let (mut migrated, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
         assert_eq!(migrated.rebuild_binding_indexes_bounded().unwrap(), 1);
-        assert_eq!(migrated.binding_posting_residency(), (0, 1));
+        assert_eq!(migrated.binding_posting_residency(), (0, 3));
+        assert_eq!(migrated.fingerprint_state_residency(), (0, 2));
+        assert_eq!(migrated.tentative_binding_count(), 1);
         assert_eq!(
             migrated
                 .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
@@ -1537,12 +1539,18 @@ mod tests {
             trained_binding_id,
             "binding labels must remain indexed for idempotent live training",
         );
+        assert_eq!(
+            migrated.tentative_binding_count(),
+            1,
+            "pair-only legacy fingerprint identity must match the next ordered episode",
+        );
         let new_binding_id = migrated
             .pretrain_binding_episode(&[(3, b"fresh".to_vec()), (4, b"novel".to_vec())])
             .unwrap();
         assert_ne!(new_binding_id, trained_binding_id);
         migrated.serialize_all_neurons_for_idle().unwrap();
-        assert_eq!(migrated.binding_posting_residency(), (0, 2));
+        assert_eq!(migrated.binding_posting_residency(), (0, 4));
+        assert_eq!(migrated.fingerprint_state_residency(), (0, 3));
         assert_eq!(
             migrated.stats().evicted_neurons,
             migrated.stats().total_neurons
@@ -1551,7 +1559,8 @@ mod tests {
 
         let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
-        assert_eq!(restored.binding_posting_residency(), (0, 2));
+        assert_eq!(restored.binding_posting_residency(), (0, 4));
+        assert_eq!(restored.fingerprint_state_residency(), (0, 3));
         assert_eq!(
             restored
                 .pretrain_binding_episode(&[(3, b"fresh".to_vec()), (4, b"novel".to_vec())])
@@ -1572,6 +1581,115 @@ mod tests {
             restored.stats().evicted_neurons,
             restored.stats().total_neurons
         );
+
+        std::fs::remove_file(legacy).ok();
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn paged_lifetime_recurrence_can_force_promote_without_rehydrating_map() {
+        let destination = tmpfile("paged-lifetime-force-promote");
+        let binding_pool_id;
+        {
+            let mut config = BrainConfig::default();
+            config.tentative_emergence_threshold = u32::MAX;
+            config.binding_emergence_threshold = u32::MAX;
+            let mut brain = Brain::new(config);
+            binding_pool_id = brain.binding_pool_id();
+            for (id, name, prefix) in [(3, "prompt", "p"), (4, "answer", "a")] {
+                brain.create_pool(
+                    PoolConfig::defaults(name, id),
+                    Box::new(BytePassthroughEncoding {
+                        prefix: prefix.into(),
+                    }),
+                );
+            }
+            brain.observe(3, b"unseen task");
+            brain.observe(4, b"integrated answer");
+            brain.advance_tick();
+            assert_eq!(brain.tentative_binding_count(), 0);
+            brain.attach_wbrain(&destination).unwrap();
+            brain.serialize_all_neurons_for_idle().unwrap();
+        }
+
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
+        for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a")] {
+            encodings.insert(
+                id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(restored.fingerprint_state_residency(), (0, 1));
+        assert_eq!(restored.force_promote_tentative(1).len(), 1);
+        assert_eq!(restored.tentative_binding_count(), 1);
+        assert!(restored.force_promote_tentative(1).is_empty());
+        restored.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(restored.fingerprint_state_residency(), (0, 2));
+
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn migrated_pair_only_recurrence_joins_next_ordered_episode() {
+        let legacy = tmpfile("legacy-pair-only-recurrence").with_extension("bin");
+        let destination = tmpfile("migrated-pair-only-recurrence");
+        let binding_pool_id;
+        {
+            let mut config = BrainConfig::default();
+            config.tentative_emergence_threshold = 2;
+            config.binding_emergence_threshold = u32::MAX;
+            let mut brain = Brain::new(config);
+            binding_pool_id = brain.binding_pool_id();
+            for (id, name, prefix) in [(3, "prompt", "p"), (4, "answer", "a")] {
+                brain.create_pool(
+                    PoolConfig::defaults(name, id),
+                    Box::new(BytePassthroughEncoding {
+                        prefix: prefix.into(),
+                    }),
+                );
+            }
+            brain.observe(3, b"ordered prompt");
+            brain.observe(4, b"ordered response");
+            brain.advance_tick();
+            assert_eq!(brain.tentative_binding_count(), 0);
+            brain.checkpoint(&legacy).unwrap();
+        }
+
+        Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination).unwrap();
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
+        for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a")] {
+            encodings.insert(
+                id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(restored.fingerprint_state_residency(), (0, 1));
+        restored.observe(3, b"ordered prompt");
+        restored.observe(4, b"ordered response");
+        restored.advance_tick();
+        assert_eq!(
+            restored.tentative_binding_count(),
+            1,
+            "the migrated count must combine with live ordered experience",
+        );
+        restored.activate_for_prediction(3, b"ordered prompt");
+        assert_eq!(
+            restored
+                .decode_best_trained_binding_multi(&[3], 4)
+                .as_deref(),
+            Some(b"ordered response".as_slice()),
+        );
+        restored.clear_prediction_activation();
 
         std::fs::remove_file(legacy).ok();
         std::fs::remove_file(destination).ok();

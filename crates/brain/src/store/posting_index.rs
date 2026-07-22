@@ -182,3 +182,74 @@ pub(crate) fn lookup(
     found.reverse();
     Ok(found)
 }
+
+/// Visit every record whose key begins with `prefix` without materializing the
+/// index. Records are laid out sequentially after the bucket-head table even
+/// though point lookups follow hash chains, so maintenance can scan them with
+/// memory bounded by one key.
+pub(crate) fn scan_prefix<F>(
+    store: &WbrainNeuronStore,
+    reference: AuxiliaryRecordRef,
+    prefix: &[u8],
+    mut visitor: F,
+) -> io::Result<()>
+where
+    F: FnMut(&[u8], NeuronId) -> io::Result<()>,
+{
+    let mut header = [0_u8; HEADER_BYTES as usize];
+    store.read_auxiliary_exact(reference, 0, &mut header)?;
+    if &header[..8] != POSTING_INDEX_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid posting index magic",
+        ));
+    }
+    let entries = u64::from_le_bytes(header[8..16].try_into().unwrap());
+    let buckets = u64::from_le_bytes(header[16..24].try_into().unwrap());
+    if buckets == 0 || !buckets.is_power_of_two() || buckets > MAX_BUCKETS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid posting index bucket count",
+        ));
+    }
+    let mut at = HEADER_BYTES
+        .checked_add(buckets.saturating_mul(8))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting index overflow"))?;
+    for _ in 0..entries {
+        if at
+            .checked_add(RECORD_HEADER_BYTES)
+            .is_none_or(|end| end > reference.len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "posting index record outside auxiliary body",
+            ));
+        }
+        let mut raw = [0_u8; RECORD_HEADER_BYTES as usize];
+        store.read_auxiliary_exact(reference, at, &mut raw)?;
+        let key_len = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
+        let value = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+        let key_at = at + RECORD_HEADER_BYTES;
+        let end = key_at.checked_add(key_len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "posting index key overflow")
+        })?;
+        if end > reference.len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "posting index key outside auxiliary body",
+            ));
+        }
+        let mut key = vec![
+            0_u8;
+            usize::try_from(key_len).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "posting index key too large")
+            })?
+        ];
+        store.read_auxiliary_exact(reference, key_at, &mut key)?;
+        if key.starts_with(prefix) {
+            visitor(&key, value)?;
+        }
+        at = end;
+    }
+    Ok(())
+}
