@@ -73,23 +73,33 @@ prove both paths can restore the trained binding without a binding-pool scan.
 
 ### Neuron body slots
 
-`Pool.neurons` now uses stable nullable body slots. A dense legacy brain stores
-one boxed `Neuron` per occupied ID; an idle `.wbrain` pool stores `None` at
-every sleeping ID and allocates a body only after `ensure_loaded(id)` reads
-that exact record. Returning to idle persists and drops the box rather than
-retaining a zeroed `Neuron` sentinel. Compact kind, concept-identity, and birth
-metadata remain separate from the body so counts and routing do not require
-hydration.
+`Pool.neurons` now has two representations. A dense legacy brain stores one
+boxed `Neuron` per occupied ID. An idle `.wbrain` pool retains only scalar slot
+and concept counts plus a hash map of the bodies actually resident for the
+current request. `ensure_loaded(id)` inserts one body; returning to idle
+persists and removes it. There is no full-pool pointer vector or per-ID evicted
+set.
+
+### Paged address and identity table
+
+The first full migration attempt with compact bodies was safely aborted at
+8.26 GB private memory. The source remained intact and the monitor still
+reported 12.9 GiB physically available. Measurements showed capacity doubling
+in `Vec<Option<u64>>` offsets plus parallel kind/concept/birth vectors; neuron
+payload streaming itself remained bounded.
+
+Container version 2 replaces those resident vectors during large migration
+with one fixed-width 24-byte on-disk slot record containing the current neuron
+record offset, birth tick, kind, and flags. Initial writes are published in
+65,536-neuron contiguous batches. Reopen reads one slot record by stable ID;
+concept maintenance streams slot flags and request-time bodies independently.
+The manifest keeps no resident offset vector for a paged pool.
 
 ## Resident structures still violating the invariant
 
-1. `PoolContainerManifest.neuron_offsets: Vec<Option<u64>>` hydrates the entire
-   address table.
-2. `WbrainPoolMetadata.neuron_kinds`, `concept_slots`, and `born_ticks` hydrate
-   parallel full-pool vectors.
-3. `Brain.binding_sequence_index`, `binding_feature_atom_index`, and
+1. `Brain.binding_sequence_index`, `binding_feature_atom_index`, and
    `binding_motif_index` are rebuilt and restored as complete resident maps.
-4. Several inference paths still use whole-binding-pool scans when an exact
+2. Several inference paths still use whole-binding-pool scans when an exact
    index key is absent.
 
 ## Implementation order
@@ -101,8 +111,9 @@ hydration.
    root directories and request-local result vectors.
 3. Replace `Vec<Neuron>` with stable compact slots plus request-scoped resident
    bodies. `ensure_loaded(id)` inserts one body; idle serialization removes it.
-   **Implemented; remote persistence and inference gates pending.**
+   **Implemented and covered by persistence/inference gates.**
 4. Move offset and kind/concept/born metadata to paged fixed-width tables.
+   **Implemented in container version 2; full-scale rerun pending.**
 5. Convert diagnostic APIs to bounded cursor streams.
 6. Run cold/warm latency, bytes-read, awakened-neuron, peak-RAM, and
    return-to-sleep gates before resuming corpus training.

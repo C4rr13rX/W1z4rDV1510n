@@ -27,12 +27,30 @@ use crate::store::{
 /// [`Neuron`]. A body is present only while that exact neuron participates in
 /// inference, training, or bounded maintenance. Dense, legacy brains still
 /// occupy every slot and retain their historical behavior.
-#[derive(Clone, Default)]
-struct NeuronSlots {
-    slots: Vec<Option<Box<Neuron>>>,
-    kinds: Vec<NeuronKind>,
-    concepts: Vec<bool>,
-    born_ticks: Vec<u64>,
+#[derive(Clone)]
+enum NeuronSlots {
+    Dense {
+        slots: Vec<Option<Box<Neuron>>>,
+        kinds: Vec<NeuronKind>,
+        concepts: Vec<bool>,
+        born_ticks: Vec<u64>,
+    },
+    Paged {
+        slot_count: usize,
+        concept_count: usize,
+        residents: AHashMap<NeuronId, Box<Neuron>>,
+    },
+}
+
+impl Default for NeuronSlots {
+    fn default() -> Self {
+        Self::Dense {
+            slots: Vec::new(),
+            kinds: Vec::new(),
+            concepts: Vec::new(),
+            born_ticks: Vec::new(),
+        }
+    }
 }
 
 impl NeuronSlots {
@@ -44,7 +62,7 @@ impl NeuronSlots {
         let kinds = neurons.iter().map(|neuron| neuron.kind).collect();
         let concepts = neurons.iter().map(|neuron| !neuron.is_atom()).collect();
         let born_ticks = neurons.iter().map(|neuron| neuron.born_tick).collect();
-        Self {
+        Self::Dense {
             slots: neurons
                 .into_iter()
                 .map(|neuron| Some(Box::new(neuron)))
@@ -55,73 +73,155 @@ impl NeuronSlots {
         }
     }
 
-    fn sleeping(
-        slot_count: usize,
-        mut kinds: Vec<NeuronKind>,
-        mut concepts: Vec<bool>,
-        mut born_ticks: Vec<u64>,
-    ) -> Self {
-        let mut slots = Vec::with_capacity(slot_count);
-        slots.resize_with(slot_count, || None);
-        kinds.resize(slot_count, NeuronKind::Excitatory);
-        concepts.resize(slot_count, false);
-        born_ticks.resize(slot_count, 0);
-        Self {
-            slots,
-            kinds,
-            concepts,
-            born_ticks,
+    fn sleeping(slot_count: usize, concept_count: usize) -> Self {
+        Self::Paged {
+            slot_count,
+            concept_count,
+            residents: AHashMap::new(),
         }
     }
 
     fn len(&self) -> usize {
-        self.slots.len()
+        match self {
+            Self::Dense { slots, .. } => slots.len(),
+            Self::Paged { slot_count, .. } => *slot_count,
+        }
     }
 
     fn resident_count(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.is_some()).count()
+        match self {
+            Self::Dense { slots, .. } => slots.iter().filter(|slot| slot.is_some()).count(),
+            Self::Paged { residents, .. } => residents.len(),
+        }
     }
 
     fn get(&self, index: usize) -> Option<&Neuron> {
-        self.slots.get(index)?.as_deref()
+        match self {
+            Self::Dense { slots, .. } => slots.get(index)?.as_deref(),
+            Self::Paged { residents, .. } => residents.get(&(index as NeuronId)).map(Box::as_ref),
+        }
     }
 
     fn get_mut(&mut self, index: usize) -> Option<&mut Neuron> {
-        self.slots.get_mut(index)?.as_deref_mut()
+        match self {
+            Self::Dense { slots, .. } => slots.get_mut(index)?.as_deref_mut(),
+            Self::Paged { residents, .. } => residents
+                .get_mut(&(index as NeuronId))
+                .map(Box::as_mut),
+        }
     }
 
     fn push(&mut self, neuron: Neuron) {
-        self.kinds.push(neuron.kind);
-        self.concepts.push(!neuron.is_atom());
-        self.born_ticks.push(neuron.born_tick);
-        self.slots.push(Some(Box::new(neuron)));
+        match self {
+            Self::Dense {
+                slots,
+                kinds,
+                concepts,
+                born_ticks,
+            } => {
+                kinds.push(neuron.kind);
+                concepts.push(!neuron.is_atom());
+                born_ticks.push(neuron.born_tick);
+                slots.push(Some(Box::new(neuron)));
+            }
+            Self::Paged {
+                slot_count,
+                concept_count,
+                residents,
+            } => {
+                debug_assert_eq!(neuron.id as usize, *slot_count);
+                if !neuron.is_atom() {
+                    *concept_count += 1;
+                }
+                *slot_count += 1;
+                residents.insert(neuron.id, Box::new(neuron));
+            }
+        }
     }
 
     fn set(&mut self, index: usize, neuron: Neuron) {
-        self.kinds[index] = neuron.kind;
-        self.concepts[index] = !neuron.is_atom();
-        self.born_ticks[index] = neuron.born_tick;
-        self.slots[index] = Some(Box::new(neuron));
+        match self {
+            Self::Dense {
+                slots,
+                kinds,
+                concepts,
+                born_ticks,
+            } => {
+                kinds[index] = neuron.kind;
+                concepts[index] = !neuron.is_atom();
+                born_ticks[index] = neuron.born_tick;
+                slots[index] = Some(Box::new(neuron));
+            }
+            Self::Paged {
+                slot_count,
+                concept_count,
+                residents,
+            } => {
+                let prior_concept = residents
+                    .get(&(index as NeuronId))
+                    .is_some_and(|prior| !prior.is_atom());
+                let next_concept = !neuron.is_atom();
+                if prior_concept != next_concept {
+                    if next_concept {
+                        *concept_count += 1;
+                    } else {
+                        *concept_count = concept_count.saturating_sub(1);
+                    }
+                }
+                *slot_count = (*slot_count).max(index + 1);
+                residents.insert(index as NeuronId, Box::new(neuron));
+            }
+        }
     }
 
     fn sleep(&mut self, index: usize) -> Option<Neuron> {
-        self.slots.get_mut(index)?.take().map(|neuron| *neuron)
+        match self {
+            Self::Dense { slots, .. } => slots.get_mut(index)?.take().map(|neuron| *neuron),
+            Self::Paged { residents, .. } => residents
+                .remove(&(index as NeuronId))
+                .map(|neuron| *neuron),
+        }
     }
 
     fn wake(&mut self, index: usize, neuron: Neuron) -> bool {
-        let Some(slot) = self.slots.get_mut(index) else {
-            return false;
-        };
-        *slot = Some(Box::new(neuron));
-        true
+        match self {
+            Self::Dense { slots, .. } => {
+                let Some(slot) = slots.get_mut(index) else {
+                    return false;
+                };
+                *slot = Some(Box::new(neuron));
+                true
+            }
+            Self::Paged {
+                slot_count,
+                residents,
+                ..
+            } => {
+                if index >= *slot_count {
+                    return false;
+                }
+                residents.insert(index as NeuronId, Box::new(neuron));
+                true
+            }
+        }
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Neuron> {
-        self.slots.iter().filter_map(|slot| slot.as_deref())
+    fn iter(&self) -> Box<dyn Iterator<Item = &Neuron> + '_> {
+        match self {
+            Self::Dense { slots, .. } => {
+                Box::new(slots.iter().filter_map(|slot| slot.as_deref()))
+            }
+            Self::Paged { residents, .. } => Box::new(residents.values().map(Box::as_ref)),
+        }
     }
 
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Neuron> {
-        self.slots.iter_mut().filter_map(|slot| slot.as_deref_mut())
+    fn iter_mut(&mut self) -> Box<dyn Iterator<Item = &mut Neuron> + '_> {
+        match self {
+            Self::Dense { slots, .. } => {
+                Box::new(slots.iter_mut().filter_map(|slot| slot.as_deref_mut()))
+            }
+            Self::Paged { residents, .. } => Box::new(residents.values_mut().map(Box::as_mut)),
+        }
     }
 
     fn dense_clone(&self) -> Vec<Neuron> {
@@ -130,33 +230,51 @@ impl NeuronSlots {
             self.len(),
             "legacy snapshot requires every neuron body to be resident"
         );
-        self.iter().cloned().collect()
+        let mut neurons: Vec<_> = self.iter().cloned().collect();
+        neurons.sort_unstable_by_key(|neuron| neuron.id);
+        neurons
     }
 
     fn kinds(&self) -> &[NeuronKind] {
-        &self.kinds
+        match self {
+            Self::Dense { kinds, .. } => kinds,
+            Self::Paged { .. } => &[],
+        }
     }
 
     fn concept_flags(&self) -> &[bool] {
-        &self.concepts
+        match self {
+            Self::Dense { concepts, .. } => concepts,
+            Self::Paged { .. } => &[],
+        }
     }
 
     fn born_ticks(&self) -> &[u64] {
-        &self.born_ticks
-    }
-
-    fn concept_ids(&self) -> impl Iterator<Item = NeuronId> + '_ {
-        self.concepts
-            .iter()
-            .enumerate()
-            .filter_map(|(id, is_concept)| is_concept.then_some(id as NeuronId))
+        match self {
+            Self::Dense { born_ticks, .. } => born_ticks,
+            Self::Paged { .. } => &[],
+        }
     }
 
     fn concept_count(&self) -> usize {
-        self.concepts
-            .iter()
-            .filter(|is_concept| **is_concept)
-            .count()
+        match self {
+            Self::Dense { concepts, .. } => concepts
+                .iter()
+                .filter(|is_concept| **is_concept)
+                .count(),
+            Self::Paged { concept_count, .. } => *concept_count,
+        }
+    }
+
+    fn is_concept(&self, id: NeuronId) -> bool {
+        match self {
+            Self::Dense { concepts, .. } => {
+                concepts.get(id as usize).copied().unwrap_or(false)
+            }
+            Self::Paged { residents, .. } => residents
+                .get(&id)
+                .is_some_and(|neuron| !neuron.is_atom()),
+        }
     }
 }
 
@@ -199,7 +317,7 @@ impl<'a> IntoIterator for &'a NeuronSlots {
     type IntoIter = Box<dyn Iterator<Item = &'a Neuron> + 'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        Box::new(self.iter())
+        self.iter()
     }
 }
 
@@ -208,7 +326,7 @@ impl<'a> IntoIterator for &'a mut NeuronSlots {
     type IntoIter = Box<dyn Iterator<Item = &'a mut Neuron> + 'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        Box::new(self.iter_mut())
+        self.iter_mut()
     }
 }
 
@@ -1047,6 +1165,7 @@ struct WbrainPoolMetadata {
     neuron_kinds: Vec<NeuronKind>,
     concept_slots: Vec<bool>,
     born_ticks: Vec<u64>,
+    concept_count: usize,
     total_terminals: usize,
 }
 
@@ -1060,6 +1179,7 @@ pub(crate) struct StreamedPoolMetadata {
     pub neuron_kinds: Vec<NeuronKind>,
     pub concept_slots: Vec<bool>,
     pub born_ticks: Vec<u64>,
+    pub concept_count: usize,
     pub total_terminals: usize,
 }
 
@@ -1378,7 +1498,11 @@ impl Pool {
     /// O(1) lookup.  Iteration paths use this to skip placeholder
     /// entries in `neurons` for IDs that have been paged out.
     pub fn is_evicted(&self, id: NeuronId) -> bool {
-        self.evicted.contains(&id)
+        if self.wbrain_store.is_some() {
+            (id as usize) < self.neurons.len() && self.neurons.get(id as usize).is_none()
+        } else {
+            self.evicted.contains(&id)
+        }
     }
 
     /// True when this pool has either a cold-tier file or a
@@ -1393,7 +1517,11 @@ impl Pool {
     /// Stage 17.4 — number of currently-evicted neurons.  Diagnostic +
     /// `StorageControlState::working_set_pressure` signal source.
     pub fn evicted_count(&self) -> usize {
-        self.evicted.len()
+        if self.wbrain_store.is_some() {
+            self.neurons.len().saturating_sub(self.neurons.resident_count())
+        } else {
+            self.evicted.len()
+        }
     }
 
     /// Stage 17.4 — count of neurons currently held in RAM (live).
@@ -1412,7 +1540,7 @@ impl Pool {
     /// was already evicted (idempotent) or doesn't exist; `Err` if the
     /// cold tier is unattached or the I/O failed.
     pub fn evict_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
-        if self.evicted.contains(&id) {
+        if self.is_evicted(id) {
             return Ok(false);
         }
 
@@ -1480,7 +1608,9 @@ impl Pool {
             // uses to choose what to evict, so they remain readable post-evict.
         }
 
-        self.evicted.insert(id);
+        if self.wbrain_store.is_none() {
+            self.evicted.insert(id);
+        }
 
         // Per ARCHITECTURE §17.9: log the eviction.
         let event = WalEvent::NeuronEvicted {
@@ -1509,7 +1639,7 @@ impl Pool {
     /// it wasn't evicted to begin with (caller can ignore); `Err` if
     /// the cold tier is missing or the read failed.
     pub fn page_in_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
-        if !self.evicted.contains(&id) {
+        if !self.is_evicted(id) {
             return Ok(false);
         }
         let paging_wbrain = self.wbrain_store.is_some();
@@ -1641,7 +1771,7 @@ impl Pool {
     /// otherwise.  Used by callers that don't care which state the
     /// neuron is in, just that it's accessible.
     pub fn ensure_loaded(&mut self, id: NeuronId) -> std::io::Result<()> {
-        if self.evicted.contains(&id) {
+        if self.is_evicted(id) {
             self.page_in_neuron(id)?;
         }
         Ok(())
@@ -1695,6 +1825,7 @@ impl Pool {
             neuron_kinds: self.neurons.kinds().to_vec(),
             concept_slots: self.neurons.concept_flags().to_vec(),
             born_ticks: self.neurons.born_ticks().to_vec(),
+            concept_count: self.neurons.concept_count(),
             total_terminals: self.total_terminals,
         };
         let bytes = bincode::serialize(&metadata)
@@ -1718,6 +1849,7 @@ impl Pool {
             neuron_kinds: metadata.neuron_kinds,
             concept_slots: metadata.concept_slots,
             born_ticks: metadata.born_ticks,
+            concept_count: metadata.concept_count,
             total_terminals: metadata.total_terminals,
         };
         let bytes = bincode::serialize(&metadata)
@@ -1733,9 +1865,18 @@ impl Pool {
     pub(crate) fn rebuild_concept_indexes_bounded(&mut self) -> std::io::Result<usize> {
         self.concept_multiset_to_id.clear();
         self.concept_sequence_to_id.clear();
-        let concept_ids: Vec<NeuronId> = self.neurons.concept_ids().collect();
-
-        for &concept_id in &concept_ids {
+        if self.legacy_concept_sequence_index.is_some() {
+            // Streaming migration already constructed the authoritative
+            // on-disk sequence index while each concept body was in hand.
+            return Ok(self.neurons.concept_count());
+        }
+        let mut rebuilt = 0;
+        for raw_id in 0..self.neurons.len() {
+            let concept_id = raw_id as NeuronId;
+            if !self.is_concept_slot(concept_id) {
+                continue;
+            }
+            rebuilt += 1;
             let mut pending = vec![concept_id];
             let mut visited = AHashSet::new();
             while let Some(id) = pending.pop() {
@@ -1769,7 +1910,7 @@ impl Pool {
                 .or_insert(concept_id);
             self.serialize_all_neurons_for_idle()?;
         }
-        Ok(concept_ids.len())
+        Ok(rebuilt)
     }
 
     /// Rebuild only the compact pool address space. Every neuron body remains
@@ -1785,17 +1926,11 @@ impl Pool {
             label_to_id.insert(label, id);
         }
         let slot_count = store.slot_count();
-        let neurons = NeuronSlots::sleeping(
-            slot_count,
-            metadata.neuron_kinds.clone(),
-            metadata.concept_slots.clone(),
-            metadata.born_ticks.clone(),
-        );
+        let neurons = NeuronSlots::sleeping(slot_count, metadata.concept_count);
         let mut bloom = CountingBloom::with_expected_capacity(label_to_id.len().max(100_000));
         for label in label_to_id.keys() {
             bloom.insert(label);
         }
-        let evicted = (0..slot_count as NeuronId).collect();
         Ok(Self {
             config: metadata.config,
             encoding,
@@ -1823,7 +1958,7 @@ impl Pool {
             tiered_store: None,
             wbrain_store: Some(store),
             cold_offsets: AHashMap::new(),
-            evicted,
+            evicted: AHashSet::new(),
             decode_precision_ema: 0.0,
         })
     }
@@ -2096,8 +2231,10 @@ impl Pool {
     pub fn concept_count(&self) -> usize {
         self.neurons.concept_count()
     }
-    pub(crate) fn concept_ids(&self) -> impl Iterator<Item = NeuronId> + '_ {
-        self.neurons.concept_ids()
+    pub(crate) fn is_concept_slot(&self, id: NeuronId) -> bool {
+        self.wbrain_store
+            .as_ref()
+            .map_or_else(|| self.neurons.is_concept(id), |store| store.slot_is_concept(id))
     }
     /// Number of neuron slots (including evicted ones whose terminals
     /// have been shed).  Tier orchestrator uses this for round-robin

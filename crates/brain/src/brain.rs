@@ -1768,9 +1768,14 @@ impl Brain {
         let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) else {
             return Ok(0);
         };
-        let binding_ids: Vec<NeuronId> = binding_pool.read().concept_ids().collect();
-
-        for &binding_id in &binding_ids {
+        let binding_slots = binding_pool.read().neuron_count();
+        let mut rebuilt = 0;
+        for raw_id in 0..binding_slots {
+            let binding_id = raw_id as NeuronId;
+            if !binding_pool.read().is_concept_slot(binding_id) {
+                continue;
+            }
+            rebuilt += 1;
             let members = {
                 let mut pool = binding_pool.write();
                 pool.ensure_loaded(binding_id)?;
@@ -1788,7 +1793,7 @@ impl Brain {
                 }
             }
         }
-        Ok(binding_ids.len())
+        Ok(rebuilt)
     }
 
     /// Raw read of a pool's current activation map.  No interpretation,

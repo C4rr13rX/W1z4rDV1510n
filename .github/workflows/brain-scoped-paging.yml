@@ -30,6 +30,9 @@ jobs:
       - name: Verify streaming migration
         shell: pwsh
         run: cargo test -p w1z4rd-brain streaming_migration --lib
+      - name: Verify paged slot directory
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain paged_slot_directory_reopens_without_resident_offset_vectors --lib
       - name: Verify sleeping concept payload release
         shell: pwsh
         run: cargo test -p w1z4rd-brain sleeping_concept_releases_members_without_losing_identity --lib

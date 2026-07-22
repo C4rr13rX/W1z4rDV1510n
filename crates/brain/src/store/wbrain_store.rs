@@ -7,6 +7,7 @@
 
 use ahash::AHashMap;
 use parking_lot::{Mutex, RwLock};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,6 +17,62 @@ use crate::store::NeuronStore;
 use crate::store::container::{
     AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
 };
+
+const NEURON_SLOT_TABLE_KIND: u32 = 0x534C_4F54; // "SLOT"
+const NEURON_SLOT_BYTES: u64 = 24;
+const SLOT_PRESENT: u8 = 0b0000_0001;
+const SLOT_CONCEPT: u8 = 0b0000_0010;
+const SLOT_WRITE_BATCH: usize = 65_536;
+
+#[derive(Clone, Copy, Default)]
+struct NeuronSlotRecord {
+    offset: u64,
+    born_tick: u64,
+    kind: u8,
+    flags: u8,
+}
+
+impl NeuronSlotRecord {
+    fn from_neuron(offset: u64, neuron: &Neuron) -> Self {
+        let kind = match neuron.kind {
+            crate::neuron::NeuronKind::Excitatory => 0,
+            crate::neuron::NeuronKind::Inhibitory => 1,
+            crate::neuron::NeuronKind::Modulatory => 2,
+        };
+        Self {
+            offset,
+            born_tick: neuron.born_tick,
+            kind,
+            flags: SLOT_PRESENT | if neuron.is_atom() { 0 } else { SLOT_CONCEPT },
+        }
+    }
+
+    fn encode(self) -> [u8; NEURON_SLOT_BYTES as usize] {
+        let mut raw = [0_u8; NEURON_SLOT_BYTES as usize];
+        raw[0..8].copy_from_slice(&self.offset.to_le_bytes());
+        raw[8..16].copy_from_slice(&self.born_tick.to_le_bytes());
+        raw[16] = self.kind;
+        raw[17] = self.flags;
+        raw
+    }
+
+    fn decode(raw: [u8; NEURON_SLOT_BYTES as usize]) -> Self {
+        Self {
+            offset: u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+            born_tick: u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+            kind: raw[16],
+            flags: raw[17],
+        }
+    }
+
+    fn is_present(self) -> bool {
+        self.flags & SLOT_PRESENT != 0 && self.offset != 0
+    }
+
+    fn is_concept(self) -> bool {
+        self.flags & SLOT_CONCEPT != 0
+    }
+}
 
 /// One open `.wbrain` file shared by every pool in a brain.
 pub struct WbrainFile {
@@ -89,6 +146,9 @@ impl WbrainFile {
     /// of total neuron payload size.
     pub fn commit_manifest(&self) -> std::io::Result<u64> {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        for store in self.pools.read().values() {
+            store.flush_paged_slots()?;
+        }
         let mut pools: Vec<_> = self
             .pools
             .read()
@@ -156,6 +216,10 @@ pub struct WbrainNeuronStore {
     file: Arc<WbrainFile>,
     pool_id: PoolId,
     offsets: RwLock<Vec<Option<u64>>>,
+    slot_table: RwLock<Option<AuxiliaryRecordRef>>,
+    slot_count: AtomicU64,
+    known_count: AtomicU64,
+    pending_slots: Mutex<Vec<(NeuronId, NeuronSlotRecord)>>,
     labels: RwLock<AHashMap<String, NeuronId>>,
     pool_metadata: RwLock<Vec<u8>>,
     working_set: RwLock<AHashMap<NeuronId, Neuron>>,
@@ -172,6 +236,10 @@ impl WbrainNeuronStore {
             file,
             pool_id,
             offsets: RwLock::new(Vec::new()),
+            slot_table: RwLock::new(None),
+            slot_count: AtomicU64::new(0),
+            known_count: AtomicU64::new(0),
+            pending_slots: Mutex::new(Vec::with_capacity(SLOT_WRITE_BATCH)),
             labels: RwLock::new(AHashMap::new()),
             pool_metadata: RwLock::new(Vec::new()),
             working_set: RwLock::new(AHashMap::new()),
@@ -210,6 +278,10 @@ impl WbrainNeuronStore {
             file,
             pool_id: manifest.pool_id,
             offsets: RwLock::new(manifest.neuron_offsets),
+            slot_table: RwLock::new(manifest.neuron_slot_table),
+            slot_count: AtomicU64::new(manifest.neuron_count as u64),
+            known_count: AtomicU64::new(manifest.neuron_count as u64),
+            pending_slots: Mutex::new(Vec::with_capacity(SLOT_WRITE_BATCH)),
             labels: RwLock::new(labels),
             pool_metadata: RwLock::new(manifest.pool_metadata),
             working_set: RwLock::new(AHashMap::new()),
@@ -231,6 +303,156 @@ impl WbrainNeuronStore {
     /// duplicate label map.
     pub fn set_index_concept_labels(&self, enabled: bool) {
         self.index_concept_labels.store(enabled, Ordering::Release);
+    }
+
+    /// Allocate a fixed-width on-disk address/identity directory before a
+    /// large streaming migration. No per-neuron offset, kind, concept flag,
+    /// or birth tick is retained in RAM.
+    pub fn prepare_paged_slots(&self, slot_count: usize) -> std::io::Result<()> {
+        if self.slot_table.read().is_some() {
+            return Ok(());
+        }
+        let body_len = (slot_count as u64)
+            .checked_mul(NEURON_SLOT_BYTES)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "neuron slot table length overflow",
+                )
+            })?;
+        let reference = self.file.append_auxiliary(
+            self.pool_id,
+            NEURON_SLOT_TABLE_KIND,
+            |writer| {
+                if body_len > 0 {
+                    writer.seek(SeekFrom::Current((body_len - 1) as i64))?;
+                    writer.write_all(&[0])?;
+                }
+                Ok(())
+            },
+        )?;
+        self.offsets.write().clear();
+        *self.slot_table.write() = Some(reference);
+        self.slot_count.store(slot_count as u64, Ordering::Release);
+        self.known_count.store(0, Ordering::Release);
+        Ok(())
+    }
+
+    fn read_slot(&self, id: NeuronId) -> Option<NeuronSlotRecord> {
+        if let Some((_, record)) = self
+            .pending_slots
+            .lock()
+            .iter()
+            .rev()
+            .find(|(pending_id, _)| *pending_id == id)
+        {
+            return Some(*record);
+        }
+        let reference = *self.slot_table.read();
+        if let Some(reference) = reference {
+            if id as u64 >= self.slot_count.load(Ordering::Acquire) {
+                return None;
+            }
+            let mut raw = [0_u8; NEURON_SLOT_BYTES as usize];
+            self.file
+                .read_auxiliary_exact(reference, id as u64 * NEURON_SLOT_BYTES, &mut raw)
+                .ok()?;
+            return Some(NeuronSlotRecord::decode(raw));
+        }
+        let offset = self.offsets.read().get(id as usize).copied().flatten()?;
+        Some(NeuronSlotRecord {
+            offset,
+            flags: SLOT_PRESENT,
+            ..NeuronSlotRecord::default()
+        })
+    }
+
+    fn write_slot(&self, id: NeuronId, record: NeuronSlotRecord) -> std::io::Result<()> {
+        let reference = *self.slot_table.read();
+        if let Some(reference) = reference {
+            if id as u64 >= self.slot_count.load(Ordering::Acquire) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("neuron id {} exceeds fixed slot table", id),
+                ));
+            }
+            self.file.write_auxiliary_exact(
+                reference,
+                id as u64 * NEURON_SLOT_BYTES,
+                &record.encode(),
+            )?;
+            return Ok(());
+        }
+        let mut offsets = self.offsets.write();
+        let index = id as usize;
+        if offsets.len() <= index {
+            offsets.resize(index + 1, None);
+        }
+        offsets[index] = record.is_present().then_some(record.offset);
+        self.slot_count
+            .store(offsets.len() as u64, Ordering::Release);
+        Ok(())
+    }
+
+    fn queue_slot_write(&self, id: NeuronId, record: NeuronSlotRecord) -> std::io::Result<()> {
+        if self.slot_table.read().is_none() {
+            return self.write_slot(id, record);
+        }
+        let should_flush = {
+            let mut pending = self.pending_slots.lock();
+            pending.push((id, record));
+            pending.len() >= SLOT_WRITE_BATCH
+        };
+        if should_flush {
+            self.flush_paged_slots()?;
+        }
+        Ok(())
+    }
+
+    /// Publish queued fixed-width slot records with one contiguous write.
+    /// Initial migration IDs are dense and ascending, so this replaces tens
+    /// of thousands of table seeks with one bounded batch.
+    pub fn flush_paged_slots(&self) -> std::io::Result<()> {
+        let reference = *self.slot_table.read();
+        let Some(reference) = reference else {
+            return Ok(());
+        };
+        let pending = {
+            let mut guard = self.pending_slots.lock();
+            if guard.is_empty() {
+                return Ok(());
+            }
+            std::mem::take(&mut *guard)
+        };
+        let first = pending[0].0;
+        let contiguous = pending
+            .iter()
+            .enumerate()
+            .all(|(index, (id, _))| *id as u64 == first as u64 + index as u64);
+        if contiguous {
+            let mut raw = Vec::with_capacity(pending.len() * NEURON_SLOT_BYTES as usize);
+            for (_, record) in pending {
+                raw.extend_from_slice(&record.encode());
+            }
+            self.file.write_auxiliary_exact(
+                reference,
+                first as u64 * NEURON_SLOT_BYTES,
+                &raw,
+            )?;
+        } else {
+            for (id, record) in pending {
+                self.file.write_auxiliary_exact(
+                    reference,
+                    id as u64 * NEURON_SLOT_BYTES,
+                    &record.encode(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn slot_is_concept(&self, id: NeuronId) -> bool {
+        self.read_slot(id).is_some_and(NeuronSlotRecord::is_concept)
     }
 
     pub fn label_to_id(&self, label: &str) -> Option<NeuronId> {
@@ -258,15 +480,23 @@ impl WbrainNeuronStore {
     }
 
     pub fn known_count(&self) -> usize {
-        self.offsets
-            .read()
-            .iter()
-            .filter(|offset| offset.is_some())
-            .count()
+        if self.slot_table.read().is_some() {
+            self.known_count.load(Ordering::Acquire) as usize
+        } else {
+            self.offsets
+                .read()
+                .iter()
+                .filter(|offset| offset.is_some())
+                .count()
+        }
     }
 
     pub fn slot_count(&self) -> usize {
-        self.offsets.read().len()
+        if self.slot_table.read().is_some() {
+            self.slot_count.load(Ordering::Acquire) as usize
+        } else {
+            self.offsets.read().len()
+        }
     }
 
     pub fn page_ins(&self) -> u64 {
@@ -324,17 +554,23 @@ impl WbrainNeuronStore {
     }
 
     fn append_record(&self, neuron: &Neuron) -> std::io::Result<()> {
+        let known_before = self.known_count.load(Ordering::Acquire);
+        let was_present = (neuron.id as u64) < known_before;
         let offset = self
             .file
             .container
             .lock()
             .append_neuron(self.pool_id, neuron)?;
-        let mut offsets = self.offsets.write();
-        let index = neuron.id as usize;
-        if offsets.len() <= index {
-            offsets.resize(index + 1, None);
+        let record = NeuronSlotRecord::from_neuron(offset, neuron);
+        if !was_present && neuron.id as u64 == known_before {
+            self.queue_slot_write(neuron.id, record)?;
+        } else {
+            self.flush_paged_slots()?;
+            self.write_slot(neuron.id, record)?;
         }
-        offsets[index] = Some(offset);
+        if !was_present {
+            self.known_count.fetch_add(1, Ordering::AcqRel);
+        }
         if neuron.is_atom() || self.index_concept_labels.load(Ordering::Acquire) {
             self.labels.write().insert(neuron.label.clone(), neuron.id);
         }
@@ -342,7 +578,12 @@ impl WbrainNeuronStore {
     }
 
     fn manifest(&self) -> PoolContainerManifest {
-        let offsets = self.offsets.read().clone();
+        let slot_table = *self.slot_table.read();
+        let offsets = if slot_table.is_some() {
+            Vec::new()
+        } else {
+            self.offsets.read().clone()
+        };
         let mut labels: Vec<_> = self
             .labels
             .read()
@@ -352,7 +593,8 @@ impl WbrainNeuronStore {
         labels.sort_by(|a, b| a.0.cmp(&b.0));
         PoolContainerManifest {
             pool_id: self.pool_id,
-            neuron_count: offsets.len() as u32,
+            neuron_count: self.slot_count() as u32,
+            neuron_slot_table: slot_table,
             neuron_offsets: offsets,
             labels,
             pool_metadata: self.pool_metadata.read().clone(),
@@ -365,7 +607,11 @@ impl NeuronStore for WbrainNeuronStore {
         if let Some(neuron) = self.working_set.read().get(&id) {
             return Some(neuron.clone());
         }
-        let offset = self.offsets.read().get(id as usize).copied().flatten()?;
+        let slot = self.read_slot(id)?;
+        if !slot.is_present() {
+            return None;
+        }
+        let offset = slot.offset;
         let result = self.file.container.lock().read_neuron_at(offset);
         match result {
             Ok((pool_id, neuron)) if pool_id == self.pool_id && neuron.id == id => {
@@ -390,21 +636,25 @@ impl NeuronStore for WbrainNeuronStore {
 
     fn delete(&self, id: NeuronId) {
         self.working_set.write().remove(&id);
-        if let Some(offset) = self.offsets.write().get_mut(id as usize) {
-            *offset = None;
+        let was_present = self
+            .read_slot(id)
+            .is_some_and(NeuronSlotRecord::is_present);
+        if self
+            .write_slot(id, NeuronSlotRecord::default())
+            .is_err()
+        {
+            self.write_errors.fetch_add(1, Ordering::Relaxed);
+        } else if was_present {
+            self.known_count.fetch_sub(1, Ordering::AcqRel);
         }
         self.labels.write().retain(|_, known_id| *known_id != id);
     }
 
     fn iter_ids<'a>(&'a self) -> Box<dyn Iterator<Item = NeuronId> + 'a> {
-        let ids: Vec<_> = self
-            .offsets
-            .read()
-            .iter()
-            .enumerate()
-            .filter_map(|(id, offset)| offset.map(|_| id as NeuronId))
-            .collect();
-        Box::new(ids.into_iter())
+        Box::new((0..self.slot_count() as NeuronId).filter(|id| {
+            self.read_slot(*id)
+                .is_some_and(NeuronSlotRecord::is_present)
+        }))
     }
 
     fn len(&self) -> usize {
@@ -457,6 +707,54 @@ mod tests {
         assert_eq!(pool.resident_count(), 1);
         assert_eq!(pool.page_ins(), 1);
         assert_eq!(pool.label_to_id("atom:2"), Some(2));
+        assert_eq!(pool.resident_count(), 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn paged_slot_directory_reopens_without_resident_offset_vectors() {
+        let path = tmpfile("paged-slots");
+        {
+            let file = WbrainFile::open(&path).unwrap();
+            let pool = file.pool(7);
+            pool.prepare_paged_slots(3).unwrap();
+            pool.persist_sleeping(&Neuron::new_atom(
+                0,
+                "zero".into(),
+                NeuronKind::Excitatory,
+                1,
+            ))
+            .unwrap();
+            pool.persist_sleeping(&Neuron::new_concept(
+                1,
+                "one".into(),
+                NeuronKind::Excitatory,
+                vec![NeuronRef::new(7, 0)],
+                2,
+            ))
+            .unwrap();
+            pool.persist_sleeping(&Neuron::new_atom(
+                2,
+                "two".into(),
+                NeuronKind::Excitatory,
+                3,
+            ))
+            .unwrap();
+            file.commit_manifest().unwrap();
+            file.flush().unwrap();
+            let manifest = file.container.lock().manifest().unwrap().clone();
+            assert!(manifest.pools[0].neuron_offsets.is_empty());
+            assert!(manifest.pools[0].neuron_slot_table.is_some());
+        }
+
+        let reopened = WbrainFile::open(&path).unwrap();
+        let pool = reopened.pool(7);
+        assert_eq!(pool.slot_count(), 3);
+        assert_eq!(pool.known_count(), 3);
+        assert!(pool.slot_is_concept(1));
+        assert!(!pool.slot_is_concept(2));
+        assert_eq!(pool.resident_count(), 0);
+        assert_eq!(pool.get(2).unwrap().label, "two");
         assert_eq!(pool.resident_count(), 1);
         std::fs::remove_file(path).ok();
     }

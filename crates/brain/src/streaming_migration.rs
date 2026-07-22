@@ -378,10 +378,9 @@ fn stream_pool<R: Read>(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "neuron count exceeds usize"))?;
     let store = file.pool(config.id);
     store.set_index_concept_labels(config.id == binding_pool_id);
-    let mut neuron_kinds = Vec::with_capacity(capacity);
-    let mut concept_slots = Vec::with_capacity(capacity);
-    let mut born_ticks = Vec::with_capacity(capacity);
+    store.prepare_paged_slots(capacity)?;
     let mut concept_index = DiskConceptIndex::create(legacy_dir, config.id, neuron_count)?;
+    let mut concept_count = 0usize;
     let mut total_terminals = 0usize;
     let mut system = System::new();
 
@@ -402,11 +401,9 @@ fn stream_pool<R: Read>(
                 ),
             ));
         }
-        neuron_kinds.push(neuron.kind);
-        concept_slots.push(!neuron.is_atom());
-        born_ticks.push(neuron.born_tick);
         total_terminals = total_terminals.saturating_add(neuron.terminals.len());
         if !neuron.is_atom() {
+            concept_count = concept_count.saturating_add(1);
             let local_members: Vec<NeuronId> = neuron
                 .members
                 .iter()
@@ -419,6 +416,7 @@ fn stream_pool<R: Read>(
         }
         store.persist_sleeping(&neuron)?;
     }
+    store.flush_paged_slots()?;
 
     let label_count: u64 = read_value(reader)?;
     for _ in 0..label_count {
@@ -477,9 +475,10 @@ fn stream_pool<R: Read>(
             legacy_sequence_ledger: Some(legacy_sequence_ledger),
             concept_sequence_to_id: Vec::new(),
             legacy_concept_sequence_index: Some(legacy_concept_sequence_index),
-            neuron_kinds,
-            concept_slots,
-            born_ticks,
+            neuron_kinds: Vec::new(),
+            concept_slots: Vec::new(),
+            born_ticks: Vec::new(),
+            concept_count,
             total_terminals,
         },
     )

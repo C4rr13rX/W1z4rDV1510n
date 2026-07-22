@@ -13,7 +13,7 @@ use crate::neuron::{Neuron, NeuronId, PoolId};
 
 const HEADER_BYTES: u64 = 4096;
 const MAGIC: &[u8; 8] = b"W1ZBRAIN";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const SLOT_BYTES: u64 = 64;
 const SLOT_A: u64 = 16;
 const SLOT_B: u64 = SLOT_A + SLOT_BYTES;
@@ -42,6 +42,11 @@ pub struct BrainContainerManifest {
 pub struct PoolContainerManifest {
     pub pool_id: PoolId,
     pub neuron_count: u32,
+    /// Version-2 fixed-width address/identity table. Large brains keep this
+    /// record on disk and read one 24-byte slot at a time.
+    pub neuron_slot_table: Option<AuxiliaryRecordRef>,
+    /// Version-2 keeps this only for small/in-memory stores. Streaming
+    /// migration publishes an empty vector and uses `neuron_slot_table`.
     pub neuron_offsets: Vec<Option<u64>>,
     pub labels: Vec<(String, NeuronId)>,
     pub pool_metadata: Vec<u8>,
@@ -383,6 +388,7 @@ mod tests {
             pools: vec![PoolContainerManifest {
                 pool_id: 1,
                 neuron_count: 1,
+                neuron_slot_table: None,
                 neuron_offsets: vec![Some(offset)],
                 labels: vec![("t:YQ".into(), 0)],
                 pool_metadata: b"pool".to_vec(),
