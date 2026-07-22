@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import hashlib
 from urllib.parse import urlparse
@@ -30,6 +31,15 @@ from programming_integrated_retention import integrated_retention_passed
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+RECOVERABLE_GATE_ERRORS = (
+    RuntimeError,
+    subprocess.TimeoutExpired,
+    json.JSONDecodeError,
+    TimeoutError,
+    urllib.error.URLError,
+    ConnectionError,
+)
 
 
 @dataclass(frozen=True)
@@ -949,7 +959,8 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                     "updated_unix": time.time(),
                 })
                 if (code is None and next_canary is not None
-                        and ram >= next_canary):
+                        and ram >= next_canary
+                        and ram < block_target_row):
                     candidate_row = ram
                     publish(status_path, {
                         "state": "continuous_canary", "phase": phase.name,
@@ -963,8 +974,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         run_continuous_canary(
                             args, phase, runtime, candidate_row
                         )
-                    except (RuntimeError, subprocess.TimeoutExpired,
-                            json.JSONDecodeError) as exc:
+                    except RECOVERABLE_GATE_ERRORS as exc:
                         worker.terminate()
                         try:
                             worker.wait(timeout=30)
@@ -1158,8 +1168,7 @@ def main() -> int:
                 run_completion_gate(args, phase, runtime)
             else:
                 run_midphase_gate(args, phase, runtime, ram)
-        except (RuntimeError, subprocess.TimeoutExpired,
-                json.JSONDecodeError) as exc:
+        except RECOVERABLE_GATE_ERRORS as exc:
             publish(status_path, {
                 "state": "gate_only_failed", "phase": phase.name,
                 "ram_next_row": ram, "durable_next_row": durable,
@@ -1213,8 +1222,7 @@ def main() -> int:
                     run_continuous_canary(
                         args, attach_phase, runtime, candidate_row
                     )
-                except (RuntimeError, subprocess.TimeoutExpired,
-                        json.JSONDecodeError) as exc:
+                except RECOVERABLE_GATE_ERRORS as exc:
                     try:
                         attached_process = psutil.Process(args.attach_pid)
                         attached_process.terminate()
@@ -1284,8 +1292,7 @@ def main() -> int:
                                   "updated_unix": time.time()})
             try:
                 run_midphase_gate(args, attach_phase, runtime, attached_ram)
-            except (RuntimeError, subprocess.TimeoutExpired,
-                    json.JSONDecodeError) as exc:
+            except RECOVERABLE_GATE_ERRORS as exc:
                 record_deferred_failure(
                     runtime, attach_phase, attached_ram, attached_durable,
                     str(exc), "attached_midphase_gate_failed",
@@ -1315,8 +1322,7 @@ def main() -> int:
                                           "updated_unix": time.time()})
                     try:
                         run_completion_gate(args, phase, runtime)
-                    except (RuntimeError, subprocess.TimeoutExpired,
-                            json.JSONDecodeError) as exc:
+                    except RECOVERABLE_GATE_ERRORS as exc:
                         record_deferred_failure(
                             runtime, phase, ram, durable, str(exc),
                             "completion_gate_failed",
@@ -1365,8 +1371,7 @@ def main() -> int:
                                       "updated_unix": time.time()})
                 try:
                     run_midphase_gate(args, phase, runtime, ram_after)
-                except (RuntimeError, subprocess.TimeoutExpired,
-                        json.JSONDecodeError) as exc:
+                except RECOVERABLE_GATE_ERRORS as exc:
                     record_deferred_failure(
                         runtime, phase, ram_after, durable_after, str(exc),
                         "midphase_gate_failed",

@@ -243,6 +243,9 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertIn('"W1Z4RD_DEFER_PROMOTION": "1"', source)
             self.assertIn("args.restart_node_after_attach", source)
             self.assertIn('"--skip-range"', source)
+            self.assertIn("and ram < block_target_row", source)
+            self.assertIn("TimeoutError,", source)
+            self.assertIn("urllib.error.URLError", source)
 
     def test_quarantine_starts_after_latest_passing_canary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
