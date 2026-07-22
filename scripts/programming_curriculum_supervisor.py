@@ -112,7 +112,8 @@ def runtime_responsive_batch_size(runtime: Path, configured: int,
     return min(candidates)
 
 
-def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
+def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
+                           checkpoint_proof: dict | None = None) -> Path:
     """Preserve the authoritative accepted state until the next gate passes."""
     brain_dir = runtime / "brain"
     snapshot = (
@@ -154,9 +155,35 @@ def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
         "guard": str(guard),
         "storage": snapshot.suffix.lstrip("."),
         "guard_mode": guard_mode,
+        "checkpoint_proof": checkpoint_proof or {},
         "created_unix": time.time(),
     })
     return guard
+
+
+def ensure_live_last_good_guard(args: argparse.Namespace, runtime: Path,
+                                phase: Phase, row: int) -> Path:
+    """Checkpoint the accepted live state before assigning it a corpus row.
+
+    WAL durability protects an in-flight candidate, but copying only the base
+    container does not.  A rollback guard therefore owns an explicit checkpoint
+    barrier and the topology observed immediately after that barrier.
+    """
+    existing = runtime / "brain" / "brain.last-good.json"
+    if existing.is_file():
+        return ensure_last_good_guard(runtime, phase, row)
+    checkpoint = endpoint_post_json(
+        args.endpoint, "/brain/checkpoint", {}, timeout=4 * 3600.0
+    )
+    if checkpoint.get("ok") is False:
+        raise RuntimeError(f"last-good checkpoint barrier failed: {checkpoint}")
+    topology = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    return ensure_last_good_guard(runtime, phase, row, {
+        "checkpoint": checkpoint,
+        "topology": topology,
+        "row": row,
+        "completed_unix": time.time(),
+    })
 
 
 def accept_last_good_guard(runtime: Path, expected_phase: str | None = None) -> bool:
@@ -191,7 +218,7 @@ def assert_training_not_quarantined(runtime: Path) -> None:
         )
 
 
-def restore_canary_quarantine(runtime: Path) -> dict:
+def restore_canary_quarantine(runtime: Path, finalize: bool = True) -> dict:
     """Restore the accepted snapshot and ledger after a stopped-node failure."""
     marker = canary_quarantine_path(runtime)
     quarantine = read_json(marker)
@@ -220,11 +247,28 @@ def restore_canary_quarantine(runtime: Path) -> dict:
         raise RuntimeError(f"quarantine guard is missing: {guard}")
     same_snapshot = snapshot.exists() and os.path.samefile(snapshot, guard)
     if same_snapshot:
-        guard.unlink()
+        pass
     else:
-        snapshot.unlink(missing_ok=True)
-        os.replace(guard, snapshot)
+        temporary = snapshot.with_suffix(snapshot.suffix + ".restore.tmp")
+        temporary.unlink(missing_ok=True)
+        shutil.copy2(guard, temporary)
+        os.replace(temporary, snapshot)
     (brain_dir / "brain.wal").unlink(missing_ok=True)
+    restored = {
+        "phase": phase,
+        "row": row,
+        "snapshot": str(snapshot),
+        "checkpoint_proof": last_good.get("checkpoint_proof") or {},
+    }
+    if finalize:
+        finalize_canary_restore(runtime, restored)
+    return restored
+
+
+def finalize_canary_restore(runtime: Path, restored: dict) -> None:
+    """Publish the rewind only after a replacement node proves the snapshot."""
+    phase = str(restored["phase"])
+    row = int(restored["row"])
     progress_path = runtime / f"{phase}.progress.json"
     progress = read_json(progress_path)
     progress.update({
@@ -235,26 +279,87 @@ def restore_canary_quarantine(runtime: Path) -> dict:
         "updated_unix": time.time(),
     })
     publish(progress_path, progress)
+    brain_dir = runtime / "brain"
+    (brain_dir / "brain.last-good.bin").unlink(missing_ok=True)
+    (brain_dir / "brain.last-good.wbrain").unlink(missing_ok=True)
     (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
-    marker.unlink()
-    return {"phase": phase, "row": row, "snapshot": str(snapshot)}
+    canary_quarantine_path(runtime).unlink(missing_ok=True)
 
 
-def stop_runtime_node(runtime: Path, timeout: float = 60.0) -> int:
+def verify_restored_topology(restored: dict, observed: dict) -> None:
+    """Reject a rollback whose reopened topology is not its recorded barrier."""
+    expected = ((restored.get("checkpoint_proof") or {}).get("topology") or {})
+    if not expected:
+        raise RuntimeError(
+            "last-good guard has no checkpoint topology proof; refusing to "
+            "claim its corpus row after restart"
+        )
+    fields = (
+        "tick", "pool_count", "total_neurons", "total_concepts",
+        "total_binding", "total_terminals",
+    )
+    mismatches = {
+        field: {"expected": expected.get(field), "observed": observed.get(field)}
+        for field in fields if expected.get(field) != observed.get(field)
+    }
+    if mismatches:
+        raise RuntimeError(
+            f"restored topology does not match last-good checkpoint: {mismatches}"
+        )
+
+
+def endpoint_listener_pid(endpoint: str) -> int:
+    """Return the PID that owns the endpoint's listening socket, if any."""
+    parsed = urlparse(endpoint)
+    if not parsed.port:
+        return 0
+    host = (parsed.hostname or "").lower()
+    for connection in psutil.net_connections(kind="tcp"):
+        if connection.status != psutil.CONN_LISTEN or not connection.laddr:
+            continue
+        if connection.laddr.port != parsed.port:
+            continue
+        address = str(connection.laddr.ip).lower()
+        if host in ("localhost", "127.0.0.1", "::1") and address not in (
+                "0.0.0.0", "::", "127.0.0.1", "::1"):
+            continue
+        return int(connection.pid or 0)
+    return 0
+
+
+def stop_runtime_node(runtime: Path, endpoint: str,
+                      timeout: float = 60.0) -> int:
     pid_path = runtime / "node.pid"
     try:
         pid = int(pid_path.read_text(encoding="ascii").strip())
     except (FileNotFoundError, OSError, ValueError):
         pid = 0
+    listener_pid = endpoint_listener_pid(endpoint)
+    if listener_pid and listener_pid != pid:
+        pid = listener_pid
     if not process_alive(pid):
+        if listener_pid:
+            raise RuntimeError(
+                f"endpoint {endpoint} remains owned by live PID {listener_pid}"
+            )
         return pid
     process = psutil.Process(pid)
+    executable = Path(process.exe()).name.lower()
+    if "w1z4rd_brain_server" not in executable:
+        raise RuntimeError(
+            f"refusing to stop unrelated PID {pid}: {executable}"
+        )
     process.terminate()
     try:
         process.wait(timeout=timeout)
     except psutil.TimeoutExpired:
         process.kill()
         process.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while endpoint_listener_pid(endpoint):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"brain endpoint remained live after stopping PID {pid}")
+        time.sleep(0.1)
     return pid
 
 
@@ -266,6 +371,12 @@ def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
     parsed = urlparse(endpoint)
     if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
         raise RuntimeError(f"automatic node recovery requires an HTTP host and port: {endpoint}")
+    occupied_pid = endpoint_listener_pid(endpoint)
+    if occupied_pid:
+        raise RuntimeError(
+            f"refusing false recovery: endpoint {endpoint} is already owned by "
+            f"PID {occupied_pid}"
+        )
     identity = runtime / "brain" / "brain.identity.toml"
     deployment = runtime / "brain.deployment.toml"
     env = os.environ.copy()
@@ -300,8 +411,16 @@ def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
         if process.poll() is not None:
             raise RuntimeError(f"recovered brain server exited with {process.returncode}")
         try:
+            owner_pid = endpoint_listener_pid(endpoint)
             endpoint_json(endpoint, "/brain/stats", timeout=2.0)
-            return process
+            if owner_pid == process.pid:
+                return process
+            if owner_pid:
+                process.kill()
+                raise RuntimeError(
+                    f"recovery endpoint belongs to PID {owner_pid}, not launched "
+                    f"PID {process.pid}"
+                )
         except Exception:
             time.sleep(1.0)
     process.kill()
@@ -889,9 +1008,14 @@ def perform_automatic_recovery(args: argparse.Namespace, phase: Phase,
         "updated_unix": time.time(),
     })
     try:
-        stop_runtime_node(runtime)
-        restored = restore_canary_quarantine(runtime)
+        stop_runtime_node(runtime, args.endpoint)
+        restored = restore_canary_quarantine(runtime, finalize=False)
         start_runtime_node(runtime, args.node_bin, args.endpoint)
+        verify_restored_topology(
+            restored,
+            endpoint_json(args.endpoint, "/brain/stats", timeout=120.0),
+        )
+        finalize_canary_restore(runtime, restored)
     except (RuntimeError, OSError, psutil.Error) as exc:
         publish(status_path, {
             "state": "automatic_quarantine_recovery_failed",
@@ -1125,7 +1249,7 @@ def main() -> int:
                 })
                 return 1
             try:
-                stop_runtime_node(runtime)
+                stop_runtime_node(runtime, args.endpoint)
                 start_runtime_node(runtime, args.node_bin, args.endpoint)
             except (RuntimeError, OSError, psutil.Error) as exc:
                 publish(status_path, {
@@ -1217,7 +1341,7 @@ def main() -> int:
                                   "durable_next_row": durable,
                                   "restart": restarts,
                                   "updated_unix": time.time()})
-            ensure_last_good_guard(runtime, phase, ram)
+            ensure_live_last_good_guard(args, runtime, phase, ram)
             block_target = guarded_block_target(
                 runtime, phase, ram, args.gate_rows
             )

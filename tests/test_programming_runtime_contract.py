@@ -23,6 +23,8 @@ from scripts.programming_curriculum_supervisor import (
     append_deferred_event,
     assert_training_not_quarantined,
     ensure_last_good_guard,
+    ensure_live_last_good_guard,
+    finalize_canary_restore,
     guarded_block_target,
     deferred_interval_id,
     latest_passing_canary_row,
@@ -36,6 +38,7 @@ from scripts.programming_curriculum_supervisor import (
     settle_brain_for_admission,
     topology_delta,
     unresolved_deferred_intervals,
+    verify_restored_topology,
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
 from scripts.programming_capstone_readiness import safe_manifest, structural_checks
@@ -226,7 +229,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertIn('"state": "deferred_intervals_pending"', source)
-            self.assertIn("stop_runtime_node(runtime)", source)
+            self.assertIn("stop_runtime_node(runtime, args.endpoint)", source)
             self.assertIn("restored = restore_canary_quarantine(runtime)", source)
             self.assertIn("start_runtime_node(runtime, args.node_bin, args.endpoint)", source)
             self.assertIn('"W1Z4RD_TICK_HOUSEKEEPING": "lazy"', source)
@@ -755,6 +758,47 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
 
+    def test_live_guard_owns_checkpoint_barrier_and_topology_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            (brain / "brain.wbrain").write_bytes(b"accepted-container")
+            phase = Phase("phase-a", "script-a", runtime / "corpus.jsonl", 10)
+            args = SimpleNamespace(endpoint="http://127.0.0.1:18600")
+            topology = {
+                "tick": 4, "pool_count": 2, "total_neurons": 9,
+                "total_concepts": 5, "total_binding": 3,
+                "total_terminals": 12,
+            }
+            with patch(
+                "scripts.programming_curriculum_supervisor.endpoint_post_json",
+                return_value={"ok": True},
+            ) as checkpoint, patch(
+                "scripts.programming_curriculum_supervisor.endpoint_json",
+                return_value=topology,
+            ):
+                ensure_live_last_good_guard(args, runtime, phase, 4)
+            checkpoint.assert_called_once()
+            metadata = json.loads(
+                (brain / "brain.last-good.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["checkpoint_proof"]["row"], 4)
+            self.assertEqual(metadata["checkpoint_proof"]["topology"], topology)
+
+    def test_restore_topology_proof_rejects_stale_container(self) -> None:
+        restored = {"checkpoint_proof": {"topology": {
+            "tick": 10, "pool_count": 2, "total_neurons": 20,
+            "total_concepts": 12, "total_binding": 7,
+            "total_terminals": 40,
+        }}}
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            verify_restored_topology(restored, {
+                "tick": 9, "pool_count": 2, "total_neurons": 19,
+                "total_concepts": 12, "total_binding": 7,
+                "total_terminals": 40,
+            })
+
     def test_guard_acceptance_requires_matching_phase_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
@@ -803,11 +847,28 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                     },
                 }), encoding="utf-8",
             )
-            restored = restore_canary_quarantine(runtime)
+            restored = restore_canary_quarantine(runtime, finalize=False)
             self.assertEqual(restored["snapshot"], str(snapshot))
             self.assertEqual(snapshot.read_bytes(), b"accepted-container")
-            self.assertFalse(guard.exists())
+            self.assertTrue(guard.exists())
             self.assertFalse((brain / "brain.wal").exists())
+            self.assertEqual(
+                json.loads((runtime / "corpus.progress.json").read_text())[
+                    "durable_next_row"
+                ],
+                200,
+            )
+            self.assertTrue(
+                (runtime / "curriculum-canary-quarantine.json").exists()
+            )
+            finalize_canary_restore(runtime, restored)
+            self.assertFalse(guard.exists())
+            self.assertEqual(
+                json.loads((runtime / "corpus.progress.json").read_text())[
+                    "durable_next_row"
+                ],
+                100,
+            )
 
     def test_guarded_block_target_survives_worker_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
