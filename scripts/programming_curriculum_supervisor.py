@@ -475,6 +475,63 @@ def endpoint_json(endpoint: str, path: str, timeout: float = 30.0) -> dict:
         return json.loads(response.read())
 
 
+def endpoint_post_json(endpoint: str, path: str, payload: dict,
+                       timeout: float = 30.0) -> dict:
+    request = urllib.request.Request(
+        endpoint.rstrip("/") + path,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
+def settle_brain_for_admission(args: argparse.Namespace, phase: Phase,
+                               runtime: Path, trained_rows: int) -> dict:
+    """Finish maintenance, serialize every neuron, then durably checkpoint.
+
+    This runs only after the corpus worker has stopped at an exact guarded
+    boundary. Continuous canaries deliberately skip it because their worker is
+    still learning. The subsequent behavioral gate therefore evaluates the
+    same fully settled state that the next rollback guard will protect.
+    """
+    before = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    sleep = endpoint_post_json(
+        args.endpoint,
+        "/brain/sleep",
+        {"min_use_count": 2, "stale_ticks": 1000},
+        timeout=4 * 3600.0,
+    )
+    if sleep.get("error"):
+        raise RuntimeError(f"idle brain settlement failed: {sleep}")
+    checkpoint = endpoint_post_json(
+        args.endpoint, "/brain/checkpoint", {}, timeout=4 * 3600.0
+    )
+    if checkpoint.get("ok") is False:
+        raise RuntimeError(f"settled checkpoint failed: {checkpoint}")
+    after = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    if int(after.get("resident_terminals") or 0) != 0:
+        raise RuntimeError(
+            "settled brain retained terminals before admission: "
+            f"{after.get('resident_terminals')}"
+        )
+    report = {
+        "kind": "admission_idle_settlement",
+        "phase": phase.name,
+        "trained_rows": trained_rows,
+        "before": before,
+        "sleep": sleep,
+        "checkpoint": checkpoint,
+        "after": after,
+        "updated_unix": time.time(),
+    }
+    publish(
+        runtime / f"{phase.name}.row-{trained_rows}.idle-settlement.json",
+        report,
+    )
+    return report
+
+
 def topology_delta(before: dict, after: dict) -> dict:
     fields = (
         "tick", "pool_count", "total_neurons", "total_concepts",
@@ -516,6 +573,7 @@ def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
 def run_completion_gate(args: argparse.Namespace, phase: Phase,
                         runtime: Path) -> dict:
     """Require corpus recall plus protected foundation/code execution."""
+    settlement = settle_brain_for_admission(args, phase, runtime, phase.rows)
     recall = run_json_command(recall_command(args, phase, runtime, phase.rows, 64))
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(f"{phase.name} recall regression: {recall}")
@@ -576,6 +634,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
     report = {
         "phase": phase.name,
         "passed": True,
+        "idle_settlement": settlement,
         "recall": recall,
         "foundation": foundation,
         "code": code,
@@ -590,6 +649,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
 def run_midphase_gate(args: argparse.Namespace, phase: Phase,
                       runtime: Path, trained_rows: int) -> dict:
     """Protect retained knowledge before permitting the next corpus chunk."""
+    settlement = settle_brain_for_admission(args, phase, runtime, trained_rows)
     recall = run_json_command(
         recall_command(args, phase, runtime, trained_rows, 32)
     )
@@ -627,6 +687,7 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
         "phase": phase.name,
         "trained_rows": trained_rows,
         "passed": True,
+        "idle_settlement": settlement,
         "recall": recall,
         "foundation": foundation,
         "enterprise": enterprise,

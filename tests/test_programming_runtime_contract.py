@@ -33,6 +33,7 @@ from scripts.programming_curriculum_supervisor import (
     restore_canary_quarantine,
     responsive_batch_size,
     runtime_responsive_batch_size,
+    settle_brain_for_admission,
     topology_delta,
     unresolved_deferred_intervals,
 )
@@ -89,6 +90,53 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_block_admission_settles_and_serializes_before_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            args = argparse.Namespace(endpoint="http://brain")
+            phase = Phase("corpus", "script", Path("corpus.jsonl"), 1000)
+            with patch(
+                "scripts.programming_curriculum_supervisor.endpoint_json",
+                side_effect=[
+                    {"tick": 10, "resident_terminals": 1234},
+                    {"tick": 10, "resident_terminals": 0},
+                ],
+            ) as get_json, patch(
+                "scripts.programming_curriculum_supervisor.endpoint_post_json",
+                side_effect=[
+                    {"neurons_serialized": 42, "promotions_drained": 3},
+                    {"ok": True, "path": "brain.wbrain"},
+                ],
+            ) as post_json:
+                report = settle_brain_for_admission(
+                    args, phase, runtime, 500
+                )
+            self.assertEqual(report["after"]["resident_terminals"], 0)
+            self.assertEqual(post_json.call_args_list[0].args[1], "/brain/sleep")
+            self.assertEqual(
+                post_json.call_args_list[1].args[1], "/brain/checkpoint"
+            )
+            self.assertEqual(get_json.call_count, 2)
+            artifact = runtime / "corpus.row-500.idle-settlement.json"
+            self.assertTrue(artifact.is_file())
+
+    def test_block_admission_rejects_resident_terminals_after_sleep(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            args = argparse.Namespace(endpoint="http://brain")
+            phase = Phase("corpus", "script", Path("corpus.jsonl"), 1000)
+            with patch(
+                "scripts.programming_curriculum_supervisor.endpoint_json",
+                side_effect=[
+                    {"resident_terminals": 1234},
+                    {"resident_terminals": 1},
+                ],
+            ), patch(
+                "scripts.programming_curriculum_supervisor.endpoint_post_json",
+                side_effect=[{"neurons_serialized": 42}, {"ok": True}],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "retained terminals"):
+                    settle_brain_for_admission(args, phase, Path(raw), 500)
+
     def test_deferred_interval_preserves_exact_causal_base_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
