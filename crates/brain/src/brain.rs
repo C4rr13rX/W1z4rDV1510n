@@ -1965,6 +1965,10 @@ impl Brain {
         let mut roots_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         let mut atom_sequences: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         let mut atom_frames: AHashMap<PoolId, Vec<u8>> = AHashMap::new();
+        let mut root_shapes: AHashMap<
+            (PoolId, NeuronId),
+            (bool, Vec<NeuronRef>, Vec<u8>),
+        > = AHashMap::new();
 
         for member in members {
             roots_by_pool
@@ -1974,14 +1978,21 @@ impl Brain {
             let Some(pool) = self.fabric.pool(member.pool) else {
                 continue;
             };
-            if let Some((true, _, decoded)) =
-                pool.write().read_neuron_shape_bounded(member.neuron)?
-            {
-                atom_sequences
-                    .entry(member.pool)
-                    .or_default()
-                    .push(member.neuron);
-                atom_frames.entry(member.pool).or_default().extend(decoded);
+            if let Some(shape) = pool.write().read_neuron_shape_bounded(member.neuron)? {
+                if shape.0 {
+                    atom_sequences
+                        .entry(member.pool)
+                        .or_default()
+                        .push(member.neuron);
+                    atom_frames
+                        .entry(member.pool)
+                        .or_default()
+                        .extend_from_slice(&shape.2);
+                }
+                // The traversal starts at these same roots. Retain only their
+                // compact shape for this binding so each serialized root is
+                // opened once, not once for ordering and again for flattening.
+                root_shapes.insert((member.pool, member.neuron), shape);
             }
         }
 
@@ -1995,9 +2006,21 @@ impl Brain {
                 if !visited.insert(neuron_id) {
                     continue;
                 }
-                let Some((is_atom, children, _)) =
+                let shape = if let Some(shape) = root_shapes.remove(&(pool_id, neuron_id)) {
+                    Some(shape)
+                } else if !pool.read().is_concept_slot(neuron_id) {
+                    // Atom/concept identity lives in the compact paged slot
+                    // directory. Descendant atoms need no body read: their
+                    // stable id is already the feature posting key.
+                    builder.insert(
+                        &BindingPostingKey::Feature(pool_id, neuron_id).encode(),
+                        binding_id,
+                    )?;
+                    continue;
+                } else {
                     pool.write().read_neuron_shape_bounded(neuron_id)?
-                else {
+                };
+                let Some((is_atom, children, _)) = shape else {
                     continue;
                 };
                 if is_atom {
