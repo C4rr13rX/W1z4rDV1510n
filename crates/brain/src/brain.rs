@@ -745,6 +745,12 @@ pub struct Brain {
     /// only the hash bucket keyed by the current input; live training stays
     /// in the three small overlays above until the next idle transition.
     binding_posting_indexes: Vec<crate::store::AuxiliaryRecordRef>,
+    /// Subset of immutable generations that actually contain fingerprint
+    /// scalar state. Keeping these tiny references separate prevents every
+    /// recurrence lookup from probing binding-only indexes. The subset is
+    /// derived from generation markers on restore, so the persisted metadata
+    /// format remains backward compatible.
+    fingerprint_posting_indexes: Vec<crate::store::AuxiliaryRecordRef>,
     /// Count of advance_tick calls that produced a non-empty
     /// fingerprint.  Drives the pressure-feedback loop along with
     /// `len(tentative_promoted) + len(promoted_fingerprints)`.
@@ -947,6 +953,7 @@ impl Brain {
             binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
             binding_posting_indexes: Vec::new(),
+            fingerprint_posting_indexes: Vec::new(),
             total_observations: 0,
             current_threshold: initial_threshold,
             last_pressure_check_obs: 0,
@@ -1333,7 +1340,8 @@ impl Brain {
                 pool.write()
                     .ensure_frame_concept_for_pretrain_profiled(frame, now)
             } else {
-                pool.write().ensure_frame_atoms_for_pretrain_profiled(frame, now)
+                pool.write()
+                    .ensure_frame_atoms_for_pretrain_profiled(frame, now)
             };
             profile.frame_atomize_ns = profile
                 .frame_atomize_ns
@@ -1366,11 +1374,21 @@ impl Brain {
         profile.fingerprint_ns = stage.elapsed().as_nanos() as u64;
         self.total_observations = self.total_observations.saturating_add(1);
         let stage = std::time::Instant::now();
-        self.increment_lifetime_recurrence(&fingerprint);
+        let lifetime = self.increment_lifetime_recurrence(&fingerprint);
         profile.recurrence_ns = stage.elapsed().as_nanos() as u64;
 
         let stage = std::time::Instant::now();
-        let existing = self.existing_binding_id(&fingerprint);
+        // A promoted or tentative binding cannot predate its own lifetime
+        // recurrence.  A first observation therefore proves that both cold
+        // binding-state lookups are negative.  At corpus scale those redundant
+        // generation scans caused multi-second random-read tails for novel
+        // episodes even though the one required lifetime lookup took only
+        // milliseconds.
+        let existing = if lifetime > 1 {
+            self.existing_binding_id(&fingerprint)
+        } else {
+            None
+        };
         profile.binding_lookup_ns = stage.elapsed().as_nanos() as u64;
         let stage = std::time::Instant::now();
         let id = if let Some(id) = existing {
@@ -1607,7 +1625,11 @@ impl Brain {
         // times).  Without this, all bindings score by atom precision
         // (uniformly 1.0 for full overlap) and the decoder's smaller-
         // target-count tiebreak arbitrarily picks shorter category names.
-        let existing_bid = self.existing_binding_id(&fp);
+        let existing_bid = if lifetime > 1 {
+            self.existing_binding_id(&fp)
+        } else {
+            None
+        };
         if let Some(bid) = existing_bid {
             let now = self.fabric.current_tick();
             if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
@@ -1631,8 +1653,8 @@ impl Brain {
 
         let tentative_thr = self.config.tentative_emergence_threshold;
         let consolidated_thr = self.current_threshold;
-        let already_tentative = self.tentative_binding_id(&fp).is_some();
-        let already_consolidated = self.promoted_binding_id(&fp).is_some();
+        let already_tentative = lifetime > 1 && self.tentative_binding_id(&fp).is_some();
+        let already_consolidated = lifetime > 1 && self.promoted_binding_id(&fp).is_some();
 
         // Tier 1: tentative promotion.  Cheap — creates a binding
         // neuron in the binding pool but no EEM fact and no gossip.
@@ -2196,7 +2218,7 @@ impl Brain {
     fn disk_scalar(&self, encoded_key: &[u8]) -> Option<u32> {
         let file = self.wbrain_file.as_ref()?;
         let store = file.pool(self.binding_pool_id);
-        for reference in self.binding_posting_indexes.iter().rev() {
+        for reference in self.fingerprint_posting_indexes.iter().rev() {
             match crate::store::posting_index::lookup(&store, *reference, encoded_key, 1) {
                 Ok(values) => {
                     if let Some(value) = values.into_iter().next() {
@@ -2313,10 +2335,9 @@ impl Brain {
             .cloned()
             .unwrap_or_default();
         out.truncate(MAX_MOTIF_POSTINGS);
-        for id in self.disk_binding_postings(
-            &BindingPostingKey::Motif(pool, motif),
-            MAX_MOTIF_POSTINGS,
-        ) {
+        for id in
+            self.disk_binding_postings(&BindingPostingKey::Motif(pool, motif), MAX_MOTIF_POSTINGS)
+        {
             append_binding_posting(&mut out, id, MAX_MOTIF_POSTINGS);
         }
         out
@@ -2425,6 +2446,9 @@ impl Brain {
         }
         let reference = builder.finish(file, self.binding_pool_id)?;
         self.binding_posting_indexes.push(reference);
+        if fingerprint_entries > 0 {
+            self.fingerprint_posting_indexes.push(reference);
+        }
         self.binding_sequence_index.clear();
         self.binding_feature_atom_index.clear();
         self.binding_motif_index.clear();
@@ -2527,9 +2551,23 @@ impl Brain {
         let reference = builder.finish(&file, self.binding_pool_id)?;
         let store = file.pool(self.binding_pool_id);
         self.binding_posting_indexes.retain(|existing| {
-            crate::store::posting_index::lookup(&store, *existing, FINGERPRINT_STATE_MARKER_KEY, 1)
-                .is_ok_and(|values| !values.is_empty())
+            match crate::store::posting_index::lookup(
+                &store,
+                *existing,
+                FINGERPRINT_STATE_MARKER_KEY,
+                1,
+            ) {
+                Ok(values) => !values.is_empty(),
+                Err(error) => {
+                    tracing::warn!(
+                        "retaining unreadable posting generation during rebuild: {}",
+                        error
+                    );
+                    true
+                }
+            }
         });
+        self.fingerprint_posting_indexes = self.binding_posting_indexes.clone();
         self.binding_posting_indexes.push(reference);
         Ok(rebuilt)
     }
@@ -2833,11 +2871,7 @@ impl Brain {
                         out.extend(p.encoding_reassemble(&[(n.label.as_str(), 1.0)]));
                     }
                 }
-                if out.is_empty() {
-                    None
-                } else {
-                    Some(out)
-                }
+                if out.is_empty() { None } else { Some(out) }
             }
         }
     }
@@ -3246,7 +3280,7 @@ impl Brain {
                     let score =
                         avg_member_act * boost * length_factor * info_factor * binding_boost;
                     let _ = locked_targeted.contains(&nid); // signal retained for Phase B v2 below
-                                                            // Hold on to raw activation for grounding metric.
+                    // Hold on to raw activation for grounding metric.
                     let _ = act;
                     let _ = target.expanded_size(&n.members);
                     if score > best_score {
@@ -3930,11 +3964,7 @@ impl Brain {
         };
         drop(t);
 
-        if bytes.is_empty() {
-            None
-        } else {
-            Some(bytes)
-        }
+        if bytes.is_empty() { None } else { Some(bytes) }
     }
 
     /// Whether the current ordered atom sequence has a directly observed
@@ -4141,11 +4171,7 @@ impl Brain {
         } else {
             target.decode_concept_members(&atoms)
         };
-        if bytes.is_empty() {
-            None
-        } else {
-            Some(bytes)
-        }
+        if bytes.is_empty() { None } else { Some(bytes) }
     }
 
     /// Wake only bindings reachable from the active query atoms or their
@@ -4534,12 +4560,12 @@ impl Brain {
         }
         let mut decoded: Vec<_> = aggregated.into_iter().collect();
         decoded.sort_by(|a, b| {
-            b.1 .0
-                .cmp(&a.1 .0)
-                .then_with(|| b.1 .1.cmp(&a.1 .1))
-                .then_with(|| b.1 .2.cmp(&a.1 .2))
-                .then_with(|| a.1 .3.cmp(&b.1 .3))
-                .then_with(|| a.1 .4.cmp(&b.1 .4))
+            b.1.0
+                .cmp(&a.1.0)
+                .then_with(|| b.1.1.cmp(&a.1.1))
+                .then_with(|| b.1.2.cmp(&a.1.2))
+                .then_with(|| a.1.3.cmp(&b.1.3))
+                .then_with(|| a.1.4.cmp(&b.1.4))
         });
         let has_nonnegative = decoded.iter().any(|(_, rank)| rank.0 >= 0);
         decoded
@@ -4800,11 +4826,7 @@ impl Brain {
             let mut bindings = bindings_handle.write();
             for binding_id in &candidate_ids {
                 if let Err(error) = bindings.ensure_loaded(*binding_id) {
-                    tracing::warn!(
-                        "motif binding page-in failed for {}: {}",
-                        binding_id,
-                        error
-                    );
+                    tracing::warn!("motif binding page-in failed for {}: {}", binding_id, error);
                 }
             }
         }
@@ -6640,11 +6662,7 @@ impl Brain {
                 }
             }
         }
-        if n == 0 {
-            0.0
-        } else {
-            sum / (n as f32)
-        }
+        if n == 0 { 0.0 } else { sum / (n as f32) }
     }
 
     /// Stage 17.7 full — free-energy weighted REPLAY per
@@ -7525,23 +7543,7 @@ impl Brain {
             .len()
             .saturating_add(self.tentative_promoted.len())
             .saturating_add(self.promoted_fingerprints.len());
-        let disk_generations = self
-            .binding_posting_indexes
-            .iter()
-            .filter(|reference| {
-                let Some(file) = self.wbrain_file.as_ref() else {
-                    return false;
-                };
-                let store = file.pool(self.binding_pool_id);
-                crate::store::posting_index::lookup(
-                    &store,
-                    **reference,
-                    FINGERPRINT_STATE_MARKER_KEY,
-                    1,
-                )
-                .is_ok_and(|values| !values.is_empty())
-            })
-            .count();
+        let disk_generations = self.fingerprint_posting_indexes.len();
         (overlay_entries, disk_generations)
     }
 
@@ -7864,6 +7866,7 @@ impl Brain {
             binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
             binding_posting_indexes: Vec::new(),
+            fingerprint_posting_indexes: Vec::new(),
             total_observations: snap.total_observations,
             current_threshold: restored_threshold,
             last_pressure_check_obs: snap.total_observations,
@@ -7916,6 +7919,29 @@ impl Brain {
 
         let tentative_binding_count_total = metadata.tentative_promoted.len();
         let consolidated_binding_count_total = metadata.promoted_fingerprints.len();
+        let fingerprint_store = file.pool(metadata.binding_pool_id);
+        let fingerprint_posting_indexes = metadata
+            .binding_posting_indexes
+            .iter()
+            .copied()
+            .filter(|reference| {
+                match crate::store::posting_index::lookup(
+                    &fingerprint_store,
+                    *reference,
+                    FINGERPRINT_STATE_MARKER_KEY,
+                    1,
+                ) {
+                    Ok(values) => !values.is_empty(),
+                    Err(error) => {
+                        tracing::warn!(
+                            "conservatively retaining unreadable fingerprint generation: {}",
+                            error
+                        );
+                        true
+                    }
+                }
+            })
+            .collect();
         let mut brain = Self {
             fabric,
             config: metadata.config,
@@ -7952,6 +7978,7 @@ impl Brain {
             binding_feature_atom_index: metadata.binding_feature_atom_index.into_iter().collect(),
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
             binding_posting_indexes: metadata.binding_posting_indexes,
+            fingerprint_posting_indexes,
             total_observations: metadata.total_observations,
             current_threshold: metadata.current_threshold,
             last_pressure_check_obs: metadata.last_pressure_check_obs,

@@ -13,15 +13,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post},
-    Json, Router,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -592,6 +592,9 @@ async fn h_health() -> &'static str {
 async fn h_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let b = s.brain.lock().await;
     let st = b.stats();
+    let (binding_posting_overlay, binding_posting_generations) = b.binding_posting_residency();
+    let (fingerprint_state_overlay, fingerprint_state_generations) =
+        b.fingerprint_state_residency();
     Json(json!({
         "tick":            st.tick,
         "pool_count":      st.pool_count,
@@ -605,6 +608,10 @@ async fn h_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
         "resident_terminals": st.resident_terminals,
         "evicted_neurons":    st.evicted_neurons,
         "binding_pool_id": b.binding_pool_id(),
+        "binding_posting_overlay": binding_posting_overlay,
+        "binding_posting_generations": binding_posting_generations,
+        "fingerprint_state_overlay": fingerprint_state_overlay,
+        "fingerprint_state_generations": fingerprint_state_generations,
     }))
 }
 
@@ -740,7 +747,7 @@ async fn h_predict_multi(
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
-            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}));
         }
     };
     Json(json!({
@@ -813,7 +820,7 @@ async fn h_repair_predict(
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
-            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}));
         }
     };
     let Some(relation) = relation else {
@@ -964,7 +971,7 @@ async fn h_integrate(
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
-            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}));
         }
     };
     Json(json!({
@@ -1008,7 +1015,7 @@ async fn h_predict(
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
-            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}));
         }
     };
     Json(json!({
@@ -2767,7 +2774,7 @@ async fn h_brain_chat(
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
-            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}));
         }
     };
 
@@ -2849,7 +2856,7 @@ async fn h_integrate_chain(
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
-            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}));
         }
     };
     Json(json!({ "steps": steps, "paged_neurons_released": paged_neurons_released }))
@@ -3014,7 +3021,7 @@ async fn h_binding_diagnose(
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
-            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}));
         }
     };
     Json(json!({
@@ -3814,34 +3821,42 @@ mod tests {
             value["files"]["service.py"],
             "class NovelCoordinator:\n    def ready(self):\n        return True\n"
         );
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &candidates,
-            "Create a Python service without a specified class name.",
-        )
-        .is_none());
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &candidates,
-            "Create a Python class named 7Invalid.",
-        )
-        .is_none());
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &candidates,
+                "Create a Python service without a specified class name.",
+            )
+            .is_none()
+        );
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &candidates,
+                "Create a Python class named 7Invalid.",
+            )
+            .is_none()
+        );
         let unknown_kind = vec![
             br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"unbounded_text"},"source":"class {{CLASS_NAME}}:\n"}}"#.to_vec(),
             candidates[1].clone(),
         ];
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &unknown_kind,
-            "Create a Python class named SafeName with a method named ready.",
-        )
-        .is_none());
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &unknown_kind,
+                "Create a Python class named SafeName with a method named ready.",
+            )
+            .is_none()
+        );
         let unresolved = vec![
             br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"python_class_named"},"source":"class {{CLASS_NAME}}:\n    value = '{{UNDECLARED}}'\n"}}"#.to_vec(),
             candidates[1].clone(),
         ];
-        assert!(merge_grounded_code_fragments_for_prompt(
-            &unresolved,
-            "Create a Python class named SafeName with a method named ready.",
-        )
-        .is_none());
+        assert!(
+            merge_grounded_code_fragments_for_prompt(
+                &unresolved,
+                "Create a Python class named SafeName with a method named ready.",
+            )
+            .is_none()
+        );
     }
 
     #[test]

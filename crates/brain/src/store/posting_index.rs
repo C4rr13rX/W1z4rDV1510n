@@ -15,6 +15,28 @@ const HEADER_BYTES: u64 = 24;
 const RECORD_HEADER_BYTES: u64 = 24;
 const MAX_BUCKETS: u64 = 4 * 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static LOOKUP_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LOOKUP_KEY_PREFIXES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_lookup_calls() {
+    LOOKUP_CALLS.with(|calls| calls.set(0));
+    LOOKUP_KEY_PREFIXES.with(|prefixes| prefixes.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn lookup_calls() -> u64 {
+    LOOKUP_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn lookup_key_prefixes() -> Vec<u8> {
+    LOOKUP_KEY_PREFIXES.with(|prefixes| prefixes.borrow().clone())
+}
+
 pub(crate) struct PostingIndexBuilder {
     path: PathBuf,
     file: File,
@@ -243,6 +265,15 @@ pub(crate) fn lookup(
     key: &[u8],
     limit: usize,
 ) -> io::Result<Vec<NeuronId>> {
+    #[cfg(test)]
+    {
+        LOOKUP_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+        LOOKUP_KEY_PREFIXES.with(|prefixes| {
+            prefixes
+                .borrow_mut()
+                .push(key.first().copied().unwrap_or(0));
+        });
+    }
     let mut header = [0_u8; HEADER_BYTES as usize];
     store.read_auxiliary_exact(reference, 0, &mut header)?;
     if &header[..8] != POSTING_INDEX_MAGIC {
@@ -424,8 +455,8 @@ mod tests {
 
         let (mut resumed, last_value) =
             PostingIndexBuilder::resume_latest(&directory, 7, "brain.wbrain")
-            .unwrap()
-            .unwrap();
+                .unwrap()
+                .unwrap();
         assert_eq!(last_value, Some(7));
         assert_eq!(resumed.entries, 2);
         assert_eq!(resumed.next_record_offset, complete_len);

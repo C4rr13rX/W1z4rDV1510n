@@ -9,14 +9,14 @@ use ahash::AHashMap;
 use parking_lot::{Mutex, RwLock};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::neuron::{Neuron, NeuronId, PoolId};
+use crate::store::NeuronStore;
 use crate::store::container::{
     AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
 };
-use crate::store::NeuronStore;
 
 const NEURON_SLOT_TABLE_KIND: u32 = 0x534C_4F54; // "SLOT"
 const NEURON_SLOT_BYTES: u64 = 24;
@@ -1576,9 +1576,22 @@ mod tests {
             1,
             "pair-only legacy fingerprint identity must match the next ordered episode",
         );
+        crate::store::posting_index::reset_lookup_calls();
         let new_binding_id = migrated
             .pretrain_binding_episode(&[(3, b"fresh".to_vec()), (4, b"novel".to_vec())])
             .unwrap();
+        assert_eq!(
+            crate::store::posting_index::lookup_calls(),
+            4,
+            "a first recurrence should remain bounded to recurrence indexes",
+        );
+        assert!(
+            crate::store::posting_index::lookup_key_prefixes()
+                .iter()
+                .all(|prefix| *prefix != crate::brain::FINGERPRINT_TENTATIVE_KEY
+                    && *prefix != crate::brain::FINGERPRINT_PROMOTED_KEY),
+            "a first recurrence proves promoted and tentative state absent",
+        );
         assert_ne!(new_binding_id, trained_binding_id);
         migrated.serialize_all_neurons_for_idle().unwrap();
         assert_eq!(migrated.binding_posting_residency(), (0, 4));
@@ -1904,9 +1917,13 @@ mod tests {
             // The first episode creates the binding; two subsequent
             // reinforcements satisfy integrate()'s trained-pathway gate.
             for _ in 0..3 {
-                assert!(brain
-                    .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec()),])
-                    .is_some());
+                assert!(
+                    brain
+                        .pretrain_binding_episode(
+                            &[(3, b"hello".to_vec()), (4, b"world".to_vec()),]
+                        )
+                        .is_some()
+                );
             }
             brain.attach_wbrain(&path).unwrap();
             brain.serialize_all_neurons_for_idle().unwrap();
