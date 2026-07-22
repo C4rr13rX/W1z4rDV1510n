@@ -201,6 +201,23 @@ same atoms in opposite orders. The clean full migration must be rerun because
 the intentionally stopped diagnostic container contains unreachable appended
 records; the original legacy checkpoint remains authoritative and unchanged.
 
+The clean rerun completed raw conversion and both fingerprint generations at
+17.927 GiB, then exposed a finer-grained residency issue during finalization:
+the generic inference tree helper kept the entire first binding tree live at
+once. Although no bodies were rewritten, private memory reached about 823 MiB
+before the tree returned to sleep. Finalization was stopped at its durable
+`finalize-pending` marker, so raw conversion does not need to repeat.
+
+Binding-route reconstruction now has a maintenance-specific traversal. It
+reads one neuron shape, decodes an atom while its label is present or copies a
+concept's child references, and immediately removes that body before following
+the next ID. Flattened feature postings stream directly to the disk builder;
+only compact visited-ID sets, direct ordered atom sequences, and normalized
+motifs remain request-local. The regression additionally proves all pools have
+zero live bodies when reconstruction returns. Live inference retains its
+separate request-scope helper because reusing a small active tree within one
+request is beneficial; full migration never needs that residency.
+
 ## Resident structures still violating the invariant
 
 1. A feature shared by an extreme number of bindings can still produce a large

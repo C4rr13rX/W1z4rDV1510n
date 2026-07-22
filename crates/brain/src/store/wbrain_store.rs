@@ -1771,6 +1771,13 @@ mod tests {
         let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
         assert!(missing.is_empty());
         assert_eq!(restored.rebuild_binding_indexes_bounded().unwrap(), 2);
+        for pool_id in restored.fabric().pool_ids() {
+            assert_eq!(
+                restored.fabric().pool(pool_id).unwrap().read().live_count(),
+                0,
+                "read-only route reconstruction must release every paged body",
+            );
+        }
         for (prompt, expected) in [
             (b"ab".as_slice(), b"first".as_slice()),
             (b"ba".as_slice(), b"second".as_slice()),

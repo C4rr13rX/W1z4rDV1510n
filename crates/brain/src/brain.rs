@@ -1946,6 +1946,101 @@ impl Brain {
         }
     }
 
+    /// Emit the rebuild postings while retaining at most one neuron body.
+    /// The generic live-learning helper intentionally keeps a whole requested
+    /// tree resident for inference reuse; migration finalization instead
+    /// streams each shape and releases it immediately.
+    fn stream_binding_posting_keys_bounded(
+        &mut self,
+        members: &[NeuronRef],
+        binding_id: NeuronId,
+        builder: &mut crate::store::posting_index::PostingIndexBuilder,
+    ) -> std::io::Result<()> {
+        let represented: Vec<PoolId> = members
+            .iter()
+            .map(|member| member.pool)
+            .collect::<ahash::AHashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut roots_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        let mut atom_sequences: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        let mut atom_frames: AHashMap<PoolId, Vec<u8>> = AHashMap::new();
+
+        for member in members {
+            roots_by_pool
+                .entry(member.pool)
+                .or_default()
+                .push(member.neuron);
+            let Some(pool) = self.fabric.pool(member.pool) else {
+                continue;
+            };
+            if let Some((true, _, decoded)) =
+                pool.write().read_neuron_shape_bounded(member.neuron)?
+            {
+                atom_sequences
+                    .entry(member.pool)
+                    .or_default()
+                    .push(member.neuron);
+                atom_frames.entry(member.pool).or_default().extend(decoded);
+            }
+        }
+
+        for (&pool_id, roots) in &roots_by_pool {
+            let Some(pool) = self.fabric.pool(pool_id) else {
+                continue;
+            };
+            let mut pending = roots.clone();
+            let mut visited = ahash::AHashSet::new();
+            while let Some(neuron_id) = pending.pop() {
+                if !visited.insert(neuron_id) {
+                    continue;
+                }
+                let Some((is_atom, children, _)) =
+                    pool.write().read_neuron_shape_bounded(neuron_id)?
+                else {
+                    continue;
+                };
+                if is_atom {
+                    builder.insert(
+                        &BindingPostingKey::Feature(pool_id, neuron_id).encode(),
+                        binding_id,
+                    )?;
+                } else {
+                    pending.extend(
+                        children
+                            .into_iter()
+                            .filter(|member| member.pool == pool_id)
+                            .map(|member| member.neuron),
+                    );
+                }
+            }
+        }
+
+        for (&query_pool, sequence) in &atom_sequences {
+            if sequence.is_empty() {
+                continue;
+            }
+            for &target_pool in &represented {
+                if target_pool != query_pool {
+                    builder.insert(
+                        &BindingPostingKey::Sequence(query_pool, target_pool, sequence.clone())
+                            .encode(),
+                        binding_id,
+                    )?;
+                }
+            }
+            if let Some(frame) = atom_frames.get(&query_pool) {
+                for motif in normalized_char_motifs(frame) {
+                    builder.insert(
+                        &BindingPostingKey::Motif(query_pool, motif).encode(),
+                        binding_id,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn disk_binding_postings(&self, key: &BindingPostingKey, limit: usize) -> Vec<NeuronId> {
         let Some(file) = self.wbrain_file.as_ref() else {
             return Vec::new();
@@ -2266,23 +2361,14 @@ impl Brain {
             let members = {
                 let mut pool = binding_pool.write();
                 pool.ensure_loaded(binding_id)?;
-                pool.get(binding_id)
+                let members = pool
+                    .get(binding_id)
                     .map(|neuron| neuron.members.clone())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                pool.discard_wbrain_residents_read_only()?;
+                members
             };
-            for key in self.binding_posting_keys(&members) {
-                builder.insert(&key.encode(), binding_id)?;
-            }
-
-            // `binding_posting_keys` recursively pages only this binding's
-            // member trees and never mutates them. Drop that request-local
-            // working set without rewriting identical bodies or scanning
-            // every logical slot after every binding.
-            for pool_id in self.fabric.pool_ids() {
-                if let Some(pool) = self.fabric.pool(pool_id) {
-                    pool.write().discard_wbrain_residents_read_only()?;
-                }
-            }
+            self.stream_binding_posting_keys_bounded(&members, binding_id, &mut builder)?;
         }
         let reference = builder.finish(&file, self.binding_pool_id)?;
         let store = file.pool(self.binding_pool_id);

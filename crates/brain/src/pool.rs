@@ -1842,6 +1842,28 @@ impl Pool {
         })
     }
 
+    /// Read only the shape needed by index maintenance, then immediately
+    /// release the paged body. Concept children are returned as stable refs;
+    /// atom bytes are decoded while the label is resident.
+    pub(crate) fn read_neuron_shape_bounded(
+        &mut self,
+        id: NeuronId,
+    ) -> std::io::Result<Option<(bool, Vec<NeuronRef>, Vec<u8>)>> {
+        self.ensure_loaded(id)?;
+        let shape = self.neurons.get(id as usize).map(|neuron| {
+            let is_atom = neuron.is_atom();
+            let decoded = if is_atom {
+                let pairs = [(neuron.label.as_str(), 1.0_f32)];
+                self.encoding.reassemble(&pairs)
+            } else {
+                Vec::new()
+            };
+            (is_atom, neuron.members.clone(), decoded)
+        });
+        self.discard_wbrain_residents_read_only()?;
+        Ok(shape)
+    }
+
     fn flush_concept_sequence_overlay(&mut self) -> std::io::Result<usize> {
         let entry_count = self
             .concept_sequence_to_id
