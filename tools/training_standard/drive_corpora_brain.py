@@ -240,8 +240,9 @@ def post_pretrain_pair(prompt: str, response: str,
     return True, ""
 
 
-def post_pretrain_batch(episodes: list[dict],
-                        lock_chunk_size: int = 12) -> tuple[bool, str, float]:
+def post_pretrain_batch(
+    episodes: list[dict], lock_chunk_size: int = 12
+) -> tuple[bool, str, float, int, int]:
     """Form ordered episodes while bounding each server-side lock window."""
     ok, result = _post(
         _path("/pretrain_bindings"), {
@@ -250,8 +251,15 @@ def post_pretrain_batch(episodes: list[dict],
         }, timeout=300.0
     )
     if not ok or not isinstance(result, dict) or not result.get("ok"):
-        return False, f"pretrain-bindings: {result}", 0.0
-    return True, "", float(result.get("max_lock_millis") or 0.0) / 1000.0
+        return False, f"pretrain-bindings: {result}", 0.0, -1, 0
+    return (
+        True,
+        "",
+        float(result.get("max_lock_millis") or 0.0) / 1000.0,
+        int(result["max_lock_chunk_index"])
+        if "max_lock_chunk_index" in result else -1,
+        int(result.get("max_lock_chunk_len") or 0),
+    )
 
 
 def write_progress(path: Path, payload: dict) -> None:
@@ -567,6 +575,7 @@ def drive_one(script, repeats: int, project_root: Path,
 
         if direct_pretrain:
             episodes = []
+            episode_logical_rows: list[int] = []
             current_batch_size = batch_size
             current_lock_chunk_size = lock_chunk_size
             previous_progress: dict = {}
@@ -603,6 +612,9 @@ def drive_one(script, repeats: int, project_root: Path,
                 submitted_episodes: int,
                 encoded_payload_bytes: int,
                 request_ok: bool,
+                max_lock_chunk_index: int,
+                max_lock_chunk_len: int,
+                submitted_logical_rows: list[int],
             ) -> None:
                 nonlocal last_batch_size, last_batch_seconds
                 nonlocal max_batch_size, max_batch_seconds
@@ -641,6 +653,12 @@ def drive_one(script, repeats: int, project_root: Path,
                             "ceiling_seconds": max_live_batch_seconds,
                             "lock_chunk_size_before": prior_lock_chunk_size,
                             "lock_chunk_size_after": current_lock_chunk_size,
+                            "max_lock_chunk_index": max_lock_chunk_index,
+                            "max_lock_chunk_len": max_lock_chunk_len,
+                            "max_lock_logical_rows": submitted_logical_rows[
+                                max_lock_chunk_index:
+                                max_lock_chunk_index + max_lock_chunk_len
+                            ] if max_lock_chunk_index >= 0 else [],
                             "updated_unix": time.time(),
                         })
 
@@ -702,13 +720,14 @@ def drive_one(script, repeats: int, project_root: Path,
                     episodes.append(
                         _pretrain_episode(prompt, resp, context, feature_policy)
                     )
+                    episode_logical_rows.append(logical_row)
                 batch_next_row = logical_next_row
                 if len(episodes) >= current_batch_size:
                     submitted_count = len(episodes)
                     batch_started = time.monotonic()
-                    ok, err, lock_seconds = post_pretrain_batch(
-                        episodes, current_lock_chunk_size
-                    )
+                    (
+                        ok, err, lock_seconds, max_lock_index, max_lock_len,
+                    ) = post_pretrain_batch(episodes, current_lock_chunk_size)
                     record_batch_timing(
                         min(submitted_count, current_lock_chunk_size),
                         lock_seconds or (time.monotonic() - batch_started),
@@ -721,6 +740,9 @@ def drive_one(script, repeats: int, project_root: Path,
                             for frame in episode.get("frames", [])
                         ),
                         ok,
+                        max_lock_index,
+                        max_lock_len,
+                        episode_logical_rows,
                     )
                     if ok:
                         summary["posted_ok"] += len(episodes)
@@ -748,6 +770,7 @@ def drive_one(script, repeats: int, project_root: Path,
                             f"{batch_next_row}: {err}"
                         )
                     episodes = []
+                    episode_logical_rows = []
                     episode_batch_start_row = None
             if streamed_count == 0:
                 print(f"  [{script.id}] corpus missing or empty: {corpus_path}",
@@ -756,9 +779,9 @@ def drive_one(script, repeats: int, project_root: Path,
             if episodes:
                 submitted_count = len(episodes)
                 batch_started = time.monotonic()
-                ok, err, lock_seconds = post_pretrain_batch(
-                    episodes, current_lock_chunk_size
-                )
+                (
+                    ok, err, lock_seconds, max_lock_index, max_lock_len,
+                ) = post_pretrain_batch(episodes, current_lock_chunk_size)
                 record_batch_timing(
                     min(submitted_count, current_lock_chunk_size),
                     lock_seconds or (time.monotonic() - batch_started),
@@ -771,6 +794,9 @@ def drive_one(script, repeats: int, project_root: Path,
                         for frame in episode.get("frames", [])
                     ),
                     ok,
+                    max_lock_index,
+                    max_lock_len,
+                    episode_logical_rows,
                 )
                 if ok:
                     summary["posted_ok"] += len(episodes)

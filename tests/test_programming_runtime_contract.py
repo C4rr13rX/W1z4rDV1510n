@@ -85,11 +85,28 @@ from tools.training_standard.drive_corpora_brain import (
     append_slow_batch_event,
     checkpoint_due,
     drive_one,
+    post_pretrain_batch,
     row_is_skipped,
 )
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_pretrain_batch_reports_exact_slowest_lock_chunk(self) -> None:
+        response = {
+            "ok": True,
+            "max_lock_millis": 9500,
+            "max_lock_chunk_index": 17,
+            "max_lock_chunk_len": 1,
+        }
+        with patch(
+            "tools.training_standard.drive_corpora_brain._post",
+            return_value=(True, response),
+        ):
+            self.assertEqual(
+                post_pretrain_batch([{"frames": []}], 1),
+                (True, "", 9.5, 17, 1),
+            )
+
     def test_block_admission_settles_and_serializes_before_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw)
@@ -932,7 +949,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             )
             with patch(
                 "tools.training_standard.drive_corpora_brain.post_pretrain_batch",
-                return_value=(True, "", 9.5),
+                return_value=(True, "", 9.5, 1, 1),
             ), patch(
                 "tools.training_standard.drive_corpora_brain.post_checkpoint",
                 return_value=(True, {}),
@@ -950,6 +967,9 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(event["submitted_episodes"], 2)
             self.assertEqual(event["lock_chunk_size_before"], 2)
             self.assertEqual(event["lock_chunk_size_after"], 1)
+            self.assertEqual(event["max_lock_chunk_index"], 1)
+            self.assertEqual(event["max_lock_chunk_len"], 1)
+            self.assertEqual(event["max_lock_logical_rows"], [1])
 
 
 if __name__ == "__main__":

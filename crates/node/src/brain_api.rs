@@ -1337,9 +1337,11 @@ async fn h_pretrain_bindings(
         .unwrap_or(12);
     let mut binding_ids = Vec::with_capacity(decoded.len());
     let mut max_lock_millis = 0.0_f64;
+    let mut max_lock_chunk_index = 0_usize;
+    let mut max_lock_chunk_len = 0_usize;
     let mut tick_now = 0;
     let mut store = None;
-    for chunk in decoded.chunks(lock_chunk_size) {
+    for (chunk_number, chunk) in decoded.chunks(lock_chunk_size).enumerate() {
         let mut brain = s.brain.lock().await;
         let lock_started = Instant::now();
         binding_ids.extend(
@@ -1349,7 +1351,12 @@ async fn h_pretrain_bindings(
         );
         tick_now = brain.fabric().current_tick();
         store = Some(brain.store_clone());
-        max_lock_millis = max_lock_millis.max(lock_started.elapsed().as_secs_f64() * 1000.0);
+        let lock_millis = lock_started.elapsed().as_secs_f64() * 1000.0;
+        if lock_millis > max_lock_millis {
+            max_lock_millis = lock_millis;
+            max_lock_chunk_index = chunk_number * lock_chunk_size;
+            max_lock_chunk_len = chunk.len();
+        }
         drop(brain);
         tokio::task::yield_now().await;
     }
@@ -1366,6 +1373,8 @@ async fn h_pretrain_bindings(
         "tick_now": tick_now,
         "lock_chunk_size": lock_chunk_size,
         "max_lock_millis": max_lock_millis,
+        "max_lock_chunk_index": max_lock_chunk_index,
+        "max_lock_chunk_len": max_lock_chunk_len,
     }))
 }
 
