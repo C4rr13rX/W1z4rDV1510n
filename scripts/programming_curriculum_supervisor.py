@@ -159,13 +159,22 @@ def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
     return guard
 
 
-def accept_last_good_guard(runtime: Path) -> None:
-    """Discard the prior snapshot only after the new state passes its gates."""
+def accept_last_good_guard(runtime: Path, expected_phase: str | None = None) -> bool:
+    """Discard a prior snapshot only when the accepting phase owns it.
+
+    ``expected_phase`` is required by supervisor workflows.  The optional form is
+    retained for explicit administrative cleanup and focused unit tests.
+    """
     brain_dir = runtime / "brain"
+    if expected_phase is not None:
+        metadata = read_json(brain_dir / "brain.last-good.json")
+        if metadata.get("phase") != expected_phase:
+            return False
     (brain_dir / "brain.last-good.bin").unlink(missing_ok=True)
     (brain_dir / "brain.last-good.wbrain").unlink(missing_ok=True)
     (brain_dir / "brain.last-good.wbrain.tmp").unlink(missing_ok=True)
     (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
+    return True
 
 
 def canary_quarantine_path(runtime: Path) -> Path:
@@ -1033,7 +1042,7 @@ def main() -> int:
                 "error": str(exc), "updated_unix": time.time(),
             })
             return 1
-        accept_last_good_guard(runtime)
+        accept_last_good_guard(runtime, phase.name)
         publish(status_path, {
             "state": "gate_only_complete", "phase": phase.name,
             "ram_next_row": ram, "durable_next_row": durable,
@@ -1167,7 +1176,7 @@ def main() -> int:
                         args, attach_phase, runtime, status_path):
                     return 1
             else:
-                accept_last_good_guard(runtime)
+                accept_last_good_guard(runtime, attach_phase.name)
 
     assert_training_not_quarantined(runtime)
     for phase in phases:
@@ -1201,7 +1210,7 @@ def main() -> int:
                                       "ram_next_row": ram,
                                       "durable_next_row": durable,
                                       "updated_unix": time.time()})
-                accept_last_good_guard(runtime)
+                accept_last_good_guard(runtime, phase.name)
                 break
             publish(status_path, {"state": "running", "phase": phase.name,
                                   "ram_next_row": ram,
@@ -1249,7 +1258,7 @@ def main() -> int:
                         restarts = 0
                         continue
                     return 1
-                accept_last_good_guard(runtime)
+                accept_last_good_guard(runtime, phase.name)
                 continue
             restarts += 1
             if restarts > args.max_restarts or ram_after <= ram:

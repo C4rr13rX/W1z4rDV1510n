@@ -720,6 +720,27 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
 
+    def test_guard_acceptance_requires_matching_phase_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted-container")
+            metadata = brain / "brain.last-good.json"
+            metadata.write_text(json.dumps({
+                "phase": "metamath", "row": 100,
+                "guard": str(guard),
+            }), encoding="utf-8")
+
+            self.assertFalse(accept_last_good_guard(runtime, "mathinstruct"))
+            self.assertTrue(guard.exists())
+            self.assertTrue(metadata.exists())
+
+            self.assertTrue(accept_last_good_guard(runtime, "metamath"))
+            self.assertFalse(guard.exists())
+            self.assertFalse(metadata.exists())
+
     def test_canary_restore_replaces_authoritative_wbrain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
