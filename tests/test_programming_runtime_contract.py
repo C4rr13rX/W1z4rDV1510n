@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -79,7 +80,12 @@ from scripts.train_programming_brain import (
 )
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
 from scripts.programming_corpus_recall import accepted_responses, sample_window
-from tools.training_standard.drive_corpora_brain import checkpoint_due, row_is_skipped
+from tools.training_standard.drive_corpora_brain import (
+    append_slow_batch_event,
+    checkpoint_due,
+    drive_one,
+    row_is_skipped,
+)
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
@@ -817,6 +823,64 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(
                 runtime_responsive_batch_size(runtime, 32, {}, 8.0), 12
             )
+
+    def test_slow_batch_ledger_preserves_exact_ranges_append_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            progress = Path(raw) / "phase.progress.json"
+            first = {
+                "logical_start_row": 100,
+                "logical_end_row": 356,
+                "max_lock_seconds": 47.9,
+            }
+            second = {
+                "logical_start_row": 356,
+                "logical_end_row": 612,
+                "max_lock_seconds": 9.2,
+            }
+            ledger = append_slow_batch_event(progress, first)
+            self.assertEqual(append_slow_batch_event(progress, second), ledger)
+            rows = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(rows, [first, second])
+
+    def test_direct_pretrain_records_slow_batch_corpus_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            corpus = root / "corpus.jsonl"
+            corpus.write_text(
+                "\n".join([
+                    json.dumps({"prompt": "one", "response": "first"}),
+                    json.dumps({"prompt": "two", "response": "second"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            progress = root / "phase.progress.json"
+            script = SimpleNamespace(
+                id="fixture", category="test", phase="train",
+                inputs=[SimpleNamespace(kind="corpus", path="corpus.jsonl")],
+            )
+            with patch(
+                "tools.training_standard.drive_corpora_brain.post_pretrain_batch",
+                return_value=(True, "", 9.5),
+            ), patch(
+                "tools.training_standard.drive_corpora_brain.post_checkpoint",
+                return_value=(True, {}),
+            ):
+                drive_one(
+                    script, 1, root, smoke=False, direct_pretrain=True,
+                    batch_size=2, lock_chunk_size=2, progress_path=progress,
+                    checkpoint_rows=100, wal_durable=True,
+                    max_live_batch_seconds=8.0, inter_post_sleep=0.0,
+                )
+            ledger = progress.with_name("phase.progress.slow-batches.jsonl")
+            event = json.loads(ledger.read_text(encoding="utf-8"))
+            self.assertEqual(event["logical_start_row"], 0)
+            self.assertEqual(event["logical_end_row"], 2)
+            self.assertEqual(event["submitted_episodes"], 2)
+            self.assertEqual(event["lock_chunk_size_before"], 2)
+            self.assertEqual(event["lock_chunk_size_after"], 1)
 
 
 if __name__ == "__main__":

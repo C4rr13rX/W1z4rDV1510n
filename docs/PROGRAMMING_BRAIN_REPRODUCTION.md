@@ -62,6 +62,7 @@ The runtime contains:
 - `seed/*.json`: seed-stage and gate reports;
 - `logs/*.log`: command-level execution logs;
 - `*.progress.json`: RAM and durable corpus offsets plus batch telemetry;
+- `*.slow-batches.jsonl`: append-only row ranges and payload/lock evidence for every transaction exceeding the responsiveness ceiling;
 - `*.retention-gate.json` and `*.completion-gate.json`: admission evidence;
 - `benchmarks/experiential-generalization.json` and `benchmarks/multidomain-synthesis.json`: post-corpus experience and causal-integration admission evidence;
 - `brain/brain.wbrain`: authoritative neuron-addressed container for current runtimes;

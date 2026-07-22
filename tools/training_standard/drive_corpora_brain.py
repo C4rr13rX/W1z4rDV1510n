@@ -275,6 +275,24 @@ def write_progress(path: Path, payload: dict) -> None:
             time.sleep(min(0.5, 0.05 * (attempt + 1)))
 
 
+def append_slow_batch_event(progress_path: Path, payload: dict) -> Path:
+    """Durably retain an over-ceiling transaction instead of overwriting it.
+
+    Progress JSON intentionally describes only the newest/maximal aggregate.
+    This adjacent append-only ledger preserves the exact logical corpus range
+    needed for later micro-brain reproduction or quarantine analysis.
+    """
+    ledger = progress_path.with_name(
+        f"{progress_path.stem}.slow-batches.jsonl"
+    )
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+    return ledger
+
+
 def iter_corpus_jsonl(path: Path, *, skip_rows: int = 0,
                       limit_rows: int | None = None) -> Iterator[dict]:
     """Yield a bounded logical-row window without retaining the corpus.
@@ -577,7 +595,15 @@ def drive_one(script, repeats: int, project_root: Path,
             batch_seconds_ema = float(previous_progress.get("batch_seconds_ema", 0.0))
             timed_batches = int(previous_progress.get("timed_batches", 0))
 
-            def record_batch_timing(size: int, elapsed: float) -> None:
+            def record_batch_timing(
+                size: int,
+                elapsed: float,
+                row_start: int,
+                row_end: int,
+                submitted_episodes: int,
+                encoded_payload_bytes: int,
+                request_ok: bool,
+            ) -> None:
                 nonlocal last_batch_size, last_batch_seconds
                 nonlocal max_batch_size, max_batch_seconds
                 nonlocal batch_seconds_ema, timed_batches
@@ -594,12 +620,29 @@ def drive_one(script, repeats: int, project_root: Path,
                 )
                 if (max_live_batch_seconds > 0
                         and elapsed > max_live_batch_seconds):
+                    prior_lock_chunk_size = current_lock_chunk_size
                     scaled = max(
                         1, int(size * max_live_batch_seconds / elapsed)
                     )
                     if scaled < current_lock_chunk_size:
                         current_lock_chunk_size = scaled
                         adaptive_batch_reductions += 1
+                    if progress_path is not None:
+                        append_slow_batch_event(progress_path, {
+                            "kind": "slow_pretrain_transaction",
+                            "script_id": script.id,
+                            "corpus": str(corpus_path),
+                            "logical_start_row": row_start,
+                            "logical_end_row": row_end,
+                            "submitted_episodes": submitted_episodes,
+                            "encoded_payload_bytes": encoded_payload_bytes,
+                            "request_ok": request_ok,
+                            "max_lock_seconds": round(elapsed, 4),
+                            "ceiling_seconds": max_live_batch_seconds,
+                            "lock_chunk_size_before": prior_lock_chunk_size,
+                            "lock_chunk_size_after": current_lock_chunk_size,
+                            "updated_unix": time.time(),
+                        })
 
             def publish_progress() -> None:
                 if progress_path is not None:
@@ -637,6 +680,7 @@ def drive_one(script, repeats: int, project_root: Path,
             streamed_rows = iter_corpus_jsonl(
                 corpus_path, skip_rows=start_row, limit_rows=limit_rows
             )
+            episode_batch_start_row: int | None = None
             for row_index, row in enumerate(streamed_rows):
                 streamed_count += 1
                 summary["pairs"] += 1
@@ -652,6 +696,8 @@ def drive_one(script, repeats: int, project_root: Path,
                     batch_next_row = logical_next_row
                     continue
                 context = row.get("ctx") if isinstance(row.get("ctx"), dict) else None
+                if not episodes:
+                    episode_batch_start_row = logical_row
                 for _ in range(repeats):
                     episodes.append(
                         _pretrain_episode(prompt, resp, context, feature_policy)
@@ -666,6 +712,15 @@ def drive_one(script, repeats: int, project_root: Path,
                     record_batch_timing(
                         min(submitted_count, current_lock_chunk_size),
                         lock_seconds or (time.monotonic() - batch_started),
+                        episode_batch_start_row if episode_batch_start_row is not None else logical_row,
+                        batch_next_row,
+                        submitted_count,
+                        sum(
+                            len(str(frame.get("frame") or ""))
+                            for episode in episodes
+                            for frame in episode.get("frames", [])
+                        ),
+                        ok,
                     )
                     if ok:
                         summary["posted_ok"] += len(episodes)
@@ -693,6 +748,7 @@ def drive_one(script, repeats: int, project_root: Path,
                             f"{batch_next_row}: {err}"
                         )
                     episodes = []
+                    episode_batch_start_row = None
             if streamed_count == 0:
                 print(f"  [{script.id}] corpus missing or empty: {corpus_path}",
                       flush=True)
@@ -706,6 +762,15 @@ def drive_one(script, repeats: int, project_root: Path,
                 record_batch_timing(
                     min(submitted_count, current_lock_chunk_size),
                     lock_seconds or (time.monotonic() - batch_started),
+                    episode_batch_start_row if episode_batch_start_row is not None else start_row,
+                    batch_next_row,
+                    submitted_count,
+                    sum(
+                        len(str(frame.get("frame") or ""))
+                        for episode in episodes
+                        for frame in episode.get("frames", [])
+                    ),
+                    ok,
                 )
                 if ok:
                     summary["posted_ok"] += len(episodes)
