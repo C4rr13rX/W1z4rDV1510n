@@ -52,7 +52,7 @@ pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,
 };
 pub use brain::{
-    Brain, BrainConfig, BrainStats, BindingMatch, MatchTier,
+    Brain, BrainConfig, BrainStats, BindingMatch, MatchTier, PretrainEpisodeProfile,
     DecodedConcept, EvictionParams, EvictionStats, PoolExtrusion, ResonantExtrusion,
 };
 pub use action::{ActionEvent, ActionId, ActionRouter, NullRouter, RouteResult};

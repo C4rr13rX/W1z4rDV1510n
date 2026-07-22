@@ -80,6 +80,7 @@ from scripts.train_programming_brain import (
     resolve_seed_guard,
 )
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
+from scripts.programming_slow_batch_microbrains import read_events
 from scripts.programming_corpus_recall import accepted_responses, sample_window
 from tools.training_standard.drive_corpora_brain import (
     append_slow_batch_event,
@@ -91,6 +92,21 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_slow_microbrain_replay_deduplicates_ranges_and_keeps_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = Path(raw) / "slow.jsonl"
+            ledger.write_text("\n".join([
+                json.dumps({"logical_start_row": 0, "logical_end_row": 2,
+                            "max_lock_seconds": 9}),
+                json.dumps({"logical_start_row": 2, "logical_end_row": 4,
+                            "max_lock_seconds": 10}),
+                json.dumps({"logical_start_row": 0, "logical_end_row": 2,
+                            "max_lock_seconds": 11}),
+            ]) + "\n", encoding="utf-8")
+            events = read_events(ledger, 2)
+            self.assertEqual([event["logical_start_row"] for event in events], [2, 0])
+            self.assertEqual(events[1]["max_lock_seconds"], 11)
+
     def test_pretrain_batch_reports_exact_slowest_lock_chunk(self) -> None:
         response = {
             "ok": True,
@@ -104,7 +120,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         ):
             self.assertEqual(
                 post_pretrain_batch([{"frames": []}], 1),
-                (True, "", 9.5, 17, 1),
+                (True, "", 9.5, 17, 1, {}),
             )
 
     def test_block_admission_settles_and_serializes_before_evaluation(self) -> None:
@@ -949,7 +965,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             )
             with patch(
                 "tools.training_standard.drive_corpora_brain.post_pretrain_batch",
-                return_value=(True, "", 9.5, 1, 1),
+                return_value=(True, "", 9.5, 1, 1, {"frame_lookup": 8}),
             ), patch(
                 "tools.training_standard.drive_corpora_brain.post_checkpoint",
                 return_value=(True, {}),
@@ -970,6 +986,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(event["max_lock_chunk_index"], 1)
             self.assertEqual(event["max_lock_chunk_len"], 1)
             self.assertEqual(event["max_lock_logical_rows"], [1])
+            self.assertEqual(event["max_lock_profile_ns"], {"frame_lookup": 8})
 
 
 if __name__ == "__main__":

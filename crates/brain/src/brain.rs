@@ -515,6 +515,18 @@ pub struct BrainStats {
     pub binding_pressure: f32,
 }
 
+/// Nanosecond attribution for the cold-tier stages of one direct-pretraining
+/// episode. Values are diagnostic and never participate in learning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PretrainEpisodeProfile {
+    pub frame_lookup_ns: u64,
+    pub fingerprint_ns: u64,
+    pub recurrence_ns: u64,
+    pub binding_lookup_ns: u64,
+    pub binding_write_ns: u64,
+    pub advance_tick_ns: u64,
+}
+
 /// One captured prompt→response moment, used by the self-test loop to
 /// score recall without any externally-supplied evaluation set.  The
 /// brain auto-captures these whenever a frame is observed in a pool
@@ -1289,13 +1301,28 @@ impl Brain {
     /// long response membership vector. Repeated live experience can still
     /// grow higher mini-columns later through `observe`.
     pub fn pretrain_binding_episode(&mut self, frames: &[(PoolId, Vec<u8>)]) -> Option<NeuronId> {
+        self.pretrain_binding_episode_profiled(frames).0
+    }
+
+    /// Pretrain one episode while attributing its wall time to the bounded
+    /// stages that can touch the cold neuron/index tiers. The profile is
+    /// observational only and follows the identical learning path above.
+    pub fn pretrain_binding_episode_profiled(
+        &mut self,
+        frames: &[(PoolId, Vec<u8>)],
+    ) -> (Option<NeuronId>, PretrainEpisodeProfile) {
+        let mut profile = PretrainEpisodeProfile::default();
         let now = self.fabric.current_tick();
         let mut fired: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        let stage = std::time::Instant::now();
         for (pool_id, frame) in frames {
             if *pool_id == self.binding_pool_id || frame.is_empty() {
                 continue;
             }
-            let pool = self.fabric.pool(*pool_id)?;
+            let Some(pool) = self.fabric.pool(*pool_id) else {
+                profile.frame_lookup_ns = stage.elapsed().as_nanos() as u64;
+                return (None, profile);
+            };
             let sequence = if Some(*pool_id) == self.action_pool_id {
                 pool.write().ensure_frame_concept_for_pretrain(frame, now)
             } else {
@@ -1305,11 +1332,22 @@ impl Brain {
                 fired.insert(*pool_id, sequence);
             }
         }
-        let fingerprint = MomentFingerprint::from_fabric_moment(&fired)?;
+        profile.frame_lookup_ns = stage.elapsed().as_nanos() as u64;
+        let stage = std::time::Instant::now();
+        let Some(fingerprint) = MomentFingerprint::from_fabric_moment(&fired) else {
+            profile.fingerprint_ns = stage.elapsed().as_nanos() as u64;
+            return (None, profile);
+        };
+        profile.fingerprint_ns = stage.elapsed().as_nanos() as u64;
         self.total_observations = self.total_observations.saturating_add(1);
+        let stage = std::time::Instant::now();
         self.increment_lifetime_recurrence(&fingerprint);
+        profile.recurrence_ns = stage.elapsed().as_nanos() as u64;
 
+        let stage = std::time::Instant::now();
         let existing = self.existing_binding_id(&fingerprint);
+        profile.binding_lookup_ns = stage.elapsed().as_nanos() as u64;
+        let stage = std::time::Instant::now();
         let id = if let Some(id) = existing {
             if let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) {
                 if let Some(neuron) = binding_pool.write().get_mut(id) {
@@ -1319,17 +1357,23 @@ impl Brain {
             }
             id
         } else {
-            let id = self.promote_binding_concept(&fingerprint)?;
+            let Some(id) = self.promote_binding_concept(&fingerprint) else {
+                profile.binding_write_ns = stage.elapsed().as_nanos() as u64;
+                return (None, profile);
+            };
             self.tentative_promoted.insert(fingerprint, id);
             self.tentative_binding_count_total =
                 self.tentative_binding_count_total.saturating_add(1);
             id
         };
+        profile.binding_write_ns = stage.elapsed().as_nanos() as u64;
 
         // No frames entered Fabric::current, so advancing performs bounded
         // housekeeping without cross-wiring every atom pair.
+        let stage = std::time::Instant::now();
         self.fabric.advance_tick();
-        Some(id)
+        profile.advance_tick_ns = stage.elapsed().as_nanos() as u64;
+        (Some(id), profile)
     }
 
     /// Install a transient, read-only query activation. This does not enter

@@ -242,7 +242,7 @@ def post_pretrain_pair(prompt: str, response: str,
 
 def post_pretrain_batch(
     episodes: list[dict], lock_chunk_size: int = 12
-) -> tuple[bool, str, float, int, int]:
+) -> tuple[bool, str, float, int, int, dict]:
     """Form ordered episodes while bounding each server-side lock window."""
     ok, result = _post(
         _path("/pretrain_bindings"), {
@@ -251,7 +251,7 @@ def post_pretrain_batch(
         }, timeout=300.0
     )
     if not ok or not isinstance(result, dict) or not result.get("ok"):
-        return False, f"pretrain-bindings: {result}", 0.0, -1, 0
+        return False, f"pretrain-bindings: {result}", 0.0, -1, 0, {}
     return (
         True,
         "",
@@ -259,6 +259,8 @@ def post_pretrain_batch(
         int(result["max_lock_chunk_index"])
         if "max_lock_chunk_index" in result else -1,
         int(result.get("max_lock_chunk_len") or 0),
+        result.get("max_lock_profile_ns")
+        if isinstance(result.get("max_lock_profile_ns"), dict) else {},
     )
 
 
@@ -615,6 +617,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 max_lock_chunk_index: int,
                 max_lock_chunk_len: int,
                 submitted_logical_rows: list[int],
+                max_lock_profile_ns: dict,
             ) -> None:
                 nonlocal last_batch_size, last_batch_seconds
                 nonlocal max_batch_size, max_batch_seconds
@@ -659,6 +662,7 @@ def drive_one(script, repeats: int, project_root: Path,
                                 max_lock_chunk_index:
                                 max_lock_chunk_index + max_lock_chunk_len
                             ] if max_lock_chunk_index >= 0 else [],
+                            "max_lock_profile_ns": max_lock_profile_ns,
                             "updated_unix": time.time(),
                         })
 
@@ -727,6 +731,7 @@ def drive_one(script, repeats: int, project_root: Path,
                     batch_started = time.monotonic()
                     (
                         ok, err, lock_seconds, max_lock_index, max_lock_len,
+                        max_lock_profile,
                     ) = post_pretrain_batch(episodes, current_lock_chunk_size)
                     record_batch_timing(
                         min(submitted_count, current_lock_chunk_size),
@@ -743,6 +748,7 @@ def drive_one(script, repeats: int, project_root: Path,
                         max_lock_index,
                         max_lock_len,
                         episode_logical_rows,
+                        max_lock_profile,
                     )
                     if ok:
                         summary["posted_ok"] += len(episodes)
@@ -781,6 +787,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 batch_started = time.monotonic()
                 (
                     ok, err, lock_seconds, max_lock_index, max_lock_len,
+                    max_lock_profile,
                 ) = post_pretrain_batch(episodes, current_lock_chunk_size)
                 record_batch_timing(
                     min(submitted_count, current_lock_chunk_size),
@@ -797,6 +804,7 @@ def drive_one(script, repeats: int, project_root: Path,
                     max_lock_index,
                     max_lock_len,
                     episode_logical_rows,
+                    max_lock_profile,
                 )
                 if ok:
                     summary["posted_ok"] += len(episodes)

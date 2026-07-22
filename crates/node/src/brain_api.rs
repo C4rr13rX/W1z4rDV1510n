@@ -1339,16 +1339,27 @@ async fn h_pretrain_bindings(
     let mut max_lock_millis = 0.0_f64;
     let mut max_lock_chunk_index = 0_usize;
     let mut max_lock_chunk_len = 0_usize;
+    let mut max_lock_profile_ns = [0_u64; 6];
     let mut tick_now = 0;
     let mut store = None;
     for (chunk_number, chunk) in decoded.chunks(lock_chunk_size).enumerate() {
         let mut brain = s.brain.lock().await;
         let lock_started = Instant::now();
-        binding_ids.extend(
-            chunk
-                .iter()
-                .map(|frames| brain.pretrain_binding_episode(frames)),
-        );
+        let mut chunk_profile_ns = [0_u64; 6];
+        for frames in chunk {
+            let (binding_id, profile) = brain.pretrain_binding_episode_profiled(frames);
+            binding_ids.push(binding_id);
+            for (total, elapsed) in chunk_profile_ns.iter_mut().zip([
+                profile.frame_lookup_ns,
+                profile.fingerprint_ns,
+                profile.recurrence_ns,
+                profile.binding_lookup_ns,
+                profile.binding_write_ns,
+                profile.advance_tick_ns,
+            ]) {
+                *total = total.saturating_add(elapsed);
+            }
+        }
         tick_now = brain.fabric().current_tick();
         store = Some(brain.store_clone());
         let lock_millis = lock_started.elapsed().as_secs_f64() * 1000.0;
@@ -1356,6 +1367,7 @@ async fn h_pretrain_bindings(
             max_lock_millis = lock_millis;
             max_lock_chunk_index = chunk_number * lock_chunk_size;
             max_lock_chunk_len = chunk.len();
+            max_lock_profile_ns = chunk_profile_ns;
         }
         drop(brain);
         tokio::task::yield_now().await;
@@ -1375,6 +1387,14 @@ async fn h_pretrain_bindings(
         "max_lock_millis": max_lock_millis,
         "max_lock_chunk_index": max_lock_chunk_index,
         "max_lock_chunk_len": max_lock_chunk_len,
+        "max_lock_profile_ns": {
+            "frame_lookup": max_lock_profile_ns[0],
+            "fingerprint": max_lock_profile_ns[1],
+            "recurrence": max_lock_profile_ns[2],
+            "binding_lookup": max_lock_profile_ns[3],
+            "binding_write": max_lock_profile_ns[4],
+            "advance_tick": max_lock_profile_ns[5],
+        },
     }))
 }
 
