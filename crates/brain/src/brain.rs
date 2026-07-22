@@ -1831,18 +1831,6 @@ impl Brain {
             .collect::<ahash::AHashSet<_>>()
             .into_iter()
             .collect();
-        let mut atom_sequences: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
-        for member in members {
-            let Some(pool) = self.fabric.pool(member.pool) else {
-                continue;
-            };
-            if pool.read().get(member.neuron).is_some_and(|n| n.is_atom()) {
-                atom_sequences
-                    .entry(member.pool)
-                    .or_default()
-                    .push(member.neuron);
-            }
-        }
         let mut roots_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         for member in members {
             roots_by_pool
@@ -1880,6 +1868,25 @@ impl Brain {
             }
             for atom in atoms {
                 keys.push(BindingPostingKey::Feature(pool_id, atom));
+            }
+        }
+        // Atom/concept identity is available only after the requested member
+        // roots have been paged. Classifying sleeping slots before this point
+        // silently omitted exact sequence and motif routes during migration.
+        let mut atom_sequences: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
+        for member in members {
+            let Some(pool) = self.fabric.pool(member.pool) else {
+                continue;
+            };
+            if pool
+                .read()
+                .get(member.neuron)
+                .is_some_and(|neuron| neuron.is_atom())
+            {
+                atom_sequences
+                    .entry(member.pool)
+                    .or_default()
+                    .push(member.neuron);
             }
         }
         for (&query_pool, sequence) in &atom_sequences {
@@ -2267,11 +2274,13 @@ impl Brain {
                 builder.insert(&key.encode(), binding_id)?;
             }
 
-            // `index_binding_members` recursively pages only this binding's
-            // member trees. Return that working set to SSD before proceeding.
+            // `binding_posting_keys` recursively pages only this binding's
+            // member trees and never mutates them. Drop that request-local
+            // working set without rewriting identical bodies or scanning
+            // every logical slot after every binding.
             for pool_id in self.fabric.pool_ids() {
                 if let Some(pool) = self.fabric.pool(pool_id) {
-                    pool.write().serialize_all_neurons_for_idle()?;
+                    pool.write().discard_wbrain_residents_read_only()?;
                 }
             }
         }

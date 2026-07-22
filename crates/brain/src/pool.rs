@@ -17,11 +17,11 @@ use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
+use crate::store::posting_index::{self, PostingIndexBuilder};
 use crate::store::{
     AuxiliaryRecordRef, ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore,
     WalEvent, WbrainFile, WbrainNeuronStore,
 };
-use crate::store::posting_index::{self, PostingIndexBuilder};
 
 const CONCEPT_GENERATION_DIRECTORY_MAGIC: &[u8; 8] = b"W1ZCGEN1";
 const CONCEPT_GENERATION_DIRECTORY_KIND: u32 = 0x4347_454E; // "CGEN"
@@ -115,9 +115,9 @@ impl NeuronSlots {
     fn get_mut(&mut self, index: usize) -> Option<&mut Neuron> {
         match self {
             Self::Dense { slots, .. } => slots.get_mut(index)?.as_deref_mut(),
-            Self::Paged { residents, .. } => residents
-                .get_mut(&(index as NeuronId))
-                .map(Box::as_mut),
+            Self::Paged { residents, .. } => {
+                residents.get_mut(&(index as NeuronId)).map(Box::as_mut)
+            }
         }
     }
 
@@ -187,9 +187,20 @@ impl NeuronSlots {
     fn sleep(&mut self, index: usize) -> Option<Neuron> {
         match self {
             Self::Dense { slots, .. } => slots.get_mut(index)?.take().map(|neuron| *neuron),
-            Self::Paged { residents, .. } => residents
-                .remove(&(index as NeuronId))
-                .map(|neuron| *neuron),
+            Self::Paged { residents, .. } => {
+                residents.remove(&(index as NeuronId)).map(|neuron| *neuron)
+            }
+        }
+    }
+
+    fn discard_paged_residents(&mut self) -> Option<usize> {
+        match self {
+            Self::Dense { .. } => None,
+            Self::Paged { residents, .. } => {
+                let discarded = residents.len();
+                *residents = AHashMap::new();
+                Some(discarded)
+            }
         }
     }
 
@@ -218,9 +229,7 @@ impl NeuronSlots {
 
     fn iter(&self) -> Box<dyn Iterator<Item = &Neuron> + '_> {
         match self {
-            Self::Dense { slots, .. } => {
-                Box::new(slots.iter().filter_map(|slot| slot.as_deref()))
-            }
+            Self::Dense { slots, .. } => Box::new(slots.iter().filter_map(|slot| slot.as_deref())),
             Self::Paged { residents, .. } => Box::new(residents.values().map(Box::as_ref)),
         }
     }
@@ -268,22 +277,19 @@ impl NeuronSlots {
 
     fn concept_count(&self) -> usize {
         match self {
-            Self::Dense { concepts, .. } => concepts
-                .iter()
-                .filter(|is_concept| **is_concept)
-                .count(),
+            Self::Dense { concepts, .. } => {
+                concepts.iter().filter(|is_concept| **is_concept).count()
+            }
             Self::Paged { concept_count, .. } => *concept_count,
         }
     }
 
     fn is_concept(&self, id: NeuronId) -> bool {
         match self {
-            Self::Dense { concepts, .. } => {
-                concepts.get(id as usize).copied().unwrap_or(false)
+            Self::Dense { concepts, .. } => concepts.get(id as usize).copied().unwrap_or(false),
+            Self::Paged { residents, .. } => {
+                residents.get(&id).is_some_and(|neuron| !neuron.is_atom())
             }
-            Self::Paged { residents, .. } => residents
-                .get(&id)
-                .is_some_and(|neuron| !neuron.is_atom()),
         }
     }
 }
@@ -1528,7 +1534,9 @@ impl Pool {
     /// `StorageControlState::working_set_pressure` signal source.
     pub fn evicted_count(&self) -> usize {
         if self.wbrain_store.is_some() {
-            self.neurons.len().saturating_sub(self.neurons.resident_count())
+            self.neurons
+                .len()
+                .saturating_sub(self.neurons.resident_count())
         } else {
             self.evicted.len()
         }
@@ -1815,6 +1823,25 @@ impl Pool {
         Ok(serialized)
     }
 
+    /// Release bodies paged in by a provably read-only maintenance pass.
+    /// Unlike the ordinary idle transition this performs no neuron rewrite
+    /// and no full logical-slot scan. It is intentionally crate-private: a
+    /// caller must know that no resident body was mutated after page-in.
+    pub(crate) fn discard_wbrain_residents_read_only(&mut self) -> std::io::Result<usize> {
+        if self.wbrain_store.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "read-only resident discard requires a .wbrain store",
+            ));
+        }
+        self.neurons.discard_paged_residents().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "read-only resident discard requires paged neuron slots",
+            )
+        })
+    }
+
     fn flush_concept_sequence_overlay(&mut self) -> std::io::Result<usize> {
         let entry_count = self
             .concept_sequence_to_id
@@ -1836,11 +1863,8 @@ impl Pool {
                 ".wbrain path has no parent directory",
             )
         })?;
-        let mut builder = PostingIndexBuilder::create(
-            &directory,
-            self.config.id,
-            entry_count as u64,
-        )?;
+        let mut builder =
+            PostingIndexBuilder::create(&directory, self.config.id, entry_count as u64)?;
         for (sequence, id) in &self.concept_sequence_to_id {
             builder.insert(
                 &Self::concept_posting_key(CONCEPT_SEQUENCE_KEY, sequence),
@@ -2406,9 +2430,10 @@ impl Pool {
         self.neurons.concept_count()
     }
     pub(crate) fn is_concept_slot(&self, id: NeuronId) -> bool {
-        self.wbrain_store
-            .as_ref()
-            .map_or_else(|| self.neurons.is_concept(id), |store| store.slot_is_concept(id))
+        self.wbrain_store.as_ref().map_or_else(
+            || self.neurons.is_concept(id),
+            |store| store.slot_is_concept(id),
+        )
     }
     /// Number of neuron slots (including evicted ones whose terminals
     /// have been shed).  Tier orchestrator uses this for round-robin
@@ -2721,12 +2746,13 @@ impl Pool {
             if record_hash == hash && member_count == sequence.len() {
                 let mut encoded_members = vec![0_u8; member_count * 4];
                 store.read_auxiliary_exact(reference, record + 20, &mut encoded_members)?;
-                let matches = encoded_members
-                    .chunks_exact(4)
-                    .zip(sequence)
-                    .all(|(raw, expected)| {
-                        u32::from_le_bytes(raw.try_into().unwrap()) == *expected
-                    });
+                let matches =
+                    encoded_members
+                        .chunks_exact(4)
+                        .zip(sequence)
+                        .all(|(raw, expected)| {
+                            u32::from_le_bytes(raw.try_into().unwrap()) == *expected
+                        });
                 if matches {
                     let mut member_raw = [0_u8; 4];
                     store.read_auxiliary_exact(
@@ -2742,19 +2768,12 @@ impl Pool {
         Ok(None)
     }
 
-    fn cold_sequence_recurrence(
-        &self,
-        sequence: &[NeuronId],
-    ) -> std::io::Result<Option<u32>> {
+    fn cold_sequence_recurrence(&self, sequence: &[NeuronId]) -> std::io::Result<Option<u32>> {
         let Some(root) = self.legacy_sequence_ledger else {
             return Ok(None);
         };
         for reference in self
-            .auxiliary_generations(
-                root,
-                SEQUENCE_GENERATION_DIRECTORY_MAGIC,
-                "sequence ledger",
-            )?
+            .auxiliary_generations(root, SEQUENCE_GENERATION_DIRECTORY_MAGIC, "sequence ledger")?
             .into_iter()
             .rev()
         {
@@ -2897,12 +2916,13 @@ impl Pool {
             if record_hash == hash && member_count == sequence.len() {
                 let mut encoded_members = vec![0_u8; member_count * 4];
                 store.read_auxiliary_exact(reference, record + 20, &mut encoded_members)?;
-                let matches = encoded_members
-                    .chunks_exact(4)
-                    .zip(sequence)
-                    .all(|(raw, expected)| {
-                        u32::from_le_bytes(raw.try_into().unwrap()) == *expected
-                    });
+                let matches =
+                    encoded_members
+                        .chunks_exact(4)
+                        .zip(sequence)
+                        .all(|(raw, expected)| {
+                            u32::from_le_bytes(raw.try_into().unwrap()) == *expected
+                        });
                 if matches {
                     let mut member_raw = [0_u8; 4];
                     store.read_auxiliary_exact(

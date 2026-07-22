@@ -178,6 +178,29 @@ recall. The full brain suite passes 76 tests and every node target passes after
 this change. The resumed full-scale migration remains the final empirical
 peak-memory gate for this field.
 
+That continuation crossed both fingerprint phases at full scale with private
+memory holding near 87--88 MiB. The tentative generation appended at a
+15.61-GiB container size, and the lifetime generation appended at 17.93 GiB.
+Final binding-route reconstruction then revealed an independent I/O scaling
+bug: after processing each binding it invoked the ordinary whole-brain sleep
+transition. The pass remained memory-bounded, but it rescanned every logical
+slot and rewrote every read-only body paged for that binding. The diagnostic
+run was stopped after the container reached 20.60 GB rather than allowing
+quadratic scanning and duplicate records to continue.
+
+Read-only index reconstruction now releases the request-local residents from
+the paged maps directly. It does not append neuron records, flush learning
+overlays, or scan unrelated logical slots. The ordinary sleep path remains the
+only path that persists mutated bodies. The same sweep also fixed an ordering
+error: migration formerly classified binding members as atoms before paging
+their bodies, which omitted exact sequence and motif routes for sleeping
+members. It now pages the binding trees first, then derives ordered routes,
+then discards the read-only working set. Regressions prove zero file growth
+from read-only release and distinguish two bindings whose prompts contain the
+same atoms in opposite orders. The clean full migration must be rerun because
+the intentionally stopped diagnostic container contains unreachable appended
+records; the original legacy checkpoint remains authoritative and unchanged.
+
 ## Resident structures still violating the invariant
 
 1. A feature shared by an extreme number of bindings can still produce a large

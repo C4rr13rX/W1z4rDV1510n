@@ -1635,6 +1635,48 @@ mod tests {
     }
 
     #[test]
+    fn read_only_maintenance_discards_residents_without_rewriting_bodies() {
+        let path = tmpfile("read-only-resident-discard");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            brain.create_pool(
+                PoolConfig::defaults("prompt", 3),
+                Box::new(BytePassthroughEncoding { prefix: "p".into() }),
+            );
+            brain.pretrain_binding_episode(&[(3, b"resident".to_vec())]);
+            brain.attach_wbrain(&path).unwrap();
+            brain.serialize_all_neurons_for_idle().unwrap();
+        }
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
+        encodings.insert(
+            binding_pool_id,
+            Box::new(BytePassthroughEncoding {
+                prefix: "bind".into(),
+            }),
+        );
+        encodings.insert(3, Box::new(BytePassthroughEncoding { prefix: "p".into() }));
+        let (restored, missing) = Brain::restore_wbrain(&path, encodings).unwrap();
+        assert!(missing.is_empty());
+        let prompt_pool = restored.fabric().pool(3).unwrap();
+        prompt_pool.write().ensure_loaded(0).unwrap();
+        assert_eq!(prompt_pool.read().live_count(), 1);
+        let before = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(
+            prompt_pool
+                .write()
+                .discard_wbrain_residents_read_only()
+                .unwrap(),
+            1,
+        );
+        assert_eq!(prompt_pool.read().live_count(), 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn migrated_pair_only_recurrence_joins_next_ordered_episode() {
         let legacy = tmpfile("legacy-pair-only-recurrence").with_extension("bin");
         let destination = tmpfile("migrated-pair-only-recurrence");
@@ -1691,6 +1733,57 @@ mod tests {
         );
         restored.clear_prediction_activation();
 
+        std::fs::remove_file(legacy).ok();
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn migrated_binding_rebuild_pages_members_before_ordered_route_classification() {
+        let legacy = tmpfile("legacy-ordered-routes").with_extension("bin");
+        let destination = tmpfile("migrated-ordered-routes");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            for (id, name, prefix) in [(3, "prompt", "p"), (4, "answer", "a")] {
+                brain.create_pool(
+                    PoolConfig::defaults(name, id),
+                    Box::new(BytePassthroughEncoding {
+                        prefix: prefix.into(),
+                    }),
+                );
+            }
+            brain.pretrain_binding_episode(&[(3, b"ab".to_vec()), (4, b"first".to_vec())]);
+            brain.pretrain_binding_episode(&[(3, b"ba".to_vec()), (4, b"second".to_vec())]);
+            brain.checkpoint(&legacy).unwrap();
+        }
+        Brain::migrate_legacy_checkpoint_streaming(&legacy, &destination).unwrap();
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
+        for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a")] {
+            encodings.insert(
+                id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(restored.rebuild_binding_indexes_bounded().unwrap(), 2);
+        for (prompt, expected) in [
+            (b"ab".as_slice(), b"first".as_slice()),
+            (b"ba".as_slice(), b"second".as_slice()),
+        ] {
+            restored.activate_for_prediction(3, prompt);
+            assert_eq!(
+                restored
+                    .decode_best_trained_binding_multi(&[3], 4)
+                    .as_deref(),
+                Some(expected),
+            );
+            restored.clear_prediction_activation();
+        }
         std::fs::remove_file(legacy).ok();
         std::fs::remove_file(destination).ok();
     }

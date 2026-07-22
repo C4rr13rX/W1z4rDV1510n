@@ -48,6 +48,12 @@ jobs:
       - name: Verify migrated pair history joins ordered live experience
         shell: pwsh
         run: cargo test -p w1z4rd-brain migrated_pair_only_recurrence_joins_next_ordered_episode --lib
+      - name: Verify read-only maintenance does not rewrite neuron bodies
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain read_only_maintenance_discards_residents_without_rewriting_bodies --lib
+      - name: Verify ordered migration routes classify paged members
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain migrated_binding_rebuild_pages_members_before_ordered_route_classification --lib
       - name: Verify scoped lazy recall
         shell: pwsh
         run: cargo test -p w1z4rd-brain lazy_restore_pages_binding_scope_and_preserves_recall --lib
