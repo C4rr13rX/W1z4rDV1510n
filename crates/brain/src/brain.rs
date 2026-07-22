@@ -2369,13 +2369,35 @@ impl Brain {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let mut builder = crate::store::posting_index::PostingIndexBuilder::create(
-            &directory,
-            self.binding_pool_id,
-            (binding_slots as u64).saturating_mul(16),
-        )?;
+        let index_scope = file
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("brain.wbrain")
+            .to_owned();
+        let (mut builder, resume_binding) =
+            match crate::store::posting_index::PostingIndexBuilder::resume_latest(
+                &directory,
+                self.binding_pool_id,
+                &index_scope,
+            )? {
+                Some(resumed) => resumed,
+                None => (
+                    crate::store::posting_index::PostingIndexBuilder::create_scoped(
+                        &directory,
+                        self.binding_pool_id,
+                        (binding_slots as u64).saturating_mul(16),
+                        &index_scope,
+                    )?,
+                    None,
+                ),
+            };
+        // A process can stop after any posting belonging to a binding. Replay
+        // that whole binding: duplicate adjacent values are removed by lookup,
+        // while every posting that had not yet reached disk is restored.
+        let first_binding = resume_binding.map_or(0, |id| id as usize);
         let mut rebuilt = 0;
-        for raw_id in 0..binding_slots {
+        for raw_id in first_binding..binding_slots {
             let binding_id = raw_id as NeuronId;
             if !binding_pool.read().is_concept_slot(binding_id) {
                 continue;
