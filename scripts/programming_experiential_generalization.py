@@ -8,6 +8,7 @@ import difflib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -184,24 +185,38 @@ def run_enterprise_retention(endpoint: str, output: Path) -> dict:
 
 
 def begin_experience_transaction(endpoint: str, runtime: Path) -> tuple[Path, Path]:
-    """Checkpoint and hard-link the pre-experience state until every gate passes."""
+    """Checkpoint and independently guard the pre-experience brain until admission."""
     brain_dir = runtime.resolve() / "brain"
-    snapshot = brain_dir / "brain.bin"
-    guard = brain_dir / "brain.experience-last-good.bin"
+    wbrain = brain_dir / "brain.wbrain"
+    snapshot = wbrain if wbrain.is_file() else brain_dir / "brain.bin"
+    guard = brain_dir / f"brain.experience-last-good{snapshot.suffix}"
     metadata = brain_dir / "brain.experience-last-good.json"
-    if guard.exists() and metadata.exists():
+    existing_guards = [
+        candidate for candidate in (
+            brain_dir / "brain.experience-last-good.wbrain",
+            brain_dir / "brain.experience-last-good.bin",
+        ) if candidate.exists()
+    ]
+    if metadata.exists():
         recorded = json.loads(metadata.read_text(encoding="utf-8"))
+        recorded_guard = Path(str(recorded.get("guard") or guard))
+        if not recorded_guard.is_file():
+            raise RuntimeError(
+                "experiential transaction metadata exists without its guard: "
+                f"{recorded_guard}"
+            )
         current_tick = request(endpoint, "/brain/stats", None).get("tick")
         if current_tick == recorded.get("tick"):
-            return guard, metadata
+            return recorded_guard, metadata
         raise RuntimeError(
             "experiential transaction already mutated the brain; restore its "
             f"guard before retrying (guard tick {recorded.get('tick')}, "
             f"current tick {current_tick})"
         )
-    if guard.exists() or metadata.exists():
+    if existing_guards:
         raise RuntimeError(
-            f"incomplete experiential transaction metadata/guard pair: {guard}"
+            "experiential guard exists without transaction metadata: "
+            + ", ".join(map(str, existing_guards))
         )
     checkpoint = request(endpoint, "/brain/checkpoint", {}, timeout=2 * 3600)
     if not checkpoint.get("ok"):
@@ -213,12 +228,22 @@ def begin_experience_transaction(endpoint: str, runtime: Path) -> tuple[Path, Pa
         )
     if not snapshot.is_file():
         raise RuntimeError(f"checkpoint did not create snapshot: {snapshot}")
-    os.link(snapshot, guard)
-    metadata.write_text(json.dumps({
+    if snapshot.suffix == ".wbrain":
+        temporary = guard.with_suffix(guard.suffix + ".tmp")
+        shutil.copy2(snapshot, temporary)
+        os.replace(temporary, guard)
+        guard_mode = "copy"
+    else:
+        os.link(snapshot, guard)
+        guard_mode = "hardlink"
+    metadata_temporary = metadata.with_suffix(metadata.suffix + ".tmp")
+    metadata_temporary.write_text(json.dumps({
         "snapshot": str(snapshot), "guard": str(guard),
+        "storage": snapshot.suffix.lstrip("."), "guard_mode": guard_mode,
         "tick": checkpoint.get("tick"), "created_unix": time.time(),
-        "recovery": "stop the node, replace brain.bin with this guard, then restart",
+        "recovery": "stop the node, replace the recorded snapshot with this guard, then restart",
     }, indent=2) + "\n", encoding="utf-8")
+    os.replace(metadata_temporary, metadata)
     return guard, metadata
 
 

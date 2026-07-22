@@ -355,6 +355,27 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertFalse(guard.exists())
             self.assertFalse(metadata.exists())
 
+    def test_experiential_wbrain_guard_is_an_independent_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            snapshot = runtime / "brain" / "brain.wbrain"
+            snapshot.parent.mkdir()
+            snapshot.write_bytes(b"accepted-container")
+            with patch(
+                "scripts.programming_experiential_generalization.request",
+                return_value={"ok": True, "path": str(snapshot), "tick": 41},
+            ):
+                guard, metadata = begin_experience_transaction(
+                    "http://brain", runtime
+                )
+            self.assertEqual(guard.name, "brain.experience-last-good.wbrain")
+            self.assertFalse(guard.samefile(snapshot))
+            snapshot.write_bytes(b"mutated-container")
+            self.assertEqual(guard.read_bytes(), b"accepted-container")
+            recorded = json.loads(metadata.read_text(encoding="utf-8"))
+            self.assertEqual(recorded["storage"], "wbrain")
+            self.assertEqual(recorded["guard_mode"], "copy")
+
     def test_experiential_batch_uses_deployed_bulk_route(self) -> None:
         source = (ROOT / "scripts/programming_experiential_generalization.py").read_text(
             encoding="utf-8"
@@ -717,6 +738,25 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 ("multilanguage", "committed"),
             )
             self.assertEqual(snapshot.read_bytes(), b"accepted-candidate")
+
+    def test_seed_stage_wbrain_guard_restores_independent_container(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.wbrain"
+            snapshot.write_bytes(b"accepted-container")
+            guard_seed_stage(runtime, "multilanguage")
+            guard = brain / "seed.last-good.wbrain"
+            self.assertTrue(guard.is_file())
+            self.assertFalse(guard.samefile(snapshot))
+            snapshot.write_bytes(b"rejected-container")
+            self.assertEqual(
+                resolve_seed_guard(runtime, {"completed_seed_stages": []}),
+                ("multilanguage", "restored"),
+            )
+            self.assertEqual(snapshot.read_bytes(), b"accepted-container")
+            self.assertFalse(guard.exists())
 
     def test_reproducible_trainer_covers_proven_seed_curriculum(self) -> None:
         self.assertEqual(SEED_STAGES[0].name, "foundation-python-debug")

@@ -15,7 +15,7 @@ python scripts/train_programming_brain.py `
 
 The default corpus root is `D:\w1z4rdv1510n-data\training`. Override it with `--corpus-root` when the generated corpora live elsewhere.
 
-Use `--resume` with the same runtime after an interruption. The trainer records only accepted stages. Each seed stage is protected by an NTFS hard-linked last-known-good snapshot. On an owned-node resume, an interrupted transaction is either committed when its durable state record exists or restored before the stage is retried. This avoids silently training a partially completed stage twice.
+Use `--resume` with the same runtime after an interruption. The trainer records only accepted stages. Each seed stage is protected using the authoritative brain representation: immutable atomically replaced `brain.bin` checkpoints may use an NTFS hard link, while mutable `brain.wbrain` containers always use an independent copy published by atomic rename. On an owned-node resume, an interrupted transaction is either committed when its durable state record exists or restored before the stage is retried. This avoids silently training a partially completed stage twice and prevents a `.wbrain` candidate from mutating its own rollback guard.
 
 Use `--dry-run` to inspect the complete command plan without creating a runtime or contacting a node. Use `--seed-only` to stop after the curated enterprise curriculum and its strict gate. `--external-node` is available for an intentionally pre-launched node, but the normal owned-node mode provides safer restart and rollback behavior.
 
@@ -49,7 +49,7 @@ The corpus supervisor then trains:
 8. four-way scientific Jupyter paraphrases;
 9. partial-context scientific Jupyter examples.
 
-Corpus processing is resumable, WAL-durable, snapshotted and retention-gated in 16,384-row blocks. Every small batch is flushed to the WAL before acknowledgement, so a full multi-gigabyte snapshot need not be rewritten four times inside one gate. Each block keeps a last-known-good snapshot and must pass distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and non-mutation checks before the next block starts. Batch size adapts downward when observed brain-lock time exceeds the configured ceiling, and the safest measured size carries forward into later corpus phases.
+Corpus processing is resumable and WAL-durable. The default production schedule uses a 131,072-row guarded admission block with non-halting 16,384-row canaries. Every small batch is flushed to the WAL before acknowledgement. Canaries detect drift while training continues and quarantine only the suspect interval; the stopped-worker block gate then requires distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and read-only tick/topology invariants before releasing the independent last-known-good guard. Lock scope adapts downward when observed brain-lock time exceeds the configured ceiling, and the safest measured setting carries forward into later corpus phases.
 
 After the corpus curriculum, the trainer admits two experience gates. The first exercises an unseen environment rule through baseline failure, verified repair, successful execution, and held-out structural transfer. The second composes a never-trained class from twelve independently trained disciplines, executes it, causally ablates every premise, and tests a contradictory no-retry policy. Both mutations are transactionally guarded and must preserve foundation and enterprise retention before their checkpoints are accepted.
 
@@ -64,7 +64,9 @@ The runtime contains:
 - `*.progress.json`: RAM and durable corpus offsets plus batch telemetry;
 - `*.retention-gate.json` and `*.completion-gate.json`: admission evidence;
 - `benchmarks/experiential-generalization.json` and `benchmarks/multidomain-synthesis.json`: post-corpus experience and causal-integration admission evidence;
-- `brain/brain.bin` and `brain/brain.wal`: persisted brain state;
+- `brain/brain.wbrain`: authoritative neuron-addressed container for current runtimes;
+- `brain/brain.wal`: durable mutations not yet incorporated into the accepted container state;
+- `brain/brain.bin`: optional legacy checkpoint input, not authoritative after `.wbrain` migration;
 - `brain/*.last-good.*`: unresolved rollback state, present only while a candidate is under review.
 
 Do not declare a reproduced brain equivalent merely because the process exits successfully. Verify the final state file, every completion gate, the strict enterprise report, execution results, OOV honesty, and the final brain identity together.

@@ -141,26 +141,57 @@ def prepare_runtime(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     return runtime, state_path, identity_copy
 
 
+def authoritative_brain_path(runtime: Path) -> Path:
+    brain_dir = runtime / "brain"
+    wbrain = brain_dir / "brain.wbrain"
+    return wbrain if wbrain.is_file() else brain_dir / "brain.bin"
+
+
 def seed_guard_path(runtime: Path) -> Path:
-    return runtime / "brain" / "seed.last-good.bin"
+    brain_dir = runtime / "brain"
+    for suffix in (".wbrain", ".bin"):
+        candidate = brain_dir / f"seed.last-good{suffix}"
+        if candidate.exists():
+            return candidate
+    return brain_dir / f"seed.last-good{authoritative_brain_path(runtime).suffix}"
+
+
+def seed_guard_metadata_path(runtime: Path) -> Path:
+    return runtime / "brain" / "seed.last-good.json"
 
 
 def guard_seed_stage(runtime: Path, stage: str) -> None:
-    snapshot = runtime / "brain" / "brain.bin"
+    snapshot = authoritative_brain_path(runtime)
     guard = seed_guard_path(runtime)
-    metadata = guard.with_suffix(".json")
+    metadata = seed_guard_metadata_path(runtime)
     if guard.exists():
         raise RuntimeError(f"unresolved seed-stage guard: {guard}")
     if not snapshot.is_file():
         raise RuntimeError(f"cannot guard missing brain snapshot: {snapshot}")
-    os.link(snapshot, guard)
-    atomic_json(metadata, {"stage": stage, "created_unix": time.time()})
+    if snapshot.suffix == ".wbrain":
+        temporary = guard.with_suffix(guard.suffix + ".tmp")
+        shutil.copy2(snapshot, temporary)
+        os.replace(temporary, guard)
+        guard_mode = "copy"
+    else:
+        os.link(snapshot, guard)
+        guard_mode = "hardlink"
+    atomic_json(metadata, {
+        "stage": stage,
+        "snapshot": str(snapshot.resolve()),
+        "guard": str(guard.resolve()),
+        "storage": snapshot.suffix.lstrip("."),
+        "guard_mode": guard_mode,
+        "created_unix": time.time(),
+    })
 
 
 def accept_seed_stage(runtime: Path) -> None:
-    guard = seed_guard_path(runtime)
-    guard.unlink(missing_ok=True)
-    guard.with_suffix(".json").unlink(missing_ok=True)
+    brain_dir = runtime / "brain"
+    (brain_dir / "seed.last-good.bin").unlink(missing_ok=True)
+    (brain_dir / "seed.last-good.wbrain").unlink(missing_ok=True)
+    (brain_dir / "seed.last-good.wbrain.tmp").unlink(missing_ok=True)
+    seed_guard_metadata_path(runtime).unlink(missing_ok=True)
 
 
 def resolve_seed_guard(runtime: Path, state: dict) -> tuple[str, str] | None:
@@ -168,16 +199,16 @@ def resolve_seed_guard(runtime: Path, state: dict) -> tuple[str, str] | None:
     guard = seed_guard_path(runtime)
     if not guard.exists():
         return None
-    metadata = read_state(guard.with_suffix(".json"))
+    metadata_path = seed_guard_metadata_path(runtime)
+    metadata = read_state(metadata_path)
     stage = str(metadata.get("stage") or "unknown")
     if stage in set(state.get("completed_seed_stages") or []):
         accept_seed_stage(runtime)
         return (stage, "committed")
-    snapshot = runtime / "brain" / "brain.bin"
-    snapshot.unlink(missing_ok=True)
+    snapshot = Path(metadata.get("snapshot") or authoritative_brain_path(runtime))
     os.replace(guard, snapshot)
     (runtime / "brain" / "brain.wal").unlink(missing_ok=True)
-    guard.with_suffix(".json").unlink(missing_ok=True)
+    metadata_path.unlink(missing_ok=True)
     return (stage, "restored")
 
 
@@ -196,6 +227,8 @@ def start_node(args: argparse.Namespace, runtime: Path,
         "W1Z4RD_BRAIN_DEPLOYMENT": str(runtime / "brain.deployment.toml"),
         "W1Z4RD_BRAIN_PORT": str(args.port),
         "W1Z4RD_BRAIN_BIND": "127.0.0.1",
+        "W1Z4RD_TICK_HOUSEKEEPING": "lazy",
+        "W1Z4RD_DEFER_PROMOTION": "1",
     })
     stdout = (runtime / "node.stdout.log").open("ab")
     stderr = (runtime / "node.stderr.log").open("ab")
