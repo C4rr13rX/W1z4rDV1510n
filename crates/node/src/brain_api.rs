@@ -3139,15 +3139,22 @@ async fn h_checkpoint(State(s): State<BrainApiState>) -> Json<serde_json::Value>
         return Json(json!({ "ok": false, "error": format!("mkdir {}: {}", dir.display(), e) }));
     }
     let mut brain = s.brain.lock().await;
-    let result = if brain.uses_wbrain_storage() {
+    let uses_wbrain = brain.uses_wbrain_storage();
+    let result = if uses_wbrain {
         brain.serialize_all_neurons_for_idle().map(|_| ())
     } else {
         brain.checkpoint(&path)
     };
+    let reported_path = if uses_wbrain {
+        dir.join("brain.wbrain")
+    } else {
+        path
+    };
     match result {
         Ok(()) => Json(json!({
             "ok": true,
-            "path": path.display().to_string(),
+            "path": reported_path.display().to_string(),
+            "storage": if uses_wbrain { "wbrain" } else { "bin" },
             "tick": brain.fabric().current_tick(),
         })),
         Err(e) => Json(json!({ "ok": false, "error": e.to_string() })),

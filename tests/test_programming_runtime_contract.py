@@ -175,6 +175,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "retained terminals"):
                     settle_brain_for_admission(args, phase, Path(raw), 500)
 
+    def test_checkpoint_reports_authoritative_wbrain_path(self) -> None:
+        source = (ROOT / "crates/node/src/brain_api.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('dir.join("brain.wbrain")', source)
+        self.assertIn('"storage": if uses_wbrain { "wbrain" } else { "bin" }', source)
+
     def test_deferred_interval_preserves_exact_causal_base_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
