@@ -13,7 +13,7 @@ use crate::neuron::{Neuron, NeuronId, PoolId};
 
 const HEADER_BYTES: u64 = 4096;
 const MAGIC: &[u8; 8] = b"W1ZBRAIN";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const SLOT_BYTES: u64 = 64;
 const SLOT_A: u64 = 16;
 const SLOT_B: u64 = SLOT_A + SLOT_BYTES;
@@ -42,9 +42,16 @@ pub struct BrainContainerManifest {
 pub struct PoolContainerManifest {
     pub pool_id: PoolId,
     pub neuron_count: u32,
+    /// Allocated entries in the paged slot table. `neuron_count` remains the
+    /// logical dense ID extent; spare entries permit live neurogenesis.
+    pub neuron_capacity: u32,
     /// Version-2 fixed-width address/identity table. Large brains keep this
     /// record on disk and read one 24-byte slot at a time.
     pub neuron_slot_table: Option<AuxiliaryRecordRef>,
+    /// Version-3 immutable hash index for labels learned before this
+    /// container generation. Runtime-created labels remain as the small
+    /// overlay below until the next compaction.
+    pub label_indexes: Vec<AuxiliaryRecordRef>,
     /// Version-2 keeps this only for small/in-memory stores. Streaming
     /// migration publishes an empty vector and uses `neuron_slot_table`.
     pub neuron_offsets: Vec<Option<u64>>,
@@ -295,7 +302,9 @@ impl BrainContainer {
     ) -> io::Result<()> {
         let end = relative_offset
             .checked_add(body.len() as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "auxiliary read overflow"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "auxiliary read overflow")
+            })?;
         if end > reference.len {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -318,7 +327,9 @@ impl BrainContainer {
     ) -> io::Result<()> {
         let end = relative_offset
             .checked_add(body.len() as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "auxiliary write overflow"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "auxiliary write overflow")
+            })?;
         if end > reference.len {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -388,7 +399,9 @@ mod tests {
             pools: vec![PoolContainerManifest {
                 pool_id: 1,
                 neuron_count: 1,
+                neuron_capacity: 1,
                 neuron_slot_table: None,
+                label_indexes: Vec::new(),
                 neuron_offsets: vec![Some(offset)],
                 labels: vec![("t:YQ".into(), 0)],
                 pool_metadata: b"pool".to_vec(),

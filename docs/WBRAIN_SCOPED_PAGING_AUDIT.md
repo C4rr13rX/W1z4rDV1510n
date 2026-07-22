@@ -8,7 +8,7 @@ input. It is architecture work, not brain-configuration advice.
 
 - A sleeping neuron occupies a compact address entry, not a full `Neuron`.
 - Startup does not hydrate neuron bodies, concept membership, recurrence
-  history, or complete binding-routing maps.
+  history, historical label maps, or complete binding-routing maps.
 - Statistics use persisted counters and compact histograms.
 - Maintenance may stream neuron IDs sequentially under an explicit budget.
 - Inference must obtain candidate IDs from input-keyed disk indexes; it may
@@ -88,19 +88,41 @@ reported 12.9 GiB physically available. Measurements showed capacity doubling
 in `Vec<Option<u64>>` offsets plus parallel kind/concept/birth vectors; neuron
 payload streaming itself remained bounded.
 
-Container version 2 replaces those resident vectors during large migration
+Container version 2 replaced those resident vectors during large migration
 with one fixed-width 24-byte on-disk slot record containing the current neuron
 record offset, birth tick, kind, and flags. Initial writes are published in
 65,536-neuron contiguous batches. Reopen reads one slot record by stable ID;
 concept maintenance streams slot flags and request-time bodies independently.
 The manifest keeps no resident offset vector for a paged pool.
 
+The first v2 full-scale rerun advanced to a 7.99 GB generated container while
+private memory plateaued at 2.02 GB instead of climbing to the 8 GB abort
+limit. That run was intentionally stopped after the plateau was traced to the
+remaining historical binding-label `HashMap`; completing it would have
+produced a container that reopened with the same multi-gigabyte index.
+
+Container version 3 moves historical atom and binding labels into immutable
+on-disk hash generations. Exact lookup reads one bucket chain and verifies the
+stable neuron slot is still present. Labels created by live training form a
+small resident overlay, are flushed as a disk delta at idle/manifest commit,
+and are then removed from both the store and pool maps. Prediction and
+neurogenesis now use the same overlay-plus-disk lookup path.
+
+Version 3 also separates logical neuron count from allocated slot capacity.
+Migration reserves bounded growth space, and exhausting it relocates the
+fixed-width slot table with a bounded copy rather than hydrating it. The
+regression suite creates neurons beyond the initial reserve, reopens the
+container, and proves exact body and label lookup for the new ID.
+
 ## Resident structures still violating the invariant
 
 1. `Brain.binding_sequence_index`, `binding_feature_atom_index`, and
    `binding_motif_index` are rebuilt and restored as complete resident maps.
-2. Several inference paths still use whole-binding-pool scans when an exact
-   index key is absent.
+2. Live concept-sequence overlays are still serialized in pool metadata; they
+   need the same immutable-delta treatment before indefinitely long training.
+3. Diagnostic/export and analogy paths listed above still need explicit
+   cursor/budget enforcement; request-time binding decoders no longer have a
+   whole-pool fallback.
 
 ## Implementation order
 
@@ -113,9 +135,11 @@ The manifest keeps no resident offset vector for a paged pool.
    bodies. `ensure_loaded(id)` inserts one body; idle serialization removes it.
    **Implemented and covered by persistence/inference gates.**
 4. Move offset and kind/concept/born metadata to paged fixed-width tables.
-   **Implemented in container version 2; full-scale rerun pending.**
-5. Convert diagnostic APIs to bounded cursor streams.
-6. Run cold/warm latency, bytes-read, awakened-neuron, peak-RAM, and
+   **Implemented in container version 2.**
+5. Move historical labels to disk and preserve post-migration neurogenesis.
+   **Implemented in container version 3; full-scale rerun pending.**
+6. Convert diagnostic APIs to bounded cursor streams.
+7. Run cold/warm latency, bytes-read, awakened-neuron, peak-RAM, and
    return-to-sleep gates before resuming corpus training.
 
 ## Admission rule

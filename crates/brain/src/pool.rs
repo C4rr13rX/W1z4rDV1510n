@@ -1793,6 +1793,10 @@ impl Pool {
                 serialized += 1;
             }
         }
+        let store = self.wbrain_store.as_ref().unwrap();
+        store.flush_resident_labels_to_disk()?;
+        self.label_to_id.clear();
+        self.bloom = CountingBloom::with_expected_capacity(100_000);
         Ok(serialized)
     }
 
@@ -2134,6 +2138,10 @@ impl Pool {
     /// answers fall through to [`Pool::label_to_id`].
     pub fn label_might_exist(&self, label: &str) -> bool {
         self.bloom.might_contain(label)
+            || self
+                .wbrain_store
+                .as_ref()
+                .is_some_and(|store| store.label_to_id(label).is_some())
     }
 
     /// Stage 17.3 — diagnostic: number of byte slots the Bloom filter
@@ -2303,7 +2311,7 @@ impl Pool {
             .encoding
             .atomize(frame)
             .into_iter()
-            .filter_map(|label| self.label_to_id.get(&label).copied())
+            .filter_map(|label| self.label_to_id(&label))
             .collect();
         for &id in &fired {
             if let Err(error) = self.ensure_loaded(id) {
@@ -2703,7 +2711,11 @@ impl Pool {
     }
 
     pub fn label_to_id(&self, label: &str) -> Option<NeuronId> {
-        self.label_to_id.get(label).copied()
+        self.label_to_id.get(label).copied().or_else(|| {
+            self.wbrain_store
+                .as_ref()
+                .and_then(|store| store.label_to_id(label))
+        })
     }
 
     /// Insert a fully-constructed concept neuron.  Used by the Brain to
@@ -3480,7 +3492,7 @@ impl Pool {
     }
 
     fn ensure_atom(&mut self, label: String, tick: u64) -> NeuronId {
-        if let Some(&id) = self.label_to_id.get(&label) {
+        if let Some(id) = self.label_to_id(&label) {
             if let Err(error) = self.ensure_loaded(id) {
                 tracing::warn!("training page-in failed for atom {}: {}", id, error);
             }

@@ -15,6 +15,7 @@ use crate::action::{ActionEvent, ActionId};
 use crate::neuron::{Neuron, NeuronId, PoolId};
 use crate::persistence::{AnnealerSnapshot, EemSnapshot, SerializableFingerprint};
 use crate::pool::{Pool, PoolConfig, StreamedPoolMetadata};
+use crate::store::wbrain_store::{LABEL_INDEX_HEADER_BYTES, LABEL_INDEX_KIND, LABEL_INDEX_MAGIC};
 use crate::store::{AuxiliaryRecordRef, ColdTier, NeuronStore, WbrainFile};
 
 use super::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
@@ -144,10 +145,7 @@ fn stream_sequence_ledger<R: Read>(
     let sequence_count: u64 = read_value(reader)?;
     const LEDGER_MAGIC: &[u8; 8] = b"W1ZSEQ01";
     const MAX_BUCKETS: u64 = 4 * 1024 * 1024;
-    let desired_buckets = sequence_count
-        .saturating_mul(2)
-        .max(1)
-        .next_power_of_two();
+    let desired_buckets = sequence_count.saturating_mul(2).max(1).next_power_of_two();
     let bucket_count = desired_buckets.min(MAX_BUCKETS);
     file.append_auxiliary(
         pool_id,
@@ -248,6 +246,88 @@ struct DiskConceptIndex {
     file: File,
     bucket_count: u64,
     entries: u64,
+}
+
+struct DiskLabelIndex {
+    path: PathBuf,
+    file: File,
+    bucket_count: u64,
+    entries: u64,
+}
+
+impl DiskLabelIndex {
+    fn create(directory: &Path, pool_id: PoolId, expected_entries: u64) -> io::Result<Self> {
+        let path = directory.join(format!(".pool-{pool_id}.label-index.tmp"));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        let desired = expected_entries
+            .saturating_mul(2)
+            .max(1)
+            .next_power_of_two();
+        let bucket_count = desired.min(MAX_DISK_INDEX_BUCKETS);
+        file.write_all(LABEL_INDEX_MAGIC)?;
+        file.write_all(&0_u64.to_le_bytes())?;
+        file.write_all(&bucket_count.to_le_bytes())?;
+        let zeroes = [0_u8; DISCARD_BUFFER_BYTES];
+        let mut remaining = bucket_count * 8;
+        while remaining > 0 {
+            let n = usize::try_from(remaining.min(zeroes.len() as u64)).unwrap();
+            file.write_all(&zeroes[..n])?;
+            remaining -= n as u64;
+        }
+        Ok(Self {
+            path,
+            file,
+            bucket_count,
+            entries: 0,
+        })
+    }
+
+    fn insert(&mut self, label: &str, id: NeuronId) -> io::Result<()> {
+        let digest = blake3::hash(label.as_bytes());
+        let hash = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
+        let bucket = hash & (self.bucket_count - 1);
+        let bucket_offset = LABEL_INDEX_HEADER_BYTES + bucket * 8;
+        self.file.seek(SeekFrom::Start(bucket_offset))?;
+        let mut old_head = [0_u8; 8];
+        self.file.read_exact(&mut old_head)?;
+        let record = self.file.seek(SeekFrom::End(0))?;
+        self.file.write_all(&old_head)?;
+        self.file.write_all(&hash.to_le_bytes())?;
+        self.file.write_all(
+            &u32::try_from(label.len())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "label too large"))?
+                .to_le_bytes(),
+        )?;
+        self.file.write_all(&id.to_le_bytes())?;
+        self.file.write_all(label.as_bytes())?;
+        self.file.seek(SeekFrom::Start(bucket_offset))?;
+        self.file.write_all(&(record + 1).to_le_bytes())?;
+        self.file.seek(SeekFrom::End(0))?;
+        self.entries += 1;
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        destination: &std::sync::Arc<WbrainFile>,
+        pool_id: PoolId,
+    ) -> io::Result<AuxiliaryRecordRef> {
+        self.file.seek(SeekFrom::Start(8))?;
+        self.file.write_all(&self.entries.to_le_bytes())?;
+        self.file.flush()?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let reference = destination.append_auxiliary(pool_id, LABEL_INDEX_KIND, |writer| {
+            io::copy(&mut self.file, writer).map(|_| ())
+        })?;
+        drop(self.file);
+        std::fs::remove_file(&self.path).ok();
+        Ok(reference)
+    }
 }
 
 impl DiskConceptIndex {
@@ -378,8 +458,10 @@ fn stream_pool<R: Read>(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "neuron count exceeds usize"))?;
     let store = file.pool(config.id);
     store.set_index_concept_labels(config.id == binding_pool_id);
+    store.set_suppress_resident_labels(true);
     store.prepare_paged_slots(capacity)?;
     let mut concept_index = DiskConceptIndex::create(legacy_dir, config.id, neuron_count)?;
+    let mut label_index = DiskLabelIndex::create(legacy_dir, config.id, neuron_count)?;
     let mut concept_count = 0usize;
     let mut total_terminals = 0usize;
     let mut system = System::new();
@@ -414,6 +496,9 @@ fn stream_pool<R: Read>(
                 concept_index.insert(&local_members, neuron.id)?;
             }
         }
+        if neuron.is_atom() || config.id == binding_pool_id {
+            label_index.insert(&neuron.label, neuron.id)?;
+        }
         store.persist_sleeping(&neuron)?;
     }
     store.flush_paged_slots()?;
@@ -430,6 +515,9 @@ fn stream_pool<R: Read>(
     let recent_atoms = read_recent_atoms(reader, config.recent_atoms_window)?;
     let legacy_sequence_ledger = stream_sequence_ledger(reader, &mut system, file, config.id)?;
     let legacy_concept_sequence_index = concept_index.finish(file, config.id)?;
+    let legacy_label_index = label_index.finish(file, config.id)?;
+    store.install_label_index(legacy_label_index);
+    store.set_suppress_resident_labels(false);
     let cold_offset_count: u64 = read_value(reader)?;
 
     if cold_offset_count > 0 {
