@@ -1706,6 +1706,7 @@ mod tests {
         let (restored, missing) = Brain::restore_wbrain(&path, encodings).unwrap();
         assert!(missing.is_empty());
         let prompt_pool = restored.fabric().pool(3).unwrap();
+        prompt_pool.write().begin_read_only_inference();
         prompt_pool.write().ensure_loaded(0).unwrap();
         assert_eq!(prompt_pool.read().live_count(), 1);
         let before = std::fs::metadata(&path).unwrap().len();
@@ -1772,6 +1773,39 @@ mod tests {
         assert_eq!(stats.resident_terminals, 0);
         assert_eq!(stats.evicted_neurons, stats.total_neurons);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn read_only_inference_preserves_unserialized_training_residents() {
+        let path = tmpfile("read-only-preserves-training");
+        let file = WbrainFile::open(&path).unwrap();
+        let store = file.pool(3);
+        let mut pool = Pool::new(
+            PoolConfig::defaults("test", 3),
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+        );
+        pool.set_wbrain_store(store.clone());
+        pool.ensure_frame_atoms_for_pretrain(b"abc", 1);
+        pool.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(store.slot_count(), 3);
+
+        let new_ids = pool.ensure_frame_atoms_for_pretrain(b"def", 2);
+        assert_eq!(new_ids, vec![3, 4, 5]);
+        pool.begin_read_only_inference();
+        pool.ensure_loaded(0).unwrap();
+        assert_eq!(pool.live_count(), 4);
+        assert_eq!(pool.discard_wbrain_residents_read_only().unwrap(), 1);
+        assert_eq!(pool.live_count(), 3, "training residents must survive query cleanup");
+
+        assert_eq!(pool.serialize_all_neurons_for_idle().unwrap(), 3);
+        assert_eq!(store.slot_count(), 6);
+        for id in new_ids {
+            pool.ensure_loaded(id).unwrap();
+            assert!(pool.get(id).is_some());
+        }
         std::fs::remove_file(path).ok();
     }
 

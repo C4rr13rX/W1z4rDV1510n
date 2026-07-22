@@ -1422,6 +1422,7 @@ impl Brain {
     /// Install a transient, read-only query activation. This does not enter
     /// recent_frames or the Fabric moment and therefore cannot be learned.
     pub fn activate_for_prediction(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        self.begin_read_only_inference();
         self.fabric.activate_for_prediction(pool_id, frame)
     }
 
@@ -1432,7 +1433,19 @@ impl Brain {
         pool_id: PoolId,
         frame: &[u8],
     ) -> Vec<NeuronId> {
+        self.begin_read_only_inference();
         self.fabric.activate_shape_for_prediction(pool_id, frame)
+    }
+
+    fn begin_read_only_inference(&mut self) {
+        for pool_id in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pool_id) {
+                let mut pool = pool.write();
+                if pool.has_wbrain_store() {
+                    pool.begin_read_only_inference();
+                }
+            }
+        }
     }
 
     pub fn clear_prediction_activation(&mut self) {

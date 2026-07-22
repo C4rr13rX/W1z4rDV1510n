@@ -206,17 +206,6 @@ impl NeuronSlots {
         }
     }
 
-    fn discard_paged_residents(&mut self) -> Option<usize> {
-        match self {
-            Self::Dense { .. } => None,
-            Self::Paged { residents, .. } => {
-                let discarded = residents.len();
-                *residents = AHashMap::new();
-                Some(discarded)
-            }
-        }
-    }
-
     fn wake(&mut self, index: usize, neuron: Neuron) -> bool {
         match self {
             Self::Dense { slots, .. } => {
@@ -1390,6 +1379,11 @@ pub struct Pool {
     /// potentially enormous terminal payload. A full-access request upgrades
     /// the stub through `ensure_loaded`; request cleanup drops it outright.
     shape_only_residents: AHashSet<NeuronId>,
+    /// Neurons brought into RAM by the current read-only inference scope.
+    /// Pre-existing residents may contain uncheckpointed training changes,
+    /// so request cleanup must never discard them.
+    read_only_inference_active: bool,
+    read_only_inference_residents: AHashSet<NeuronId>,
 
     /// Disk offsets for currently-evicted neurons.  An ID in this map
     /// is one whose in-RAM slot has been zeroed out (terminals + members
@@ -1491,6 +1485,8 @@ impl Pool {
             tiered_store: None,
             wbrain_store: None,
             shape_only_residents: AHashSet::new(),
+            read_only_inference_active: false,
+            read_only_inference_residents: AHashSet::new(),
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
         }
@@ -1759,6 +1755,9 @@ impl Pool {
             }
             self.cold_offsets.remove(&id);
             self.evicted.remove(&id);
+            if self.read_only_inference_active {
+                self.read_only_inference_residents.insert(id);
+            }
             // `.wbrain` metadata keeps the complete learned terminal count;
             // paging a body changes residency, not learned topology.
             return Ok(true);
@@ -1819,6 +1818,9 @@ impl Pool {
 
         self.cold_offsets.remove(&id);
         self.evicted.remove(&id);
+        if self.read_only_inference_active {
+            self.read_only_inference_residents.insert(id);
+        }
         if !paging_wbrain {
             self.total_terminals += restored_terms;
         }
@@ -1863,7 +1865,19 @@ impl Pool {
             ));
         }
         self.shape_only_residents.insert(id);
+        if self.read_only_inference_active {
+            self.read_only_inference_residents.insert(id);
+        }
         Ok(())
+    }
+
+    /// Mark the start of a read-only request. Nested activations share one
+    /// scope so multi-pool inference retains the complete set of page-ins.
+    pub(crate) fn begin_read_only_inference(&mut self) {
+        if !self.read_only_inference_active {
+            self.read_only_inference_residents.clear();
+            self.read_only_inference_active = true;
+        }
     }
 
     /// Serialize every live neuron after maintenance has completed. This is
@@ -1894,10 +1908,12 @@ impl Pool {
         self.concept_multiset_to_id.clear();
         self.sequences.clear();
         self.bloom = CountingBloom::with_expected_capacity(100_000);
+        self.read_only_inference_active = false;
+        self.read_only_inference_residents.clear();
         Ok(serialized)
     }
 
-    /// Release bodies paged in by a provably read-only maintenance pass.
+    /// Release only bodies paged in by the current read-only request.
     /// Unlike the ordinary idle transition this performs no neuron rewrite
     /// and no full logical-slot scan. It is intentionally crate-private: a
     /// caller must know that no resident body was mutated after page-in.
@@ -1908,13 +1924,15 @@ impl Pool {
                 "read-only resident discard requires a .wbrain store",
             ));
         }
-        let discarded = self.neurons.discard_paged_residents().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "read-only resident discard requires paged neuron slots",
-            )
-        })?;
-        self.shape_only_residents.clear();
+        let ids = std::mem::take(&mut self.read_only_inference_residents);
+        self.read_only_inference_active = false;
+        let mut discarded = 0;
+        for id in ids {
+            if self.neurons.sleep(id as usize).is_some() {
+                self.shape_only_residents.remove(&id);
+                discarded += 1;
+            }
+        }
         Ok(discarded)
     }
 
@@ -2262,6 +2280,8 @@ impl Pool {
             tiered_store: None,
             wbrain_store: Some(store),
             shape_only_residents: AHashSet::new(),
+            read_only_inference_active: false,
+            read_only_inference_residents: AHashSet::new(),
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
             decode_precision_ema: 0.0,
@@ -3428,6 +3448,8 @@ impl Pool {
             tiered_store: None, // §18.12 step 4b
             wbrain_store: None,
             shape_only_residents: AHashSet::new(),
+            read_only_inference_active: false,
+            read_only_inference_residents: AHashSet::new(),
             cold_offsets: snap.cold_offsets.iter().copied().collect(),
             evicted: snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
         };
