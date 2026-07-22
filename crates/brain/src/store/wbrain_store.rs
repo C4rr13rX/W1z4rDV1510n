@@ -9,14 +9,14 @@ use ahash::AHashMap;
 use parking_lot::{Mutex, RwLock};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, PoolId};
-use crate::store::NeuronStore;
 use crate::store::container::{
     AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
 };
+use crate::store::NeuronStore;
 
 const NEURON_SLOT_TABLE_KIND: u32 = 0x534C_4F54; // "SLOT"
 const NEURON_SLOT_BYTES: u64 = 24;
@@ -1709,6 +1709,60 @@ mod tests {
     }
 
     #[test]
+    fn read_only_inference_boundary_discards_every_pool_without_rewriting() {
+        let path = tmpfile("read-only-inference-boundary");
+        let binding_pool_id;
+        {
+            let mut brain = Brain::new(BrainConfig::default());
+            binding_pool_id = brain.binding_pool_id();
+            brain.create_pool(
+                PoolConfig::defaults("prompt", 3),
+                Box::new(BytePassthroughEncoding { prefix: "p".into() }),
+            );
+            brain.create_pool(
+                PoolConfig::defaults("answer", 4),
+                Box::new(BytePassthroughEncoding { prefix: "a".into() }),
+            );
+            brain.pretrain_binding_episode(&[
+                (3, b"resident prompt".to_vec()),
+                (4, b"resident answer".to_vec()),
+            ]);
+            brain.attach_wbrain(&path).unwrap();
+            brain.serialize_all_neurons_for_idle().unwrap();
+        }
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
+        for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a")] {
+            encodings.insert(
+                id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let (mut restored, missing) = Brain::restore_wbrain(&path, encodings).unwrap();
+        assert!(missing.is_empty());
+        let fired = restored.activate_for_indexed_prediction(3, b"resident prompt");
+        assert_eq!(restored.stats().resident_terminals, 0);
+        assert!(restored.stats().evicted_neurons < restored.stats().total_neurons);
+        restored
+            .fabric()
+            .pool(3)
+            .unwrap()
+            .write()
+            .ensure_loaded(fired[0])
+            .unwrap();
+        assert!(restored.stats().resident_terminals > 0);
+        let before = std::fs::metadata(&path).unwrap().len();
+        assert!(restored.finish_read_only_inference().unwrap() > 0);
+        let stats = restored.stats();
+        assert_eq!(stats.resident_terminals, 0);
+        assert_eq!(stats.evicted_neurons, stats.total_neurons);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn migrated_pair_only_recurrence_joins_next_ordered_episode() {
         let legacy = tmpfile("legacy-pair-only-recurrence").with_extension("bin");
         let destination = tmpfile("migrated-pair-only-recurrence");
@@ -1850,13 +1904,9 @@ mod tests {
             // The first episode creates the binding; two subsequent
             // reinforcements satisfy integrate()'s trained-pathway gate.
             for _ in 0..3 {
-                assert!(
-                    brain
-                        .pretrain_binding_episode(
-                            &[(3, b"hello".to_vec()), (4, b"world".to_vec()),]
-                        )
-                        .is_some()
-                );
+                assert!(brain
+                    .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec()),])
+                    .is_some());
             }
             brain.attach_wbrain(&path).unwrap();
             brain.serialize_all_neurons_for_idle().unwrap();

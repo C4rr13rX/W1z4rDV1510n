@@ -13,15 +13,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
     extract::State,
     routing::{get, post},
+    Json, Router,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -457,8 +457,8 @@ pub fn migrate_legacy_brain_container(data_dir: &Path) -> Result<usize> {
         std::fs::remove_file(&finalize_marker)?;
         finalize_pending = false;
     }
-    let resumable_raw = destination.exists()
-        && Brain::legacy_migration_is_resumable(&legacy, &destination);
+    let resumable_raw =
+        destination.exists() && Brain::legacy_migration_is_resumable(&legacy, &destination);
     let raw_complete =
         destination.exists() && Brain::legacy_migration_raw_is_complete(&destination);
     if marker_matches(&raw_marker) && raw_complete {
@@ -726,19 +726,29 @@ async fn h_predict_multi(
     let mut query_pools = Vec::with_capacity(decoded.len());
     for (pool_id, frame) in &decoded {
         if brain.fabric().pool(*pool_id).is_none() {
-            brain.clear_prediction_activation();
-            return Json(json!({"error": format!("unknown pool id {}", pool_id)}));
+            return match brain.finish_read_only_inference() {
+                Ok(_) => Json(json!({"error": format!("unknown pool id {}", pool_id)})),
+                Err(error) => Json(json!({"error": format!(
+                    "unknown pool id {}; inference cleanup failed: {}", pool_id, error
+                )})),
+            };
         }
-        brain.activate_for_prediction(*pool_id, frame);
+        brain.activate_for_indexed_prediction(*pool_id, frame);
         query_pools.push(*pool_id);
     }
     let answer = brain.decode_best_trained_binding_multi(&query_pools, target_pool);
-    brain.clear_prediction_activation();
+    let paged_neurons_released = match brain.finish_read_only_inference() {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+        }
+    };
     Json(json!({
         "integrated": true,
         "query_pools": query_pools,
         "target_pool": target_pool,
         "answer": answer.map(|bytes| b64_url_no_pad(&bytes)),
+        "paged_neurons_released": paged_neurons_released,
     }))
 }
 
@@ -789,28 +799,40 @@ async fn h_repair_predict(
     let mut query_pools = Vec::new();
     for (pool_id, frame) in &decoded {
         if brain.fabric().pool(*pool_id).is_none() {
-            brain.clear_prediction_activation();
-            return Json(json!({"error": format!("unknown pool id {}", pool_id)}));
+            return match brain.finish_read_only_inference() {
+                Ok(_) => Json(json!({"error": format!("unknown pool id {}", pool_id)})),
+                Err(error) => Json(json!({"error": format!(
+                    "unknown pool id {}; inference cleanup failed: {}", pool_id, error
+                )})),
+            };
         }
-        brain.activate_for_prediction(*pool_id, frame);
+        brain.activate_for_indexed_prediction(*pool_id, frame);
         query_pools.push(*pool_id);
     }
     let relation = brain.decode_best_trained_binding_multi(&query_pools, relation_pool);
-    brain.clear_prediction_activation();
+    let paged_neurons_released = match brain.finish_read_only_inference() {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+        }
+    };
     let Some(relation) = relation else {
-        return Json(json!({"integrated": true, "answer": null, "relation": null}));
+        return Json(json!({"integrated": true, "answer": null, "relation": null,
+            "paged_neurons_released": paged_neurons_released}));
     };
     match w1z4rd_brain::apply_code_repair_relation(source, &relation) {
         Ok(answer) => Json(json!({
             "integrated": true,
             "relation": b64_url_no_pad(&relation),
             "answer": b64_url_no_pad(answer.as_bytes()),
+            "paged_neurons_released": paged_neurons_released,
         })),
         Err(error) => Json(json!({
             "integrated": true,
             "relation": b64_url_no_pad(&relation),
             "answer": null,
             "composition_error": error.to_string(),
+            "paged_neurons_released": paged_neurons_released,
         })),
     }
 }
@@ -922,7 +944,7 @@ async fn h_integrate(
         .get("query_pool")
         .and_then(|v| v.as_u64())
         .unwrap_or(POOL_TEXT as u64) as PoolId;
-    let brain = s.brain.lock().await;
+    let mut brain = s.brain.lock().await;
     let tp = req
         .get("target_pool")
         .and_then(|v| v.as_u64())
@@ -939,6 +961,12 @@ async fn h_integrate(
     let authoritative = brain.decode_best_trained_binding(qp, tp);
     let answer_bytes = authoritative.or(legacy.answer);
     let answer_b64 = answer_bytes.as_ref().map(|b| b64_url_no_pad(b));
+    let paged_neurons_released = match brain.finish_read_only_inference() {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+        }
+    };
     Json(json!({
         "answer":                answer_b64,
         "confidence_tier":       format!("{:?}", legacy.confidence_tier),
@@ -948,6 +976,7 @@ async fn h_integrate(
         "integrated_confidence": legacy.grounding.integrated_confidence,
         "outside_grounding":     legacy.grounding.outside_grounding,
         "speculation_flag":      legacy.grounding.speculation_flag,
+        "paged_neurons_released": paged_neurons_released,
     }))
 }
 
@@ -976,13 +1005,19 @@ async fn h_predict(
     let legacy = brain.integrate(qp, tp);
     let authoritative = brain.decode_best_trained_binding(qp, tp);
     let answer = authoritative.or(legacy.answer).map(|b| b64_url_no_pad(&b));
-    brain.clear_prediction_activation();
+    let paged_neurons_released = match brain.finish_read_only_inference() {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+        }
+    };
     Json(json!({
         "answer": answer, "known_atom_count": fired.len(),
         "integrated_confidence": legacy.grounding.integrated_confidence,
         "outside_grounding": legacy.grounding.outside_grounding || fired.is_empty(),
         "speculation_flag": legacy.grounding.speculation_flag,
         "learning": false,
+        "paged_neurons_released": paged_neurons_released,
     }))
 }
 
@@ -2110,7 +2145,7 @@ async fn h_brain_chat(
 
     let mut brain = s.brain.lock().await;
     let action_pool = brain.action_pool_id().unwrap_or(POOL_ACTION);
-    brain.activate_for_prediction(POOL_TEXT, prompt.as_bytes());
+    brain.activate_for_indexed_prediction(POOL_TEXT, prompt.as_bytes());
 
     // Exact ordered sensory evidence can be established from the raw pool
     // immediately. Do this before semantic-routing diagnostics: those routes
@@ -2210,7 +2245,7 @@ async fn h_brain_chat(
         // such as LANGUAGE + BEHAVIOR before derived evidence may influence
         // readout. Raw characters still activate regardless of this gate.
         if brain
-            .activate_for_prediction(pool_id, effective_frame)
+            .activate_for_indexed_prediction(pool_id, effective_frame)
             .len()
             >= 2
         {
@@ -2254,7 +2289,11 @@ async fn h_brain_chat(
         {
             continue;
         }
-        if brain.activate_for_prediction(pool_id, &intent_frame).len() >= 2 {
+        if brain
+            .activate_for_indexed_prediction(pool_id, &intent_frame)
+            .len()
+            >= 2
+        {
             chat_query_pools.push(pool_id);
             if labels.len() >= 2 {
                 composition_features = Some((pool_id, labels));
@@ -2277,12 +2316,20 @@ async fn h_brain_chat(
         })
         .collect();
     let raw_trained = exact_raw_trained.or_else(|| {
-        brain.decode_best_trained_binding_with_context(
-            POOL_TEXT,
-            action_pool,
-            &chat_query_pools,
-            &turn_pools,
-        )
+        // Once a derived pool has independently grounded the request, do not
+        // wake a second broad character-overlap population. Feature ranking
+        // and the bounded motif route below retain the raw evidence needed
+        // for disambiguation. Raw-only prompts still use fuzzy recall here.
+        if chat_query_pools.len() == 1 {
+            brain.decode_best_trained_binding_with_context(
+                POOL_TEXT,
+                action_pool,
+                &chat_query_pools,
+                &turn_pools,
+            )
+        } else {
+            None
+        }
     });
     // Sparse LANGUAGE+BEHAVIOR labels identify an intent class, but several
     // independently learned artifacts may legitimately share that class.
@@ -2447,13 +2494,6 @@ async fn h_brain_chat(
         // language and behavior. Plain single-file source is valid here as
         // long as its shape agrees with that language.
         ranked_single_source
-    } else if raw_trained.is_some() && (!programming_language_intent || raw_programming_compatible)
-    {
-        // Fuzzy raw recall is valid for ordinary same-domain retrieval, but
-        // a recognized code-language request must be supported by its
-        // derived feature bindings. Otherwise a recently trained reasoning
-        // corpus can answer an unknown code request with unrelated prose.
-        raw_trained
     } else if chat_query_pools.len() > 1 && !programming_language_intent {
         brain.decode_best_trained_binding_multi(&chat_query_pools, action_pool)
     } else {
@@ -2581,7 +2621,12 @@ async fn h_brain_chat(
             }))
         })
         .collect();
-    brain.clear_prediction_activation();
+    let paged_neurons_released = match brain.finish_read_only_inference() {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+        }
+    };
 
     Json(json!({
         "reply":              reply,
@@ -2598,6 +2643,7 @@ async fn h_brain_chat(
         "word_activations":   Vec::<serde_json::Value>::new(),
         "semantic_refinement_score": semantic_refinement_score,
         "semantic_refinement_margin": semantic_refinement_margin,
+        "paged_neurons_released": paged_neurons_released,
         "intent_diagnostics": {
             "labels": diagnostic_intent_labels,
             "ranked_candidates": feature_candidates.len(),
@@ -2655,7 +2701,13 @@ async fn h_integrate_chain(
                 "answer": a.map(|b| b64_url_no_pad(&b)) })
         })
         .collect();
-    Json(json!({ "steps": steps }))
+    let paged_neurons_released = match brain.finish_read_only_inference() {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+        }
+    };
+    Json(json!({ "steps": steps, "paged_neurons_released": paged_neurons_released }))
 }
 
 async fn h_integrate_islands(
@@ -2814,7 +2866,12 @@ async fn h_binding_diagnose(
     }
     fuzzy.sort_by(|a, b| b.0.total_cmp(&a.0));
     let top_matches: Vec<_> = fuzzy.into_iter().take(10).map(|(_, row)| row).collect();
-    brain.clear_prediction_activation();
+    let paged_neurons_released = match brain.finish_read_only_inference() {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(json!({"error": format!("inference cleanup failed: {}", error)}))
+        }
+    };
     Json(json!({
         "learning": false,
         "known_atom_count": known.len(),
@@ -2822,6 +2879,7 @@ async fn h_binding_diagnose(
         "exact_binding_count": exact.len(),
         "exact_bindings": exact,
         "top_matches": top_matches,
+        "paged_neurons_released": paged_neurons_released,
     }))
 }
 
@@ -3577,42 +3635,34 @@ mod tests {
             value["files"]["service.py"],
             "class NovelCoordinator:\n    def ready(self):\n        return True\n"
         );
-        assert!(
-            merge_grounded_code_fragments_for_prompt(
-                &candidates,
-                "Create a Python service without a specified class name.",
-            )
-            .is_none()
-        );
-        assert!(
-            merge_grounded_code_fragments_for_prompt(
-                &candidates,
-                "Create a Python class named 7Invalid.",
-            )
-            .is_none()
-        );
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &candidates,
+            "Create a Python service without a specified class name.",
+        )
+        .is_none());
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &candidates,
+            "Create a Python class named 7Invalid.",
+        )
+        .is_none());
         let unknown_kind = vec![
             br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"unbounded_text"},"source":"class {{CLASS_NAME}}:\n"}}"#.to_vec(),
             candidates[1].clone(),
         ];
-        assert!(
-            merge_grounded_code_fragments_for_prompt(
-                &unknown_kind,
-                "Create a Python class named SafeName with a method named ready.",
-            )
-            .is_none()
-        );
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &unknown_kind,
+            "Create a Python class named SafeName with a method named ready.",
+        )
+        .is_none());
         let unresolved = vec![
             br#"{"code_fragment":{"file":"service.py","role":"class","after":[],"parameters":{"CLASS_NAME":"python_class_named"},"source":"class {{CLASS_NAME}}:\n    value = '{{UNDECLARED}}'\n"}}"#.to_vec(),
             candidates[1].clone(),
         ];
-        assert!(
-            merge_grounded_code_fragments_for_prompt(
-                &unresolved,
-                "Create a Python class named SafeName with a method named ready.",
-            )
-            .is_none()
-        );
+        assert!(merge_grounded_code_fragments_for_prompt(
+            &unresolved,
+            "Create a Python class named SafeName with a method named ready.",
+        )
+        .is_none());
     }
 
     #[test]

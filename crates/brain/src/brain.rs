@@ -44,7 +44,7 @@ fn ensure_neuron_trees_loaded(pool: &mut Pool, roots: &[NeuronId]) {
         if !seen.insert(id) {
             continue;
         }
-        if pool.ensure_loaded(id).is_err() {
+        if pool.ensure_shape_loaded_read_only(id).is_err() {
             continue;
         }
         let members = pool
@@ -1338,8 +1338,43 @@ impl Brain {
         self.fabric.activate_for_prediction(pool_id, frame)
     }
 
+    /// Activate the label/member shape needed by posting-index inference
+    /// without paging unrelated terminal vectors into RAM.
+    pub fn activate_for_indexed_prediction(
+        &mut self,
+        pool_id: PoolId,
+        frame: &[u8],
+    ) -> Vec<NeuronId> {
+        self.fabric.activate_shape_for_prediction(pool_id, frame)
+    }
+
     pub fn clear_prediction_activation(&mut self) {
         self.fabric.clear_prediction_activation();
+    }
+
+    /// End a read-only inference moment and return every demand-paged neuron
+    /// body to its independently addressable `.wbrain` representation.
+    ///
+    /// Prediction is deliberately non-learning: query activation, decoder
+    /// traversal, and diagnostics must not make the request's working set
+    /// permanently resident. Unlike [`Self::serialize_all_neurons_for_idle`],
+    /// this performs no body rewrite or manifest commit. Callers must use it
+    /// only after operations that cannot make durable neuron changes.
+    pub fn finish_read_only_inference(&mut self) -> std::io::Result<usize> {
+        self.clear_prediction_activation();
+        if self.wbrain_file.is_none() {
+            return Ok(0);
+        }
+        let mut discarded = 0;
+        for pool_id in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pool_id) {
+                let mut pool = pool.write();
+                if pool.has_wbrain_store() {
+                    discarded += pool.discard_wbrain_residents_read_only()?;
+                }
+            }
+        }
+        Ok(discarded)
     }
 
     /// Close the current tick.  Performs:
@@ -1965,10 +2000,8 @@ impl Brain {
         let mut roots_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         let mut atom_sequences: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         let mut atom_frames: AHashMap<PoolId, Vec<u8>> = AHashMap::new();
-        let mut root_shapes: AHashMap<
-            (PoolId, NeuronId),
-            (bool, Vec<NeuronRef>, Vec<u8>),
-        > = AHashMap::new();
+        let mut root_shapes: AHashMap<(PoolId, NeuronId), (bool, Vec<NeuronRef>, Vec<u8>)> =
+            AHashMap::new();
 
         for member in members {
             roots_by_pool
@@ -2187,26 +2220,35 @@ impl Brain {
     }
 
     fn binding_feature_postings(&self, pool: PoolId, neuron: NeuronId) -> Vec<NeuronId> {
+        const MAX_FEATURE_POSTINGS: usize = 512;
         let mut out = self
             .binding_feature_atom_index
             .get(&(pool, neuron))
             .cloned()
             .unwrap_or_default();
-        for id in self.disk_binding_postings(&BindingPostingKey::Feature(pool, neuron), usize::MAX)
-        {
-            append_binding_posting(&mut out, id, usize::MAX);
+        out.truncate(MAX_FEATURE_POSTINGS);
+        for id in self.disk_binding_postings(
+            &BindingPostingKey::Feature(pool, neuron),
+            MAX_FEATURE_POSTINGS,
+        ) {
+            append_binding_posting(&mut out, id, MAX_FEATURE_POSTINGS);
         }
         out
     }
 
     fn binding_motif_postings(&self, pool: PoolId, motif: [u8; 3]) -> Vec<NeuronId> {
+        const MAX_MOTIF_POSTINGS: usize = 512;
         let mut out = self
             .binding_motif_index
             .get(&(pool, motif))
             .cloned()
             .unwrap_or_default();
-        for id in self.disk_binding_postings(&BindingPostingKey::Motif(pool, motif), 512) {
-            append_binding_posting(&mut out, id, 512);
+        out.truncate(MAX_MOTIF_POSTINGS);
+        for id in self.disk_binding_postings(
+            &BindingPostingKey::Motif(pool, motif),
+            MAX_MOTIF_POSTINGS,
+        ) {
+            append_binding_posting(&mut out, id, MAX_MOTIF_POSTINGS);
         }
         out
     }
@@ -2722,7 +2764,11 @@ impl Brain {
                         out.extend(p.encoding_reassemble(&[(n.label.as_str(), 1.0)]));
                     }
                 }
-                if out.is_empty() { None } else { Some(out) }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
             }
         }
     }
@@ -3131,7 +3177,7 @@ impl Brain {
                     let score =
                         avg_member_act * boost * length_factor * info_factor * binding_boost;
                     let _ = locked_targeted.contains(&nid); // signal retained for Phase B v2 below
-                    // Hold on to raw activation for grounding metric.
+                                                            // Hold on to raw activation for grounding metric.
                     let _ = act;
                     let _ = target.expanded_size(&n.members);
                     if score > best_score {
@@ -3460,9 +3506,10 @@ impl Brain {
             .unwrap_or_default();
 
         // Route to a bounded candidate set before touching the binding pool.
-        // A missing exact key must not fall back to scanning every sleeping
-        // binding: combine exact sequence, flattened feature atoms, and
-        // character motifs reachable from this query instead.
+        // Exact ordered evidence is authoritative and must preempt broad
+        // feature postings. Unioning those postings even after an exact hit
+        // made short, common prompts wake a corpus-scale binding population.
+        // Only an exact miss enters the fuzzy feature/motif route.
         let exact_candidates = if query_seq.is_empty() {
             Vec::new()
         } else {
@@ -3470,56 +3517,64 @@ impl Brain {
         };
         let mut candidate_set = ahash::AHashSet::new();
         candidate_set.extend(exact_candidates);
-        let mut routing_atoms = q_atoms.clone();
-        if !q_concepts.is_empty() {
-            if let Some(query_handle) = self.fabric.pool(query_pool) {
-                let query = query_handle.read();
-                let mut pending: Vec<NeuronId> = q_concepts.iter().copied().collect();
-                let mut visited = ahash::AHashSet::new();
-                while let Some(id) = pending.pop() {
-                    if !visited.insert(id) {
-                        continue;
-                    }
-                    let Some(neuron) = query.get(id) else {
-                        continue;
-                    };
-                    if neuron.is_atom() {
-                        routing_atoms.insert(id);
-                    } else {
-                        pending.extend(
-                            neuron
-                                .members
-                                .iter()
-                                .filter(|member| member.pool == query_pool)
-                                .map(|member| member.neuron),
-                        );
+        if candidate_set.is_empty() {
+            let mut routing_atoms = q_atoms.clone();
+            if !q_concepts.is_empty() {
+                if let Some(query_handle) = self.fabric.pool(query_pool) {
+                    let query = query_handle.read();
+                    let mut pending: Vec<NeuronId> = q_concepts.iter().copied().collect();
+                    let mut visited = ahash::AHashSet::new();
+                    while let Some(id) = pending.pop() {
+                        if !visited.insert(id) {
+                            continue;
+                        }
+                        let Some(neuron) = query.get(id) else {
+                            continue;
+                        };
+                        if neuron.is_atom() {
+                            routing_atoms.insert(id);
+                        } else {
+                            pending.extend(
+                                neuron
+                                    .members
+                                    .iter()
+                                    .filter(|member| member.pool == query_pool)
+                                    .map(|member| member.neuron),
+                            );
+                        }
                     }
                 }
             }
-        }
-        for atom in &routing_atoms {
-            candidate_set.extend(self.binding_feature_postings(query_pool, *atom));
-        }
-        if !query_seq.is_empty() {
-            if let Some(query_handle) = self.fabric.pool(query_pool) {
-                let query = query_handle.read();
-                let refs: Vec<NeuronRef> = query_seq
-                    .iter()
-                    .map(|&neuron| NeuronRef {
-                        pool: query_pool,
-                        neuron,
-                    })
-                    .collect();
-                let frame = query.decode_concept_members(&refs);
-                let motifs = normalized_char_motifs(&frame);
-                let mut postings: Vec<Vec<NeuronId>> = motifs
-                    .iter()
-                    .map(|motif| self.binding_motif_postings(query_pool, *motif))
-                    .filter(|ids| !ids.is_empty())
-                    .collect();
-                postings.sort_unstable_by_key(|ids| ids.len());
-                for ids in postings.into_iter().take(8) {
-                    candidate_set.extend(ids.iter().copied());
+            let mut feature_postings: Vec<(NeuronId, Vec<NeuronId>)> = routing_atoms
+                .iter()
+                .map(|atom| (*atom, self.binding_feature_postings(query_pool, *atom)))
+                .filter(|(_, ids)| !ids.is_empty())
+                .collect();
+            feature_postings.sort_unstable_by_key(|(atom, ids)| (ids.len(), *atom));
+            for (_, ids) in feature_postings.into_iter().take(8) {
+                candidate_set.extend(ids);
+            }
+            if !query_seq.is_empty() {
+                if let Some(query_handle) = self.fabric.pool(query_pool) {
+                    let query = query_handle.read();
+                    let refs: Vec<NeuronRef> = query_seq
+                        .iter()
+                        .map(|&neuron| NeuronRef {
+                            pool: query_pool,
+                            neuron,
+                        })
+                        .collect();
+                    let frame = query.decode_concept_members(&refs);
+                    let motifs = normalized_char_motifs(&frame);
+                    let mut postings: Vec<Vec<NeuronId>> = motifs
+                        .iter()
+                        .map(|motif| self.binding_motif_postings(query_pool, *motif))
+                        .filter(|ids| !ids.is_empty())
+                        .collect();
+                    postings.sort_unstable_by_key(|ids| ids.len());
+                    for ids in postings.into_iter().take(8) {
+                        candidate_set.extend(ids.iter().copied());
+                    }
                 }
             }
         }
@@ -3768,7 +3823,7 @@ impl Brain {
             }
         }
 
-        let (bnid, winning_score, _, _, _) = best?;
+        let (bnid, _, _, _, _) = best?;
         let bnode = bp_read.get(bnid)?;
         // A promoted binding can contain both the ordered target atoms and
         // concepts that collapsed from those same atoms in the training
@@ -3786,10 +3841,6 @@ impl Brain {
         if target_members.is_empty() {
             return None;
         }
-        // Keep the winner's complete participation set before releasing the
-        // binding-pool read lock. Target bodies are independently asleep and
-        // must be paged by the exact member IDs named by this binding.
-        let all_winner_members: Vec<NeuronRef> = bnode.members.clone();
         drop(bp_read);
 
         let target_handle = self.fabric.pool(target_pool)?;
@@ -3808,71 +3859,13 @@ impl Brain {
         } else {
             t.decode_concept_members(&target_atoms)
         };
-        // Stage 17.5: collect ALL members of the winning binding (across
-        // every pool, not just target).  These are the neurons that
-        // participated in this successful decode and should receive the
-        // reward-modulated salience bump.
         drop(t);
 
-        // Feedback: record this decode's score into the query pool's
-        // decode_precision_ema so DecodePrecisionEma ControlSignal
-        // reflects how confidently the substrate is retrieving lately.
-        // ControlModes that read it can adapt — e.g. raise the floor
-        // when decodes are confident, lower it when struggling.
-        // Divide winning_score by the freq_weight to recover the raw
-        // precision×recall (which is what we want as a [0,1] signal).
-        let raw_score = if winning_score > 1.0 {
-            // Has concept-tier bonus (+1.0).  Recover the freq-weighted
-            // concept portion, then clamp to [0,1].
-            (winning_score - 1.0).min(1.0)
+        if bytes.is_empty() {
+            None
         } else {
-            winning_score.min(1.0)
-        };
-        if let Some(qp) = self.fabric.pool(query_pool) {
-            qp.write().record_decode_precision(raw_score);
+            Some(bytes)
         }
-
-        // Stage 17.5: brain-emitted salience update.  The winning binding
-        // AND each of its members get a salience bump proportional to
-        // the decode precision.  Frémaux & Gerstner (2016) three-factor
-        // plasticity: pre × post × reward → tag the post-synaptic neurons
-        // (here: binding + members) for long-term retention.
-        // Frankland & Bontempi (2005): salience-tagged engrams resist
-        // consolidation-driven loss.  This is the substrate's own answer
-        // to "which of my own neurons matter for my future self?".
-        //
-        // Bump magnitude: `raw_score * 0.10`.  A perfect decode (score=1.0)
-        // contributes 0.10 to salience; salience saturates at 1.0 in
-        // Neuron::bump_salience.  Empirically chosen — fast enough that
-        // hot bindings reach high salience within a few thousand decodes,
-        // slow enough that one lucky decode doesn't dominate.
-        let salience_delta = raw_score * 0.10;
-        if salience_delta > 0.0 {
-            // Bump the binding concept itself.
-            if let Some(bp) = self.fabric.pool(bpid) {
-                if let Some(n) = bp.write().get_mut(bnid) {
-                    n.bump_salience(salience_delta);
-                }
-            }
-            // Group members by their pool, then take one write lock per pool.
-            let mut by_pool: std::collections::HashMap<PoolId, Vec<NeuronId>> =
-                std::collections::HashMap::new();
-            for nref in &all_winner_members {
-                by_pool.entry(nref.pool).or_default().push(nref.neuron);
-            }
-            for (pid, nids) in by_pool {
-                if let Some(p) = self.fabric.pool(pid) {
-                    let mut w = p.write();
-                    for nid in nids {
-                        if let Some(n) = w.get_mut(nid) {
-                            n.bump_salience(salience_delta);
-                        }
-                    }
-                }
-            }
-        }
-
-        if bytes.is_empty() { None } else { Some(bytes) }
     }
 
     /// Whether the current ordered atom sequence has a directly observed
@@ -4079,7 +4072,11 @@ impl Brain {
         } else {
             target.decode_concept_members(&atoms)
         };
-        if bytes.is_empty() { None } else { Some(bytes) }
+        if bytes.is_empty() {
+            None
+        } else {
+            Some(bytes)
+        }
     }
 
     /// Wake only bindings reachable from the active query atoms or their
@@ -4282,6 +4279,18 @@ impl Brain {
             Some(pool) => pool,
             None => return Vec::new(),
         };
+        {
+            let mut bindings = binding_handle.write();
+            for binding_id in &candidate_ids {
+                if let Err(error) = bindings.ensure_loaded(*binding_id) {
+                    tracing::warn!(
+                        "feature binding page-in failed for {}: {}",
+                        binding_id,
+                        error
+                    );
+                }
+            }
+        }
         let bindings = binding_handle.read();
         let feature_roots: Vec<NeuronId> = candidate_ids
             .iter()
@@ -4390,6 +4399,18 @@ impl Brain {
             Some(pool) => pool,
             None => return Vec::new(),
         };
+        let target_roots: Vec<NeuronId> = ranked
+            .iter()
+            .filter_map(|(binding_id, _, _, _, _)| bindings.get(*binding_id))
+            .flat_map(|binding| {
+                binding
+                    .members
+                    .iter()
+                    .filter(move |member| member.pool == target_pool)
+                    .map(|member| member.neuron)
+            })
+            .collect();
+        ensure_neuron_trees_loaded(&mut target_handle.write(), &target_roots);
         let target = target_handle.read();
         let mut aggregated: std::collections::HashMap<Vec<u8>, (i32, usize, u64, usize, NeuronId)> =
             std::collections::HashMap::new();
@@ -4444,12 +4465,12 @@ impl Brain {
         }
         let mut decoded: Vec<_> = aggregated.into_iter().collect();
         decoded.sort_by(|a, b| {
-            b.1.0
-                .cmp(&a.1.0)
-                .then_with(|| b.1.1.cmp(&a.1.1))
-                .then_with(|| b.1.2.cmp(&a.1.2))
-                .then_with(|| a.1.3.cmp(&b.1.3))
-                .then_with(|| a.1.4.cmp(&b.1.4))
+            b.1 .0
+                .cmp(&a.1 .0)
+                .then_with(|| b.1 .1.cmp(&a.1 .1))
+                .then_with(|| b.1 .2.cmp(&a.1 .2))
+                .then_with(|| a.1 .3.cmp(&b.1 .3))
+                .then_with(|| a.1 .4.cmp(&b.1 .4))
         });
         let has_nonnegative = decoded.iter().any(|(_, rank)| rank.0 >= 0);
         decoded
@@ -4489,6 +4510,18 @@ impl Brain {
             return None;
         }
         let bindings_handle = self.fabric.pool(self.binding_pool_id)?;
+        {
+            let mut bindings = bindings_handle.write();
+            for binding_id in &candidate_ids {
+                if let Err(error) = bindings.ensure_loaded(*binding_id) {
+                    tracing::warn!(
+                        "exact feature binding page-in failed for {}: {}",
+                        binding_id,
+                        error
+                    );
+                }
+            }
+        }
         let bindings = bindings_handle.read();
         let feature_roots: Vec<NeuronId> = candidate_ids
             .iter()
@@ -4571,6 +4604,18 @@ impl Brain {
             .map(|(_, direct, _)| *direct)
             .max()?;
         let target_handle = self.fabric.pool(target_pool)?;
+        let target_roots: Vec<NeuronId> = exact_candidates
+            .iter()
+            .filter_map(|(binding_id, _, _)| bindings.get(*binding_id))
+            .flat_map(|binding| {
+                binding
+                    .members
+                    .iter()
+                    .filter(move |member| member.pool == target_pool)
+                    .map(|member| member.neuron)
+            })
+            .collect();
+        ensure_neuron_trees_loaded(&mut target_handle.write(), &target_roots);
         let target = target_handle.read();
         let mut decoded: Vec<(Vec<u8>, u64)> = Vec::new();
         for (binding_id, _, uses) in exact_candidates
@@ -4681,6 +4726,34 @@ impl Brain {
         for ids in posting_lists.into_iter().take(8) {
             candidate_ids.extend(ids.iter().copied());
         }
+        drop(bindings);
+        {
+            let mut bindings = bindings_handle.write();
+            for binding_id in &candidate_ids {
+                if let Err(error) = bindings.ensure_loaded(*binding_id) {
+                    tracing::warn!(
+                        "motif binding page-in failed for {}: {}",
+                        binding_id,
+                        error
+                    );
+                }
+            }
+        }
+        let bindings = bindings_handle.read();
+        drop(target);
+        let target_roots: Vec<NeuronId> = candidate_ids
+            .iter()
+            .filter_map(|binding_id| bindings.get(*binding_id))
+            .flat_map(|binding| {
+                binding
+                    .members
+                    .iter()
+                    .filter(move |member| member.pool == target_pool)
+                    .map(|member| member.neuron)
+            })
+            .collect();
+        ensure_neuron_trees_loaded(&mut target_handle.write(), &target_roots);
+        let target = target_handle.read();
         for binding_id in candidate_ids {
             let Some(binding) = bindings.get(binding_id) else {
                 continue;
@@ -6498,7 +6571,11 @@ impl Brain {
                 }
             }
         }
-        if n == 0 { 0.0 } else { sum / (n as f32) }
+        if n == 0 {
+            0.0
+        } else {
+            sum / (n as f32)
+        }
     }
 
     /// Stage 17.7 full — free-energy weighted REPLAY per
@@ -6627,7 +6704,7 @@ impl Brain {
     ///
     /// Closes the loop with Stage 17.5: high-salience neurons get
     /// preferential replay, which strengthens their terminals (and bumps
-    /// their salience again on decode).  Frémaux & Gerstner 2016 three-
+    /// their salience through confirmed learning outcomes).  Frémaux & Gerstner 2016 three-
     /// factor plasticity at the moment-buffer scale.
     ///
     /// True free-energy-weighted replay using the annealer (boltzmann

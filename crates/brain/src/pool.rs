@@ -1371,6 +1371,11 @@ pub struct Pool {
     /// The in-memory `neurons` vector then contains either the one live body
     /// or a compact routing slot for that stable id.
     wbrain_store: Option<Arc<WbrainNeuronStore>>,
+    /// Read-only inference stubs loaded from the shape prefix of a `.wbrain`
+    /// record. These carry identity/label/members but deliberately omit the
+    /// potentially enormous terminal payload. A full-access request upgrades
+    /// the stub through `ensure_loaded`; request cleanup drops it outright.
+    shape_only_residents: AHashSet<NeuronId>,
 
     /// Disk offsets for currently-evicted neurons.  An ID in this map
     /// is one whose in-RAM slot has been zeroed out (terminals + members
@@ -1471,6 +1476,7 @@ impl Pool {
             cold_tier: None,
             tiered_store: None,
             wbrain_store: None,
+            shape_only_residents: AHashSet::new(),
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
         }
@@ -1571,6 +1577,10 @@ impl Pool {
     /// was already evicted (idempotent) or doesn't exist; `Err` if the
     /// cold tier is unattached or the I/O failed.
     pub fn evict_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
+        if self.shape_only_residents.remove(&id) {
+            self.neurons.sleep(id as usize);
+            return Ok(true);
+        }
         if self.is_evicted(id) {
             return Ok(false);
         }
@@ -1670,6 +1680,9 @@ impl Pool {
     /// it wasn't evicted to begin with (caller can ignore); `Err` if
     /// the cold tier is missing or the read failed.
     pub fn page_in_neuron(&mut self, id: NeuronId) -> std::io::Result<bool> {
+        if self.shape_only_residents.remove(&id) {
+            self.neurons.sleep(id as usize);
+        }
         if !self.is_evicted(id) {
             return Ok(false);
         }
@@ -1802,9 +1815,40 @@ impl Pool {
     /// otherwise.  Used by callers that don't care which state the
     /// neuron is in, just that it's accessible.
     pub fn ensure_loaded(&mut self, id: NeuronId) -> std::io::Result<()> {
-        if self.is_evicted(id) {
+        if self.shape_only_residents.contains(&id) || self.is_evicted(id) {
             self.page_in_neuron(id)?;
         }
+        Ok(())
+    }
+
+    /// Load only the stable routing shape of a sleeping neuron for a
+    /// read-only inference request. Terminal vectors remain on SSD. A later
+    /// `ensure_loaded` transparently replaces this stub with the full body.
+    pub(crate) fn ensure_shape_loaded_read_only(&mut self, id: NeuronId) -> std::io::Result<()> {
+        if self.neurons.get(id as usize).is_some() {
+            return Ok(());
+        }
+        let Some(store) = self.wbrain_store.as_ref() else {
+            return self.ensure_loaded(id);
+        };
+        let Some((is_atom, label, members)) = store.neuron_shape(id)? else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(".wbrain store has no neuron shape for id {}", id),
+            ));
+        };
+        let neuron = if is_atom {
+            Neuron::new_atom(id, label, NeuronKind::Excitatory, 0)
+        } else {
+            Neuron::new_concept(id, label, NeuronKind::Excitatory, members, 0)
+        };
+        if !self.neurons.wake(id as usize, neuron) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("neuron address {} no longer exists", id),
+            ));
+        }
+        self.shape_only_residents.insert(id);
         Ok(())
     }
 
@@ -1850,12 +1894,14 @@ impl Pool {
                 "read-only resident discard requires a .wbrain store",
             ));
         }
-        self.neurons.discard_paged_residents().ok_or_else(|| {
+        let discarded = self.neurons.discard_paged_residents().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "read-only resident discard requires paged neuron slots",
             )
-        })
+        })?;
+        self.shape_only_residents.clear();
+        Ok(discarded)
     }
 
     /// Read only the shape needed by index maintenance, then immediately
@@ -2201,6 +2247,7 @@ impl Pool {
             cold_tier: None,
             tiered_store: None,
             wbrain_store: Some(store),
+            shape_only_residents: AHashSet::new(),
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
             decode_precision_ema: 0.0,
@@ -2545,9 +2592,8 @@ impl Pool {
         self.terminal_count_ema = self.terminal_count_ema * (1.0 - ALPHA) + n_terms * ALPHA;
     }
 
-    /// Record one decode-time precision sample (winning binding's
-    /// atom_score).  Called by Brain::decode_best_trained_binding
-    /// when this pool is query_pool.
+    /// Record one externally confirmed precision sample. Read-only decoding
+    /// must not call this: an unverified answer is not a learning outcome.
     pub fn record_decode_precision(&mut self, score: f32) {
         const ALPHA: f32 = 0.15;
         self.decode_precision_ema =
@@ -2560,6 +2606,23 @@ impl Pool {
     /// recurrence accounting, decay, WAL writes, or Hebbian updates.
     /// The caller must invoke `clear_prediction_activation` after readout.
     pub fn activate_known_frame_for_prediction(&mut self, frame: &[u8]) -> Vec<NeuronId> {
+        self.activate_known_frame_for_prediction_mode(frame, false)
+    }
+
+    /// Indexed inference needs identity, labels, and concept membership but
+    /// routes through posting indexes rather than terminal propagation.
+    pub(crate) fn activate_known_frame_shape_for_prediction(
+        &mut self,
+        frame: &[u8],
+    ) -> Vec<NeuronId> {
+        self.activate_known_frame_for_prediction_mode(frame, true)
+    }
+
+    fn activate_known_frame_for_prediction_mode(
+        &mut self,
+        frame: &[u8],
+        shape_only: bool,
+    ) -> Vec<NeuronId> {
         self.clear_prediction_activation();
         let fired: Vec<NeuronId> = self
             .encoding
@@ -2568,7 +2631,12 @@ impl Pool {
             .filter_map(|label| self.label_to_id(&label))
             .collect();
         for &id in &fired {
-            if let Err(error) = self.ensure_loaded(id) {
+            let loaded = if shape_only {
+                self.ensure_shape_loaded_read_only(id)
+            } else {
+                self.ensure_loaded(id)
+            };
+            if let Err(error) = loaded {
                 tracing::warn!("prediction page-in failed for neuron {}: {}", id, error);
                 continue;
             }
@@ -2598,7 +2666,12 @@ impl Pool {
                     }
                 }
                 let Some((len, cid)) = matched else { break };
-                if let Err(error) = self.ensure_loaded(cid) {
+                let loaded = if shape_only {
+                    self.ensure_shape_loaded_read_only(cid)
+                } else {
+                    self.ensure_loaded(cid)
+                };
+                if let Err(error) = loaded {
                     tracing::warn!("prediction concept page-in failed for {}: {}", cid, error);
                     break;
                 }
@@ -3308,6 +3381,7 @@ impl Pool {
             cold_tier: None,
             tiered_store: None, // §18.12 step 4b
             wbrain_store: None,
+            shape_only_residents: AHashSet::new(),
             cold_offsets: snap.cold_offsets.iter().copied().collect(),
             evicted: snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
         };

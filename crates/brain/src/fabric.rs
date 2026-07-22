@@ -1179,6 +1179,18 @@ impl Fabric {
             .activate_known_frame_for_prediction(frame)
     }
 
+    pub(crate) fn activate_shape_for_prediction(
+        &mut self,
+        pool_id: PoolId,
+        frame: &[u8],
+    ) -> Vec<NeuronId> {
+        self.pools
+            .get(&pool_id)
+            .expect("unknown pool")
+            .write()
+            .activate_known_frame_shape_for_prediction(frame)
+    }
+
     pub fn clear_prediction_activation(&mut self) {
         for pool in self.pools.values() {
             pool.write().clear_prediction_activation();

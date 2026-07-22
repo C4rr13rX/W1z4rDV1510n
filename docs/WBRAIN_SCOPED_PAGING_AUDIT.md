@@ -273,3 +273,46 @@ Do not claim neuron-level paging from a zero-resident-terminal count alone.
 Admission requires proving that fixed metadata and routing memory do not scale
 as full `Neuron` objects or full binding maps, and that an unseen prompt cannot
 trigger a whole-pool fallback scan.
+
+## Production admission evidence (2026-07-22)
+
+The resumable production finalizer completed successfully. It published a
+28,695,385,443-byte `brain.wbrain` containing 491,363 neurons while preserving
+the authoritative 13,648,877,763-byte `brain.bin`. Finalization held private
+memory near 153--154 MiB, and a cold reopen used 52.8 MiB with zero resident
+terminals.
+
+The first production inference audit correctly rejected the initial
+implementation: a retention request reached 4.4--6.3 GiB, exact `dog` recall
+exceeded 3.5 GiB, and an OOV prompt exceeded 3 GiB. The failures mapped to two
+independent causes: exact evidence was unioned with broad fuzzy postings, and
+reading the identity of a candidate hydrated its complete terminal vector.
+
+The admitted read path now distinguishes shape residency from full-body
+residency. Indexed prediction loads only neuron identity, label, and concept
+membership; an explicit full load transparently upgrades that shape when
+propagation or learning needs terminals. Exact sequence evidence preempts fuzzy
+routing. Fuzzy feature and motif recall retains up to 512 candidates per
+posting but consults only the eight most selective lists of each kind. This
+separates candidate breadth, which protects accuracy, from body depth, which
+controls memory. At request completion, read-only residents are discarded
+without rewriting neuron records or the manifest.
+
+Production results after the correction:
+
+- exact `dog -> animal`: 67.7 MiB peak, 52.9 MiB afterward, zero resident terminals;
+- unseen `quasarithmetic`: honest OOV with bounded memory;
+- Python `square` request: exact executable source in 4.03 seconds, 138.9 MiB peak,
+  57.0 MiB afterward, 5,882 request-local neurons released, zero resident terminals;
+- debug gate: exact `6/6`, held-out `6/6`, structural `4/4`, OOV `3/3`,
+  212.8 MiB peak and zero resident terminals afterward;
+- integrated retention: toddler `32/32`, K--12 `16/16`, OOV `3/3`, trained
+  code `5/5`, novel paraphrase `5/5`, and all debug gates passing at a
+  215.5 MiB peak with zero resident terminals afterward.
+
+Repeated clean-server evaluations returned trained and novel code `5/5` three
+times. The audit also found and removed unconfirmed decode-time updates to
+precision EMA and neuron salience. Ordinary inference is now deterministic and
+read-only; learning state changes require a confirmed success or failure path.
+All 82 brain library tests pass serially, including shape-to-full upgrade and
+return-to-sleep coverage.
