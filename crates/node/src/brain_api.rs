@@ -1536,6 +1536,19 @@ fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
         .collect()
 }
 
+fn is_single_language_single_behavior(labels: &[String]) -> bool {
+    let language_count = labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .count();
+    let behavior_count = manifest_component_feature_pairs(labels)
+        .into_iter()
+        .map(|pair| pair[1].clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    language_count == 1 && behavior_count == 1
+}
+
 /// A paraphrased single-language request may state a strict subset of the
 /// constraints present in its training episode. The ranked decoder has
 /// already required at least language+behavior evidence and allows at most
@@ -2126,23 +2139,23 @@ fn merge_grounded_code_fragments_for_prompt(
             }
         }
         // Ranked retrieval can activate one complete artifact alongside a
-        // partial, unrelated historical chain.  Missing dependencies make
-        // that connected component ineligible; they must not veto an
-        // independently complete component.  Prune to a dependency-closed
-        // subgraph (including descendants of every removed node).
+        // partial, unrelated historical chain. Missing dependencies make the
+        // entire affected file ineligible: emitting only its independent
+        // imports or initializer would misrepresent a prefix as a complete
+        // implementation. Repeating this removal also quarantines files that
+        // depend on a newly removed cross-file prerequisite, while preserving
+        // independent dependency-complete files.
         loop {
             let all_roles: std::collections::BTreeSet<String> = graph.keys().cloned().collect();
-            let incomplete: Vec<String> = graph
+            let incomplete_files: std::collections::BTreeSet<String> = graph
                 .iter()
                 .filter(|(_, (_, _, dependencies))| !dependencies.is_subset(&all_roles))
-                .map(|(key, _)| key.clone())
+                .map(|(_, (file, _, _))| file.clone())
                 .collect();
-            if incomplete.is_empty() {
+            if incomplete_files.is_empty() {
                 break;
             }
-            for key in incomplete {
-                graph.remove(&key);
-            }
+            graph.retain(|_, (file, _, _)| !incomplete_files.contains(file));
         }
         if graph.len() < 2 {
             return None;
@@ -2415,7 +2428,7 @@ async fn h_brain_chat(
     // raw prompt. Richer requests remain on the multi-feature composition path.
     let raw_motif_trained = composition_features
         .as_ref()
-        .filter(|(_, labels)| labels.len() == 2)
+        .filter(|(_, labels)| is_single_language_single_behavior(labels))
         .and_then(|_| {
             brain.decode_best_binding_by_char_motifs_with_margin(
                 POOL_TEXT,
@@ -2534,9 +2547,13 @@ async fn h_brain_chat(
         fragment_composition,
         manifest_composition,
     );
-    let exact_is_composition_prerequisite = exact_feature
-        .as_ref()
-        .is_some_and(|exact| exact_fragment_has_grounded_dependents(exact, &feature_candidates));
+    let exact_is_composition_prerequisite = diagnostic_intent_labels.len() >= 4
+        && exact_feature.as_ref().is_some_and(|exact| {
+            exact_fragment_has_grounded_dependents(exact, &feature_candidates)
+                && composed
+                    .as_ref()
+                    .is_some_and(|artifact| composed_artifact_contains_fragment(artifact, exact))
+        });
     let trained_bytes = if raw_is_exact && raw_trained.is_some() {
         // Direct sensory evidence is the strongest tier. Derived diagnostic
         // pools may compose novel requests, but can never overwrite an
@@ -3513,6 +3530,33 @@ fn exact_fragment_has_grounded_dependents(exact: &[u8], candidates: &[Vec<u8>]) 
     })
 }
 
+/// A dependency relationship alone does not prove that the settled artifact
+/// retained the exact evidence. Incomplete sibling chains may leave a valid
+/// prefix that omits the requested fragment entirely.
+fn composed_artifact_contains_fragment(artifact: &[u8], exact: &[u8]) -> bool {
+    let Some(fragment) = serde_json::from_slice::<serde_json::Value>(exact)
+        .ok()
+        .and_then(|value| value.get("code_fragment").cloned())
+    else {
+        return false;
+    };
+    let (Some(file), Some(source)) = (
+        fragment.get("file").and_then(|value| value.as_str()),
+        fragment.get("source").and_then(|value| value.as_str()),
+    ) else {
+        return false;
+    };
+    if source.contains("{{") {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(artifact)
+        .ok()
+        .and_then(|value| value.get("files").cloned())
+        .and_then(|files| files.get(file).cloned())
+        .and_then(|source| source.as_str().map(str::to_owned))
+        .is_some_and(|composed| composed.contains(source))
+}
+
 /// Phase routes for the standalone brain server, which supplies its own
 /// elaborated tick-profile, sleep, and checkpoint handlers.
 pub fn brain_phase_routes_without_core(state: BrainApiState) -> Router {
@@ -3807,6 +3851,20 @@ mod tests {
     }
 
     #[test]
+    fn project_container_does_not_turn_one_behavior_into_rich_composition() {
+        let labels = vec![
+            "intent:LANGUAGE:PYTHON".to_string(),
+            "intent:ARTIFACT:PROJECT".to_string(),
+            "intent:SECURITY:AUTHORIZATION".to_string(),
+        ];
+        assert!(is_single_language_single_behavior(&labels));
+
+        let mut rich = labels;
+        rich.push("intent:OBSERVABILITY:CORRELATED_LOGGING".to_string());
+        assert!(!is_single_language_single_behavior(&rich));
+    }
+
+    #[test]
     fn single_language_ranked_manifest_beats_raw_similarity_fallback() {
         let manifest = br#"{"files":{"service.js":"module.exports = 1;\n"}}"#.to_vec();
         let labels = vec![
@@ -3948,12 +4006,19 @@ mod tests {
         let body = br#"{"code_fragment":{"file":"main.js","role":"return","after":["signature"],"source":"  return value;\n}\n"}}"#.to_vec();
         assert!(exact_fragment_has_grounded_dependents(
             &signature,
-            &[signature.clone(), body]
+            &[signature.clone(), body.clone()]
         ));
         assert!(!exact_fragment_has_grounded_dependents(
             &signature,
             &[signature.clone()]
         ));
+        let partial = br#"{"files":{"main.js":"function identity(value) {\n"}}"#;
+        let complete =
+            br#"{"files":{"main.js":"function identity(value) {\n  return value;\n}\n"}}"#;
+        assert!(composed_artifact_contains_fragment(partial, &signature));
+        assert!(composed_artifact_contains_fragment(complete, &signature));
+        assert!(composed_artifact_contains_fragment(complete, &body));
+        assert!(!composed_artifact_contains_fragment(partial, &body));
     }
 
     #[test]
@@ -3996,6 +4061,16 @@ mod tests {
             "class Ready:\n    value = 1\n"
         );
         assert!(value["files"].get("partial.py").is_none());
+    }
+
+    #[test]
+    fn unresolved_behavior_quarantines_independent_prefixes_in_same_file() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"partial.py","role":"imports","after":[],"source":"import json\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"partial.py","role":"init","after":["imports"],"source":"STATE = {}\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"partial.py","role":"authorization","after":["validation"],"source":"def authorize(): return True\n"}}"#.to_vec(),
+        ];
+        assert!(merge_grounded_code_fragments(&candidates).is_none());
     }
 
     #[test]
