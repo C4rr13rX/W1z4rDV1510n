@@ -36,6 +36,9 @@ jobs:
       - name: Verify sleeping concept payload release
         shell: pwsh
         run: cargo test -p w1z4rd-brain sleeping_concept_releases_members_without_losing_identity --lib
+      - name: Verify recurrence survives sleep without resident ledger
+        shell: pwsh
+        run: cargo test -p w1z4rd-brain sequence_recurrence_crosses_sleep_without_a_resident_ledger --lib
       - name: Verify scoped lazy recall
         shell: pwsh
         run: cargo test -p w1z4rd-brain lazy_restore_pages_binding_scope_and_preserves_recall --lib

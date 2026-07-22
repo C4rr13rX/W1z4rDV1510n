@@ -321,6 +321,10 @@ impl WbrainNeuronStore {
         self.pool_id
     }
 
+    pub(crate) fn file(&self) -> Arc<WbrainFile> {
+        self.file.clone()
+    }
+
     /// Binding concepts use their stable composite labels as a dedup key.
     /// Other concepts are routed by sequence/member indexes and keep their
     /// labels inside their neuron records, avoiding a multi-gigabyte resident
@@ -1145,14 +1149,110 @@ mod tests {
         assert!(!pool.get(concept).unwrap().members.is_empty());
 
         pool.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(pool.concept_index_residency(), (0, 1));
         assert!(
             pool.get(concept).is_none(),
             "a sleeping neuron must not retain an in-memory sentinel body"
         );
 
+        let reused = pool.ensure_frame_concept_for_pretrain(b"sleeping concept", 3)[0];
+        assert_eq!(reused, concept, "disk-routed concept must deduplicate");
+        pool.ensure_frame_concept_for_pretrain(b"second sleeping concept", 4);
+        let second = pool.ensure_frame_concept_for_pretrain(b"second sleeping concept", 5)[0];
+        assert_ne!(second, concept);
+
         pool.ensure_loaded(concept).unwrap();
         assert!(!pool.get(concept).unwrap().is_atom());
         assert!(!pool.get(concept).unwrap().members.is_empty());
+        pool.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(pool.concept_index_residency(), (0, 2));
+        pool.stage_wbrain_metadata().unwrap();
+        file.commit_manifest().unwrap();
+        file.flush().unwrap();
+        drop(pool);
+        drop(file);
+
+        let reopened = WbrainFile::open(&path).unwrap();
+        let mut restored = Pool::from_wbrain_store(
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+            reopened.pool(3),
+        )
+        .unwrap();
+        assert_eq!(restored.concept_index_residency(), (0, 2));
+        assert_eq!(
+            restored.ensure_frame_concept_for_pretrain(b"sleeping concept", 6),
+            vec![concept],
+            "concept identity must survive reopen without a resident sequence map"
+        );
+        assert_eq!(
+            restored.ensure_frame_concept_for_pretrain(b"second sleeping concept", 7),
+            vec![second],
+            "newer concept generations must preserve earlier disk routes"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn sequence_recurrence_crosses_sleep_without_a_resident_ledger() {
+        let path = tmpfile("sequence-recurrence-sleep");
+        let first_ids = {
+            let file = WbrainFile::open(&path).unwrap();
+            let mut pool = Pool::new(
+                PoolConfig::defaults("test", 3),
+                Box::new(BytePassthroughEncoding {
+                    prefix: "byte".into(),
+                }),
+            );
+            pool.set_wbrain_store(file.pool(3));
+            let ids = pool.ensure_frame_concept_for_pretrain(b"cross sleep", 1);
+            assert!(ids.len() > 1, "first recurrence must remain raw atoms");
+            pool.serialize_all_neurons_for_idle().unwrap();
+            assert_eq!(pool.sequence_ledger_residency(), (0, 1));
+            pool.stage_wbrain_metadata().unwrap();
+            file.commit_manifest().unwrap();
+            file.flush().unwrap();
+            ids
+        };
+
+        let concept = {
+            let file = WbrainFile::open(&path).unwrap();
+            let mut pool = Pool::from_wbrain_store(
+                Box::new(BytePassthroughEncoding {
+                    prefix: "byte".into(),
+                }),
+                file.pool(3),
+            )
+            .unwrap();
+            assert_eq!(pool.sequence_ledger_residency(), (0, 1));
+            let ids = pool.ensure_frame_concept_for_pretrain(b"cross sleep", 2);
+            assert_eq!(ids.len(), 1, "second recurrence must promote after reopen");
+            assert!(!first_ids.contains(&ids[0]));
+            assert!(!pool.get(ids[0]).unwrap().is_atom());
+            pool.serialize_all_neurons_for_idle().unwrap();
+            assert_eq!(pool.sequence_ledger_residency(), (0, 2));
+            pool.stage_wbrain_metadata().unwrap();
+            file.commit_manifest().unwrap();
+            file.flush().unwrap();
+            ids[0]
+        };
+
+        let file = WbrainFile::open(&path).unwrap();
+        let mut restored = Pool::from_wbrain_store(
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+            file.pool(3),
+        )
+        .unwrap();
+        assert_eq!(restored.sequence_ledger_residency(), (0, 2));
+        assert_eq!(
+            restored.ensure_frame_concept_for_pretrain(b"cross sleep", 3),
+            vec![concept]
+        );
+        drop(restored);
+        drop(file);
         std::fs::remove_file(path).ok();
     }
 

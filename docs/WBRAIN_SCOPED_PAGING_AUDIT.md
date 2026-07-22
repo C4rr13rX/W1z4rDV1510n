@@ -125,16 +125,25 @@ generation and clears it from RAM. The regression suite verifies zero
 resident posting entries after rebuild, after live learning and sleep, and
 after reopen, while preserving exact deduplication and trained recall.
 
+Live concept identity and recurrence overlays now use the same append-only
+generation pattern without changing the version-4 manifest schema. Ordered
+immediate-member keys, bounded flattened atom-leaf keys, and cumulative
+sequence recurrence counts are written as immutable posting deltas at idle;
+the existing auxiliary reference points to a compact generation directory.
+The resident maps are then cleared. Tests cover two train/sleep generations,
+reopen, old-and-new concept deduplication, and a recurrence whose first
+observation occurs before sleep and whose second observation promotes the
+concept after reopen.
+
 ## Resident structures still violating the invariant
 
-1. Live concept-sequence overlays are still serialized in pool metadata; they
-   need the same immutable-delta treatment before indefinitely long training.
-2. A feature shared by an extreme number of bindings can still produce a large
+1. A feature shared by an extreme number of bindings can still produce a large
    request-local posting vector. Preserve accuracy while replacing this with a
    cursor/intersection strategy before mobile admission.
-3. Immutable posting generations need bounded compaction after many separate
-   train/sleep cycles so lookup cost does not grow with generation count.
-4. Diagnostic/export and analogy paths listed above still need explicit
+2. Immutable binding, concept, and recurrence posting generations need bounded
+   compaction after many separate train/sleep cycles so lookup cost does not
+   grow with generation count.
+3. Diagnostic/export and analogy paths listed above still need explicit
    cursor/budget enforcement; request-time binding decoders no longer have a
    whole-pool fallback.
 

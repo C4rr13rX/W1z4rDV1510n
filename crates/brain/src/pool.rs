@@ -12,14 +12,24 @@ use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
 use crate::store::{
     AuxiliaryRecordRef, ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore,
-    WalEvent, WbrainNeuronStore,
+    WalEvent, WbrainFile, WbrainNeuronStore,
 };
+use crate::store::posting_index::{self, PostingIndexBuilder};
+
+const CONCEPT_GENERATION_DIRECTORY_MAGIC: &[u8; 8] = b"W1ZCGEN1";
+const CONCEPT_GENERATION_DIRECTORY_KIND: u32 = 0x4347_454E; // "CGEN"
+const SEQUENCE_GENERATION_DIRECTORY_MAGIC: &[u8; 8] = b"W1ZSGEN1";
+const SEQUENCE_GENERATION_DIRECTORY_KIND: u32 = 0x5347_454E; // "SGEN"
+const CONCEPT_SEQUENCE_KEY: u8 = 0;
+const CONCEPT_ATOM_LEAVES_KEY: u8 = 1;
+const SEQUENCE_RECURRENCE_KEY: u8 = 2;
 
 /// Stable neuron address space with independently resident bodies.
 ///
@@ -1795,9 +1805,165 @@ impl Pool {
         }
         let store = self.wbrain_store.as_ref().unwrap();
         store.flush_resident_labels_to_disk()?;
+        self.flush_concept_sequence_overlay()?;
+        self.flush_sequence_recurrence_overlay()?;
         self.label_to_id.clear();
+        self.concept_sequence_to_id.clear();
+        self.concept_multiset_to_id.clear();
+        self.sequences.clear();
         self.bloom = CountingBloom::with_expected_capacity(100_000);
         Ok(serialized)
+    }
+
+    fn flush_concept_sequence_overlay(&mut self) -> std::io::Result<usize> {
+        let entry_count = self
+            .concept_sequence_to_id
+            .len()
+            .saturating_add(self.concept_multiset_to_id.len());
+        if entry_count == 0 {
+            return Ok(0);
+        }
+        let store = self.wbrain_store.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "concept index flush requires a .wbrain store",
+            )
+        })?;
+        let file = store.file();
+        let directory = file.path().parent().map(ToOwned::to_owned).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                ".wbrain path has no parent directory",
+            )
+        })?;
+        let mut builder = PostingIndexBuilder::create(
+            &directory,
+            self.config.id,
+            entry_count as u64,
+        )?;
+        for (sequence, id) in &self.concept_sequence_to_id {
+            builder.insert(
+                &Self::concept_posting_key(CONCEPT_SEQUENCE_KEY, sequence),
+                *id,
+            )?;
+        }
+        for (sequence, id) in &self.concept_multiset_to_id {
+            builder.insert(
+                &Self::concept_posting_key(CONCEPT_ATOM_LEAVES_KEY, sequence),
+                *id,
+            )?;
+        }
+        let delta = builder.finish(&file, self.config.id)?;
+        let root = self.publish_auxiliary_generation(
+            &file,
+            self.legacy_concept_sequence_index,
+            delta,
+            CONCEPT_GENERATION_DIRECTORY_MAGIC,
+            CONCEPT_GENERATION_DIRECTORY_KIND,
+            "concept index",
+        )?;
+        self.legacy_concept_sequence_index = Some(root);
+        Ok(entry_count)
+    }
+
+    fn flush_sequence_recurrence_overlay(&mut self) -> std::io::Result<usize> {
+        if self.sequences.is_empty() {
+            return Ok(0);
+        }
+        let store = self.wbrain_store.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "sequence ledger flush requires a .wbrain store",
+            )
+        })?;
+        let file = store.file();
+        let directory = file.path().parent().map(ToOwned::to_owned).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                ".wbrain path has no parent directory",
+            )
+        })?;
+        let mut builder =
+            PostingIndexBuilder::create(&directory, self.config.id, self.sequences.len() as u64)?;
+        for (sequence, count) in &self.sequences {
+            builder.insert(
+                &Self::concept_posting_key(SEQUENCE_RECURRENCE_KEY, sequence),
+                *count,
+            )?;
+        }
+        let delta = builder.finish(&file, self.config.id)?;
+        let root = self.publish_auxiliary_generation(
+            &file,
+            self.legacy_sequence_ledger,
+            delta,
+            SEQUENCE_GENERATION_DIRECTORY_MAGIC,
+            SEQUENCE_GENERATION_DIRECTORY_KIND,
+            "sequence ledger",
+        )?;
+        self.legacy_sequence_ledger = Some(root);
+        Ok(self.sequences.len())
+    }
+
+    fn publish_auxiliary_generation(
+        &self,
+        file: &Arc<WbrainFile>,
+        existing: Option<AuxiliaryRecordRef>,
+        delta: AuxiliaryRecordRef,
+        directory_magic: &[u8; 8],
+        directory_kind: u32,
+        description: &str,
+    ) -> std::io::Result<AuxiliaryRecordRef> {
+        let mut generations = match existing {
+            Some(root) => self.auxiliary_generations(root, directory_magic, description)?,
+            None => Vec::new(),
+        };
+        generations.push(delta);
+        if generations.len() == 1 {
+            return Ok(delta);
+        }
+        file.append_auxiliary(self.config.id, directory_kind, |writer| {
+            writer.write_all(directory_magic)?;
+            writer.write_all(&(generations.len() as u64).to_le_bytes())?;
+            for reference in &generations {
+                writer.write_all(&reference.offset.to_le_bytes())?;
+                writer.write_all(&reference.len.to_le_bytes())?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn concept_index_residency(&self) -> (usize, usize) {
+        let overlay_entries = self
+            .concept_sequence_to_id
+            .len()
+            .saturating_add(self.concept_multiset_to_id.len());
+        let generation_count = self
+            .legacy_concept_sequence_index
+            .and_then(|root| {
+                self.auxiliary_generations(
+                    root,
+                    CONCEPT_GENERATION_DIRECTORY_MAGIC,
+                    "concept index",
+                )
+                .ok()
+            })
+            .map_or(0, |generations| generations.len());
+        (overlay_entries, generation_count)
+    }
+
+    pub fn sequence_ledger_residency(&self) -> (usize, usize) {
+        let generation_count = self
+            .legacy_sequence_ledger
+            .and_then(|root| {
+                self.auxiliary_generations(
+                    root,
+                    SEQUENCE_GENERATION_DIRECTORY_MAGIC,
+                    "sequence ledger",
+                )
+                .ok()
+            })
+            .map_or(0, |generations| generations.len());
+        (self.sequences.len(), generation_count)
     }
 
     /// Store the compact address-space and routing state needed to reopen this
@@ -2500,14 +2666,12 @@ impl Pool {
         vec![id]
     }
 
-    fn legacy_sequence_recurrence(
+    fn sequence_recurrence_in_generation(
         &self,
+        reference: AuxiliaryRecordRef,
         sequence: &[NeuronId],
     ) -> std::io::Result<Option<u32>> {
         const LEDGER_MAGIC: &[u8; 8] = b"W1ZSEQ01";
-        let Some(reference) = self.legacy_sequence_ledger else {
-            return Ok(None);
-        };
         let store = self.wbrain_store.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -2517,10 +2681,9 @@ impl Pool {
         let mut header = [0_u8; 24];
         store.read_auxiliary_exact(reference, 0, &mut header)?;
         if &header[..8] != LEDGER_MAGIC {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unsupported cold sequence ledger",
-            ));
+            let key = Self::concept_posting_key(SEQUENCE_RECURRENCE_KEY, sequence);
+            return posting_index::lookup(store, reference, &key, 1)
+                .map(|counts| counts.into_iter().next());
         }
         let bucket_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
         if bucket_count == 0 || !bucket_count.is_power_of_two() {
@@ -2579,11 +2742,109 @@ impl Pool {
         Ok(None)
     }
 
-    fn legacy_concept_id(&self, sequence: &[NeuronId]) -> std::io::Result<Option<NeuronId>> {
-        const INDEX_MAGIC: &[u8; 8] = b"W1ZCID01";
-        let Some(reference) = self.legacy_concept_sequence_index else {
+    fn cold_sequence_recurrence(
+        &self,
+        sequence: &[NeuronId],
+    ) -> std::io::Result<Option<u32>> {
+        let Some(root) = self.legacy_sequence_ledger else {
             return Ok(None);
         };
+        for reference in self
+            .auxiliary_generations(
+                root,
+                SEQUENCE_GENERATION_DIRECTORY_MAGIC,
+                "sequence ledger",
+            )?
+            .into_iter()
+            .rev()
+        {
+            if let Some(count) = self.sequence_recurrence_in_generation(reference, sequence)? {
+                return Ok(Some(count));
+            }
+        }
+        Ok(None)
+    }
+
+    fn concept_posting_key(kind: u8, sequence: &[NeuronId]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(1 + sequence.len() * 4);
+        key.push(kind);
+        for id in sequence {
+            key.extend_from_slice(&id.to_le_bytes());
+        }
+        key
+    }
+
+    fn auxiliary_generations(
+        &self,
+        root: AuxiliaryRecordRef,
+        directory_magic: &[u8; 8],
+        description: &str,
+    ) -> std::io::Result<Vec<AuxiliaryRecordRef>> {
+        let store = self.wbrain_store.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cold concept index has no .wbrain store",
+            )
+        })?;
+        let mut magic = [0_u8; 8];
+        store.read_auxiliary_exact(root, 0, &mut magic)?;
+        if &magic != directory_magic {
+            return Ok(vec![root]);
+        }
+        let mut raw_count = [0_u8; 8];
+        store.read_auxiliary_exact(root, 8, &mut raw_count)?;
+        let count = u64::from_le_bytes(raw_count);
+        let required = 16_u64
+            .checked_add(count.checked_mul(16).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{description} generation directory overflow"),
+                )
+            })?)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{description} generation directory overflow"),
+                )
+            })?;
+        if required > root.len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{description} generation directory is truncated"),
+            ));
+        }
+        let capacity = usize::try_from(count).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{description} generation count exceeds address space"),
+            )
+        })?;
+        let mut generations = Vec::with_capacity(capacity);
+        for index in 0..count {
+            let mut raw = [0_u8; 16];
+            store.read_auxiliary_exact(root, 16 + index * 16, &mut raw)?;
+            let reference = AuxiliaryRecordRef {
+                offset: u64::from_le_bytes(raw[..8].try_into().unwrap()),
+                len: u64::from_le_bytes(raw[8..].try_into().unwrap()),
+            };
+            if reference.offset == 0 || reference.len < 8 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{description} generation contains an invalid reference"),
+                ));
+            }
+            generations.push(reference);
+        }
+        Ok(generations)
+    }
+
+    fn concept_id_in_generation(
+        &self,
+        reference: AuxiliaryRecordRef,
+        key_kind: u8,
+        sequence: &[NeuronId],
+    ) -> std::io::Result<Option<NeuronId>> {
+        const INDEX_MAGIC: &[u8; 8] = b"W1ZCID01";
         let store = self.wbrain_store.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -2593,10 +2854,12 @@ impl Pool {
         let mut header = [0_u8; 24];
         store.read_auxiliary_exact(reference, 0, &mut header)?;
         if &header[..8] != INDEX_MAGIC {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unsupported cold concept index",
-            ));
+            let key = Self::concept_posting_key(key_kind, sequence);
+            return posting_index::lookup(store, reference, &key, 1)
+                .map(|ids| ids.into_iter().next());
+        }
+        if key_kind != CONCEPT_SEQUENCE_KEY {
+            return Ok(None);
         }
         let bucket_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
         if bucket_count == 0 || !bucket_count.is_power_of_two() {
@@ -2655,15 +2918,51 @@ impl Pool {
         Ok(None)
     }
 
+    fn cold_concept_id(
+        &self,
+        key_kind: u8,
+        sequence: &[NeuronId],
+    ) -> std::io::Result<Option<NeuronId>> {
+        let Some(root) = self.legacy_concept_sequence_index else {
+            return Ok(None);
+        };
+        for reference in self
+            .auxiliary_generations(root, CONCEPT_GENERATION_DIRECTORY_MAGIC, "concept index")?
+            .into_iter()
+            .rev()
+        {
+            if let Some(id) = self.concept_id_in_generation(reference, key_kind, sequence)? {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
     fn concept_id_for_sequence(&self, sequence: &[NeuronId]) -> Option<NeuronId> {
         if let Some(id) = self.concept_sequence_to_id.get(sequence) {
             return Some(*id);
         }
-        match self.legacy_concept_id(sequence) {
+        match self.cold_concept_id(CONCEPT_SEQUENCE_KEY, sequence) {
             Ok(id) => id,
             Err(error) => {
                 eprintln!(
                     "cold concept lookup failed in pool {}: {error}",
+                    self.config.id
+                );
+                None
+            }
+        }
+    }
+
+    fn concept_id_for_atom_leaves(&self, sequence: &[NeuronId]) -> Option<NeuronId> {
+        if let Some(id) = self.concept_multiset_to_id.get(sequence) {
+            return Some(*id);
+        }
+        match self.cold_concept_id(CONCEPT_ATOM_LEAVES_KEY, sequence) {
+            Ok(id) => id,
+            Err(error) => {
+                eprintln!(
+                    "cold atom-leaf concept lookup failed in pool {}: {error}",
                     self.config.id
                 );
                 None
@@ -2679,7 +2978,7 @@ impl Pool {
             *count = count.saturating_add(1);
             return Ok(*count);
         }
-        let old = self.legacy_sequence_recurrence(sequence)?.unwrap_or(0);
+        let old = self.cold_sequence_recurrence(sequence)?.unwrap_or(0);
         let next = old.saturating_add(1);
         self.sequences.insert(sequence.clone(), next);
         Ok(next)
@@ -3666,7 +3965,7 @@ impl Pool {
         let leaves_seq = self.expand_to_atom_leaves_bounded(&members, 512);
         if leaves_seq
             .as_ref()
-            .is_some_and(|leaves| self.concept_multiset_to_id.contains_key(leaves))
+            .is_some_and(|leaves| self.concept_id_for_atom_leaves(leaves).is_some())
         {
             return; // canonical concept already exists for this ordered sequence
         }

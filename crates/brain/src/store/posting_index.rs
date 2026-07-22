@@ -64,7 +64,7 @@ impl PostingIndexBuilder {
         })
     }
 
-    pub(crate) fn insert(&mut self, key: &[u8], binding_id: NeuronId) -> io::Result<()> {
+    pub(crate) fn insert(&mut self, key: &[u8], value: NeuronId) -> io::Result<()> {
         let digest = blake3::hash(key);
         let hash = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
         let bucket = hash & (self.bucket_count - 1);
@@ -80,7 +80,7 @@ impl PostingIndexBuilder {
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "posting key too large"))?
                 .to_le_bytes(),
         )?;
-        self.file.write_all(&binding_id.to_le_bytes())?;
+        self.file.write_all(&value.to_le_bytes())?;
         self.file.write_all(key)?;
         self.file.seek(SeekFrom::Start(bucket_at))?;
         self.file.write_all(&(record + 1).to_le_bytes())?;
@@ -118,7 +118,7 @@ pub(crate) fn lookup(
     if &header[..8] != POSTING_INDEX_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "invalid binding posting index magic",
+            "invalid posting index magic",
         ));
     }
     let entries = u64::from_le_bytes(header[8..16].try_into().unwrap());
@@ -141,7 +141,7 @@ pub(crate) fn lookup(
         if visited >= entries {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "binding posting chain cycle",
+                "posting index chain cycle",
             ));
         }
         let record = next_plus_one - 1;
@@ -151,7 +151,7 @@ pub(crate) fn lookup(
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "binding posting record outside auxiliary body",
+                "posting index record outside auxiliary body",
             ));
         }
         let mut raw = [0_u8; RECORD_HEADER_BYTES as usize];
@@ -159,7 +159,7 @@ pub(crate) fn lookup(
         next_plus_one = u64::from_le_bytes(raw[0..8].try_into().unwrap());
         let stored_hash = u64::from_le_bytes(raw[8..16].try_into().unwrap());
         let key_len = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
-        let binding_id = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+        let value = u32::from_le_bytes(raw[20..24].try_into().unwrap());
         let key_at = record + RECORD_HEADER_BYTES;
         if key_at
             .checked_add(key_len)
@@ -167,14 +167,14 @@ pub(crate) fn lookup(
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "binding posting key outside auxiliary body",
+                "posting index key outside auxiliary body",
             ));
         }
         if stored_hash == hash && key_len == key.len() as u64 {
             let mut stored = vec![0_u8; key.len()];
             store.read_auxiliary_exact(reference, key_at, &mut stored)?;
-            if stored == key && found.last().copied() != Some(binding_id) {
-                found.push(binding_id);
+            if stored == key && found.last().copied() != Some(value) {
+                found.push(value);
             }
         }
         visited += 1;

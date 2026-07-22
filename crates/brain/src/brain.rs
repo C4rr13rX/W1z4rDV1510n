@@ -6932,8 +6932,8 @@ impl Brain {
         for pid in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pid) {
                 let mut pool = pool.write();
-                pool.stage_wbrain_metadata()?;
                 serialized += pool.serialize_all_neurons_for_idle()?;
+                pool.stage_wbrain_metadata()?;
             }
         }
         file.set_tick(self.fabric.current_tick());
