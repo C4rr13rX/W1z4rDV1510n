@@ -218,6 +218,22 @@ zero live bodies when reconstruction returns. Live inference retains its
 separate request-scope helper because reusing a small active tree within one
 request is beneficial; full migration never needs that residency.
 
+The production continuation then exposed two costs inside that bounded pass,
+neither of which justified waking more neurons. First, the immutable posting
+builder sought to a bucket root, back to the append tail, and back to the
+bucket for every value. It now retains only the bounded bucket-head directory
+(at most 32 MiB), appends records sequentially, and publishes the directory
+once at completion. Second, traversal reopened each direct root and opened
+every descendant atom body merely to classify it. Direct-root shapes are now
+reused within the binding; descendant atom/concept identity comes from the
+compact paged slot directory, and only concepts whose child references are
+needed have their shape record opened. The ordered-route, zero-resident,
+recurrence, and node recovery suites pass locally and on Windows CI at exact
+commit `2e482bf`. The full-scale finalizer is active from its durable
+`finalize-pending` marker with private memory stable near 153--154 MiB; marker
+clearance, final container publication, and production recall remain pending
+and must be recorded before this migration is admitted.
+
 ## Resident structures still violating the invariant
 
 1. A feature shared by an extreme number of bindings can still produce a large
