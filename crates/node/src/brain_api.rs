@@ -1712,9 +1712,19 @@ fn single_language_ranked_source(labels: &[String], candidates: &[Vec<u8>]) -> O
 
 fn select_composed_artifact(
     labels: &[String],
+    prompt: &str,
     fragment_composition: Option<Vec<u8>>,
     manifest_composition: Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
+    let prompt = prompt.to_ascii_lowercase();
+    let explicitly_multifile = prompt.contains("multi-file")
+        || prompt.contains("multiple files")
+        || prompt.contains("across multiple files")
+        || prompt.contains("in multiple files");
+    let requests_single_class = prompt.contains("class") && !explicitly_multifile;
+    if requests_single_class {
+        return fragment_composition.or(manifest_composition);
+    }
     if labels
         .iter()
         .any(|label| label.ends_with(":ARTIFACT:PROJECT"))
@@ -1973,8 +1983,7 @@ fn merge_grounded_code_fragments_for_prompt(
         String,
         std::collections::BTreeMap<String, RelativeFragment>,
     > = std::collections::BTreeMap::new();
-    let mut numeric_count = 0usize;
-    let mut relative_count = 0usize;
+    let mut invalid_files = std::collections::BTreeSet::new();
     let mut outcomes: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     for bytes in candidates {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
@@ -1987,16 +1996,17 @@ fn merge_grounded_code_fragments_for_prompt(
             outcome.get("evidence_id").and_then(|v| v.as_str()),
             outcome.get("confirmed").and_then(|v| v.as_bool()),
         ) else {
-            return None;
+            continue;
         };
         if evidence_id.is_empty() {
-            return None;
+            continue;
         }
-        if outcomes
-            .insert(evidence_id.to_string(), confirmed)
-            .is_some()
-        {
-            return None; // contradictory/repeated control evidence is ambiguous
+        if let Some(previous) = outcomes.insert(evidence_id.to_string(), confirmed) {
+            // Repeated identical confirmation is idempotent. Contradictory
+            // evidence fails closed for fragments carrying this evidence id.
+            if previous != confirmed {
+                outcomes.insert(evidence_id.to_string(), false);
+            }
         }
     }
     for bytes in candidates {
@@ -2010,7 +2020,7 @@ fn merge_grounded_code_fragments_for_prompt(
             fragment.get("file").and_then(|v| v.as_str()),
             fragment.get("source").and_then(|v| v.as_str()),
         ) else {
-            return None;
+            continue;
         };
         if file.is_empty()
             || file.starts_with('/')
@@ -2018,9 +2028,16 @@ fn merge_grounded_code_fragments_for_prompt(
             || file.split(['/', '\\']).any(|part| part == "..")
             || raw_source.is_empty()
         {
-            return None;
+            invalid_files.insert(file.to_string());
+            continue;
         }
-        let source = render_grounded_fragment_source(fragment, raw_source, prompt)?;
+        // A ranked request can retrieve several independently learned
+        // fragment families. A template whose required prompt parameters are
+        // absent is ineligible for this request; it must not veto a separate,
+        // dependency-complete family that needs no such parameters.
+        let Some(source) = render_grounded_fragment_source(fragment, raw_source, prompt) else {
+            continue;
+        };
         if let Some(evidence_id) = fragment.get("evidence_id").and_then(|v| v.as_str()) {
             if outcomes.get(evidence_id) == Some(&false) {
                 continue;
@@ -2030,23 +2047,24 @@ fn merge_grounded_code_fragments_for_prompt(
             let slots = numeric.entry(file.to_string()).or_default();
             if let Some(existing) = slots.get(&order) {
                 if existing != &source {
-                    return None;
+                    invalid_files.insert(file.to_string());
                 }
                 continue;
             }
             slots.insert(order, source);
-            numeric_count += 1;
             continue;
         }
         let Some(role) = fragment.get("role").and_then(|v| v.as_str()) else {
-            return None;
+            invalid_files.insert(file.to_string());
+            continue;
         };
         if role.is_empty()
             || !role
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':'))
         {
-            return None;
+            invalid_files.insert(file.to_string());
+            continue;
         }
         let after_values = fragment
             .get("after")
@@ -2056,10 +2074,12 @@ fn merge_grounded_code_fragments_for_prompt(
         let mut after = std::collections::BTreeSet::new();
         for value in after_values {
             let Some(dependency) = value.as_str() else {
-                return None;
+                invalid_files.insert(file.to_string());
+                continue;
             };
             if dependency == role || dependency.is_empty() {
-                return None;
+                invalid_files.insert(file.to_string());
+                continue;
             }
             after.insert(dependency.to_string());
         }
@@ -2067,16 +2087,18 @@ fn merge_grounded_code_fragments_for_prompt(
         let roles = relative.entry(file.to_string()).or_default();
         if let Some(existing) = roles.get(role) {
             if existing != &entry {
-                return None;
+                invalid_files.insert(file.to_string());
             }
             continue;
         }
         roles.insert(role.to_string(), entry);
-        relative_count += 1;
     }
-    if relative_count >= 2 && numeric_count > 0 {
-        return None; // one artifact must use one ordering contract
+    for file in &invalid_files {
+        numeric.remove(file);
+        relative.remove(file);
     }
+    let numeric_count: usize = numeric.values().map(|slots| slots.len()).sum();
+    let relative_count: usize = relative.values().map(|roles| roles.len()).sum();
     if relative_count < 2 && numeric_count < 2 {
         return None;
     }
@@ -2136,7 +2158,20 @@ fn merge_grounded_code_fragments_for_prompt(
                 })
                 .map(|(key, (file, source, _))| (key.clone(), file.clone(), source.clone()));
             let Some((key, file, fragment_source)) = next else {
-                return None;
+                // A cycle in one independently retrieved fragment family
+                // must not erase a different file whose dependency graph has
+                // already settled completely. Remove every file represented
+                // by the stalled remainder, including any prefix emitted for
+                // that file, then preserve only fully settled files.
+                let stalled_files: std::collections::BTreeSet<String> = graph
+                    .iter()
+                    .filter(|(key, _)| !emitted.contains(*key))
+                    .map(|(_, (file, _, _))| file.clone())
+                    .collect();
+                for file in stalled_files {
+                    file_sources.remove(&file);
+                }
+                break;
             };
             file_sources
                 .entry(file)
@@ -2154,6 +2189,9 @@ fn merge_grounded_code_fragments_for_prompt(
                 serde_json::Value::String(slots.into_values().collect()),
             );
         }
+    }
+    if rendered.is_empty() {
+        return None;
     }
     serde_json::to_vec(&serde_json::json!({"files": rendered})).ok()
 }
@@ -2485,10 +2523,16 @@ async fn h_brain_chat(
     let raw_programming_compatible = raw_trained.as_ref().is_some_and(|candidate| {
         programming_response_compatible(&diagnostic_intent_labels, candidate)
     });
+    let fragment_composition =
+        merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt);
+    let manifest_composition = merge_grounded_file_manifests(&feature_candidates);
+    let diagnostic_fragment_composition_ready = fragment_composition.is_some();
+    let diagnostic_manifest_composition_ready = manifest_composition.is_some();
     let composed = select_composed_artifact(
         &diagnostic_intent_labels,
-        merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt),
-        merge_grounded_file_manifests(&feature_candidates),
+        prompt,
+        fragment_composition,
+        manifest_composition,
     );
     let exact_is_composition_prerequisite = exact_feature
         .as_ref()
@@ -2692,6 +2736,8 @@ async fn h_brain_chat(
             "fragment_candidates": diagnostic_fragment_candidates,
             "exact_feature": diagnostic_exact_feature,
             "exact_complete_manifest": diagnostic_exact_manifest,
+            "fragment_composition_ready": diagnostic_fragment_composition_ready,
+            "manifest_composition_ready": diagnostic_manifest_composition_ready,
             "raw_fallback_inhibited": programming_language_intent
                 && !raw_is_exact
                 && !raw_programming_compatible
@@ -3800,13 +3846,43 @@ mod tests {
             "intent:ARTIFACT:PROJECT".to_string(),
         ];
         assert_eq!(
-            select_composed_artifact(&project, Some(fragments.clone()), Some(manifest.clone())),
+            select_composed_artifact(
+                &project,
+                "Build a Python project across multiple files.",
+                Some(fragments.clone()),
+                Some(manifest.clone())
+            ),
             Some(manifest)
         );
         let component = vec!["intent:LANGUAGE:PYTHON".to_string()];
         assert_eq!(
-            select_composed_artifact(&component, Some(fragments.clone()), None),
+            select_composed_artifact(
+                &component,
+                "Build one Python component.",
+                Some(fragments.clone()),
+                None
+            ),
             Some(fragments)
+        );
+    }
+
+    #[test]
+    fn project_class_prefers_dependency_composed_class_over_broad_manifest() {
+        let class = br#"{"files":{"adaptive_system.py":"class AdaptiveCoordinator:\n    pass\n"}}"#
+            .to_vec();
+        let broad = br#"{"files":{"api.py":"def api(): pass\n","repository.py":"class Repository: pass\n"}}"#.to_vec();
+        let labels = vec![
+            "intent:LANGUAGE:PYTHON".to_string(),
+            "intent:ARTIFACT:PROJECT".to_string(),
+        ];
+        assert_eq!(
+            select_composed_artifact(
+                &labels,
+                "Build a Python project class integrating twelve behaviors.",
+                Some(class.clone()),
+                Some(broad)
+            ),
+            Some(class)
         );
     }
 
@@ -3892,6 +3968,20 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_fragment_cycle_does_not_veto_settled_file() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"ready.py","role":"root","after":[],"source":"class Ready:\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"ready.py","role":"body","after":["root"],"source":"    value = 1\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"cyclic.py","role":"a","after":["b"],"source":"a\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"cyclic.py","role":"b","after":["a"],"source":"b\n"}}"#.to_vec(),
+        ];
+        let assembled = merge_grounded_code_fragments(&candidates).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        assert_eq!(value["files"]["ready.py"], "class Ready:\n    value = 1\n");
+        assert!(value["files"].get("cyclic.py").is_none());
+    }
+
+    #[test]
     fn incomplete_unrelated_chain_does_not_veto_complete_artifact() {
         let candidates = vec![
             br#"{"code_fragment":{"file":"complete.py","role":"root","after":[],"source":"class Ready:\n"}}"#.to_vec(),
@@ -3906,6 +3996,27 @@ mod tests {
             "class Ready:\n    value = 1\n"
         );
         assert!(value["files"].get("partial.py").is_none());
+    }
+
+    #[test]
+    fn inapplicable_parameterized_family_does_not_veto_complete_artifact() {
+        let candidates = vec![
+            br#"{"code_fragment":{"file":"adaptive.py","role":"root","after":[],"source":"class Adaptive:\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"adaptive.py","role":"body","after":["root"],"source":"    value = 1\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"other.py","role":"root","after":[],"parameters":{"CLASS_NAME":"python_class_named"},"source":"class {{CLASS_NAME}}:\n"}}"#.to_vec(),
+            br#"{"code_fragment":{"file":"other.py","role":"body","after":["root"],"source":"    other = True\n"}}"#.to_vec(),
+        ];
+        let assembled = merge_grounded_code_fragments_for_prompt(
+            &candidates,
+            "Combine the learned adaptive behaviors without naming a class.",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
+        assert_eq!(
+            value["files"]["adaptive.py"],
+            "class Adaptive:\n    value = 1\n"
+        );
+        assert!(value["files"].get("other.py").is_none());
     }
 
     #[test]
