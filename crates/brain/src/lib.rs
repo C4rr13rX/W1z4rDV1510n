@@ -46,7 +46,7 @@ pub mod crystallizer;
 pub mod code_repair;
 
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
-pub use pool::{AtomEncoding, BytePassthroughEncoding, CodeStructureEncoding, InstructionIntentEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig, PretrainReport};
+pub use pool::{AtomEncoding, BytePassthroughEncoding, CodeStructureEncoding, InstructionIntentEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig, PretrainFrameProfile, PretrainReport};
 pub use fabric::{Fabric, FabricConfig, Moment, SettleResult, TickProfile, TickProfileSnapshot};
 pub use grounding::{
     AnswerWithGrounding, ConfidenceTier, GroundingReport, RequestObservation,

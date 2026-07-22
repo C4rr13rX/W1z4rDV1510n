@@ -520,6 +520,12 @@ pub struct BrainStats {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PretrainEpisodeProfile {
     pub frame_lookup_ns: u64,
+    pub frame_atomize_ns: u64,
+    pub frame_ensure_atoms_ns: u64,
+    pub frame_touch_atoms_ns: u64,
+    pub frame_concept_lookup_ns: u64,
+    pub frame_sequence_recurrence_ns: u64,
+    pub frame_concept_write_ns: u64,
     pub fingerprint_ns: u64,
     pub recurrence_ns: u64,
     pub binding_lookup_ns: u64,
@@ -1323,11 +1329,30 @@ impl Brain {
                 profile.frame_lookup_ns = stage.elapsed().as_nanos() as u64;
                 return (None, profile);
             };
-            let sequence = if Some(*pool_id) == self.action_pool_id {
-                pool.write().ensure_frame_concept_for_pretrain(frame, now)
+            let (sequence, frame_profile) = if Some(*pool_id) == self.action_pool_id {
+                pool.write()
+                    .ensure_frame_concept_for_pretrain_profiled(frame, now)
             } else {
-                pool.write().ensure_frame_atoms_for_pretrain(frame, now)
+                pool.write().ensure_frame_atoms_for_pretrain_profiled(frame, now)
             };
+            profile.frame_atomize_ns = profile
+                .frame_atomize_ns
+                .saturating_add(frame_profile.atomize_ns);
+            profile.frame_ensure_atoms_ns = profile
+                .frame_ensure_atoms_ns
+                .saturating_add(frame_profile.ensure_atoms_ns);
+            profile.frame_touch_atoms_ns = profile
+                .frame_touch_atoms_ns
+                .saturating_add(frame_profile.touch_atoms_ns);
+            profile.frame_concept_lookup_ns = profile
+                .frame_concept_lookup_ns
+                .saturating_add(frame_profile.concept_lookup_ns);
+            profile.frame_sequence_recurrence_ns = profile
+                .frame_sequence_recurrence_ns
+                .saturating_add(frame_profile.sequence_recurrence_ns);
+            profile.frame_concept_write_ns = profile
+                .frame_concept_write_ns
+                .saturating_add(frame_profile.concept_write_ns);
             if !sequence.is_empty() {
                 fired.insert(*pool_id, sequence);
             }

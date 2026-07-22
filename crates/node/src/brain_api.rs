@@ -1339,18 +1339,24 @@ async fn h_pretrain_bindings(
     let mut max_lock_millis = 0.0_f64;
     let mut max_lock_chunk_index = 0_usize;
     let mut max_lock_chunk_len = 0_usize;
-    let mut max_lock_profile_ns = [0_u64; 6];
+    let mut max_lock_profile_ns = [0_u64; 12];
     let mut tick_now = 0;
     let mut store = None;
     for (chunk_number, chunk) in decoded.chunks(lock_chunk_size).enumerate() {
         let mut brain = s.brain.lock().await;
         let lock_started = Instant::now();
-        let mut chunk_profile_ns = [0_u64; 6];
+        let mut chunk_profile_ns = [0_u64; 12];
         for frames in chunk {
             let (binding_id, profile) = brain.pretrain_binding_episode_profiled(frames);
             binding_ids.push(binding_id);
             for (total, elapsed) in chunk_profile_ns.iter_mut().zip([
                 profile.frame_lookup_ns,
+                profile.frame_atomize_ns,
+                profile.frame_ensure_atoms_ns,
+                profile.frame_touch_atoms_ns,
+                profile.frame_concept_lookup_ns,
+                profile.frame_sequence_recurrence_ns,
+                profile.frame_concept_write_ns,
                 profile.fingerprint_ns,
                 profile.recurrence_ns,
                 profile.binding_lookup_ns,
@@ -1389,11 +1395,17 @@ async fn h_pretrain_bindings(
         "max_lock_chunk_len": max_lock_chunk_len,
         "max_lock_profile_ns": {
             "frame_lookup": max_lock_profile_ns[0],
-            "fingerprint": max_lock_profile_ns[1],
-            "recurrence": max_lock_profile_ns[2],
-            "binding_lookup": max_lock_profile_ns[3],
-            "binding_write": max_lock_profile_ns[4],
-            "advance_tick": max_lock_profile_ns[5],
+            "frame_atomize": max_lock_profile_ns[1],
+            "frame_ensure_atoms": max_lock_profile_ns[2],
+            "frame_touch_atoms": max_lock_profile_ns[3],
+            "frame_concept_lookup": max_lock_profile_ns[4],
+            "frame_sequence_recurrence": max_lock_profile_ns[5],
+            "frame_concept_write": max_lock_profile_ns[6],
+            "fingerprint": max_lock_profile_ns[7],
+            "recurrence": max_lock_profile_ns[8],
+            "binding_lookup": max_lock_profile_ns[9],
+            "binding_write": max_lock_profile_ns[10],
+            "advance_tick": max_lock_profile_ns[11],
         },
     }))
 }

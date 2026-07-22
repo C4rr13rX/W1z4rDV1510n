@@ -113,6 +113,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             "max_lock_millis": 9500,
             "max_lock_chunk_index": 17,
             "max_lock_chunk_len": 1,
+            "max_lock_profile_ns": {"frame_concept_lookup": 9_000_000_000},
         }
         with patch(
             "tools.training_standard.drive_corpora_brain._post",
@@ -120,7 +121,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         ):
             self.assertEqual(
                 post_pretrain_batch([{"frames": []}], 1),
-                (True, "", 9.5, 17, 1, {}),
+                (True, "", 9.5, 17, 1,
+                 {"frame_concept_lookup": 9_000_000_000}),
             )
 
     def test_block_admission_settles_and_serializes_before_evaluation(self) -> None:

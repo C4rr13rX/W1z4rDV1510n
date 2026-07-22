@@ -1144,6 +1144,17 @@ pub struct PretrainReport {
     pub concepts_promoted: usize,
 }
 
+/// Nanosecond attribution inside one frame's direct-pretraining path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PretrainFrameProfile {
+    pub atomize_ns: u64,
+    pub ensure_atoms_ns: u64,
+    pub touch_atoms_ns: u64,
+    pub concept_lookup_ns: u64,
+    pub sequence_recurrence_ns: u64,
+    pub concept_write_ns: u64,
+}
+
 fn default_sparsity_mode() -> ControlMode {
     ControlMode::Constant(1.0)
 }
@@ -2765,12 +2776,25 @@ impl Pool {
     /// ordinary atom neuron, so direct bindings stay grounded in the same
     /// substrate as live observations.
     pub fn ensure_frame_atoms_for_pretrain(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
-        let sequence: Vec<NeuronId> = self
-            .encoding
-            .atomize(frame)
+        self.ensure_frame_atoms_for_pretrain_profiled(frame, tick).0
+    }
+
+    pub fn ensure_frame_atoms_for_pretrain_profiled(
+        &mut self,
+        frame: &[u8],
+        tick: u64,
+    ) -> (Vec<NeuronId>, PretrainFrameProfile) {
+        let mut profile = PretrainFrameProfile::default();
+        let stage = std::time::Instant::now();
+        let labels = self.encoding.atomize(frame);
+        profile.atomize_ns = stage.elapsed().as_nanos() as u64;
+        let stage = std::time::Instant::now();
+        let sequence: Vec<NeuronId> = labels
             .into_iter()
             .map(|label| self.ensure_atom(label, tick))
             .collect();
+        profile.ensure_atoms_ns = stage.elapsed().as_nanos() as u64;
+        let stage = std::time::Instant::now();
         for &id in &sequence {
             if let Some(neuron) = self.neurons.get_mut(id as usize) {
                 neuron.use_count = neuron.use_count.saturating_add(1);
@@ -2778,7 +2802,8 @@ impl Pool {
             }
         }
         self.last_observed_sequence = sequence.clone();
-        sequence
+        profile.touch_atoms_ns = stage.elapsed().as_nanos() as u64;
+        (sequence, profile)
     }
 
     /// Return an ordered pretraining frame, collapsing it to one reusable,
@@ -2787,32 +2812,49 @@ impl Pool {
     /// second observation onward, paraphrase bindings store one shared concept
     /// reference instead of another full response membership vector.
     pub fn ensure_frame_concept_for_pretrain(&mut self, frame: &[u8], tick: u64) -> Vec<NeuronId> {
-        let sequence = self.ensure_frame_atoms_for_pretrain(frame, tick);
+        self.ensure_frame_concept_for_pretrain_profiled(frame, tick).0
+    }
+
+    pub fn ensure_frame_concept_for_pretrain_profiled(
+        &mut self,
+        frame: &[u8],
+        tick: u64,
+    ) -> (Vec<NeuronId>, PretrainFrameProfile) {
+        let (sequence, mut profile) = self.ensure_frame_atoms_for_pretrain_profiled(frame, tick);
         if sequence.is_empty() {
-            return Vec::new();
+            return (Vec::new(), profile);
         }
+        let stage = std::time::Instant::now();
         if let Some(id) = self.concept_id_for_sequence(&sequence) {
+            profile.concept_lookup_ns = stage.elapsed().as_nanos() as u64;
+            let stage = std::time::Instant::now();
             if let Some(neuron) = self.neurons.get_mut(id as usize) {
                 neuron.use_count = neuron.use_count.saturating_add(1);
                 neuron.last_fired_tick = tick;
             }
-            return vec![id];
+            profile.concept_write_ns = stage.elapsed().as_nanos() as u64;
+            return (vec![id], profile);
         }
+        profile.concept_lookup_ns = stage.elapsed().as_nanos() as u64;
 
+        let stage = std::time::Instant::now();
         let recurrence = match self.increment_sequence_recurrence(&sequence) {
             Ok(recurrence) => recurrence,
             Err(error) => {
+                profile.sequence_recurrence_ns = stage.elapsed().as_nanos() as u64;
                 eprintln!(
                     "refusing concept promotion because cold recurrence lookup failed in pool {}: {error}",
                     self.config.id
                 );
-                return sequence;
+                return (sequence, profile);
             }
         };
+        profile.sequence_recurrence_ns = stage.elapsed().as_nanos() as u64;
         if recurrence < 2 {
-            return sequence;
+            return (sequence, profile);
         }
 
+        let stage = std::time::Instant::now();
         let mut hasher = DefaultHasher::new();
         sequence.hash(&mut hasher);
         let label = format!("pretrain-frame:{}:{:016x}", sequence.len(), hasher.finish(),);
@@ -2827,7 +2869,8 @@ impl Pool {
         if sequence.len() <= 512 {
             self.concept_multiset_to_id.entry(sequence).or_insert(id);
         }
-        vec![id]
+        profile.concept_write_ns = stage.elapsed().as_nanos() as u64;
+        (vec![id], profile)
     }
 
     fn sequence_recurrence_in_generation(
