@@ -1551,7 +1551,10 @@ fn single_language_ranked_manifest(labels: &[String], candidates: &[Vec<u8>]) ->
         .then(|| {
             candidates
                 .iter()
-                .find(|candidate| is_complete_file_manifest(candidate))
+                .find(|candidate| {
+                    is_complete_file_manifest(candidate)
+                        && programming_response_compatible(labels, candidate)
+                })
                 .cloned()
         })
         .flatten()
@@ -1571,7 +1574,43 @@ fn has_programming_language_intent(labels: &[String]) -> bool {
 /// TypeScript requests.
 fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
     if is_complete_file_manifest(bytes) {
-        return true;
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return false;
+        };
+        let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
+            return false;
+        };
+        let names: Vec<String> = files.keys().map(|name| name.to_ascii_lowercase()).collect();
+        let has_file = |suffixes: &[&str]| {
+            names
+                .iter()
+                .any(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
+        };
+        return labels.iter().any(|label| {
+            let Some(language) = label.split(":LANGUAGE:").nth(1) else {
+                return false;
+            };
+            let language = language.split(':').next().unwrap_or(language);
+            match language {
+                "PYTHON" => has_file(&[".py"]),
+                "TYPESCRIPT" => has_file(&[".ts", ".tsx"]),
+                "JAVASCRIPT" => has_file(&[".js", ".mjs", ".cjs", ".jsx"]),
+                "RUST" => has_file(&[".rs"]),
+                "GO" => has_file(&[".go"]),
+                "JAVA" => has_file(&[".java"]),
+                "CSHARP" | "C_SHARP" => has_file(&[".cs"]),
+                "C" => has_file(&[".c", ".h"]),
+                "CPP" | "CPLUSPLUS" => has_file(&[".cc", ".cpp", ".cxx", ".hpp", ".hh"]),
+                "RUBY" => has_file(&[".rb"]),
+                "PHP" => has_file(&[".php"]),
+                "KOTLIN" => has_file(&[".kt", ".kts"]),
+                "SWIFT" => has_file(&[".swift"]),
+                "SQL" => has_file(&[".sql"]),
+                "HTML" => has_file(&[".html", ".htm"]),
+                "SHELL" | "BASH" => has_file(&[".sh", ".bash"]),
+                _ => false,
+            }
+        });
     }
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim_start();
@@ -2461,10 +2500,6 @@ async fn h_brain_chat(
         raw_trained.clone()
     } else if exact_complete_manifest.is_some() {
         exact_complete_manifest
-    } else if raw_motif_trained.as_ref().is_some_and(|candidate| {
-        programming_response_compatible(&diagnostic_intent_labels, candidate)
-    }) {
-        raw_motif_trained
     } else if exact_is_composition_prerequisite && composed.is_some() {
         composed
     } else if exact_feature
@@ -2477,6 +2512,12 @@ async fn h_brain_chat(
         // exactly while broad project fragments share enough diagnostics to
         // form a syntactically valid but unrelated composition.
         exact_feature
+    } else if raw_motif_trained.as_ref().is_some_and(|candidate| {
+        programming_response_compatible(&diagnostic_intent_labels, candidate)
+    }) {
+        // Character motifs resolve sparse-feature ambiguity, but cannot
+        // displace one unambiguous complete feature episode.
+        raw_motif_trained
     } else if composed.is_some() {
         composed
     } else if ranked_single_manifest.is_some() {
@@ -3737,6 +3778,15 @@ mod tests {
             single_language_ranked_manifest(&polyglot, &[manifest]),
             None
         );
+
+        let java = vec!["intent:LANGUAGE:JAVA".to_string()];
+        let javascript = br#"{"files":{"order_service.js":"class OrderService {}\n"}}"#.to_vec();
+        let java_manifest = br#"{"files":{"AuditLog.java":"public class AuditLog {}\n"}}"#.to_vec();
+        assert_eq!(
+            single_language_ranked_manifest(&java, &[javascript.clone(), java_manifest.clone()]),
+            Some(java_manifest)
+        );
+        assert!(!programming_response_compatible(&java, &javascript));
     }
 
     #[test]
@@ -3791,6 +3841,16 @@ mod tests {
         assert!(!programming_response_compatible(
             &typescript,
             b"The construction cost is 216 dollars.",
+        ));
+
+        let java = vec!["instruction_intent:LANGUAGE:JAVA".to_string()];
+        assert!(programming_response_compatible(
+            &java,
+            br#"{"files":{"AuditLog.java":"public class AuditLog {}"}}"#,
+        ));
+        assert!(!programming_response_compatible(
+            &java,
+            br#"{"files":{"order_service.js":"class OrderService {}"}}"#,
         ));
 
         let python_source = b"def avg_list(values):\n    return 0\n".to_vec();

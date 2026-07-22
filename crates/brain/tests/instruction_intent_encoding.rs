@@ -273,6 +273,8 @@ fn missing_specification_emits_inhibitory_grounding_evidence() {
     for prompt in [
         b"Write Python code that migrates an unknown production database schema.".as_slice(),
         b"Implement a Python API client for an endpoint whose protocol is unknown.".as_slice(),
+        b"Create Python code for a proprietary payment provider whose API has not been specified."
+            .as_slice(),
     ] {
         let features = encoding.atomize(prompt);
         assert!(
