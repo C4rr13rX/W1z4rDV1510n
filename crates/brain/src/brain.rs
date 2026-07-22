@@ -2358,16 +2358,14 @@ impl Brain {
                 continue;
             }
             rebuilt += 1;
-            let members = {
-                let mut pool = binding_pool.write();
-                pool.ensure_loaded(binding_id)?;
-                let members = pool
-                    .get(binding_id)
-                    .map(|neuron| neuron.members.clone())
-                    .unwrap_or_default();
-                pool.discard_wbrain_residents_read_only()?;
-                members
-            };
+            // Finalization needs only the binding's topology. Read that
+            // prefix directly from the serialized neuron record so a large
+            // terminal payload never enters the working set.
+            let members = binding_pool
+                .write()
+                .read_neuron_shape_bounded(binding_id)?
+                .map(|(_, members, _)| members)
+                .unwrap_or_default();
             self.stream_binding_posting_keys_bounded(&members, binding_id, &mut builder)?;
         }
         let reference = builder.finish(&file, self.binding_pool_id)?;

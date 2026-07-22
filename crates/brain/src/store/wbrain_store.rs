@@ -632,6 +632,30 @@ impl WbrainNeuronStore {
         self.read_slot(id).is_some_and(NeuronSlotRecord::is_concept)
     }
 
+    /// Read only the stable shape used for routing/index maintenance. The
+    /// terminal payload remains serialized in the container and no working-set
+    /// entry is created.
+    pub(crate) fn neuron_shape(
+        &self,
+        id: NeuronId,
+    ) -> std::io::Result<Option<(bool, String, Vec<crate::neuron::NeuronRef>)>> {
+        let Some(slot) = self.read_slot(id).filter(|slot| slot.is_present()) else {
+            return Ok(None);
+        };
+        let shape = self
+            .file
+            .container
+            .lock()
+            .read_neuron_shape_at(slot.offset)?;
+        if shape.pool != self.pool_id || shape.id != id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "neuron shape identity mismatch",
+            ));
+        }
+        Ok(Some((!slot.is_concept(), shape.label, shape.members)))
+    }
+
     pub fn label_to_id(&self, label: &str) -> Option<NeuronId> {
         if let Some(id) = self.labels.read().get(label).copied() {
             return Some(id);

@@ -9,7 +9,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::neuron::{Neuron, NeuronId, PoolId};
+use crate::neuron::{Neuron, NeuronId, NeuronRef, PoolId};
 
 const HEADER_BYTES: u64 = 4096;
 const MAGIC: &[u8; 8] = b"W1ZBRAIN";
@@ -20,6 +20,16 @@ const SLOT_B: u64 = SLOT_A + SLOT_BYTES;
 const NEURON_RECORD: &[u8; 8] = b"W1ZNEUR1";
 const MANIFEST_RECORD: &[u8; 8] = b"W1ZMANI1";
 const AUXILIARY_RECORD: &[u8; 8] = b"W1ZAUX01";
+
+/// Routing-only projection of a neuron record. Maintenance paths use this to
+/// inspect identity and members without reading or deserializing the terminal
+/// payload, which can be orders of magnitude larger than the shape itself.
+pub(crate) struct NeuronShapeRecord {
+    pub pool: PoolId,
+    pub id: NeuronId,
+    pub label: String,
+    pub members: Vec<NeuronRef>,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuxiliaryRecordRef {
@@ -237,6 +247,99 @@ impl BrainContainer {
         Ok((pool, neuron))
     }
 
+    /// Read the bincode prefix through `members` and deliberately leave the
+    /// terminal vector on disk. `Neuron`'s persisted prefix is fixed-width
+    /// bincode data except for the label and member vector; skipped runtime
+    /// fields do not participate in this layout.
+    pub(crate) fn read_neuron_shape_at(&mut self, offset: u64) -> io::Result<NeuronShapeRecord> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut marker = [0_u8; 8];
+        let mut pool_raw = [0_u8; 4];
+        let mut id_raw = [0_u8; 4];
+        let mut len_raw = [0_u8; 8];
+        self.file.read_exact(&mut marker)?;
+        self.file.read_exact(&mut pool_raw)?;
+        self.file.read_exact(&mut id_raw)?;
+        self.file.read_exact(&mut len_raw)?;
+        if &marker != NEURON_RECORD {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "neuron marker mismatch",
+            ));
+        }
+        let pool = PoolId::from_le_bytes(pool_raw);
+        let expected_id = NeuronId::from_le_bytes(id_raw);
+        let body_len = u64::from_le_bytes(len_raw);
+        let body_start = self.file.stream_position()?;
+        let body_end = body_start.checked_add(body_len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "neuron body extent overflow")
+        })?;
+
+        let read_u32 = |file: &mut File| -> io::Result<u32> {
+            let mut raw = [0_u8; 4];
+            file.read_exact(&mut raw)?;
+            Ok(u32::from_le_bytes(raw))
+        };
+        let read_u64 = |file: &mut File| -> io::Result<u64> {
+            let mut raw = [0_u8; 8];
+            file.read_exact(&mut raw)?;
+            Ok(u64::from_le_bytes(raw))
+        };
+
+        let id = read_u32(&mut self.file)?;
+        if id != expected_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "neuron id mismatch",
+            ));
+        }
+        let label_len = read_u64(&mut self.file)?;
+        let label_end = self
+            .file
+            .stream_position()?
+            .checked_add(label_len)
+            .filter(|end| *end <= body_end)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "label outside neuron"))?;
+        let mut label = vec![
+            0_u8;
+            usize::try_from(label_len).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "neuron label too large")
+            })?
+        ];
+        self.file.read_exact(&mut label)?;
+        debug_assert_eq!(self.file.stream_position()?, label_end);
+        let label = String::from_utf8(label)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+        // NeuronKind is a bincode enum discriminant encoded as u32.
+        let _kind = read_u32(&mut self.file)?;
+        let member_count = read_u64(&mut self.file)?;
+        let member_bytes = member_count
+            .checked_mul(8)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "member extent overflow"))?;
+        self.file
+            .stream_position()?
+            .checked_add(member_bytes)
+            .filter(|end| *end <= body_end)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "members outside neuron"))?;
+        let mut members =
+            Vec::with_capacity(usize::try_from(member_count).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "too many neuron members")
+            })?);
+        for _ in 0..member_count {
+            members.push(NeuronRef {
+                pool: read_u32(&mut self.file)?,
+                neuron: read_u32(&mut self.file)?,
+            });
+        }
+        Ok(NeuronShapeRecord {
+            pool,
+            id,
+            label,
+            members,
+        })
+    }
+
     pub fn append_auxiliary<F>(
         &mut self,
         pool: PoolId,
@@ -377,7 +480,7 @@ impl BrainContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::neuron::NeuronKind;
+    use crate::neuron::{NeuronKind, Terminal};
 
     fn tmpfile(name: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -425,6 +528,32 @@ mod tests {
         let (pool, neuron) = reopened.read_neuron_at(offset).unwrap();
         assert_eq!(pool, 1);
         assert_eq!(neuron.label, "t:YQ");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn routing_shape_skips_terminal_payload_and_preserves_members() {
+        let path = tmpfile("shape");
+        let members = vec![NeuronRef::new(3, 7), NeuronRef::new(3, 9)];
+        let mut neuron = Neuron::new_concept(
+            4,
+            "concept:shape".into(),
+            NeuronKind::Excitatory,
+            members.clone(),
+            8,
+        );
+        neuron.terminals = (0..10_000)
+            .map(|id| Terminal::new(NeuronRef::new(0, id), 0.5, 8))
+            .collect();
+        let mut container = BrainContainer::open(&path).unwrap();
+        let offset = container.append_neuron(3, &neuron).unwrap();
+        let shape = container.read_neuron_shape_at(offset).unwrap();
+        assert_eq!(shape.pool, 3);
+        assert_eq!(shape.id, 4);
+        assert_eq!(shape.label, "concept:shape");
+        assert_eq!(shape.members, members);
+        let (_, complete) = container.read_neuron_at(offset).unwrap();
+        assert_eq!(complete.terminals.len(), 10_000);
         std::fs::remove_file(path).ok();
     }
 

@@ -105,6 +105,19 @@ impl NeuronSlots {
         }
     }
 
+    fn resident_ids(&self) -> Vec<NeuronId> {
+        let mut ids: Vec<NeuronId> = match self {
+            Self::Dense { slots, .. } => slots
+                .iter()
+                .enumerate()
+                .filter_map(|(id, slot)| slot.as_ref().map(|_| id as NeuronId))
+                .collect(),
+            Self::Paged { residents, .. } => residents.keys().copied().collect(),
+        };
+        ids.sort_unstable();
+        ids
+    }
+
     fn get(&self, index: usize) -> Option<&Neuron> {
         match self {
             Self::Dense { slots, .. } => slots.get(index)?.as_deref(),
@@ -1806,7 +1819,10 @@ impl Pool {
             ));
         }
         let mut serialized = 0;
-        for id in 0..self.neurons.len() as NeuronId {
+        // A paged brain may have millions of stable addresses but only the
+        // request-local working set is awake. Iterating the logical address
+        // extent here made per-binding finalization quadratic in brain size.
+        for id in self.neurons.resident_ids() {
             if self.evict_neuron(id)? {
                 serialized += 1;
             }
@@ -1849,6 +1865,18 @@ impl Pool {
         &mut self,
         id: NeuronId,
     ) -> std::io::Result<Option<(bool, Vec<NeuronRef>, Vec<u8>)>> {
+        if let Some(store) = self.wbrain_store.as_ref() {
+            let shape = store.neuron_shape(id)?;
+            return Ok(shape.map(|(is_atom, label, members)| {
+                let decoded = if is_atom {
+                    let pairs = [(label.as_str(), 1.0_f32)];
+                    self.encoding.reassemble(&pairs)
+                } else {
+                    Vec::new()
+                };
+                (is_atom, members, decoded)
+            }));
+        }
         self.ensure_loaded(id)?;
         let shape = self.neurons.get(id as usize).map(|neuron| {
             let is_atom = neuron.is_atom();
@@ -4117,5 +4145,29 @@ impl Pool {
         // recent_atoms.  Same lockstep with label_to_id.
         let member_ids: Vec<NeuronId> = members.iter().copied().collect();
         self.concept_sequence_to_id.insert(member_ids, id);
+    }
+}
+
+#[cfg(test)]
+mod resident_slot_tests {
+    use super::*;
+
+    #[test]
+    fn paged_resident_ids_do_not_scan_or_materialize_the_sleeping_extent() {
+        let mut slots = NeuronSlots::sleeping(10_000_000, 0);
+        assert!(slots.wake(
+            42,
+            Neuron::new_atom(42, "test:42".into(), NeuronKind::Excitatory, 1),
+        ));
+        assert!(slots.wake(
+            9_000_000,
+            Neuron::new_atom(
+                9_000_000,
+                "test:9000000".into(),
+                NeuronKind::Excitatory,
+                1,
+            ),
+        ));
+        assert_eq!(slots.resident_ids(), vec![42, 9_000_000]);
     }
 }

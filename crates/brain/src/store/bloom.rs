@@ -59,9 +59,10 @@ pub struct CountingBloom {
     slots:    usize,
     /// Number of hash functions to use per key.
     k_hashes: usize,
-    /// Number of distinct keys inserted (not the number of insertions —
-    /// double-inserts count once toward this; we estimate by checking
-    /// "all k counters > 0 before this insert").
+    /// Approximate number of distinct keys inserted (not the number of
+    /// insertions). A Bloom filter cannot distinguish a duplicate from a
+    /// false positive, so this is estimated by checking whether at least one
+    /// counter was zero before insertion.
     inserted_keys: usize,
 }
 
@@ -274,7 +275,15 @@ mod tests {
         for i in 0..10_000u32 {
             f.insert(&format!("inserted_{i}"));
         }
-        assert_eq!(f.inserted_keys(), 10_000);
+        // This diagnostic is necessarily approximate: a not-yet-inserted key
+        // can already look present when all of its counters collide. Keep the
+        // estimate close to the true cardinality without requiring impossible
+        // exact-set semantics from the compact probabilistic sidecar.
+        assert!((9_800..=10_000).contains(&f.inserted_keys()));
+        // Insertions must still have no false negatives.
+        for i in 0..10_000u32 {
+            assert!(f.might_contain(&format!("inserted_{i}")));
+        }
         // Probe 10K NOT-inserted labels.
         let mut fp = 0;
         for i in 0..10_000u32 {
