@@ -1,7 +1,7 @@
 //! Immutable, request-keyed posting lists stored as auxiliary `.wbrain` records.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,7 +19,9 @@ pub(crate) struct PostingIndexBuilder {
     path: PathBuf,
     file: File,
     bucket_count: u64,
+    bucket_heads: Vec<u64>,
     entries: u64,
+    next_record_offset: u64,
 }
 
 impl PostingIndexBuilder {
@@ -56,11 +58,14 @@ impl PostingIndexBuilder {
             file.write_all(&zeroes[..n])?;
             remaining -= n as u64;
         }
+        let next_record_offset = HEADER_BYTES + bucket_count * 8;
         Ok(Self {
             path,
             file,
             bucket_count,
+            bucket_heads: vec![0; usize::try_from(bucket_count).unwrap()],
             entries: 0,
+            next_record_offset,
         })
     }
 
@@ -68,12 +73,10 @@ impl PostingIndexBuilder {
         let digest = blake3::hash(key);
         let hash = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
         let bucket = hash & (self.bucket_count - 1);
-        let bucket_at = HEADER_BYTES + bucket * 8;
-        self.file.seek(SeekFrom::Start(bucket_at))?;
-        let mut old_head = [0_u8; 8];
-        self.file.read_exact(&mut old_head)?;
-        let record = self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&old_head)?;
+        let bucket_index = usize::try_from(bucket).unwrap();
+        let old_head = self.bucket_heads[bucket_index];
+        let record = self.next_record_offset;
+        self.file.write_all(&old_head.to_le_bytes())?;
         self.file.write_all(&hash.to_le_bytes())?;
         self.file.write_all(
             &u32::try_from(key.len())
@@ -82,9 +85,11 @@ impl PostingIndexBuilder {
         )?;
         self.file.write_all(&value.to_le_bytes())?;
         self.file.write_all(key)?;
-        self.file.seek(SeekFrom::Start(bucket_at))?;
-        self.file.write_all(&(record + 1).to_le_bytes())?;
-        self.file.seek(SeekFrom::End(0))?;
+        self.bucket_heads[bucket_index] = record + 1;
+        self.next_record_offset = record
+            .checked_add(RECORD_HEADER_BYTES)
+            .and_then(|offset| offset.checked_add(key.len() as u64))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting index overflow"))?;
         self.entries += 1;
         Ok(())
     }
@@ -96,6 +101,10 @@ impl PostingIndexBuilder {
     ) -> io::Result<AuxiliaryRecordRef> {
         self.file.seek(SeekFrom::Start(8))?;
         self.file.write_all(&self.entries.to_le_bytes())?;
+        self.file.seek(SeekFrom::Start(HEADER_BYTES))?;
+        for head in &self.bucket_heads {
+            self.file.write_all(&head.to_le_bytes())?;
+        }
         self.file.flush()?;
         self.file.seek(SeekFrom::Start(0))?;
         let reference = destination.append_auxiliary(pool_id, POSTING_INDEX_KIND, |writer| {
