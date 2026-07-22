@@ -60,6 +60,45 @@ fn ensure_neuron_trees_loaded(pool: &mut Pool, roots: &[NeuronId]) {
     }
 }
 
+#[derive(Clone)]
+enum BindingPostingKey {
+    Sequence(PoolId, PoolId, Vec<NeuronId>),
+    Feature(PoolId, NeuronId),
+    Motif(PoolId, [u8; 3]),
+}
+
+impl BindingPostingKey {
+    fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Sequence(query, target, sequence) => {
+                let mut out = Vec::with_capacity(13 + sequence.len() * 4);
+                out.push(1);
+                out.extend_from_slice(&query.to_le_bytes());
+                out.extend_from_slice(&target.to_le_bytes());
+                out.extend_from_slice(&(sequence.len() as u32).to_le_bytes());
+                for id in sequence {
+                    out.extend_from_slice(&id.to_le_bytes());
+                }
+                out
+            }
+            Self::Feature(pool, neuron) => {
+                let mut out = Vec::with_capacity(9);
+                out.push(2);
+                out.extend_from_slice(&pool.to_le_bytes());
+                out.extend_from_slice(&neuron.to_le_bytes());
+                out
+            }
+            Self::Motif(pool, motif) => {
+                let mut out = Vec::with_capacity(8);
+                out.push(3);
+                out.extend_from_slice(&pool.to_le_bytes());
+                out.extend_from_slice(motif);
+                out
+            }
+        }
+    }
+}
+
 /// Which tier of substrate a [`BindingMatch`] succeeded at.  Stage 11
 /// (concept-tier OOV) audits #1, #4 and #8 in the design log: the
 /// tier tag travels alongside precision/recall so the single OOV gate
@@ -596,6 +635,10 @@ pub struct Brain {
     /// Common-motif postings are bounded because they carry little
     /// discriminative information and otherwise grow with corpus size.
     binding_motif_index: AHashMap<(PoolId, [u8; 3]), Vec<NeuronId>>,
+    /// Immutable historical posting generations. Request-time lookup reads
+    /// only the hash bucket keyed by the current input; live training stays
+    /// in the three small overlays above until the next idle transition.
+    binding_posting_indexes: Vec<crate::store::AuxiliaryRecordRef>,
     /// Count of advance_tick calls that produced a non-empty
     /// fingerprint.  Drives the pressure-feedback loop along with
     /// `len(tentative_promoted) + len(promoted_fingerprints)`.
@@ -795,6 +838,7 @@ impl Brain {
             binding_sequence_index: AHashMap::new(),
             binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
+            binding_posting_indexes: Vec::new(),
             total_observations: 0,
             current_threshold: initial_threshold,
             last_pressure_check_obs: 0,
@@ -1636,7 +1680,8 @@ impl Brain {
         Some(id)
     }
 
-    fn index_binding_members(&mut self, binding_id: NeuronId, members: &[NeuronRef]) {
+    fn binding_posting_keys(&mut self, members: &[NeuronRef]) -> Vec<BindingPostingKey> {
+        let mut keys = Vec::new();
         let represented: Vec<PoolId> = members
             .iter()
             .map(|member| member.pool)
@@ -1691,11 +1736,7 @@ impl Brain {
                 }
             }
             for atom in atoms {
-                let ids = self
-                    .binding_feature_atom_index
-                    .entry((pool_id, atom))
-                    .or_default();
-                append_binding_posting(ids, binding_id, usize::MAX);
+                keys.push(BindingPostingKey::Feature(pool_id, atom));
             }
         }
         for (&query_pool, sequence) in &atom_sequences {
@@ -1706,11 +1747,11 @@ impl Brain {
                 if target_pool == query_pool {
                     continue;
                 }
-                let ids = self
-                    .binding_sequence_index
-                    .entry((query_pool, target_pool, sequence.clone()))
-                    .or_default();
-                append_binding_posting(ids, binding_id, usize::MAX);
+                keys.push(BindingPostingKey::Sequence(
+                    query_pool,
+                    target_pool,
+                    sequence.clone(),
+                ));
             }
             if let Some(pool) = self.fabric.pool(query_pool) {
                 let pool = pool.read();
@@ -1723,15 +1764,160 @@ impl Brain {
                     .collect();
                 let frame = pool.decode_concept_members(&refs);
                 for motif in normalized_char_motifs(&frame) {
-                    let ids = self
-                        .binding_motif_index
-                        .entry((query_pool, motif))
-                        .or_default();
-                    const MAX_MOTIF_POSTINGS: usize = 512;
-                    append_binding_posting(ids, binding_id, MAX_MOTIF_POSTINGS);
+                    keys.push(BindingPostingKey::Motif(query_pool, motif));
                 }
             }
         }
+        keys
+    }
+
+    fn index_binding_members(&mut self, binding_id: NeuronId, members: &[NeuronRef]) {
+        for key in self.binding_posting_keys(members) {
+            match key {
+                BindingPostingKey::Sequence(query, target, sequence) => {
+                    let ids = self
+                        .binding_sequence_index
+                        .entry((query, target, sequence))
+                        .or_default();
+                    append_binding_posting(ids, binding_id, usize::MAX);
+                }
+                BindingPostingKey::Feature(pool, neuron) => {
+                    let ids = self
+                        .binding_feature_atom_index
+                        .entry((pool, neuron))
+                        .or_default();
+                    append_binding_posting(ids, binding_id, usize::MAX);
+                }
+                BindingPostingKey::Motif(pool, motif) => {
+                    let ids = self.binding_motif_index.entry((pool, motif)).or_default();
+                    append_binding_posting(ids, binding_id, 512);
+                }
+            }
+        }
+    }
+
+    fn disk_binding_postings(&self, key: &BindingPostingKey, limit: usize) -> Vec<NeuronId> {
+        let Some(file) = self.wbrain_file.as_ref() else {
+            return Vec::new();
+        };
+        let store = file.pool(self.binding_pool_id);
+        let encoded = key.encode();
+        let mut out = Vec::new();
+        for reference in self.binding_posting_indexes.iter().rev() {
+            let remaining = limit.saturating_sub(out.len());
+            if remaining == 0 {
+                break;
+            }
+            match crate::store::posting_index::lookup(&store, *reference, &encoded, remaining) {
+                Ok(ids) => {
+                    for id in ids {
+                        append_binding_posting(&mut out, id, limit);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("binding posting lookup failed: {}", error);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn binding_sequence_postings(
+        &self,
+        query: PoolId,
+        target: PoolId,
+        sequence: &[NeuronId],
+    ) -> Vec<NeuronId> {
+        let mut out = self
+            .binding_sequence_index
+            .get(&(query, target, sequence.to_vec()))
+            .cloned()
+            .unwrap_or_default();
+        for id in self.disk_binding_postings(
+            &BindingPostingKey::Sequence(query, target, sequence.to_vec()),
+            usize::MAX,
+        ) {
+            append_binding_posting(&mut out, id, usize::MAX);
+        }
+        out
+    }
+
+    fn binding_feature_postings(&self, pool: PoolId, neuron: NeuronId) -> Vec<NeuronId> {
+        let mut out = self
+            .binding_feature_atom_index
+            .get(&(pool, neuron))
+            .cloned()
+            .unwrap_or_default();
+        for id in self.disk_binding_postings(
+            &BindingPostingKey::Feature(pool, neuron),
+            usize::MAX,
+        ) {
+            append_binding_posting(&mut out, id, usize::MAX);
+        }
+        out
+    }
+
+    fn binding_motif_postings(&self, pool: PoolId, motif: [u8; 3]) -> Vec<NeuronId> {
+        let mut out = self
+            .binding_motif_index
+            .get(&(pool, motif))
+            .cloned()
+            .unwrap_or_default();
+        for id in self.disk_binding_postings(&BindingPostingKey::Motif(pool, motif), 512) {
+            append_binding_posting(&mut out, id, 512);
+        }
+        out
+    }
+
+    fn flush_binding_posting_overlay(&mut self) -> std::io::Result<()> {
+        let Some(file) = self.wbrain_file.as_ref() else {
+            return Ok(());
+        };
+        let expected = self
+            .binding_sequence_index
+            .values()
+            .chain(self.binding_feature_atom_index.values())
+            .chain(self.binding_motif_index.values())
+            .map(Vec::len)
+            .sum::<usize>();
+        if expected == 0 {
+            return Ok(());
+        }
+        let directory = file
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let mut builder = crate::store::posting_index::PostingIndexBuilder::create(
+            &directory,
+            self.binding_pool_id,
+            expected as u64,
+        )?;
+        for ((query, target, sequence), ids) in &self.binding_sequence_index {
+            let key = BindingPostingKey::Sequence(*query, *target, sequence.clone()).encode();
+            for id in ids {
+                builder.insert(&key, *id)?;
+            }
+        }
+        for ((pool, neuron), ids) in &self.binding_feature_atom_index {
+            let key = BindingPostingKey::Feature(*pool, *neuron).encode();
+            for id in ids {
+                builder.insert(&key, *id)?;
+            }
+        }
+        for ((pool, motif), ids) in &self.binding_motif_index {
+            let key = BindingPostingKey::Motif(*pool, *motif).encode();
+            for id in ids {
+                builder.insert(&key, *id)?;
+            }
+        }
+        let reference = builder.finish(file, self.binding_pool_id)?;
+        self.binding_posting_indexes.push(reference);
+        self.binding_sequence_index.clear();
+        self.binding_feature_atom_index.clear();
+        self.binding_motif_index.clear();
+        Ok(())
     }
 
     fn rebuild_binding_sequence_index(&mut self) {
@@ -1769,6 +1955,22 @@ impl Brain {
             return Ok(0);
         };
         let binding_slots = binding_pool.read().neuron_count();
+        let file = self.wbrain_file.as_ref().cloned().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "bounded binding rebuild requires a .wbrain container",
+            )
+        })?;
+        let directory = file
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let mut builder = crate::store::posting_index::PostingIndexBuilder::create(
+            &directory,
+            self.binding_pool_id,
+            (binding_slots as u64).saturating_mul(16),
+        )?;
         let mut rebuilt = 0;
         for raw_id in 0..binding_slots {
             let binding_id = raw_id as NeuronId;
@@ -1783,7 +1985,9 @@ impl Brain {
                     .map(|neuron| neuron.members.clone())
                     .unwrap_or_default()
             };
-            self.index_binding_members(binding_id, &members);
+            for key in self.binding_posting_keys(&members) {
+                builder.insert(&key.encode(), binding_id)?;
+            }
 
             // `index_binding_members` recursively pages only this binding's
             // member trees. Return that working set to SSD before proceeding.
@@ -1793,6 +1997,9 @@ impl Brain {
                 }
             }
         }
+        let reference = builder.finish(&file, self.binding_pool_id)?;
+        self.binding_posting_indexes.clear();
+        self.binding_posting_indexes.push(reference);
         Ok(rebuilt)
     }
 
@@ -1851,20 +2058,10 @@ impl Brain {
         let mut candidates = ahash::AHashSet::new();
         candidates.extend(terminal_routes);
         for neuron_id in firing {
-            if let Some(postings) = self
-                .binding_feature_atom_index
-                .get(&(query_pool, neuron_id))
-            {
-                candidates.extend(postings.iter().copied());
-            }
+            candidates.extend(self.binding_feature_postings(query_pool, neuron_id));
         }
         if let Some(target_pool) = target_pool.filter(|_| !sequence.is_empty()) {
-            if let Some(postings) =
-                self.binding_sequence_index
-                    .get(&(query_pool, target_pool, sequence))
-            {
-                candidates.extend(postings.iter().copied());
-            }
+            candidates.extend(self.binding_sequence_postings(query_pool, target_pool, &sequence));
         }
 
         let mut ids: Vec<NeuronId> = candidates.into_iter().collect();
@@ -2847,15 +3044,12 @@ impl Brain {
         // binding: combine exact sequence, flattened feature atoms, and
         // character motifs reachable from this query instead.
         let exact_candidates = if query_seq.is_empty() {
-            None
+            Vec::new()
         } else {
-            self.binding_sequence_index
-                .get(&(query_pool, target_pool, query_seq.clone()))
+            self.binding_sequence_postings(query_pool, target_pool, &query_seq)
         };
         let mut candidate_set = ahash::AHashSet::new();
-        if let Some(ids) = exact_candidates {
-            candidate_set.extend(ids.iter().copied());
-        }
+        candidate_set.extend(exact_candidates);
         let mut routing_atoms = q_atoms.clone();
         if !q_concepts.is_empty() {
             if let Some(query_handle) = self.fabric.pool(query_pool) {
@@ -2884,9 +3078,7 @@ impl Brain {
             }
         }
         for atom in &routing_atoms {
-            if let Some(ids) = self.binding_feature_atom_index.get(&(query_pool, *atom)) {
-                candidate_set.extend(ids.iter().copied());
-            }
+            candidate_set.extend(self.binding_feature_postings(query_pool, *atom));
         }
         if !query_seq.is_empty() {
             if let Some(query_handle) = self.fabric.pool(query_pool) {
@@ -2900,9 +3092,10 @@ impl Brain {
                     .collect();
                 let frame = query.decode_concept_members(&refs);
                 let motifs = normalized_char_motifs(&frame);
-                let mut postings: Vec<&Vec<NeuronId>> = motifs
+                let mut postings: Vec<Vec<NeuronId>> = motifs
                     .iter()
-                    .filter_map(|motif| self.binding_motif_index.get(&(query_pool, *motif)))
+                    .map(|motif| self.binding_motif_postings(query_pool, *motif))
+                    .filter(|ids| !ids.is_empty())
                     .collect();
                 postings.sort_unstable_by_key(|ids| ids.len());
                 for ids in postings.into_iter().take(8) {
@@ -3274,9 +3467,9 @@ impl Brain {
         };
         let sequence = pool.read().last_observed_sequence().to_vec();
         !sequence.is_empty()
-            && self
-                .binding_sequence_index
-                .contains_key(&(query_pool, target_pool, sequence))
+            && !self
+                .binding_sequence_postings(query_pool, target_pool, &sequence)
+                .is_empty()
     }
 
     /// Decode a target from the joint firing state of several evidence pools.
@@ -3490,11 +3683,7 @@ impl Brain {
             for neuron_id in pool.currently_firing() {
                 if let Some(neuron) = pool.get(neuron_id) {
                     if neuron.is_atom() {
-                        if let Some(ids) =
-                            self.binding_feature_atom_index.get(&(*pool_id, neuron_id))
-                        {
-                            binding_ids.extend(ids.iter().copied());
-                        }
+                        binding_ids.extend(self.binding_feature_postings(*pool_id, neuron_id));
                     }
                     binding_ids.extend(
                         neuron
@@ -3506,11 +3695,12 @@ impl Brain {
                 }
             }
             let sequence = pool.last_observed_sequence().to_vec();
-            if let Some(ids) = self
-                .binding_sequence_index
-                .get(&(*pool_id, target_pool, sequence))
-            {
-                binding_ids.extend(ids.iter().copied());
+            if !sequence.is_empty() {
+                binding_ids.extend(self.binding_sequence_postings(
+                    *pool_id,
+                    target_pool,
+                    &sequence,
+                ));
             }
             let refs: Vec<NeuronRef> = pool
                 .last_observed_sequence()
@@ -3522,9 +3712,10 @@ impl Brain {
                 .collect();
             let frame = pool.decode_concept_members(&refs);
             let motifs = normalized_char_motifs(&frame);
-            let mut postings: Vec<&Vec<NeuronId>> = motifs
+            let mut postings: Vec<Vec<NeuronId>> = motifs
                 .iter()
-                .filter_map(|motif| self.binding_motif_index.get(&(*pool_id, *motif)))
+                .map(|motif| self.binding_motif_postings(*pool_id, *motif))
+                .filter(|ids| !ids.is_empty())
                 .collect();
             postings.sort_unstable_by_key(|ids| ids.len());
             for ids in postings.into_iter().take(8) {
@@ -3646,9 +3837,7 @@ impl Brain {
         }
         let candidate_ids: ahash::AHashSet<NeuronId> = query_atoms
             .iter()
-            .filter_map(|atom| self.binding_feature_atom_index.get(&(feature_pool, *atom)))
-            .flatten()
-            .copied()
+            .flat_map(|atom| self.binding_feature_postings(feature_pool, *atom))
             .collect();
         if candidate_ids.is_empty() {
             return Vec::new();
@@ -3878,9 +4067,7 @@ impl Brain {
         }
         let candidate_ids: ahash::AHashSet<NeuronId> = query_atoms
             .iter()
-            .filter_map(|atom| self.binding_feature_atom_index.get(&(feature_pool, *atom)))
-            .flatten()
-            .copied()
+            .flat_map(|atom| self.binding_feature_postings(feature_pool, *atom))
             .collect();
         if candidate_ids.is_empty() {
             return None;
@@ -4068,9 +4255,10 @@ impl Brain {
         let target = target_handle.read();
         let mut classes: std::collections::HashMap<Vec<u8>, (f32, u64)> =
             std::collections::HashMap::new();
-        let mut posting_lists: Vec<&Vec<NeuronId>> = query_motifs
+        let mut posting_lists: Vec<Vec<NeuronId>> = query_motifs
             .iter()
-            .filter_map(|motif| self.binding_motif_index.get(&(query_pool, *motif)))
+            .map(|motif| self.binding_motif_postings(query_pool, *motif))
+            .filter(|ids| !ids.is_empty())
             .collect();
         posting_lists.sort_unstable_by_key(|ids| ids.len());
         let mut candidate_ids = ahash::AHashSet::new();
@@ -6703,6 +6891,7 @@ impl Brain {
                 .iter()
                 .map(|(key, ids)| (*key, ids.clone()))
                 .collect(),
+            binding_posting_indexes: self.binding_posting_indexes.clone(),
             total_observations: self.total_observations,
             current_threshold: self.current_threshold,
             last_pressure_check_obs: self.last_pressure_check_obs,
@@ -6724,7 +6913,14 @@ impl Brain {
 
     /// Run the final sleep transition after maintenance: serialize every live
     /// neuron independently and publish the compact routing manifest.
-    pub fn serialize_all_neurons_for_idle(&self) -> std::io::Result<usize> {
+    pub fn serialize_all_neurons_for_idle(&mut self) -> std::io::Result<usize> {
+        if self.wbrain_file.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "brain has no .wbrain container attached",
+            ));
+        }
+        self.flush_binding_posting_overlay()?;
         let file = self.wbrain_file.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -6748,6 +6944,17 @@ impl Brain {
 
     pub fn uses_wbrain_storage(&self) -> bool {
         self.wbrain_file.is_some()
+    }
+
+    pub fn binding_posting_residency(&self) -> (usize, usize) {
+        let overlay_entries = self
+            .binding_sequence_index
+            .values()
+            .chain(self.binding_feature_atom_index.values())
+            .chain(self.binding_motif_index.values())
+            .map(Vec::len)
+            .sum();
+        (overlay_entries, self.binding_posting_indexes.len())
     }
 
     /// Stage 17.4 full — run one eviction pass per
@@ -7064,6 +7271,7 @@ impl Brain {
             binding_sequence_index: AHashMap::new(),
             binding_feature_atom_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
+            binding_posting_indexes: Vec::new(),
             total_observations: snap.total_observations,
             current_threshold: restored_threshold,
             last_pressure_check_obs: snap.total_observations,
@@ -7147,6 +7355,7 @@ impl Brain {
             binding_sequence_index: metadata.binding_sequence_index.into_iter().collect(),
             binding_feature_atom_index: metadata.binding_feature_atom_index.into_iter().collect(),
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
+            binding_posting_indexes: metadata.binding_posting_indexes,
             total_observations: metadata.total_observations,
             current_threshold: metadata.current_threshold,
             last_pressure_check_obs: metadata.last_pressure_check_obs,

@@ -13,7 +13,7 @@ use crate::neuron::{Neuron, NeuronId, PoolId};
 
 const HEADER_BYTES: u64 = 4096;
 const MAGIC: &[u8; 8] = b"W1ZBRAIN";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const SLOT_BYTES: u64 = 64;
 const SLOT_A: u64 = 16;
 const SLOT_B: u64 = SLOT_A + SLOT_BYTES;

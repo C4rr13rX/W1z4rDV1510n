@@ -27,6 +27,7 @@ pub mod control;
 pub mod event;
 pub mod merkle;
 pub mod neuron_store;
+pub(crate) mod posting_index;
 pub mod recovery;
 pub mod wal;
 pub mod wbrain_store;

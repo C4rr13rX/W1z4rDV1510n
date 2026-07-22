@@ -149,6 +149,10 @@ impl WbrainFile {
         ids
     }
 
+    pub fn path(&self) -> std::path::PathBuf {
+        self.container.lock().path().to_path_buf()
+    }
+
     /// Publish all compact routing state. Neuron bodies were already appended
     /// individually by `put`/`sleep_neuron`, so this operation is independent
     /// of total neuron payload size.
@@ -853,7 +857,8 @@ impl WbrainNeuronStore {
         if neuron.id as u64 == logical_before {
             self.slot_count.fetch_add(1, Ordering::AcqRel);
         }
-        if !self.suppress_resident_labels.load(Ordering::Acquire)
+        if !was_present
+            && !self.suppress_resident_labels.load(Ordering::Acquire)
             && (neuron.is_atom() || self.index_concept_labels.load(Ordering::Acquire))
         {
             self.labels.write().insert(neuron.label.clone(), neuron.id);
@@ -1424,6 +1429,7 @@ mod tests {
         let (mut migrated, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
         assert_eq!(migrated.rebuild_binding_indexes_bounded().unwrap(), 1);
+        assert_eq!(migrated.binding_posting_residency(), (0, 1));
         assert_eq!(
             migrated
                 .pretrain_binding_episode(&[(3, b"hello".to_vec()), (4, b"world".to_vec())])
@@ -1436,6 +1442,7 @@ mod tests {
             .unwrap();
         assert_ne!(new_binding_id, trained_binding_id);
         migrated.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(migrated.binding_posting_residency(), (0, 2));
         assert_eq!(
             migrated.stats().evicted_neurons,
             migrated.stats().total_neurons
@@ -1444,6 +1451,7 @@ mod tests {
 
         let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
+        assert_eq!(restored.binding_posting_residency(), (0, 2));
         assert_eq!(
             restored
                 .pretrain_binding_episode(&[(3, b"fresh".to_vec()), (4, b"novel".to_vec())])

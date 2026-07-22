@@ -114,13 +114,27 @@ fixed-width slot table with a bounded copy rather than hydrating it. The
 regression suite creates neurons beyond the initial reserve, reopens the
 container, and proves exact body and label lookup for the new ID.
 
+Container version 4 moves the three historical binding-routing maps into an
+immutable on-disk posting index. Finalization streams each binding once and
+emits exact ordered-sequence, feature-atom, and character-motif postings
+without retaining a corpus-sized map. Inference hashes only the keys derived
+from the active input, reads the corresponding bucket chains, and pages the
+returned binding IDs. Bindings learned after migration remain in a small live
+overlay until the next idle transition; idle writes that overlay as a new disk
+generation and clears it from RAM. The regression suite verifies zero
+resident posting entries after rebuild, after live learning and sleep, and
+after reopen, while preserving exact deduplication and trained recall.
+
 ## Resident structures still violating the invariant
 
-1. `Brain.binding_sequence_index`, `binding_feature_atom_index`, and
-   `binding_motif_index` are rebuilt and restored as complete resident maps.
-2. Live concept-sequence overlays are still serialized in pool metadata; they
+1. Live concept-sequence overlays are still serialized in pool metadata; they
    need the same immutable-delta treatment before indefinitely long training.
-3. Diagnostic/export and analogy paths listed above still need explicit
+2. A feature shared by an extreme number of bindings can still produce a large
+   request-local posting vector. Preserve accuracy while replacing this with a
+   cursor/intersection strategy before mobile admission.
+3. Immutable posting generations need bounded compaction after many separate
+   train/sleep cycles so lookup cost does not grow with generation count.
+4. Diagnostic/export and analogy paths listed above still need explicit
    cursor/budget enforcement; request-time binding decoders no longer have a
    whole-pool fallback.
 
@@ -130,14 +144,15 @@ container, and proves exact body and label lookup for the new ID.
    atom, character motif, and active-concept candidate IDs. Honest OOV is
    preferable to waking an unrelated entire brain.
 2. Move the three binding indexes into `.wbrain` disk hash records with compact
-   root directories and request-local result vectors.
+   root directories and request-local result vectors. **Implemented in
+   container version 4; full-scale rerun pending.**
 3. Replace `Vec<Neuron>` with stable compact slots plus request-scoped resident
    bodies. `ensure_loaded(id)` inserts one body; idle serialization removes it.
    **Implemented and covered by persistence/inference gates.**
 4. Move offset and kind/concept/born metadata to paged fixed-width tables.
    **Implemented in container version 2.**
 5. Move historical labels to disk and preserve post-migration neurogenesis.
-   **Implemented in container version 3; full-scale rerun pending.**
+   **Implemented in container version 3.**
 6. Convert diagnostic APIs to bounded cursor streams.
 7. Run cold/warm latency, bytes-read, awakened-neuron, peak-RAM, and
    return-to-sleep gates before resuming corpus training.

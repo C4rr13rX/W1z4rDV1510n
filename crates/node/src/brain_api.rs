@@ -2885,7 +2885,7 @@ async fn h_sleep(
         .get("stale_ticks")
         .and_then(|v| v.as_u64())
         .unwrap_or(1000);
-    let brain = s.brain.lock().await;
+    let mut brain = s.brain.lock().await;
     // Phase 0 — drain deferred promotions (when W1Z4RD_DEFER_PROMOTION
     // mode is active, this is where structure work crystallises).
     let promotions = brain.sleep_drain_promotions();
@@ -2935,7 +2935,7 @@ async fn h_checkpoint(State(s): State<BrainApiState>) -> Json<serde_json::Value>
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return Json(json!({ "ok": false, "error": format!("mkdir {}: {}", dir.display(), e) }));
     }
-    let brain = s.brain.lock().await;
+    let mut brain = s.brain.lock().await;
     let result = if brain.uses_wbrain_storage() {
         brain.serialize_all_neurons_for_idle().map(|_| ())
     } else {

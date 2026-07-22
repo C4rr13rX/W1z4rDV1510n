@@ -9,6 +9,7 @@ use crate::action::{ActionEvent, ActionId};
 use crate::brain::BrainConfig;
 use crate::neuron::{NeuronId, PoolId};
 use crate::persistence::{AnnealerSnapshot, EemSnapshot};
+use crate::store::AuxiliaryRecordRef;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PersistedMomentFingerprint {
@@ -29,6 +30,7 @@ pub(crate) struct WbrainBrainMetadata {
     pub binding_sequence_index: Vec<((PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>)>,
     pub binding_feature_atom_index: Vec<((PoolId, NeuronId), Vec<NeuronId>)>,
     pub binding_motif_index: Vec<((PoolId, [u8; 3]), Vec<NeuronId>)>,
+    pub binding_posting_indexes: Vec<AuxiliaryRecordRef>,
     pub total_observations: u64,
     pub current_threshold: u32,
     pub last_pressure_check_obs: u64,

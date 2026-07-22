@@ -694,6 +694,7 @@ pub(super) fn migrate(legacy_path: &Path, destination: &Path) -> io::Result<usiz
         binding_sequence_index: Vec::new(),
         binding_feature_atom_index: Vec::new(),
         binding_motif_index: Vec::new(),
+        binding_posting_indexes: Vec::new(),
         total_observations,
         current_threshold,
         last_pressure_check_obs: total_observations,
