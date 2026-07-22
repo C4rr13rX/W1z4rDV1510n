@@ -1171,8 +1171,16 @@ mod tests {
         let concept = pool.ensure_frame_concept_for_pretrain(b"sleeping concept", 2)[0];
         assert!(!pool.get(concept).unwrap().is_atom());
         assert!(!pool.get(concept).unwrap().members.is_empty());
+        assert!(pool.get_mut(concept).unwrap().reinforce_terminal(
+            NeuronRef::new(3, 0),
+            0.5,
+            2,
+            1.0,
+        ));
+        assert_eq!(pool.resident_terminal_count(), 1);
 
         pool.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(pool.resident_terminal_count(), 0);
         assert_eq!(pool.concept_index_residency(), (0, 1));
         assert!(
             pool.get(concept).is_none(),
@@ -1865,7 +1873,10 @@ mod tests {
         }
         let (mut restored, missing) = Brain::restore_wbrain(&path, encodings).unwrap();
         assert!(missing.is_empty());
-        let asleep = restored.stats().evicted_neurons;
+        let restored_stats = restored.stats();
+        assert!(restored_stats.total_terminals > 0);
+        assert_eq!(restored_stats.resident_terminals, 0);
+        let asleep = restored_stats.evicted_neurons;
 
         restored.activate_for_prediction(3, b"hello");
         let binding_match = restored.best_binding_match_v2(3);
@@ -1900,6 +1911,7 @@ mod tests {
             restored.stats().evicted_neurons,
             restored.stats().total_neurons
         );
+        assert_eq!(restored.stats().resident_terminals, 0);
         std::fs::remove_file(path).ok();
     }
 }

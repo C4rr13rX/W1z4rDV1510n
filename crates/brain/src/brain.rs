@@ -7915,7 +7915,7 @@ impl Brain {
                 // O(1) — maintained terminal counter (was O(N) walk
                 // before pool.total_terminals was introduced).
                 stats.total_terminals += pool.total_terminals();
-                stats.resident_terminals += pool.total_terminals();
+                stats.resident_terminals += pool.resident_terminal_count();
                 stats.evicted_neurons += pool.evicted_count();
                 if pid == self.binding_pool_id {
                     stats.total_binding += cc;

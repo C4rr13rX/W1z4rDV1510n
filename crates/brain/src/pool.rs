@@ -2476,6 +2476,19 @@ impl Pool {
     pub fn total_terminals(&self) -> usize {
         self.total_terminals
     }
+
+    /// Terminals whose owning neuron body is currently resident in RAM.
+    /// This walks only the bounded resident set; sleeping slot metadata and
+    /// serialized neuron bodies are never paged in for telemetry.
+    pub fn resident_terminal_count(&self) -> usize {
+        self.neurons
+            .resident_ids()
+            .into_iter()
+            .filter_map(|id| self.neurons.get(id as usize))
+            .map(|neuron| neuron.terminals.len())
+            .sum()
+    }
+
     pub fn concept_count(&self) -> usize {
         self.neurons.concept_count()
     }
