@@ -277,7 +277,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         source = (ROOT / "crates/node/src/brain_api.rs").read_text(encoding="utf-8")
         self.assertIn("has_programming_language_intent", source)
         self.assertIn("programming_response_compatible", source)
-        self.assertIn("!programming_language_intent || raw_programming_compatible", source)
+        self.assertIn("&& !raw_programming_compatible", source)
+        self.assertIn("directly_underspecified", source)
         self.assertIn('"raw_fallback_inhibited"', source)
 
     def test_capstone_safety_rejects_prose_and_requires_kernel_boundaries(self) -> None:
@@ -622,6 +623,60 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(ensure_last_good_guard(runtime, phase, 6), guard)
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
+
+    def test_wbrain_guard_is_an_independent_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.wbrain"
+            snapshot.write_bytes(b"accepted-container")
+            phase = Phase("phase-a", "script-a", runtime / "corpus.jsonl", 10)
+            guard = ensure_last_good_guard(runtime, phase, 4)
+            self.assertEqual(guard.name, "brain.last-good.wbrain")
+            self.assertFalse(snapshot.samefile(guard))
+            snapshot.write_bytes(b"rejected-container")
+            self.assertEqual(guard.read_bytes(), b"accepted-container")
+            metadata = json.loads(
+                (brain / "brain.last-good.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["storage"], "wbrain")
+            self.assertEqual(metadata["guard_mode"], "copy")
+            accept_last_good_guard(runtime)
+            self.assertFalse(guard.exists())
+
+    def test_canary_restore_replaces_authoritative_wbrain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.wbrain"
+            snapshot.write_bytes(b"rejected-container")
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted-container")
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus", "row": 100,
+                "snapshot": str(snapshot), "guard": str(guard),
+                "storage": "wbrain", "guard_mode": "copy",
+            }), encoding="utf-8")
+            (brain / "brain.wal").write_bytes(b"rejected-wal")
+            (runtime / "corpus.progress.json").write_text(json.dumps({
+                "ram_next_row": 200, "durable_next_row": 200,
+            }), encoding="utf-8")
+            (runtime / "curriculum-canary-quarantine.json").write_text(
+                json.dumps({
+                    "phase": "corpus", "candidate_row": 200,
+                    "last_good": {
+                        "phase": "corpus", "row": 100,
+                        "snapshot": str(snapshot), "guard": str(guard),
+                    },
+                }), encoding="utf-8",
+            )
+            restored = restore_canary_quarantine(runtime)
+            self.assertEqual(restored["snapshot"], str(snapshot))
+            self.assertEqual(snapshot.read_bytes(), b"accepted-container")
+            self.assertFalse(guard.exists())
+            self.assertFalse((brain / "brain.wal").exists())
 
     def test_guarded_block_target_survives_worker_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

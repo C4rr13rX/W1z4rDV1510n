@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -112,10 +113,14 @@ def runtime_responsive_batch_size(runtime: Path, configured: int,
 
 
 def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
-    """Hard-link the accepted snapshot until the next retention gate passes."""
+    """Preserve the authoritative accepted state until the next gate passes."""
     brain_dir = runtime / "brain"
-    snapshot = brain_dir / "brain.bin"
-    guard = brain_dir / "brain.last-good.bin"
+    snapshot = (
+        brain_dir / "brain.wbrain"
+        if (brain_dir / "brain.wbrain").is_file()
+        else brain_dir / "brain.bin"
+    )
+    guard = brain_dir / f"brain.last-good{snapshot.suffix}"
     metadata = brain_dir / "brain.last-good.json"
     if guard.exists():
         existing = read_json(metadata)
@@ -129,12 +134,26 @@ def ensure_last_good_guard(runtime: Path, phase: Phase, row: int) -> Path:
         return guard
     if not snapshot.exists():
         raise RuntimeError(f"cannot guard missing snapshot: {snapshot}")
-    os.link(snapshot, guard)
+    if snapshot.suffix == ".wbrain":
+        # The neuron container updates slots and appends bodies in place, so a
+        # hard link would mutate the alleged rollback copy too. Publish a full
+        # independent copy atomically. This is paid only at comprehensive gate
+        # boundaries, never for fast canaries.
+        temporary = guard.with_suffix(guard.suffix + ".tmp")
+        temporary.unlink(missing_ok=True)
+        shutil.copy2(snapshot, temporary)
+        os.replace(temporary, guard)
+        guard_mode = "copy"
+    else:
+        os.link(snapshot, guard)
+        guard_mode = "hardlink"
     publish(metadata, {
         "phase": phase.name,
         "row": row,
         "snapshot": str(snapshot),
         "guard": str(guard),
+        "storage": snapshot.suffix.lstrip("."),
+        "guard_mode": guard_mode,
         "created_unix": time.time(),
     })
     return guard
@@ -144,6 +163,8 @@ def accept_last_good_guard(runtime: Path) -> None:
     """Discard the prior snapshot only after the new state passes its gates."""
     brain_dir = runtime / "brain"
     (brain_dir / "brain.last-good.bin").unlink(missing_ok=True)
+    (brain_dir / "brain.last-good.wbrain").unlink(missing_ok=True)
+    (brain_dir / "brain.last-good.wbrain.tmp").unlink(missing_ok=True)
     (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
 
 
@@ -184,8 +205,8 @@ def restore_canary_quarantine(runtime: Path) -> dict:
     if not phase or not isinstance(row, int) or row < 0:
         raise RuntimeError(f"quarantine lacks valid last-good phase/row: {quarantine}")
     brain_dir = runtime / "brain"
-    snapshot = brain_dir / "brain.bin"
-    guard = brain_dir / "brain.last-good.bin"
+    snapshot = Path(last_good.get("snapshot") or brain_dir / "brain.bin")
+    guard = Path(last_good.get("guard") or brain_dir / f"brain.last-good{snapshot.suffix}")
     if not guard.is_file():
         raise RuntimeError(f"quarantine guard is missing: {guard}")
     same_snapshot = snapshot.exists() and os.path.samefile(snapshot, guard)
@@ -347,15 +368,19 @@ def deferred_interval_id(phase: str, start_row: int, end_row: int) -> str:
 
 def preserve_deferred_base(runtime: Path, interval_id: str) -> Path:
     """Keep the exact causal starting snapshot for later interval bisection."""
-    guard = runtime / "brain" / "brain.last-good.bin"
+    metadata = read_json(runtime / "brain" / "brain.last-good.json")
+    guard = Path(metadata.get("guard") or runtime / "brain" / "brain.last-good.bin")
     if not guard.is_file():
         raise RuntimeError(f"cannot preserve deferred base without guard: {guard}")
     digest = hashlib.sha256(interval_id.encode("utf-8")).hexdigest()[:16]
     directory = runtime / "deferred" / digest
     directory.mkdir(parents=True, exist_ok=True)
-    base = directory / "brain.base.bin"
+    base = directory / f"brain.base{guard.suffix}"
     if not base.exists():
-        os.link(guard, base)
+        if guard.suffix == ".wbrain":
+            shutil.copy2(guard, base)
+        else:
+            os.link(guard, base)
     return base
 
 
