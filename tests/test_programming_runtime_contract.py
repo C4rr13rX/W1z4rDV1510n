@@ -195,6 +195,26 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             guard.write_bytes(b"later-guard")
             self.assertEqual(base.read_bytes(), b"causal-base")
 
+    def test_deferred_wbrain_base_links_immutable_guard_not_live_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            live = brain / "brain.wbrain"
+            guard = brain / "brain.last-good.wbrain"
+            live.write_bytes(b"mutable-candidate")
+            guard.write_bytes(b"accepted-base")
+            (brain / "brain.last-good.json").write_text(
+                json.dumps({"guard": str(guard)}), encoding="utf-8"
+            )
+
+            base = preserve_deferred_base(runtime, "phase:120:140")
+            self.assertTrue(base.samefile(guard))
+            self.assertFalse(base.samefile(live))
+            guard.unlink()
+            live.write_bytes(b"later-candidate")
+            self.assertEqual(base.read_bytes(), b"accepted-base")
+
     def test_deferred_ranges_skip_only_the_half_open_suspect_rows(self) -> None:
         ranges = ((10, 20), (30, 31))
         self.assertFalse(row_is_skipped(9, ranges))

@@ -515,10 +515,17 @@ def preserve_deferred_base(runtime: Path, interval_id: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     base = directory / f"brain.base{guard.suffix}"
     if not base.exists():
-        if guard.suffix == ".wbrain":
-            shutil.copy2(guard, base)
-        else:
+        # The last-good guard is already an immutable, independent inode. A
+        # hard link to that guard remains isolated from the mutable live
+        # `.wbrain`; rollback copies the guard into a new live inode before
+        # the guard name is removed. This avoids another tens-of-gigabytes
+        # copy for every quarantined interval while retaining its exact base.
+        try:
             os.link(guard, base)
+        except OSError:
+            # Cross-volume or link-restricted filesystems retain the slower
+            # but portable independent-copy fallback.
+            shutil.copy2(guard, base)
     return base
 
 
