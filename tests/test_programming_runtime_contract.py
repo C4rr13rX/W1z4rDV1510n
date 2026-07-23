@@ -28,6 +28,7 @@ from scripts.programming_curriculum_supervisor import (
     guarded_block_target,
     deferred_interval_id,
     latest_passing_canary_row,
+    next_suspect_start,
     phase_offsets,
     preserve_deferred_base,
     publish,
@@ -294,6 +295,26 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             )
             self.assertEqual(latest_passing_canary_row(runtime, "corpus", 100), 140)
             self.assertEqual(latest_passing_canary_row(runtime, "missing", 100), 100)
+
+    def test_quarantine_start_advances_past_existing_deferred_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "curriculum-health.jsonl").write_text(
+                json.dumps({
+                    "kind": "continuous_canary", "phase": "corpus",
+                    "trained_rows": 16896, "passed": True,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            for start, end in ((0, 16640), (16896, 32768)):
+                append_deferred_event(runtime, {
+                    "interval_id": deferred_interval_id("corpus", start, end),
+                    "status": "deferred", "phase": "corpus",
+                    "start_row": start, "end_row": end,
+                })
+            self.assertEqual(
+                next_suspect_start(runtime, "corpus", 33536, 0), 32768
+            )
 
     def test_continuous_canary_attributes_concurrent_topology_growth(self) -> None:
         self.assertEqual(

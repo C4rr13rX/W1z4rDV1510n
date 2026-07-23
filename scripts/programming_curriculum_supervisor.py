@@ -566,12 +566,28 @@ def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> li
     ))
 
 
+def next_suspect_start(runtime: Path, phase: str, candidate_row: int,
+                       floor: int) -> int:
+    """Start after both the latest green canary and prior quarantines.
+
+    A canary immediately following one or more skipped ranges must not create
+    a new interval that overlaps those same ranges merely because no green
+    canary exists inside quarantined data.
+    """
+    start = latest_passing_canary_row(runtime, phase, floor)
+    for interval in unresolved_deferred_intervals(runtime, phase):
+        end = interval.get("end_row")
+        if isinstance(end, int) and start < end <= candidate_row:
+            start = end
+    return start
+
+
 def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
                             durable_row: int, error: str, reason: str) -> dict:
     """Persist one failed interval before any rollback can erase its evidence."""
     last_good = read_json(runtime / "brain" / "brain.last-good.json")
-    suspect_start = latest_passing_canary_row(
-        runtime, phase.name, int(last_good.get("row") or 0)
+    suspect_start = next_suspect_start(
+        runtime, phase.name, candidate_row, int(last_good.get("row") or 0)
     )
     interval_id = deferred_interval_id(phase.name, suspect_start, candidate_row)
     base_snapshot = preserve_deferred_base(runtime, interval_id)
