@@ -20,6 +20,13 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from scripts.programming_curriculum_supervisor import stop_runtime_node
+except ModuleNotFoundError:
+    # Direct `python scripts/train_programming_brain.py` execution places the
+    # scripts directory, rather than the repository root, on sys.path.
+    from programming_curriculum_supervisor import stop_runtime_node
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -440,13 +447,12 @@ def main() -> int:
         print(f"[programming-train] complete: {runtime}")
         return 0
     finally:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
+        if not args.external_node:
+            # Automatic quarantine recovery may replace the originally
+            # launched process. Resolve the current runtime/endpoint owner
+            # instead of leaking that replacement or stopping an unrelated
+            # process by stale PID.
+            stop_runtime_node(runtime, args.endpoint)
 
 
 if __name__ == "__main__":

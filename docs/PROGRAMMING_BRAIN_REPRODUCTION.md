@@ -27,6 +27,12 @@ Use `--resume` with the same runtime after an interruption. The trainer records 
 
 Use `--dry-run` to inspect the complete command plan without creating a runtime or contacting a node. Use `--seed-only` to stop after the curated enterprise curriculum and its strict gate. `--external-node` is available for an intentionally pre-launched node, but the normal owned-node mode provides safer restart and rollback behavior.
 
+In owned-node mode, final cleanup resolves the process currently owning the
+runtime endpoint. This matters because automatic quarantine recovery may
+replace the PID launched at startup. The trainer verifies that the listener is
+a Wizard brain server before stopping it, so successful completion and
+exceptions do not leak a replacement node or terminate an unrelated service.
+
 For a controlled deployment or experience-admission window, stop the supervisor near a block target but allow its corpus worker to reach the exact durable boundary. Then run `programming_curriculum_supervisor.py --gate-only-phase <phase>` with the normal endpoint/runtime/gate options. It executes the same authoritative midphase or completion gate, releases the matching last-good guard only on success, and exits without starting another worker. Resume the ordinary supervisor only after the protected maintenance operation is complete.
 
 When a continuous canary rejects a live candidate and a causal correction has

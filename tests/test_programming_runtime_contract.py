@@ -1634,6 +1634,9 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn('"--auto-quarantine-recovery"', trainer)
         self.assertIn('"--replay-deferred"', trainer)
         self.assertIn('"--node-bin", str(args.node_bin.resolve())', trainer)
+        self.assertIn(
+            "stop_runtime_node(runtime, args.endpoint)", trainer
+        )
 
     def test_reproducible_trainer_separates_forward_and_deferred_replay(self) -> None:
         args = SimpleNamespace(
