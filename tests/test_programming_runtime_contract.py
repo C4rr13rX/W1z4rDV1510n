@@ -115,6 +115,7 @@ from scripts.train_programming_brain import (
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
 from scripts.programming_slow_batch_microbrains import read_events
 from scripts.programming_corpus_recall import accepted_responses, sample_window
+from scripts.programming_mobile_runtime_eval import summarize_trials
 from tools.training_standard.drive_corpora_brain import (
     append_slow_batch_event,
     checkpoint_due,
@@ -125,6 +126,46 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_mobile_runtime_gate_requires_latency_scope_and_idle_identity(
+            self) -> None:
+        base = {
+            "tick": 7,
+            "pool_count": 3,
+            "total_neurons": 100,
+            "total_concepts": 50,
+            "total_binding": 40,
+            "binding_pool_id": 0,
+            "resident_terminals": 0,
+            "total_terminals": 1000,
+        }
+        trial = {
+            "cold_correct": True,
+            "warm_correct": True,
+            "deterministic": True,
+            "cold_seconds": 0.8,
+            "warm_seconds": 0.2,
+            "before_cold": base,
+            "after_cold": {**base, "resident_terminals": 80},
+            "after_warm": {**base, "resident_terminals": 90},
+            "after_resleep": base,
+        }
+        report = summarize_trials(
+            [trial], base, base, 1.0, 0.5, 0.10
+        )
+        self.assertTrue(report["passed"])
+        self.assertEqual(
+            report["observed"]["peak_resident_fraction"], 0.09
+        )
+        too_broad = {
+            **trial,
+            "after_warm": {**base, "resident_terminals": 101},
+        }
+        report = summarize_trials(
+            [too_broad], base, base, 1.0, 0.5, 0.10
+        )
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["checks"]["bounded_residency"])
+
     def test_canary_transport_timeout_is_not_semantic_regression(self) -> None:
         timeout = GateCommandFailure(
             ["python", "eval.py"], 1, "",
@@ -1692,6 +1733,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 "cross-project-composition",
                 "polyglot-composition",
                 "composition-matrix",
+                "mobile-runtime",
             },
         )
         self.assertIn(

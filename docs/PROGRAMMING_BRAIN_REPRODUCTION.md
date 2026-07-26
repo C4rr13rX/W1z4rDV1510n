@@ -155,6 +155,12 @@ The trainer then runs resumable, read-only causal qualification gates for the
 multidomain holdout, domain-transfer holdout, third state contract,
 cross-project composition, polyglot composition, and composition matrix.
 Multidomain and domain-transfer qualification include premise ablations.
+The mobile-runtime gate sleeps the brain before each cold request, requires
+correct deterministic cold/warm output in under `1.0s`/`0.5s`, limits peak
+resident terminals to ten percent of learned terminals, and requires zero
+residency between trials. This desktop measurement is a necessary deployment
+proxy, not a substitute for the later benchmark on representative phone
+hardware.
 Each passing gate is recorded independently in
 `completed_qualification_gates`, so interruption does not repeat earlier
 checks or mistake a partially evaluated suite for final qualification.

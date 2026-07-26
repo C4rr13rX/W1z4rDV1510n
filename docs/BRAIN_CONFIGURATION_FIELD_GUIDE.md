@@ -164,6 +164,15 @@ Read-only validation must distinguish learned topology from tier residency. In t
 
 Phone-class deployment is a design target, not a later compression exercise. When training and maintenance are idle, ordinary inference must complete in well under one second on phone-class storage and memory. Keep only compact symbolic routing state resident; let the input select a minimal focus, page individual neurons along the learned focus chain, expand a symbol into richer entities only when the chain requires it, emit the response or action sequence, and return that scope to sleep. A compact concept may be represented by a single byte or similarly small identifier as long as atom-grounded expansion remains deterministic and available on demand. Every production admission must therefore measure warm and cold latency, bytes read, neuron bodies awakened, peak resident bytes, pools traversed, focus-chain depth, output correctness, and post-inference return-to-sleep. A desktop result that is correct only after broad hydration does not satisfy the architecture.
 
+Until the node exposes request-scoped SSD-byte and focus-depth counters, use
+resident-terminal delta as the explicit scope proxy and record the telemetry
+gap rather than implying those dimensions were measured. The executable
+desktop gate sleeps before every cold request, repeats it warm, requires
+correct deterministic output, enforces `cold <= 1.0s`, `warm <= 0.5s`, caps
+resident scope at ten percent, and requires zero residency after every trial.
+Passing is necessary but does not replace the same gate on phone-class
+hardware.
+
 “Pre-training” in Wizard Vision should mean accelerated construction of complete atom-grounded episodes and their derived simultaneous features. It must not mean replacing character/byte learning with an external token vocabulary.
 
 ## Procedure for configuring a new domain brain

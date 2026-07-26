@@ -367,6 +367,11 @@ def qualification_commands(
             "programming_composition_matrix.py",
             (),
         ),
+        (
+            "mobile-runtime",
+            "programming_mobile_runtime_eval.py",
+            (),
+        ),
     )
     return [
         (
