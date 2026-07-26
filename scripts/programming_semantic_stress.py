@@ -33,7 +33,8 @@ def main() -> int:
             try: files=sorted(json.loads(reply).get("files",{}).keys())
             except (json.JSONDecodeError,AttributeError): files=[]
             rows.append({"kind":kind,"expected":expected,"recalled":expected in files,"files":files,
-                         "outside_grounding":bool((result.get("grounding") or {}).get("outside_grounding"))})
+                         "outside_grounding":bool((result.get("grounding") or {}).get("outside_grounding")),
+                         "reply":reply,"intent_diagnostics":result.get("intent_diagnostics")})
     summary={kind:{"recalled":sum(row["recalled"] for row in rows if row["kind"]==kind),
                    "total":sum(row["kind"]==kind for row in rows)} for kind in ("trained","heldout")}
     report={"summary":summary,"results":rows}

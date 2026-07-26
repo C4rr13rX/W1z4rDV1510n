@@ -213,6 +213,23 @@ pub struct BindingMatch {
     pub tier: MatchTier,
 }
 
+/// A recalled action together with the learned neural evidence that selected
+/// it. Keeping this evidence attached prevents downstream callers from
+/// reverse-engineering intent from the decoded bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedFeatureBinding {
+    pub bytes: Vec<u8>,
+    /// Query feature atoms that co-fired with this action during learning.
+    pub matched_labels: Vec<String>,
+    /// Total feature atoms on the narrowest qualifying learned pathway.
+    pub learned_feature_count: usize,
+    /// Success evidence minus failure evidence across identical actions.
+    pub outcome_score: i32,
+    pub use_count: u64,
+    pub target_size: usize,
+    pub binding_id: NeuronId,
+}
+
 /// Stage 13A — one neuron in a single pool's decoded extrusion.
 #[derive(Debug, Clone)]
 pub struct DecodedConcept {
@@ -4335,6 +4352,37 @@ impl Brain {
         active_context_pools: &[PoolId],
         conditioned_pools: &[PoolId],
     ) -> Vec<Vec<u8>> {
+        self.decode_ranked_feature_bindings_with_evidence(
+            feature_pool,
+            query_labels,
+            target_pool,
+            max_results,
+            success_pool,
+            failure_pool,
+            active_context_pools,
+            conditioned_pools,
+        )
+        .into_iter()
+        .map(|candidate| candidate.bytes)
+        .collect()
+    }
+
+    /// Evidence-preserving form of
+    /// [`Self::decode_ranked_feature_bindings_with_context`]. The byte-only
+    /// API remains for compatibility; orchestration and composition should
+    /// use this method so prompt coverage, outcome valence, and learned
+    /// pathway strength survive recall.
+    pub fn decode_ranked_feature_bindings_with_evidence(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+        max_results: usize,
+        success_pool: Option<PoolId>,
+        failure_pool: Option<PoolId>,
+        active_context_pools: &[PoolId],
+        conditioned_pools: &[PoolId],
+    ) -> Vec<RankedFeatureBinding> {
         if max_results == 0
             || feature_pool == target_pool
             || feature_pool == self.binding_pool_id
@@ -4346,12 +4394,20 @@ impl Brain {
             Some(pool) => pool,
             None => return Vec::new(),
         };
-        let query_atoms: ahash::AHashSet<NeuronId> = {
+        let (query_atoms, query_atom_labels): (
+            ahash::AHashSet<NeuronId>,
+            ahash::AHashMap<NeuronId, String>,
+        ) = {
             let features = feature_handle.read();
-            query_labels
+            let labels: ahash::AHashMap<NeuronId, String> = query_labels
                 .iter()
-                .filter_map(|label| features.label_to_id(label))
-                .collect()
+                .filter_map(|label| {
+                    features
+                        .label_to_id(label)
+                        .map(|neuron| (neuron, label.clone()))
+                })
+                .collect();
+            (labels.keys().copied().collect(), labels)
         };
         if query_atoms.len() < 2 {
             return Vec::new();
@@ -4413,7 +4469,8 @@ impl Brain {
             .collect();
         ensure_neuron_trees_loaded(&mut feature_handle.write(), &feature_roots);
         let features = feature_handle.read();
-        let mut ranked: Vec<(NeuronId, usize, u64, usize, i32)> = Vec::new();
+        let mut ranked: Vec<(NeuronId, usize, usize, u64, usize, i32, Vec<NeuronId>)> =
+            Vec::new();
         for binding_id in candidate_ids {
             let Some(binding) = bindings.get(binding_id) else {
                 continue;
@@ -4450,11 +4507,15 @@ impl Brain {
             // Direct atoms and an emerged concept are alternative evidence
             // layers. Unioning them can make a broad concept's unrelated
             // members mandatory and hide an otherwise exact sparse binding.
-            let hits = [&direct_atoms, &expanded_atoms]
+            let evidence = [&direct_atoms, &expanded_atoms]
                 .into_iter()
                 .filter_map(|atoms| {
                     if atoms.len() >= 2 && atoms.is_subset(&query_atoms) {
-                        Some(atoms.len())
+                        Some((
+                            atoms.len(),
+                            atoms.len(),
+                            atoms.iter().copied().collect::<Vec<_>>(),
+                        ))
                     } else if query_atoms.len() >= 2
                         && query_atoms.is_subset(atoms)
                         && atoms.len() == query_atoms.len() + 1
@@ -4464,13 +4525,19 @@ impl Brain {
                         // constraint (for example, an idempotent service
                         // whose implementation also validates input). Wider
                         // supersets remain ineligible.
-                        Some(query_atoms.len())
+                        Some((
+                            query_atoms.len(),
+                            atoms.len(),
+                            query_atoms.iter().copied().collect::<Vec<_>>(),
+                        ))
                     } else {
                         None
                     }
                 })
-                .max()
-                .unwrap_or(0);
+                .max_by_key(|(hits, learned, _)| (*hits, std::cmp::Reverse(*learned)));
+            let Some((hits, learned_feature_count, matched_atoms)) = evidence else {
+                continue;
+            };
             if hits < 2 {
                 continue;
             }
@@ -4493,13 +4560,22 @@ impl Brain {
             } else {
                 0
             };
-            ranked.push((binding.id, hits, binding.use_count, target_size, outcome));
+            ranked.push((
+                binding.id,
+                hits,
+                learned_feature_count,
+                binding.use_count,
+                target_size,
+                outcome,
+                matched_atoms,
+            ));
         }
         ranked.sort_by(|a, b| {
-            b.4.cmp(&a.4)
+            b.5.cmp(&a.5)
                 .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| b.2.cmp(&a.2))
-                .then_with(|| a.3.cmp(&b.3))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| b.3.cmp(&a.3))
+                .then_with(|| a.4.cmp(&b.4))
                 .then_with(|| a.0.cmp(&b.0))
         });
 
@@ -4509,7 +4585,7 @@ impl Brain {
         };
         let target_roots: Vec<NeuronId> = ranked
             .iter()
-            .filter_map(|(binding_id, _, _, _, _)| bindings.get(*binding_id))
+            .filter_map(|(binding_id, _, _, _, _, _, _)| bindings.get(*binding_id))
             .flat_map(|binding| {
                 binding
                     .members
@@ -4520,9 +4596,28 @@ impl Brain {
             .collect();
         ensure_neuron_trees_loaded(&mut target_handle.write(), &target_roots);
         let target = target_handle.read();
-        let mut aggregated: std::collections::HashMap<Vec<u8>, (i32, usize, u64, usize, NeuronId)> =
-            std::collections::HashMap::new();
-        for (binding_id, hits, use_count, target_size, outcome) in ranked {
+        let mut aggregated: std::collections::HashMap<
+            Vec<u8>,
+            (
+                i32,
+                usize,
+                usize,
+                u64,
+                usize,
+                NeuronId,
+                std::collections::BTreeSet<String>,
+            ),
+        > = std::collections::HashMap::new();
+        for (
+            binding_id,
+            hits,
+            learned_feature_count,
+            use_count,
+            target_size,
+            outcome,
+            matched_atoms,
+        ) in ranked
+        {
             let Some(binding) = bindings.get(binding_id) else {
                 continue;
             };
@@ -4549,26 +4644,39 @@ impl Brain {
             if bytes.is_empty() {
                 continue;
             }
-            let entry =
-                aggregated
-                    .entry(bytes)
-                    .or_insert((0, hits, use_count, target_size, binding_id));
+            let matched_labels: std::collections::BTreeSet<String> = matched_atoms
+                .iter()
+                .filter_map(|atom| query_atom_labels.get(atom).cloned())
+                .collect();
+            let entry = aggregated.entry(bytes).or_insert((
+                0,
+                hits,
+                learned_feature_count,
+                use_count,
+                target_size,
+                binding_id,
+                std::collections::BTreeSet::new(),
+            ));
             entry.0 += outcome;
+            entry.6.extend(matched_labels);
             if (
                 hits,
+                std::cmp::Reverse(learned_feature_count),
                 use_count,
                 std::cmp::Reverse(target_size),
                 std::cmp::Reverse(binding_id),
             ) > (
                 entry.1,
-                entry.2,
-                std::cmp::Reverse(entry.3),
+                std::cmp::Reverse(entry.2),
+                entry.3,
                 std::cmp::Reverse(entry.4),
+                std::cmp::Reverse(entry.5),
             ) {
                 entry.1 = hits;
-                entry.2 = use_count;
-                entry.3 = target_size;
-                entry.4 = binding_id;
+                entry.2 = learned_feature_count;
+                entry.3 = use_count;
+                entry.4 = target_size;
+                entry.5 = binding_id;
             }
         }
         let mut decoded: Vec<_> = aggregated.into_iter().collect();
@@ -4576,16 +4684,25 @@ impl Brain {
             b.1.0
                 .cmp(&a.1.0)
                 .then_with(|| b.1.1.cmp(&a.1.1))
-                .then_with(|| b.1.2.cmp(&a.1.2))
-                .then_with(|| a.1.3.cmp(&b.1.3))
+                .then_with(|| a.1.2.cmp(&b.1.2))
+                .then_with(|| b.1.3.cmp(&a.1.3))
                 .then_with(|| a.1.4.cmp(&b.1.4))
+                .then_with(|| a.1.5.cmp(&b.1.5))
         });
         let has_nonnegative = decoded.iter().any(|(_, rank)| rank.0 >= 0);
         decoded
             .into_iter()
             .filter(|(_, rank)| !has_nonnegative || rank.0 >= 0)
             .take(max_results)
-            .map(|(bytes, _)| bytes)
+            .map(|(bytes, rank)| RankedFeatureBinding {
+                bytes,
+                matched_labels: rank.6.into_iter().collect(),
+                learned_feature_count: rank.2,
+                outcome_score: rank.0,
+                use_count: rank.3,
+                target_size: rank.4,
+                binding_id: rank.5,
+            })
             .collect()
     }
 

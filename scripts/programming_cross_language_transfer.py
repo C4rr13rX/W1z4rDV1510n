@@ -150,7 +150,8 @@ def main() -> int:
             passed, detail = execute(case, reply)
             rows.append({"name": case.name, "kind": kind, "executes": passed,
                          "outside_grounding": bool((result.get("grounding") or {}).get("outside_grounding")),
-                         "detail": "" if passed else detail})
+                         "detail": "" if passed else detail, "reply": reply,
+                         "intent_diagnostics": result.get("intent_diagnostics")})
     oov = []
     for prompt in OOV:
         result = request(args.endpoint, "/brain/chat", {"text": prompt})

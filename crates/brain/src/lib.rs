@@ -53,6 +53,7 @@ pub use grounding::{
 };
 pub use brain::{
     Brain, BrainConfig, BrainStats, BindingMatch, MatchTier, PretrainEpisodeProfile,
+    RankedFeatureBinding,
     DecodedConcept, EvictionParams, EvictionStats, PoolExtrusion, ResonantExtrusion,
 };
 pub use action::{ActionEvent, ActionId, ActionRouter, NullRouter, RouteResult};

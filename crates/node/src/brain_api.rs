@@ -1219,22 +1219,95 @@ async fn h_logic_recognize(
                 "template_count": brain.eem().semantic_template_count()}))
 }
 
-/// Union files from independently grounded action manifests. Conflicting
-/// filenames abort composition rather than guessing which implementation wins.
-fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
-    let mut files = serde_json::Map::new();
-    let mut manifests = 0usize;
-    for bytes in candidates {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-            continue;
+fn manifest_language_coverage(labels: &[String], files: &serde_json::Map<String, serde_json::Value>)
+    -> bool
+{
+    let names: Vec<String> = files.keys().map(|name| name.to_ascii_lowercase()).collect();
+    let has_file = |suffixes: &[&str]| {
+        names
+            .iter()
+            .any(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
+    };
+    labels
+        .iter()
+        .filter_map(|label| label.split(":LANGUAGE:").nth(1))
+        .map(|language| language.split(':').next().unwrap_or(language))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .all(|language| match language {
+            "PYTHON" => has_file(&[".py"]),
+            "TYPESCRIPT" => has_file(&[".ts", ".tsx"]),
+            "JAVASCRIPT" => has_file(&[".js", ".mjs", ".cjs", ".jsx"]),
+            "RUST" => has_file(&[".rs"]),
+            "GO" => has_file(&[".go"]),
+            "JAVA" => has_file(&[".java"]),
+            "CSHARP" | "C_SHARP" => has_file(&[".cs"]),
+            "C" => has_file(&[".c", ".h"]),
+            "CPP" | "CPLUSPLUS" => has_file(&[".cc", ".cpp", ".cxx", ".hpp", ".hh"]),
+            "RUBY" => has_file(&[".rb"]),
+            "PHP" => has_file(&[".php"]),
+            "KOTLIN" => has_file(&[".kt", ".kts"]),
+            "SWIFT" => has_file(&[".swift"]),
+            "SQL" => has_file(&[".sql"]),
+            "HTML" => has_file(&[".html", ".htm"]),
+            "SHELL" | "BASH" => has_file(&[".sh", ".bash"]),
+            _ => false,
+        })
+}
+
+fn requested_manifest_component_count(labels: &[String]) -> usize {
+    let mut groups = std::collections::BTreeSet::new();
+    for label in labels {
+        let group = if label.ends_with(":SECURITY:AUTHORIZATION") {
+            Some("authorization")
+        } else if label.ends_with(":API:IDEMPOTENT_COMMAND") {
+            Some("idempotency")
+        } else if label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION")
+            || label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER")
+        {
+            Some("transaction")
+        } else if label.ends_with(":OBSERVABILITY:CORRELATED_LOGGING")
+            || label.ends_with(":ENTERPRISE:SECRET_REDACTION")
+        {
+            Some("observability")
+        } else if label.ends_with(":RESILIENCE:CIRCUIT_BREAKER") {
+            Some("circuit_breaker")
+        } else if label.ends_with(":ENTERPRISE:BOUNDED_RETRY")
+            || label.ends_with(":RESILIENCE:ASYNC_RETRY")
+        {
+            Some("retry")
+        } else if label.ends_with(":CONCURRENCY:DEDUPLICATION") {
+            Some("deduplication")
+        } else if label.ends_with(":INTEGRATION:TRANSACTIONAL_OUTBOX") {
+            Some("outbox")
+        } else if label.ends_with(":STATE:OPTIMISTIC_CONCURRENCY") {
+            Some("optimistic_concurrency")
+        } else if label.ends_with(":ENTERPRISE:BATCHING") {
+            Some("batching")
+        } else {
+            None
         };
-        let Some(candidate_files) = value.get("files").and_then(|files| files.as_object()) else {
-            continue;
-        };
-        if candidate_files.is_empty() {
-            continue;
+        if let Some(group) = group {
+            groups.insert(group);
         }
-        let mut accepted = false;
+    }
+    let languages = labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .count();
+    groups.len().max(languages).clamp(2, 4)
+}
+
+fn merge_manifest_selection(selection: &[&Vec<u8>])
+    -> Option<serde_json::Map<String, serde_json::Value>>
+{
+    let mut files = serde_json::Map::new();
+    for bytes in selection {
+        let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+        let candidate_files = value.get("files")?.as_object()?;
+        if candidate_files.is_empty() {
+            return None;
+        }
         for (name, content) in candidate_files {
             if !content.is_string() {
                 return None;
@@ -1245,17 +1318,57 @@ fn merge_grounded_file_manifests(candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
                 }
             } else {
                 files.insert(name.clone(), content.clone());
-                accepted = true;
             }
         }
-        if accepted {
-            manifests += 1;
-        }
     }
-    if manifests < 2 || files.len() < 2 {
+    Some(files)
+}
+
+/// Select a small, collectively compatible set of independently grounded
+/// manifests. At accumulated-corpus scale, broad ranking legitimately returns
+/// unrelated alternatives that reuse filenames such as `main.py`. One
+/// conflict must not poison a different dependency-complete project. Search
+/// rank order deterministically and admit only a subset whose aggregate
+/// source satisfies every requested behavior and every requested language.
+fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let manifests: Vec<&Vec<u8>> = candidates
+        .iter()
+        .filter(|candidate| is_complete_file_manifest(candidate))
+        .collect();
+    let required = requested_manifest_component_count(labels);
+    if manifests.len() < required {
         return None;
     }
-    serde_json::to_vec(&serde_json::json!({"files": files})).ok()
+    fn search(
+        labels: &[String],
+        manifests: &[&Vec<u8>],
+        required: usize,
+        start: usize,
+        selected: &mut Vec<usize>,
+    ) -> Option<Vec<u8>> {
+        if selected.len() == required {
+            let selection: Vec<&Vec<u8>> =
+                selected.iter().map(|index| manifests[*index]).collect();
+            let files = merge_manifest_selection(&selection)?;
+            if files.len() < required || !manifest_language_coverage(labels, &files) {
+                return None;
+            }
+            let bytes = serde_json::to_vec(&serde_json::json!({"files": files})).ok()?;
+            return programming_response_compatible(labels, &bytes).then_some(bytes);
+        }
+        let remaining = required - selected.len();
+        for index in start..=manifests.len().saturating_sub(remaining) {
+            selected.push(index);
+            if let Some(bytes) = search(
+                labels, manifests, required, index + 1, selected,
+            ) {
+                return Some(bytes);
+            }
+            selected.pop();
+        }
+        None
+    }
+    search(labels, &manifests, required, 0, &mut Vec::new())
 }
 
 /// Direct cross-pool corpus episode formation. Frames are atomized by each
@@ -1569,6 +1682,13 @@ fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
                 ":STATE:",
                 ":GUARD:",
                 ":FLOW:",
+                ":POWER_SELF:",
+                ":MATH:",
+                ":PARITY:",
+                ":COMPARISON:",
+                ":TEXT:",
+                ":ORDER:",
+                ":CODE:",
             ]
             .iter()
             .any(|namespace| label.contains(namespace))
@@ -1649,6 +1769,35 @@ fn contains_ascii_call(text: &str, name: &str) -> bool {
     })
 }
 
+fn contains_self_product(text: &str) -> bool {
+    let identifier = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    text.match_indices('*').any(|(index, _)| {
+        let before = &text[..index];
+        let after = &text[index + 1..];
+        if before.ends_with('*') || after.starts_with('*') {
+            return false;
+        }
+        let left: String = before
+            .chars()
+            .rev()
+            .skip_while(|ch| ch.is_ascii_whitespace())
+            .take_while(|ch| identifier(*ch))
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        let right: String = after
+            .chars()
+            .skip_while(|ch| ch.is_ascii_whitespace())
+            .take_while(|ch| identifier(*ch))
+            .collect();
+        !left.is_empty() && left == right
+    }) || text.contains(".pow(2)")
+        || text.contains(".powi(2)")
+        || text.contains("** 2")
+        || text.contains("**2")
+}
+
 fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
     let intent_requires = |suffix: &str, evidence: &[&str]| {
         !labels.iter().any(|label| label.ends_with(suffix))
@@ -1669,6 +1818,42 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
         ],
     ) {
         return false;
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":POWER_SELF:2"))
+        && !contains_self_product(lowercase)
+    {
+        return false;
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":GUARD:POSITIVE_SIZE"))
+    {
+        let validates_size = [
+            "size < 1",
+            "size<1",
+            "size <= 0",
+            "size<=0",
+            "size == 0",
+            "size==0",
+            "size.is_zero(",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence));
+        let rejects_size = [
+            "raise ",
+            "valueerror",
+            "argumentoutofrange",
+            "illegalargument",
+            "return err",
+            "panic!",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence));
+        if !validates_size || !rejects_size {
+            return false;
+        }
     }
     if !intent_requires(":PARITY:ODD", &["% 2", "%2", "& 1", "&1"]) {
         return false;
@@ -1769,17 +1954,19 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
     let paired_ledger_update = (lowercase.contains("debit") && lowercase.contains("credit"))
         || (lowercase.contains("source_id")
             && lowercase.contains("target_id")
-            && lowercase.contains("balance"));
+            && lowercase.contains("balance"))
+        || (lowercase.contains("balances[from") && lowercase.contains("balances[to"))
+        || (lowercase.contains("balance")
+            && lowercase.contains("source")
+            && lowercase.contains("target"));
     if labels.iter().any(|label| {
         label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION")
             || label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER")
     }) && !paired_ledger_update
         && ![
-            "transaction",
             "rollback",
             "commit",
             "begin(",
-            "atomic",
             "with sqlite3.connect",
         ]
         .iter()
@@ -1894,6 +2081,7 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
                 "public class ",
                 "class ",
                 "interface ",
+                "static ",
                 "```java",
             ]),
             "CSHARP" | "C_SHARP" => has(&[
@@ -1901,6 +2089,7 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
                 "namespace ",
                 "public class ",
                 "class ",
+                "static ",
                 "```csharp",
                 "```cs",
             ]),
@@ -2698,20 +2887,30 @@ async fn h_brain_chat(
         // episode. Recover through grounded LANGUAGE+BEHAVIOR conjunctions,
         // never through a language-only or generic-project match.
         for subset in manifest_component_feature_pairs(labels) {
-            for candidate in brain.decode_ranked_feature_bindings_with_context(
-                *pool_id,
-                &subset,
-                action_pool,
-                4,
+            let mut component_candidates = brain.decode_ranked_feature_bindings_with_context(
+                *pool_id, &subset, action_pool, 32,
                 brain.fabric().pool(8).map(|_| 8),
                 brain.fabric().pool(6).map(|_| 6),
-                &chat_query_pools,
-                &turn_pools,
+                &chat_query_pools, &turn_pools,
+            );
+            for candidate in brain.decode_ranked_feature_bindings_with_context(
+                *pool_id, &subset, action_pool, 32, None, None,
+                &chat_query_pools, &turn_pools,
             ) {
+                if !component_candidates.contains(&candidate) {
+                    component_candidates.push(candidate);
+                }
+            }
+            let mut accepted_components = 0usize;
+            for candidate in component_candidates {
                 if (is_complete_file_manifest(&candidate) || is_grounded_code_fragment(&candidate))
                     && !feature_candidates.contains(&candidate)
                 {
                     feature_candidates.push(candidate);
+                    accepted_components += 1;
+                    if accepted_components >= 8 {
+                        break;
+                    }
                 }
             }
         }
@@ -2759,7 +2958,8 @@ async fn h_brain_chat(
     });
     let fragment_composition =
         merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt);
-    let manifest_composition = merge_grounded_file_manifests(&feature_candidates);
+    let manifest_composition =
+        merge_grounded_file_manifests(&diagnostic_intent_labels, &feature_candidates);
     let diagnostic_fragment_composition_ready = fragment_composition.is_some();
     let diagnostic_manifest_composition_ready = manifest_composition.is_some();
     let composed = select_composed_artifact(
@@ -4147,6 +4347,52 @@ mod tests {
     }
 
     #[test]
+    fn accumulated_manifest_conflicts_do_not_poison_a_valid_subset() {
+        let labels = vec![
+            "intent:LANGUAGE:PYTHON".to_string(),
+            "intent:ARTIFACT:PROJECT".to_string(),
+            "intent:SECURITY:AUTHORIZATION".to_string(),
+            "intent:PERSISTENCE:ATOMIC_TRANSACTION".to_string(),
+        ];
+        let candidates = vec![
+            br#"{"files":{"repository.py":"def unrelated():\n    return 'transaction'\n"}}"#
+                .to_vec(),
+            br#"{"files":{"authorization.py":"def is_authorized(user):\n    return 'admin' in user.get('roles', [])\n"}}"#
+                .to_vec(),
+            br#"{"files":{"repository.py":"def transfer(db, source_id, target_id, amount):\n    with db:\n        db.debit(source_id, amount)\n        db.credit(target_id, amount)\n"}}"#
+                .to_vec(),
+        ];
+        let composed = merge_grounded_file_manifests(&labels, &candidates).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&composed).unwrap();
+        assert!(value["files"].get("authorization.py").is_some());
+        assert!(value["files"]["repository.py"]
+            .as_str()
+            .unwrap()
+            .contains("def transfer"));
+    }
+
+    #[test]
+    fn manifest_composition_requires_every_requested_language() {
+        let labels = vec![
+            "intent:LANGUAGE:JAVA".to_string(),
+            "intent:LANGUAGE:RUST".to_string(),
+            "intent:STATE:OPTIMISTIC_CONCURRENCY".to_string(),
+            "intent:PERSISTENCE:ATOMIC_TRANSACTION".to_string(),
+            "intent:DOMAIN:ATOMIC_LEDGER_TRANSFER".to_string(),
+        ];
+        let java = br#"{"files":{"VersionedStore.java":"class VersionedStore { long expectedVersion; }"}}"#
+            .to_vec();
+        let rust = br#"{"files":{"ledger.rs":"fn transfer(source_id: &str, target_id: &str) { /* atomic debit credit transaction */ }"}}"#
+            .to_vec();
+        assert!(merge_grounded_file_manifests(
+            &labels,
+            &[java.clone(), rust],
+        )
+        .is_some());
+        assert!(merge_grounded_file_manifests(&labels, &[java]).is_none());
+    }
+
+    #[test]
     fn explicit_project_prefers_complete_manifest_over_fragment_subgraph() {
         let manifest =
             br#"{"files":{"circuit.py":"class Circuit: pass\n","logs.py":"def log(): pass\n"}}"#
@@ -4384,6 +4630,33 @@ mod tests {
         let access = br#"{"files":{"authorization.py":"def is_authorized(principal, action, owner_id):\n    roles = set(principal.get('roles', []))\n    if 'admin' in roles:\n        return True\n    return action == 'read' and principal.get('id') == owner_id\n"}}"#;
         assert!(!programming_response_compatible(&authorization, email));
         assert!(programming_response_compatible(&authorization, access));
+
+        let square = vec![
+            "instruction_intent:LANGUAGE:JAVA".to_string(),
+            "instruction_intent:POWER_SELF:2".to_string(),
+        ];
+        assert!(programming_response_compatible(
+            &square,
+            b"static int square(int n) { return n * n; }",
+        ));
+        assert!(!programming_response_compatible(
+            &square,
+            b"static int increment(int n) { return n + 1; }",
+        ));
+
+        let batching = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:ENTERPRISE:BATCHING".to_string(),
+            "instruction_intent:GUARD:POSITIVE_SIZE".to_string(),
+        ];
+        assert!(programming_response_compatible(
+            &batching,
+            b"def make_batches(items, size):\n    if size < 1: raise ValueError()\n    return [items[i:i+size] for i in range(0, len(items), size)]",
+        ));
+        assert!(!programming_response_compatible(
+            &batching,
+            b"def split_genome(genome, chunk_size):\n    return [genome[i:i+chunk_size] for i in range(0, len(genome), chunk_size)]",
+        ));
     }
 
     #[test]

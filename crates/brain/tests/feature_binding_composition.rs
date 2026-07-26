@@ -270,6 +270,84 @@ fn confirmed_outcome_promotes_repair_and_inhibits_failed_action_frame() {
 }
 
 #[test]
+fn ranked_feature_readout_preserves_selection_evidence() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let failure_pool = brain.create_pool(
+        PoolConfig::defaults("failure", 6),
+        Box::new(BytePassthroughEncoding { prefix: "failure" }),
+    );
+    let success_pool = brain.create_pool(
+        PoolConfig::defaults("success", 8),
+        Box::new(BytePassthroughEncoding { prefix: "success" }),
+    );
+    let intent = b"@intent:LANGUAGE:RUST\n@intent:PERSISTENCE:ATOMIC_TRANSACTION\n@intent:DOMAIN:ATOMIC_LEDGER_TRANSFER\n";
+    let rejected = b"fn transfer() { /* incomplete */ }";
+    let accepted = b"fn transfer() { debit(); credit(); commit(); }";
+    for _ in 0..4 {
+        brain.observe(feature_pool, intent);
+        brain.observe(action_pool, rejected);
+        brain.observe(failure_pool, b"compile_error");
+        brain.advance_tick();
+    }
+    for _ in 0..6 {
+        brain.observe(feature_pool, intent);
+        brain.observe(action_pool, accepted);
+        brain.observe(success_pool, b"PASS");
+        brain.advance_tick();
+    }
+
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(intent);
+    let decoded = brain.decode_ranked_feature_bindings_with_evidence(
+        feature_pool,
+        &labels,
+        action_pool,
+        8,
+        Some(success_pool),
+        Some(failure_pool),
+        &[feature_pool],
+        &[],
+    );
+    let winner = decoded.first().expect("successful action should be recalled");
+    assert_eq!(winner.bytes, accepted);
+    assert!(winner.outcome_score > 0);
+    assert!(winner.use_count > 0);
+    assert!(winner.target_size > 0);
+    assert!(winner.learned_feature_count >= 3);
+    assert!(
+        winner
+            .matched_labels
+            .iter()
+            .any(|label| label.ends_with(":LANGUAGE:RUST"))
+    );
+    assert!(
+        winner
+            .matched_labels
+            .iter()
+            .any(|label| label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION"))
+    );
+    assert!(
+        winner
+            .matched_labels
+            .iter()
+            .any(|label| label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER"))
+    );
+    assert!(!decoded.iter().any(|candidate| candidate.bytes == rejected));
+}
+
+#[test]
 fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
     let mut brain = Brain::new(BrainConfig::default());
     let feature_pool = brain.create_pool(

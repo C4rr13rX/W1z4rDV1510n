@@ -38,7 +38,8 @@ def main() -> int:
     args = parser.parse_args()
     results = []
     for index, prompt in enumerate(PROMPTS):
-        reply = str(request(args.endpoint, "/brain/chat", {"text": prompt}).get("reply") or "")
+        response = request(args.endpoint, "/brain/chat", {"text": prompt})
+        reply = str(response.get("reply") or "")
         passed, detail = execute_project(reply, INTEGRATION_TEST)
         files = []
         try:
@@ -47,7 +48,8 @@ def main() -> int:
             pass
         results.append({"kind": "canonical" if index == 0 else "paraphrase",
                         "executes": passed, "files": files,
-                        "detail": "" if passed else detail})
+                        "detail": "" if passed else detail, "reply": reply,
+                        "intent_diagnostics": response.get("intent_diagnostics")})
     report = {"passed": sum(row["executes"] for row in results),
               "total": len(results), "results": results}
     args.output.parent.mkdir(parents=True, exist_ok=True)

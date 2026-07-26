@@ -119,11 +119,13 @@ def main() -> int:
     results = []
     for case in CASES:
         for kind, prompt in (("trained", case.prompt), ("paraphrase", case.paraphrase)):
-            reply = str(request(args.endpoint, "/brain/chat", {"text": prompt}).get("reply") or "")
+            response = request(args.endpoint, "/brain/chat", {"text": prompt})
+            reply = str(response.get("reply") or "")
             passed, detail = execute(case, reply)
             results.append({"language": case.language, "kind": kind, "nonempty": bool(reply),
                             "exact": reply == case.response, "executes": passed,
-                            "detail": "" if passed else detail})
+                            "detail": "" if passed else detail, "reply": reply,
+                            "intent_diagnostics": response.get("intent_diagnostics")})
     summary = {kind: {"executes": sum(r["executes"] for r in results if r["kind"] == kind),
                       "total": len(CASES)} for kind in ("trained", "paraphrase")}
     report = {"summary": summary, "results": results}

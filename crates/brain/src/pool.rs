@@ -810,6 +810,12 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("batch") || text.contains("chunk") {
             emit("ENTERPRISE:BATCHING");
         }
+        if (text.contains("positive") && text.contains("size"))
+            || ((text.contains("validate") || text.contains("validates"))
+                && text.contains("size"))
+        {
+            emit("GUARD:POSITIVE_SIZE");
+        }
         if text.contains("multi-file")
             || text.contains("multiple files")
             || (text.contains("domain") && text.contains("service file"))
@@ -4332,6 +4338,34 @@ impl Pool {
 #[cfg(test)]
 mod resident_slot_tests {
     use super::*;
+
+    #[test]
+    fn batching_size_validation_cofires_as_an_independent_guard() {
+        let encoding = InstructionIntentEncoding {
+            prefix: "intent".to_string(),
+        };
+        for prompt in [
+            "Implement a Python function make_batches that chunks items into batches of a positive size.",
+            "Write a Python batching function that splits records into fixed-size chunks and validates the size.",
+        ] {
+            let lower = prompt.to_ascii_lowercase();
+            assert!(lower.contains("positive") || lower.contains("validate"));
+            assert!(lower.contains("size"));
+            let labels = encoding.atomize(prompt.as_bytes());
+            assert!(
+                labels.contains(&"intent:LANGUAGE:PYTHON".to_string()),
+                "{prompt}: {labels:?}"
+            );
+            assert!(
+                labels.contains(&"intent:ENTERPRISE:BATCHING".to_string()),
+                "{prompt}: {labels:?}"
+            );
+            assert!(
+                labels.contains(&"intent:GUARD:POSITIVE_SIZE".to_string()),
+                "{prompt}: {labels:?}"
+            );
+        }
+    }
 
     #[test]
     fn paged_resident_ids_do_not_scan_or_materialize_the_sleeping_extent() {

@@ -158,8 +158,9 @@ def main() -> int:
     results=[]
     for case in CASES:
         for kind,prompt in (("trained",case.prompt),("paraphrase",case.paraphrase)):
-            reply=str(request(args.endpoint,"/brain/chat",{"text":prompt}).get("reply") or "")
-            passed,detail=execute(case,reply); results.append({"name":case.name,"kind":kind,"exact":reply==case.response,"executes":passed,"detail":"" if passed else detail})
+            response=request(args.endpoint,"/brain/chat",{"text":prompt})
+            reply=str(response.get("reply") or "")
+            passed,detail=execute(case,reply); results.append({"name":case.name,"kind":kind,"exact":reply==case.response,"executes":passed,"detail":"" if passed else detail,"reply":reply,"intent_diagnostics":response.get("intent_diagnostics")})
     oov=[]
     for prompt in OOV:
         result=request(args.endpoint,"/brain/chat",{"text":prompt}); honest=not result.get("reply") and bool((result.get("grounding") or {}).get("outside_grounding")); oov.append({"prompt":prompt,"honest":honest})
