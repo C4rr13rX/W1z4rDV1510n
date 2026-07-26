@@ -19,6 +19,13 @@ fn word_frequency_is_distinct_from_generic_increment() {
     );
     assert!(redis.contains(&"intent:STATE:INCREMENT_COUNT".to_string()));
     assert!(!redis.contains(&"intent:TEXT:WORD_FREQUENCY".to_string()));
+
+    let keyword_arguments = encoding.atomize(
+        b"Write Python code that accepts keyword arguments in a dictionary and returns the number of times it was called.",
+    );
+    assert!(keyword_arguments.contains(&"intent:LANGUAGE:PYTHON".to_string()));
+    assert!(!keyword_arguments.contains(&"intent:STATE:INCREMENT_COUNT".to_string()));
+    assert!(!keyword_arguments.contains(&"intent:TEXT:WORD_FREQUENCY".to_string()));
 }
 
 #[test]

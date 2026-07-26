@@ -1178,10 +1178,11 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
     stdout_path = runtime / f"{phase.name}.stdout.log"
     stderr_path = runtime / f"{phase.name}.stderr.log"
     batch_size = args.batch_size
-    lock_chunk_size = runtime_responsive_batch_size(
+    initial_lock_chunk_size = runtime_responsive_batch_size(
         runtime, args.lock_chunk_size, read_json(progress),
         args.max_live_lock_seconds
     )
+    lock_chunk_size = args.lock_chunk_size
     command = [
         sys.executable, "-m", "tools.training_standard.drive_corpora_brain",
         "--brain", args.endpoint,
@@ -1194,6 +1195,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         "--durable-start-row", str(durable),
         "--batch-size", str(batch_size),
         "--lock-chunk-size", str(lock_chunk_size),
+        "--initial-lock-chunk-size", str(initial_lock_chunk_size),
         "--max-batch-seconds", str(args.max_live_lock_seconds),
         "--inter-post-sleep", str(args.inter_batch_yield_seconds),
         "--checkpoint-rows", str(args.checkpoint_rows),
@@ -1229,6 +1231,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                     "durable_next_row": durable,
                     "batch_size": batch_size,
                     "lock_chunk_size": lock_chunk_size,
+                    "initial_lock_chunk_size": initial_lock_chunk_size,
                     "block_target_row": block_target_row,
                     "updated_unix": time.time(),
                 })

@@ -1658,18 +1658,35 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
     ) {
         return false;
     }
-    if !intent_requires(
-        ":TEXT:WORD_FREQUENCY",
-        &[
-            "word",
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":TEXT:WORD_FREQUENCY"))
+    {
+        let counter_aggregation = lowercase.contains("counter(");
+        let segmentation = [
             ".split(",
             "split()",
             "findall(",
-            "counter(",
-            "token",
-        ],
-    ) {
-        return false;
+            "tokenize(",
+            "word_tokenize(",
+            ".words(",
+            "words()",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence));
+        let incremental_aggregation = [
+            ".get(",
+            "defaultdict(",
+            "+= 1",
+            "+=1",
+            "+ 1",
+            "+1",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence));
+        if !counter_aggregation && !(segmentation && incremental_aggregation) {
+            return false;
+        }
     }
     if !intent_requires(
         ":SECURITY:AUTHORIZATION",
@@ -1888,6 +1905,11 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
             _ => false,
         }
     })
+}
+
+fn derived_feature_artifact_compatible(labels: &[String], bytes: &[u8]) -> bool {
+    !has_programming_language_intent(labels)
+        || programming_response_compatible(labels, bytes)
 }
 
 /// A ranked language+behavior binding may hold a complete single-file source
@@ -2681,10 +2703,6 @@ async fn h_brain_chat(
     let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
         brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
     });
-    let exact_complete_manifest = exact_feature
-        .as_ref()
-        .filter(|bytes| is_complete_file_manifest(bytes))
-        .cloned();
     let ranked_single_manifest = composition_features
         .as_ref()
         .and_then(|(_, labels)| single_language_ranked_manifest(labels, &feature_candidates));
@@ -2692,6 +2710,15 @@ async fn h_brain_chat(
         .as_ref()
         .map(|(_, labels)| labels.clone())
         .unwrap_or_default();
+    let exact_feature_compatible = exact_feature.as_ref().is_some_and(|candidate| {
+        derived_feature_artifact_compatible(&diagnostic_intent_labels, candidate)
+    });
+    let exact_complete_manifest = exact_feature
+        .as_ref()
+        .filter(|bytes| {
+            is_complete_file_manifest(bytes) && exact_feature_compatible
+        })
+        .cloned();
     let diagnostic_exact_feature = exact_feature.is_some();
     let diagnostic_exact_manifest = exact_complete_manifest.is_some();
     let programming_language_intent = has_programming_language_intent(&diagnostic_intent_labels);
@@ -2710,7 +2737,13 @@ async fn h_brain_chat(
         prompt,
         fragment_composition,
         manifest_composition,
-    );
+    )
+    .filter(|candidate| {
+        derived_feature_artifact_compatible(
+            &diagnostic_intent_labels,
+            candidate,
+        )
+    });
     let exact_is_composition_prerequisite = diagnostic_intent_labels.len() >= 4
         && exact_feature.as_ref().is_some_and(|exact| {
             exact_fragment_has_grounded_dependents(exact, &feature_candidates)
@@ -2729,7 +2762,9 @@ async fn h_brain_chat(
         composed
     } else if exact_feature
         .as_ref()
-        .is_some_and(|candidate| !is_grounded_code_fragment(candidate))
+        .is_some_and(|candidate| {
+            !is_grounded_code_fragment(candidate) && exact_feature_compatible
+        })
     {
         // An exact sparse-intent episode is stronger evidence than a fuzzy
         // assembly of several partially matching artifacts.  In particular,
@@ -2750,7 +2785,13 @@ async fn h_brain_chat(
         // This is the normal path for a paraphrase that omits one constraint
         // from a learned single-language project episode.
         ranked_single_manifest
-    } else if exact_feature.is_some() {
+    } else if exact_feature
+        .as_ref()
+        .is_some_and(|candidate| {
+            is_grounded_code_fragment(candidate)
+                && !programming_language_intent
+        })
+    {
         // An isolated exact fragment is useful training evidence, but it is
         // not a complete user-facing artifact. Return it only after grounded
         // composition and complete ranked manifests have both failed.
@@ -4189,14 +4230,28 @@ mod tests {
         let increment =
             b"def incrby(self, key, increment):\n    return self.execute('INCRBY', key, increment)"
                 .to_vec();
+        let call_count = b"def __get_call_count(self, args, kwargs, args_list, kwargs_list):\n    return len(self.__get_matching_indices(args, kwargs, args_list, kwargs_list))"
+            .to_vec();
+        let misleading_terms =
+            b"def keyword_token(password):\n    return {'word': password}".to_vec();
         let frequency = b"def word_freq(text):\n    out = {}\n    for word in text.split():\n        out[word] = out.get(word, 0) + 1\n    return out"
             .to_vec();
         assert!(!programming_response_compatible(&labels, &increment));
+        assert!(!programming_response_compatible(&labels, &call_count));
+        assert!(!programming_response_compatible(
+            &labels,
+            &misleading_terms
+        ));
         assert!(programming_response_compatible(&labels, &frequency));
+        assert!(!derived_feature_artifact_compatible(
+            &labels,
+            &call_count
+        ));
+        assert!(derived_feature_artifact_compatible(&labels, &frequency));
         assert_eq!(
             single_language_ranked_source(
                 &labels,
-                &[increment, frequency.clone()]
+                &[increment, call_count, misleading_terms, frequency.clone()]
             ),
             Some(frequency)
         );

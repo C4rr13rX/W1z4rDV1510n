@@ -77,6 +77,7 @@ from scripts.programming_multidomain_holdout import (
     holdout_prompt,
     execute as execute_multidomain_holdout,
 )
+from tools.training_standard.drive_corpora_brain import adapt_lock_chunk_size
 from scripts.programming_parameterized_fulfillment import (
     FRAGMENTS as PARAMETERIZED_FULFILLMENT_FRAGMENTS,
     render_fulfillment_fixture,
@@ -905,7 +906,9 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("adaptive_batch_reductions", driver)
-        self.assertIn("current_lock_chunk_size = scaled", driver)
+        self.assertIn("adapt_lock_chunk_size(", driver)
+        self.assertIn("adaptive_lock_increases", driver)
+        self.assertIn("--initial-lock-chunk-size", driver)
         self.assertIn('"lock_chunk_size": lock_chunk_size', driver)
         self.assertIn('previous_progress.get("max_batch_seconds"', driver)
 
@@ -1321,6 +1324,28 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 8,
             ),
             21,
+        )
+
+    def test_lock_scope_grows_on_repeated_live_success_and_reduces_on_breach(self) -> None:
+        current = 1
+        streak = 0
+        for _ in range(7):
+            current, streak, change = adapt_lock_chunk_size(
+                32, current, 0.1, 8.0, streak
+            )
+            self.assertEqual(change, "unchanged")
+        self.assertEqual((current, streak), (1, 7))
+        self.assertEqual(
+            adapt_lock_chunk_size(32, current, 0.1, 8.0, streak),
+            (2, 0, "increased"),
+        )
+        self.assertEqual(
+            adapt_lock_chunk_size(32, 4, 16.0, 8.0, 5),
+            (2, 0, "reduced"),
+        )
+        self.assertEqual(
+            adapt_lock_chunk_size(32, 4, 3.0, 8.0, 5),
+            (4, 0, "unchanged"),
         )
 
     def test_bulk_size_calibration_survives_phase_transition(self) -> None:

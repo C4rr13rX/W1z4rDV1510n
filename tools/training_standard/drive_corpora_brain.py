@@ -78,6 +78,26 @@ from tools.training_standard import runner as runner_mod   # noqa: E402
 
 
 BRAIN_URL = os.environ.get("W1Z4RD_BRAIN_URL", "http://127.0.0.1:8090")
+LOCK_SCOPE_GROWTH_STREAK = 8
+
+
+def adapt_lock_chunk_size(configured: int, current: int, elapsed: float,
+                          ceiling: float,
+                          low_latency_streak: int) -> tuple[int, int, str]:
+    """Grow from live evidence and reduce immediately on a ceiling breach."""
+    if ceiling <= 0 or elapsed < 0:
+        return current, 0, "unchanged"
+    if elapsed > ceiling:
+        scaled = max(1, int(current * ceiling / elapsed))
+        reduced = min(current, scaled)
+        return reduced, 0, "reduced" if reduced < current else "unchanged"
+    if elapsed <= ceiling / 4:
+        low_latency_streak += 1
+        if low_latency_streak >= LOCK_SCOPE_GROWTH_STREAK \
+                and current < configured:
+            return min(configured, current * 2), 0, "increased"
+        return current, low_latency_streak, "unchanged"
+    return current, 0, "unchanged"
 # When True (default), routes /observe/tick/chat/sleep/checkpoint
 # through the /brain/* prefix on the merged main node binary.  Set
 # WIZARD_USE_BRAIN_PREFIX=0 to fall back to the top-level paths the
@@ -509,6 +529,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 input_path: str = "",
                 batch_size: int = 16,
                 lock_chunk_size: int = 12,
+                initial_lock_chunk_size: int | None = None,
                 progress_path: Path | None = None,
                 checkpoint_rows: int = 4096,
                 feature_policy: str = "auto",
@@ -579,7 +600,6 @@ def drive_one(script, repeats: int, project_root: Path,
             episodes = []
             episode_logical_rows: list[int] = []
             current_batch_size = batch_size
-            current_lock_chunk_size = lock_chunk_size
             previous_progress: dict = {}
             if progress_path is not None:
                 try:
@@ -588,8 +608,31 @@ def drive_one(script, repeats: int, project_root: Path,
                     )
                 except (FileNotFoundError, json.JSONDecodeError, OSError):
                     previous_progress = {}
+            persisted_lock_chunk_size = int(
+                previous_progress.get("current_lock_chunk_size", 0)
+            )
+            requested_initial = (
+                persisted_lock_chunk_size
+                if persisted_lock_chunk_size > 0
+                else initial_lock_chunk_size
+            )
+            current_lock_chunk_size = max(
+                1,
+                min(
+                    lock_chunk_size,
+                    requested_initial
+                    if requested_initial is not None
+                    else lock_chunk_size,
+                ),
+            )
             adaptive_batch_reductions = int(
                 previous_progress.get("adaptive_batch_reductions", 0)
+            )
+            adaptive_lock_increases = int(
+                previous_progress.get("adaptive_lock_increases", 0)
+            )
+            low_lock_latency_streak = int(
+                previous_progress.get("low_lock_latency_streak", 0)
             )
             streamed_count = 0
             batch_next_row = start_row
@@ -623,6 +666,7 @@ def drive_one(script, repeats: int, project_root: Path,
                 nonlocal max_batch_size, max_batch_seconds
                 nonlocal batch_seconds_ema, timed_batches
                 nonlocal current_lock_chunk_size, adaptive_batch_reductions
+                nonlocal adaptive_lock_increases, low_lock_latency_streak
                 last_batch_size = size
                 last_batch_seconds = elapsed
                 timed_batches += 1
@@ -633,15 +677,24 @@ def drive_one(script, repeats: int, project_root: Path,
                     elapsed if timed_batches == 1
                     else 0.2 * elapsed + 0.8 * batch_seconds_ema
                 )
+                prior_lock_chunk_size = current_lock_chunk_size
+                (
+                    current_lock_chunk_size,
+                    low_lock_latency_streak,
+                    lock_change,
+                ) = adapt_lock_chunk_size(
+                    lock_chunk_size,
+                    current_lock_chunk_size,
+                    elapsed,
+                    max_live_batch_seconds,
+                    low_lock_latency_streak,
+                )
+                if lock_change == "reduced":
+                    adaptive_batch_reductions += 1
+                elif lock_change == "increased":
+                    adaptive_lock_increases += 1
                 if (max_live_batch_seconds > 0
                         and elapsed > max_live_batch_seconds):
-                    prior_lock_chunk_size = current_lock_chunk_size
-                    scaled = max(
-                        1, int(size * max_live_batch_seconds / elapsed)
-                    )
-                    if scaled < current_lock_chunk_size:
-                        current_lock_chunk_size = scaled
-                        adaptive_batch_reductions += 1
                     if progress_path is not None:
                         append_slow_batch_event(progress_path, {
                             "kind": "slow_pretrain_transaction",
@@ -683,6 +736,8 @@ def drive_one(script, repeats: int, project_root: Path,
                         "current_batch_size": current_batch_size,
                         "current_lock_chunk_size": current_lock_chunk_size,
                         "adaptive_batch_reductions": adaptive_batch_reductions,
+                        "adaptive_lock_increases": adaptive_lock_increases,
+                        "low_lock_latency_streak": low_lock_latency_streak,
                         "skipped_rows": summary["skipped_rows"],
                         "updated_unix": time.time(),
                     })
@@ -945,7 +1000,11 @@ def main(argv: list[str] | None = None) -> int:
                      help="direct-pretrain episodes per request (1..256); "
                           "smaller batches keep live inference responsive")
     p.add_argument("--lock-chunk-size", type=int, default=12,
-                   help="maximum ordered episodes held under one server lock")
+                    help="maximum ordered episodes held under one server lock")
+    p.add_argument(
+        "--initial-lock-chunk-size", type=int,
+        help="conservative starting lock scope; may grow toward --lock-chunk-size",
+    )
     p.add_argument("--max-batch-seconds", type=float, default=0.0,
                      help="adapt the direct-pretrain batch downward within a "
                           "run when an acknowledged batch exceeds this live-"
@@ -1002,6 +1061,14 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--batch-size must be between 1 and 256")
     if not 1 <= args.lock_chunk_size <= 32:
         p.error("--lock-chunk-size must be between 1 and 32")
+    if (
+        args.initial_lock_chunk_size is not None
+        and not 1 <= args.initial_lock_chunk_size <= args.lock_chunk_size
+    ):
+        p.error(
+            "--initial-lock-chunk-size must be between 1 and "
+            "--lock-chunk-size"
+        )
     if args.durable_start_row is not None and not 0 <= args.durable_start_row <= args.start_row:
         p.error("--durable-start-row must be between 0 and --start-row")
     skip_ranges: list[tuple[int, int]] = []
@@ -1054,6 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
                             input_path=args.input_path,
                             batch_size=args.batch_size,
                             lock_chunk_size=args.lock_chunk_size,
+                            initial_lock_chunk_size=args.initial_lock_chunk_size,
                             progress_path=args.progress_path,
                             checkpoint_rows=args.checkpoint_rows,
                             feature_policy=args.feature_policy,

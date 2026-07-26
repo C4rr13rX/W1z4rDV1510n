@@ -565,6 +565,16 @@ pub struct InstructionIntentEncoding {
     pub prefix: String,
 }
 
+fn contains_ascii_term(text: &str, term: &str) -> bool {
+    text.match_indices(term).any(|(start, matched)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + matched.len()..].chars().next();
+        let is_identifier = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+        before.map_or(true, |ch| !is_identifier(ch))
+            && after.map_or(true, |ch| !is_identifier(ch))
+    })
+}
+
 impl AtomEncoding for InstructionIntentEncoding {
     fn atomize(&self, frame: &[u8]) -> Vec<String> {
         let text = String::from_utf8_lossy(frame).to_ascii_lowercase();
@@ -680,15 +690,17 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("odd") || text.contains("odd parity") {
             emit("PARITY:ODD");
         }
+        let word_term =
+            contains_ascii_term(&text, "word") || contains_ascii_term(&text, "words");
         if text.contains("increment")
             || text.contains("increments")
             || text.contains("repeated words")
             || text.contains("increase their stored total")
-            || (text.contains("word") && text.contains("count"))
+            || (word_term && text.contains("count"))
         {
             emit("STATE:INCREMENT_COUNT");
         }
-        if text.contains("word")
+        if word_term
             && (text.contains("frequency")
                 || text.contains("frequencies")
                 || text.contains("occurrence")
