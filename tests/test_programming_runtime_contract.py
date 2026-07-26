@@ -54,6 +54,7 @@ from scripts.programming_curriculum_supervisor import (
     run_admission_json_command,
     run_admission_operation,
     run_canary_json_command,
+    run_phase,
     release_supervisor_claim,
     require_snapshot_copy_headroom,
     runtime_responsive_batch_size,
@@ -122,6 +123,7 @@ from tools.training_standard.drive_corpora_brain import (
     checkpoint_due,
     drive_one,
     post_pretrain_batch,
+    read_corpus_jsonl,
     row_is_skipped,
 )
 
@@ -133,6 +135,40 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertEqual(client.conn.timeout, 180.0)
         client.conn.close()
+
+    def test_exact_block_boundary_never_launches_one_extra_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            phase = Phase(
+                "corpus", "script", runtime / "corpus.jsonl", 100
+            )
+            publish(runtime / "corpus.progress.json", {
+                "ram_next_row": 10,
+                "durable_next_row": 10,
+            })
+            with patch(
+                "scripts.programming_curriculum_supervisor.subprocess.Popen"
+            ) as worker:
+                result = run_phase(
+                    SimpleNamespace(),
+                    phase,
+                    runtime,
+                    runtime / "status.json",
+                    10,
+                )
+            self.assertEqual(result, 0)
+            worker.assert_not_called()
+
+    def test_zero_row_corpus_window_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory) / "corpus.jsonl"
+            corpus.write_text(
+                '{"prompt":"one","response":"two"}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                read_corpus_jsonl(corpus, limit_rows=0), []
+            )
 
     def test_mobile_runtime_gate_requires_latency_scope_and_idle_identity(
             self) -> None:

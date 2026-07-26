@@ -1387,7 +1387,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
               status_path: Path, block_target_row: int) -> int:
     progress = runtime / f"{phase.name}.progress.json"
     ram, durable = phase_offsets(progress)
-    if ram >= phase.rows:
+    if ram >= phase.rows or ram >= block_target_row:
         return 0
     stdout_path = runtime / f"{phase.name}.stdout.log"
     stderr_path = runtime / f"{phase.name}.stderr.log"

@@ -333,6 +333,8 @@ def iter_corpus_jsonl(path: Path, *, skip_rows: int = 0,
     if not path.exists():
         return
     emitted = 0
+    if limit_rows is not None and limit_rows <= 0:
+        return
     valid_index = 0
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
