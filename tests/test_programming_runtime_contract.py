@@ -28,6 +28,7 @@ from scripts.programming_curriculum_supervisor import (
     ensure_live_last_good_guard,
     finalize_canary_restore,
     guarded_block_target,
+    guard_state_identity,
     deferred_interval_id,
     latest_passing_canary_row,
     next_suspect_start,
@@ -1104,6 +1105,52 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             )
             self.assertFalse(second.parent.exists())
             self.assertTrue(unknown.exists())
+
+    def test_regenerated_guard_for_same_proven_state_reuses_causal_base(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"first-accepted-container")
+            metadata = {
+                "phase": "corpus",
+                "row": 100,
+                "storage": "wbrain",
+                "guard": str(guard),
+                "checkpoint_proof": {
+                    "topology": {
+                        "tick": 7,
+                        "pool_count": 2,
+                        "total_neurons": 11,
+                        "binding_posting_generations": 3,
+                    },
+                },
+            }
+            (brain / "brain.last-good.json").write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+            first_id = deferred_interval_id("corpus", 100, 110)
+            first = preserve_deferred_base(runtime, first_id)
+            identity = guard_state_identity(metadata)
+            append_deferred_event(runtime, {
+                "interval_id": first_id,
+                "phase": "corpus",
+                "start_row": 100,
+                "end_row": 110,
+                "status": "deferred",
+                "base_snapshot": str(first),
+                "base_state_identity": identity,
+            })
+
+            guard.unlink()
+            guard.write_bytes(b"regenerated-equivalent-container")
+            second = preserve_deferred_base(
+                runtime, deferred_interval_id("corpus", 110, 120)
+            )
+            self.assertTrue(first.samefile(second))
+            self.assertEqual(second.read_bytes(), b"first-accepted-container")
+            self.assertFalse(second.samefile(guard))
 
     def test_live_guard_owns_checkpoint_barrier_and_topology_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -612,6 +612,27 @@ def deferred_interval_id(phase: str, start_row: int, end_row: int) -> str:
     return f"{phase}:{start_row}:{end_row}"
 
 
+def guard_state_identity(metadata: dict) -> str:
+    """Identify one topology-proven accepted state across regenerated guards."""
+    proof = metadata.get("checkpoint_proof")
+    topology = proof.get("topology") if isinstance(proof, dict) else None
+    if not isinstance(topology, dict) or not topology:
+        return ""
+    row = metadata.get("row")
+    phase = metadata.get("phase")
+    if not isinstance(row, int) or not isinstance(phase, str) or not phase:
+        return ""
+    payload = {
+        "phase": phase,
+        "row": row,
+        "storage": metadata.get("storage"),
+        "topology": topology,
+    }
+    return hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+
 def valid_deferred_interval(event: dict, phase: str | None = None) -> bool:
     """Accept only well-formed half-open corpus ranges."""
     start = event.get("start_row")
@@ -637,20 +658,31 @@ def preserve_deferred_base(runtime: Path, interval_id: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     base = directory / f"brain.base{guard.suffix}"
     if not base.exists():
+        state_identity = guard_state_identity(metadata)
+        reusable: Path | None = None
+        if state_identity:
+            for event in unresolved_deferred_intervals(runtime):
+                candidate = Path(str(event.get("base_snapshot") or ""))
+                if (event.get("base_state_identity") == state_identity
+                        and candidate.is_file()):
+                    reusable = candidate
+                    break
         # The last-good guard is already an immutable, independent inode. A
         # hard link to that guard remains isolated from the mutable live
         # `.wbrain`; rollback copies the guard into a new live inode before
         # the guard name is removed. This avoids another tens-of-gigabytes
         # copy for every quarantined interval while retaining its exact base.
+        link_source = reusable or guard
         try:
-            os.link(guard, base)
+            os.link(link_source, base)
         except OSError:
             # Cross-volume or link-restricted filesystems retain the slower
             # but portable independent-copy fallback.
             require_snapshot_copy_headroom(
-                guard, copies=1, operation="deferred causal-base fallback"
+                link_source, copies=1,
+                operation="deferred causal-base fallback"
             )
-            shutil.copy2(guard, base)
+            shutil.copy2(link_source, base)
     return base
 
 
@@ -824,6 +856,7 @@ def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
             "start_row": suspect_start,
             "end_row": suspect_end,
             "base_snapshot": str(base_snapshot),
+            "base_state_identity": guard_state_identity(last_good),
             "base_row": int(last_good.get("row") or 0),
             "reason": reason,
             "error": error,
