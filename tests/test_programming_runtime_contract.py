@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import os
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from scripts.programming_curriculum_supervisor import (
     accept_last_good_guard,
     append_deferred_event,
     assert_training_not_quarantined,
+    claim_curriculum_supervisor,
     ensure_last_good_guard,
     ensure_live_last_good_guard,
     finalize_canary_restore,
@@ -38,6 +40,7 @@ from scripts.programming_curriculum_supervisor import (
     recall_command,
     restore_canary_quarantine,
     responsive_batch_size,
+    release_supervisor_claim,
     require_snapshot_copy_headroom,
     runtime_responsive_batch_size,
     settle_brain_for_admission,
@@ -102,6 +105,32 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_curriculum_supervisor_claim_rejects_live_runtime_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.programming_curriculum_supervisor."
+            "matching_live_supervisor_pid",
+            return_value=777,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "already owns"):
+                claim_curriculum_supervisor(Path(directory))
+
+    def test_curriculum_supervisor_claim_replaces_stale_pid_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.programming_curriculum_supervisor."
+            "matching_live_supervisor_pid",
+            return_value=0,
+        ), patch(
+            "scripts.programming_curriculum_supervisor.process_alive",
+            return_value=False,
+        ):
+            runtime = Path(directory)
+            claim = runtime / "curriculum-supervisor.pid"
+            claim.write_text("999999\n", encoding="ascii")
+            self.assertEqual(claim_curriculum_supervisor(runtime), claim)
+            self.assertEqual(int(claim.read_text(encoding="ascii")), os.getpid())
+            release_supervisor_claim(claim, os.getpid())
+            self.assertFalse(claim.exists())
+
     def test_slow_microbrain_replay_deduplicates_ranges_and_keeps_latest(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             ledger = Path(raw) / "slow.jsonl"

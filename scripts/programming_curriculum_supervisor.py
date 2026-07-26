@@ -9,6 +9,7 @@ checkpoint accounting resumes from the separately recorded durable offset.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import shutil
@@ -68,6 +69,74 @@ def process_alive(pid: int) -> bool:
     except psutil.Error:
         # The process can exit between pid_exists and Process construction.
         return False
+
+
+def matching_live_supervisor_pid(runtime: Path) -> int:
+    """Return another Python supervisor already owning this runtime."""
+    runtime_token = str(runtime.resolve()).casefold()
+    for process in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if process.pid == os.getpid():
+                continue
+            name = str(process.info.get("name") or "").casefold()
+            command = " ".join(process.info.get("cmdline") or []).casefold()
+            if (
+                name.startswith("python")
+                and "programming_curriculum_supervisor.py" in command
+                and runtime_token in command
+            ):
+                return process.pid
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return 0
+
+
+def release_supervisor_claim(path: Path, pid: int) -> None:
+    try:
+        if int(path.read_text(encoding="ascii").strip()) == pid:
+            path.unlink()
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+
+
+def claim_curriculum_supervisor(runtime: Path) -> Path:
+    """Atomically claim one supervisor per runtime, recovering stale PID files."""
+    live_pid = matching_live_supervisor_pid(runtime)
+    if live_pid:
+        raise RuntimeError(
+            f"curriculum supervisor PID {live_pid} already owns {runtime}"
+        )
+    path = runtime / "curriculum-supervisor.pid"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(3):
+        try:
+            descriptor = os.open(
+                path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            )
+        except FileExistsError:
+            try:
+                recorded_pid = int(
+                    path.read_text(encoding="ascii").strip()
+                )
+            except (FileNotFoundError, OSError, ValueError):
+                recorded_pid = 0
+            if process_alive(recorded_pid):
+                raise RuntimeError(
+                    f"curriculum supervisor claim is held by live PID "
+                    f"{recorded_pid}: {path}"
+                )
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+            stream.write(f"{os.getpid()}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        atexit.register(release_supervisor_claim, path, os.getpid())
+        return path
+    raise RuntimeError(f"could not atomically claim curriculum supervisor: {path}")
 
 
 def publish(path: Path, payload: dict) -> None:
@@ -1325,6 +1394,7 @@ def main() -> int:
         help="also train the canonical algorithms and GSM8K phases used by a fresh brain",
     )
     args = parser.parse_args()
+    claim_curriculum_supervisor(args.runtime.resolve())
     if (args.auto_quarantine_recovery or args.restart_node_after_attach) \
             and args.node_bin is None:
         parser.error(
