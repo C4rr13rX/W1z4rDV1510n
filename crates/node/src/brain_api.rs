@@ -4234,6 +4234,8 @@ mod tests {
             .to_vec();
         let misleading_terms =
             b"def keyword_token(password):\n    return {'word': password}".to_vec();
+        let password_hash = b"def make_password(password, salt=None):\n    if not salt:\n        salt = hasher.salt()\n    return hasher.encode(password, salt)"
+            .to_vec();
         let frequency = b"def word_freq(text):\n    out = {}\n    for word in text.split():\n        out[word] = out.get(word, 0) + 1\n    return out"
             .to_vec();
         assert!(!programming_response_compatible(&labels, &increment));
@@ -4242,16 +4244,27 @@ mod tests {
             &labels,
             &misleading_terms
         ));
+        assert!(!programming_response_compatible(&labels, &password_hash));
         assert!(programming_response_compatible(&labels, &frequency));
         assert!(!derived_feature_artifact_compatible(
             &labels,
             &call_count
         ));
+        assert!(!derived_feature_artifact_compatible(
+            &labels,
+            &password_hash
+        ));
         assert!(derived_feature_artifact_compatible(&labels, &frequency));
         assert_eq!(
             single_language_ranked_source(
                 &labels,
-                &[increment, call_count, misleading_terms, frequency.clone()]
+                &[
+                    increment,
+                    call_count,
+                    misleading_terms,
+                    password_hash,
+                    frequency.clone(),
+                ]
             ),
             Some(frequency)
         );
@@ -4266,8 +4279,11 @@ mod tests {
         ];
         let redis_remove =
             b"def srem(self, key, *members):\n    return self.execute('SREM', key, members)";
+        let time_grid = b"def grid_time(time):\n    nt = time.shape[0]\n    weights = np.linalg.lstsq(np.arange(nt), time)[0]\n    return weights[0] * np.arange(nt)";
         let mean = b"def avg_list(values):\n    return sum(values) / len(values) if values else 0";
         assert!(!programming_response_compatible(&average, redis_remove));
+        assert!(!programming_response_compatible(&average, time_grid));
+        assert!(!derived_feature_artifact_compatible(&average, time_grid));
         assert!(programming_response_compatible(&average, mean));
 
         let odd = vec![
