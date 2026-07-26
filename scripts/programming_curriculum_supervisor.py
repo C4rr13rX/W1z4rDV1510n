@@ -45,6 +45,25 @@ MIN_COPY_RESERVE_BYTES = 64 * 1024 * 1024
 MAX_COPY_RESERVE_BYTES = 4 * 1024 * 1024 * 1024
 
 
+class GateCommandFailure(RuntimeError):
+    """A gate subprocess failed after it was launched successfully."""
+
+    def __init__(self, command: list[str], returncode: int,
+                 stdout: str, stderr: str) -> None:
+        self.command = tuple(command)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(
+            f"gate command failed ({returncode}): {' '.join(command)}\n"
+            f"stdout: {stdout[-4000:]}\nstderr: {stderr[-2000:]}"
+        )
+
+
+class CanaryInfrastructureError(Exception):
+    """Read-only canary could not complete for a non-semantic reason."""
+
+
 @dataclass(frozen=True)
 class Phase:
     name: str
@@ -551,14 +570,68 @@ def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
         timeout=timeout, check=False,
     )
     if run.returncode != 0:
-        raise RuntimeError(
-            f"gate command failed ({run.returncode}): {' '.join(command)}\n"
-            f"stdout: {run.stdout[-4000:]}\nstderr: {run.stderr[-2000:]}"
+        raise GateCommandFailure(
+            command, run.returncode, run.stdout, run.stderr
         )
     lines = [line for line in run.stdout.splitlines() if line.strip()]
     if not lines:
         raise RuntimeError(f"gate command produced no JSON: {' '.join(command)}")
     return json.loads(lines[-1])
+
+
+def transient_gate_failure(error: BaseException) -> bool:
+    """Separate transport/resource failures from behavioral regressions."""
+    if isinstance(error, (
+        subprocess.TimeoutExpired,
+        TimeoutError,
+        urllib.error.URLError,
+        ConnectionError,
+    )):
+        return True
+    if not isinstance(error, GateCommandFailure):
+        return False
+    diagnostic = f"{error.stdout}\n{error.stderr}".casefold()
+    return any(marker in diagnostic for marker in (
+        "timeouterror",
+        "timed out",
+        "connectionrefusederror",
+        "connectionreseterror",
+        "remotedisconnected",
+        "connection aborted",
+        "connection refused",
+        "urlerror",
+    ))
+
+
+def run_canary_json_command(
+        runtime: Path, phase: Phase, trained_rows: int, stage: str,
+        command: list[str], timeout: float = 900.0,
+        attempts: int = 4) -> dict:
+    """Retry transient read-only evaluator failures without quarantining data."""
+    last_error: BaseException | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return run_json_command(command, timeout=timeout)
+        except RECOVERABLE_GATE_ERRORS as error:
+            if not transient_gate_failure(error):
+                raise
+            last_error = error
+            append_health_event(runtime, {
+                "kind": "continuous_canary_infrastructure_retry",
+                "phase": phase.name,
+                "trained_rows": trained_rows,
+                "stage": stage,
+                "attempt": attempt,
+                "max_attempts": max(1, attempts),
+                "error": str(error),
+                "passed": None,
+            })
+            if attempt < max(1, attempts):
+                time.sleep(min(5.0, float(attempt)))
+    raise CanaryInfrastructureError(
+        f"{phase.name} row {trained_rows} {stage} remained unavailable "
+        f"after {max(1, attempts)} attempts: {last_error}"
+    ) from last_error
 
 
 def append_health_event(runtime: Path, event: dict) -> None:
@@ -1148,15 +1221,19 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
     progress_path = runtime / f"{phase.name}.progress.json"
     rows_before = phase_offsets(progress_path)
     stats_before = endpoint_json(args.endpoint, "/brain/stats")
-    recall = run_json_command(
-        recall_command(args, phase, runtime, trained_rows, 8), timeout=900.0
+    recall = run_canary_json_command(
+        runtime, phase, trained_rows, "recall",
+        recall_command(args, phase, runtime, trained_rows, 8),
+        timeout=900.0,
     )
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(f"continuous recall regression: {recall}")
-    foundation = run_json_command([
-        sys.executable, "scripts/programming_brain_eval.py",
-        "--endpoint", args.endpoint,
-    ], timeout=900.0)
+    foundation = run_canary_json_command(
+        runtime, phase, trained_rows, "foundation", [
+            sys.executable, "scripts/programming_brain_eval.py",
+            "--endpoint", args.endpoint,
+        ], timeout=900.0,
+    )
     for passed_key, total_key in (
         ("toddler_exact", "toddler_total"),
         ("k12_trained_answer", "k12_total"),
@@ -1164,10 +1241,12 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
     ):
         if foundation.get(passed_key) != foundation.get(total_key):
             raise RuntimeError(f"continuous foundation regression: {foundation}")
-    code = run_json_command([
-        sys.executable, "scripts/programming_code_eval.py",
-        "--endpoint", args.endpoint, "--details",
-    ], timeout=900.0)
+    code = run_canary_json_command(
+        runtime, phase, trained_rows, "code", [
+            sys.executable, "scripts/programming_code_eval.py",
+            "--endpoint", args.endpoint, "--details",
+        ], timeout=900.0,
+    )
     for kind in ("trained", "novel_paraphrase"):
         group = (code.get("summary") or {}).get(kind) or {}
         if (group.get("executes") != group.get("count")
@@ -1284,6 +1363,32 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         run_continuous_canary(
                             args, phase, runtime, candidate_row
                         )
+                    except CanaryInfrastructureError as exc:
+                        worker.terminate()
+                        try:
+                            worker.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            worker.kill()
+                            worker.wait(timeout=30)
+                        failed_ram, failed_durable = phase_offsets(progress)
+                        append_health_event(runtime, {
+                            "kind": "continuous_canary_infrastructure_paused",
+                            "phase": phase.name,
+                            "trained_rows": failed_durable,
+                            "canary_started_row": candidate_row,
+                            "error": str(exc),
+                            "passed": None,
+                        })
+                        publish(status_path, {
+                            "state": "continuous_canary_infrastructure_paused",
+                            "phase": phase.name,
+                            "canary_started_row": candidate_row,
+                            "ram_next_row": failed_ram,
+                            "durable_next_row": failed_durable,
+                            "error": str(exc),
+                            "updated_unix": time.time(),
+                        })
+                        return 87
                     except RECOVERABLE_GATE_ERRORS as exc:
                         worker.terminate()
                         try:
@@ -2011,6 +2116,33 @@ def main() -> int:
                     run_continuous_canary(
                         args, attach_phase, runtime, candidate_row
                     )
+                except CanaryInfrastructureError as exc:
+                    try:
+                        attached_process = psutil.Process(args.attach_pid)
+                        attached_process.terminate()
+                        attached_process.wait(timeout=30)
+                    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                        pass
+                    failed_ram, failed_durable = phase_offsets(
+                        runtime / f"{attach_phase.name}.progress.json"
+                    )
+                    append_health_event(runtime, {
+                        "kind": "attached_continuous_canary_infrastructure_paused",
+                        "phase": attach_phase.name,
+                        "trained_rows": failed_durable,
+                        "canary_started_row": candidate_row,
+                        "error": str(exc),
+                        "passed": None,
+                    })
+                    publish(status_path, {
+                        "state": "continuous_canary_infrastructure_paused",
+                        "phase": attach_phase.name,
+                        "ram_next_row": failed_ram,
+                        "durable_next_row": failed_durable,
+                        "error": str(exc),
+                        "updated_unix": time.time(),
+                    })
+                    return 1
                 except RECOVERABLE_GATE_ERRORS as exc:
                     try:
                         attached_process = psutil.Process(args.attach_pid)
@@ -2155,6 +2287,11 @@ def main() -> int:
                         args, phase, runtime, status_path):
                     restarts = 0
                     continue
+                return 1
+            if code == 87:
+                # The candidate remains guarded and unadmitted. A fresh
+                # supervisor can retry the read-only canary without either
+                # replaying or falsely quarantining its corpus rows.
                 return 1
             if code == 0 and ram_after >= phase.rows:
                 continue

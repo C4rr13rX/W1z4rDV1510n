@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.programming_integrated_retention import mutation_enabled
 from scripts.programming_curriculum_supervisor import (
+    CanaryInfrastructureError,
+    GateCommandFailure,
     Phase,
     accept_last_good_guard,
     append_deferred_event,
@@ -45,12 +48,14 @@ from scripts.programming_curriculum_supervisor import (
     recall_command,
     restore_canary_quarantine,
     responsive_batch_size,
+    run_canary_json_command,
     release_supervisor_claim,
     require_snapshot_copy_headroom,
     runtime_responsive_batch_size,
     settle_brain_for_admission,
     suspect_intervals,
     topology_delta,
+    transient_gate_failure,
     unresolved_deferred_intervals,
     valid_deferred_interval,
     verify_restored_topology,
@@ -112,6 +117,91 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_canary_transport_timeout_is_not_semantic_regression(self) -> None:
+        timeout = GateCommandFailure(
+            ["python", "eval.py"], 1, "",
+            "TimeoutError: timed out while reading response",
+        )
+        regression = GateCommandFailure(
+            ["python", "eval.py"], 1, "",
+            "novel_paraphrase executes 4/5",
+        )
+        self.assertTrue(transient_gate_failure(timeout))
+        self.assertFalse(transient_gate_failure(regression))
+
+    def test_canary_transport_retry_passes_without_deferred_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            failure = subprocess.CompletedProcess(
+                ["python", "eval.py"], 1, "",
+                "TimeoutError: timed out",
+            )
+            success = subprocess.CompletedProcess(
+                ["python", "eval.py"], 0, '{"passed": true}\n', "",
+            )
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.subprocess.run",
+                    side_effect=[failure, success],
+                ) as run,
+                patch(
+                    "scripts.programming_curriculum_supervisor.time.sleep"
+                ),
+            ):
+                result = run_canary_json_command(
+                    runtime,
+                    Phase("corpus", "script", Path("corpus.jsonl"), 100),
+                    64,
+                    "foundation",
+                    ["python", "eval.py"],
+                )
+            self.assertTrue(result["passed"])
+            self.assertEqual(run.call_count, 2)
+            events = [
+                json.loads(line)
+                for line in (runtime / "curriculum-health.jsonl")
+                .read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                events[0]["kind"],
+                "continuous_canary_infrastructure_retry",
+            )
+            self.assertIsNone(events[0]["passed"])
+            self.assertFalse(
+                (runtime / "curriculum-deferred-intervals.jsonl").exists()
+            )
+
+    def test_exhausted_canary_transport_does_not_become_runtime_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            failure = subprocess.CompletedProcess(
+                ["python", "eval.py"], 1, "",
+                "ConnectionResetError: peer reset the connection",
+            )
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.subprocess.run",
+                    return_value=failure,
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.time.sleep"
+                ),
+            ):
+                with self.assertRaises(CanaryInfrastructureError):
+                    run_canary_json_command(
+                        runtime,
+                        Phase(
+                            "corpus", "script", Path("corpus.jsonl"), 100
+                        ),
+                        64,
+                        "foundation",
+                        ["python", "eval.py"],
+                        attempts=2,
+                    )
+            self.assertFalse(
+                (runtime / "curriculum-deferred-intervals.jsonl").exists()
+            )
+
     def test_curriculum_supervisor_claim_rejects_live_runtime_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch(
             "scripts.programming_curriculum_supervisor."
