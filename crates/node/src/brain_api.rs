@@ -1676,6 +1676,35 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim_start();
     let lowercase = text.to_ascii_lowercase();
+    let intent_requires = |suffix: &str, evidence: &[&str]| {
+        !labels.iter().any(|label| label.ends_with(suffix))
+            || evidence
+                .iter()
+                .any(|candidate| lowercase.contains(candidate))
+    };
+    if !intent_requires(
+        ":MATH:AVERAGE",
+        &[
+            "sum(",
+            ".mean(",
+            " mean(",
+            "fmean(",
+            "average(",
+            "statistics.mean",
+            "statistics.fmean",
+        ],
+    ) {
+        return false;
+    }
+    if !intent_requires(":PARITY:ODD", &["% 2", "%2", "& 1", "&1"]) {
+        return false;
+    }
+    if !intent_requires(
+        ":COMPARISON:LESS_THAN_ZERO",
+        &["< 0", "<0", ".is_negative(", "signbit("],
+    ) {
+        return false;
+    }
     if labels
         .iter()
         .any(|label| label.ends_with(":TEXT:WORD_FREQUENCY"))
@@ -2340,7 +2369,7 @@ async fn h_brain_chat(
     let mut inhibited_feature_pools = std::collections::HashSet::new();
     let mut directly_underspecified = false;
     for pool_id in feature_pools.iter().copied() {
-        let mut labels = brain
+        let labels = brain
             .fabric()
             .pool(pool_id)
             .map(|pool| pool.read().encoded_labels(prompt.as_bytes()))
@@ -2364,37 +2393,12 @@ async fn h_brain_chat(
             semantic_refinement_score = Some(*score);
             semantic_refinement_margin = Some(*margin);
         }
-        let learned_frame = learned_route.as_ref().map(|(bytes, _, _)| bytes.as_slice());
-        let mut effective_owned: Option<Vec<u8>> = None;
-        if let Some(frame) = learned_frame {
-            let learned_labels = brain
-                .fabric()
-                .pool(pool_id)
-                .map(|pool| pool.read().encoded_labels(frame))
-                .unwrap_or_default();
-            let removes_one_spurious_diagnostic = learned_labels.len() == 2
-                && labels.len() == 3
-                && learned_labels.iter().all(|label| labels.contains(label));
-            let route_score = learned_route
-                .as_ref()
-                .map(|(_, score, _)| *score)
-                .unwrap_or(0.0);
-            let route_margin = learned_route
-                .as_ref()
-                .map(|(_, _, margin)| *margin)
-                .unwrap_or(0.0);
-            let reliable_removal =
-                route_score >= 0.39 && route_margin >= 0.025 && removes_one_spurious_diagnostic;
-            if reliable_removal
-                && !learned_labels
-                    .iter()
-                    .any(|label| label.ends_with(":GROUNDING:UNDERSPECIFIED"))
-            {
-                labels = learned_labels;
-                effective_owned = Some(frame.to_vec());
-            }
-        }
-        let effective_frame = effective_owned.as_deref().unwrap_or(prompt.as_bytes());
+        // Deterministic sensory features are direct evidence. A fuzzy route
+        // may recover an intent below when the surface sensor cannot ground
+        // one, but it must not delete a directly observed behavior while
+        // retaining only its language and a generic modifier. If a surface
+        // extractor proves over-broad, correct that extractor explicitly.
+        let effective_frame = prompt.as_bytes();
         // A lone diagnostic (most commonly only LANGUAGE:PYTHON) is too
         // broad to establish task grounding. Require a co-firing composition
         // such as LANGUAGE + BEHAVIOR before derived evidence may influence
@@ -4101,6 +4105,40 @@ mod tests {
             ),
             Some(frequency)
         );
+    }
+
+    #[test]
+    fn behavioral_intents_reject_language_shaped_but_unrelated_sources() {
+        let average = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:MATH:AVERAGE".to_string(),
+            "instruction_intent:GUARD:EMPTY_INPUT".to_string(),
+        ];
+        let redis_remove =
+            b"def srem(self, key, *members):\n    return self.execute('SREM', key, members)";
+        let mean = b"def avg_list(values):\n    return sum(values) / len(values) if values else 0";
+        assert!(!programming_response_compatible(&average, redis_remove));
+        assert!(programming_response_compatible(&average, mean));
+
+        let odd = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:PARITY:ODD".to_string(),
+        ];
+        assert!(!programming_response_compatible(&odd, mean));
+        assert!(programming_response_compatible(
+            &odd,
+            b"def odd(values):\n    return [value for value in values if value % 2]"
+        ));
+
+        let negative = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:COMPARISON:LESS_THAN_ZERO".to_string(),
+        ];
+        assert!(!programming_response_compatible(&negative, mean));
+        assert!(programming_response_compatible(
+            &negative,
+            b"def negative(value):\n    return value < 0"
+        ));
     }
 
     #[test]
