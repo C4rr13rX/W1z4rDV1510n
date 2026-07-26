@@ -474,8 +474,16 @@ def append_health_event(runtime: Path, event: dict) -> None:
         os.fsync(stream.fileno())
 
 
-def latest_passing_canary_row(runtime: Path, phase: str, floor: int) -> int:
-    """Return the latest durable behavioral boundary known to be green."""
+def latest_passing_canary_row(runtime: Path, phase: str, floor: int,
+                              before_row: int | None = None,
+                              after_unix: float = 0.0) -> int:
+    """Return the latest green boundary in the current guarded epoch.
+
+    A logical row can be revisited after rollback with a different set of
+    deferred intervals.  A green canary from the earlier state is therefore
+    not evidence about the rebuilt state at the same row.  Callers may scope
+    the lookup to events published after the current last-good guard.
+    """
     latest = floor
     path = runtime / "curriculum-health.jsonl"
     try:
@@ -489,7 +497,9 @@ def latest_passing_canary_row(runtime: Path, phase: str, floor: int) -> int:
                 if (event.get("kind") == "continuous_canary"
                         and event.get("phase") == phase
                         and event.get("passed") is True
-                        and isinstance(row, int)):
+                        and isinstance(row, int)
+                        and (before_row is None or row < before_row)
+                        and float(event.get("updated_unix") or 0.0) >= after_unix):
                     latest = max(latest, row)
     except (FileNotFoundError, OSError):
         pass
@@ -502,6 +512,20 @@ def deferred_intervals_path(runtime: Path) -> Path:
 
 def deferred_interval_id(phase: str, start_row: int, end_row: int) -> str:
     return f"{phase}:{start_row}:{end_row}"
+
+
+def valid_deferred_interval(event: dict, phase: str | None = None) -> bool:
+    """Accept only well-formed half-open corpus ranges."""
+    start = event.get("start_row")
+    end = event.get("end_row")
+    return (
+        isinstance(start, int)
+        and not isinstance(start, bool)
+        and isinstance(end, int)
+        and not isinstance(end, bool)
+        and 0 <= start < end
+        and (phase is None or event.get("phase") == phase)
+    )
 
 
 def preserve_deferred_base(runtime: Path, interval_id: str) -> Path:
@@ -554,7 +578,8 @@ def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> li
                     continue
                 if event.get("status") == "resolved":
                     current.pop(interval_id, None)
-                elif event.get("status") == "deferred":
+                elif (event.get("status") == "deferred"
+                      and valid_deferred_interval(event)):
                     current[interval_id] = event
     except (FileNotFoundError, OSError):
         pass
@@ -567,18 +592,26 @@ def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> li
 
 
 def next_suspect_start(runtime: Path, phase: str, candidate_row: int,
-                       floor: int) -> int:
+                       floor: int, canary_after_unix: float = 0.0) -> int:
     """Start after both the latest green canary and prior quarantines.
 
     A canary immediately following one or more skipped ranges must not create
     a new interval that overlaps those same ranges merely because no green
     canary exists inside quarantined data.
     """
-    start = latest_passing_canary_row(runtime, phase, floor)
+    start = latest_passing_canary_row(
+        runtime, phase, floor,
+        before_row=candidate_row,
+        after_unix=canary_after_unix,
+    )
+    # Advance only through deferred coverage contiguous with the current
+    # boundary.  Jumping across an untested accepted gap would erase the very
+    # rows that a failed canary must attribute.
     for interval in unresolved_deferred_intervals(runtime, phase):
-        end = interval.get("end_row")
-        if isinstance(end, int) and start < end <= candidate_row:
-            start = end
+        interval_start = int(interval["start_row"])
+        interval_end = int(interval["end_row"])
+        if interval_start <= start < interval_end <= candidate_row:
+            start = interval_end
     return start
 
 
@@ -587,8 +620,14 @@ def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
     """Persist one failed interval before any rollback can erase its evidence."""
     last_good = read_json(runtime / "brain" / "brain.last-good.json")
     suspect_start = next_suspect_start(
-        runtime, phase.name, candidate_row, int(last_good.get("row") or 0)
+        runtime, phase.name, candidate_row, int(last_good.get("row") or 0),
+        float(last_good.get("created_unix") or 0.0),
     )
+    if suspect_start >= candidate_row:
+        raise RuntimeError(
+            "failed canary contains no newly trained, non-deferred rows: "
+            f"phase={phase.name} boundary={candidate_row}"
+        )
     interval_id = deferred_interval_id(phase.name, suspect_start, candidate_row)
     base_snapshot = preserve_deferred_base(runtime, interval_id)
     event = {
@@ -753,7 +792,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
 
     code = run_json_command([
         sys.executable, "scripts/programming_code_eval.py",
-        "--endpoint", args.endpoint,
+        "--endpoint", args.endpoint, "--details",
     ])
     for kind in ("trained", "novel_paraphrase"):
         group = (code.get("summary") or {}).get(kind) or {}
@@ -882,7 +921,7 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
             raise RuntimeError(f"continuous foundation regression: {foundation}")
     code = run_json_command([
         sys.executable, "scripts/programming_code_eval.py",
-        "--endpoint", args.endpoint,
+        "--endpoint", args.endpoint, "--details",
     ], timeout=900.0)
     for kind in ("trained", "novel_paraphrase"):
         group = (code.get("summary") or {}).get(kind) or {}

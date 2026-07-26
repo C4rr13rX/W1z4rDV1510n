@@ -94,6 +94,10 @@ def main() -> int:
                 "kind": kind, "function": function, "prompt": prompt,
                 "nonempty": bool(reply), "syntax_valid": syntax_valid(reply),
                 "executes": ran, "exact_training_response": reply == exemplar["response"],
+                "reply": reply,
+                "expected_training_response": exemplar["response"],
+                "call_args": call_args,
+                "expected_result": expected,
                 "error": error,
             })
     summary = {}

@@ -32,6 +32,7 @@ from scripts.programming_curriculum_supervisor import (
     phase_offsets,
     preserve_deferred_base,
     publish,
+    record_deferred_failure,
     recall_command,
     restore_canary_quarantine,
     responsive_batch_size,
@@ -39,6 +40,7 @@ from scripts.programming_curriculum_supervisor import (
     settle_brain_for_admission,
     topology_delta,
     unresolved_deferred_intervals,
+    valid_deferred_interval,
     verify_restored_topology,
 )
 from scripts.programming_enterprise_retention import run_suite, stable_structure
@@ -295,6 +297,18 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             )
             self.assertEqual(latest_passing_canary_row(runtime, "corpus", 100), 140)
             self.assertEqual(latest_passing_canary_row(runtime, "missing", 100), 100)
+            self.assertEqual(
+                latest_passing_canary_row(
+                    runtime, "corpus", 100, before_row=140
+                ),
+                120,
+            )
+            self.assertEqual(
+                latest_passing_canary_row(
+                    runtime, "corpus", 100, after_unix=1.0
+                ),
+                100,
+            )
 
     def test_quarantine_start_advances_past_existing_deferred_ranges(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -315,6 +329,90 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(
                 next_suspect_start(runtime, "corpus", 33536, 0), 32768
             )
+
+    def test_quarantine_epoch_does_not_reuse_pre_restore_canary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "curriculum-health.jsonl").write_text(
+                json.dumps({
+                    "kind": "continuous_canary", "phase": "corpus",
+                    "trained_rows": 16896, "passed": True,
+                    "updated_unix": 10.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            append_deferred_event(runtime, {
+                "interval_id": deferred_interval_id("corpus", 0, 16640),
+                "status": "deferred", "phase": "corpus",
+                "start_row": 0, "end_row": 16640,
+            })
+            self.assertEqual(
+                next_suspect_start(
+                    runtime, "corpus", 16896, 0, canary_after_unix=20.0
+                ),
+                16640,
+            )
+
+    def test_quarantine_does_not_jump_across_unexamined_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            for start, end in ((0, 100), (120, 200)):
+                append_deferred_event(runtime, {
+                    "interval_id": deferred_interval_id("corpus", start, end),
+                    "status": "deferred", "phase": "corpus",
+                    "start_row": start, "end_row": end,
+                })
+            self.assertEqual(
+                next_suspect_start(runtime, "corpus", 220, 0), 100
+            )
+
+    def test_zero_width_deferred_interval_is_never_replayed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            append_deferred_event(runtime, {
+                "interval_id": deferred_interval_id("corpus", 20, 20),
+                "status": "deferred", "phase": "corpus",
+                "start_row": 20, "end_row": 20,
+            })
+            self.assertFalse(valid_deferred_interval({
+                "phase": "corpus", "start_row": 20, "end_row": 20,
+            }))
+            self.assertEqual(unresolved_deferred_intervals(runtime), [])
+
+    def test_deferred_failure_attributes_only_new_epoch_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.bin"
+            guard.write_bytes(b"accepted")
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus",
+                "row": 0,
+                "guard": str(guard),
+                "created_unix": 20.0,
+            }), encoding="utf-8")
+            (runtime / "curriculum-health.jsonl").write_text(json.dumps({
+                "kind": "continuous_canary",
+                "phase": "corpus",
+                "trained_rows": 16896,
+                "passed": True,
+                "updated_unix": 10.0,
+            }) + "\n", encoding="utf-8")
+            append_deferred_event(runtime, {
+                "interval_id": deferred_interval_id("corpus", 0, 16640),
+                "status": "deferred", "phase": "corpus",
+                "start_row": 0, "end_row": 16640,
+            })
+            phase = Phase("corpus", "script", runtime / "corpus.jsonl", 100000)
+            event = record_deferred_failure(
+                runtime, phase, 16896, 16896,
+                "novel_paraphrase executes 4/5",
+                "continuous_canary_failed",
+            )
+            self.assertEqual(event["start_row"], 16640)
+            self.assertEqual(event["end_row"], 16896)
+            self.assertNotEqual(event["start_row"], event["end_row"])
 
     def test_continuous_canary_attributes_concurrent_topology_growth(self) -> None:
         self.assertEqual(
