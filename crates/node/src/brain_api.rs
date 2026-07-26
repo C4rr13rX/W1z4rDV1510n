@@ -1335,32 +1335,35 @@ fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> O
         .iter()
         .filter(|candidate| is_complete_file_manifest(candidate))
         .collect();
-    let required = requested_manifest_component_count(labels);
-    if manifests.len() < required {
+    if manifests.len() < 2 {
         return None;
     }
     fn search(
         labels: &[String],
         manifests: &[&Vec<u8>],
-        required: usize,
+        selection_size: usize,
         start: usize,
         selected: &mut Vec<usize>,
     ) -> Option<Vec<u8>> {
-        if selected.len() == required {
+        if selected.len() == selection_size {
             let selection: Vec<&Vec<u8>> =
                 selected.iter().map(|index| manifests[*index]).collect();
             let files = merge_manifest_selection(&selection)?;
-            if files.len() < required || !manifest_language_coverage(labels, &files) {
+            if files.len() < 2 || !manifest_language_coverage(labels, &files) {
                 return None;
             }
             let bytes = serde_json::to_vec(&serde_json::json!({"files": files})).ok()?;
             return programming_response_compatible(labels, &bytes).then_some(bytes);
         }
-        let remaining = required - selected.len();
+        let remaining = selection_size - selected.len();
         for index in start..=manifests.len().saturating_sub(remaining) {
             selected.push(index);
             if let Some(bytes) = search(
-                labels, manifests, required, index + 1, selected,
+                labels,
+                manifests,
+                selection_size,
+                index + 1,
+                selected,
             ) {
                 return Some(bytes);
             }
@@ -1368,7 +1371,16 @@ fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> O
         }
         None
     }
-    search(labels, &manifests, required, 0, &mut Vec::new())
+    let maximum = requested_manifest_component_count(labels).min(manifests.len());
+    (2..=maximum).find_map(|selection_size| {
+        search(
+            labels,
+            &manifests,
+            selection_size,
+            0,
+            &mut Vec::new(),
+        )
+    })
 }
 
 /// Direct cross-pool corpus episode formation. Frames are atomized by each
@@ -4390,6 +4402,24 @@ mod tests {
         )
         .is_some());
         assert!(merge_grounded_file_manifests(&labels, &[java]).is_none());
+    }
+
+    #[test]
+    fn one_polyglot_component_may_satisfy_multiple_requested_behaviors() {
+        let labels = vec![
+            "intent:LANGUAGE:JAVASCRIPT".to_string(),
+            "intent:LANGUAGE:GO".to_string(),
+            "intent:API:IDEMPOTENT_COMMAND".to_string(),
+            "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
+            "intent:CONCURRENCY:DEDUPLICATION".to_string(),
+        ];
+        let javascript = br#"{"files":{"order_service.js":"class OrderService { constructor() { this.responses = new Map(); this.outbox = []; } create(key) { if (this.responses.has(key)) return this.responses.get(key); const order = { key }; this.responses.set(key, order); this.outbox.push({ type: 'created' }); return order; } }"}}"#.to_vec();
+        let go = br#"{"files":{"dedup.go":"package main\nimport \"sync\"\ntype Deduplicator struct { mu sync.Mutex; seen map[string]struct{} }\nfunc (d *Deduplicator) AddIfNew(key string) bool { d.mu.Lock(); defer d.mu.Unlock(); if _, ok := d.seen[key]; ok { return false }; d.seen[key] = struct{}{}; return true }"}}"#.to_vec();
+        let composed = merge_grounded_file_manifests(&labels, &[javascript, go])
+            .expect("two manifests should satisfy three behaviors");
+        let value: serde_json::Value = serde_json::from_slice(&composed).unwrap();
+        assert!(value["files"].get("order_service.js").is_some());
+        assert!(value["files"].get("dedup.go").is_some());
     }
 
     #[test]
