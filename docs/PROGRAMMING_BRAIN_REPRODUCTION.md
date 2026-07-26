@@ -32,6 +32,9 @@ runtime endpoint. This matters because automatic quarantine recovery may
 replace the PID launched at startup. The trainer verifies that the listener is
 a Wizard brain server before stopping it, so successful completion and
 exceptions do not leak a replacement node or terminate an unrelated service.
+Cleanup is armed only after this trainer launches its initial node; discovering
+a pre-existing listener therefore reports the port conflict without attempting
+ownership cleanup.
 
 For a controlled deployment or experience-admission window, stop the supervisor near a block target but allow its corpus worker to reach the exact durable boundary. Then run `programming_curriculum_supervisor.py --gate-only-phase <phase>` with the normal endpoint/runtime/gate options. It executes the same authoritative midphase or completion gate, releases the matching last-good guard only on success, and exits without starting another worker. Resume the ordinary supervisor only after the protected maintenance operation is complete.
 
@@ -172,7 +175,8 @@ The runtime contains:
 - `*.progress.json`: RAM and durable corpus offsets plus batch telemetry;
 - `*.slow-batches.jsonl`: append-only row ranges and payload/lock evidence for every transaction exceeding the responsiveness ceiling;
 - `*.retention-gate.json` and `*.completion-gate.json`: admission evidence;
-- `benchmarks/experiential-generalization.json` and `benchmarks/multidomain-synthesis.json`: post-corpus experience and causal-integration admission evidence;
+- `benchmarks/experiential-generalization.json`, `benchmarks/multidomain-synthesis.json`, and `benchmarks/parameterized-fulfillment.json`: post-corpus experience, causal integration, and generalized state-contract admission evidence;
+- `benchmarks/final-qualification.json`: the completed holdout list and read-only stable-topology bracket;
 - `brain/brain.wbrain`: authoritative neuron-addressed container for current runtimes;
 - `brain/brain.wal`: durable mutations not yet incorporated into the accepted container state;
 - `brain/brain.bin`: optional legacy checkpoint input, not authoritative after `.wbrain` migration;

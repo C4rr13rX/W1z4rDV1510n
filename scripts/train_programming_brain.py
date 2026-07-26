@@ -440,7 +440,7 @@ def main() -> int:
     state = read_state(state_path)
     process: subprocess.Popen | None = None
     try:
-        if not args.external_node:
+        if not args.external_node and process is not None:
             if endpoint_healthy(args.endpoint):
                 raise RuntimeError(
                     f"endpoint is already in use: {args.endpoint}; choose another "
