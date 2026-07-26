@@ -164,6 +164,12 @@ neurons page in and out, but any learned-topology change fails final
 qualification. The authoritative bracket is written to
 `benchmarks/final-qualification.json`.
 
+Finally, the owned live brain completes neuron-wise sleep, checkpoints the
+qualified `.wbrain`, and must report zero resident terminals without changing
+tick or stable topology. The trainer records the before/sleep/after proof in
+`benchmarks/production-finalization.json` and only then marks
+`production_brain_finalized` in its durable state.
+
 ## Authoritative artifacts
 
 The runtime contains:
@@ -177,6 +183,7 @@ The runtime contains:
 - `*.retention-gate.json` and `*.completion-gate.json`: admission evidence;
 - `benchmarks/experiential-generalization.json`, `benchmarks/multidomain-synthesis.json`, and `benchmarks/parameterized-fulfillment.json`: post-corpus experience, causal integration, and generalized state-contract admission evidence;
 - `benchmarks/final-qualification.json`: the completed holdout list and read-only stable-topology bracket;
+- `benchmarks/production-finalization.json`: final neuron-wise sleep, checkpoint, zero-residency, and identity proof;
 - `brain/brain.wbrain`: authoritative neuron-addressed container for current runtimes;
 - `brain/brain.wal`: durable mutations not yet incorporated into the accepted container state;
 - `brain/brain.bin`: optional legacy checkpoint input, not authoritative after `.wbrain` migration;

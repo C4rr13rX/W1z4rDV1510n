@@ -396,6 +396,48 @@ def qualification_state_signature(stats: dict) -> dict:
     return {field: stats.get(field) for field in fields}
 
 
+def finalize_production_brain(
+        endpoint: str, runtime: Path) -> dict:
+    """Serialize the qualified brain, checkpoint it, and prove idle identity."""
+    before = request(endpoint, "/brain/stats", None, timeout=120.0)
+    sleep = request(
+        endpoint,
+        "/brain/sleep",
+        {"min_use_count": 2, "stale_ticks": 1000},
+        timeout=4 * 3600.0,
+    )
+    if sleep.get("error"):
+        raise RuntimeError(f"final brain sleep failed: {sleep}")
+    checkpoint(endpoint)
+    after = request(endpoint, "/brain/stats", None, timeout=120.0)
+    if int(after.get("resident_terminals") or 0) != 0:
+        raise RuntimeError(
+            "final brain retained deserialized terminals: "
+            f"{after.get('resident_terminals')}"
+        )
+    before_signature = qualification_state_signature(before)
+    after_signature = qualification_state_signature(after)
+    if after_signature != before_signature:
+        raise RuntimeError(
+            "final sleep/checkpoint mutated learned topology: "
+            f"before={before_signature} after={after_signature}"
+        )
+    report = {
+        "passed": True,
+        "before": before,
+        "sleep": sleep,
+        "after": after,
+        "state_before": before_signature,
+        "state_after": after_signature,
+        "resident_terminals": 0,
+        "updated_unix": time.time(),
+    }
+    atomic_json(
+        runtime / "benchmarks/production-finalization.json", report
+    )
+    return report
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime", type=Path, required=True)
@@ -590,6 +632,17 @@ def main() -> int:
             state["final_qualification_passed"] = True
             state["updated_unix"] = time.time()
             atomic_json(state_path, state)
+            finalization_path = (
+                runtime / "benchmarks/production-finalization.json"
+            )
+            if (
+                not state.get("production_brain_finalized")
+                or not read_state(finalization_path).get("passed")
+            ):
+                finalize_production_brain(args.endpoint, runtime)
+                state["production_brain_finalized"] = True
+                state["updated_unix"] = time.time()
+                atomic_json(state_path, state)
         print(f"[programming-train] complete: {runtime}")
         return 0
     finally:

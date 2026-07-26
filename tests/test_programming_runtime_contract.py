@@ -105,6 +105,7 @@ from scripts.programming_domain_transfer_holdout import (
 from scripts.train_programming_brain import (
     SEED_STAGES,
     curriculum_commands,
+    finalize_production_brain,
     guard_seed_stage,
     parameterized_admission_command,
     qualification_commands,
@@ -1715,6 +1716,41 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 "binding_pool_id": 0,
             },
         )
+
+    def test_reproducible_trainer_finalizes_zero_resident_wbrain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            before = {
+                "tick": 7,
+                "pool_count": 3,
+                "total_neurons": 11,
+                "total_concepts": 5,
+                "total_binding": 4,
+                "binding_pool_id": 0,
+                "resident_terminals": 99,
+            }
+            after = {**before, "resident_terminals": 0}
+            with (
+                patch(
+                    "scripts.train_programming_brain.request",
+                    side_effect=[before, {"ok": True}, after],
+                ),
+                patch(
+                    "scripts.train_programming_brain.checkpoint"
+                ) as checkpoint_call,
+            ):
+                report = finalize_production_brain(
+                    "http://127.0.0.1:18095", runtime
+                )
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["resident_terminals"], 0)
+            checkpoint_call.assert_called_once()
+            persisted = json.loads(
+                (runtime / "benchmarks/production-finalization.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(persisted["state_before"],
+                             persisted["state_after"])
 
     def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
