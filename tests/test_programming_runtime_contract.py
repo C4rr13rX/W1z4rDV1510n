@@ -656,6 +656,31 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 next_suspect_start(runtime, "corpus", 33536, 0), 32768
             )
 
+    def test_comprehensive_failure_ignores_narrow_passing_canaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "curriculum-health.jsonl").write_text(
+                json.dumps({
+                    "kind": "continuous_canary", "phase": "corpus",
+                    "trained_rows": 140, "passed": True,
+                    "updated_unix": 20.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            append_deferred_event(runtime, {
+                "interval_id": deferred_interval_id("corpus", 110, 120),
+                "status": "deferred", "phase": "corpus",
+                "start_row": 110, "end_row": 120,
+            })
+            self.assertEqual(
+                suspect_intervals(
+                    runtime, "corpus", 160, 100,
+                    canary_after_unix=10.0,
+                    use_passing_canary=False,
+                ),
+                [(100, 110), (120, 160)],
+            )
+
     def test_quarantine_epoch_does_not_reuse_pre_restore_canary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)

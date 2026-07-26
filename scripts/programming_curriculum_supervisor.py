@@ -945,12 +945,23 @@ def next_suspect_start(runtime: Path, phase: str, candidate_row: int,
 
 def suspect_intervals(runtime: Path, phase: str, candidate_row: int,
                       floor: int,
-                      canary_after_unix: float = 0.0) -> list[tuple[int, int]]:
-    """Subtract existing deferred coverage from this failed canary window."""
-    start = latest_passing_canary_row(
-        runtime, phase, floor,
-        before_row=candidate_row,
-        after_unix=canary_after_unix,
+                      canary_after_unix: float = 0.0,
+                      use_passing_canary: bool = True) -> list[tuple[int, int]]:
+    """Subtract existing deferred coverage from a failed admission window.
+
+    A passing continuous canary narrows only another continuous canary's
+    foundation/code failure.  It cannot narrow a later comprehensive
+    foundation/enterprise failure because it never evaluated that contract.
+    Comprehensive failures therefore begin at the last comprehensively
+    admitted guard row.
+    """
+    start = (
+        latest_passing_canary_row(
+            runtime, phase, floor,
+            before_row=candidate_row,
+            after_unix=canary_after_unix,
+        )
+        if use_passing_canary else floor
     )
     if start >= candidate_row:
         return []
@@ -970,12 +981,14 @@ def suspect_intervals(runtime: Path, phase: str, candidate_row: int,
 
 
 def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
-                            durable_row: int, error: str, reason: str) -> dict:
+                            durable_row: int, error: str, reason: str,
+                            use_passing_canary: bool = True) -> dict:
     """Persist one failed interval before any rollback can erase its evidence."""
     last_good = read_json(runtime / "brain" / "brain.last-good.json")
     ranges = suspect_intervals(
         runtime, phase.name, candidate_row, int(last_good.get("row") or 0),
         float(last_good.get("created_unix") or 0.0),
+        use_passing_canary,
     )
     if not ranges:
         raise RuntimeError(
@@ -2362,6 +2375,7 @@ def main() -> int:
                 record_deferred_failure(
                     runtime, attach_phase, attached_ram, attached_durable,
                     str(exc), "attached_midphase_gate_failed",
+                    use_passing_canary=False,
                 )
                 publish(status_path, {"state": "midphase_gate_failed",
                                       "phase": attach_phase.name,
@@ -2398,6 +2412,7 @@ def main() -> int:
                         record_deferred_failure(
                             runtime, phase, ram, durable, str(exc),
                             "completion_gate_failed",
+                            use_passing_canary=False,
                         )
                         publish(status_path, {"state": "gate_failed",
                                               "phase": phase.name,
@@ -2458,6 +2473,7 @@ def main() -> int:
                     record_deferred_failure(
                         runtime, phase, ram_after, durable_after, str(exc),
                         "midphase_gate_failed",
+                        use_passing_canary=False,
                     )
                     publish(status_path, {"state": "midphase_gate_failed",
                                           "phase": phase.name,
