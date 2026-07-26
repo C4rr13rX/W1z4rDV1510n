@@ -38,6 +38,7 @@ from scripts.programming_curriculum_supervisor import (
     responsive_batch_size,
     runtime_responsive_batch_size,
     settle_brain_for_admission,
+    suspect_intervals,
     topology_delta,
     unresolved_deferred_intervals,
     valid_deferred_interval,
@@ -365,6 +366,10 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(
                 next_suspect_start(runtime, "corpus", 220, 0), 100
             )
+            self.assertEqual(
+                suspect_intervals(runtime, "corpus", 220, 0),
+                [(100, 120), (200, 220)],
+            )
 
     def test_zero_width_deferred_interval_is_never_replayed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -413,6 +418,37 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(event["start_row"], 16640)
             self.assertEqual(event["end_row"], 16896)
             self.assertNotEqual(event["start_row"], event["end_row"])
+
+    def test_deferred_failure_records_disjoint_uncovered_spans(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.bin"
+            guard.write_bytes(b"accepted")
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus", "row": 0,
+                "guard": str(guard), "created_unix": 20.0,
+            }), encoding="utf-8")
+            for start, end in ((0, 100), (120, 200)):
+                append_deferred_event(runtime, {
+                    "interval_id": deferred_interval_id("corpus", start, end),
+                    "status": "deferred", "phase": "corpus",
+                    "start_row": start, "end_row": end,
+                })
+            event = record_deferred_failure(
+                runtime, Phase("corpus", "script", Path("x"), 1000),
+                220, 220, "regression", "continuous_canary_failed",
+            )
+            self.assertEqual(event["suspect_intervals"], [
+                {"start_row": 100, "end_row": 120},
+                {"start_row": 200, "end_row": 220},
+            ])
+            recorded = unresolved_deferred_intervals(runtime, "corpus")
+            self.assertEqual(
+                [(row["start_row"], row["end_row"]) for row in recorded],
+                [(0, 100), (100, 120), (120, 200), (200, 220)],
+            )
 
     def test_continuous_canary_attributes_concurrent_topology_growth(self) -> None:
         self.assertEqual(
@@ -804,7 +840,9 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn('"curriculum-health.jsonl"', source)
         self.assertIn('"state": "continuous_canary_failed"', source)
         self.assertIn('"suspect_start_row": suspect_start', source)
-        self.assertIn('"suspect_end_row": candidate_row', source)
+        self.assertIn('"suspect_end_row": suspect_end', source)
+        self.assertIn('"suspect_intervals": [', source)
+        self.assertIn("failed_row = max(", source)
         self.assertIn("worker.terminate()", source)
         self.assertIn("if code == 86:", source)
 

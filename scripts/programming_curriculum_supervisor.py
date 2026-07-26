@@ -593,80 +593,115 @@ def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> li
 
 def next_suspect_start(runtime: Path, phase: str, candidate_row: int,
                        floor: int, canary_after_unix: float = 0.0) -> int:
-    """Start after both the latest green canary and prior quarantines.
+    """Return the first newly trained row after subtracting quarantines.
 
     A canary immediately following one or more skipped ranges must not create
     a new interval that overlaps those same ranges merely because no green
     canary exists inside quarantined data.
     """
+    ranges = suspect_intervals(
+        runtime, phase, candidate_row, floor, canary_after_unix
+    )
+    return ranges[0][0] if ranges else candidate_row
+
+
+def suspect_intervals(runtime: Path, phase: str, candidate_row: int,
+                      floor: int,
+                      canary_after_unix: float = 0.0) -> list[tuple[int, int]]:
+    """Subtract existing deferred coverage from this failed canary window."""
     start = latest_passing_canary_row(
         runtime, phase, floor,
         before_row=candidate_row,
         after_unix=canary_after_unix,
     )
-    # Advance only through deferred coverage contiguous with the current
-    # boundary.  Jumping across an untested accepted gap would erase the very
-    # rows that a failed canary must attribute.
+    if start >= candidate_row:
+        return []
+    uncovered: list[tuple[int, int]] = []
+    cursor = start
     for interval in unresolved_deferred_intervals(runtime, phase):
-        interval_start = int(interval["start_row"])
-        interval_end = int(interval["end_row"])
-        if interval_start <= start < interval_end <= candidate_row:
-            start = interval_end
-    return start
+        interval_start = max(start, int(interval["start_row"]))
+        interval_end = min(candidate_row, int(interval["end_row"]))
+        if interval_end <= cursor or interval_start >= candidate_row:
+            continue
+        if interval_start > cursor:
+            uncovered.append((cursor, interval_start))
+        cursor = max(cursor, interval_end)
+    if cursor < candidate_row:
+        uncovered.append((cursor, candidate_row))
+    return [(begin, end) for begin, end in uncovered if begin < end]
 
 
 def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
                             durable_row: int, error: str, reason: str) -> dict:
     """Persist one failed interval before any rollback can erase its evidence."""
     last_good = read_json(runtime / "brain" / "brain.last-good.json")
-    suspect_start = next_suspect_start(
+    ranges = suspect_intervals(
         runtime, phase.name, candidate_row, int(last_good.get("row") or 0),
         float(last_good.get("created_unix") or 0.0),
     )
-    if suspect_start >= candidate_row:
+    if not ranges:
         raise RuntimeError(
             "failed canary contains no newly trained, non-deferred rows: "
             f"phase={phase.name} boundary={candidate_row}"
         )
-    interval_id = deferred_interval_id(phase.name, suspect_start, candidate_row)
-    base_snapshot = preserve_deferred_base(runtime, interval_id)
-    event = {
-        "interval_id": interval_id,
-        "phase": phase.name,
-        "start_row": suspect_start,
-        "end_row": candidate_row,
-        "base_snapshot": str(base_snapshot),
-        "base_row": int(last_good.get("row") or 0),
-        "reason": reason,
-        "error": error,
-    }
+    events = []
+    for suspect_start, suspect_end in ranges:
+        interval_id = deferred_interval_id(
+            phase.name, suspect_start, suspect_end
+        )
+        base_snapshot = preserve_deferred_base(runtime, interval_id)
+        event = {
+            "interval_id": interval_id,
+            "phase": phase.name,
+            "start_row": suspect_start,
+            "end_row": suspect_end,
+            "base_snapshot": str(base_snapshot),
+            "base_row": int(last_good.get("row") or 0),
+            "reason": reason,
+            "error": error,
+        }
+        events.append(event)
+        if not any(
+            row.get("interval_id") == interval_id
+            for row in unresolved_deferred_intervals(runtime)
+        ):
+            append_deferred_event(runtime, {**event, "status": "deferred"})
+    suspect_start = ranges[0][0]
+    suspect_end = ranges[-1][1]
     append_health_event(runtime, {
         "kind": reason,
         "phase": phase.name,
         "trained_rows": candidate_row,
         "passed": False,
         "suspect_start_row": suspect_start,
-        "suspect_end_row": candidate_row,
+        "suspect_end_row": suspect_end,
+        "suspect_intervals": [
+            {"start_row": begin, "end_row": end} for begin, end in ranges
+        ],
         "last_good": last_good,
         "error": error,
     })
-    if not any(
-        row.get("interval_id") == interval_id
-        for row in unresolved_deferred_intervals(runtime)
-    ):
-        append_deferred_event(runtime, {**event, "status": "deferred"})
     publish(canary_quarantine_path(runtime), {
         "state": reason,
         "candidate_row": candidate_row,
         "suspect_start_row": suspect_start,
-        "suspect_end_row": candidate_row,
+        "suspect_end_row": suspect_end,
+        "suspect_intervals": [
+            {"start_row": begin, "end_row": end} for begin, end in ranges
+        ],
         "durable_next_row": durable_row,
         "last_good": last_good,
         "error": error,
         "created_unix": time.time(),
-        **event,
+        "deferred_events": events,
     })
-    return event
+    return {
+        **events[0],
+        "suspect_intervals": [
+            {"start_row": begin, "end_row": end} for begin, end in ranges
+        ],
+        "deferred_events": events,
+    }
 
 
 def endpoint_json(endpoint: str, path: str, timeout: float = 30.0) -> dict:
@@ -1043,15 +1078,20 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         except subprocess.TimeoutExpired:
                             worker.kill()
                             worker.wait(timeout=30)
+                        failed_ram, failed_durable = phase_offsets(progress)
+                        failed_row = max(
+                            candidate_row, failed_ram, failed_durable
+                        )
                         record_deferred_failure(
-                            runtime, phase, candidate_row, durable, str(exc),
+                            runtime, phase, failed_row, failed_durable, str(exc),
                             "continuous_canary_failed",
                         )
                         publish(status_path, {
                             "state": "continuous_canary_failed",
                             "phase": phase.name,
-                            "ram_next_row": candidate_row,
-                            "durable_next_row": durable,
+                            "canary_started_row": candidate_row,
+                            "ram_next_row": failed_ram,
+                            "durable_next_row": failed_durable,
                             "error": str(exc),
                             "updated_unix": time.time(),
                         })
@@ -1291,9 +1331,15 @@ def main() -> int:
                         attached_process.wait(timeout=30)
                     except (psutil.NoSuchProcess, psutil.TimeoutExpired):
                         pass
+                    failed_ram, failed_durable = phase_offsets(
+                        runtime / f"{attach_phase.name}.progress.json"
+                    )
+                    failed_row = max(
+                        candidate_row, failed_ram, failed_durable
+                    )
                     record_deferred_failure(
-                        runtime, attach_phase, candidate_row,
-                        attached_durable, str(exc),
+                        runtime, attach_phase, failed_row,
+                        failed_durable, str(exc),
                         "attached_continuous_canary_failed",
                     )
                     if not perform_automatic_recovery(
