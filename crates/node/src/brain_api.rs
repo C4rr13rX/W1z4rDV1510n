@@ -1628,6 +1628,130 @@ fn has_programming_language_intent(labels: &[String]) -> bool {
     labels.iter().any(|label| label.contains(":LANGUAGE:"))
 }
 
+fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
+    let intent_requires = |suffix: &str, evidence: &[&str]| {
+        !labels.iter().any(|label| label.ends_with(suffix))
+            || evidence
+                .iter()
+                .any(|candidate| lowercase.contains(candidate))
+    };
+    if !intent_requires(
+        ":MATH:AVERAGE",
+        &[
+            "sum(",
+            ".mean(",
+            " mean(",
+            "fmean(",
+            "average(",
+            "statistics.mean",
+            "statistics.fmean",
+        ],
+    ) {
+        return false;
+    }
+    if !intent_requires(":PARITY:ODD", &["% 2", "%2", "& 1", "&1"]) {
+        return false;
+    }
+    if !intent_requires(
+        ":COMPARISON:LESS_THAN_ZERO",
+        &["< 0", "<0", ".is_negative(", "signbit("],
+    ) {
+        return false;
+    }
+    if !intent_requires(
+        ":TEXT:WORD_FREQUENCY",
+        &[
+            "word",
+            ".split(",
+            "split()",
+            "findall(",
+            "counter(",
+            "token",
+        ],
+    ) {
+        return false;
+    }
+    if !intent_requires(
+        ":SECURITY:AUTHORIZATION",
+        &[
+            "authoriz",
+            "permission",
+            "admin",
+            "superuser",
+            "role",
+            "owner_id",
+            "access_control",
+            "access control",
+            "rbac",
+            "forbidden",
+            "deny",
+        ],
+    ) {
+        return false;
+    }
+    if !intent_requires(
+        ":API:IDEMPOTENT_COMMAND",
+        &[
+            "idempot",
+            "dedup",
+            "replay",
+            "request_id",
+            "request key",
+            "request_key",
+            "responses",
+        ],
+    ) {
+        return false;
+    }
+    if !intent_requires(
+        ":OBSERVABILITY:CORRELATED_LOGGING",
+        &[
+            "correlation",
+            "request_id",
+            "request id",
+            "trace",
+            "write_event",
+        ],
+    ) {
+        return false;
+    }
+    if !intent_requires(
+        ":ENTERPRISE:SECRET_REDACTION",
+        &[
+            "redact",
+            "password",
+            "api_key",
+            "secret",
+            "token",
+            "credential",
+        ],
+    ) {
+        return false;
+    }
+    let paired_ledger_update = (lowercase.contains("debit") && lowercase.contains("credit"))
+        || (lowercase.contains("source_id")
+            && lowercase.contains("target_id")
+            && lowercase.contains("balance"));
+    if labels.iter().any(|label| {
+        label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION")
+            || label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER")
+    }) && !paired_ledger_update
+        && ![
+            "transaction",
+            "rollback",
+            "commit",
+            "begin(",
+            "atomic",
+            "with sqlite3.connect",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence))
+    {
+        return false;
+    }
+    true
+}
+
 /// Permit fuzzy sensory recall across a paraphrase only when the recalled
 /// action is visibly compatible with the requested programming language.
 /// This preserves atom-grounded code generalization without reopening the
@@ -1641,6 +1765,15 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
         let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
             return false;
         };
+        let lowercase = files
+            .values()
+            .filter_map(|content| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_ascii_lowercase();
+        if !programming_behavior_compatible(labels, &lowercase) {
+            return false;
+        }
         let names: Vec<String> = files.keys().map(|name| name.to_ascii_lowercase()).collect();
         let has_file = |suffixes: &[&str]| {
             names
@@ -1676,49 +1809,7 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim_start();
     let lowercase = text.to_ascii_lowercase();
-    let intent_requires = |suffix: &str, evidence: &[&str]| {
-        !labels.iter().any(|label| label.ends_with(suffix))
-            || evidence
-                .iter()
-                .any(|candidate| lowercase.contains(candidate))
-    };
-    if !intent_requires(
-        ":MATH:AVERAGE",
-        &[
-            "sum(",
-            ".mean(",
-            " mean(",
-            "fmean(",
-            "average(",
-            "statistics.mean",
-            "statistics.fmean",
-        ],
-    ) {
-        return false;
-    }
-    if !intent_requires(":PARITY:ODD", &["% 2", "%2", "& 1", "&1"]) {
-        return false;
-    }
-    if !intent_requires(
-        ":COMPARISON:LESS_THAN_ZERO",
-        &["< 0", "<0", ".is_negative(", "signbit("],
-    ) {
-        return false;
-    }
-    if labels
-        .iter()
-        .any(|label| label.ends_with(":TEXT:WORD_FREQUENCY"))
-        && ![
-            "word",
-            ".split(",
-            "split()",
-            "findall(",
-            "counter(",
-            "token",
-        ]
-        .iter()
-        .any(|evidence| lowercase.contains(evidence))
-    {
+    if !programming_behavior_compatible(labels, &lowercase) {
         return false;
     }
     let has = |needles: &[&str]| {
@@ -2523,6 +2614,27 @@ async fn h_brain_chat(
             )
         })
         .unwrap_or_default();
+    let unweighted_feature_candidates = composition_features
+        .as_ref()
+        .map(|(pool_id, labels)| {
+            brain.decode_ranked_feature_bindings_with_context(
+                *pool_id,
+                labels,
+                action_pool,
+                64,
+                None,
+                None,
+                &chat_query_pools,
+                &turn_pools,
+            )
+        })
+        .unwrap_or_default();
+    let diagnostic_unweighted_candidates = unweighted_feature_candidates.len();
+    for candidate in unweighted_feature_candidates {
+        if !feature_candidates.contains(&candidate) {
+            feature_candidates.push(candidate);
+        }
+    }
     if let Some((pool_id, labels)) = composition_features.as_ref() {
         for candidate in exact_manifest_subset_candidates(&brain, *pool_id, labels, action_pool) {
             if !feature_candidates.contains(&candidate) {
@@ -2566,23 +2678,6 @@ async fn h_brain_chat(
             }
         }
     }
-    let diagnostic_unweighted_candidates = composition_features
-        .as_ref()
-        .map(|(pool_id, labels)| {
-            brain
-                .decode_ranked_feature_bindings_with_context(
-                    *pool_id,
-                    labels,
-                    action_pool,
-                    64,
-                    None,
-                    None,
-                    &chat_query_pools,
-                    &turn_pools,
-                )
-                .len()
-        })
-        .unwrap_or(0);
     let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
         brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
     });
@@ -4139,6 +4234,37 @@ mod tests {
             &negative,
             b"def negative(value):\n    return value < 0"
         ));
+
+        let transaction = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:PERSISTENCE:ATOMIC_TRANSACTION".to_string(),
+            "instruction_intent:DOMAIN:ATOMIC_LEDGER_TRANSFER".to_string(),
+        ];
+        let audit = b"def audit(record):\n    return {'password_last_used': record['date']}";
+        let repository = br#"{"files":{"repository.py":"import sqlite3\n\ndef transfer(db_path, source_id, target_id, amount):\n    with sqlite3.connect(db_path) as connection:\n        debited = connection.execute('UPDATE accounts SET balance = balance - ?', (amount,))\n        credited = connection.execute('UPDATE accounts SET balance = balance + ?', (amount,))\n"}}"#;
+        assert!(!programming_response_compatible(&transaction, audit));
+        assert!(programming_response_compatible(&transaction, repository));
+        assert_eq!(
+            single_language_ranked_manifest(
+                &transaction,
+                &[
+                    br#"{"files":{"audit.py":"def audit(record):\n    return record\n"}}"#
+                        .to_vec(),
+                    repository.to_vec(),
+                ],
+            ),
+            Some(repository.to_vec())
+        );
+
+        let authorization = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:SECURITY:AUTHORIZATION".to_string(),
+        ];
+        let email =
+            b"def add_email_addresses(self, addresses):\n    return self.post(addresses)";
+        let access = br#"{"files":{"authorization.py":"def is_authorized(principal, action, owner_id):\n    roles = set(principal.get('roles', []))\n    if 'admin' in roles:\n        return True\n    return action == 'read' and principal.get('id') == owner_id\n"}}"#;
+        assert!(!programming_response_compatible(&authorization, email));
+        assert!(programming_response_compatible(&authorization, access));
     }
 
     #[test]
