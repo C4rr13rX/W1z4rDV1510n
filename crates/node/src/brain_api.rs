@@ -1628,6 +1628,27 @@ fn has_programming_language_intent(labels: &[String]) -> bool {
     labels.iter().any(|label| label.contains(":LANGUAGE:"))
 }
 
+fn contains_ascii_call(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(start, matched)| {
+        let before = text[..start].chars().next_back();
+        let is_identifier = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+        if before.is_some_and(is_identifier) {
+            return false;
+        }
+        let remainder = &text[start + matched.len()..];
+        let mut chars = remainder.chars();
+        match chars.next() {
+            Some(ch) if is_identifier(ch) => false,
+            Some(ch) if ch == '(' => true,
+            Some(ch) if ch.is_ascii_whitespace() => {
+                chars.skip_while(|next| next.is_ascii_whitespace()).next()
+                    == Some('(')
+            }
+            _ => false,
+        }
+    })
+}
+
 fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
     let intent_requires = |suffix: &str, evidence: &[&str]| {
         !labels.iter().any(|label| label.ends_with(suffix))
@@ -1662,7 +1683,7 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
         .iter()
         .any(|label| label.ends_with(":TEXT:WORD_FREQUENCY"))
     {
-        let counter_aggregation = lowercase.contains("counter(");
+        let counter_aggregation = contains_ascii_call(lowercase, "counter");
         let segmentation = [
             ".split(",
             "split()",
