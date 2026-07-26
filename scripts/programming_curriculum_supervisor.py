@@ -60,8 +60,17 @@ class GateCommandFailure(RuntimeError):
         )
 
 
-class CanaryInfrastructureError(Exception):
-    """Read-only canary could not complete for a non-semantic reason."""
+class AdmissionInfrastructureError(Exception):
+    """An admission evaluator could not complete for a non-semantic reason."""
+
+
+# Kept as a public compatibility name for the runtime-contract tests and any
+# operator tooling imported before admission retries were generalized.
+CanaryInfrastructureError = AdmissionInfrastructureError
+
+ADMISSION_GATE_ERRORS = RECOVERABLE_GATE_ERRORS + (
+    AdmissionInfrastructureError,
+)
 
 
 @dataclass(frozen=True)
@@ -583,10 +592,14 @@ def transient_gate_failure(error: BaseException) -> bool:
     """Separate transport/resource failures from behavioral regressions."""
     if isinstance(error, (
         subprocess.TimeoutExpired,
+        json.JSONDecodeError,
         TimeoutError,
         urllib.error.URLError,
         ConnectionError,
     )):
+        return True
+    if isinstance(error, RuntimeError) and (
+            "gate command produced no json" in str(error).casefold()):
         return True
     if not isinstance(error, GateCommandFailure):
         return False
@@ -603,21 +616,20 @@ def transient_gate_failure(error: BaseException) -> bool:
     ))
 
 
-def run_canary_json_command(
-        runtime: Path, phase: Phase, trained_rows: int, stage: str,
-        command: list[str], timeout: float = 900.0,
-        attempts: int = 4) -> dict:
-    """Retry transient read-only evaluator failures without quarantining data."""
+def run_admission_operation(
+        runtime: Path, phase: Phase, trained_rows: int, gate_kind: str,
+        stage: str, operation, attempts: int = 4):
+    """Retry a transient admission operation without quarantining data."""
     last_error: BaseException | None = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            return run_json_command(command, timeout=timeout)
+            return operation()
         except RECOVERABLE_GATE_ERRORS as error:
             if not transient_gate_failure(error):
                 raise
             last_error = error
             append_health_event(runtime, {
-                "kind": "continuous_canary_infrastructure_retry",
+                "kind": f"{gate_kind}_infrastructure_retry",
                 "phase": phase.name,
                 "trained_rows": trained_rows,
                 "stage": stage,
@@ -628,10 +640,63 @@ def run_canary_json_command(
             })
             if attempt < max(1, attempts):
                 time.sleep(min(5.0, float(attempt)))
-    raise CanaryInfrastructureError(
-        f"{phase.name} row {trained_rows} {stage} remained unavailable "
+    raise AdmissionInfrastructureError(
+        f"{phase.name} row {trained_rows} {gate_kind}/{stage} remained unavailable "
         f"after {max(1, attempts)} attempts: {last_error}"
     ) from last_error
+
+
+def run_admission_json_command(
+        runtime: Path, phase: Phase, trained_rows: int, gate_kind: str,
+        stage: str,
+        command: list[str], timeout: float = 900.0,
+        attempts: int = 4) -> dict:
+    """Retry transient admission evaluator failures without quarantining data."""
+    return run_admission_operation(
+        runtime, phase, trained_rows, gate_kind, stage,
+        lambda: run_json_command(command, timeout=timeout),
+        attempts=attempts,
+    )
+
+
+def run_canary_json_command(
+        runtime: Path, phase: Phase, trained_rows: int, stage: str,
+        command: list[str], timeout: float = 900.0,
+        attempts: int = 4) -> dict:
+    """Compatibility wrapper for the continuous-canary admission gate."""
+    return run_admission_json_command(
+        runtime, phase, trained_rows, "continuous_canary", stage,
+        command, timeout=timeout, attempts=attempts,
+    )
+
+
+def admission_infrastructure_failure(error: BaseException) -> bool:
+    return (
+        isinstance(error, AdmissionInfrastructureError)
+        or transient_gate_failure(error)
+    )
+
+
+def pause_admission_for_infrastructure(
+        runtime: Path, status_path: Path, phase: Phase, trained_rows: int,
+        gate_kind: str, error: BaseException, **status_fields: object) -> None:
+    """Durably pause a guarded candidate without inventing a regression."""
+    append_health_event(runtime, {
+        "kind": f"{gate_kind}_infrastructure_paused",
+        "phase": phase.name,
+        "trained_rows": trained_rows,
+        "error": str(error),
+        "passed": None,
+        **status_fields,
+    })
+    publish(status_path, {
+        "state": f"{gate_kind}_infrastructure_paused",
+        "phase": phase.name,
+        "trained_rows": trained_rows,
+        "error": str(error),
+        "updated_unix": time.time(),
+        **status_fields,
+    })
 
 
 def append_health_event(runtime: Path, event: dict) -> None:
@@ -1004,21 +1069,37 @@ def settle_brain_for_admission(args: argparse.Namespace, phase: Phase,
     still learning. The subsequent behavioral gate therefore evaluates the
     same fully settled state that the next rollback guard will protect.
     """
-    before = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
-    sleep = endpoint_post_json(
-        args.endpoint,
-        "/brain/sleep",
-        {"min_use_count": 2, "stale_ticks": 1000},
-        timeout=4 * 3600.0,
+    before = run_admission_operation(
+        runtime, phase, trained_rows, "idle_settlement", "stats_before",
+        lambda: endpoint_json(
+            args.endpoint, "/brain/stats", timeout=120.0
+        ),
+    )
+    sleep = run_admission_operation(
+        runtime, phase, trained_rows, "idle_settlement", "sleep",
+        lambda: endpoint_post_json(
+            args.endpoint,
+            "/brain/sleep",
+            {"min_use_count": 2, "stale_ticks": 1000},
+            timeout=4 * 3600.0,
+        ),
     )
     if sleep.get("error"):
         raise RuntimeError(f"idle brain settlement failed: {sleep}")
-    checkpoint = endpoint_post_json(
-        args.endpoint, "/brain/checkpoint", {}, timeout=4 * 3600.0
+    checkpoint = run_admission_operation(
+        runtime, phase, trained_rows, "idle_settlement", "checkpoint",
+        lambda: endpoint_post_json(
+            args.endpoint, "/brain/checkpoint", {}, timeout=4 * 3600.0
+        ),
     )
     if checkpoint.get("ok") is False:
         raise RuntimeError(f"settled checkpoint failed: {checkpoint}")
-    after = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    after = run_admission_operation(
+        runtime, phase, trained_rows, "idle_settlement", "stats_after",
+        lambda: endpoint_json(
+            args.endpoint, "/brain/stats", timeout=120.0
+        ),
+    )
     if int(after.get("resident_terminals") or 0) != 0:
         raise RuntimeError(
             "settled brain retained terminals before admission: "
@@ -1087,13 +1168,20 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
                         include_interval_ids: frozenset[str] = frozenset()) -> dict:
     """Require corpus recall plus protected foundation/code execution."""
     settlement = settle_brain_for_admission(args, phase, runtime, phase.rows)
-    recall = run_json_command(recall_command(
+    def evaluate(stage: str, command: list[str],
+                 timeout: float = 900.0) -> dict:
+        return run_admission_json_command(
+            runtime, phase, phase.rows, "completion_gate", stage,
+            command, timeout=timeout,
+        )
+
+    recall = evaluate("recall", recall_command(
         args, phase, runtime, phase.rows, 64, include_interval_ids
     ))
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(f"{phase.name} recall regression: {recall}")
 
-    foundation = run_json_command([
+    foundation = evaluate("foundation", [
         sys.executable, "scripts/programming_brain_eval.py",
         "--endpoint", args.endpoint,
     ])
@@ -1105,7 +1193,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
         if foundation.get(passed_key) != foundation.get(total_key):
             raise RuntimeError(f"foundation regression after {phase.name}: {foundation}")
 
-    code = run_json_command([
+    code = evaluate("code", [
         sys.executable, "scripts/programming_code_eval.py",
         "--endpoint", args.endpoint, "--details",
     ])
@@ -1115,7 +1203,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
                 or group.get("syntax_valid") != group.get("count")):
             raise RuntimeError(f"code regression after {phase.name}: {code}")
 
-    typescript = run_json_command([
+    typescript = evaluate("typescript", [
         sys.executable, "scripts/programming_typescript_enterprise.py",
         "--endpoint", args.endpoint, "--no-train",
         "--output", str(runtime / f"{phase.name}.typescript-gate.json"),
@@ -1132,7 +1220,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
             f"TypeScript OOV regression after {phase.name}: {typescript}"
         )
 
-    enterprise = run_json_command([
+    enterprise = evaluate("enterprise", [
         sys.executable, "scripts/programming_enterprise_retention.py",
         "--endpoint", args.endpoint,
         "--output", str(runtime / f"{phase.name}.enterprise-gate.json"),
@@ -1166,17 +1254,25 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
                       include_interval_ids: frozenset[str] = frozenset()) -> dict:
     """Protect retained knowledge before permitting the next corpus chunk."""
     settlement = settle_brain_for_admission(args, phase, runtime, trained_rows)
-    recall = run_json_command(
+    def evaluate(stage: str, command: list[str],
+                 timeout: float = 900.0) -> dict:
+        return run_admission_json_command(
+            runtime, phase, trained_rows, "midphase_gate", stage,
+            command, timeout=timeout,
+        )
+
+    recall = evaluate(
+        "recall",
         recall_command(
             args, phase, runtime, trained_rows, 32, include_interval_ids
-        )
+        ),
     )
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(
             f"{phase.name} midphase recall regression at {trained_rows}: {recall}"
         )
     foundation_path = runtime / f"{phase.name}.row-{trained_rows}.foundation.json"
-    run_json_command([
+    evaluate("foundation", [
         sys.executable, "scripts/programming_integrated_retention.py",
         "--endpoint", args.endpoint, "--no-checkpoint",
         "--output", str(foundation_path),
@@ -1187,7 +1283,7 @@ def run_midphase_gate(args: argparse.Namespace, phase: Phase,
             f"integrated retention regression after {phase.name} row "
             f"{trained_rows}: {foundation}"
         )
-    enterprise = run_json_command([
+    enterprise = evaluate("enterprise", [
         sys.executable, "scripts/programming_enterprise_retention.py",
         "--endpoint", args.endpoint,
         "--output", str(runtime / f"{phase.name}.row-{trained_rows}.enterprise.json"),
@@ -1220,7 +1316,10 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
     """Fast read-only drift screen while the corpus worker keeps advancing."""
     progress_path = runtime / f"{phase.name}.progress.json"
     rows_before = phase_offsets(progress_path)
-    stats_before = endpoint_json(args.endpoint, "/brain/stats")
+    stats_before = run_admission_operation(
+        runtime, phase, trained_rows, "continuous_canary", "stats_before",
+        lambda: endpoint_json(args.endpoint, "/brain/stats"),
+    )
     recall = run_canary_json_command(
         runtime, phase, trained_rows, "recall",
         recall_command(args, phase, runtime, trained_rows, 8),
@@ -1252,7 +1351,10 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
         if (group.get("executes") != group.get("count")
                 or group.get("syntax_valid") != group.get("count")):
             raise RuntimeError(f"continuous code regression: {code}")
-    stats_after = endpoint_json(args.endpoint, "/brain/stats")
+    stats_after = run_admission_operation(
+        runtime, phase, trained_rows, "continuous_canary", "stats_after",
+        lambda: endpoint_json(args.endpoint, "/brain/stats"),
+    )
     rows_after = phase_offsets(progress_path)
     report = {
         "kind": "continuous_canary", "phase": phase.name,
@@ -1666,7 +1768,14 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 f"deferred interval has unknown phase: {event}"
             )
         assert_training_not_quarantined(runtime)
-        settle_brain_for_admission(args, phase, runtime, phase.rows)
+        try:
+            settle_brain_for_admission(args, phase, runtime, phase.rows)
+        except AdmissionInfrastructureError as exc:
+            pause_admission_for_infrastructure(
+                runtime, status_path, phase, phase.rows,
+                "deferred_replay", exc, interval_id=interval_id,
+            )
+            return 1
         ensure_live_last_good_guard(args, runtime, phase, phase.rows)
         publish(deferred_replay_marker_path(runtime), {
             "state": "training",
@@ -1692,6 +1801,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
         stdout_path = runtime / f"deferred-replay-{digest}.stdout.log"
         stderr_path = runtime / f"deferred-replay-{digest}.stderr.log"
         error = ""
+        infrastructure_error = False
         report: dict = {}
         try:
             with stdout_path.open("a", encoding="utf-8") as stdout, \
@@ -1710,7 +1820,9 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                     f"deferred replay worker exited {worker.returncode}; "
                     f"stderr={stderr_path}"
                 )
-            interval_recall = run_json_command(
+            interval_recall = run_admission_json_command(
+                runtime, phase, int(event["end_row"]),
+                "deferred_replay", "interval_recall",
                 replay_interval_recall_command(
                     args, phase, runtime, event
                 ),
@@ -1733,6 +1845,9 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             }
         # Once replay starts, every exception is a transaction failure: no
         # orchestration bug may leave an unadmitted mutation live.
+        except AdmissionInfrastructureError as exc:
+            infrastructure_error = True
+            error = str(exc)
         except Exception as exc:
             error = str(exc)
 
@@ -1742,14 +1857,20 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             )
             replay_progress.unlink(missing_ok=True)
             append_health_event(runtime, {
-                "kind": "deferred_replay_failed",
+                "kind": (
+                    "deferred_replay_infrastructure_paused"
+                    if infrastructure_error else "deferred_replay_failed"
+                ),
                 "phase": phase.name,
                 "interval_id": interval_id,
-                "passed": False,
+                "passed": None if infrastructure_error else False,
                 "error": error,
             })
             publish(status_path, {
-                "state": "deferred_replay_failed",
+                "state": (
+                    "deferred_replay_infrastructure_paused"
+                    if infrastructure_error else "deferred_replay_failed"
+                ),
                 "phase": phase.name,
                 "interval_id": interval_id,
                 "error": error,
@@ -1999,7 +2120,14 @@ def main() -> int:
                 report = run_midphase_gate(
                     args, phase, runtime, candidate_row, interval_ids
                 )
-        except RECOVERABLE_GATE_ERRORS as exc:
+        except ADMISSION_GATE_ERRORS as exc:
+            if admission_infrastructure_failure(exc):
+                pause_admission_for_infrastructure(
+                    runtime, status_path, phase, candidate_row,
+                    "quarantine_retest", exc,
+                    interval_ids=sorted(interval_ids),
+                )
+                return 1
             publish(status_path, {
                 "state": "quarantine_retest_failed",
                 "phase": phase.name,
@@ -2062,7 +2190,12 @@ def main() -> int:
                 run_completion_gate(args, phase, runtime)
             else:
                 run_midphase_gate(args, phase, runtime, ram)
-        except RECOVERABLE_GATE_ERRORS as exc:
+        except ADMISSION_GATE_ERRORS as exc:
+            if admission_infrastructure_failure(exc):
+                pause_admission_for_infrastructure(
+                    runtime, status_path, phase, ram, "gate_only", exc,
+                )
+                return 1
             publish(status_path, {
                 "state": "gate_only_failed", "phase": phase.name,
                 "ram_next_row": ram, "durable_next_row": durable,
@@ -2219,7 +2352,13 @@ def main() -> int:
                                   "updated_unix": time.time()})
             try:
                 run_midphase_gate(args, attach_phase, runtime, attached_ram)
-            except RECOVERABLE_GATE_ERRORS as exc:
+            except ADMISSION_GATE_ERRORS as exc:
+                if admission_infrastructure_failure(exc):
+                    pause_admission_for_infrastructure(
+                        runtime, status_path, attach_phase, attached_ram,
+                        "attached_midphase_gate", exc,
+                    )
+                    return 1
                 record_deferred_failure(
                     runtime, attach_phase, attached_ram, attached_durable,
                     str(exc), "attached_midphase_gate_failed",
@@ -2249,7 +2388,13 @@ def main() -> int:
                                           "updated_unix": time.time()})
                     try:
                         run_completion_gate(args, phase, runtime)
-                    except RECOVERABLE_GATE_ERRORS as exc:
+                    except ADMISSION_GATE_ERRORS as exc:
+                        if admission_infrastructure_failure(exc):
+                            pause_admission_for_infrastructure(
+                                runtime, status_path, phase, durable,
+                                "completion_gate", exc,
+                            )
+                            return 1
                         record_deferred_failure(
                             runtime, phase, ram, durable, str(exc),
                             "completion_gate_failed",
@@ -2303,7 +2448,13 @@ def main() -> int:
                                       "updated_unix": time.time()})
                 try:
                     run_midphase_gate(args, phase, runtime, ram_after)
-                except RECOVERABLE_GATE_ERRORS as exc:
+                except ADMISSION_GATE_ERRORS as exc:
+                    if admission_infrastructure_failure(exc):
+                        pause_admission_for_infrastructure(
+                            runtime, status_path, phase, durable_after,
+                            "midphase_gate", exc,
+                        )
+                        return 1
                     record_deferred_failure(
                         runtime, phase, ram_after, durable_after, str(exc),
                         "midphase_gate_failed",

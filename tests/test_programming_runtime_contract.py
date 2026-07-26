@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.programming_integrated_retention import mutation_enabled
 from scripts.programming_curriculum_supervisor import (
+    AdmissionInfrastructureError,
     CanaryInfrastructureError,
     GateCommandFailure,
     Phase,
@@ -38,6 +39,7 @@ from scripts.programming_curriculum_supervisor import (
     latest_passing_canary_row,
     next_suspect_start,
     phase_offsets,
+    pause_admission_for_infrastructure,
     preserve_deferred_base,
     prune_resolved_deferred_bases,
     publish,
@@ -48,6 +50,8 @@ from scripts.programming_curriculum_supervisor import (
     recall_command,
     restore_canary_quarantine,
     responsive_batch_size,
+    run_admission_json_command,
+    run_admission_operation,
     run_canary_json_command,
     release_supervisor_claim,
     require_snapshot_copy_headroom,
@@ -128,6 +132,16 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertTrue(transient_gate_failure(timeout))
         self.assertFalse(transient_gate_failure(regression))
+        self.assertTrue(
+            transient_gate_failure(
+                json.JSONDecodeError("partial output", "x", 0)
+            )
+        )
+        self.assertTrue(
+            transient_gate_failure(
+                RuntimeError("gate command produced no JSON: evaluator")
+            )
+        )
 
     def test_canary_transport_retry_passes_without_deferred_interval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -198,6 +212,99 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                         ["python", "eval.py"],
                         attempts=2,
                     )
+            self.assertFalse(
+                (runtime / "curriculum-deferred-intervals.jsonl").exists()
+            )
+
+    def test_midphase_transport_retry_uses_shared_admission_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            failure = subprocess.CompletedProcess(
+                ["python", "eval.py"], 1, "",
+                "ConnectionRefusedError: endpoint unavailable",
+            )
+            success = subprocess.CompletedProcess(
+                ["python", "eval.py"], 0, '{"passed": true}\n', "",
+            )
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.subprocess.run",
+                    side_effect=[failure, success],
+                ) as run,
+                patch(
+                    "scripts.programming_curriculum_supervisor.time.sleep"
+                ),
+            ):
+                result = run_admission_json_command(
+                    runtime,
+                    Phase("corpus", "script", Path("corpus.jsonl"), 100),
+                    96,
+                    "midphase_gate",
+                    "enterprise",
+                    ["python", "eval.py"],
+                )
+            self.assertTrue(result["passed"])
+            self.assertEqual(run.call_count, 2)
+            event = json.loads(
+                (runtime / "curriculum-health.jsonl")
+                .read_text(encoding="utf-8").splitlines()[0]
+            )
+            self.assertEqual(
+                event["kind"], "midphase_gate_infrastructure_retry"
+            )
+            self.assertFalse(
+                (runtime / "curriculum-deferred-intervals.jsonl").exists()
+            )
+
+    def test_idle_settlement_operation_uses_shared_admission_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            operation = Mock(
+                side_effect=[TimeoutError("timed out"), {"ok": True}]
+            )
+            with patch(
+                "scripts.programming_curriculum_supervisor.time.sleep"
+            ):
+                result = run_admission_operation(
+                    runtime,
+                    Phase("corpus", "script", Path("corpus.jsonl"), 100),
+                    96,
+                    "idle_settlement",
+                    "checkpoint",
+                    operation,
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(operation.call_count, 2)
+            event = json.loads(
+                (runtime / "curriculum-health.jsonl")
+                .read_text(encoding="utf-8").splitlines()[0]
+            )
+            self.assertEqual(
+                event["kind"], "idle_settlement_infrastructure_retry"
+            )
+
+    def test_exhausted_admission_pause_preserves_semantic_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            phase = Phase(
+                "corpus", "script", Path("corpus.jsonl"), 100
+            )
+            status_path = runtime / "status.json"
+            pause_admission_for_infrastructure(
+                runtime,
+                status_path,
+                phase,
+                100,
+                "completion_gate",
+                AdmissionInfrastructureError(
+                    "completion evaluator unavailable"
+                ),
+            )
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                status["state"],
+                "completion_gate_infrastructure_paused",
+            )
             self.assertFalse(
                 (runtime / "curriculum-deferred-intervals.jsonl").exists()
             )
