@@ -290,6 +290,10 @@ def training_plan(args: argparse.Namespace) -> list[list[str]]:
     if not args.seed_only:
         commands.extend(curriculum_commands(args))
         commands.extend(experience_commands(args))
+        commands.append(parameterized_admission_command(args))
+        commands.extend(
+            command for _, command in qualification_commands(args)
+        )
     return commands
 
 
@@ -311,6 +315,85 @@ def experience_commands(args: argparse.Namespace) -> list[list[str]]:
             "--output", str(benchmark_dir / "multidomain-synthesis.json"),
         ],
     ]
+
+
+def parameterized_admission_command(args: argparse.Namespace) -> list[str]:
+    """Reproduce the proven one-presentation generic state-contract motif."""
+    return [
+        sys.executable,
+        str(ROOT / "scripts/programming_parameterized_fulfillment.py"),
+        "--endpoint", args.endpoint,
+        "--runtime", str(args.runtime),
+        "--train", "--repeats", "1", "--enterprise-gate",
+        "--output", str(
+            args.runtime / "benchmarks/parameterized-fulfillment.json"
+        ),
+    ]
+
+
+def qualification_commands(
+        args: argparse.Namespace,
+) -> list[tuple[str, list[str]]]:
+    """Read-only causal and integration gates for the accumulated brain."""
+    benchmark_dir = args.runtime / "benchmarks"
+    definitions = (
+        (
+            "multidomain-holdout",
+            "programming_multidomain_holdout.py",
+            ("--ablations",),
+        ),
+        (
+            "domain-transfer-holdout",
+            "programming_domain_transfer_holdout.py",
+            ("--ablations",),
+        ),
+        (
+            "state-contract-holdout",
+            "programming_state_contract_holdout.py",
+            (),
+        ),
+        (
+            "cross-project-composition",
+            "programming_cross_project_composition.py",
+            (),
+        ),
+        (
+            "polyglot-composition",
+            "programming_polyglot_composition.py",
+            (),
+        ),
+        (
+            "composition-matrix",
+            "programming_composition_matrix.py",
+            (),
+        ),
+    )
+    return [
+        (
+            name,
+            [
+                sys.executable,
+                str(ROOT / f"scripts/{script}"),
+                "--endpoint", args.endpoint,
+                "--output", str(benchmark_dir / f"{name}.json"),
+                *extra,
+            ],
+        )
+        for name, script, extra in definitions
+    ]
+
+
+def qualification_state_signature(stats: dict) -> dict:
+    """Stable learned topology; residency is allowed to change while reading."""
+    fields = (
+        "tick",
+        "pool_count",
+        "total_neurons",
+        "total_concepts",
+        "total_binding",
+        "binding_pool_id",
+    )
+    return {field: stats.get(field) for field in fields}
 
 
 def main() -> int:
@@ -442,6 +525,69 @@ def main() -> int:
             command = experience_commands(args)[1]
             run_logged(command, runtime / "logs/multidomain-admission.log")
             state["multidomain_admission_passed"] = True
+            state["updated_unix"] = time.time()
+            atomic_json(state_path, state)
+
+        if not args.seed_only and not state.get(
+                "parameterized_admission_passed"):
+            run_logged(
+                parameterized_admission_command(args),
+                runtime / "logs/parameterized-admission.log",
+            )
+            state["parameterized_admission_passed"] = True
+            state["updated_unix"] = time.time()
+            atomic_json(state_path, state)
+
+        completed_qualifications = set(
+            state.get("completed_qualification_gates") or []
+        )
+        if not args.seed_only:
+            qualification_before = state.get(
+                "qualification_state_before"
+            )
+            if not isinstance(qualification_before, dict):
+                qualification_before = qualification_state_signature(
+                    request(args.endpoint, "/brain/stats", None)
+                )
+                state["qualification_state_before"] = qualification_before
+                state["updated_unix"] = time.time()
+                atomic_json(state_path, state)
+            for name, command in qualification_commands(args):
+                if name in completed_qualifications:
+                    continue
+                run_logged(
+                    command,
+                    runtime / "logs" / f"{name}.log",
+                )
+                completed_qualifications.add(name)
+                state["completed_qualification_gates"] = [
+                    item
+                    for item, _ in qualification_commands(args)
+                    if item in completed_qualifications
+                ]
+                state["updated_unix"] = time.time()
+                atomic_json(state_path, state)
+            qualification_after = qualification_state_signature(
+                request(args.endpoint, "/brain/stats", None)
+            )
+            if qualification_after != qualification_before:
+                raise RuntimeError(
+                    "read-only final qualification mutated learned topology: "
+                    f"before={qualification_before} "
+                    f"after={qualification_after}"
+                )
+            qualification_report = {
+                "passed": True,
+                "completed_gates": state["completed_qualification_gates"],
+                "state_before": qualification_before,
+                "state_after": qualification_after,
+                "updated_unix": time.time(),
+            }
+            atomic_json(
+                runtime / "benchmarks/final-qualification.json",
+                qualification_report,
+            )
+            state["final_qualification_passed"] = True
             state["updated_unix"] = time.time()
             atomic_json(state_path, state)
         print(f"[programming-train] complete: {runtime}")

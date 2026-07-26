@@ -136,7 +136,30 @@ Replay is deliberately an end-of-corpus transaction. Each interval trains agains
 
 Only one curriculum supervisor may own a runtime. Startup scans for an existing Python supervisor with the same resolved runtime and then claims `curriculum-supervisor.pid` using exclusive creation; stale PID files are recovered, while a live owner is rejected. This claim covers guard creation as well as training so two launches cannot race on the same temporary snapshot or progress ledger.
 
-After the corpus curriculum, the trainer admits two experience gates. The first exercises an unseen environment rule through baseline failure, verified repair, successful execution, and held-out structural transfer. The second composes a never-trained class from twelve independently trained disciplines, executes it, causally ablates every premise, and tests a contradictory no-retry policy. Both mutations are transactionally guarded and must preserve foundation and enterprise retention before their checkpoints are accepted.
+After the corpus curriculum, the trainer admits three experience gates. The
+first exercises an unseen environment rule through baseline failure, verified
+repair, successful execution, and held-out structural transfer. The second
+composes a never-trained class from twelve independently trained disciplines,
+executes it, causally ablates every premise, and tests a contradictory no-retry
+policy. The third reproduces the production-proven generic state-contract
+motif as exactly one presentation of 26 domain-rich/abstract atom-grounded
+episodes; no lesson contains a complete service. It must instantiate two
+unseen inventory interfaces and transfer to withheld scheduler and quota state
+models. All three mutations are transactionally guarded and must preserve
+foundation and enterprise retention before their checkpoints are accepted.
+
+The trainer then runs resumable, read-only causal qualification gates for the
+multidomain holdout, domain-transfer holdout, third state contract,
+cross-project composition, polyglot composition, and composition matrix.
+Multidomain and domain-transfer qualification include premise ablations.
+Each passing gate is recorded independently in
+`completed_qualification_gates`, so interruption does not repeat earlier
+checks or mistake a partially evaluated suite for final qualification.
+The entire read-only sequence is bracketed by tick, pool count, neuron,
+concept, binding, and binding-pool identity. Residency counters may change as
+neurons page in and out, but any learned-topology change fails final
+qualification. The authoritative bracket is written to
+`benchmarks/final-qualification.json`.
 
 ## Authoritative artifacts
 

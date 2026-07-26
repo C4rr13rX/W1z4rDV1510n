@@ -106,6 +106,9 @@ from scripts.train_programming_brain import (
     SEED_STAGES,
     curriculum_commands,
     guard_seed_stage,
+    parameterized_admission_command,
+    qualification_commands,
+    qualification_state_signature,
     resolve_seed_guard,
 )
 from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
@@ -1631,6 +1634,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("programming_experiential_generalization.py", trainer)
         self.assertIn("programming_multidomain_synthesis.py", trainer)
+        self.assertIn("programming_parameterized_fulfillment.py", trainer)
+        self.assertIn('"--repeats", "1"', trainer)
         self.assertIn('"--auto-quarantine-recovery"', trainer)
         self.assertIn('"--replay-deferred"', trainer)
         self.assertIn('"--node-bin", str(args.node_bin.resolve())', trainer)
@@ -1666,6 +1671,46 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertEqual(
             forward[forward.index("--max-restarts") + 1], "10"
+        )
+        parameterized = parameterized_admission_command(args)
+        self.assertIn("programming_parameterized_fulfillment.py",
+                      parameterized[1])
+        self.assertEqual(
+            parameterized[parameterized.index("--repeats") + 1], "1"
+        )
+        qualifications = dict(qualification_commands(args))
+        self.assertEqual(
+            set(qualifications),
+            {
+                "multidomain-holdout",
+                "domain-transfer-holdout",
+                "state-contract-holdout",
+                "cross-project-composition",
+                "polyglot-composition",
+                "composition-matrix",
+            },
+        )
+        self.assertIn(
+            "--ablations", qualifications["domain-transfer-holdout"]
+        )
+        self.assertEqual(
+            qualification_state_signature({
+                "tick": 7,
+                "pool_count": 3,
+                "total_neurons": 11,
+                "total_concepts": 5,
+                "total_binding": 4,
+                "binding_pool_id": 0,
+                "resident_terminals": 999,
+            }),
+            {
+                "tick": 7,
+                "pool_count": 3,
+                "total_neurons": 11,
+                "total_concepts": 5,
+                "total_binding": 4,
+                "binding_pool_id": 0,
+            },
         )
 
     def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
