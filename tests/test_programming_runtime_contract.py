@@ -32,6 +32,7 @@ from scripts.programming_curriculum_supervisor import (
     phase_offsets,
     preserve_deferred_base,
     publish,
+    quarantine_interval_ids,
     record_deferred_failure,
     recall_command,
     restore_canary_quarantine,
@@ -449,6 +450,51 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 [(row["start_row"], row["end_row"]) for row in recorded],
                 [(0, 100), (100, 120), (120, 200), (200, 220)],
             )
+
+    def test_quarantine_retest_owns_exact_disjoint_interval_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            corpus = runtime / "corpus.jsonl"
+            corpus.write_text("{}\n", encoding="utf-8")
+            quarantine = {
+                "deferred_events": [
+                    {"interval_id": "phase:100:120"},
+                    {"interval_id": "phase:200:220"},
+                    {"interval_id": "phase:100:120"},
+                ],
+                "interval_id": "legacy:1:2",
+            }
+            self.assertEqual(quarantine_interval_ids(quarantine), [
+                "phase:100:120", "phase:200:220", "legacy:1:2",
+            ])
+            for interval_id, start, end in (
+                ("phase:0:100", 0, 100),
+                ("phase:100:120", 100, 120),
+                ("phase:120:200", 120, 200),
+                ("phase:200:220", 200, 220),
+            ):
+                append_deferred_event(runtime, {
+                    "interval_id": interval_id,
+                    "status": "deferred",
+                    "phase": "phase",
+                    "start_row": start,
+                    "end_row": end,
+                })
+            args = argparse.Namespace(endpoint="http://127.0.0.1:1")
+            command = recall_command(
+                args,
+                Phase("phase", "script", corpus, 220),
+                runtime,
+                220,
+                32,
+                frozenset({"phase:100:120", "phase:200:220"}),
+            )
+            skip_ranges = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--skip-range"
+            ]
+            self.assertEqual(skip_ranges, ["0:100", "120:200"])
 
     def test_continuous_canary_attributes_concurrent_topology_growth(self) -> None:
         self.assertEqual(

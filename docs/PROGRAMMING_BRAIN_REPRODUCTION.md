@@ -21,6 +21,29 @@ Use `--dry-run` to inspect the complete command plan without creating a runtime 
 
 For a controlled deployment or experience-admission window, stop the supervisor near a block target but allow its corpus worker to reach the exact durable boundary. Then run `programming_curriculum_supervisor.py --gate-only-phase <phase>` with the normal endpoint/runtime/gate options. It executes the same authoritative midphase or completion gate, releases the matching last-good guard only on success, and exits without starting another worker. Resume the ordinary supervisor only after the protected maintenance operation is complete.
 
+When a continuous canary rejects a live candidate and a causal correction has
+been deployed without rolling that candidate back, use
+`--retest-canary-quarantine`. The supervisor requires the exact candidate RAM
+and durable offsets, the phase-owned rollback guard, and every disjoint
+candidate interval in the unresolved ledger. Its recall gate temporarily
+includes only those candidate intervals while continuing to exclude unrelated
+deferred ranges. It then runs the normal settled midphase or completion gate.
+Failure leaves the candidate, ledger, marker, and guard unresolved. Success
+resolves exactly the marker-owned intervals, admits the checkpointed candidate,
+removes the quarantine marker, and releases the matching guard:
+
+```powershell
+python scripts/programming_curriculum_supervisor.py `
+  --endpoint http://127.0.0.1:18095 `
+  --runtime runtime/brains/programming-integrated-20260713 `
+  --corpus-root D:\w1z4rdv1510n-data\training `
+  --retest-canary-quarantine
+```
+
+Do not use this mode after restoring the guard or against a different live
+candidate. Do not resolve the candidate intervals manually before the retest;
+their unresolved identity is part of the admission proof.
+
 ## Encoded curriculum
 
 The seed curriculum is ordered as follows:

@@ -779,7 +779,8 @@ def topology_delta(before: dict, after: dict) -> dict:
 
 
 def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
-                   rows: int, samples: int) -> list[str]:
+                   rows: int, samples: int,
+                   include_interval_ids: frozenset[str] = frozenset()) -> list[str]:
     """Accept deterministic answers supervised by any durable prior corpus."""
     command = [
         sys.executable, "scripts/programming_corpus_recall.py", str(phase.corpus),
@@ -798,6 +799,8 @@ def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
     for corpus in sorted(accepted - {phase.corpus.resolve()}, key=str):
         command.extend(["--accepted-corpus", str(corpus)])
     for interval in unresolved_deferred_intervals(runtime, phase.name):
+        if interval.get("interval_id") in include_interval_ids:
+            continue
         command.extend([
             "--skip-range",
             f"{int(interval['start_row'])}:{int(interval['end_row'])}",
@@ -806,10 +809,13 @@ def recall_command(args: argparse.Namespace, phase: Phase, runtime: Path,
 
 
 def run_completion_gate(args: argparse.Namespace, phase: Phase,
-                        runtime: Path) -> dict:
+                        runtime: Path,
+                        include_interval_ids: frozenset[str] = frozenset()) -> dict:
     """Require corpus recall plus protected foundation/code execution."""
     settlement = settle_brain_for_admission(args, phase, runtime, phase.rows)
-    recall = run_json_command(recall_command(args, phase, runtime, phase.rows, 64))
+    recall = run_json_command(recall_command(
+        args, phase, runtime, phase.rows, 64, include_interval_ids
+    ))
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(f"{phase.name} recall regression: {recall}")
 
@@ -882,11 +888,14 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
 
 
 def run_midphase_gate(args: argparse.Namespace, phase: Phase,
-                      runtime: Path, trained_rows: int) -> dict:
+                      runtime: Path, trained_rows: int,
+                      include_interval_ids: frozenset[str] = frozenset()) -> dict:
     """Protect retained knowledge before permitting the next corpus chunk."""
     settlement = settle_brain_for_admission(args, phase, runtime, trained_rows)
     recall = run_json_command(
-        recall_command(args, phase, runtime, trained_rows, 32)
+        recall_command(
+            args, phase, runtime, trained_rows, 32, include_interval_ids
+        )
     )
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(
@@ -1145,6 +1154,23 @@ def perform_automatic_recovery(args: argparse.Namespace, phase: Phase,
     return True
 
 
+def quarantine_interval_ids(quarantine: dict) -> list[str]:
+    """Return the exact disjoint obligations owned by one failed candidate."""
+    identifiers = []
+    for event in quarantine.get("deferred_events") or []:
+        interval_id = event.get("interval_id")
+        if (
+            isinstance(interval_id, str)
+            and interval_id
+            and interval_id not in identifiers
+        ):
+            identifiers.append(interval_id)
+    legacy = quarantine.get("interval_id")
+    if isinstance(legacy, str) and legacy and legacy not in identifiers:
+        identifiers.append(legacy)
+    return identifiers
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:18600")
@@ -1162,6 +1188,13 @@ def main() -> int:
     parser.add_argument(
         "--restore-canary-quarantine", action="store_true",
         help="with the brain server stopped, restore last-good state and rewind progress",
+    )
+    parser.add_argument(
+        "--retest-canary-quarantine", action="store_true",
+        help=(
+            "comprehensively retest the live failed candidate after a fix; "
+            "on success admit its exact deferred spans instead of rolling back"
+        ),
     )
     parser.add_argument(
         "--auto-quarantine-recovery", action="store_true",
@@ -1248,6 +1281,103 @@ def main() -> int:
     missing = [str(phase.corpus) for phase in phases if not phase.corpus.is_file()]
     if missing:
         parser.error("missing corpus files: " + ", ".join(missing))
+    if args.retest_canary_quarantine:
+        quarantine = read_json(canary_quarantine_path(runtime))
+        if not quarantine:
+            parser.error("no continuous-canary quarantine exists to retest")
+        last_good = quarantine.get("last_good") or read_json(
+            runtime / "brain" / "brain.last-good.json"
+        )
+        phase_name = str(
+            quarantine.get("phase") or last_good.get("phase") or ""
+        )
+        phase = next((item for item in phases if item.name == phase_name), None)
+        if phase is None:
+            parser.error(f"quarantine has unknown phase: {phase_name!r}")
+        candidate_row = int(quarantine.get("candidate_row", -1))
+        ram, durable = phase_offsets(runtime / f"{phase.name}.progress.json")
+        if candidate_row < 0 or ram != candidate_row or durable != candidate_row:
+            parser.error(
+                "quarantine retest requires its exact durable live candidate; "
+                f"candidate={candidate_row} ram={ram} durable={durable}"
+            )
+        guard_metadata = read_json(runtime / "brain" / "brain.last-good.json")
+        guard_path = Path(str(guard_metadata.get("guard") or ""))
+        if (
+            guard_metadata.get("phase") != phase.name
+            or not guard_path.is_file()
+            or int(guard_metadata.get("row", -1)) > candidate_row
+        ):
+            parser.error(
+                "quarantine retest requires the candidate's valid rollback "
+                f"guard: {guard_metadata}"
+            )
+        interval_ids = frozenset(quarantine_interval_ids(quarantine))
+        unresolved_ids = {
+            str(event["interval_id"])
+            for event in unresolved_deferred_intervals(runtime, phase.name)
+        }
+        if not interval_ids or not interval_ids.issubset(unresolved_ids):
+            parser.error(
+                "quarantine retest intervals are missing from the unresolved "
+                f"ledger: candidate={sorted(interval_ids)} "
+                f"unresolved={sorted(unresolved_ids)}"
+            )
+        publish(status_path, {
+            "state": "quarantine_retest_benchmarking",
+            "phase": phase.name,
+            "candidate_row": candidate_row,
+            "interval_ids": sorted(interval_ids),
+            "updated_unix": time.time(),
+        })
+        try:
+            if candidate_row >= phase.rows:
+                report = run_completion_gate(
+                    args, phase, runtime, interval_ids
+                )
+            else:
+                report = run_midphase_gate(
+                    args, phase, runtime, candidate_row, interval_ids
+                )
+        except RECOVERABLE_GATE_ERRORS as exc:
+            publish(status_path, {
+                "state": "quarantine_retest_failed",
+                "phase": phase.name,
+                "candidate_row": candidate_row,
+                "interval_ids": sorted(interval_ids),
+                "error": str(exc),
+                "updated_unix": time.time(),
+            })
+            return 1
+        for interval_id in sorted(interval_ids):
+            append_deferred_event(runtime, {
+                "interval_id": interval_id,
+                "status": "resolved",
+                "phase": phase.name,
+                "reason": "fixed candidate passed comprehensive quarantine retest",
+            })
+        canary_quarantine_path(runtime).unlink(missing_ok=True)
+        if not accept_last_good_guard(runtime, phase.name):
+            raise RuntimeError(
+                f"could not release {phase.name} last-good guard after admission"
+            )
+        append_health_event(runtime, {
+            "kind": "quarantine_retest_admitted",
+            "phase": phase.name,
+            "trained_rows": candidate_row,
+            "interval_ids": sorted(interval_ids),
+            "passed": True,
+            "report": report,
+        })
+        publish(status_path, {
+            "state": "quarantine_retest_admitted",
+            "phase": phase.name,
+            "ram_next_row": ram,
+            "durable_next_row": durable,
+            "interval_ids": sorted(interval_ids),
+            "updated_unix": time.time(),
+        })
+        return 0
     if args.gate_only_phase:
         phase = next(
             (item for item in phases if item.name == args.gate_only_phase), None
