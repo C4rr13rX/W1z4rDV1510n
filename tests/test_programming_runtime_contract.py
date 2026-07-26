@@ -39,6 +39,7 @@ from scripts.programming_curriculum_supervisor import (
     deferred_replay_command,
     deferred_replay_marker_path,
     latest_passing_canary_row,
+    memory_floor_breached,
     next_suspect_start,
     phase_offsets,
     pause_admission_for_infrastructure,
@@ -130,6 +131,14 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_memory_floor_requires_forward_durable_progress(self) -> None:
+        gib = 1024 * 1024 * 1024
+        self.assertFalse(memory_floor_breached(6.0, 100, 100, 100, 1 * gib))
+        self.assertFalse(memory_floor_breached(6.0, 100, 101, 100, 1 * gib))
+        self.assertFalse(memory_floor_breached(0.0, 100, 101, 101, 1 * gib))
+        self.assertFalse(memory_floor_breached(6.0, 100, 101, 101, 7 * gib))
+        self.assertTrue(memory_floor_breached(6.0, 100, 101, 101, 5 * gib))
+
     def test_foundation_gate_allows_saturated_host_response_window(self) -> None:
         client = FoundationBrainClient(
             "http://127.0.0.1:18095", timeout=180.0

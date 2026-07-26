@@ -23,6 +23,17 @@ evidence selects a smaller starting scope, the live controller increases it
 only after repeated sub-threshold measurements, and any breach reduces it
 immediately.
 
+The supervisor also keeps a `6 GiB` host-available-memory floor by default.
+When active training crosses that floor, it stops the corpus worker only after
+three consecutive observations at an exact WAL-durable row, performs the
+normal neuron-wise sleep and checkpoint without admitting the partial block,
+waits for host memory to recover above the floor, and resumes from that same
+row under the existing rollback guard. This treats memory pressure as a
+lifecycle yield, not as a learned failure or a reason to quarantine correct
+corpus data. Set
+`--min-free-memory-gb 0` only when an external resource supervisor provides an
+equivalent safeguard.
+
 Use `--resume` with the same runtime after an interruption. The trainer records only accepted stages. Each seed stage is protected using the authoritative brain representation: immutable atomically replaced `brain.bin` checkpoints may use an NTFS hard link, while mutable `brain.wbrain` containers always use an independent copy published by atomic rename. On an owned-node resume, an interrupted transaction is either committed when its durable state record exists or restored before the stage is retried. This avoids silently training a partially completed stage twice and prevents a `.wbrain` candidate from mutating its own rollback guard.
 
 Use `--dry-run` to inspect the complete command plan without creating a runtime or contacting a node. Use `--seed-only` to stop after the curated enterprise curriculum and its strict gate. `--external-node` is available for an intentionally pre-launched node, but the normal owned-node mode provides safer restart and rollback behavior.

@@ -43,6 +43,8 @@ RECOVERABLE_GATE_ERRORS = (
 )
 MIN_COPY_RESERVE_BYTES = 64 * 1024 * 1024
 MAX_COPY_RESERVE_BYTES = 4 * 1024 * 1024 * 1024
+RESOURCE_SETTLED_EXIT = 88
+RESOURCE_SETTLEMENT_FAILED_EXIT = 89
 
 
 class GateCommandFailure(RuntimeError):
@@ -238,6 +240,37 @@ def runtime_responsive_batch_size(runtime: Path, configured: int,
         responsive_batch_size(configured, progress, max_lock_seconds)
     )
     return min(candidates)
+
+
+def memory_floor_breached(min_free_memory_gb: float, initial_row: int,
+                          ram_row: int, durable_row: int,
+                          available_bytes: int | None = None) -> bool:
+    """Request a safe candidate settlement before host memory is exhausted.
+
+    At least one durable row must have advanced in this worker. This prevents
+    a shared host that is already below its configured floor from repeatedly
+    sleeping an unchanged brain without doing useful work.
+    """
+    if min_free_memory_gb <= 0 or ram_row <= initial_row:
+        return False
+    if durable_row != ram_row:
+        return False
+    if available_bytes is None:
+        available_bytes = int(psutil.virtual_memory().available)
+    floor_bytes = int(min_free_memory_gb * 1024 * 1024 * 1024)
+    return available_bytes < floor_bytes
+
+
+def stop_worker_process(worker: subprocess.Popen, timeout: float = 30.0) -> None:
+    """Stop a corpus worker at its already-published WAL-durable boundary."""
+    if worker.poll() is not None:
+        return
+    worker.terminate()
+    try:
+        worker.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        worker.kill()
+        worker.wait(timeout=timeout)
 
 
 def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
@@ -1416,6 +1449,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
               status_path: Path, block_target_row: int) -> int:
     progress = runtime / f"{phase.name}.progress.json"
     ram, durable = phase_offsets(progress)
+    initial_row = ram
     if ram >= phase.rows or ram >= block_target_row:
         return 0
     stdout_path = runtime / f"{phase.name}.stdout.log"
@@ -1426,6 +1460,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
         args.max_live_lock_seconds
     )
     lock_chunk_size = args.lock_chunk_size
+    low_memory_streak = 0
     command = [
         sys.executable, "-m", "tools.training_standard.drive_corpora_brain",
         "--brain", args.endpoint,
@@ -1495,12 +1530,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                             args, phase, runtime, candidate_row
                         )
                     except CanaryInfrastructureError as exc:
-                        worker.terminate()
-                        try:
-                            worker.wait(timeout=30)
-                        except subprocess.TimeoutExpired:
-                            worker.kill()
-                            worker.wait(timeout=30)
+                        stop_worker_process(worker)
                         failed_ram, failed_durable = phase_offsets(progress)
                         append_health_event(runtime, {
                             "kind": "continuous_canary_infrastructure_paused",
@@ -1521,12 +1551,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         })
                         return 87
                     except RECOVERABLE_GATE_ERRORS as exc:
-                        worker.terminate()
-                        try:
-                            worker.wait(timeout=30)
-                        except subprocess.TimeoutExpired:
-                            worker.kill()
-                            worker.wait(timeout=30)
+                        stop_worker_process(worker)
                         failed_ram, failed_durable = phase_offsets(progress)
                         failed_row = max(
                             candidate_row, failed_ram, failed_durable
@@ -1547,6 +1572,74 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         return 86
                     while next_canary <= candidate_row:
                         next_canary += args.canary_rows
+                if code is None and memory_floor_breached(
+                        args.min_free_memory_gb,
+                        initial_row,
+                        ram,
+                        durable,
+                    ):
+                    low_memory_streak += 1
+                else:
+                    low_memory_streak = 0
+                if code is None and low_memory_streak >= 3:
+                    available_before = int(psutil.virtual_memory().available)
+                    stop_worker_process(worker)
+                    settled_ram, settled_durable = phase_offsets(progress)
+                    if settled_ram != settled_durable:
+                        publish(status_path, {
+                            "state": "resource_settlement_failed",
+                            "phase": phase.name,
+                            "ram_next_row": settled_ram,
+                            "durable_next_row": settled_durable,
+                            "error": "resource yield reached a non-durable boundary",
+                            "updated_unix": time.time(),
+                        })
+                        return RESOURCE_SETTLEMENT_FAILED_EXIT
+                    publish(status_path, {
+                        "state": "resource_settling",
+                        "phase": phase.name,
+                        "ram_next_row": settled_ram,
+                        "durable_next_row": settled_durable,
+                        "available_bytes_before": available_before,
+                        "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "updated_unix": time.time(),
+                    })
+                    try:
+                        settlement = settle_brain_for_admission(
+                            args, phase, runtime, settled_durable
+                        )
+                    except ADMISSION_GATE_ERRORS as exc:
+                        publish(status_path, {
+                            "state": "resource_settlement_failed",
+                            "phase": phase.name,
+                            "ram_next_row": settled_ram,
+                            "durable_next_row": settled_durable,
+                            "error": str(exc),
+                            "updated_unix": time.time(),
+                        })
+                        return RESOURCE_SETTLEMENT_FAILED_EXIT
+                    available_after = int(psutil.virtual_memory().available)
+                    append_health_event(runtime, {
+                        "kind": "resource_bounded_settlement",
+                        "passed": True,
+                        "phase": phase.name,
+                        "trained_rows": settled_durable,
+                        "available_bytes_before": available_before,
+                        "available_bytes_after": available_after,
+                        "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "idle_settlement": settlement,
+                    })
+                    publish(status_path, {
+                        "state": "resource_settled",
+                        "phase": phase.name,
+                        "ram_next_row": settled_ram,
+                        "durable_next_row": settled_durable,
+                        "available_bytes_before": available_before,
+                        "available_bytes_after": available_after,
+                        "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "updated_unix": time.time(),
+                    })
+                    return RESOURCE_SETTLED_EXIT
                 if code is not None:
                     return code
                 time.sleep(max(1.0, args.poll_seconds))
@@ -2058,6 +2151,14 @@ def main() -> int:
     parser.add_argument("--lock-chunk-size", type=int, default=12)
     parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.0)
     parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)
+    parser.add_argument(
+        "--min-free-memory-gb", type=float, default=6.0,
+        help=(
+            "stop at a WAL-durable row, serialize/checkpoint the guarded "
+            "candidate, and resume when host-available memory falls below "
+            "this floor; 0 disables"
+        ),
+    )
     parser.add_argument("--checkpoint-rows", type=int, default=131072)
     parser.add_argument("--gate-rows", type=int, default=131072)
     parser.add_argument(
@@ -2535,6 +2636,35 @@ def main() -> int:
                 # The candidate remains guarded and unadmitted. A fresh
                 # supervisor can retry the read-only canary without either
                 # replaying or falsely quarantining its corpus rows.
+                return 1
+            if code == RESOURCE_SETTLED_EXIT:
+                # The same guarded candidate was neuron-wise serialized and
+                # checkpointed without being admitted. Resume from its exact
+                # durable row toward the original guarded block target.
+                floor_bytes = int(
+                    args.min_free_memory_gb * 1024 * 1024 * 1024
+                )
+                while (
+                    floor_bytes > 0
+                    and int(psutil.virtual_memory().available) < floor_bytes
+                ):
+                    publish(status_path, {
+                        "state": "resource_waiting",
+                        "phase": phase.name,
+                        "ram_next_row": ram_after,
+                        "durable_next_row": durable_after,
+                        "available_bytes": int(
+                            psutil.virtual_memory().available
+                        ),
+                        "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "updated_unix": time.time(),
+                    })
+                    time.sleep(max(1.0, args.poll_seconds))
+                restarts = 0
+                continue
+            if code == RESOURCE_SETTLEMENT_FAILED_EXIT:
+                # Preserve the guard and durable progress for a clean retry;
+                # never reinterpret host pressure as a semantic regression.
                 return 1
             if code == 0 and ram_after >= phase.rows:
                 continue
