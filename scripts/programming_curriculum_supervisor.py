@@ -573,6 +573,22 @@ def guarded_block_target(runtime: Path, phase: Phase, current_row: int,
     return min(phase.rows, start + gate_rows)
 
 
+def guarded_admission_due(runtime: Path, phase: Phase, current_row: int,
+                          gate_rows: int) -> bool:
+    """Return whether a stopped/restarted worker is already at its gate.
+
+    Reaching the exact half-open block target is successful corpus progress,
+    not a zero-work worker failure. A fresh supervisor must comprehensively
+    admit that durable candidate before it can assign another block.
+    """
+    return (
+        current_row < phase.rows
+        and current_row >= guarded_block_target(
+            runtime, phase, current_row, gate_rows
+        )
+    )
+
+
 def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
     run = subprocess.run(
         command, cwd=ROOT, capture_output=True, text=True,
@@ -1578,6 +1594,62 @@ def perform_automatic_recovery(args: argparse.Namespace, phase: Phase,
     return True
 
 
+def admit_midphase_candidate(args: argparse.Namespace, phase: Phase,
+                             runtime: Path, status_path: Path,
+                             candidate_row: int,
+                             durable_row: int) -> str:
+    """Comprehensively admit one durable block boundary.
+
+    The same transaction is used both immediately after a worker advances and
+    after a supervisor restart discovers that the worker already stopped at
+    the guarded target.
+    """
+    if durable_row != candidate_row:
+        publish(status_path, {
+            "state": "midphase_gate_failed",
+            "phase": phase.name,
+            "ram_next_row": candidate_row,
+            "durable_next_row": durable_row,
+            "error": "midphase admission requires an exact durable boundary",
+            "updated_unix": time.time(),
+        })
+        return "failed"
+    publish(status_path, {
+        "state": "midphase_benchmarking",
+        "phase": phase.name,
+        "ram_next_row": candidate_row,
+        "durable_next_row": durable_row,
+        "updated_unix": time.time(),
+    })
+    try:
+        run_midphase_gate(args, phase, runtime, candidate_row)
+    except ADMISSION_GATE_ERRORS as exc:
+        if admission_infrastructure_failure(exc):
+            pause_admission_for_infrastructure(
+                runtime, status_path, phase, durable_row,
+                "midphase_gate", exc,
+            )
+            return "paused"
+        record_deferred_failure(
+            runtime, phase, candidate_row, durable_row, str(exc),
+            "midphase_gate_failed",
+            use_passing_canary=False,
+        )
+        publish(status_path, {
+            "state": "midphase_gate_failed",
+            "phase": phase.name,
+            "ram_next_row": candidate_row,
+            "durable_next_row": durable_row,
+            "error": str(exc),
+            "updated_unix": time.time(),
+        })
+        if perform_automatic_recovery(args, phase, runtime, status_path):
+            return "recovered"
+        return "failed"
+    accept_last_good_guard(runtime, phase.name)
+    return "admitted"
+
+
 def quarantine_interval_ids(quarantine: dict) -> list[str]:
     """Return the exact disjoint obligations owned by one failed candidate."""
     identifiers = []
@@ -2438,6 +2510,17 @@ def main() -> int:
             block_target = guarded_block_target(
                 runtime, phase, ram, args.gate_rows
             )
+            if guarded_admission_due(
+                    runtime, phase, ram, args.gate_rows):
+                admission = admit_midphase_candidate(
+                    args, phase, runtime, status_path, ram, durable
+                )
+                if admission == "admitted":
+                    continue
+                if admission == "recovered":
+                    restarts = 0
+                    continue
+                return 1
             code = run_phase(args, phase, runtime, status_path, block_target)
             ram_after, durable_after = phase_offsets(
                 runtime / f"{phase.name}.progress.json"
@@ -2456,38 +2539,16 @@ def main() -> int:
             if code == 0 and ram_after >= phase.rows:
                 continue
             if code == 0 and ram_after > ram and durable_after == ram_after:
-                publish(status_path, {"state": "midphase_benchmarking",
-                                      "phase": phase.name,
-                                      "ram_next_row": ram_after,
-                                      "durable_next_row": durable_after,
-                                      "updated_unix": time.time()})
-                try:
-                    run_midphase_gate(args, phase, runtime, ram_after)
-                except ADMISSION_GATE_ERRORS as exc:
-                    if admission_infrastructure_failure(exc):
-                        pause_admission_for_infrastructure(
-                            runtime, status_path, phase, durable_after,
-                            "midphase_gate", exc,
-                        )
-                        return 1
-                    record_deferred_failure(
-                        runtime, phase, ram_after, durable_after, str(exc),
-                        "midphase_gate_failed",
-                        use_passing_canary=False,
-                    )
-                    publish(status_path, {"state": "midphase_gate_failed",
-                                          "phase": phase.name,
-                                          "ram_next_row": ram_after,
-                                          "durable_next_row": durable_after,
-                                          "error": str(exc),
-                                          "updated_unix": time.time()})
-                    if perform_automatic_recovery(
-                            args, phase, runtime, status_path):
-                        restarts = 0
-                        continue
-                    return 1
-                accept_last_good_guard(runtime, phase.name)
-                continue
+                admission = admit_midphase_candidate(
+                    args, phase, runtime, status_path,
+                    ram_after, durable_after,
+                )
+                if admission == "admitted":
+                    continue
+                if admission == "recovered":
+                    restarts = 0
+                    continue
+                return 1
             restarts += 1
             if restarts > args.max_restarts or ram_after <= ram:
                 publish(status_path, {"state": "failed", "phase": phase.name,

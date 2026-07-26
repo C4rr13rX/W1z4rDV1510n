@@ -32,6 +32,7 @@ from scripts.programming_curriculum_supervisor import (
     ensure_last_good_guard,
     ensure_live_last_good_guard,
     finalize_canary_restore,
+    guarded_admission_due,
     guarded_block_target,
     guard_state_identity,
     deferred_interval_id,
@@ -1300,7 +1301,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('"--limit-rows", str(max(0, block_target_row - ram))', source)
         self.assertIn("guarded_block_target", source)
-        self.assertIn("run_midphase_gate(args, phase, runtime, ram_after)", source)
+        self.assertIn("admit_midphase_candidate(", source)
+        self.assertIn("guarded_admission_due(", source)
         self.assertIn('"--no-checkpoint"', source)
         self.assertIn('"--gate-rows", type=int, default=131072', source)
         self.assertIn('"--checkpoint-rows", type=int, default=131072', source)
@@ -1685,6 +1687,29 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(guarded_block_target(runtime, phase, 100, 200), 300)
             self.assertEqual(guarded_block_target(runtime, phase, 175, 200), 300)
             self.assertEqual(guarded_block_target(runtime, phase, 299, 200), 300)
+
+    def test_exact_guarded_boundary_is_admitted_after_supervisor_restart(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus", "row": 100,
+            }), encoding="utf-8")
+            phase = Phase("corpus", "script", Path("corpus.jsonl"), 1000)
+            self.assertFalse(guarded_admission_due(
+                runtime, phase, 299, 200
+            ))
+            self.assertTrue(guarded_admission_due(
+                runtime, phase, 300, 200
+            ))
+            self.assertTrue(guarded_admission_due(
+                runtime, phase, 301, 200
+            ))
+            self.assertFalse(guarded_admission_due(
+                runtime, phase, phase.rows, 200
+            ))
 
     def test_seed_stage_transaction_resolves_without_duplicate_training(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
