@@ -40,6 +40,8 @@ RECOVERABLE_GATE_ERRORS = (
     urllib.error.URLError,
     ConnectionError,
 )
+MIN_COPY_RESERVE_BYTES = 64 * 1024 * 1024
+MAX_COPY_RESERVE_BYTES = 4 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,25 @@ def phase_offsets(progress_path: Path) -> tuple[int, int]:
     ram = max(0, int(progress.get("ram_next_row", 0)))
     durable = max(0, min(ram, int(progress.get("durable_next_row", 0))))
     return ram, durable
+
+
+def require_snapshot_copy_headroom(source: Path, copies: int,
+                                   operation: str) -> None:
+    """Refuse a large copy before it consumes rollback or host headroom."""
+    size = source.stat().st_size
+    reserve = min(
+        MAX_COPY_RESERVE_BYTES,
+        max(MIN_COPY_RESERVE_BYTES, size // 10),
+    )
+    required = size * max(1, copies) + reserve
+    free = shutil.disk_usage(source.parent).free
+    if free < required:
+        gib = 1024 ** 3
+        raise RuntimeError(
+            f"insufficient disk headroom for {operation}: "
+            f"{free / gib:.2f} GiB free, {required / gib:.2f} GiB required "
+            f"for {copies} snapshot copy/copies plus reserve"
+        )
 
 
 def responsive_batch_size(configured: int, progress: dict,
@@ -150,6 +171,11 @@ def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
         # hard link would mutate the alleged rollback copy too. Publish a full
         # independent copy atomically. This is paid only at comprehensive gate
         # boundaries, never for fast canaries.
+        # The next failure must still have room to make its independent
+        # rollback replacement after this guard exists.
+        require_snapshot_copy_headroom(
+            snapshot, copies=2, operation="independent .wbrain guard"
+        )
         temporary = guard.with_suffix(guard.suffix + ".tmp")
         temporary.unlink(missing_ok=True)
         shutil.copy2(snapshot, temporary)
@@ -261,6 +287,9 @@ def restore_canary_quarantine(runtime: Path, finalize: bool = True) -> dict:
     else:
         temporary = snapshot.with_suffix(snapshot.suffix + ".restore.tmp")
         temporary.unlink(missing_ok=True)
+        require_snapshot_copy_headroom(
+            guard, copies=1, operation=".wbrain quarantine restore"
+        )
         shutil.copy2(guard, temporary)
         os.replace(temporary, snapshot)
     (brain_dir / "brain.wal").unlink(missing_ok=True)
@@ -549,6 +578,9 @@ def preserve_deferred_base(runtime: Path, interval_id: str) -> Path:
         except OSError:
             # Cross-volume or link-restricted filesystems retain the slower
             # but portable independent-copy fallback.
+            require_snapshot_copy_headroom(
+                guard, copies=1, operation="deferred causal-base fallback"
+            )
             shutil.copy2(guard, base)
     return base
 
@@ -561,6 +593,73 @@ def append_deferred_event(runtime: Path, event: dict) -> None:
         stream.write(json.dumps(payload, sort_keys=True) + "\n")
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def prune_resolved_deferred_bases(runtime: Path) -> list[Path]:
+    """Remove causal bases only after every interval using them is resolved.
+
+    Deferred `.wbrain` bases can be tens of gigabytes. The append-only ledger
+    remains authoritative: a known interval directory absent from its
+    unresolved fold has no replay obligation. Unknown files and directories
+    are deliberately preserved.
+    """
+    root = runtime / "deferred"
+    try:
+        resolved_root = root.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        return []
+
+    known: set[str] = set()
+    try:
+        with deferred_intervals_path(runtime).open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                interval_id = event.get("interval_id")
+                if not isinstance(interval_id, str) or not interval_id:
+                    continue
+                known.add(hashlib.sha256(
+                    interval_id.encode("utf-8")
+                ).hexdigest()[:16])
+    except (FileNotFoundError, OSError):
+        return []
+
+    active: set[str] = set()
+    for event in unresolved_deferred_intervals(runtime):
+        active.add(hashlib.sha256(
+            str(event["interval_id"]).encode("utf-8")
+        ).hexdigest()[:16])
+        # Ledger repair can replace an outer interval with a non-overlapping
+        # sub-interval while deliberately retaining the outer interval's exact
+        # causal base. Protect that recorded directory as well as the new ID's
+        # derived directory.
+        base_snapshot = event.get("base_snapshot")
+        if isinstance(base_snapshot, str) and base_snapshot:
+            base_parent = Path(base_snapshot).resolve(strict=False).parent
+            if base_parent.parent == resolved_root:
+                active.add(base_parent.name)
+    removed: list[Path] = []
+    for digest in sorted(known - active):
+        directory = root / digest
+        try:
+            resolved = directory.resolve(strict=True)
+        except (FileNotFoundError, OSError):
+            continue
+        if resolved.parent != resolved_root or resolved.name != digest:
+            raise RuntimeError(
+                f"refusing deferred-base cleanup outside {resolved_root}: "
+                f"{resolved}"
+            )
+        if not any(
+            child.is_file() and child.name.startswith("brain.base.")
+            for child in resolved.iterdir()
+        ):
+            continue
+        shutil.rmtree(resolved)
+        removed.append(resolved)
+    return removed
 
 
 def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> list[dict]:
@@ -1356,6 +1455,7 @@ def main() -> int:
                 "phase": phase.name,
                 "reason": "fixed candidate passed comprehensive quarantine retest",
             })
+        pruned_bases = prune_resolved_deferred_bases(runtime)
         canary_quarantine_path(runtime).unlink(missing_ok=True)
         if not accept_last_good_guard(runtime, phase.name):
             raise RuntimeError(
@@ -1375,6 +1475,7 @@ def main() -> int:
             "ram_next_row": ram,
             "durable_next_row": durable,
             "interval_ids": sorted(interval_ids),
+            "pruned_deferred_bases": [str(path) for path in pruned_bases],
             "updated_unix": time.time(),
         })
         return 0

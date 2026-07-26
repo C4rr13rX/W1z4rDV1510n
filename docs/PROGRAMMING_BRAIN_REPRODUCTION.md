@@ -76,6 +76,8 @@ Corpus processing is resumable and WAL-durable. The default production schedule 
 
 Each deferred interval retains an exact causal base for later bisection. Because the last-good `.wbrain` guard is already an immutable inode independent of the mutable live container, the deferred base uses a hard link to that guard when the filesystem permits it. Rollback always copies the guard into a new live inode before removing the guard name, so the deferred link remains immutable. This makes quarantine publication effectively constant-space; cross-volume or link-restricted filesystems fall back to an independent copy.
 
+Resolved interval bases are not permanent archives. After the append-only ledger records resolution, the supervisor folds the complete ledger and removes only known causal-base directories that no unresolved interval references; unknown experiment directories remain untouched. Before creating an independent `.wbrain` guard, the supervisor also requires free space for both the guard and a later rollback replacement plus reserve. A low-disk host therefore stops before copying rather than accepting a guard it could not safely restore.
+
 After the corpus curriculum, the trainer admits two experience gates. The first exercises an unseen environment rule through baseline failure, verified repair, successful execution, and held-out structural transfer. The second composes a never-trained class from twelve independently trained disciplines, executes it, causally ablates every premise, and tests a contradictory no-retry policy. Both mutations are transactionally guarded and must preserve foundation and enterprise retention before their checkpoints are accepted.
 
 ## Authoritative artifacts

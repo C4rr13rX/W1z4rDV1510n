@@ -31,12 +31,14 @@ from scripts.programming_curriculum_supervisor import (
     next_suspect_start,
     phase_offsets,
     preserve_deferred_base,
+    prune_resolved_deferred_bases,
     publish,
     quarantine_interval_ids,
     record_deferred_failure,
     recall_command,
     restore_canary_quarantine,
     responsive_batch_size,
+    require_snapshot_copy_headroom,
     runtime_responsive_batch_size,
     settle_brain_for_admission,
     suspect_intervals,
@@ -990,6 +992,86 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(metadata["guard_mode"], "copy")
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
+
+    def test_snapshot_copy_refuses_to_consume_rollback_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "brain.wbrain"
+            source.write_bytes(b"accepted-container")
+            with patch(
+                "scripts.programming_curriculum_supervisor.shutil.disk_usage",
+                return_value=SimpleNamespace(free=1),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "insufficient disk headroom"
+                ):
+                    require_snapshot_copy_headroom(
+                        source, copies=2, operation="test guard"
+                    )
+
+    def test_resolved_deferred_bases_are_pruned_without_touching_active_or_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted-container")
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus", "row": 0, "guard": str(guard),
+            }), encoding="utf-8")
+
+            first_id = deferred_interval_id("corpus", 0, 10)
+            second_id = deferred_interval_id("corpus", 10, 20)
+            first = preserve_deferred_base(runtime, first_id)
+            second = preserve_deferred_base(runtime, second_id)
+            append_deferred_event(runtime, {
+                "interval_id": first_id, "phase": "corpus",
+                "start_row": 0, "end_row": 10, "status": "deferred",
+                "base_snapshot": str(first),
+            })
+            append_deferred_event(runtime, {
+                "interval_id": second_id, "phase": "corpus",
+                "start_row": 10, "end_row": 20, "status": "deferred",
+                "base_snapshot": str(second),
+            })
+            replacement_id = deferred_interval_id("corpus", 2, 8)
+            append_deferred_event(runtime, {
+                "interval_id": replacement_id, "phase": "corpus",
+                "start_row": 2, "end_row": 8, "status": "deferred",
+                "base_snapshot": str(first),
+            })
+            unknown = runtime / "deferred" / "manual-experiment"
+            unknown.mkdir()
+            (unknown / "brain.base.wbrain").write_bytes(b"keep")
+
+            append_deferred_event(runtime, {
+                "interval_id": first_id, "phase": "corpus",
+                "status": "resolved",
+            })
+            self.assertEqual(prune_resolved_deferred_bases(runtime), [])
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+            self.assertTrue(unknown.exists())
+
+            append_deferred_event(runtime, {
+                "interval_id": replacement_id, "phase": "corpus",
+                "status": "resolved",
+            })
+            self.assertEqual(
+                prune_resolved_deferred_bases(runtime),
+                [first.parent.resolve()],
+            )
+            self.assertFalse(first.parent.exists())
+
+            append_deferred_event(runtime, {
+                "interval_id": second_id, "phase": "corpus",
+                "status": "resolved",
+            })
+            self.assertEqual(
+                prune_resolved_deferred_bases(runtime),
+                [second.parent.resolve()],
+            )
+            self.assertFalse(second.parent.exists())
+            self.assertTrue(unknown.exists())
 
     def test_live_guard_owns_checkpoint_barrier_and_topology_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
