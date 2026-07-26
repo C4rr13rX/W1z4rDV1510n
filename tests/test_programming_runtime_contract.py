@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.programming_integrated_retention import mutation_enabled
+from scripts.programming_brain_eval import BrainClient as FoundationBrainClient
 from scripts.programming_curriculum_supervisor import (
     AdmissionInfrastructureError,
     CanaryInfrastructureError,
@@ -126,6 +127,13 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_foundation_gate_allows_saturated_host_response_window(self) -> None:
+        client = FoundationBrainClient(
+            "http://127.0.0.1:18095", timeout=180.0
+        )
+        self.assertEqual(client.conn.timeout, 180.0)
+        client.conn.close()
+
     def test_mobile_runtime_gate_requires_latency_scope_and_idle_identity(
             self) -> None:
         base = {

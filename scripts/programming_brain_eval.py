@@ -43,10 +43,12 @@ def accepted_answers(path: Path) -> dict[str, set[str]]:
 
 
 class BrainClient:
-    def __init__(self, endpoint: str) -> None:
+    def __init__(self, endpoint: str, timeout: float = 180.0) -> None:
         url = urlparse(endpoint)
         self.prefix = url.path.rstrip("/")
-        self.conn = http.client.HTTPConnection(url.hostname, url.port or 80, timeout=60)
+        self.conn = http.client.HTTPConnection(
+            url.hostname, url.port or 80, timeout=timeout
+        )
 
     def chat(self, text: str) -> dict:
         self.conn.request("POST", f"{self.prefix}/brain/chat", json.dumps({"text": text}),
@@ -62,9 +64,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:8291")
     parser.add_argument("--details", action="store_true")
+    parser.add_argument(
+        "--request-timeout", type=float, default=180.0,
+        help=(
+            "maximum wait for one brain response; supervisors retain a "
+            "separate whole-evaluator deadline"
+        ),
+    )
     args = parser.parse_args()
+    if args.request_timeout <= 0:
+        parser.error("--request-timeout must be positive")
     accepted = accepted_answers(ROOT / "data/training/categorical_unified_001.jsonl")
-    brain = BrainClient(args.endpoint)
+    brain = BrainClient(args.endpoint, timeout=args.request_timeout)
 
     toddler_rows = [(p, expected, brain.chat(p).get("reply", "")) for p, expected in TODDLER]
     k12_rows = [(p, (reply := brain.chat(p).get("reply", "")), reply in accepted.get(p, set()))
