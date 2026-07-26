@@ -1646,6 +1646,8 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             gate_rows=131072,
             canary_rows=16384,
             max_live_lock_seconds=8.0,
+            poll_seconds=2.0,
+            max_restarts=10,
             node_bin=Path("brain-server.exe"),
         )
         forward, replay = curriculum_commands(args)
@@ -1653,6 +1655,15 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("--replay-deferred", forward)
         self.assertIn("--replay-deferred", replay)
         self.assertNotIn("--auto-quarantine-recovery", replay)
+        self.assertEqual(
+            forward[forward.index("--lock-chunk-size") + 1], "12"
+        )
+        self.assertEqual(
+            forward[forward.index("--poll-seconds") + 1], "2.0"
+        )
+        self.assertEqual(
+            forward[forward.index("--max-restarts") + 1], "10"
+        )
 
     def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(

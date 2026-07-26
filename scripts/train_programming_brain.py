@@ -257,6 +257,8 @@ def curriculum_commands(args: argparse.Namespace) -> list[list[str]]:
         "--gate-rows", str(args.gate_rows),
         "--canary-rows", str(args.canary_rows),
         "--max-live-lock-seconds", str(args.max_live_lock_seconds),
+        "--poll-seconds", str(args.poll_seconds),
+        "--max-restarts", str(args.max_restarts),
         "--node-bin", str(args.node_bin.resolve()),
     ]
     return [
@@ -323,11 +325,13 @@ def main() -> int:
     parser.add_argument("--corpus-root", type=Path,
                         default=Path(r"D:\w1z4rdv1510n-data\training"))
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--lock-chunk-size", type=int, default=12)
+    parser.add_argument("--lock-chunk-size", type=int, default=32)
     parser.add_argument("--checkpoint-rows", type=int, default=131072)
     parser.add_argument("--gate-rows", type=int, default=131072)
     parser.add_argument("--canary-rows", type=int, default=16384)
     parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)
+    parser.add_argument("--poll-seconds", type=float, default=2.0)
+    parser.add_argument("--max-restarts", type=int, default=10)
     args = parser.parse_args()
     args.runtime = args.runtime.resolve()
     args.corpus_root = args.corpus_root.resolve()

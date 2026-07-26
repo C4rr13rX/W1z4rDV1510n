@@ -15,6 +15,14 @@ python scripts/train_programming_brain.py `
 
 The default corpus root is `D:\w1z4rdv1510n-data\training`. Override it with `--corpus-root` when the generated corpora live elsewhere.
 
+The canonical production defaults use a maximum neural lock scope of `32`, a
+two-second supervisor poll, ten process-restart attempts, a `131072`-row
+guarded block, and a `16384`-row live canary interval. The lock scope is a
+ceiling rather than an unconditional transaction size: persisted slow-batch
+evidence selects a smaller starting scope, the live controller increases it
+only after repeated sub-threshold measurements, and any breach reduces it
+immediately.
+
 Use `--resume` with the same runtime after an interruption. The trainer records only accepted stages. Each seed stage is protected using the authoritative brain representation: immutable atomically replaced `brain.bin` checkpoints may use an NTFS hard link, while mutable `brain.wbrain` containers always use an independent copy published by atomic rename. On an owned-node resume, an interrupted transaction is either committed when its durable state record exists or restored before the stage is retried. This avoids silently training a partially completed stage twice and prevents a `.wbrain` candidate from mutating its own rollback guard.
 
 Use `--dry-run` to inspect the complete command plan without creating a runtime or contacting a node. Use `--seed-only` to stop after the curated enterprise curriculum and its strict gate. `--external-node` is available for an intentionally pre-launched node, but the normal owned-node mode provides safer restart and rollback behavior.
@@ -93,6 +101,14 @@ The corpus supervisor then trains:
 9. partial-context scientific Jupyter examples.
 
 Corpus processing is resumable and WAL-durable. The default production schedule uses a 131,072-row guarded admission block with non-halting 16,384-row canaries. Every small batch is flushed to the WAL before acknowledgement. Interior canaries detect drift while training continues and quarantine only the suspect interval; the canary coincident with the comprehensive block endpoint is deliberately skipped because the worker may still be finishing its final checkpoint. At the exact stopped-worker boundary, the supervisor drains deferred maintenance, serializes all neuron bodies, checkpoints that settled state, verifies zero resident terminals, and only then runs distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and read-only tick/topology invariants. A passing gate releases the independent last-known-good guard. Before the next guard is assigned a corpus row, the live node completes another checkpoint barrier and the guard records the post-barrier topology. Recovery resolves the process that actually owns the configured endpoint, confirms the replacement PID owns it, and requires its reopened topology to match that proof before the ledger may be rewound to the guard row. Historical over-ceiling evidence initializes a conservative server-side neural lock scope. Within a live run, eight consecutive observations below one quarter of the responsiveness ceiling double that scope gradually up to the configured maximum; any ceiling breach immediately scales it downward and records the exact slow rows and stage profile. This sheds obsolete calibration after a causal optimization without weakening the measured responsiveness invariant. During inference, complete raw atom-grounded exact episodes remain authoritative. Exact, composed, or ranked artifacts reconstructed from derived intent pools must pass the same language and behavioral compatibility contract before they can answer; “exact” within a lossy semantic projection is not equivalent to exact sensory experience.
+
+All admission observations use one infrastructure policy. Transient timeout,
+connection, empty-output, or truncated-JSON failures are retried and recorded
+as `passed: null`; they are never converted into semantic corpus intervals.
+If retries are exhausted, the supervisor preserves the guarded candidate and
+exits for a restart. Deferred replay restores its pre-replay guard before
+pausing. A completed evaluator reporting a behavioral mismatch is the only
+path that may reject or quarantine learned rows.
 
 Each deferred interval retains an exact causal base for later bisection. Because the last-good `.wbrain` guard is already an immutable inode independent of the mutable live container, the deferred base uses a hard link to that guard when the filesystem permits it. Rollback always copies the guard into a new live inode before removing the guard name, so the deferred link remains immutable. If rollback regenerates another guard for the same phase, row, storage type, and checkpoint-proven topology, the supervisor links new intervals to the existing causal-base inode instead of retaining another tens-of-gigabytes copy of the same accepted state. This makes quarantine publication effectively constant-space per distinct accepted state; cross-volume or link-restricted filesystems fall back to an independent copy.
 
