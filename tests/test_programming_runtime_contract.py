@@ -31,6 +31,7 @@ from scripts.programming_curriculum_supervisor import (
     guard_state_identity,
     deferred_interval_id,
     deferred_replay_command,
+    deferred_replay_marker_path,
     latest_passing_canary_row,
     next_suspect_start,
     phase_offsets,
@@ -39,6 +40,7 @@ from scripts.programming_curriculum_supervisor import (
     publish,
     quarantine_interval_ids,
     record_deferred_failure,
+    recover_interrupted_deferred_replay,
     replay_interval_recall_command,
     recall_command,
     restore_canary_quarantine,
@@ -93,6 +95,7 @@ from scripts.programming_domain_transfer_holdout import (
 )
 from scripts.train_programming_brain import (
     SEED_STAGES,
+    curriculum_commands,
     guard_seed_stage,
     resolve_seed_guard,
 )
@@ -476,6 +479,42 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             '"final-brain deferred replay passed comprehensive admission"',
             source,
         )
+
+    def test_committed_deferred_replay_recovers_without_duplicate_training(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.bin"
+            guard.write_bytes(b"accepted-before-replay")
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus",
+                "row": 1000,
+                "guard": str(guard),
+            }), encoding="utf-8")
+            event = {
+                "interval_id": "corpus:100:120",
+                "phase": "corpus",
+                "start_row": 100,
+                "end_row": 120,
+                "status": "deferred",
+            }
+            append_deferred_event(runtime, event)
+            publish(deferred_replay_marker_path(runtime), {
+                "state": "admitted",
+                "phase": "corpus",
+                "interval_id": event["interval_id"],
+                "interval": event,
+            })
+            recover_interrupted_deferred_replay(
+                SimpleNamespace(), runtime,
+                {"corpus": Phase(
+                    "corpus", "script", runtime / "corpus.jsonl", 1000
+                )},
+            )
+            self.assertEqual(unresolved_deferred_intervals(runtime), [])
+            self.assertFalse(guard.exists())
+            self.assertFalse(deferred_replay_marker_path(runtime).exists())
 
     def test_deferred_failure_attributes_only_new_epoch_gap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1396,7 +1435,27 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn("programming_experiential_generalization.py", trainer)
         self.assertIn("programming_multidomain_synthesis.py", trainer)
         self.assertIn('"--auto-quarantine-recovery"', trainer)
+        self.assertIn('"--replay-deferred"', trainer)
         self.assertIn('"--node-bin", str(args.node_bin.resolve())', trainer)
+
+    def test_reproducible_trainer_separates_forward_and_deferred_replay(self) -> None:
+        args = SimpleNamespace(
+            endpoint="http://127.0.0.1:18095",
+            runtime=Path("runtime"),
+            corpus_root=Path("corpus"),
+            batch_size=256,
+            lock_chunk_size=12,
+            checkpoint_rows=131072,
+            gate_rows=131072,
+            canary_rows=16384,
+            max_live_lock_seconds=8.0,
+            node_bin=Path("brain-server.exe"),
+        )
+        forward, replay = curriculum_commands(args)
+        self.assertIn("--auto-quarantine-recovery", forward)
+        self.assertNotIn("--replay-deferred", forward)
+        self.assertIn("--replay-deferred", replay)
+        self.assertNotIn("--auto-quarantine-recovery", replay)
 
     def test_attached_bounded_worker_is_gated_before_training_resumes(self) -> None:
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(

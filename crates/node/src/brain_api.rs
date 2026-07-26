@@ -1912,6 +1912,15 @@ fn derived_feature_artifact_compatible(labels: &[String], bytes: &[u8]) -> bool 
         || programming_response_compatible(labels, bytes)
 }
 
+fn compatible_integrated_reply(
+    labels: &[String],
+    answer: Option<&[u8]>,
+) -> Option<String> {
+    answer
+        .filter(|bytes| derived_feature_artifact_compatible(labels, bytes))
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+}
+
 /// A ranked language+behavior binding may hold a complete single-file source
 /// response rather than a JSON project manifest. Admit it only for exactly
 /// one requested language and only when the response is language-shaped.
@@ -2832,10 +2841,13 @@ async fn h_brain_chat(
         if result.grounding.outside_grounding {
             None
         } else {
-            result
-                .answer
-                .as_ref()
-                .map(|b| String::from_utf8_lossy(b).into_owned())
+            // Autonomous propagation is also a derived response path. Its
+            // confidence/composition evidence cannot admit behaviorally
+            // unrelated but language-valid source.
+            compatible_integrated_reply(
+                &diagnostic_intent_labels,
+                result.answer.as_deref(),
+            )
         }
     });
 
@@ -4236,6 +4248,8 @@ mod tests {
             b"def keyword_token(password):\n    return {'word': password}".to_vec();
         let password_hash = b"def make_password(password, salt=None):\n    if not salt:\n        salt = hasher.salt()\n    return hasher.encode(password, salt)"
             .to_vec();
+        let profiler_increment = b"def increment(self, delta=1):\n    check_call(_LIB.MXProfileAdjustCounter(self.handle, int(delta)))"
+            .to_vec();
         let frequency = b"def word_freq(text):\n    out = {}\n    for word in text.split():\n        out[word] = out.get(word, 0) + 1\n    return out"
             .to_vec();
         assert!(!programming_response_compatible(&labels, &increment));
@@ -4245,6 +4259,10 @@ mod tests {
             &misleading_terms
         ));
         assert!(!programming_response_compatible(&labels, &password_hash));
+        assert!(!programming_response_compatible(
+            &labels,
+            &profiler_increment
+        ));
         assert!(programming_response_compatible(&labels, &frequency));
         assert!(!derived_feature_artifact_compatible(
             &labels,
@@ -4254,6 +4272,14 @@ mod tests {
             &labels,
             &password_hash
         ));
+        assert_eq!(
+            compatible_integrated_reply(&labels, Some(&profiler_increment)),
+            None
+        );
+        assert_eq!(
+            compatible_integrated_reply(&labels, Some(&frequency)),
+            Some(String::from_utf8_lossy(&frequency).into_owned())
+        );
         assert!(derived_feature_artifact_compatible(&labels, &frequency));
         assert_eq!(
             single_language_ranked_source(
@@ -4263,6 +4289,7 @@ mod tests {
                     call_count,
                     misleading_terms,
                     password_hash,
+                    profiler_increment,
                     frequency.clone(),
                 ]
             ),

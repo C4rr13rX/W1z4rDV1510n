@@ -246,6 +246,25 @@ def checkpoint(endpoint: str) -> None:
         raise RuntimeError(f"checkpoint failed: {result}")
 
 
+def curriculum_commands(args: argparse.Namespace) -> list[list[str]]:
+    shared = [
+        sys.executable, str(ROOT / "scripts/programming_curriculum_supervisor.py"),
+        "--endpoint", args.endpoint, "--runtime", str(args.runtime),
+        "--corpus-root", str(args.corpus_root), "--include-seed-corpora",
+        "--batch-size", str(args.batch_size),
+        "--lock-chunk-size", str(args.lock_chunk_size),
+        "--checkpoint-rows", str(args.checkpoint_rows),
+        "--gate-rows", str(args.gate_rows),
+        "--canary-rows", str(args.canary_rows),
+        "--max-live-lock-seconds", str(args.max_live_lock_seconds),
+        "--node-bin", str(args.node_bin.resolve()),
+    ]
+    return [
+        [*shared, "--auto-quarantine-recovery"],
+        [*shared, "--replay-deferred"],
+    ]
+
+
 def training_plan(args: argparse.Namespace) -> list[list[str]]:
     endpoint = args.endpoint
     commands: list[list[str]] = []
@@ -260,19 +279,7 @@ def training_plan(args: argparse.Namespace) -> list[list[str]]:
         "--output", str(args.runtime / "seed" / "enterprise-final.json"),
     ])
     if not args.seed_only:
-        commands.append([
-            sys.executable, str(ROOT / "scripts/programming_curriculum_supervisor.py"),
-            "--endpoint", endpoint, "--runtime", str(args.runtime),
-            "--corpus-root", str(args.corpus_root), "--include-seed-corpora",
-            "--batch-size", str(args.batch_size),
-            "--lock-chunk-size", str(args.lock_chunk_size),
-            "--checkpoint-rows", str(args.checkpoint_rows),
-            "--gate-rows", str(args.gate_rows),
-            "--canary-rows", str(args.canary_rows),
-            "--max-live-lock-seconds", str(args.max_live_lock_seconds),
-            "--auto-quarantine-recovery",
-            "--node-bin", str(args.node_bin.resolve()),
-        ])
+        commands.extend(curriculum_commands(args))
         commands.extend(experience_commands(args))
     return commands
 
@@ -400,10 +407,16 @@ def main() -> int:
             state["updated_unix"] = time.time()
             atomic_json(state_path, state)
 
+        curriculum = curriculum_commands(args)
         if not args.seed_only and not state.get("corpus_curriculum_passed"):
-            supervisor = training_plan(args)[-(len(experience_commands(args)) + 1)]
-            run_logged(supervisor, runtime / "logs/curriculum-supervisor.log")
+            run_logged(curriculum[0], runtime / "logs/curriculum-supervisor.log")
             state["corpus_curriculum_passed"] = True
+            state["updated_unix"] = time.time()
+            atomic_json(state_path, state)
+
+        if not args.seed_only and not state.get("deferred_replay_passed"):
+            run_logged(curriculum[1], runtime / "logs/deferred-replay.log")
+            state["deferred_replay_passed"] = True
             state["updated_unix"] = time.time()
             atomic_json(state_path, state)
 

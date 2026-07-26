@@ -44,6 +44,26 @@ Do not use this mode after restoring the guard or against a different live
 candidate. Do not resolve the candidate intervals manually before the retest;
 their unresolved identity is part of the admission proof.
 
+The canonical trainer runs the supervisor twice as two restart-safe stages.
+The first command uses `--auto-quarantine-recovery` to finish the forward sweep
+while excluding exact failed intervals. Only after every forward phase has a
+durable completion gate does the second command use `--replay-deferred`. It
+orders the still-unresolved intervals by phase and row and replays one exact
+half-open span into the final accumulated brain. Each replay has its own
+pre-mutation `.wbrain` guard, progress ledger, exact-interval recall, and normal
+whole-brain completion gate with only that interval temporarily included. A
+failure restores the final accepted brain without rewinding any completed
+forward offset and leaves the interval unresolved for the test–fix retry. A
+pass records admission, resolves only that interval, and prunes its unreferenced
+causal base.
+
+`deferred-replay-active.json` makes this final queue restart-safe. A marker in
+`training` state is rolled back before retry; a marker advanced to `admitted`
+after the comprehensive gate is committed without rerunning its examples.
+The ledger resolution and guard release occur only after that durable admitted
+marker, preventing either duplicated replay training or a resolved interval
+whose learned state was rolled back.
+
 ## Encoded curriculum
 
 The seed curriculum is ordered as follows:
