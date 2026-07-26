@@ -1375,6 +1375,329 @@ def quarantine_interval_ids(quarantine: dict) -> list[str]:
     return identifiers
 
 
+def deferred_replay_marker_path(runtime: Path) -> Path:
+    return runtime / "deferred-replay-active.json"
+
+
+def deferred_replay_command(args: argparse.Namespace, phase: Phase,
+                            runtime: Path, event: dict) -> list[str]:
+    """Build an exact, independently durable replay for one quarantined span."""
+    start = int(event["start_row"])
+    end = int(event["end_row"])
+    digest = hashlib.sha256(
+        str(event["interval_id"]).encode("utf-8")
+    ).hexdigest()[:16]
+    progress = runtime / f"deferred-replay-{digest}.progress.json"
+    initial_lock_chunk_size = runtime_responsive_batch_size(
+        runtime, args.lock_chunk_size, {}, args.max_live_lock_seconds
+    )
+    return [
+        sys.executable, "-m", "tools.training_standard.drive_corpora_brain",
+        "--brain", args.endpoint,
+        "--script", phase.script_id,
+        "--input-path", str(phase.corpus),
+        "--repeats", str(phase.repeats),
+        "--direct-pretrain",
+        "--start-row", str(start),
+        "--limit-rows", str(end - start),
+        "--durable-start-row", str(start),
+        "--batch-size", str(args.batch_size),
+        "--lock-chunk-size", str(args.lock_chunk_size),
+        "--initial-lock-chunk-size", str(initial_lock_chunk_size),
+        "--max-batch-seconds", str(args.max_live_lock_seconds),
+        "--inter-post-sleep", str(args.inter_batch_yield_seconds),
+        "--checkpoint-rows", str(args.checkpoint_rows),
+        "--wal-durable",
+        "--feature-policy", "auto",
+        "--midcheck-rows", "0",
+        "--no-sleep-between",
+        "--progress-path", str(progress),
+    ]
+
+
+def replay_interval_recall_command(args: argparse.Namespace, phase: Phase,
+                                   runtime: Path, event: dict) -> list[str]:
+    start = int(event["start_row"])
+    end = int(event["end_row"])
+    command = [
+        sys.executable, "scripts/programming_corpus_recall.py",
+        str(phase.corpus),
+        "--endpoint", args.endpoint,
+        "--start-row", str(start),
+        "--window-rows", str(end - start),
+        "--samples", str(min(64, end - start)),
+        "--syntax", "none",
+    ]
+    for progress_path in runtime.glob("*.progress.json"):
+        progress = read_json(progress_path)
+        corpus = Path(str(progress.get("corpus") or ""))
+        if (int(progress.get("durable_next_row") or 0) > 0
+                and corpus.is_file()
+                and corpus.resolve() != phase.corpus.resolve()):
+            command.extend(["--accepted-corpus", str(corpus.resolve())])
+    return command
+
+
+def restore_rejected_deferred_replay(args: argparse.Namespace, runtime: Path,
+                                     phase: Phase, event: dict,
+                                     error: str) -> None:
+    """Restore the final accepted brain without changing completed offsets."""
+    last_good = read_json(runtime / "brain" / "brain.last-good.json")
+    publish(canary_quarantine_path(runtime), {
+        "state": "deferred_replay_failed",
+        "phase": phase.name,
+        "candidate_row": phase.rows,
+        "durable_next_row": phase.rows,
+        "last_good": last_good,
+        "error": error,
+        "deferred_events": [event],
+        "created_unix": time.time(),
+    })
+    stop_runtime_node(runtime, args.endpoint)
+    restored = restore_canary_quarantine(runtime, finalize=False)
+    start_runtime_node(runtime, args.node_bin, args.endpoint)
+    verify_restored_topology(
+        restored,
+        endpoint_json(args.endpoint, "/brain/stats", timeout=120.0),
+    )
+    finalize_canary_restore(runtime, restored)
+    deferred_replay_marker_path(runtime).unlink(missing_ok=True)
+
+
+def recover_interrupted_deferred_replay(
+        args: argparse.Namespace, runtime: Path,
+        phase_by_name: dict[str, Phase]) -> None:
+    """Commit a proven replay or roll an interrupted mutation back exactly once."""
+    marker_path = deferred_replay_marker_path(runtime)
+    marker = read_json(marker_path)
+    if not marker:
+        return
+    event = marker.get("interval")
+    if not isinstance(event, dict) or not valid_deferred_interval(event):
+        raise RuntimeError(
+            f"invalid deferred replay transaction marker: {marker}"
+        )
+    interval_id = str(event["interval_id"])
+    phase = phase_by_name.get(str(event.get("phase") or ""))
+    if phase is None:
+        raise RuntimeError(
+            f"deferred replay marker has unknown phase: {marker}"
+        )
+    if marker.get("state") == "admitted":
+        unresolved_ids = {
+            str(row["interval_id"])
+            for row in unresolved_deferred_intervals(runtime)
+        }
+        if interval_id in unresolved_ids:
+            append_deferred_event(runtime, {
+                "interval_id": interval_id,
+                "phase": phase.name,
+                "status": "resolved",
+                "reason": (
+                    "recovered committed final-brain deferred replay"
+                ),
+            })
+        guard = read_json(runtime / "brain" / "brain.last-good.json")
+        if guard:
+            if not accept_last_good_guard(runtime, phase.name):
+                raise RuntimeError(
+                    f"committed replay guard belongs to another phase: {guard}"
+                )
+        marker_path.unlink(missing_ok=True)
+        prune_resolved_deferred_bases(runtime)
+        return
+    restore_rejected_deferred_replay(
+        args, runtime, phase, event,
+        "interrupted deferred replay rolled back before retry",
+    )
+
+
+def run_deferred_replays(args: argparse.Namespace, runtime: Path,
+                         status_path: Path, phases: list[Phase]) -> int:
+    """Admit clean deferred spans into the final brain one transaction at a time."""
+    incomplete = []
+    for phase in phases:
+        ram, durable = phase_offsets(runtime / f"{phase.name}.progress.json")
+        if ram < phase.rows or durable < phase.rows:
+            incomplete.append({
+                "phase": phase.name, "ram": ram, "durable": durable,
+                "required": phase.rows,
+            })
+    if incomplete:
+        raise RuntimeError(
+            "deferred replay is an end-of-corpus operation; incomplete phases: "
+            f"{incomplete}"
+        )
+
+    phase_by_name = {phase.name: phase for phase in phases}
+    recover_interrupted_deferred_replay(
+        args, runtime, phase_by_name
+    )
+    selected = args.replay_interval_id.strip()
+    single_selected = bool(selected)
+    while True:
+        pending = unresolved_deferred_intervals(runtime)
+        if selected:
+            pending = [
+                event for event in pending
+                if event.get("interval_id") == selected
+            ]
+            if not pending:
+                raise RuntimeError(
+                    f"deferred interval is not unresolved: {selected}"
+                )
+        if not pending:
+            publish(status_path, {
+                "state": "deferred_replay_complete",
+                "updated_unix": time.time(),
+            })
+            return 0
+
+        event = pending[0]
+        interval_id = str(event["interval_id"])
+        phase = phase_by_name.get(str(event.get("phase") or ""))
+        if phase is None:
+            raise RuntimeError(
+                f"deferred interval has unknown phase: {event}"
+            )
+        assert_training_not_quarantined(runtime)
+        settle_brain_for_admission(args, phase, runtime, phase.rows)
+        ensure_live_last_good_guard(args, runtime, phase, phase.rows)
+        publish(deferred_replay_marker_path(runtime), {
+            "state": "training",
+            "phase": phase.name,
+            "interval_id": interval_id,
+            "interval": event,
+            "created_unix": time.time(),
+        })
+        digest = hashlib.sha256(
+            interval_id.encode("utf-8")
+        ).hexdigest()[:16]
+        replay_progress = runtime / f"deferred-replay-{digest}.progress.json"
+        replay_progress.unlink(missing_ok=True)
+        publish(status_path, {
+            "state": "deferred_replay_training",
+            "phase": phase.name,
+            "interval_id": interval_id,
+            "start_row": int(event["start_row"]),
+            "end_row": int(event["end_row"]),
+            "updated_unix": time.time(),
+        })
+
+        stdout_path = runtime / f"deferred-replay-{digest}.stdout.log"
+        stderr_path = runtime / f"deferred-replay-{digest}.stderr.log"
+        error = ""
+        report: dict = {}
+        try:
+            with stdout_path.open("a", encoding="utf-8") as stdout, \
+                    stderr_path.open("a", encoding="utf-8") as stderr:
+                worker = subprocess.run(
+                    deferred_replay_command(
+                        args, phase, runtime, event
+                    ),
+                    cwd=ROOT,
+                    stdout=stdout,
+                    stderr=stderr,
+                    check=False,
+                )
+            if worker.returncode != 0:
+                raise RuntimeError(
+                    f"deferred replay worker exited {worker.returncode}; "
+                    f"stderr={stderr_path}"
+                )
+            interval_recall = run_json_command(
+                replay_interval_recall_command(
+                    args, phase, runtime, event
+                ),
+                timeout=2 * 3600.0,
+            )
+            if (interval_recall.get("accepted_trained_response")
+                    != interval_recall.get("sampled")):
+                raise RuntimeError(
+                    f"deferred interval recall failed: {interval_recall}"
+                )
+            completion = run_completion_gate(
+                args, phase, runtime, frozenset({interval_id})
+            )
+            report = {
+                "passed": True,
+                "interval": event,
+                "interval_recall": interval_recall,
+                "completion": completion,
+                "updated_unix": time.time(),
+            }
+        # Once replay starts, every exception is a transaction failure: no
+        # orchestration bug may leave an unadmitted mutation live.
+        except Exception as exc:
+            error = str(exc)
+
+        if error:
+            restore_rejected_deferred_replay(
+                args, runtime, phase, event, error
+            )
+            replay_progress.unlink(missing_ok=True)
+            append_health_event(runtime, {
+                "kind": "deferred_replay_failed",
+                "phase": phase.name,
+                "interval_id": interval_id,
+                "passed": False,
+                "error": error,
+            })
+            publish(status_path, {
+                "state": "deferred_replay_failed",
+                "phase": phase.name,
+                "interval_id": interval_id,
+                "error": error,
+                "updated_unix": time.time(),
+            })
+            return 1
+
+        publish(
+            runtime / f"deferred-replay-{digest}.admission.json",
+            report,
+        )
+        publish(deferred_replay_marker_path(runtime), {
+            "state": "admitted",
+            "phase": phase.name,
+            "interval_id": interval_id,
+            "interval": event,
+            "admission": str(
+                runtime / f"deferred-replay-{digest}.admission.json"
+            ),
+            "updated_unix": time.time(),
+        })
+        append_deferred_event(runtime, {
+            "interval_id": interval_id,
+            "phase": phase.name,
+            "status": "resolved",
+            "reason": "final-brain deferred replay passed comprehensive admission",
+        })
+        if not accept_last_good_guard(runtime, phase.name):
+            raise RuntimeError(
+                f"could not release {phase.name} replay guard"
+            )
+        deferred_replay_marker_path(runtime).unlink(missing_ok=True)
+        pruned = prune_resolved_deferred_bases(runtime)
+        publish(
+            runtime / f"deferred-replay-{digest}.admission.json",
+            {**report, "pruned_deferred_bases": [str(path) for path in pruned]},
+        )
+        append_health_event(runtime, {
+            "kind": "deferred_replay_admitted",
+            "phase": phase.name,
+            "interval_id": interval_id,
+            "passed": True,
+        })
+        if single_selected:
+            publish(status_path, {
+                "state": "deferred_replay_complete",
+                "interval_id": interval_id,
+                "updated_unix": time.time(),
+            })
+            return 0
+        selected = ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:18600")
@@ -1399,6 +1722,17 @@ def main() -> int:
             "comprehensively retest the live failed candidate after a fix; "
             "on success admit its exact deferred spans instead of rolling back"
         ),
+    )
+    parser.add_argument(
+        "--replay-deferred", action="store_true",
+        help=(
+            "after every forward phase completes, transactionally replay "
+            "deferred intervals into the final brain"
+        ),
+    )
+    parser.add_argument(
+        "--replay-interval-id", default="",
+        help="with --replay-deferred, replay only this exact unresolved ID",
     )
     parser.add_argument(
         "--auto-quarantine-recovery", action="store_true",
@@ -1486,6 +1820,22 @@ def main() -> int:
     missing = [str(phase.corpus) for phase in phases if not phase.corpus.is_file()]
     if missing:
         parser.error("missing corpus files: " + ", ".join(missing))
+    if args.replay_deferred and args.node_bin is None:
+        parser.error("--replay-deferred requires --node-bin")
+    if args.replay_deferred and read_json(
+            deferred_replay_marker_path(runtime)):
+        try:
+            recover_interrupted_deferred_replay(
+                args, runtime,
+                {phase.name: phase for phase in phases},
+            )
+        except (OSError, RuntimeError, psutil.Error) as exc:
+            publish(status_path, {
+                "state": "deferred_replay_recovery_failed",
+                "error": str(exc),
+                "updated_unix": time.time(),
+            })
+            return 1
     if args.retest_canary_quarantine:
         quarantine = read_json(canary_quarantine_path(runtime))
         if not quarantine:
@@ -1846,6 +2196,18 @@ def main() -> int:
 
     deferred = unresolved_deferred_intervals(runtime)
     if deferred:
+        if args.replay_deferred:
+            try:
+                return run_deferred_replays(
+                    args, runtime, status_path, phases
+                )
+            except (OSError, RuntimeError, psutil.Error) as exc:
+                publish(status_path, {
+                    "state": "deferred_replay_orchestration_failed",
+                    "error": str(exc),
+                    "updated_unix": time.time(),
+                })
+                return 1
         publish(status_path, {
             "state": "deferred_intervals_pending",
             "deferred_intervals": deferred,

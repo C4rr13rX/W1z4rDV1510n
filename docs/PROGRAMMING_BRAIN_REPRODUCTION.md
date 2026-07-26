@@ -78,6 +78,20 @@ Each deferred interval retains an exact causal base for later bisection. Because
 
 Resolved interval bases are not permanent archives. After the append-only ledger records resolution, the supervisor folds the complete ledger and removes only known causal-base directories that no unresolved interval references; unknown experiment directories remain untouched. Before creating an independent `.wbrain` guard, the supervisor also requires free space for both the guard and a later rollback replacement plus reserve. A low-disk host therefore stops before copying rather than accepting a guard it could not safely restore.
 
+After every forward phase is complete, replay the folded deferred ledger with the same supervisor:
+
+```powershell
+python scripts/programming_curriculum_supervisor.py `
+  --runtime runtime/brains/programming-integrated-20260713 `
+  --endpoint http://127.0.0.1:18095 `
+  --node-bin target/release/w1z4rd_brain_server.exe `
+  --replay-deferred `
+  --batch-size 256 `
+  --lock-chunk-size 32
+```
+
+Replay is deliberately an end-of-corpus transaction. Each interval trains against the final accepted brain under an independent guard, recalls samples from its exact row window, and then passes the complete corpus/foundation/enterprise admission gate with that interval temporarily included. A passing interval is resolved and its unreferenced causal base pruned. A failing interval restores the final brain, remains unresolved with its diagnostic artifacts, and stops the replay loop for a test/family-fix/retry cycle. Use `--replay-interval-id PHASE:START:END` to retry one corrected interval without admitting any other pending range.
+
 Only one curriculum supervisor may own a runtime. Startup scans for an existing Python supervisor with the same resolved runtime and then claims `curriculum-supervisor.pid` using exclusive creation; stale PID files are recovered, while a live owner is rejected. This claim covers guard creation as well as training so two launches cannot race on the same temporary snapshot or progress ledger.
 
 After the corpus curriculum, the trainer admits two experience gates. The first exercises an unseen environment rule through baseline failure, verified repair, successful execution, and held-out structural transfer. The second composes a never-trained class from twelve independently trained disciplines, executes it, causally ablates every premise, and tests a contradictory no-retry policy. Both mutations are transactionally guarded and must preserve foundation and enterprise retention before their checkpoints are accepted.

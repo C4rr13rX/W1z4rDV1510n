@@ -30,6 +30,7 @@ from scripts.programming_curriculum_supervisor import (
     guarded_block_target,
     guard_state_identity,
     deferred_interval_id,
+    deferred_replay_command,
     latest_passing_canary_row,
     next_suspect_start,
     phase_offsets,
@@ -38,6 +39,7 @@ from scripts.programming_curriculum_supervisor import (
     publish,
     quarantine_interval_ids,
     record_deferred_failure,
+    replay_interval_recall_command,
     recall_command,
     restore_canary_quarantine,
     responsive_batch_size,
@@ -417,6 +419,63 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 "phase": "corpus", "start_row": 20, "end_row": 20,
             }))
             self.assertEqual(unresolved_deferred_intervals(runtime), [])
+
+    def test_deferred_replay_command_targets_only_the_exact_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            corpus = runtime / "corpus.jsonl"
+            phase = Phase("corpus", "script", corpus, 1000)
+            event = {
+                "interval_id": "corpus:100:120",
+                "phase": "corpus",
+                "start_row": 100,
+                "end_row": 120,
+            }
+            args = SimpleNamespace(
+                endpoint="http://brain",
+                batch_size=256,
+                lock_chunk_size=32,
+                max_live_lock_seconds=8.0,
+                inter_batch_yield_seconds=0.0,
+                checkpoint_rows=131072,
+            )
+            command = deferred_replay_command(
+                args, phase, runtime, event
+            )
+            self.assertEqual(
+                command[command.index("--start-row") + 1], "100"
+            )
+            self.assertEqual(
+                command[command.index("--limit-rows") + 1], "20"
+            )
+            self.assertNotIn("--skip-range", command)
+            self.assertIn("deferred-replay-", " ".join(command))
+
+            recall = replay_interval_recall_command(
+                args, phase, runtime, event
+            )
+            self.assertEqual(
+                recall[recall.index("--start-row") + 1], "100"
+            )
+            self.assertEqual(
+                recall[recall.index("--window-rows") + 1], "20"
+            )
+
+    def test_deferred_replay_is_guarded_and_comprehensively_admitted(self) -> None:
+        source = (
+            ROOT / "scripts" / "programming_curriculum_supervisor.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"state": "deferred_replay_training"', source)
+        self.assertIn("restore_rejected_deferred_replay(", source)
+        self.assertIn(
+            "run_completion_gate(\n"
+            "                args, phase, runtime, frozenset({interval_id})",
+            source,
+        )
+        self.assertIn(
+            '"final-brain deferred replay passed comprehensive admission"',
+            source,
+        )
 
     def test_deferred_failure_attributes_only_new_epoch_gap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
