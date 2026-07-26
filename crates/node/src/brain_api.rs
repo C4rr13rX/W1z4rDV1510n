@@ -1675,6 +1675,23 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
     }
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim_start();
+    let lowercase = text.to_ascii_lowercase();
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":TEXT:WORD_FREQUENCY"))
+        && ![
+            "word",
+            ".split(",
+            "split()",
+            "findall(",
+            "counter(",
+            "token",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence))
+    {
+        return false;
+    }
     let has = |needles: &[&str]| {
         needles
             .iter()
@@ -4060,6 +4077,29 @@ mod tests {
         assert_eq!(
             single_language_ranked_source(&polyglot, &[python_source]),
             None
+        );
+    }
+
+    #[test]
+    fn word_frequency_intent_rejects_generic_increment_source() {
+        let labels = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:STATE:INCREMENT_COUNT".to_string(),
+            "instruction_intent:TEXT:WORD_FREQUENCY".to_string(),
+        ];
+        let increment =
+            b"def incrby(self, key, increment):\n    return self.execute('INCRBY', key, increment)"
+                .to_vec();
+        let frequency = b"def word_freq(text):\n    out = {}\n    for word in text.split():\n        out[word] = out.get(word, 0) + 1\n    return out"
+            .to_vec();
+        assert!(!programming_response_compatible(&labels, &increment));
+        assert!(programming_response_compatible(&labels, &frequency));
+        assert_eq!(
+            single_language_ranked_source(
+                &labels,
+                &[increment, frequency.clone()]
+            ),
+            Some(frequency)
         );
     }
 

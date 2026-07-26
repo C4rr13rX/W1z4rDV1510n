@@ -688,6 +688,20 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("STATE:INCREMENT_COUNT");
         }
+        if text.contains("word")
+            && (text.contains("frequency")
+                || text.contains("frequencies")
+                || text.contains("occurrence")
+                || text.contains("count"))
+            && (text.contains("whitespace")
+                || text.contains("separated")
+                || text.contains("string")
+                || text.contains("dict")
+                || text.contains("mapping")
+                || text.contains("repeated"))
+        {
+            emit("TEXT:WORD_FREQUENCY");
+        }
         if text.contains("uppercase") {
             emit("TEXT:UPPERCASE");
         }

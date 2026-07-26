@@ -1,6 +1,27 @@
 use w1z4rd_brain::{AtomEncoding, InstructionIntentEncoding};
 
 #[test]
+fn word_frequency_is_distinct_from_generic_increment() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    for prompt in [
+        "Implement a Python function that takes a string and returns a dict of word -> count.",
+        "Produce a Python function mapping every whitespace-separated word to its occurrence count.",
+    ] {
+        let labels = encoding.atomize(prompt.as_bytes());
+        assert!(labels.contains(&"intent:LANGUAGE:PYTHON".to_string()));
+        assert!(labels.contains(&"intent:STATE:INCREMENT_COUNT".to_string()));
+        assert!(labels.contains(&"intent:TEXT:WORD_FREQUENCY".to_string()));
+    }
+    let redis = encoding.atomize(
+        b"Write a Python function incrby that increments the number stored at key.",
+    );
+    assert!(redis.contains(&"intent:STATE:INCREMENT_COUNT".to_string()));
+    assert!(!redis.contains(&"intent:TEXT:WORD_FREQUENCY".to_string()));
+}
+
+#[test]
 fn square_paraphrases_share_intent_but_cube_is_distinct() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
