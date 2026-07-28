@@ -1980,6 +1980,42 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
     }
     if labels
         .iter()
+        .any(|label| label.ends_with(":ENTERPRISE:JSON_AGGREGATION"))
+    {
+        let parses_json = [
+            "json.loads(",
+            "json.parse(",
+            "serde_json::from_",
+            "json_decode(",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence));
+        let groups_and_aggregates = [
+            ".get(",
+            "defaultdict(",
+            ".setdefault(",
+            ".entry(",
+            "groupby(",
+            ".reduce(",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence))
+            && [
+                " + ",
+                "+=",
+                ".sum(",
+                "sum(",
+                ".reduce(",
+                "and_modify(",
+            ]
+            .iter()
+            .any(|evidence| lowercase.contains(evidence));
+        if !parses_json || !groups_and_aggregates {
+            return false;
+        }
+    }
+    if labels
+        .iter()
         .any(|label| label.ends_with(":POWER_SELF:2"))
         && !contains_self_product(lowercase)
     {
@@ -4876,6 +4912,36 @@ mod tests {
         assert!(programming_response_compatible(
             &odd,
             b"def odd(values):\n    return [value for value in values if value % 2]"
+        ));
+
+        let json_aggregation = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:ENTERPRISE:JSON_AGGREGATION".to_string(),
+        ];
+        let json_customer_create = br#"def create(self, store_id, data):
+    if 'id' not in data:
+        raise KeyError('customer id required')
+    response = self._client.post(data=data)
+    return response"#;
+        let aggregate_orders = br#"def aggregate_orders(payload):
+    import json
+    orders = json.loads(payload) if isinstance(payload, str) else payload
+    totals = {}
+    for order in orders:
+        customer = str(order["customer"])
+        totals[customer] = totals.get(customer, 0) + order["amount"]
+    return totals"#;
+        assert!(!programming_response_compatible(
+            &json_aggregation,
+            json_customer_create
+        ));
+        assert!(!derived_feature_artifact_compatible(
+            &json_aggregation,
+            json_customer_create
+        ));
+        assert!(programming_response_compatible(
+            &json_aggregation,
+            aggregate_orders
         ));
 
         let negative = vec![
