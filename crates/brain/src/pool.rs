@@ -690,8 +690,9 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("odd") || text.contains("odd parity") {
             emit("PARITY:ODD");
         }
-        let word_term =
-            contains_ascii_term(&text, "word") || contains_ascii_term(&text, "words");
+        let word_term = contains_ascii_term(&text, "word")
+            || contains_ascii_term(&text, "words")
+            || text.contains("word_freq");
         if text.contains("increment")
             || text.contains("increments")
             || text.contains("repeated words")
@@ -700,17 +701,21 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("STATE:INCREMENT_COUNT");
         }
+        let per_word_distribution = text.contains("frequency")
+            || text.contains("frequencies")
+            || text.contains("word_freq")
+            || text.contains("dict")
+            || text.contains("mapping")
+            || text.contains("repeated")
+            || text.contains("each word")
+            || text.contains("every word")
+            || text.contains("distinct word");
         if word_term
+            && per_word_distribution
             && (text.contains("frequency")
                 || text.contains("frequencies")
                 || text.contains("occurrence")
                 || text.contains("count"))
-            && (text.contains("whitespace")
-                || text.contains("separated")
-                || text.contains("string")
-                || text.contains("dict")
-                || text.contains("mapping")
-                || text.contains("repeated"))
         {
             emit("TEXT:WORD_FREQUENCY");
         }

@@ -1880,7 +1880,6 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
         .iter()
         .any(|label| label.ends_with(":TEXT:WORD_FREQUENCY"))
     {
-        let counter_aggregation = contains_ascii_call(lowercase, "counter");
         let segmentation = [
             ".split(",
             "split()",
@@ -1892,17 +1891,26 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
         ]
         .iter()
         .any(|evidence| lowercase.contains(evidence));
-        let incremental_aggregation = [
+        let counter_aggregation = contains_ascii_call(lowercase, "counter")
+            && (lowercase.contains("import counter")
+                || lowercase.contains("collections.counter("));
+        let mapping_aggregation = [
             ".get(",
             "defaultdict(",
-            "+= 1",
-            "+=1",
-            "+ 1",
-            "+1",
+            ".setdefault(",
+            "]+= 1",
+            "]+=1",
+            "] += 1",
+            "] +=1",
         ]
         .iter()
         .any(|evidence| lowercase.contains(evidence));
-        if !counter_aggregation && !(segmentation && incremental_aggregation) {
+        // A scalar wc/file-statistics routine may split text and contain an
+        // unrelated `+ 1` for paragraphs, yet it does not construct the
+        // requested word -> occurrence mapping. Require word segmentation
+        // together with an actual mapping accumulator (or the standard
+        // Counter type), not generic counting-shaped syntax.
+        if !segmentation || (!counter_aggregation && !mapping_aggregation) {
             return false;
         }
     }
@@ -4547,7 +4555,28 @@ mod tests {
             .to_vec();
         let profiler_increment = b"def increment(self, delta=1):\n    check_call(_LIB.MXProfileAdjustCounter(self.handle, int(delta)))"
             .to_vec();
+        let scalar_word_count =
+            b"def word_count(text):\n    return len(text.split())".to_vec();
+        let misleading_counter_name =
+            b"def counter(text):\n    return len(text.split())".to_vec();
+        let file_statistics = br#"def wc(filename, contents, parsed=None, is_jekyll=False):
+    body = parsed.strip() if parsed else contents.strip()
+    words = re.split(r"\s+", body)
+    paragraphs = [1 if len(line) == 0 else 0 for line in contents.splitlines()]
+    return {
+        "counts": {
+            "file": filename,
+            "paragraphs": sum(paragraphs) + 1,
+            "words": len(words),
+            "characters_total": len(body),
+        }
+    }"#
+        .to_vec();
         let frequency = b"def word_freq(text):\n    out = {}\n    for word in text.split():\n        out[word] = out.get(word, 0) + 1\n    return out"
+            .to_vec();
+        let counter_frequency = b"from collections import Counter\n\ndef word_freq(text):\n    return Counter(text.split())"
+            .to_vec();
+        let indexed_frequency = b"def word_freq(text):\n    out = {}\n    for word in text.split():\n        if word not in out:\n            out[word] = 0\n        out[word] += 1\n    return out"
             .to_vec();
         assert!(!programming_response_compatible(&labels, &increment));
         assert!(!programming_response_compatible(&labels, &call_count));
@@ -4560,7 +4589,27 @@ mod tests {
             &labels,
             &profiler_increment
         ));
+        assert!(!programming_response_compatible(
+            &labels,
+            &scalar_word_count
+        ));
+        assert!(!programming_response_compatible(
+            &labels,
+            &misleading_counter_name
+        ));
+        assert!(!programming_response_compatible(
+            &labels,
+            &file_statistics
+        ));
         assert!(programming_response_compatible(&labels, &frequency));
+        assert!(programming_response_compatible(
+            &labels,
+            &counter_frequency
+        ));
+        assert!(programming_response_compatible(
+            &labels,
+            &indexed_frequency
+        ));
         assert!(!derived_feature_artifact_compatible(
             &labels,
             &call_count
@@ -4587,6 +4636,9 @@ mod tests {
                     misleading_terms,
                     password_hash,
                     profiler_increment,
+                    scalar_word_count,
+                    misleading_counter_name,
+                    file_statistics,
                     frequency.clone(),
                 ]
             ),

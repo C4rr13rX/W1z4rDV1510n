@@ -26,6 +26,20 @@ fn word_frequency_is_distinct_from_generic_increment() {
     assert!(keyword_arguments.contains(&"intent:LANGUAGE:PYTHON".to_string()));
     assert!(!keyword_arguments.contains(&"intent:STATE:INCREMENT_COUNT".to_string()));
     assert!(!keyword_arguments.contains(&"intent:TEXT:WORD_FREQUENCY".to_string()));
+
+    for scalar_metric in [
+        "Write a Python function that returns the number of words in a string.",
+        "Create a Python wc utility reporting word, paragraph, and character counts.",
+    ] {
+        let labels = encoding.atomize(scalar_metric.as_bytes());
+        assert!(labels.contains(&"intent:LANGUAGE:PYTHON".to_string()));
+        assert!(!labels.contains(&"intent:TEXT:WORD_FREQUENCY".to_string()));
+    }
+
+    let repair =
+        encoding.atomize(b"Fix word_freq so every occurrence increments its count.");
+    assert!(repair.contains(&"intent:STATE:INCREMENT_COUNT".to_string()));
+    assert!(repair.contains(&"intent:TEXT:WORD_FREQUENCY".to_string()));
 }
 
 #[test]
