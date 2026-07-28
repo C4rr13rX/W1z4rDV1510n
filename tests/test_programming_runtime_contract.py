@@ -39,6 +39,7 @@ from scripts.programming_curriculum_supervisor import (
     deferred_replay_command,
     deferred_replay_marker_path,
     latest_passing_canary_row,
+    disk_floor_breached,
     memory_floor_breached,
     mark_phase_forward_harvested,
     next_suspect_start,
@@ -140,6 +141,12 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertFalse(memory_floor_breached(0.0, 100, 101, 101, 1 * gib))
         self.assertFalse(memory_floor_breached(6.0, 100, 101, 101, 7 * gib))
         self.assertTrue(memory_floor_breached(6.0, 100, 101, 101, 5 * gib))
+        runtime = ROOT / "runtime"
+        self.assertFalse(disk_floor_breached(8.0, runtime, 100, 100, 100, 1 * gib))
+        self.assertFalse(disk_floor_breached(8.0, runtime, 100, 101, 100, 1 * gib))
+        self.assertFalse(disk_floor_breached(0.0, runtime, 100, 101, 101, 1 * gib))
+        self.assertFalse(disk_floor_breached(8.0, runtime, 100, 101, 101, 9 * gib))
+        self.assertTrue(disk_floor_breached(8.0, runtime, 100, 101, 101, 7 * gib))
 
     def test_attached_worker_has_the_same_memory_settlement_contract(self) -> None:
         source = (

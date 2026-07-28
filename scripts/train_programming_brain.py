@@ -267,6 +267,9 @@ def curriculum_commands(args: argparse.Namespace) -> list[list[str]]:
         "--min-free-memory-gb", str(
             getattr(args, "min_free_memory_gb", 6.0)
         ),
+        "--min-free-disk-gb", str(
+            getattr(args, "min_free_disk_gb", 8.0)
+        ),
         "--poll-seconds", str(args.poll_seconds),
         "--max-restarts", str(args.max_restarts),
         "--node-bin", str(args.node_bin.resolve()),
@@ -471,6 +474,7 @@ def main() -> int:
     parser.add_argument("--canary-rows", type=int, default=16384)
     parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)
     parser.add_argument("--min-free-memory-gb", type=float, default=6.0)
+    parser.add_argument("--min-free-disk-gb", type=float, default=8.0)
     parser.add_argument("--poll-seconds", type=float, default=2.0)
     parser.add_argument("--max-restarts", type=int, default=10)
     args = parser.parse_args()

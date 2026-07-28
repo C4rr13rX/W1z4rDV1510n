@@ -261,6 +261,20 @@ def memory_floor_breached(min_free_memory_gb: float, initial_row: int,
     return available_bytes < floor_bytes
 
 
+def disk_floor_breached(min_free_disk_gb: float, runtime: Path,
+                        initial_row: int, ram_row: int, durable_row: int,
+                        free_bytes: int | None = None) -> bool:
+    """Stop at a durable row before WAL/container writes exhaust the volume."""
+    if min_free_disk_gb <= 0 or ram_row <= initial_row:
+        return False
+    if durable_row != ram_row:
+        return False
+    if free_bytes is None:
+        free_bytes = int(shutil.disk_usage(runtime).free)
+    floor_bytes = int(min_free_disk_gb * 1024 * 1024 * 1024)
+    return free_bytes < floor_bytes
+
+
 def stop_worker_process(worker: subprocess.Popen, timeout: float = 30.0) -> None:
     """Stop a corpus worker at its already-published WAL-durable boundary."""
     if worker.poll() is not None:
@@ -1660,17 +1674,26 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         return 86
                     while next_canary <= candidate_row:
                         next_canary += args.canary_rows
-                if code is None and memory_floor_breached(
+                memory_pressure = code is None and memory_floor_breached(
                         args.min_free_memory_gb,
                         initial_row,
                         ram,
                         durable,
-                    ):
+                    )
+                disk_pressure = code is None and disk_floor_breached(
+                    args.min_free_disk_gb,
+                    runtime,
+                    initial_row,
+                    ram,
+                    durable,
+                )
+                if memory_pressure or disk_pressure:
                     low_memory_streak += 1
                 else:
                     low_memory_streak = 0
                 if code is None and low_memory_streak >= 3:
                     available_before = int(psutil.virtual_memory().available)
+                    disk_free_before = int(shutil.disk_usage(runtime).free)
                     stop_worker_process(worker)
                     settled_ram, settled_durable = phase_offsets(progress)
                     if settled_ram != settled_durable:
@@ -1689,7 +1712,13 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         "ram_next_row": settled_ram,
                         "durable_next_row": settled_durable,
                         "available_bytes_before": available_before,
+                        "disk_free_bytes_before": disk_free_before,
                         "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "minimum_free_disk_gb": args.min_free_disk_gb,
+                        "pressure": {
+                            "memory": memory_pressure,
+                            "disk": disk_pressure,
+                        },
                         "updated_unix": time.time(),
                     })
                     try:
@@ -1707,6 +1736,7 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         })
                         return RESOURCE_SETTLEMENT_FAILED_EXIT
                     available_after = int(psutil.virtual_memory().available)
+                    disk_free_after = int(shutil.disk_usage(runtime).free)
                     append_health_event(runtime, {
                         "kind": "resource_bounded_settlement",
                         "passed": True,
@@ -1714,7 +1744,14 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         "trained_rows": settled_durable,
                         "available_bytes_before": available_before,
                         "available_bytes_after": available_after,
+                        "disk_free_bytes_before": disk_free_before,
+                        "disk_free_bytes_after": disk_free_after,
                         "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "minimum_free_disk_gb": args.min_free_disk_gb,
+                        "pressure": {
+                            "memory": memory_pressure,
+                            "disk": disk_pressure,
+                        },
                         "idle_settlement": settlement,
                     })
                     publish(status_path, {
@@ -1724,7 +1761,10 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                         "durable_next_row": settled_durable,
                         "available_bytes_before": available_before,
                         "available_bytes_after": available_after,
+                        "disk_free_bytes_before": disk_free_before,
+                        "disk_free_bytes_after": disk_free_after,
                         "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "minimum_free_disk_gb": args.min_free_disk_gb,
                         "updated_unix": time.time(),
                     })
                     return RESOURCE_SETTLED_EXIT
@@ -2255,6 +2295,13 @@ def main() -> int:
             "this floor; 0 disables"
         ),
     )
+    parser.add_argument(
+        "--min-free-disk-gb", type=float, default=8.0,
+        help=(
+            "stop at a WAL-durable row and settle the neuron-scoped state "
+            "before the runtime volume drops below this floor; 0 disables"
+        ),
+    )
     parser.add_argument("--checkpoint-rows", type=int, default=131072)
     parser.add_argument("--gate-rows", type=int, default=131072)
     parser.add_argument(
@@ -2587,17 +2634,26 @@ def main() -> int:
                     break
                 while next_attached_canary <= attached_durable:
                     next_attached_canary += args.canary_rows
-            if memory_floor_breached(
+            memory_pressure = memory_floor_breached(
                     args.min_free_memory_gb,
                     attached_start,
                     attached_ram,
                     attached_durable,
-                ):
+                )
+            disk_pressure = disk_floor_breached(
+                args.min_free_disk_gb,
+                runtime,
+                attached_start,
+                attached_ram,
+                attached_durable,
+            )
+            if memory_pressure or disk_pressure:
                 attached_low_memory_streak += 1
             else:
                 attached_low_memory_streak = 0
             if attached_low_memory_streak >= 3:
                 available_before = int(psutil.virtual_memory().available)
+                disk_free_before = int(shutil.disk_usage(runtime).free)
                 try:
                     attached_process = psutil.Process(args.attach_pid)
                     attached_process.terminate()
@@ -2626,7 +2682,13 @@ def main() -> int:
                     "ram_next_row": settled_ram,
                     "durable_next_row": settled_durable,
                     "available_bytes_before": available_before,
+                    "disk_free_bytes_before": disk_free_before,
                     "minimum_free_memory_gb": args.min_free_memory_gb,
+                    "minimum_free_disk_gb": args.min_free_disk_gb,
+                    "pressure": {
+                        "memory": memory_pressure,
+                        "disk": disk_pressure,
+                    },
                     "updated_unix": time.time(),
                 })
                 try:
@@ -2644,6 +2706,7 @@ def main() -> int:
                     })
                     return 1
                 available_after = int(psutil.virtual_memory().available)
+                disk_free_after = int(shutil.disk_usage(runtime).free)
                 append_health_event(runtime, {
                     "kind": "attached_resource_bounded_settlement",
                     "passed": True,
@@ -2651,7 +2714,14 @@ def main() -> int:
                     "trained_rows": settled_durable,
                     "available_bytes_before": available_before,
                     "available_bytes_after": available_after,
+                    "disk_free_bytes_before": disk_free_before,
+                    "disk_free_bytes_after": disk_free_after,
                     "minimum_free_memory_gb": args.min_free_memory_gb,
+                    "minimum_free_disk_gb": args.min_free_disk_gb,
+                    "pressure": {
+                        "memory": memory_pressure,
+                        "disk": disk_pressure,
+                    },
                     "idle_settlement": settlement,
                 })
                 publish(status_path, {
@@ -2661,7 +2731,10 @@ def main() -> int:
                     "durable_next_row": settled_durable,
                     "available_bytes_before": available_before,
                     "available_bytes_after": available_after,
+                    "disk_free_bytes_before": disk_free_before,
+                    "disk_free_bytes_after": disk_free_after,
                     "minimum_free_memory_gb": args.min_free_memory_gb,
+                    "minimum_free_disk_gb": args.min_free_disk_gb,
                     "updated_unix": time.time(),
                 })
                 attached_resource_settled = True
@@ -2837,9 +2910,19 @@ def main() -> int:
                 floor_bytes = int(
                     args.min_free_memory_gb * 1024 * 1024 * 1024
                 )
+                disk_floor_bytes = int(
+                    args.min_free_disk_gb * 1024 * 1024 * 1024
+                )
                 while (
-                    floor_bytes > 0
-                    and int(psutil.virtual_memory().available) < floor_bytes
+                    (
+                        floor_bytes > 0
+                        and int(psutil.virtual_memory().available) < floor_bytes
+                    )
+                    or (
+                        disk_floor_bytes > 0
+                        and int(shutil.disk_usage(runtime).free)
+                        < disk_floor_bytes
+                    )
                 ):
                     publish(status_path, {
                         "state": "resource_waiting",
@@ -2849,7 +2932,11 @@ def main() -> int:
                         "available_bytes": int(
                             psutil.virtual_memory().available
                         ),
+                        "disk_free_bytes": int(
+                            shutil.disk_usage(runtime).free
+                        ),
                         "minimum_free_memory_gb": args.min_free_memory_gb,
+                        "minimum_free_disk_gb": args.min_free_disk_gb,
                         "updated_unix": time.time(),
                     })
                     time.sleep(max(1.0, args.poll_seconds))
