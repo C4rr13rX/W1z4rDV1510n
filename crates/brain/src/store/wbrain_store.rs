@@ -1675,12 +1675,57 @@ mod tests {
         let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
         assert!(missing.is_empty());
         assert_eq!(restored.fingerprint_state_residency(), (0, 1));
+        assert_eq!(restored.fingerprint_candidate_generation_count(), 1);
         assert_eq!(restored.force_promote_tentative(1).len(), 1);
         assert_eq!(restored.tentative_binding_count(), 1);
         assert!(restored.force_promote_tentative(1).is_empty());
         restored.serialize_all_neurons_for_idle().unwrap();
         assert_eq!(restored.fingerprint_state_residency(), (0, 2));
 
+        std::fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn promoted_long_fingerprint_uses_hashed_scalar_state_only() {
+        let destination = tmpfile("promoted-long-fingerprint-hashed-state");
+        let mut brain = Brain::new(BrainConfig::default());
+        let binding_pool_id = brain.binding_pool_id();
+        for (id, name, prefix) in [(3, "prompt", "p"), (4, "answer", "a")] {
+            brain.create_pool(
+                PoolConfig::defaults(name, id),
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let prompt = vec![b'x'; 64 * 1024];
+        let answer = vec![b'y'; 64 * 1024];
+        assert!(brain
+            .pretrain_binding_episode(&[(3, prompt), (4, answer)])
+            .is_some());
+        brain.attach_wbrain(&destination).unwrap();
+        brain.serialize_all_neurons_for_idle().unwrap();
+        assert_eq!(brain.fingerprint_state_residency(), (0, 1));
+        assert_eq!(
+            brain.fingerprint_candidate_generation_count(),
+            0,
+            "a fingerprint that already has a binding must not be repeated in a full-key maintenance generation"
+        );
+
+        let mut encodings: std::collections::HashMap<PoolId, Box<dyn crate::pool::AtomEncoding>> =
+            std::collections::HashMap::new();
+        for (id, prefix) in [(binding_pool_id, "bind"), (3, "p"), (4, "a")] {
+            encodings.insert(
+                id,
+                Box::new(BytePassthroughEncoding {
+                    prefix: prefix.into(),
+                }),
+            );
+        }
+        let (restored, missing) = Brain::restore_wbrain(&destination, encodings).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(restored.fingerprint_state_residency(), (0, 1));
+        assert_eq!(restored.fingerprint_candidate_generation_count(), 0);
         std::fs::remove_file(destination).ok();
     }
 

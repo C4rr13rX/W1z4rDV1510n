@@ -74,6 +74,8 @@ pub(crate) const FINGERPRINT_TENTATIVE_COUNT_KEY: &[u8] = &[19];
 pub(crate) const FINGERPRINT_PROMOTED_COUNT_KEY: &[u8] = &[20];
 pub(crate) const FINGERPRINT_STATE_MARKER_KEY: &[u8] = &[21];
 const FINGERPRINT_ONLY_GENERATION_KEY: &[u8] = &[22];
+const FINGERPRINT_CANDIDATE_GENERATION_KEY: &[u8] = &[23];
+const FINGERPRINT_HASHED_SCALAR_GENERATION_KEY: &[u8] = &[24];
 
 pub(crate) fn encode_fingerprint_posting_key(
     kind: u8,
@@ -769,6 +771,11 @@ pub struct Brain {
     /// derived from generation markers on restore, so the persisted metadata
     /// format remains backward compatible.
     fingerprint_posting_indexes: Vec<crate::store::AuxiliaryRecordRef>,
+    /// Full-key, prefix-enumerable fingerprints that have recurrence state
+    /// but no binding yet. Scalar state uses hashed point lookups; only these
+    /// unresolved candidates retain the full atom-grounded identity needed by
+    /// `force_promote_tentative`.
+    fingerprint_candidate_indexes: Vec<crate::store::AuxiliaryRecordRef>,
     /// Count of advance_tick calls that produced a non-empty
     /// fingerprint.  Drives the pressure-feedback loop along with
     /// `len(tentative_promoted) + len(promoted_fingerprints)`.
@@ -972,6 +979,7 @@ impl Brain {
             binding_motif_index: AHashMap::new(),
             binding_posting_indexes: Vec::new(),
             fingerprint_posting_indexes: Vec::new(),
+            fingerprint_candidate_indexes: Vec::new(),
             total_observations: 0,
             current_threshold: initial_threshold,
             last_pressure_check_obs: 0,
@@ -1817,7 +1825,7 @@ impl Brain {
             return out;
         };
         let store = file.pool(self.binding_pool_id);
-        let references = self.fingerprint_posting_indexes.clone();
+        let references = self.fingerprint_candidate_indexes.clone();
         for reference in references.into_iter().rev() {
             let result = crate::store::posting_index::scan_prefix(
                 &store,
@@ -2432,8 +2440,8 @@ impl Brain {
         }
 
         if fingerprint_entries > 0 {
-            let expected = fingerprint_entries.saturating_add(4);
-            let mut builder = crate::store::posting_index::PostingIndexBuilder::create(
+            let expected = fingerprint_entries.saturating_add(5);
+            let mut builder = crate::store::posting_index::PostingIndexBuilder::create_hashed(
                 &directory,
                 self.binding_pool_id,
                 expected as u64,
@@ -2444,6 +2452,7 @@ impl Brain {
             // routes and fingerprint state and therefore remain visible to
             // both runtime indexes after restore.
             builder.insert(FINGERPRINT_ONLY_GENERATION_KEY, 1)?;
+            builder.insert(FINGERPRINT_HASHED_SCALAR_GENERATION_KEY, 1)?;
             builder.insert(
                 FINGERPRINT_TENTATIVE_COUNT_KEY,
                 u32::try_from(self.tentative_binding_count_total).map_err(|_| {
@@ -2494,6 +2503,45 @@ impl Brain {
             }
             let reference = builder.finish(file, self.binding_pool_id)?;
             self.fingerprint_posting_indexes.push(reference);
+
+            // Scalar recurrence/promotion state is point-looked-up and can be
+            // stored by full digest. Maintenance enumeration needs the full
+            // fingerprint only when no binding exists yet. Promoted direct-
+            // pretrain episodes therefore avoid repeating their long atom
+            // sequence in both lifetime and promotion records.
+            let unresolved_count = self
+                .lifetime_recurrences
+                .keys()
+                .filter(|fingerprint| {
+                    self.tentative_binding_id(fingerprint).is_none()
+                        && self.promoted_binding_id(fingerprint).is_none()
+                })
+                .count();
+            if unresolved_count > 0 {
+                let mut candidates = crate::store::posting_index::PostingIndexBuilder::create(
+                    &directory,
+                    self.binding_pool_id,
+                    unresolved_count.saturating_add(1) as u64,
+                )?;
+                candidates.insert(FINGERPRINT_CANDIDATE_GENERATION_KEY, 1)?;
+                for (fingerprint, count) in &self.lifetime_recurrences {
+                    if self.tentative_binding_id(fingerprint).is_some()
+                        || self.promoted_binding_id(fingerprint).is_some()
+                    {
+                        continue;
+                    }
+                    candidates.insert(
+                        &encode_fingerprint_posting_key(
+                            FINGERPRINT_LIFETIME_KEY,
+                            &fingerprint.pairs,
+                            &fingerprint.ordered_per_pool,
+                        ),
+                        *count,
+                    )?;
+                }
+                let reference = candidates.finish(file, self.binding_pool_id)?;
+                self.fingerprint_candidate_indexes.push(reference);
+            }
         }
         self.binding_sequence_index.clear();
         self.binding_feature_atom_index.clear();
@@ -7611,6 +7659,11 @@ impl Brain {
                         references.push(*reference);
                     }
                 }
+                for reference in &self.fingerprint_candidate_indexes {
+                    if !references.contains(reference) {
+                        references.push(*reference);
+                    }
+                }
                 references
             },
             total_observations: self.total_observations,
@@ -7686,6 +7739,11 @@ impl Brain {
             .saturating_add(self.promoted_fingerprints.len());
         let disk_generations = self.fingerprint_posting_indexes.len();
         (overlay_entries, disk_generations)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fingerprint_candidate_generation_count(&self) -> usize {
+        self.fingerprint_candidate_indexes.len()
     }
 
     /// Stage 17.4 full — run one eviction pass per
@@ -8008,6 +8066,7 @@ impl Brain {
             binding_motif_index: AHashMap::new(),
             binding_posting_indexes: Vec::new(),
             fingerprint_posting_indexes: Vec::new(),
+            fingerprint_candidate_indexes: Vec::new(),
             total_observations: snap.total_observations,
             current_threshold: restored_threshold,
             last_pressure_check_obs: snap.total_observations,
@@ -8063,6 +8122,7 @@ impl Brain {
         let fingerprint_store = file.pool(metadata.binding_pool_id);
         let mut binding_posting_indexes = Vec::new();
         let mut fingerprint_posting_indexes = Vec::new();
+        let mut fingerprint_candidate_indexes = Vec::new();
         for reference in metadata.binding_posting_indexes.iter().copied() {
             let has_fingerprint_state = crate::store::posting_index::lookup(
                 &fingerprint_store,
@@ -8076,10 +8136,36 @@ impl Brain {
                 FINGERPRINT_ONLY_GENERATION_KEY,
                 1,
             );
-            match (has_fingerprint_state, fingerprint_only) {
-                (Ok(state), Ok(only)) => {
+            let candidate_only = crate::store::posting_index::lookup(
+                &fingerprint_store,
+                reference,
+                FINGERPRINT_CANDIDATE_GENERATION_KEY,
+                1,
+            );
+            let hashed_scalar = crate::store::posting_index::lookup(
+                &fingerprint_store,
+                reference,
+                FINGERPRINT_HASHED_SCALAR_GENERATION_KEY,
+                1,
+            );
+            match (
+                has_fingerprint_state,
+                fingerprint_only,
+                candidate_only,
+                hashed_scalar,
+            ) {
+                (Ok(state), Ok(only), Ok(candidate), Ok(hashed)) => {
+                    if !candidate.is_empty() {
+                        fingerprint_candidate_indexes.push(reference);
+                        continue;
+                    }
                     if !state.is_empty() {
                         fingerprint_posting_indexes.push(reference);
+                        // Legacy combined and first-generation split state
+                        // records retain full keys and remain enumerable.
+                        if hashed.is_empty() {
+                            fingerprint_candidate_indexes.push(reference);
+                        }
                     }
                     // Legacy generations with fingerprint state predate the
                     // discriminator and also contain binding routes. New
@@ -8088,15 +8174,18 @@ impl Brain {
                         binding_posting_indexes.push(reference);
                     }
                 }
-                (state, only) => {
+                (state, only, candidate, hashed) => {
                     tracing::warn!(
-                        "conservatively retaining unreadable posting generation in both indexes: \
-                         state={:?} only={:?}",
+                        "conservatively retaining unreadable posting generation in all indexes: \
+                         state={:?} only={:?} candidate={:?} hashed={:?}",
                         state.err(),
-                        only.err()
+                        only.err(),
+                        candidate.err(),
+                        hashed.err()
                     );
                     binding_posting_indexes.push(reference);
                     fingerprint_posting_indexes.push(reference);
+                    fingerprint_candidate_indexes.push(reference);
                 }
             }
         }
@@ -8137,6 +8226,7 @@ impl Brain {
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
             binding_posting_indexes,
             fingerprint_posting_indexes,
+            fingerprint_candidate_indexes,
             total_observations: metadata.total_observations,
             current_threshold: metadata.current_threshold,
             last_pressure_check_obs: metadata.last_pressure_check_obs,
