@@ -1824,7 +1824,11 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
             ".mean(",
             " mean(",
             "fmean(",
-            "average(",
+            // A bare `average(` is often only a function declaration.  It
+            // admitted a temporal midpoint method that divided a duration
+            // by two but never aggregated a collection.  Qualified
+            // collection-library calls remain valid mean evidence.
+            ".average(",
             "statistics.mean",
             "statistics.fmean",
         ],
@@ -4656,11 +4660,28 @@ mod tests {
         let redis_remove =
             b"def srem(self, key, *members):\n    return self.execute('SREM', key, members)";
         let time_grid = b"def grid_time(time):\n    nt = time.shape[0]\n    weights = np.linalg.lstsq(np.arange(nt), time)[0]\n    return weights[0] * np.arange(nt)";
+        let temporal_midpoint = br#"def average(self, dt=None):
+    if dt is None:
+        dt = self.now(self.tz)
+    diff = self.diff(dt, False)
+    return self.add(
+        microseconds=(diff.in_seconds() * 1000000 + diff.microseconds) // 2
+    )"#;
         let mean = b"def avg_list(values):\n    return sum(values) / len(values) if values else 0";
+        let numpy_mean = b"def avg_list(values):\n    return np.average(values)";
         assert!(!programming_response_compatible(&average, redis_remove));
         assert!(!programming_response_compatible(&average, time_grid));
+        assert!(!programming_response_compatible(
+            &average,
+            temporal_midpoint
+        ));
         assert!(!derived_feature_artifact_compatible(&average, time_grid));
+        assert!(!derived_feature_artifact_compatible(
+            &average,
+            temporal_midpoint
+        ));
         assert!(programming_response_compatible(&average, mean));
+        assert!(programming_response_compatible(&average, numpy_mean));
 
         let odd = vec![
             "instruction_intent:LANGUAGE:PYTHON".to_string(),
