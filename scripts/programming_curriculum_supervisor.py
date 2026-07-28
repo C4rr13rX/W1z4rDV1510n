@@ -301,10 +301,13 @@ def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
         # hard link would mutate the alleged rollback copy too. Publish a full
         # independent copy atomically. This is paid only at comprehensive gate
         # boundaries, never for fast canaries.
-        # The next failure must still have room to make its independent
-        # rollback replacement after this guard exists.
+        # Only one independent accepted copy is required. If a later
+        # unadmitted candidate consumes the remaining volume, rollback may
+        # discard that rejected live inode before recreating it from this
+        # untouched guard; the quarantined row interval, not its derived
+        # candidate container, is the causal replay artifact.
         require_snapshot_copy_headroom(
-            snapshot, copies=2, operation="independent .wbrain guard"
+            snapshot, copies=1, operation="independent .wbrain guard"
         )
         temporary = guard.with_suffix(guard.suffix + ".tmp")
         temporary.unlink(missing_ok=True)
@@ -417,9 +420,23 @@ def restore_canary_quarantine(runtime: Path, finalize: bool = True) -> dict:
     else:
         temporary = snapshot.with_suffix(snapshot.suffix + ".restore.tmp")
         temporary.unlink(missing_ok=True)
-        require_snapshot_copy_headroom(
-            guard, copies=1, operation=".wbrain quarantine restore"
-        )
+        try:
+            require_snapshot_copy_headroom(
+                guard, copies=1, operation=".wbrain quarantine restore"
+            )
+        except RuntimeError:
+            if snapshot.suffix != ".wbrain" or not snapshot.is_file():
+                raise
+            # The candidate has already failed admission, its exact corpus
+            # interval is durably quarantined, and the independent guard is
+            # the accepted authority. Removing only the rejected live inode
+            # makes room for a retryable restoration without risking the
+            # accepted state. If copying is interrupted, the guard remains
+            # intact and a later restore repeats this branch.
+            snapshot.unlink()
+            require_snapshot_copy_headroom(
+                guard, copies=1, operation=".wbrain quarantine restore"
+            )
         shutil.copy2(guard, temporary)
         os.replace(temporary, snapshot)
     (brain_dir / "brain.wal").unlink(missing_ok=True)

@@ -1446,6 +1446,25 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
 
+    def test_wbrain_guard_reserves_one_independent_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.wbrain"
+            snapshot.write_bytes(b"accepted-container")
+            phase = Phase("phase-a", "script-a", runtime / "corpus.jsonl", 10)
+            with patch(
+                "scripts.programming_curriculum_supervisor."
+                "require_snapshot_copy_headroom"
+            ) as headroom:
+                ensure_last_good_guard(runtime, phase, 4)
+            headroom.assert_called_once_with(
+                snapshot,
+                copies=1,
+                operation="independent .wbrain guard",
+            )
+
     def test_snapshot_copy_refuses_to_consume_rollback_headroom(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "brain.wbrain"
@@ -1682,6 +1701,62 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                     "durable_next_row"
                 ],
                 100,
+            )
+
+    def test_low_space_wbrain_restore_discards_only_rejected_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.wbrain"
+            snapshot.write_bytes(b"rejected-container")
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted-container")
+            last_good = {
+                "phase": "corpus",
+                "row": 100,
+                "snapshot": str(snapshot),
+                "guard": str(guard),
+                "storage": "wbrain",
+                "guard_mode": "copy",
+            }
+            (brain / "brain.last-good.json").write_text(
+                json.dumps(last_good), encoding="utf-8"
+            )
+            (runtime / "corpus.progress.json").write_text(
+                json.dumps({"ram_next_row": 200, "durable_next_row": 200}),
+                encoding="utf-8",
+            )
+            (runtime / "curriculum-canary-quarantine.json").write_text(
+                json.dumps({
+                    "phase": "corpus",
+                    "candidate_row": 200,
+                    "last_good": last_good,
+                }),
+                encoding="utf-8",
+            )
+
+            calls = 0
+
+            def require_after_candidate_removed(*_args, **_kwargs) -> None:
+                nonlocal calls
+                calls += 1
+                if snapshot.exists():
+                    raise RuntimeError("insufficient disk headroom")
+
+            with patch(
+                "scripts.programming_curriculum_supervisor."
+                "require_snapshot_copy_headroom",
+                side_effect=require_after_candidate_removed,
+            ):
+                restored = restore_canary_quarantine(runtime, finalize=False)
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(restored["row"], 100)
+            self.assertEqual(snapshot.read_bytes(), b"accepted-container")
+            self.assertEqual(guard.read_bytes(), b"accepted-container")
+            self.assertTrue(
+                (runtime / "curriculum-canary-quarantine.json").exists()
             )
 
     def test_guarded_block_target_survives_worker_restart(self) -> None:
