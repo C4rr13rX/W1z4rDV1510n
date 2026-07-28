@@ -681,8 +681,18 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("COMPARISON:LESS_THAN_ZERO");
         }
-        if text.contains("average") || text.contains("arithmetic mean") {
+        let average_intent = text.contains("average") || text.contains("arithmetic mean");
+        if average_intent {
             emit("MATH:AVERAGE");
+            if contains_ascii_term(&text, "list")
+                || contains_ascii_term(&text, "array")
+                || contains_ascii_term(&text, "collection")
+                || contains_ascii_term(&text, "sequence")
+                || contains_ascii_term(&text, "values")
+                || contains_ascii_term(&text, "numbers")
+            {
+                emit("INPUT:COLLECTION_ARGUMENT");
+            }
         }
         if text.contains("empty") || text.contains("no elements") {
             emit("GUARD:EMPTY_INPUT");

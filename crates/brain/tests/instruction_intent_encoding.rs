@@ -121,10 +121,20 @@ fn average_paraphrases_share_language_and_task_features() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),
     };
-    let average = encoding.atomize(b"Implement avg_list in Python to return the average.");
-    let mean = encoding.atomize(b"Write Python that calculates the arithmetic mean.");
+    let average =
+        encoding.atomize(b"Implement avg_list in Python to return the average of a list.");
+    let mean = encoding.atomize(b"Write Python that calculates the arithmetic mean of a list.");
     assert_eq!(average, mean);
     assert!(average.iter().any(|label| label == "intent:MATH:AVERAGE"));
+    assert!(average
+        .iter()
+        .any(|label| label == "intent:INPUT:COLLECTION_ARGUMENT"));
+
+    let stateful = encoding.atomize(b"Write Python that returns the average response time.");
+    assert!(stateful.iter().any(|label| label == "intent:MATH:AVERAGE"));
+    assert!(!stateful
+        .iter()
+        .any(|label| label == "intent:INPUT:COLLECTION_ARGUMENT"));
 }
 
 #[test]

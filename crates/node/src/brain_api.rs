@@ -1810,6 +1810,73 @@ fn contains_self_product(text: &str) -> bool {
         || text.contains("**2")
 }
 
+fn declared_parameter_names(text: &str) -> Vec<String> {
+    let declaration = ["def ", "function ", "fn "]
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
+        .unwrap_or(0);
+    let Some(open_relative) = text[declaration..].find('(') else {
+        return Vec::new();
+    };
+    let open = declaration + open_relative;
+    let Some(close_relative) = text[open + 1..].find(')') else {
+        return Vec::new();
+    };
+    text[open + 1..open + 1 + close_relative]
+        .split(',')
+        .filter_map(|raw| {
+            let before_default = raw.split('=').next().unwrap_or(raw).trim();
+            let before_type = before_default.split(':').next().unwrap_or(before_default).trim();
+            let candidate = before_type
+                .split_ascii_whitespace()
+                .last()
+                .unwrap_or(before_type)
+                .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
+            (!candidate.is_empty()).then(|| candidate.to_string())
+        })
+        .collect()
+}
+
+fn collection_argument_mean_evidence(text: &str) -> bool {
+    let body = text
+        .find(')')
+        .map(|close| &text[close + 1..])
+        .unwrap_or(text);
+    let compact: String = body
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
+    declared_parameter_names(text)
+        .into_iter()
+        .filter(|parameter| parameter != "self" && parameter != "cls")
+        .any(|parameter| {
+            let sum = format!("sum({parameter})");
+            let len = format!("len({parameter})");
+            let qualified_average = format!(".average({parameter}");
+            let qualified_mean = format!(".mean({parameter}");
+            let direct_average = format!("average({parameter}");
+            let direct_mean = format!("mean({parameter}");
+            let fmean = format!("fmean({parameter}");
+            let method_mean = format!("{parameter}.mean(");
+            let reduce = format!("{parameter}.reduce(");
+            let length = format!("{parameter}.length");
+            let iterator = format!("{parameter}.iter(");
+            let rust_len = format!("{parameter}.len(");
+            (compact.contains(&sum) && compact.contains(&len))
+                || compact.contains(&qualified_average)
+                || compact.contains(&qualified_mean)
+                || compact.contains(&direct_average)
+                || compact.contains(&direct_mean)
+                || compact.contains(&fmean)
+                || compact.contains(&method_mean)
+                || (compact.contains(&reduce) && compact.contains(&length))
+                || (compact.contains(&iterator)
+                    && compact.contains(".sum")
+                    && compact.contains(&rust_len))
+        })
+}
+
 fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
     let intent_requires = |suffix: &str, evidence: &[&str]| {
         !labels.iter().any(|label| label.ends_with(suffix))
@@ -1833,6 +1900,16 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
             "statistics.fmean",
         ],
     ) {
+        return false;
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":INPUT:COLLECTION_ARGUMENT"))
+        && labels
+            .iter()
+            .any(|label| label.ends_with(":MATH:AVERAGE"))
+        && !collection_argument_mean_evidence(lowercase)
+    {
         return false;
     }
     if labels
@@ -4655,6 +4732,7 @@ mod tests {
         let average = vec![
             "instruction_intent:LANGUAGE:PYTHON".to_string(),
             "instruction_intent:MATH:AVERAGE".to_string(),
+            "instruction_intent:INPUT:COLLECTION_ARGUMENT".to_string(),
             "instruction_intent:GUARD:EMPTY_INPUT".to_string(),
         ];
         let redis_remove =
@@ -4667,6 +4745,10 @@ mod tests {
     return self.add(
         microseconds=(diff.in_seconds() * 1000000 + diff.microseconds) // 2
     )"#;
+        let stateful_average = br#"def avg_resp_time(self):
+    if not self._runtimes:
+        return 0
+    return round(sum(self._runtimes) / len(self._runtimes), 2)"#;
         let mean = b"def avg_list(values):\n    return sum(values) / len(values) if values else 0";
         let numpy_mean = b"def avg_list(values):\n    return np.average(values)";
         assert!(!programming_response_compatible(&average, redis_remove));
@@ -4675,10 +4757,18 @@ mod tests {
             &average,
             temporal_midpoint
         ));
+        assert!(!programming_response_compatible(
+            &average,
+            stateful_average
+        ));
         assert!(!derived_feature_artifact_compatible(&average, time_grid));
         assert!(!derived_feature_artifact_compatible(
             &average,
             temporal_midpoint
+        ));
+        assert!(!derived_feature_artifact_compatible(
+            &average,
+            stateful_average
         ));
         assert!(programming_response_compatible(&average, mean));
         assert!(programming_response_compatible(&average, numpy_mean));
