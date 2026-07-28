@@ -100,6 +100,12 @@ after restoring it. The next worker reuses that guard instead of copying the
 same multi-gigabyte accepted state a second time. Forward harvest releases the
 guard when it accounts the failed phase and advances to a different corpus.
 
+An attached worker is subject to the same three-sample host-memory floor as a
+worker launched by the supervisor. On a breach, the supervisor stops the
+worker, requires equal RAM and WAL-durable offsets, sleeps and checkpoints the
+neuron-scoped state, records the resource settlement, and resumes through the
+ordinary guarded loop. Attachment is not an exemption from host protection.
+
 ## Encoded curriculum
 
 The seed curriculum is ordered as follows:

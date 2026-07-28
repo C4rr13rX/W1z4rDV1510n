@@ -2506,6 +2506,8 @@ def main() -> int:
             runtime / f"{attach_phase.name}.progress.json"
         )
         attach_recovered = False
+        attached_resource_settled = False
+        attached_low_memory_streak = 0
         next_attached_canary = (
             ((attached_start // args.canary_rows) + 1) * args.canary_rows
             if args.canary_rows > 0 else None
@@ -2585,6 +2587,85 @@ def main() -> int:
                     break
                 while next_attached_canary <= attached_durable:
                     next_attached_canary += args.canary_rows
+            if memory_floor_breached(
+                    args.min_free_memory_gb,
+                    attached_start,
+                    attached_ram,
+                    attached_durable,
+                ):
+                attached_low_memory_streak += 1
+            else:
+                attached_low_memory_streak = 0
+            if attached_low_memory_streak >= 3:
+                available_before = int(psutil.virtual_memory().available)
+                try:
+                    attached_process = psutil.Process(args.attach_pid)
+                    attached_process.terminate()
+                    attached_process.wait(timeout=30)
+                except psutil.NoSuchProcess:
+                    pass
+                except psutil.TimeoutExpired:
+                    attached_process.kill()
+                    attached_process.wait(timeout=30)
+                settled_ram, settled_durable = phase_offsets(
+                    runtime / f"{attach_phase.name}.progress.json"
+                )
+                if settled_ram != settled_durable:
+                    publish(status_path, {
+                        "state": "attached_resource_settlement_failed",
+                        "phase": attach_phase.name,
+                        "ram_next_row": settled_ram,
+                        "durable_next_row": settled_durable,
+                        "error": "resource yield reached a non-durable boundary",
+                        "updated_unix": time.time(),
+                    })
+                    return 1
+                publish(status_path, {
+                    "state": "attached_resource_settling",
+                    "phase": attach_phase.name,
+                    "ram_next_row": settled_ram,
+                    "durable_next_row": settled_durable,
+                    "available_bytes_before": available_before,
+                    "minimum_free_memory_gb": args.min_free_memory_gb,
+                    "updated_unix": time.time(),
+                })
+                try:
+                    settlement = settle_brain_for_admission(
+                        args, attach_phase, runtime, settled_durable
+                    )
+                except ADMISSION_GATE_ERRORS as exc:
+                    publish(status_path, {
+                        "state": "attached_resource_settlement_failed",
+                        "phase": attach_phase.name,
+                        "ram_next_row": settled_ram,
+                        "durable_next_row": settled_durable,
+                        "error": str(exc),
+                        "updated_unix": time.time(),
+                    })
+                    return 1
+                available_after = int(psutil.virtual_memory().available)
+                append_health_event(runtime, {
+                    "kind": "attached_resource_bounded_settlement",
+                    "passed": True,
+                    "phase": attach_phase.name,
+                    "trained_rows": settled_durable,
+                    "available_bytes_before": available_before,
+                    "available_bytes_after": available_after,
+                    "minimum_free_memory_gb": args.min_free_memory_gb,
+                    "idle_settlement": settlement,
+                })
+                publish(status_path, {
+                    "state": "attached_resource_settled",
+                    "phase": attach_phase.name,
+                    "ram_next_row": settled_ram,
+                    "durable_next_row": settled_durable,
+                    "available_bytes_before": available_before,
+                    "available_bytes_after": available_after,
+                    "minimum_free_memory_gb": args.min_free_memory_gb,
+                    "updated_unix": time.time(),
+                })
+                attached_resource_settled = True
+                break
             time.sleep(max(1.0, args.poll_seconds))
         attached_ram, attached_durable = phase_offsets(
             runtime / f"{attach_phase.name}.progress.json"
@@ -2619,7 +2700,8 @@ def main() -> int:
                 "tick_housekeeping": "lazy",
                 "defer_promotion": True,
             })
-        if (not attach_recovered and attached_ram > attached_start
+        if (not attach_recovered and not attached_resource_settled
+                and attached_ram > attached_start
                 and attached_ram < attach_phase.rows):
             if attached_durable != attached_ram:
                 publish(status_path, {"state": "midphase_gate_failed",

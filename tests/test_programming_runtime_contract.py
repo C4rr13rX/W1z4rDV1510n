@@ -141,6 +141,17 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertFalse(memory_floor_breached(6.0, 100, 101, 101, 7 * gib))
         self.assertTrue(memory_floor_breached(6.0, 100, 101, 101, 5 * gib))
 
+    def test_attached_worker_has_the_same_memory_settlement_contract(self) -> None:
+        source = (
+            ROOT / "scripts" / "programming_curriculum_supervisor.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"state": "attached_resource_settling"', source)
+        self.assertIn('"kind": "attached_resource_bounded_settlement"', source)
+        self.assertIn(
+            "not attach_recovered and not attached_resource_settled",
+            source,
+        )
+
     def test_foundation_gate_allows_saturated_host_response_window(self) -> None:
         client = FoundationBrainClient(
             "http://127.0.0.1:18095", timeout=180.0
