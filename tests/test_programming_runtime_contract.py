@@ -767,6 +767,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 "status": "deferred", "phase": "corpus",
                 "start_row": 60, "end_row": 100,
             })
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted")
+            publish(brain / "brain.last-good.json", {
+                "phase": "corpus", "row": 20, "guard": str(guard),
+            })
             report = mark_phase_forward_harvested(
                 runtime, phase, {"row": 20}
             )
@@ -779,6 +786,37 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                     "forward_harvested_from_guard_row"
                 ],
                 20,
+            )
+
+    def test_same_phase_restore_can_reuse_verified_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted")
+            publish(brain / "brain.last-good.json", {
+                "phase": "corpus", "row": 20, "guard": str(guard),
+            })
+            publish(runtime / "corpus.progress.json", {
+                "ram_next_row": 40, "durable_next_row": 40,
+            })
+            publish(runtime / "curriculum-canary-quarantine.json", {
+                "state": "failed",
+            })
+
+            finalize_canary_restore(
+                runtime, {"phase": "corpus", "row": 20},
+                retain_guard=True,
+            )
+
+            self.assertTrue(guard.exists())
+            self.assertTrue((brain / "brain.last-good.json").exists())
+            self.assertFalse(
+                (runtime / "curriculum-canary-quarantine.json").exists()
+            )
+            self.assertEqual(
+                phase_offsets(runtime / "corpus.progress.json"), (20, 20)
             )
 
     def test_deferred_replay_command_targets_only_the_exact_interval(self) -> None:

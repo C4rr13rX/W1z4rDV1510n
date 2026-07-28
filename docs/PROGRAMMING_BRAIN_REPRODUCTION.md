@@ -95,6 +95,11 @@ The ledger resolution and guard release occur only after that durable admitted
 marker, preventing either duplicated replay training or a resolved interval
 whose learned state was rolled back.
 
+Automatic same-phase recovery retains the verified immutable rollback guard
+after restoring it. The next worker reuses that guard instead of copying the
+same multi-gigabyte accepted state a second time. Forward harvest releases the
+guard when it accounts the failed phase and advances to a different corpus.
+
 ## Encoded curriculum
 
 The seed curriculum is ordered as follows:

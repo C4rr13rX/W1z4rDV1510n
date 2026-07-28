@@ -451,8 +451,14 @@ def restore_canary_quarantine(runtime: Path, finalize: bool = True) -> dict:
     return restored
 
 
-def finalize_canary_restore(runtime: Path, restored: dict) -> None:
-    """Publish the rewind only after a replacement node proves the snapshot."""
+def finalize_canary_restore(runtime: Path, restored: dict,
+                            retain_guard: bool = False) -> None:
+    """Publish the rewind only after a replacement node proves the snapshot.
+
+    Automatic same-phase recovery retains its already verified immutable guard.
+    Deleting it here would force an identical multi-gigabyte copy before the
+    next worker even though the accepted boundary has not changed.
+    """
     phase = str(restored["phase"])
     row = int(restored["row"])
     progress_path = runtime / f"{phase}.progress.json"
@@ -465,10 +471,11 @@ def finalize_canary_restore(runtime: Path, restored: dict) -> None:
         "updated_unix": time.time(),
     })
     publish(progress_path, progress)
-    brain_dir = runtime / "brain"
-    (brain_dir / "brain.last-good.bin").unlink(missing_ok=True)
-    (brain_dir / "brain.last-good.wbrain").unlink(missing_ok=True)
-    (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
+    if not retain_guard:
+        brain_dir = runtime / "brain"
+        (brain_dir / "brain.last-good.bin").unlink(missing_ok=True)
+        (brain_dir / "brain.last-good.wbrain").unlink(missing_ok=True)
+        (brain_dir / "brain.last-good.json").unlink(missing_ok=True)
     canary_quarantine_path(runtime).unlink(missing_ok=True)
 
 
@@ -529,6 +536,10 @@ def mark_phase_forward_harvested(runtime: Path, phase: Phase,
         "kind": "phase_forward_harvested",
         **report,
     })
+    if not accept_last_good_guard(runtime, phase.name):
+        raise RuntimeError(
+            f"could not release {phase.name} guard after forward harvest"
+        )
     return report
 
 
@@ -1746,7 +1757,7 @@ def perform_automatic_recovery(args: argparse.Namespace, phase: Phase,
             restored,
             endpoint_json(args.endpoint, "/brain/stats", timeout=120.0),
         )
-        finalize_canary_restore(runtime, restored)
+        finalize_canary_restore(runtime, restored, retain_guard=True)
     except (RuntimeError, OSError, psutil.Error) as exc:
         publish(status_path, {
             "state": "automatic_quarantine_recovery_failed",
