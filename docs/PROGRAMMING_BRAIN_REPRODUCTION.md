@@ -73,9 +73,12 @@ candidate. Do not resolve the candidate intervals manually before the retest;
 their unresolved identity is part of the admission proof.
 
 The canonical trainer runs the supervisor twice as two restart-safe stages.
-The first command uses `--auto-quarantine-recovery` to finish the forward sweep
-while excluding exact failed intervals. Only after every forward phase has a
-durable completion gate does the second command use `--replay-deferred`. It
+The first command uses `--auto-quarantine-recovery --forward-harvest` to finish
+the forward sweep while excluding exact failed intervals. A phase advances only
+after either a durable completion gate passes or every row after its restored
+accepted guard is covered by durable deferred intervals. Only after every
+forward phase is completely accounted does the second command use
+`--replay-deferred`. It
 orders the still-unresolved intervals by phase and row and replays one exact
 half-open span into the final accumulated brain. Each replay has its own
 pre-mutation `.wbrain` guard, progress ledger, exact-interval recall, and normal

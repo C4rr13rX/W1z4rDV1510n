@@ -472,6 +472,66 @@ def finalize_canary_restore(runtime: Path, restored: dict) -> None:
     canary_quarantine_path(runtime).unlink(missing_ok=True)
 
 
+def mark_phase_forward_harvested(runtime: Path, phase: Phase,
+                                 restored: dict) -> dict:
+    """Account for a completed corpus whose unadmitted tail is fully deferred.
+
+    The live brain remains the comprehensively accepted guard.  Progress may
+    advance to the end of the phase only when unresolved intervals cover every
+    row between that guard and the corpus boundary without a gap.
+    """
+    guard_row = int(restored["row"])
+    cursor = guard_row
+    interval_ids = []
+    for event in unresolved_deferred_intervals(runtime, phase.name):
+        start = max(guard_row, int(event["start_row"]))
+        end = min(phase.rows, int(event["end_row"]))
+        if end <= cursor:
+            continue
+        if start > cursor:
+            raise RuntimeError(
+                "cannot forward-harvest a phase with an unaccounted row gap: "
+                f"phase={phase.name} gap={cursor}:{start}"
+            )
+        cursor = max(cursor, end)
+        interval_ids.append(str(event["interval_id"]))
+        if cursor >= phase.rows:
+            break
+    if cursor < phase.rows:
+        raise RuntimeError(
+            "cannot forward-harvest a phase whose deferred coverage stops "
+            f"before completion: phase={phase.name} covered_to={cursor} "
+            f"required={phase.rows}"
+        )
+
+    progress_path = runtime / f"{phase.name}.progress.json"
+    progress = read_json(progress_path)
+    progress.update({
+        "ram_next_row": phase.rows,
+        "durable_next_row": phase.rows,
+        "accepted_episodes": 0,
+        "forward_harvested_from_guard_row": guard_row,
+        "forward_harvest_deferred_interval_ids": interval_ids,
+        "updated_unix": time.time(),
+    })
+    publish(progress_path, progress)
+    report = {
+        "phase": phase.name,
+        "passed": True,
+        "forward_harvest_only": True,
+        "accepted_guard_row": guard_row,
+        "accounted_rows": phase.rows,
+        "deferred_interval_ids": interval_ids,
+        "updated_unix": time.time(),
+    }
+    publish(runtime / f"{phase.name}.forward-harvest.json", report)
+    append_health_event(runtime, {
+        "kind": "phase_forward_harvested",
+        **report,
+    })
+    return report
+
+
 def verify_restored_topology(restored: dict, observed: dict) -> None:
     """Reject a rollback whose reopened topology is not its recorded barrier."""
     expected = ((restored.get("checkpoint_proof") or {}).get("topology") or {})
@@ -2160,6 +2220,14 @@ def main() -> int:
         help="on canary failure, restart the node, rollback, defer the suspect range, and continue",
     )
     parser.add_argument(
+        "--forward-harvest", action="store_true",
+        help=(
+            "after a semantic completion-gate failure is rolled back and its "
+            "entire unadmitted tail is deferred, advance to the next corpus; "
+            "all deferred intervals still require end-of-corpus replay"
+        ),
+    )
+    parser.add_argument(
         "--node-bin", type=Path,
         help="brain server executable required by --auto-quarantine-recovery",
     )
@@ -2200,6 +2268,8 @@ def main() -> int:
             "--auto-quarantine-recovery and --restart-node-after-attach "
             "require --node-bin"
         )
+    if args.forward_harvest and not args.auto_quarantine_recovery:
+        parser.error("--forward-harvest requires --auto-quarantine-recovery")
 
     runtime = args.runtime.resolve()
     status_path = runtime / "curriculum-supervisor.status.json"
@@ -2610,6 +2680,19 @@ def main() -> int:
                                               "updated_unix": time.time()})
                         if perform_automatic_recovery(
                                 args, phase, runtime, status_path):
+                            if args.forward_harvest:
+                                harvested = mark_phase_forward_harvested(
+                                    runtime, phase, {
+                                        "row": phase_offsets(
+                                            runtime / f"{phase.name}.progress.json"
+                                        )[1],
+                                    },
+                                )
+                                publish(status_path, {
+                                    "state": "forward_harvest_deferred",
+                                    **harvested,
+                                })
+                                break
                             restarts = 0
                             continue
                         return 1

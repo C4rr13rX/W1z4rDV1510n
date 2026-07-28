@@ -272,7 +272,7 @@ def curriculum_commands(args: argparse.Namespace) -> list[list[str]]:
         "--node-bin", str(args.node_bin.resolve()),
     ]
     return [
-        [*shared, "--auto-quarantine-recovery"],
+        [*shared, "--auto-quarantine-recovery", "--forward-harvest"],
         [*shared, "--replay-deferred"],
     ]
 

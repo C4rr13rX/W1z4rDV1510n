@@ -40,6 +40,7 @@ from scripts.programming_curriculum_supervisor import (
     deferred_replay_marker_path,
     latest_passing_canary_row,
     memory_floor_breached,
+    mark_phase_forward_harvested,
     next_suspect_start,
     phase_offsets,
     pause_admission_for_infrastructure,
@@ -47,6 +48,7 @@ from scripts.programming_curriculum_supervisor import (
     prune_resolved_deferred_bases,
     publish,
     quarantine_interval_ids,
+    read_json,
     record_deferred_failure,
     recover_interrupted_deferred_replay,
     replay_interval_recall_command,
@@ -743,6 +745,41 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 "phase": "corpus", "start_row": 20, "end_row": 20,
             }))
             self.assertEqual(unresolved_deferred_intervals(runtime), [])
+
+    def test_forward_harvest_requires_complete_deferred_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            phase = Phase("corpus", "script", runtime / "corpus.jsonl", 100)
+            publish(runtime / "corpus.progress.json", {
+                "ram_next_row": 20,
+                "durable_next_row": 20,
+            })
+            append_deferred_event(runtime, {
+                "interval_id": deferred_interval_id("corpus", 20, 60),
+                "status": "deferred", "phase": "corpus",
+                "start_row": 20, "end_row": 60,
+            })
+            with self.assertRaisesRegex(RuntimeError, "coverage stops"):
+                mark_phase_forward_harvested(runtime, phase, {"row": 20})
+
+            append_deferred_event(runtime, {
+                "interval_id": deferred_interval_id("corpus", 60, 100),
+                "status": "deferred", "phase": "corpus",
+                "start_row": 60, "end_row": 100,
+            })
+            report = mark_phase_forward_harvested(
+                runtime, phase, {"row": 20}
+            )
+            self.assertTrue(report["forward_harvest_only"])
+            self.assertEqual(phase_offsets(
+                runtime / "corpus.progress.json"
+            ), (100, 100))
+            self.assertEqual(
+                read_json(runtime / "corpus.progress.json")[
+                    "forward_harvested_from_guard_row"
+                ],
+                20,
+            )
 
     def test_deferred_replay_command_targets_only_the_exact_interval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1883,6 +1920,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         forward, replay = curriculum_commands(args)
         self.assertIn("--auto-quarantine-recovery", forward)
+        self.assertIn("--forward-harvest", forward)
         self.assertNotIn("--replay-deferred", forward)
         self.assertIn("--replay-deferred", replay)
         self.assertNotIn("--auto-quarantine-recovery", replay)
