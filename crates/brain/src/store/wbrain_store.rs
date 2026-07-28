@@ -1561,7 +1561,7 @@ mod tests {
         let (mut migrated, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
         assert_eq!(migrated.rebuild_binding_indexes_bounded().unwrap(), 1);
-        assert_eq!(migrated.binding_posting_residency(), (0, 3));
+        assert_eq!(migrated.binding_posting_residency(), (0, 1));
         assert_eq!(migrated.fingerprint_state_residency(), (0, 2));
         assert_eq!(migrated.tentative_binding_count(), 1);
         assert_eq!(
@@ -1594,7 +1594,7 @@ mod tests {
         );
         assert_ne!(new_binding_id, trained_binding_id);
         migrated.serialize_all_neurons_for_idle().unwrap();
-        assert_eq!(migrated.binding_posting_residency(), (0, 4));
+        assert_eq!(migrated.binding_posting_residency(), (0, 2));
         assert_eq!(migrated.fingerprint_state_residency(), (0, 3));
         assert_eq!(
             migrated.stats().evicted_neurons,
@@ -1604,7 +1604,12 @@ mod tests {
 
         let (mut restored, missing) = Brain::restore_wbrain(&destination, encodings()).unwrap();
         assert!(missing.is_empty());
-        assert_eq!(restored.binding_posting_residency(), (0, 4));
+        assert_eq!(
+            restored.binding_posting_residency(),
+            (0, 4),
+            "the two legacy combined generations remain valid binding sources \
+             after restore; new fingerprint-only generations stay excluded",
+        );
         assert_eq!(restored.fingerprint_state_residency(), (0, 3));
         assert_eq!(
             restored

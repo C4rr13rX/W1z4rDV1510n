@@ -1606,7 +1606,14 @@ impl Pool {
     /// Stage 17.4 — count of neurons currently held in RAM (live).
     /// Equals `neuron_count() - evicted_count()`.
     pub fn live_count(&self) -> usize {
-        self.neurons.resident_count()
+        if self.wbrain_store.is_some() {
+            self.neurons.resident_count()
+        } else {
+            // Legacy cold/tiered stores retain a compact identity body in
+            // the dense slot, so resident pointer count includes evicted
+            // sentinels. Their explicit eviction set is the authority.
+            self.neurons.len().saturating_sub(self.evicted.len())
+        }
     }
 
     /// Stage 17.4 — evict one neuron to the cold tier.  Serialises its

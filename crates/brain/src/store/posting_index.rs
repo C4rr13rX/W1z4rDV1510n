@@ -11,9 +11,17 @@ use super::{AuxiliaryRecordRef, WbrainFile, WbrainNeuronStore};
 
 const POSTING_INDEX_KIND: u32 = 0x504F_5354; // "POST"
 const POSTING_INDEX_MAGIC: &[u8; 8] = b"W1ZPOST1";
+const HASHED_POSTING_INDEX_MAGIC: &[u8; 8] = b"W1ZPOST2";
 const HEADER_BYTES: u64 = 24;
 const RECORD_HEADER_BYTES: u64 = 24;
+const HASHED_RECORD_BYTES: u64 = 44;
 const MAX_BUCKETS: u64 = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostingKeyMode {
+    Full,
+    Hashed,
+}
 
 #[cfg(test)]
 thread_local! {
@@ -44,6 +52,7 @@ pub(crate) struct PostingIndexBuilder {
     bucket_heads: Vec<u64>,
     entries: u64,
     next_record_offset: u64,
+    key_mode: PostingKeyMode,
 }
 
 impl PostingIndexBuilder {
@@ -82,12 +91,16 @@ impl PostingIndexBuilder {
         let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
         let mut header = [0_u8; HEADER_BYTES as usize];
         file.read_exact(&mut header)?;
-        if &header[..8] != POSTING_INDEX_MAGIC {
+        let key_mode = if &header[..8] == POSTING_INDEX_MAGIC {
+            PostingKeyMode::Full
+        } else if &header[..8] == HASHED_POSTING_INDEX_MAGIC {
+            PostingKeyMode::Hashed
+        } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid unfinished posting index magic",
             ));
-        }
+        };
         let bucket_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
         if bucket_count == 0 || !bucket_count.is_power_of_two() || bucket_count > MAX_BUCKETS {
             return Err(io::Error::new(
@@ -107,18 +120,31 @@ impl PostingIndexBuilder {
         let mut at = records_start;
         let mut entries = 0_u64;
         let mut last_value = None;
-        let mut raw = [0_u8; RECORD_HEADER_BYTES as usize];
+        let record_header_bytes = match key_mode {
+            PostingKeyMode::Full => RECORD_HEADER_BYTES,
+            PostingKeyMode::Hashed => HASHED_RECORD_BYTES,
+        };
+        let mut raw = [0_u8; HASHED_RECORD_BYTES as usize];
         while at
-            .checked_add(RECORD_HEADER_BYTES)
+            .checked_add(record_header_bytes)
             .is_some_and(|end| end <= file_len)
         {
             file.seek(SeekFrom::Start(at))?;
-            file.read_exact(&mut raw)?;
-            let hash = u64::from_le_bytes(raw[8..16].try_into().unwrap());
-            let key_len = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
-            let value = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+            file.read_exact(&mut raw[..record_header_bytes as usize])?;
+            let (hash, key_len, value) = match key_mode {
+                PostingKeyMode::Full => (
+                    u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+                    u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64,
+                    u32::from_le_bytes(raw[20..24].try_into().unwrap()),
+                ),
+                PostingKeyMode::Hashed => (
+                    u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+                    0,
+                    u32::from_le_bytes(raw[40..44].try_into().unwrap()),
+                ),
+            };
             let Some(end) = at
-                .checked_add(RECORD_HEADER_BYTES)
+                .checked_add(record_header_bytes)
                 .and_then(|offset| offset.checked_add(key_len))
             else {
                 break;
@@ -144,6 +170,7 @@ impl PostingIndexBuilder {
                 bucket_heads,
                 entries,
                 next_record_offset: at,
+                key_mode,
             },
             last_value,
         ))
@@ -154,7 +181,27 @@ impl PostingIndexBuilder {
         pool_id: PoolId,
         expected_entries: u64,
     ) -> io::Result<Self> {
-        Self::create_inner(directory, pool_id, expected_entries, None)
+        Self::create_inner(
+            directory,
+            pool_id,
+            expected_entries,
+            None,
+            PostingKeyMode::Full,
+        )
+    }
+
+    pub(crate) fn create_hashed(
+        directory: &Path,
+        pool_id: PoolId,
+        expected_entries: u64,
+    ) -> io::Result<Self> {
+        Self::create_inner(
+            directory,
+            pool_id,
+            expected_entries,
+            None,
+            PostingKeyMode::Hashed,
+        )
     }
 
     pub(crate) fn create_scoped(
@@ -163,7 +210,28 @@ impl PostingIndexBuilder {
         expected_entries: u64,
         scope: &str,
     ) -> io::Result<Self> {
-        Self::create_inner(directory, pool_id, expected_entries, Some(scope))
+        Self::create_inner(
+            directory,
+            pool_id,
+            expected_entries,
+            Some(scope),
+            PostingKeyMode::Full,
+        )
+    }
+
+    pub(crate) fn create_scoped_hashed(
+        directory: &Path,
+        pool_id: PoolId,
+        expected_entries: u64,
+        scope: &str,
+    ) -> io::Result<Self> {
+        Self::create_inner(
+            directory,
+            pool_id,
+            expected_entries,
+            Some(scope),
+            PostingKeyMode::Hashed,
+        )
     }
 
     fn create_inner(
@@ -171,6 +239,7 @@ impl PostingIndexBuilder {
         pool_id: PoolId,
         expected_entries: u64,
         scope: Option<&str>,
+        key_mode: PostingKeyMode,
     ) -> io::Result<Self> {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -191,7 +260,10 @@ impl PostingIndexBuilder {
             .max(1)
             .next_power_of_two()
             .min(MAX_BUCKETS);
-        file.write_all(POSTING_INDEX_MAGIC)?;
+        file.write_all(match key_mode {
+            PostingKeyMode::Full => POSTING_INDEX_MAGIC,
+            PostingKeyMode::Hashed => HASHED_POSTING_INDEX_MAGIC,
+        })?;
         file.write_all(&0_u64.to_le_bytes())?;
         file.write_all(&bucket_count.to_le_bytes())?;
         let zeroes = [0_u8; 64 * 1024];
@@ -209,29 +281,44 @@ impl PostingIndexBuilder {
             bucket_heads: vec![0; usize::try_from(bucket_count).unwrap()],
             entries: 0,
             next_record_offset,
+            key_mode,
         })
     }
 
     pub(crate) fn insert(&mut self, key: &[u8], value: NeuronId) -> io::Result<()> {
         let digest = blake3::hash(key);
-        let hash = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
+        let digest_bytes = digest.as_bytes();
+        let hash = u64::from_le_bytes(digest_bytes[..8].try_into().unwrap());
         let bucket = hash & (self.bucket_count - 1);
         let bucket_index = usize::try_from(bucket).unwrap();
         let old_head = self.bucket_heads[bucket_index];
         let record = self.next_record_offset;
         self.file.write_all(&old_head.to_le_bytes())?;
-        self.file.write_all(&hash.to_le_bytes())?;
-        self.file.write_all(
-            &u32::try_from(key.len())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "posting key too large"))?
-                .to_le_bytes(),
-        )?;
-        self.file.write_all(&value.to_le_bytes())?;
-        self.file.write_all(key)?;
+        match self.key_mode {
+            PostingKeyMode::Full => {
+                self.file.write_all(&hash.to_le_bytes())?;
+                self.file.write_all(
+                    &u32::try_from(key.len())
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "posting key too large")
+                        })?
+                        .to_le_bytes(),
+                )?;
+                self.file.write_all(&value.to_le_bytes())?;
+                self.file.write_all(key)?;
+            }
+            PostingKeyMode::Hashed => {
+                self.file.write_all(digest_bytes)?;
+                self.file.write_all(&value.to_le_bytes())?;
+            }
+        }
         self.bucket_heads[bucket_index] = record + 1;
+        let record_bytes = match self.key_mode {
+            PostingKeyMode::Full => RECORD_HEADER_BYTES + key.len() as u64,
+            PostingKeyMode::Hashed => HASHED_RECORD_BYTES,
+        };
         self.next_record_offset = record
-            .checked_add(RECORD_HEADER_BYTES)
-            .and_then(|offset| offset.checked_add(key.len() as u64))
+            .checked_add(record_bytes)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting index overflow"))?;
         self.entries += 1;
         Ok(())
@@ -276,12 +363,16 @@ pub(crate) fn lookup(
     }
     let mut header = [0_u8; HEADER_BYTES as usize];
     store.read_auxiliary_exact(reference, 0, &mut header)?;
-    if &header[..8] != POSTING_INDEX_MAGIC {
+    let key_mode = if &header[..8] == POSTING_INDEX_MAGIC {
+        PostingKeyMode::Full
+    } else if &header[..8] == HASHED_POSTING_INDEX_MAGIC {
+        PostingKeyMode::Hashed
+    } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid posting index magic",
         ));
-    }
+    };
     let entries = u64::from_le_bytes(header[8..16].try_into().unwrap());
     let buckets = u64::from_le_bytes(header[16..24].try_into().unwrap());
     if buckets == 0 || !buckets.is_power_of_two() {
@@ -306,8 +397,12 @@ pub(crate) fn lookup(
             ));
         }
         let record = next_plus_one - 1;
+        let record_header_bytes = match key_mode {
+            PostingKeyMode::Full => RECORD_HEADER_BYTES,
+            PostingKeyMode::Hashed => HASHED_RECORD_BYTES,
+        };
         if record
-            .checked_add(RECORD_HEADER_BYTES)
+            .checked_add(record_header_bytes)
             .is_none_or(|end| end > reference.len)
         {
             return Err(io::Error::new(
@@ -315,27 +410,38 @@ pub(crate) fn lookup(
                 "posting index record outside auxiliary body",
             ));
         }
-        let mut raw = [0_u8; RECORD_HEADER_BYTES as usize];
-        store.read_auxiliary_exact(reference, record, &mut raw)?;
+        let mut raw = [0_u8; HASHED_RECORD_BYTES as usize];
+        store.read_auxiliary_exact(reference, record, &mut raw[..record_header_bytes as usize])?;
         next_plus_one = u64::from_le_bytes(raw[0..8].try_into().unwrap());
-        let stored_hash = u64::from_le_bytes(raw[8..16].try_into().unwrap());
-        let key_len = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
-        let value = u32::from_le_bytes(raw[20..24].try_into().unwrap());
-        let key_at = record + RECORD_HEADER_BYTES;
-        if key_at
-            .checked_add(key_len)
-            .is_none_or(|end| end > reference.len)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "posting index key outside auxiliary body",
-            ));
-        }
-        if stored_hash == hash && key_len == key.len() as u64 {
-            let mut stored = vec![0_u8; key.len()];
-            store.read_auxiliary_exact(reference, key_at, &mut stored)?;
-            if stored == key && found.last().copied() != Some(value) {
-                found.push(value);
+        match key_mode {
+            PostingKeyMode::Full => {
+                let stored_hash = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let key_len = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
+                let value = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+                let key_at = record + RECORD_HEADER_BYTES;
+                if key_at
+                    .checked_add(key_len)
+                    .is_none_or(|end| end > reference.len)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "posting index key outside auxiliary body",
+                    ));
+                }
+                if stored_hash == hash && key_len == key.len() as u64 {
+                    let mut stored = vec![0_u8; key.len()];
+                    store.read_auxiliary_exact(reference, key_at, &mut stored)?;
+                    if stored == key && found.last().copied() != Some(value) {
+                        found.push(value);
+                    }
+                }
+            }
+            PostingKeyMode::Hashed => {
+                let stored_digest = &raw[8..40];
+                let value = u32::from_le_bytes(raw[40..44].try_into().unwrap());
+                if stored_digest == digest.as_bytes() && found.last().copied() != Some(value) {
+                    found.push(value);
+                }
             }
         }
         visited += 1;
@@ -359,6 +465,12 @@ where
 {
     let mut header = [0_u8; HEADER_BYTES as usize];
     store.read_auxiliary_exact(reference, 0, &mut header)?;
+    if &header[..8] == HASHED_POSTING_INDEX_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "hashed posting indexes do not retain prefix-scannable keys",
+        ));
+    }
     if &header[..8] != POSTING_INDEX_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -474,6 +586,96 @@ mod tests {
         assert_eq!(lookup(&store, reference, b"beta", 8).unwrap(), vec![7]);
         assert_eq!(lookup(&store, reference, b"gamma", 8).unwrap(), vec![8]);
         assert!(!unfinished_path.exists());
+        drop(store);
+        drop(file);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn hashed_postings_preserve_point_lookup_without_repeating_long_keys() {
+        let directory = temp_directory("hashed");
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("brain.wbrain");
+        let long_key = vec![0xA5; 4096];
+        let other_key = vec![0x5A; 3072];
+        let mut builder = PostingIndexBuilder::create_hashed(&directory, 7, 3).unwrap();
+        builder.insert(&long_key, 42).unwrap();
+        builder.insert(&long_key, 43).unwrap();
+        builder.insert(&other_key, 99).unwrap();
+        let hashed_bytes = builder.next_record_offset;
+        let repeated_full_key_bytes = HEADER_BYTES
+            + builder.bucket_count * 8
+            + (RECORD_HEADER_BYTES + long_key.len() as u64) * 2
+            + RECORD_HEADER_BYTES
+            + other_key.len() as u64;
+        assert!(
+            hashed_bytes * 20 < repeated_full_key_bytes,
+            "hashed={hashed_bytes} repeated-full={repeated_full_key_bytes}"
+        );
+
+        let file = WbrainFile::open(&destination).unwrap();
+        let reference = builder.finish(&file, 7).unwrap();
+        let store = file.pool(7);
+        assert_eq!(
+            lookup(&store, reference, &long_key, 8).unwrap(),
+            vec![42, 43]
+        );
+        assert_eq!(lookup(&store, reference, &other_key, 8).unwrap(), vec![99]);
+        let error = scan_prefix(&store, reference, &[0xA5], |_, _| Ok(())).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        drop(store);
+        drop(file);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn hashed_posting_resume_discards_torn_record_and_preserves_mode() {
+        let directory = temp_directory("hashed-resume");
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("brain.wbrain");
+        let unfinished_path;
+        let complete_len;
+        {
+            let mut builder = PostingIndexBuilder::create_scoped_hashed(
+                &directory,
+                7,
+                4,
+                "brain.wbrain",
+            )
+            .unwrap();
+            builder.insert(b"alpha", 4).unwrap();
+            builder.insert(b"beta", 7).unwrap();
+            complete_len = builder.next_record_offset;
+            unfinished_path = builder.path.clone();
+        }
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&unfinished_path)
+                .unwrap();
+            file.write_all(&[0xAA; 17]).unwrap();
+        }
+
+        let (mut resumed, last_value) =
+            PostingIndexBuilder::resume_latest(&directory, 7, "brain.wbrain")
+                .unwrap()
+                .unwrap();
+        assert_eq!(resumed.key_mode, PostingKeyMode::Hashed);
+        assert_eq!(last_value, Some(7));
+        assert_eq!(resumed.entries, 2);
+        assert_eq!(resumed.next_record_offset, complete_len);
+        assert_eq!(
+            std::fs::metadata(&unfinished_path).unwrap().len(),
+            complete_len
+        );
+        resumed.insert(b"gamma", 8).unwrap();
+
+        let file = WbrainFile::open(&destination).unwrap();
+        let reference = resumed.finish(&file, 7).unwrap();
+        let store = file.pool(7);
+        assert_eq!(lookup(&store, reference, b"alpha", 8).unwrap(), vec![4]);
+        assert_eq!(lookup(&store, reference, b"beta", 8).unwrap(), vec![7]);
+        assert_eq!(lookup(&store, reference, b"gamma", 8).unwrap(), vec![8]);
         drop(store);
         drop(file);
         std::fs::remove_dir_all(directory).ok();

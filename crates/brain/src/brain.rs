@@ -73,6 +73,7 @@ pub(crate) const FINGERPRINT_PROMOTED_KEY: u8 = 18;
 pub(crate) const FINGERPRINT_TENTATIVE_COUNT_KEY: &[u8] = &[19];
 pub(crate) const FINGERPRINT_PROMOTED_COUNT_KEY: &[u8] = &[20];
 pub(crate) const FINGERPRINT_STATE_MARKER_KEY: &[u8] = &[21];
+const FINGERPRINT_ONLY_GENERATION_KEY: &[u8] = &[22];
 
 pub(crate) fn encode_fingerprint_posting_key(
     kind: u8,
@@ -1816,7 +1817,7 @@ impl Brain {
             return out;
         };
         let store = file.pool(self.binding_pool_id);
-        let references = self.binding_posting_indexes.clone();
+        let references = self.fingerprint_posting_indexes.clone();
         for reference in references.into_iter().rev() {
             let result = crate::store::posting_index::scan_prefix(
                 &store,
@@ -2389,10 +2390,7 @@ impl Brain {
             .len()
             .saturating_add(self.tentative_promoted.len())
             .saturating_add(self.promoted_fingerprints.len());
-        let expected = binding_entries
-            .saturating_add(fingerprint_entries)
-            .saturating_add(usize::from(fingerprint_entries > 0) * 3);
-        if expected == 0 {
+        if binding_entries == 0 && fingerprint_entries == 0 {
             return Ok(());
         }
         let directory = file
@@ -2400,31 +2398,52 @@ impl Brain {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let mut builder = crate::store::posting_index::PostingIndexBuilder::create(
-            &directory,
-            self.binding_pool_id,
-            expected as u64,
-        )?;
-        for ((query, target, sequence), ids) in &self.binding_sequence_index {
-            let key = BindingPostingKey::Sequence(*query, *target, sequence.clone()).encode();
-            for id in ids {
-                builder.insert(&key, *id)?;
+        if binding_entries > 0 {
+            // Binding routes are point-looked-up by their complete key and
+            // never prefix-scanned. Persist a full BLAKE3 digest once per
+            // posting instead of repeating arbitrarily long atom sequences.
+            // Fingerprint state remains in a separate full-key generation
+            // below because maintenance scans those records by prefix.
+            let mut builder = crate::store::posting_index::PostingIndexBuilder::create_hashed(
+                &directory,
+                self.binding_pool_id,
+                binding_entries as u64,
+            )?;
+            for ((query, target, sequence), ids) in &self.binding_sequence_index {
+                let key = BindingPostingKey::Sequence(*query, *target, sequence.clone()).encode();
+                for id in ids {
+                    builder.insert(&key, *id)?;
+                }
             }
-        }
-        for ((pool, neuron), ids) in &self.binding_feature_atom_index {
-            let key = BindingPostingKey::Feature(*pool, *neuron).encode();
-            for id in ids {
-                builder.insert(&key, *id)?;
+            for ((pool, neuron), ids) in &self.binding_feature_atom_index {
+                let key = BindingPostingKey::Feature(*pool, *neuron).encode();
+                for id in ids {
+                    builder.insert(&key, *id)?;
+                }
             }
-        }
-        for ((pool, motif), ids) in &self.binding_motif_index {
-            let key = BindingPostingKey::Motif(*pool, *motif).encode();
-            for id in ids {
-                builder.insert(&key, *id)?;
+            for ((pool, motif), ids) in &self.binding_motif_index {
+                let key = BindingPostingKey::Motif(*pool, *motif).encode();
+                for id in ids {
+                    builder.insert(&key, *id)?;
+                }
             }
+            let reference = builder.finish(file, self.binding_pool_id)?;
+            self.binding_posting_indexes.push(reference);
         }
+
         if fingerprint_entries > 0 {
+            let expected = fingerprint_entries.saturating_add(4);
+            let mut builder = crate::store::posting_index::PostingIndexBuilder::create(
+                &directory,
+                self.binding_pool_id,
+                expected as u64,
+            )?;
             builder.insert(FINGERPRINT_STATE_MARKER_KEY, 1)?;
+            // New split generations carry an explicit discriminator. Legacy
+            // W1ZPOST1 generations lack it because they combine binding
+            // routes and fingerprint state and therefore remain visible to
+            // both runtime indexes after restore.
+            builder.insert(FINGERPRINT_ONLY_GENERATION_KEY, 1)?;
             builder.insert(
                 FINGERPRINT_TENTATIVE_COUNT_KEY,
                 u32::try_from(self.tentative_binding_count_total).map_err(|_| {
@@ -2473,10 +2492,7 @@ impl Brain {
                     *id,
                 )?;
             }
-        }
-        let reference = builder.finish(file, self.binding_pool_id)?;
-        self.binding_posting_indexes.push(reference);
-        if fingerprint_entries > 0 {
+            let reference = builder.finish(file, self.binding_pool_id)?;
             self.fingerprint_posting_indexes.push(reference);
         }
         self.binding_sequence_index.clear();
@@ -2548,7 +2564,7 @@ impl Brain {
             )? {
                 Some(resumed) => resumed,
                 None => (
-                    crate::store::posting_index::PostingIndexBuilder::create_scoped(
+                    crate::store::posting_index::PostingIndexBuilder::create_scoped_hashed(
                         &directory,
                         self.binding_pool_id,
                         (binding_slots as u64).saturating_mul(16),
@@ -2579,25 +2595,9 @@ impl Brain {
             self.stream_binding_posting_keys_bounded(&members, binding_id, &mut builder)?;
         }
         let reference = builder.finish(&file, self.binding_pool_id)?;
-        let store = file.pool(self.binding_pool_id);
-        self.binding_posting_indexes.retain(|existing| {
-            match crate::store::posting_index::lookup(
-                &store,
-                *existing,
-                FINGERPRINT_STATE_MARKER_KEY,
-                1,
-            ) {
-                Ok(values) => !values.is_empty(),
-                Err(error) => {
-                    tracing::warn!(
-                        "retaining unreadable posting generation during rebuild: {}",
-                        error
-                    );
-                    true
-                }
-            }
-        });
-        self.fingerprint_posting_indexes = self.binding_posting_indexes.clone();
+        // Replace only derived binding routes. Fingerprint recurrence
+        // generations are independent causal state and remain untouched.
+        self.binding_posting_indexes.clear();
         self.binding_posting_indexes.push(reference);
         Ok(rebuilt)
     }
@@ -7601,7 +7601,18 @@ impl Brain {
                 .iter()
                 .map(|(key, ids)| (*key, ids.clone()))
                 .collect(),
-            binding_posting_indexes: self.binding_posting_indexes.clone(),
+            // The existing bincode metadata schema has one generation
+            // vector. Preserve that wire format by persisting the union and
+            // partitioning it from generation markers during restore.
+            binding_posting_indexes: {
+                let mut references = self.binding_posting_indexes.clone();
+                for reference in &self.fingerprint_posting_indexes {
+                    if !references.contains(reference) {
+                        references.push(*reference);
+                    }
+                }
+                references
+            },
             total_observations: self.total_observations,
             current_threshold: self.current_threshold,
             last_pressure_check_obs: self.last_pressure_check_obs,
@@ -8050,28 +8061,45 @@ impl Brain {
         let tentative_binding_count_total = metadata.tentative_promoted.len();
         let consolidated_binding_count_total = metadata.promoted_fingerprints.len();
         let fingerprint_store = file.pool(metadata.binding_pool_id);
-        let fingerprint_posting_indexes = metadata
-            .binding_posting_indexes
-            .iter()
-            .copied()
-            .filter(|reference| {
-                match crate::store::posting_index::lookup(
-                    &fingerprint_store,
-                    *reference,
-                    FINGERPRINT_STATE_MARKER_KEY,
-                    1,
-                ) {
-                    Ok(values) => !values.is_empty(),
-                    Err(error) => {
-                        tracing::warn!(
-                            "conservatively retaining unreadable fingerprint generation: {}",
-                            error
-                        );
-                        true
+        let mut binding_posting_indexes = Vec::new();
+        let mut fingerprint_posting_indexes = Vec::new();
+        for reference in metadata.binding_posting_indexes.iter().copied() {
+            let has_fingerprint_state = crate::store::posting_index::lookup(
+                &fingerprint_store,
+                reference,
+                FINGERPRINT_STATE_MARKER_KEY,
+                1,
+            );
+            let fingerprint_only = crate::store::posting_index::lookup(
+                &fingerprint_store,
+                reference,
+                FINGERPRINT_ONLY_GENERATION_KEY,
+                1,
+            );
+            match (has_fingerprint_state, fingerprint_only) {
+                (Ok(state), Ok(only)) => {
+                    if !state.is_empty() {
+                        fingerprint_posting_indexes.push(reference);
+                    }
+                    // Legacy generations with fingerprint state predate the
+                    // discriminator and also contain binding routes. New
+                    // fingerprint-only deltas are excluded from point lookup.
+                    if only.is_empty() {
+                        binding_posting_indexes.push(reference);
                     }
                 }
-            })
-            .collect();
+                (state, only) => {
+                    tracing::warn!(
+                        "conservatively retaining unreadable posting generation in both indexes: \
+                         state={:?} only={:?}",
+                        state.err(),
+                        only.err()
+                    );
+                    binding_posting_indexes.push(reference);
+                    fingerprint_posting_indexes.push(reference);
+                }
+            }
+        }
         let mut brain = Self {
             fabric,
             config: metadata.config,
@@ -8107,7 +8135,7 @@ impl Brain {
             binding_sequence_index: metadata.binding_sequence_index.into_iter().collect(),
             binding_feature_atom_index: metadata.binding_feature_atom_index.into_iter().collect(),
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
-            binding_posting_indexes: metadata.binding_posting_indexes,
+            binding_posting_indexes,
             fingerprint_posting_indexes,
             total_observations: metadata.total_observations,
             current_threshold: metadata.current_threshold,
