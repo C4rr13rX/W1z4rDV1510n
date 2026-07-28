@@ -1847,34 +1847,84 @@ fn collection_argument_mean_evidence(text: &str) -> bool {
         .chars()
         .filter(|ch| !ch.is_ascii_whitespace())
         .collect();
+    let whole_argument_call = |function: &str, parameter: &str| {
+        let prefix = format!("{function}({parameter}");
+        compact.match_indices(&prefix).any(|(start, _)| {
+            matches!(
+                compact.as_bytes().get(start + prefix.len()),
+                Some(b')' | b',')
+            )
+        })
+    };
     declared_parameter_names(text)
         .into_iter()
         .filter(|parameter| parameter != "self" && parameter != "cls")
         .any(|parameter| {
             let sum = format!("sum({parameter})");
             let len = format!("len({parameter})");
-            let qualified_average = format!(".average({parameter}");
-            let qualified_mean = format!(".mean({parameter}");
-            let direct_average = format!("average({parameter}");
-            let direct_mean = format!("mean({parameter}");
-            let fmean = format!("fmean({parameter}");
             let method_mean = format!("{parameter}.mean(");
             let reduce = format!("{parameter}.reduce(");
             let length = format!("{parameter}.length");
             let iterator = format!("{parameter}.iter(");
             let rust_len = format!("{parameter}.len(");
             (compact.contains(&sum) && compact.contains(&len))
-                || compact.contains(&qualified_average)
-                || compact.contains(&qualified_mean)
-                || compact.contains(&direct_average)
-                || compact.contains(&direct_mean)
-                || compact.contains(&fmean)
+                || whole_argument_call("average", &parameter)
+                || whole_argument_call("mean", &parameter)
+                || whole_argument_call("fmean", &parameter)
                 || compact.contains(&method_mean)
                 || (compact.contains(&reduce) && compact.contains(&length))
                 || (compact.contains(&iterator)
                     && compact.contains(".sum")
                     && compact.contains(&rust_len))
         })
+}
+
+fn collection_argument_empty_zero_evidence(text: &str) -> bool {
+    let compact: String = text
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
+    declared_parameter_names(text)
+        .into_iter()
+        .filter(|parameter| parameter != "self" && parameter != "cls")
+        .any(|parameter| {
+            let empty_guard = [
+                format!("ifnot{parameter}:"),
+                format!("if!{parameter}."),
+                format!("iflen({parameter})==0"),
+                format!("iflen({parameter})<1"),
+                format!("if{parameter}.is_empty()"),
+                format!("if{parameter}.length===0"),
+                format!("if{parameter}.length==0"),
+            ]
+            .iter()
+            .any(|evidence| compact.contains(evidence));
+            let zero_result = compact.contains("return0")
+                || compact.contains("return0.0")
+                || compact.contains(&format!("if{parameter}else0"));
+            (empty_guard && zero_result)
+                || compact.contains(&format!("if{parameter}else0"))
+        })
+}
+
+fn has_top_level_multi_value_return(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let Some(expression) = trimmed.strip_prefix("return ") else {
+            return false;
+        };
+        let mut depth = 0_i32;
+        for ch in expression.chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = (depth - 1).max(0),
+                ',' if depth == 0 => return true,
+                '#' => break,
+                _ => {}
+            }
+        }
+        false
+    })
 }
 
 fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
@@ -1909,6 +1959,22 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
             .iter()
             .any(|label| label.ends_with(":MATH:AVERAGE"))
         && !collection_argument_mean_evidence(lowercase)
+    {
+        return false;
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":INPUT:COLLECTION_ARGUMENT"))
+        && labels.iter().any(|label| label.ends_with(":MATH:AVERAGE"))
+        && has_top_level_multi_value_return(lowercase)
+    {
+        return false;
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":INPUT:COLLECTION_ARGUMENT"))
+        && labels.iter().any(|label| label.ends_with(":GUARD:EMPTY_INPUT"))
+        && !collection_argument_empty_zero_evidence(lowercase)
     {
         return false;
     }
@@ -4749,8 +4815,21 @@ mod tests {
     if not self._runtimes:
         return 0
     return round(sum(self._runtimes) / len(self._runtimes), 2)"#;
+        let sliced_scientific_average = br#"def sbar(Ss):
+    if type(Ss) == list:
+        Ss = np.array(Ss)
+    avs = []
+    for j in range(6):
+        avs.append(np.average(Ss[j]))
+    return 6, np.std(Ss), avs"#;
+        let multi_value_average = br#"def summarize(values):
+    if not values:
+        return 0
+    return len(values), sum(values) / len(values)"#;
         let mean = b"def avg_list(values):\n    return sum(values) / len(values) if values else 0";
-        let numpy_mean = b"def avg_list(values):\n    return np.average(values)";
+        let unguarded_numpy_mean = b"def avg_list(values):\n    return np.average(values)";
+        let numpy_mean =
+            b"def avg_list(values):\n    if not values:\n        return 0\n    return np.average(values)";
         assert!(!programming_response_compatible(&average, redis_remove));
         assert!(!programming_response_compatible(&average, time_grid));
         assert!(!programming_response_compatible(
@@ -4761,6 +4840,14 @@ mod tests {
             &average,
             stateful_average
         ));
+        assert!(!programming_response_compatible(
+            &average,
+            sliced_scientific_average
+        ));
+        assert!(!programming_response_compatible(
+            &average,
+            multi_value_average
+        ));
         assert!(!derived_feature_artifact_compatible(&average, time_grid));
         assert!(!derived_feature_artifact_compatible(
             &average,
@@ -4770,7 +4857,15 @@ mod tests {
             &average,
             stateful_average
         ));
+        assert!(!derived_feature_artifact_compatible(
+            &average,
+            sliced_scientific_average
+        ));
         assert!(programming_response_compatible(&average, mean));
+        assert!(!programming_response_compatible(
+            &average,
+            unguarded_numpy_mean
+        ));
         assert!(programming_response_compatible(&average, numpy_mean));
 
         let odd = vec![
