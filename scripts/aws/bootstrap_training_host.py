@@ -193,7 +193,7 @@ def bootstrap_commands(
             "dnf install -y rust cargo gcc gcc-c++ openssl-devel "
             "pkgconf-pkg-config cmake python3-psutil "
             "python-unversioned-command nodejs npm golang "
-            "java-21-amazon-corretto-devel dotnet-sdk-8.0"
+            "java-21-amazon-corretto-devel dotnet-sdk-8.0 python3-tomli"
         ),
         "mkdir -p /srv/wizard/project /srv/wizard/staging",
         (

@@ -573,12 +573,23 @@ def drive_one(script, repeats: int, project_root: Path,
         "start_row":   start_row,
         "direct_pretrain": direct_pretrain,
     }
+    explicit_input = Path(input_path).resolve() if input_path else None
+    explicit_input_consumed = False
     for inp in script.inputs:
         if inp.kind != "corpus":
             continue
-        if input_path and Path(inp.path).as_posix().lower() != Path(input_path).as_posix().lower():
-            continue
-        corpus_path = project_root / inp.path
+        if explicit_input is not None:
+            # The registry describes the corpus's canonical development-host
+            # location. A supervisor-provided --input-path is an intentional
+            # deployment-host override, not a second value to compare with
+            # that Windows/Linux-specific spelling. Consume it once even if a
+            # training script declares multiple corpus inputs.
+            if explicit_input_consumed:
+                continue
+            corpus_path = explicit_input
+            explicit_input_consumed = True
+        else:
+            corpus_path = project_root / inp.path
         rows = None if direct_pretrain else read_corpus_jsonl(
             corpus_path, skip_rows=start_row, limit_rows=limit_rows
         )

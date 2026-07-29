@@ -2279,6 +2279,49 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(event["max_lock_logical_rows"], [1])
             self.assertEqual(event["max_lock_profile_ns"], {"frame_lookup": 8})
 
+    def test_direct_pretrain_explicit_input_overrides_registry_host_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            corpus = root / "restored" / "corpus.jsonl"
+            corpus.parent.mkdir()
+            corpus.write_text(
+                "\n".join([
+                    json.dumps({"prompt": "one", "response": "first"}),
+                    json.dumps({"prompt": "two", "response": "second"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            progress = root / "phase.progress.json"
+            script = SimpleNamespace(
+                id="fixture", category="test", phase="train",
+                inputs=[
+                    SimpleNamespace(
+                        kind="corpus",
+                        path=r"D:\training\canonical-corpus.jsonl",
+                    ),
+                ],
+            )
+            with patch(
+                "tools.training_standard.drive_corpora_brain.post_pretrain_batch",
+                return_value=(True, "", 0.1, 0, 2, {}),
+            ) as pretrain, patch(
+                "tools.training_standard.drive_corpora_brain.post_checkpoint",
+                return_value=(True, {}),
+            ):
+                summary = drive_one(
+                    script, 1, root, smoke=False, direct_pretrain=True,
+                    input_path=str(corpus), batch_size=2, lock_chunk_size=2,
+                    progress_path=progress, checkpoint_rows=100,
+                    wal_durable=True, max_live_batch_seconds=8.0,
+                    inter_post_sleep=0.0,
+                )
+            self.assertEqual(summary["pairs"], 2)
+            self.assertEqual(summary["posted_ok"], 2)
+            pretrain.assert_called_once()
+            state = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(state["ram_next_row"], 2)
+            self.assertEqual(state["durable_next_row"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
