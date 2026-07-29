@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -133,6 +135,8 @@ from tools.training_standard.drive_corpora_brain import (
     append_slow_batch_event,
     checkpoint_due,
     drive_one,
+    honor_pause_control,
+    pause_ack_path,
     post_pretrain_batch,
     read_corpus_jsonl,
     row_is_skipped,
@@ -2227,6 +2231,47 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             stop,
         )
         self.assertIn("Curriculum processes survived SIGKILL", stop)
+
+    def test_worker_cooperatively_pauses_only_after_durable_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            control = root / "phase.pause"
+            progress = root / "phase.progress.json"
+            control.write_text("request-token\n", encoding="ascii")
+            worker = threading.Thread(
+                target=honor_pause_control,
+                args=(control, progress, 321, 321),
+                daemon=True,
+            )
+            worker.start()
+            acknowledgement = pause_ack_path(control)
+            deadline = time.monotonic() + 2.0
+            while not acknowledgement.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            payload = json.loads(
+                acknowledgement.read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["token"], "request-token")
+            self.assertEqual(payload["ram_next_row"], 321)
+            self.assertEqual(payload["durable_next_row"], 321)
+            self.assertTrue(worker.is_alive())
+            control.unlink()
+            worker.join(timeout=2.0)
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(acknowledgement.exists())
+
+    def test_continuous_canary_uses_cooperative_idle_retry(self) -> None:
+        source = (
+            ROOT / "scripts" / "programming_curriculum_supervisor.py"
+        ).read_text(encoding="utf-8")
+        driver = (
+            ROOT / "tools" / "training_standard" / "drive_corpora_brain.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("request_worker_pause(", source)
+        self.assertIn("continuous_canary_cooperative_retry", source)
+        self.assertIn('command.extend(["--pause-control-path"', source)
+        self.assertIn("honor_pause_control(", driver)
+        self.assertIn("cooperatively pause after a durable batch", driver)
 
     def test_reproducible_trainer_finalizes_zero_resident_wbrain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 import hashlib
@@ -286,6 +287,55 @@ def stop_worker_process(worker: subprocess.Popen, timeout: float = 30.0) -> None
     except subprocess.TimeoutExpired:
         worker.kill()
         worker.wait(timeout=timeout)
+
+
+def worker_pause_paths(runtime: Path, phase: Phase) -> tuple[Path, Path]:
+    control = runtime / f"{phase.name}.pause"
+    return control, control.with_name(control.name + ".ack.json")
+
+
+def request_worker_pause(
+    worker: subprocess.Popen,
+    runtime: Path,
+    phase: Phase,
+    timeout: float = 600.0,
+) -> dict:
+    """Pause after the worker publishes an equal RAM/WAL-durable boundary."""
+    control, acknowledgement = worker_pause_paths(runtime, phase)
+    token = uuid.uuid4().hex
+    temporary = control.with_name(control.name + ".tmp")
+    temporary.write_text(token + "\n", encoding="ascii")
+    os.replace(temporary, control)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if worker.poll() is not None:
+            raise CanaryInfrastructureError(
+                f"corpus worker exited {worker.returncode} before pause acknowledgement"
+            )
+        payload = read_json(acknowledgement)
+        if (
+            payload.get("token") == token
+            and payload.get("pid") == worker.pid
+            and isinstance(payload.get("ram_next_row"), int)
+            and payload.get("ram_next_row") == payload.get("durable_next_row")
+        ):
+            return payload
+        time.sleep(0.1)
+    raise CanaryInfrastructureError(
+        f"corpus worker did not acknowledge pause within {timeout:.1f}s"
+    )
+
+
+def release_worker_pause(runtime: Path, phase: Phase, token: str = "") -> None:
+    control, acknowledgement = worker_pause_paths(runtime, phase)
+    try:
+        current = control.read_text(encoding="ascii").strip()
+    except (FileNotFoundError, OSError):
+        current = ""
+    if not token or current == token:
+        control.unlink(missing_ok=True)
+    if not token or read_json(acknowledgement).get("token") == token:
+        acknowledgement.unlink(missing_ok=True)
 
 
 def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
@@ -1557,11 +1607,12 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
     stats_before = run_admission_operation(
         runtime, phase, trained_rows, "continuous_canary", "stats_before",
         lambda: endpoint_json(args.endpoint, "/brain/stats"),
+        attempts=1,
     )
     recall = run_canary_json_command(
         runtime, phase, trained_rows, "recall",
         recall_command(args, phase, runtime, trained_rows, 8),
-        timeout=900.0,
+        timeout=900.0, attempts=1,
     )
     if recall.get("accepted_trained_response") != recall.get("sampled"):
         raise RuntimeError(f"continuous recall regression: {recall}")
@@ -1569,7 +1620,7 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
         runtime, phase, trained_rows, "foundation", [
             sys.executable, "scripts/programming_brain_eval.py",
             "--endpoint", args.endpoint,
-        ], timeout=900.0,
+        ], timeout=900.0, attempts=1,
     )
     for passed_key, total_key in (
         ("toddler_exact", "toddler_total"),
@@ -1582,7 +1633,7 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
         runtime, phase, trained_rows, "code", [
             sys.executable, "scripts/programming_code_eval.py",
             "--endpoint", args.endpoint, "--details",
-        ], timeout=900.0,
+        ], timeout=900.0, attempts=1,
     )
     for kind in ("trained", "novel_paraphrase"):
         group = (code.get("summary") or {}).get(kind) or {}
@@ -1592,6 +1643,7 @@ def run_continuous_canary(args: argparse.Namespace, phase: Phase,
     stats_after = run_admission_operation(
         runtime, phase, trained_rows, "continuous_canary", "stats_after",
         lambda: endpoint_json(args.endpoint, "/brain/stats"),
+        attempts=1,
     )
     rows_after = phase_offsets(progress_path)
     report = {
@@ -1664,6 +1716,12 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
             "--skip-range",
             f"{int(interval['start_row'])}:{int(interval['end_row'])}",
         ])
+    pause_control_path, pause_acknowledgement_path = worker_pause_paths(
+        runtime, phase
+    )
+    pause_control_path.unlink(missing_ok=True)
+    pause_acknowledgement_path.unlink(missing_ok=True)
+    command.extend(["--pause-control-path", str(pause_control_path)])
     worker_pid_path = runtime / f"{phase.name}.pid"
     next_canary = (
         ((ram // args.canary_rows) + 1) * args.canary_rows
@@ -1706,26 +1764,72 @@ def run_phase(args: argparse.Namespace, phase: Phase, runtime: Path,
                             args, phase, runtime, candidate_row
                         )
                     except CanaryInfrastructureError as exc:
-                        stop_worker_process(worker)
-                        failed_ram, failed_durable = phase_offsets(progress)
-                        append_health_event(runtime, {
-                            "kind": "continuous_canary_infrastructure_paused",
-                            "phase": phase.name,
-                            "trained_rows": failed_durable,
-                            "canary_started_row": candidate_row,
-                            "error": str(exc),
-                            "passed": None,
-                        })
-                        publish(status_path, {
-                            "state": "continuous_canary_infrastructure_paused",
-                            "phase": phase.name,
-                            "canary_started_row": candidate_row,
-                            "ram_next_row": failed_ram,
-                            "durable_next_row": failed_durable,
-                            "error": str(exc),
-                            "updated_unix": time.time(),
-                        })
-                        return 87
+                        pause_token = ""
+                        try:
+                            acknowledgement = request_worker_pause(
+                                worker, runtime, phase
+                            )
+                            pause_token = str(acknowledgement["token"])
+                            candidate_row = int(
+                                acknowledgement["durable_next_row"]
+                            )
+                            append_health_event(runtime, {
+                                "kind": "continuous_canary_cooperative_retry",
+                                "phase": phase.name,
+                                "trained_rows": candidate_row,
+                                "initial_error": str(exc),
+                                "passed": None,
+                            })
+                            run_continuous_canary(
+                                args, phase, runtime, candidate_row
+                            )
+                        except CanaryInfrastructureError as retry_exc:
+                            stop_worker_process(worker)
+                            failed_ram, failed_durable = phase_offsets(progress)
+                            append_health_event(runtime, {
+                                "kind": "continuous_canary_infrastructure_paused",
+                                "phase": phase.name,
+                                "trained_rows": failed_durable,
+                                "canary_started_row": candidate_row,
+                                "initial_error": str(exc),
+                                "error": str(retry_exc),
+                                "passed": None,
+                            })
+                            publish(status_path, {
+                                "state": "continuous_canary_infrastructure_paused",
+                                "phase": phase.name,
+                                "canary_started_row": candidate_row,
+                                "ram_next_row": failed_ram,
+                                "durable_next_row": failed_durable,
+                                "error": str(retry_exc),
+                                "updated_unix": time.time(),
+                            })
+                            return 87
+                        except RECOVERABLE_GATE_ERRORS as retry_exc:
+                            stop_worker_process(worker)
+                            failed_ram, failed_durable = phase_offsets(progress)
+                            failed_row = max(
+                                candidate_row, failed_ram, failed_durable
+                            )
+                            record_deferred_failure(
+                                runtime, phase, failed_row, failed_durable,
+                                str(retry_exc),
+                                "continuous_canary_failed",
+                            )
+                            publish(status_path, {
+                                "state": "continuous_canary_failed",
+                                "phase": phase.name,
+                                "canary_started_row": candidate_row,
+                                "ram_next_row": failed_ram,
+                                "durable_next_row": failed_durable,
+                                "error": str(retry_exc),
+                                "updated_unix": time.time(),
+                            })
+                            return 86
+                        finally:
+                            release_worker_pause(
+                                runtime, phase, pause_token
+                            )
                     except RECOVERABLE_GATE_ERRORS as exc:
                         stop_worker_process(worker)
                         failed_ram, failed_durable = phase_offsets(progress)

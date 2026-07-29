@@ -305,6 +305,50 @@ def write_progress(path: Path, payload: dict) -> None:
             time.sleep(min(0.5, 0.05 * (attempt + 1)))
 
 
+def pause_ack_path(control_path: Path) -> Path:
+    return control_path.with_name(control_path.name + ".ack.json")
+
+
+def honor_pause_control(
+    control_path: Path | None,
+    progress_path: Path | None,
+    ram_next_row: int,
+    durable_next_row: int,
+) -> None:
+    """Cooperatively yield between durable HTTP batches for live evaluation."""
+    if control_path is None:
+        return
+    try:
+        token = control_path.read_text(encoding="ascii").strip()
+    except (FileNotFoundError, OSError):
+        return
+    if not token:
+        return
+    acknowledgement = pause_ack_path(control_path)
+    write_progress(acknowledgement, {
+        "token": token,
+        "pid": os.getpid(),
+        "progress_path": str(progress_path) if progress_path else "",
+        "ram_next_row": ram_next_row,
+        "durable_next_row": durable_next_row,
+        "updated_unix": time.time(),
+    })
+    while True:
+        try:
+            current = control_path.read_text(encoding="ascii").strip()
+        except (FileNotFoundError, OSError):
+            break
+        if current != token:
+            break
+        time.sleep(0.1)
+    try:
+        payload = json.loads(acknowledgement.read_text(encoding="utf-8"))
+        if payload.get("token") == token:
+            acknowledgement.unlink(missing_ok=True)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+
 def append_slow_batch_event(progress_path: Path, payload: dict) -> Path:
     """Durably retain an over-ceiling transaction instead of overwriting it.
 
@@ -538,7 +582,8 @@ def drive_one(script, repeats: int, project_root: Path,
                 durable_start_row: int | None = None,
                 wal_durable: bool = False,
                 skip_ranges: tuple[tuple[int, int], ...] = (),
-                max_live_batch_seconds: float = 0.0) -> dict:
+                max_live_batch_seconds: float = 0.0,
+                pause_control_path: Path | None = None) -> dict:
     """Drive one registry script's corpus through the brain.
 
     `burst=False` (default): epoch-interleaved schedule.  Each rep is
@@ -832,6 +877,12 @@ def drive_one(script, repeats: int, project_root: Path,
                         # layers, not mutually-exclusive modes.
                         if checkpoint_due(checkpoint_rows, accepted_since_checkpoint):
                             make_durable()
+                        honor_pause_control(
+                            pause_control_path,
+                            progress_path,
+                            batch_next_row,
+                            durable_next_row,
+                        )
                         if inter_post_sleep > 0:
                             # Yield between bulk transactions so live chat,
                             # stats, and health requests can acquire the brain
@@ -880,6 +931,12 @@ def drive_one(script, repeats: int, project_root: Path,
                     if wal_durable:
                         durable_next_row = batch_next_row
                     publish_progress()
+                    honor_pause_control(
+                        pause_control_path,
+                        progress_path,
+                        batch_next_row,
+                        durable_next_row,
+                    )
                     if inter_post_sleep > 0:
                         time.sleep(inter_post_sleep)
                 else:
@@ -1025,6 +1082,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--progress-path", type=Path,
                      help="atomically record the next fully accepted logical "
                           "row after every direct-pretrain batch")
+    p.add_argument(
+        "--pause-control-path",
+        type=Path,
+        help="cooperatively pause after a durable batch while this token file exists",
+    )
     p.add_argument("--checkpoint-rows", type=int, default=4096,
                      help="persist brain.bin after this many accepted direct-"
                           "pretrain episodes (default 4096; 0 disables)")
@@ -1141,7 +1203,8 @@ def main(argv: list[str] | None = None) -> int:
                             durable_start_row=args.durable_start_row,
                             wal_durable=args.wal_durable,
                             skip_ranges=tuple(skip_ranges),
-                            max_live_batch_seconds=args.max_batch_seconds)
+                            max_live_batch_seconds=args.max_batch_seconds,
+                            pause_control_path=args.pause_control_path)
         summaries.append(summ)
         print(f"  pairs={summ['pairs']}  ok={summ['posted_ok']}  "
                 f"fail={summ['posted_fail']}  smoke={summ.get('smoke_ok')}",
