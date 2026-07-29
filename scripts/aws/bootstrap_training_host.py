@@ -79,10 +79,34 @@ def source_manifest(profile: str, commit: str) -> dict:
     )
 
 
-def bootstrap_commands(presigned_url: str, commit: str, manifest: dict) -> list[str]:
+def rust_manifest(profile: str, commit: str) -> dict:
+    return json.loads(
+        aws(
+            profile,
+            "s3",
+            "cp",
+            (
+                f"s3://{BUCKET}/wizard-vision/build/rust-offline/"
+                f"{commit}/manifest.json"
+            ),
+            "-",
+            "--only-show-errors",
+        ).stdout
+    )
+
+
+def bootstrap_commands(
+    presigned_url: str,
+    commit: str,
+    manifest: dict,
+    rust: dict,
+) -> list[str]:
     archive = manifest["archive"]
     checksum = manifest["sha256"]
     source_root = f"s3://{BUCKET}/wizard-vision/source/{commit}"
+    rust_archive = rust["archive"]
+    rust_checksum = rust["sha256"]
+    rust_root = f"s3://{BUCKET}/wizard-vision/build/rust-offline/{commit}"
     return [
         "set -euxo pipefail",
         "test -d /srv/wizard/control",
@@ -93,6 +117,10 @@ def bootstrap_commands(presigned_url: str, commit: str, manifest: dict) -> list[
         ),
         "python3 -m zipfile -e /tmp/awscliv2.zip /tmp/aws",
         "/tmp/aws/aws/install --update",
+        (
+            "dnf install -y rust cargo gcc gcc-c++ openssl-devel "
+            "pkgconf-pkg-config cmake"
+        ),
         "mkdir -p /srv/wizard/project /srv/wizard/staging",
         (
             f"/usr/local/bin/aws s3 cp {source_root}/{archive} "
@@ -104,6 +132,19 @@ def bootstrap_commands(presigned_url: str, commit: str, manifest: dict) -> list[
         ),
         (
             f"tar -xzf /srv/wizard/staging/{archive} "
+            "-C /srv/wizard/project"
+        ),
+        (
+            f"/usr/local/bin/aws s3 cp {rust_root}/{rust_archive} "
+            f"/srv/wizard/staging/{rust_archive} "
+            f"--region {REGION} --only-show-errors"
+        ),
+        (
+            f"test \"$(sha256sum /srv/wizard/staging/{rust_archive} | "
+            f"cut -d' ' -f1)\" = \"{rust_checksum}\""
+        ),
+        (
+            f"tar -xzf /srv/wizard/staging/{rust_archive} "
             "-C /srv/wizard/project"
         ),
         (
@@ -183,6 +224,7 @@ def main() -> int:
 
     instance_id = stack_instance_id(args.profile)
     manifest = source_manifest(args.profile, args.source_commit)
+    rust = rust_manifest(args.profile, args.source_commit)
     wait_for_ssm(args.profile, instance_id, min(args.timeout, 1800))
     presigned_url = aws(
         args.profile,
@@ -195,7 +237,12 @@ def main() -> int:
     invocation = send_and_wait(
         args.profile,
         instance_id,
-        bootstrap_commands(presigned_url, args.source_commit, manifest),
+        bootstrap_commands(
+            presigned_url,
+            args.source_commit,
+            manifest,
+            rust,
+        ),
         args.timeout,
     )
     print(

@@ -61,8 +61,10 @@ corpus ledgers, deferred intervals, and admission metadata enumerated in its
 SHA-256 manifest. Do not delete local state until the AWS instance has restored
 the exact hashes and passed the retention and enterprise gates.
 
-Once the source, corpus, and stopped brain manifests all exist, restore through
-Systems Manager without opening ingress or adding a NAT gateway:
+Before provisioning, run `scripts/aws/stage_rust_dependencies.py --upload` to
+vendor the lockfile-pinned Rust dependencies under the same source commit.
+Once the source, corpus, Rust, and stopped brain manifests all exist, restore
+through Systems Manager without opening ingress or adding a NAT gateway:
 
 ```text
 python scripts/aws/bootstrap_training_host.py \

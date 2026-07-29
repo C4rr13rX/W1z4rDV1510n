@@ -45,9 +45,13 @@ def test_private_host_bootstrap_verifies_source_then_restores_manifests():
             "https://example.invalid/presigned",
             "a" * 40,
             {"archive": "source.tar.gz", "sha256": "b" * 64},
+            {"archive": "rust.tar.gz", "sha256": "c" * 64},
         )
     )
     assert "sha256sum" in commands
     assert '"b' in commands
+    assert '"c' in commands
+    assert "dnf install -y rust cargo" in commands
+    assert "rust.tar.gz" in commands
     assert "restore_training_inputs.py" in commands
     assert "--source-commit " + "a" * 40 in commands
