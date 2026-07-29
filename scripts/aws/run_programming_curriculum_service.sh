@@ -77,7 +77,7 @@ common=(
   --endpoint "${endpoint}"
   --node-bin "${node_bin}"
   --corpus-root "${corpus_root}"
-  --batch-size 256
+  --batch-size 32
   --lock-chunk-size 32
   --poll-seconds 2
   --checkpoint-rows 131072

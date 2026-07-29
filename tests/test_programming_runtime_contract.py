@@ -1498,7 +1498,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"--batch-size", type=int, default=256', source)
+        self.assertIn('"--batch-size", type=int, default=32', source)
         self.assertIn('"--inter-batch-yield-seconds", type=float, default=0.0', source)
         self.assertIn('"--max-batch-seconds", str(args.max_live_lock_seconds)', source)
         driver = (ROOT / "tools/training_standard/drive_corpora_brain.py").read_text(

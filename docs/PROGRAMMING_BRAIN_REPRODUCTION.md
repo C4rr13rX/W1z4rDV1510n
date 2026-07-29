@@ -156,7 +156,7 @@ python scripts/programming_curriculum_supervisor.py `
   --endpoint http://127.0.0.1:18095 `
   --node-bin target/release/w1z4rd_brain_server.exe `
   --replay-deferred `
-  --batch-size 256 `
+  --batch-size 32 `
   --lock-chunk-size 32
 ```
 

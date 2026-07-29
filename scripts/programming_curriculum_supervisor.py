@@ -2474,7 +2474,7 @@ def main() -> int:
         help="brain server executable required by --auto-quarantine-recovery",
     )
     parser.add_argument("--poll-seconds", type=float, default=10.0)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lock-chunk-size", type=int, default=12)
     parser.add_argument("--inter-batch-yield-seconds", type=float, default=0.0)
     parser.add_argument("--max-live-lock-seconds", type=float, default=8.0)

@@ -482,7 +482,7 @@ def main() -> int:
                         default=ROOT / "brains/coding_debug.deployment.toml")
     parser.add_argument("--corpus-root", type=Path,
                         default=Path(r"D:\w1z4rdv1510n-data\training"))
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lock-chunk-size", type=int, default=32)
     parser.add_argument("--checkpoint-rows", type=int, default=131072)
     parser.add_argument("--gate-rows", type=int, default=131072)
