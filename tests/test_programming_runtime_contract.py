@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.programming_integrated_retention import mutation_enabled
+from scripts.independent_snapshot import publish_independent_copy
 from scripts.programming_brain_eval import BrainClient as FoundationBrainClient
 from scripts.programming_curriculum_supervisor import (
     AdmissionInfrastructureError,
@@ -1242,7 +1243,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(guard.read_bytes(), b"accepted-container")
             recorded = json.loads(metadata.read_text(encoding="utf-8"))
             self.assertEqual(recorded["storage"], "wbrain")
-            self.assertEqual(recorded["guard_mode"], "copy")
+            self.assertIn(recorded["guard_mode"], {"copy", "reflink"})
 
     def test_experiential_batch_uses_deployed_bulk_route(self) -> None:
         source = (ROOT / "scripts/programming_experiential_generalization.py").read_text(
@@ -1535,7 +1536,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 (brain / "brain.last-good.json").read_text(encoding="utf-8")
             )
             self.assertEqual(metadata["storage"], "wbrain")
-            self.assertEqual(metadata["guard_mode"], "copy")
+            self.assertIn(metadata["guard_mode"], {"copy", "reflink"})
             accept_last_good_guard(runtime)
             self.assertFalse(guard.exists())
 
@@ -1557,6 +1558,60 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 copies=1,
                 operation="independent .wbrain guard",
             )
+
+    def test_reflink_guard_is_independent_without_full_copy_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "brain.wbrain"
+            guard = root / "brain.last-good.wbrain"
+            source.write_bytes(b"accepted-container")
+
+            def emulate_reflink(origin: Path, destination: Path) -> bool:
+                destination.write_bytes(origin.read_bytes())
+                return True
+
+            with patch(
+                "scripts.independent_snapshot._clone_reflink",
+                side_effect=emulate_reflink,
+            ):
+                headroom = Mock(side_effect=AssertionError("must not run"))
+                mode = publish_independent_copy(
+                    source,
+                    guard,
+                    operation="test reflink guard",
+                    require_full_copy_headroom=headroom,
+                )
+
+            self.assertEqual(mode, "reflink")
+            self.assertFalse(source.samefile(guard))
+            source.write_bytes(b"candidate-container")
+            self.assertEqual(guard.read_bytes(), b"accepted-container")
+            headroom.assert_not_called()
+
+    def test_unsupported_reflink_uses_headroom_checked_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "brain.wbrain"
+            guard = root / "brain.last-good.wbrain"
+            source.write_bytes(b"accepted-container")
+
+            with patch(
+                "scripts.independent_snapshot._clone_reflink",
+                return_value=False,
+            ):
+                headroom = Mock()
+                mode = publish_independent_copy(
+                    source,
+                    guard,
+                    operation="test copy guard",
+                    require_full_copy_headroom=headroom,
+                )
+
+            self.assertEqual(mode, "copy")
+            headroom.assert_called_once_with(
+                source, 1, "test copy guard"
+            )
+            self.assertEqual(guard.read_bytes(), source.read_bytes())
 
     def test_snapshot_copy_refuses_to_consume_rollback_headroom(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

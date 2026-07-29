@@ -15,6 +15,7 @@
         "cloudformation:DescribeStackEvents",
         "cloudformation:DescribeStackResources",
         "cloudformation:GetTemplate",
+        "cloudformation:GetTemplateSummary",
         "cloudformation:ValidateTemplate",
         "cloudformation:DeleteStack"
       ],

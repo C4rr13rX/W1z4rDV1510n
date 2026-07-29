@@ -20,6 +20,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from programming_integrated_retention import integrated_retention_passed
+from independent_snapshot import publish_independent_copy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,10 +230,23 @@ def begin_experience_transaction(endpoint: str, runtime: Path) -> tuple[Path, Pa
     if not snapshot.is_file():
         raise RuntimeError(f"checkpoint did not create snapshot: {snapshot}")
     if snapshot.suffix == ".wbrain":
-        temporary = guard.with_suffix(guard.suffix + ".tmp")
-        shutil.copy2(snapshot, temporary)
-        os.replace(temporary, guard)
-        guard_mode = "copy"
+        def require_headroom(source: Path, copies: int, operation: str) -> None:
+            size = source.stat().st_size
+            reserve = max(64 * 1024 * 1024, min(4 * 1024 ** 3, size // 10))
+            required = size * copies + reserve
+            free = shutil.disk_usage(source.parent).free
+            if free < required:
+                raise RuntimeError(
+                    f"insufficient disk headroom for {operation}: "
+                    f"{free} bytes free, {required} required"
+                )
+
+        guard_mode = publish_independent_copy(
+            snapshot,
+            guard,
+            operation="experiential .wbrain guard",
+            require_full_copy_headroom=require_headroom,
+        )
     else:
         os.link(snapshot, guard)
         guard_mode = "hardlink"

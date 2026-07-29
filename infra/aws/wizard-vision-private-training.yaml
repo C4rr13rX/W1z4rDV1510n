@@ -183,12 +183,21 @@ Resources:
 
   TrainingInstance:
     Type: AWS::EC2::Instance
+    DependsOn:
+      - S3Endpoint
+      - SsmEndpoint
+      - SsmMessagesEndpoint
+      - Ec2MessagesEndpoint
     Properties:
       ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref TrainingInstanceProfile
-      SubnetId: !Ref PrivateSubnet
-      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      InstanceInitiatedShutdownBehavior: stop
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: "0"
+          GroupSet: [!Ref InstanceSecurityGroup]
+          SubnetId: !Ref PrivateSubnet
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
@@ -208,10 +217,15 @@ Resources:
           cat >/usr/local/sbin/wizard-cost-stop.sh <<'EOF'
           #!/bin/bash
           set -euo pipefail
-          /sbin/shutdown -h now
+          DEADLINE_FILE=/srv/wizard/control/cost-deadline.epoch
+          test -r "$DEADLINE_FILE" || exit 0
+          DEADLINE=$(cat "$DEADLINE_FILE")
+          NOW=$(date +%s)
+          if test "$NOW" -ge "$DEADLINE"; then
+            /sbin/shutdown -h now
+          fi
           EOF
           chmod 750 /usr/local/sbin/wizard-cost-stop.sh
-          systemd-run --unit=wizard-cost-guard --on-active=${MaximumRuntimeHours}h /usr/local/sbin/wizard-cost-stop.sh
           mkdir -p /srv/wizard
           DATA_DEVICE=""
           for ATTEMPT in $(seq 1 60); do
@@ -220,11 +234,40 @@ Resources:
             sleep 5
           done
           test -n "$DATA_DEVICE"
-          if ! blkid "$DATA_DEVICE"; then mkfs.xfs -f "$DATA_DEVICE"; fi
+          if ! blkid "$DATA_DEVICE"; then mkfs.xfs -f -m reflink=1 "$DATA_DEVICE"; fi
           DATA_UUID=$(blkid -s UUID -o value "$DATA_DEVICE")
           grep -q "$DATA_UUID" /etc/fstab || echo "UUID=$DATA_UUID /srv/wizard xfs defaults,nofail 0 2" >> /etc/fstab
           mount /srv/wizard
           mkdir -p /srv/wizard/project /srv/wizard/runtime /srv/wizard/control
+          DEADLINE_FILE=/srv/wizard/control/cost-deadline.epoch
+          if ! test -s "$DEADLINE_FILE"; then
+            echo $(($(date +%s) + ${MaximumRuntimeHours} * 3600)) >"$DEADLINE_FILE"
+          fi
+          cat >/etc/systemd/system/wizard-cost-stop.service <<'EOF'
+          [Unit]
+          Description=Stop Wizard Vision training host after its persisted cost deadline
+          After=srv-wizard.mount
+          RequiresMountsFor=/srv/wizard
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/wizard-cost-stop.sh
+          EOF
+          cat >/etc/systemd/system/wizard-cost-stop.timer <<'EOF'
+          [Unit]
+          Description=Check the Wizard Vision persisted cost deadline
+
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=1min
+          Persistent=true
+          Unit=wizard-cost-stop.service
+
+          [Install]
+          WantedBy=timers.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now wizard-cost-stop.timer
           chown -R ec2-user:ec2-user /srv/wizard
           printf '{"state":"infrastructure_ready","region":"%s","bucket":"%s"}\n' '${AWS::Region}' '${ArtifactBucket}' >/srv/wizard/control/state.json
 

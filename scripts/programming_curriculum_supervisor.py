@@ -29,6 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from programming_integrated_retention import integrated_retention_passed
+from independent_snapshot import publish_independent_copy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -320,14 +321,15 @@ def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
         # discard that rejected live inode before recreating it from this
         # untouched guard; the quarantined row interval, not its derived
         # candidate container, is the causal replay artifact.
-        require_snapshot_copy_headroom(
-            snapshot, copies=1, operation="independent .wbrain guard"
+        guard_mode = publish_independent_copy(
+            snapshot,
+            guard,
+            operation="independent .wbrain guard",
+            require_full_copy_headroom=lambda source, copies, operation:
+                require_snapshot_copy_headroom(
+                    source, copies=copies, operation=operation
+                ),
         )
-        temporary = guard.with_suffix(guard.suffix + ".tmp")
-        temporary.unlink(missing_ok=True)
-        shutil.copy2(snapshot, temporary)
-        os.replace(temporary, guard)
-        guard_mode = "copy"
     else:
         os.link(snapshot, guard)
         guard_mode = "hardlink"
@@ -432,27 +434,30 @@ def restore_canary_quarantine(runtime: Path, finalize: bool = True) -> dict:
     if same_snapshot:
         pass
     else:
-        temporary = snapshot.with_suffix(snapshot.suffix + ".restore.tmp")
-        temporary.unlink(missing_ok=True)
-        try:
-            require_snapshot_copy_headroom(
-                guard, copies=1, operation=".wbrain quarantine restore"
-            )
-        except RuntimeError:
-            if snapshot.suffix != ".wbrain" or not snapshot.is_file():
-                raise
-            # The candidate has already failed admission, its exact corpus
-            # interval is durably quarantined, and the independent guard is
-            # the accepted authority. Removing only the rejected live inode
-            # makes room for a retryable restoration without risking the
-            # accepted state. If copying is interrupted, the guard remains
-            # intact and a later restore repeats this branch.
-            snapshot.unlink()
-            require_snapshot_copy_headroom(
-                guard, copies=1, operation=".wbrain quarantine restore"
-            )
-        shutil.copy2(guard, temporary)
-        os.replace(temporary, snapshot)
+        def restore_headroom(
+            source: Path, copies: int, operation: str
+        ) -> None:
+            try:
+                require_snapshot_copy_headroom(
+                    source, copies=copies, operation=operation
+                )
+            except RuntimeError:
+                if snapshot.suffix != ".wbrain" or not snapshot.is_file():
+                    raise
+                # A full-copy fallback may discard only the rejected live
+                # candidate to recover space. The accepted guard remains
+                # intact. Reflink-capable filesystems never enter this branch.
+                snapshot.unlink()
+                require_snapshot_copy_headroom(
+                    source, copies=copies, operation=operation
+                )
+
+        publish_independent_copy(
+            guard,
+            snapshot,
+            operation=".wbrain quarantine restore",
+            require_full_copy_headroom=restore_headroom,
+        )
     (brain_dir / "brain.wal").unlink(missing_ok=True)
     restored = {
         "phase": phase,
