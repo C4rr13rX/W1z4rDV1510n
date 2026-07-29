@@ -1,15 +1,24 @@
 from pathlib import Path
 
-from scripts.aws.deploy_private_training import DEPLOYMENT_GROUP, POLICY_ARN, estimate
+from scripts.aws.deploy_private_training import (
+    DEPLOYMENT_GROUP,
+    POLICY_ARN,
+    estimate_cost,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_cost_guard_stays_below_acknowledged_ceiling():
-    costs = estimate(volume_gib=1024, hours=192, hourly_compute=0.1728)
-    assert costs["guarded_total"] < 100
-    assert costs["compute_max"] == 33.18
+    costs = estimate_cost(
+        volume_gib=1024,
+        hours=192,
+        hourly_compute=0.1728,
+        final_s3_gib=400,
+    )
+    assert costs.total < 100
+    assert round(costs.compute, 2) == 33.18
     assert POLICY_ARN.endswith(":policy/WizardVisionPrivateTrainingDeployment")
     assert DEPLOYMENT_GROUP == "WizardVisionDeployers"
 
