@@ -2201,6 +2201,23 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             source,
         )
 
+    def test_persistent_service_stop_preserves_only_the_brain_node(self) -> None:
+        unit = (
+            ROOT / "scripts" / "aws" / "wizard-curriculum-supervisor.service"
+        ).read_text(encoding="utf-8")
+        stop = (
+            ROOT / "scripts" / "aws" / "stop_programming_curriculum_service.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "ExecStop=/bin/bash /srv/wizard/project/scripts/aws/"
+            "stop_programming_curriculum_service.sh",
+            unit,
+        )
+        self.assertIn("scripts/programming_curriculum_supervisor.py", stop)
+        self.assertIn("tools.training_standard.drive_corpora_brain", stop)
+        self.assertIn("kill -TERM", stop)
+        self.assertNotIn("w1z4rd_brain_server", stop)
+
     def test_reproducible_trainer_finalizes_zero_resident_wbrain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)

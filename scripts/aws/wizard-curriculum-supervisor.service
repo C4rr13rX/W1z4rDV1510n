@@ -10,6 +10,7 @@ Type=simple
 User=ec2-user
 WorkingDirectory=/srv/wizard/project
 ExecStart=/bin/bash /srv/wizard/project/scripts/aws/run_programming_curriculum_service.sh
+ExecStop=/bin/bash /srv/wizard/project/scripts/aws/stop_programming_curriculum_service.sh
 Restart=on-failure
 RestartSec=10
 # Exit 42 means one replay was behaviorally rejected and its final-brain
