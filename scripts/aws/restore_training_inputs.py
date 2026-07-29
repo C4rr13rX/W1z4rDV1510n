@@ -44,6 +44,29 @@ def safe_extract(archive: tarfile.TarFile, destination: Path) -> None:
     archive.extractall(destination)
 
 
+def rebase_progress_corpora(runtime: Path, corpus_root: Path) -> list[str]:
+    """Rewrite verified host-specific corpus paths after a cross-OS restore."""
+    changed: list[str] = []
+    for path in sorted(runtime.glob("*.progress.json")):
+        progress = json.loads(path.read_text(encoding="utf-8"))
+        recorded = str(progress.get("corpus") or "")
+        if not recorded:
+            continue
+        basename = Path(recorded.replace("\\", "/")).name
+        target = (corpus_root / basename).resolve()
+        if not target.is_file() or recorded == str(target):
+            continue
+        progress["corpus"] = str(target)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(progress, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+        changed.append(path.name)
+    return changed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("/srv/wizard"))
@@ -87,12 +110,14 @@ def main() -> int:
             raise RuntimeError(f"brain size mismatch: {item['path']}")
         if digest(destination) != item["sha256"]:
             raise RuntimeError(f"brain checksum mismatch: {item['path']}")
+    rebased = rebase_progress_corpora(runtime, args.root / "corpora")
     print(json.dumps({
         "restored": True,
         "source_commit": args.source_commit,
         "runtime": str(runtime),
         "corpus_files": len(corpus_manifest["files"]),
         "brain_files": len(brain_manifest["files"]),
+        "rebased_progress_files": rebased,
     }, indent=2))
     return 0
 

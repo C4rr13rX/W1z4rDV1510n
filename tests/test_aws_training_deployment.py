@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from scripts.aws.bootstrap_training_host import (
@@ -5,6 +6,7 @@ from scripts.aws.bootstrap_training_host import (
     cost_guard_commands,
 )
 from scripts.aws.deploy_private_training import estimate_cost
+from scripts.aws.restore_training_inputs import rebase_progress_corpora
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,3 +77,21 @@ def test_cost_guard_uses_a_persisted_absolute_deadline():
     assert "wizard-cost-stop.timer" in commands
     assert "OnUnitActiveSec=1min" in commands
     assert "/sbin/shutdown -h now" in commands
+
+
+def test_cross_os_restore_rebases_verified_progress_corpus(tmp_path):
+    runtime = tmp_path / "runtime"
+    corpora = tmp_path / "corpora"
+    runtime.mkdir()
+    corpora.mkdir()
+    (corpora / "phase.jsonl").write_text("{}\n", encoding="utf-8")
+    progress = runtime / "phase.progress.json"
+    progress.write_text(
+        '{"corpus":"D:\\\\training\\\\phase.jsonl","durable_next_row":7}',
+        encoding="utf-8",
+    )
+
+    assert rebase_progress_corpora(runtime, corpora) == [progress.name]
+    restored = json.loads(progress.read_text(encoding="utf-8"))
+    assert restored["corpus"] == str((corpora / "phase.jsonl").resolve())
+    assert restored["durable_next_row"] == 7
