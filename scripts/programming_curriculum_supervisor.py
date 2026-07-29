@@ -980,6 +980,70 @@ def preserve_deferred_base(runtime: Path, interval_id: str) -> Path:
     return base
 
 
+DEFERRED_EVIDENCE_NAMES = (
+    "integrated_debug.json",
+    "enterprise.json",
+    "multilanguage.json",
+    "native.json",
+    "platform.json",
+    "project.json",
+    "typescript.json",
+    "cross-language.json",
+    "cross-project.json",
+    "polyglot.json",
+    "composition.json",
+    "semantic-stress.json",
+    "capstone-readiness.json",
+)
+
+
+def preserve_admission_evidence(runtime: Path, phase: str, trained_rows: int,
+                                interval_id: str, error: str,
+                                attempt: str = "candidate") -> Path:
+    """Snapshot detailed gate outputs before rollback can overwrite them.
+
+    Enterprise and integrated-retention drivers intentionally write their
+    child-suite reports beside the requested aggregate output.  Those stable
+    names are useful to humans, but a restored-state verification can replace
+    them immediately after a rejected candidate.  Each rejection therefore
+    receives an immutable, interval-owned evidence directory first.
+    """
+    digest = hashlib.sha256(interval_id.encode("utf-8")).hexdigest()[:16]
+    safe_attempt = "".join(
+        character if character.isalnum() or character in "-_." else "_"
+        for character in attempt
+    ).strip("._") or "candidate"
+    evidence = runtime / "deferred" / digest / "evidence" / safe_attempt
+    evidence.mkdir(parents=True, exist_ok=True)
+
+    candidates: set[Path] = {
+        runtime / name for name in DEFERRED_EVIDENCE_NAMES
+    }
+    candidates.update(runtime.glob(f"{phase}.row-{trained_rows}*.json"))
+    candidates.update((
+        runtime / f"{phase}.completion-gate.json",
+        runtime / f"{phase}.typescript-gate.json",
+        runtime / f"{phase}.enterprise-gate.json",
+    ))
+    captured = []
+    for source in sorted(candidates, key=lambda path: path.name):
+        if not source.is_file():
+            continue
+        destination = evidence / source.name
+        shutil.copy2(source, destination)
+        captured.append(source.name)
+    publish(evidence / "failure.json", {
+        "interval_id": interval_id,
+        "phase": phase,
+        "trained_rows": trained_rows,
+        "attempt": safe_attempt,
+        "error": error,
+        "captured_files": captured,
+        "created_unix": time.time(),
+    })
+    return evidence
+
+
 def append_deferred_event(runtime: Path, event: dict) -> None:
     payload = dict(event)
     payload.setdefault("updated_unix", time.time())
@@ -1157,6 +1221,10 @@ def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
             phase.name, suspect_start, suspect_end
         )
         base_snapshot = preserve_deferred_base(runtime, interval_id)
+        evidence_dir = preserve_admission_evidence(
+            runtime, phase.name, candidate_row, interval_id, error,
+            attempt=f"candidate-row-{candidate_row}",
+        )
         event = {
             "interval_id": interval_id,
             "phase": phase.name,
@@ -1165,6 +1233,7 @@ def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
             "base_snapshot": str(base_snapshot),
             "base_state_identity": guard_state_identity(last_good),
             "base_row": int(last_good.get("row") or 0),
+            "evidence_dir": str(evidence_dir),
             "reason": reason,
             "error": error,
         }
@@ -2163,6 +2232,17 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             error = str(exc)
 
         if error:
+            evidence_dir = preserve_admission_evidence(
+                runtime, phase.name, int(event["end_row"]), interval_id, error,
+                attempt=f"replay-{int(time.time() * 1000)}",
+            )
+            append_deferred_event(runtime, {
+                **event,
+                "status": "deferred",
+                "evidence_dir": str(evidence_dir),
+                "reason": "deferred replay rejected by comprehensive admission",
+                "error": error,
+            })
             restore_rejected_deferred_replay(
                 args, runtime, phase, event, error
             )
@@ -2175,6 +2255,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 "phase": phase.name,
                 "interval_id": interval_id,
                 "passed": None if infrastructure_error else False,
+                "evidence_dir": str(evidence_dir),
                 "error": error,
             })
             publish(status_path, {
@@ -2184,6 +2265,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 ),
                 "phase": phase.name,
                 "interval_id": interval_id,
+                "evidence_dir": str(evidence_dir),
                 "error": error,
                 "updated_unix": time.time(),
             })
