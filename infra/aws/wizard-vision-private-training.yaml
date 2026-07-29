@@ -187,11 +187,8 @@ Resources:
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref TrainingInstanceProfile
       InstanceInitiatedShutdownBehavior: stop
-      NetworkInterfaces:
-        - AssociatePublicIpAddress: false
-          DeviceIndex: "0"
-          GroupSet: [!Ref InstanceSecurityGroup]
-          SubnetId: !Ref PrivateSubnet
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:

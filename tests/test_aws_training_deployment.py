@@ -24,7 +24,7 @@ def test_private_template_has_no_public_network_or_elasticache():
     template = (
         ROOT / "infra" / "aws" / "wizard-vision-private-training.yaml"
     ).read_text(encoding="utf-8")
-    assert "AssociatePublicIpAddress: false" in template
+    assert "MapPublicIpOnLaunch: false" in template
     assert "AWS::EC2::InternetGateway" not in template
     assert "AWS::EC2::NatGateway" not in template
     assert "AWS::ElastiCache::" not in template
