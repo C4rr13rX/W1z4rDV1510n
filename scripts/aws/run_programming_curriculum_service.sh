@@ -6,6 +6,8 @@ runtime="${WIZARD_RUNTIME:-/srv/wizard/runtime/programming-integrated-20260713}"
 corpus_root="${WIZARD_CORPUS_ROOT:-/srv/wizard/corpora}"
 endpoint="${WIZARD_ENDPOINT:-http://127.0.0.1:18095}"
 node_bin="${WIZARD_NODE_BIN:-${project_root}/target/release/w1z4rd_brain_server}"
+supervisor_pid_file="${runtime}/curriculum-service-supervisor.pid"
+supervisor_stage_file="${runtime}/curriculum-service-supervisor.stage"
 
 cd "${project_root}"
 
@@ -36,6 +38,39 @@ print(payload.get("state", ""))
 PY
 }
 
+supervisor_pid_is_live() {
+  local pid="$1"
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "${pid}" 2>/dev/null || return 1
+  local command
+  command="$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null || true)"
+  [[ "${command}" == *"programming_curriculum_supervisor.py"* ]] || return 1
+  [[ "${command}" == *"--runtime ${runtime}"* ]] || return 1
+}
+
+clear_supervisor_identity() {
+  local expected_pid="${1:-}"
+  if [[ -n "${expected_pid}" && -s "${supervisor_pid_file}" ]]; then
+    [[ "$(<"${supervisor_pid_file}")" == "${expected_pid}" ]] || return 0
+  fi
+  rm -f "${supervisor_pid_file}" "${supervisor_stage_file}"
+}
+
+run_supervisor_stage() {
+  local stage="$1"
+  shift
+  printf '%s\n' "${stage}" >"${supervisor_stage_file}.tmp"
+  mv -f "${supervisor_stage_file}.tmp" "${supervisor_stage_file}"
+  "$@" &
+  local pid=$!
+  printf '%s\n' "${pid}" >"${supervisor_pid_file}.tmp"
+  mv -f "${supervisor_pid_file}.tmp" "${supervisor_pid_file}"
+  local rc=0
+  wait "${pid}" || rc=$?
+  clear_supervisor_identity "${pid}"
+  return "${rc}"
+}
+
 common=(
   python3 scripts/programming_curriculum_supervisor.py
   --runtime "${runtime}"
@@ -57,8 +92,50 @@ common=(
 # The first pass accepts every safe forward span and records any failing span
 # for later isolation. The second pass cannot declare the curriculum complete
 # until every deferred interval passes the same comprehensive admission gate.
+adopted_stage=""
+if [[ -s "${supervisor_pid_file}" ]]; then
+  adopted_pid="$(<"${supervisor_pid_file}")"
+  if supervisor_pid_is_live "${adopted_pid}"; then
+    adopted_stage="$(
+      cat "${supervisor_stage_file}" 2>/dev/null || printf 'forward\n'
+    )"
+    echo "Adopting ${adopted_stage} supervisor PID ${adopted_pid}."
+    while supervisor_pid_is_live "${adopted_pid}"; do
+      sleep 10
+    done
+  fi
+  clear_supervisor_identity "${adopted_pid}"
+fi
+
 forward_rc=0
-"${common[@]}" --auto-quarantine-recovery --forward-harvest || forward_rc=$?
+if [[ -z "${adopted_stage}" ]]; then
+  run_supervisor_stage forward \
+    "${common[@]}" --auto-quarantine-recovery --forward-harvest \
+    || forward_rc=$?
+elif [[ "${adopted_stage}" == "forward" ]]; then
+  forward_state="$(status_state)"
+  if [[ "${forward_state}" == "deferred_intervals_pending" ]]; then
+    forward_rc=1
+  elif [[ "${forward_state}" != "all_complete" ]]; then
+    echo "Adopted forward supervisor ended in state '${forward_state}'" >&2
+    exit 1
+  fi
+elif [[ "${adopted_stage}" == "replay" ]]; then
+  replay_state="$(status_state)"
+  if [[ "${replay_state}" == "deferred_replay_failed" ]]; then
+    exit 42
+  fi
+  if [[ "${replay_state}" != "deferred_replay_complete" \
+        && "${replay_state}" != "all_complete" ]]; then
+    echo "Adopted replay supervisor ended in state '${replay_state}'" >&2
+    exit 1
+  fi
+  exit 0
+else
+  echo "Unknown adopted supervisor stage '${adopted_stage}'" >&2
+  exit 1
+fi
+
 if (( forward_rc != 0 )); then
   forward_state="$(status_state)"
   if [[ "${forward_state}" != "deferred_intervals_pending" ]]; then
@@ -68,7 +145,7 @@ if (( forward_rc != 0 )); then
 fi
 
 replay_rc=0
-"${common[@]}" --replay-deferred || replay_rc=$?
+run_supervisor_stage replay "${common[@]}" --replay-deferred || replay_rc=$?
 if (( replay_rc != 0 )); then
   replay_state="$(status_state)"
   if [[ "${replay_state}" == "deferred_replay_failed" ]]; then

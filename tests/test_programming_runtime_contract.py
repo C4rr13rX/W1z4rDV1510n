@@ -2189,6 +2189,17 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("exit 42", source)
         self.assertIn("RestartPreventExitStatus=42", unit)
+        self.assertIn(
+            'supervisor_pid_file="${runtime}/curriculum-service-supervisor.pid"',
+            source,
+        )
+        self.assertIn("supervisor_pid_is_live", source)
+        self.assertIn('run_supervisor_stage forward', source)
+        self.assertIn('run_supervisor_stage replay', source)
+        self.assertIn(
+            'echo "Adopting ${adopted_stage} supervisor PID ${adopted_pid}."',
+            source,
+        )
 
     def test_reproducible_trainer_finalizes_zero_resident_wbrain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
