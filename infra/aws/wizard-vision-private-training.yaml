@@ -204,13 +204,11 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -euxo pipefail
-          dnf install -y awscli2 python3 tar gzip
+          dnf install -y python3 tar gzip xfsprogs
           cat >/usr/local/sbin/wizard-cost-stop.sh <<'EOF'
           #!/bin/bash
           set -euo pipefail
-          TOKEN=$(curl -fsS -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token)
-          INSTANCE_ID=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-          aws ec2 stop-instances --region ${AWS::Region} --instance-ids "$INSTANCE_ID"
+          /sbin/shutdown -h now
           EOF
           chmod 750 /usr/local/sbin/wizard-cost-stop.sh
           systemd-run --unit=wizard-cost-guard --on-active=${MaximumRuntimeHours}h /usr/local/sbin/wizard-cost-stop.sh

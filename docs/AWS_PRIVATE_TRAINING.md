@@ -13,8 +13,8 @@ The stack in `infra/aws/wizard-vision-private-training.yaml` creates:
 - private S3, SSM, and SSM Messages endpoints;
 - one On-Demand `m6a.xlarge` with 4 vCPU and 16 GiB dedicated RAM;
 - one encrypted 1 TiB gp3 data volume retained independently of the instance;
-- an instance timer that cancels the Spot request and stops compute after at
-  most 192 hours; and
+- an instance timer that shuts down and stops compute after at most 192 hours;
+  and
 - a least-privilege instance role restricted to the Wizard Vision bucket
   prefix and its own cost-stop operations.
 
