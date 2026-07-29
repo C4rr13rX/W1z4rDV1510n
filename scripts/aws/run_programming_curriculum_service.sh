@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="${WIZARD_PROJECT_ROOT:-/srv/wizard/project}"
+runtime="${WIZARD_RUNTIME:-/srv/wizard/runtime/programming-integrated-20260713}"
+corpus_root="${WIZARD_CORPUS_ROOT:-/srv/wizard/corpora}"
+endpoint="${WIZARD_ENDPOINT:-http://127.0.0.1:18095}"
+node_bin="${WIZARD_NODE_BIN:-${project_root}/target/release/w1z4rd_brain_server}"
+
+cd "${project_root}"
+
+ready=0
+for _ in $(seq 1 300); do
+  if curl -fsS "${endpoint}/health" >/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [[ "${ready}" != "1" ]]; then
+  echo "Wizard brain endpoint did not become healthy: ${endpoint}" >&2
+  exit 1
+fi
+
+common=(
+  python3 scripts/programming_curriculum_supervisor.py
+  --runtime "${runtime}"
+  --endpoint "${endpoint}"
+  --node-bin "${node_bin}"
+  --corpus-root "${corpus_root}"
+  --batch-size 256
+  --lock-chunk-size 32
+  --poll-seconds 2
+  --checkpoint-rows 131072
+  --gate-rows 131072
+  --canary-rows 16384
+  --max-live-lock-seconds 8
+  --min-free-memory-gb 6
+  --min-free-disk-gb 8
+  --max-restarts 10
+)
+
+# The first pass accepts every safe forward span and records any failing span
+# for later isolation. The second pass cannot declare the curriculum complete
+# until every deferred interval passes the same comprehensive admission gate.
+"${common[@]}" --auto-quarantine-recovery --forward-harvest
+"${common[@]}" --replay-deferred

@@ -1,0 +1,24 @@
+[Unit]
+Description=Wizard Vision guarded programming curriculum
+After=network-online.target srv-wizard.mount wizard-brain-initial.service
+Wants=network-online.target wizard-brain-initial.service
+RequiresMountsFor=/srv/wizard
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/srv/wizard/project
+ExecStart=/bin/bash /srv/wizard/project/scripts/aws/run_programming_curriculum_service.sh
+Restart=on-failure
+RestartSec=10
+# Automatic quarantine recovery may replace the original brain server with a
+# verified child process. Keep that recovered node alive across supervisor
+# restarts so the next invocation can attach to its endpoint.
+KillMode=process
+TimeoutStopSec=120
+StandardOutput=append:/srv/wizard/runtime/programming-integrated-20260713/curriculum-service.stdout.log
+StandardError=append:/srv/wizard/runtime/programming-integrated-20260713/curriculum-service.stderr.log
+
+[Install]
+WantedBy=multi-user.target
