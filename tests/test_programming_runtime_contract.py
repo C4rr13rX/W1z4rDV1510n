@@ -2217,6 +2217,16 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn("tools.training_standard.drive_corpora_brain", stop)
         self.assertIn("kill -TERM", stop)
         self.assertNotIn("w1z4rd_brain_server", stop)
+        self.assertIn('"${runtime}/curriculum-supervisor.pid"', stop)
+        self.assertIn(
+            '"${runtime}/curriculum-service-supervisor.pid"',
+            stop,
+        )
+        self.assertIn(
+            '"${runtime}/curriculum-service-supervisor.stage"',
+            stop,
+        )
+        self.assertIn("Curriculum processes survived SIGKILL", stop)
 
     def test_reproducible_trainer_finalizes_zero_resident_wbrain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -6,6 +6,13 @@ supervisor_marker="scripts/programming_curriculum_supervisor.py --runtime ${runt
 worker_marker="tools.training_standard.drive_corpora_brain"
 progress_marker="--progress-path ${runtime}/"
 
+clear_supervisor_identity() {
+  rm -f \
+    "${runtime}/curriculum-supervisor.pid" \
+    "${runtime}/curriculum-service-supervisor.pid" \
+    "${runtime}/curriculum-service-supervisor.stage"
+}
+
 matching_pids() {
   local first="$1"
   local second="${2:-}"
@@ -19,7 +26,7 @@ mapfile -t supervisors < <(matching_pids "${supervisor_marker}")
 targets=("${workers[@]}" "${supervisors[@]}")
 
 if (( ${#targets[@]} == 0 )); then
-  rm -f "${runtime}/curriculum-supervisor.pid"
+  clear_supervisor_identity
   exit 0
 fi
 
@@ -35,11 +42,26 @@ for _ in $(seq 1 30); do
     fi
   done
   if (( ${#alive[@]} == 0 )); then
-    rm -f "${runtime}/curriculum-supervisor.pid"
+    clear_supervisor_identity
     exit 0
   fi
   sleep 1
 done
 
 kill -KILL "${targets[@]}" 2>/dev/null || true
-rm -f "${runtime}/curriculum-supervisor.pid"
+for _ in $(seq 1 5); do
+  alive=()
+  for pid in "${targets[@]}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      alive+=("${pid}")
+    fi
+  done
+  if (( ${#alive[@]} == 0 )); then
+    clear_supervisor_identity
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "Curriculum processes survived SIGKILL: ${alive[*]}" >&2
+exit 1
