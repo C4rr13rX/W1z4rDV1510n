@@ -12,6 +12,10 @@ WorkingDirectory=/srv/wizard/project
 ExecStart=/bin/bash /srv/wizard/project/scripts/aws/run_programming_curriculum_service.sh
 Restart=on-failure
 RestartSec=10
+# Exit 42 means one replay was behaviorally rejected and its final-brain
+# transaction was rolled back. Preserve that evidence for a code/data fix
+# instead of retraining and rejecting the same interval in a restart loop.
+RestartPreventExitStatus=42
 # Automatic quarantine recovery may replace the original brain server with a
 # verified child process. Keep that recovered node alive across supervisor
 # restarts so the next invocation can attach to its endpoint.

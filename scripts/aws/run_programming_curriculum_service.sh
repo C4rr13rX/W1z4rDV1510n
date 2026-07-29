@@ -22,6 +22,20 @@ if [[ "${ready}" != "1" ]]; then
   exit 1
 fi
 
+status_state() {
+  python3 - "${runtime}/curriculum-supervisor.status.json" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    payload = {}
+print(payload.get("state", ""))
+PY
+}
+
 common=(
   python3 scripts/programming_curriculum_supervisor.py
   --runtime "${runtime}"
@@ -46,22 +60,21 @@ common=(
 forward_rc=0
 "${common[@]}" --auto-quarantine-recovery --forward-harvest || forward_rc=$?
 if (( forward_rc != 0 )); then
-  status_state="$(
-    python3 - "${runtime}/curriculum-supervisor.status.json" <<'PY'
-import json
-import pathlib
-import sys
-
-try:
-    payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-except (OSError, ValueError):
-    payload = {}
-print(payload.get("state", ""))
-PY
-  )"
-  if [[ "${status_state}" != "deferred_intervals_pending" ]]; then
-    echo "Forward curriculum failed in state '${status_state}'" >&2
+  forward_state="$(status_state)"
+  if [[ "${forward_state}" != "deferred_intervals_pending" ]]; then
+    echo "Forward curriculum failed in state '${forward_state}'" >&2
     exit "${forward_rc}"
   fi
 fi
-"${common[@]}" --replay-deferred
+
+replay_rc=0
+"${common[@]}" --replay-deferred || replay_rc=$?
+if (( replay_rc != 0 )); then
+  replay_state="$(status_state)"
+  if [[ "${replay_state}" == "deferred_replay_failed" ]]; then
+    echo "Deferred replay needs a semantic repair; evidence is stable." >&2
+    exit 42
+  fi
+  echo "Deferred replay failed in state '${replay_state}'" >&2
+  exit "${replay_rc}"
+fi

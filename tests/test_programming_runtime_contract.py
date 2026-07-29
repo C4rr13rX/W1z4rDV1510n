@@ -46,6 +46,7 @@ from scripts.programming_curriculum_supervisor import (
     next_suspect_start,
     phase_offsets,
     pause_admission_for_infrastructure,
+    preserve_admission_evidence,
     preserve_deferred_base,
     prune_resolved_deferred_bases,
     publish,
@@ -578,6 +579,55 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             guard.unlink()
             live.write_bytes(b"later-candidate")
             self.assertEqual(base.read_bytes(), b"accepted-base")
+
+    def test_deferred_interval_preserves_gate_details_before_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "cross-project.json").write_text(
+                '{"passed": false, "reply": "candidate answer"}',
+                encoding="utf-8",
+            )
+            (runtime / "semantic-stress.json").write_text(
+                '{"passed": false, "failed_case": "integration-4"}',
+                encoding="utf-8",
+            )
+            (runtime / "corpus.row-20.enterprise.json").write_text(
+                '{"passed": false, "passed_suites": 10}',
+                encoding="utf-8",
+            )
+            evidence = preserve_admission_evidence(
+                runtime, "corpus", 20, "corpus:10:20",
+                "cross-project and semantic-stress failed",
+                attempt="candidate-row-20",
+            )
+
+            (runtime / "cross-project.json").write_text(
+                '{"passed": true, "reply": "restored answer"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                json.loads((evidence / "cross-project.json").read_text(
+                    encoding="utf-8"
+                ))["reply"],
+                "candidate answer",
+            )
+            self.assertEqual(
+                json.loads((evidence / "semantic-stress.json").read_text(
+                    encoding="utf-8"
+                ))["failed_case"],
+                "integration-4",
+            )
+            failure = read_json(evidence / "failure.json")
+            self.assertEqual(failure["interval_id"], "corpus:10:20")
+            self.assertEqual(failure["trained_rows"], 20)
+            self.assertEqual(
+                sorted(failure["captured_files"]),
+                [
+                    "corpus.row-20.enterprise.json",
+                    "cross-project.json",
+                    "semantic-stress.json",
+                ],
+            )
 
     def test_deferred_ranges_skip_only_the_half_open_suspect_rows(self) -> None:
         ranges = ((10, 20), (30, 31))
@@ -2121,16 +2171,24 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         source = (
             ROOT / "scripts" / "aws" / "run_programming_curriculum_service.sh"
         ).read_text(encoding="utf-8")
+        unit = (
+            ROOT / "scripts" / "aws" / "wizard-curriculum-supervisor.service"
+        ).read_text(encoding="utf-8")
         forward_position = source.index(
             '"${common[@]}" --auto-quarantine-recovery --forward-harvest'
         )
         expected_handoff = source.index(
-            '[[ "${status_state}" != "deferred_intervals_pending" ]]'
+            '[[ "${forward_state}" != "deferred_intervals_pending" ]]'
         )
         replay_position = source.index('"${common[@]}" --replay-deferred')
         self.assertLess(forward_position, expected_handoff)
         self.assertLess(expected_handoff, replay_position)
         self.assertIn('exit "${forward_rc}"', source)
+        self.assertIn(
+            '[[ "${replay_state}" == "deferred_replay_failed" ]]', source
+        )
+        self.assertIn("exit 42", source)
+        self.assertIn("RestartPreventExitStatus=42", unit)
 
     def test_reproducible_trainer_finalizes_zero_resident_wbrain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
