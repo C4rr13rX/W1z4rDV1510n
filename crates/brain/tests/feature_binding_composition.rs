@@ -401,6 +401,50 @@ fn deterministic_validator_filters_before_bounded_feature_readout() {
 }
 
 #[test]
+fn deterministic_validator_can_recover_a_richer_learned_episode() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let learned = b"@intent:LANGUAGE:PYTHON\n@intent:ENTERPRISE:BATCHING\n@intent:GUARD:POSITIVE_SIZE\n@intent:INPUT:COLLECTION_ARGUMENT\n@intent:ARTIFACT:FUNCTION\n";
+    let response = b"def make_batches(items, size):\n    if size < 1: raise ValueError()\n    return [items[i:i+size] for i in range(0, len(items), size)]";
+    for _ in 0..3 {
+        brain.observe(feature_pool, learned);
+        brain.observe(action_pool, response);
+        brain.advance_tick();
+    }
+    let query = b"@intent:LANGUAGE:PYTHON\n@intent:ENTERPRISE:BATCHING\n@intent:GUARD:POSITIVE_SIZE\n";
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(query);
+    assert!(
+        brain
+            .decode_ranked_feature_bindings(feature_pool, &labels, action_pool, 1)
+            .is_empty(),
+        "unvalidated broad recall must preserve the one-extra-feature limit"
+    );
+    let filtered = brain.decode_first_ranked_feature_binding_with_context_where(
+        feature_pool,
+        &labels,
+        action_pool,
+        None,
+        None,
+        &[feature_pool],
+        &[],
+        &|bytes| bytes.windows(b"make_batches".len()).any(|part| part == b"make_batches"),
+    );
+    assert_eq!(filtered.as_deref(), Some(response.as_slice()));
+}
+
+#[test]
 fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
     let mut brain = Brain::new(BrainConfig::default());
     let feature_pool = brain.create_pool(

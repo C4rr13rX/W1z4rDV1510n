@@ -3191,6 +3191,25 @@ async fn h_brain_chat(
         }
     }
     if let Some((pool_id, labels)) = composition_features.as_ref() {
+        for candidate in brain.decode_ranked_feature_bindings_with_context_where(
+            *pool_id,
+            labels,
+            action_pool,
+            8,
+            brain.fabric().pool(8).map(|_| 8),
+            brain.fabric().pool(6).map(|_| 6),
+            &chat_query_pools,
+            &turn_pools,
+            &|candidate| {
+                (is_complete_file_manifest(candidate)
+                    && programming_response_compatible(labels, candidate))
+                    || is_grounded_code_fragment(candidate)
+            },
+        ) {
+            if !feature_candidates.contains(&candidate) {
+                feature_candidates.push(candidate);
+            }
+        }
         for candidate in exact_manifest_subset_candidates(&brain, *pool_id, labels, action_pool) {
             if !feature_candidates.contains(&candidate) {
                 feature_candidates.push(candidate);
@@ -3201,15 +3220,26 @@ async fn h_brain_chat(
         // episode. Recover through grounded LANGUAGE+BEHAVIOR conjunctions,
         // never through a language-only or generic-project match.
         for subset in manifest_component_feature_pairs(labels) {
-            let mut component_candidates = brain.decode_ranked_feature_bindings_with_context(
-                *pool_id, &subset, action_pool, 32,
+            let mut component_candidates =
+                brain.decode_ranked_feature_bindings_with_context_where(
+                *pool_id, &subset, action_pool, 8,
                 brain.fabric().pool(8).map(|_| 8),
                 brain.fabric().pool(6).map(|_| 6),
                 &chat_query_pools, &turn_pools,
+                &|candidate| {
+                    (is_complete_file_manifest(candidate)
+                        && programming_response_compatible(&subset, candidate))
+                        || is_grounded_code_fragment(candidate)
+                },
             );
-            for candidate in brain.decode_ranked_feature_bindings_with_context(
-                *pool_id, &subset, action_pool, 32, None, None,
+            for candidate in brain.decode_ranked_feature_bindings_with_context_where(
+                *pool_id, &subset, action_pool, 8, None, None,
                 &chat_query_pools, &turn_pools,
+                &|candidate| {
+                    (is_complete_file_manifest(candidate)
+                        && programming_response_compatible(&subset, candidate))
+                        || is_grounded_code_fragment(candidate)
+                },
             ) {
                 if !component_candidates.contains(&candidate) {
                     component_candidates.push(candidate);

@@ -4460,7 +4460,7 @@ impl Brain {
         conditioned_pools: &[PoolId],
         validator: &dyn Fn(&[u8]) -> bool,
     ) -> Option<Vec<u8>> {
-        self.decode_ranked_feature_bindings_with_evidence_filtered(
+        self.decode_ranked_feature_bindings_with_context_where(
             feature_pool,
             query_labels,
             target_pool,
@@ -4469,11 +4469,41 @@ impl Brain {
             failure_pool,
             active_context_pools,
             conditioned_pools,
-            Some(validator),
+            validator,
         )
         .into_iter()
         .next()
+    }
+
+    /// Plural form of the validator-protected readout. This is used by
+    /// project composition, where several independently grounded manifests
+    /// or fragments must survive popularity truncation.
+    pub fn decode_ranked_feature_bindings_with_context_where(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+        max_results: usize,
+        success_pool: Option<PoolId>,
+        failure_pool: Option<PoolId>,
+        active_context_pools: &[PoolId],
+        conditioned_pools: &[PoolId],
+        validator: &dyn Fn(&[u8]) -> bool,
+    ) -> Vec<Vec<u8>> {
+        self.decode_ranked_feature_bindings_with_evidence_filtered(
+            feature_pool,
+            query_labels,
+            target_pool,
+            max_results,
+            success_pool,
+            failure_pool,
+            active_context_pools,
+            conditioned_pools,
+            Some(validator),
+        )
+        .into_iter()
         .map(|candidate| candidate.bytes)
+        .collect()
     }
 
     fn decode_ranked_feature_bindings_with_evidence_filtered(
@@ -4630,6 +4660,20 @@ impl Brain {
                         // constraint (for example, an idempotent service
                         // whose implementation also validates input). Wider
                         // supersets remain ineligible.
+                        Some((
+                            query_atoms.len(),
+                            atoms.len(),
+                            query_atoms.iter().copied().collect::<Vec<_>>(),
+                        ))
+                    } else if validator.is_some()
+                        && query_atoms.len() >= 2
+                        && query_atoms.is_subset(atoms)
+                    {
+                        // A deterministic behavioral validator makes a
+                        // richer learned episode safe to consider even when
+                        // the paraphrase activates only a smaller grounded
+                        // subset. Keep the learned width in the rank so the
+                        // narrowest compatible episode still wins.
                         Some((
                             query_atoms.len(),
                             atoms.len(),

@@ -120,7 +120,11 @@ from scripts.train_programming_brain import (
     qualification_state_signature,
     resolve_seed_guard,
 )
-from scripts.programming_exec_env import benchmark_tool_env, isolated_tool_env
+from scripts.programming_exec_env import (
+    benchmark_tool_env,
+    isolated_tool_env,
+    prepare_tool_command,
+)
 from scripts.programming_slow_batch_microbrains import read_events
 from scripts.programming_corpus_recall import accepted_responses, sample_window
 from scripts.programming_mobile_runtime_eval import summarize_trials
@@ -1147,6 +1151,20 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('(work / "NuGet.Config").write_text(', source)
         self.assertIn("<packageSources><clear />", source)
+
+    def test_shared_dotnet_runner_forces_offline_restore_and_no_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command = prepare_tool_command(
+                ("dotnet", "run", "--project", "Eval.csproj"), root
+            )
+            self.assertIn("--disable-build-servers", command)
+            config = root / "NuGet.Config"
+            self.assertTrue(config.is_file())
+            self.assertIn(
+                "<packageSources><clear />",
+                config.read_text(encoding="utf-8"),
+            )
 
     def test_semantic_stress_fails_on_any_missing_recall(self) -> None:
         source = (ROOT / "scripts" / "programming_semantic_stress.py").read_text(

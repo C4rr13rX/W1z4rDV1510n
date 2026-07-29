@@ -40,13 +40,36 @@ def benchmark_tool_env() -> dict[str, str]:
     return isolated_tool_env(BENCHMARK_CACHE_ROOT)
 
 
+def prepare_tool_command(command: Sequence[str], cwd: Path) -> list[str]:
+    """Make compiler invocation hermetic before starting its process tree."""
+    prepared = list(command)
+    if not prepared or Path(prepared[0]).name.lower() not in {"dotnet", "dotnet.exe"}:
+        return prepared
+    config = cwd / "NuGet.Config"
+    if not config.exists():
+        config.write_text(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            "<configuration><packageSources><clear />"
+            "</packageSources></configuration>",
+            encoding="utf-8",
+        )
+    if (
+        len(prepared) > 1
+        and prepared[1] in {"build", "run", "test"}
+        and "--disable-build-servers" not in prepared
+    ):
+        prepared.append("--disable-build-servers")
+    return prepared
+
+
 def run_tool(
     command: Sequence[str], *, cwd: Path, env: dict[str, str], timeout: float
 ) -> subprocess.CompletedProcess[str]:
     """Run a compiler as a killable process tree so timed-out children release files."""
+    prepared = prepare_tool_command(command, cwd)
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen(
-        command,
+        prepared,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
@@ -69,5 +92,5 @@ def run_tool(
 
             os.killpg(process.pid, signal.SIGKILL)
         stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        raise subprocess.TimeoutExpired(prepared, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(prepared, process.returncode, stdout, stderr)
