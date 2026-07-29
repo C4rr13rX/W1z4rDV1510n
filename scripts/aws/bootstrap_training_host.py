@@ -184,6 +184,8 @@ def bootstrap_commands(
             f"urllib.request.urlretrieve('{presigned_url}', '/tmp/awscliv2.zip')\""
         ),
         "python3 -m zipfile -e /tmp/awscliv2.zip /tmp/aws",
+        "chmod -R a+rX /tmp/aws/aws",
+        "chmod a+x /tmp/aws/aws/install /tmp/aws/aws/dist/aws",
         "/tmp/aws/aws/install --update",
         (
             "dnf install -y rust cargo gcc gcc-c++ openssl-devel "

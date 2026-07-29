@@ -54,6 +54,7 @@ def test_private_host_bootstrap_verifies_source_then_restores_manifests():
     assert "sha256sum" in commands
     assert '"b' in commands
     assert '"c' in commands
+    assert "chmod a+x /tmp/aws/aws/install /tmp/aws/aws/dist/aws" in commands
     assert "dnf install -y rust cargo" in commands
     assert "rust.tar.gz" in commands
     assert "restore_training_inputs.py" in commands
