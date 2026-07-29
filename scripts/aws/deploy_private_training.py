@@ -158,7 +158,7 @@ def bootstrap_permissions(profile: str) -> None:
     membership = aws(
         profile,
         "iam",
-        "get-groups-for-user",
+        "list-groups-for-user",
         "--user-name",
         PROFILE,
         "--query",
