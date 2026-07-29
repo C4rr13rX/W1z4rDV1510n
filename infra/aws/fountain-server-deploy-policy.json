@@ -85,8 +85,7 @@
         "ssm:ListCommands",
         "ssm:SendCommand"
       ],
-      "Resource": "*",
-      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
+      "Resource": "*"
     },
     {
       "Sid": "WizardVisionTrainingRole",
