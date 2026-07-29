@@ -76,6 +76,19 @@
       "Resource": "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/*"
     },
     {
+      "Sid": "WizardVisionHostControl",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:CancelCommand",
+        "ssm:DescribeInstanceInformation",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands",
+        "ssm:SendCommand"
+      ],
+      "Resource": "*",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
+    },
+    {
       "Sid": "WizardVisionTrainingRole",
       "Effect": "Allow",
       "Action": [
