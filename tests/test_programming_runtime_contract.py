@@ -1129,6 +1129,11 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             for key in ("GOCACHE", "GOMODCACHE", "DOTNET_CLI_HOME", "NUGET_PACKAGES"):
                 self.assertTrue(Path(environment[key]).is_relative_to(root))
                 self.assertTrue(Path(environment[key]).is_dir())
+            self.assertEqual(
+                environment["DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE"], "1"
+            )
+            self.assertEqual(environment["NUGET_CERT_REVOCATION_MODE"], "offline")
+            self.assertEqual(environment["RestoreIgnoreFailedSources"], "true")
 
     def test_shared_compiler_cache_stays_inside_repository_runtime(self) -> None:
         environment = benchmark_tool_env()

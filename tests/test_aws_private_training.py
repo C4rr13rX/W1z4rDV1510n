@@ -5,6 +5,11 @@ from scripts.aws.deploy_private_training import (
     POLICY_ARN,
     estimate_cost,
 )
+from scripts.aws.bootstrap_training_host import (
+    TYPESCRIPT_KEY,
+    TYPESCRIPT_SHA256,
+    bootstrap_commands,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,3 +45,25 @@ def test_runbook_preserves_settle_then_upload_invariant():
     )
     assert "Never copy the mutable container while training is running" in runbook
     assert "--settle-live-node" in runbook
+
+
+def test_training_bootstrap_installs_hermetic_programming_toolchains():
+    commands = "\n".join(
+        bootstrap_commands(
+            "https://example.invalid/aws.zip",
+            "a" * 40,
+            {"archive": "source.tgz", "sha256": "1" * 64},
+            {"archive": "rust.tgz", "sha256": "2" * 64},
+        )
+    )
+    for package in (
+        "nodejs",
+        "golang",
+        "java-21-amazon-corretto-devel",
+        "dotnet-sdk-8.0",
+    ):
+        assert package in commands
+    assert TYPESCRIPT_KEY in commands
+    assert TYPESCRIPT_SHA256 in commands
+    assert "npm install --global --offline" in commands
+    assert "<clear />" in commands

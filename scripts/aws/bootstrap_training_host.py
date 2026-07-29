@@ -16,6 +16,8 @@ REGION = "us-east-1"
 STACK = "wizard-vision-private-training"
 BUCKET = "wizard-vision-private-321572159829-us-east-1"
 AWSCLI_KEY = "wizard-vision/bootstrap/awscli-exe-linux-x86_64.zip"
+TYPESCRIPT_KEY = "wizard-vision/toolchains/typescript-5.8.3.tgz"
+TYPESCRIPT_SHA256 = "bd7f5bac7ed5a849378404a684d815321322fd52456c7f97d96c9dbf0147e8d5"
 
 
 def aws(
@@ -189,9 +191,29 @@ def bootstrap_commands(
         "/tmp/aws/aws/install --update",
         (
             "dnf install -y rust cargo gcc gcc-c++ openssl-devel "
-            "pkgconf-pkg-config cmake python3-psutil"
+            "pkgconf-pkg-config cmake python3-psutil "
+            "python-unversioned-command nodejs npm golang "
+            "java-21-amazon-corretto-devel dotnet-sdk-8.0"
         ),
         "mkdir -p /srv/wizard/project /srv/wizard/staging",
+        (
+            f"/usr/local/bin/aws s3 cp s3://{BUCKET}/{TYPESCRIPT_KEY} "
+            "/srv/wizard/staging/typescript-5.8.3.tgz "
+            f"--region {REGION} --only-show-errors"
+        ),
+        (
+            "test \"$(sha256sum /srv/wizard/staging/typescript-5.8.3.tgz | "
+            f"cut -d' ' -f1)\" = \"{TYPESCRIPT_SHA256}\""
+        ),
+        "npm install --global --offline /srv/wizard/staging/typescript-5.8.3.tgz",
+        "mkdir -p /home/ec2-user/.nuget/NuGet",
+        (
+            "printf '%s\\n' '<?xml version=\"1.0\" encoding=\"utf-8\"?>' "
+            "'<configuration><packageSources><clear />"
+            "</packageSources></configuration>' "
+            ">/home/ec2-user/.nuget/NuGet/NuGet.Config"
+        ),
+        "chown -R ec2-user:ec2-user /home/ec2-user/.nuget",
         (
             f"/usr/local/bin/aws s3 cp {source_root}/{archive} "
             f"/srv/wizard/staging/{archive} --region {REGION} --only-show-errors"

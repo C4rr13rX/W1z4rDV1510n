@@ -2355,6 +2355,28 @@ fn prompt_programming_response_compatible(
             }
         }
         let request = prompt.to_ascii_lowercase();
+        let asks_for_single_input_square = labels
+            .iter()
+            .any(|label| label.ends_with(":POWER_SELF:2"))
+            && [
+                "supplied number",
+                "supplied integer",
+                "its input",
+                "integer input",
+                "input multiplied by itself",
+                "number times itself",
+            ]
+            .iter()
+            .any(|cue| request.contains(cue));
+        if asks_for_single_input_square {
+            let parameters = declared_parameter_names(&source)
+                .into_iter()
+                .filter(|parameter| parameter != "self" && parameter != "cls")
+                .count();
+            if parameters != 1 {
+                return false;
+            }
+        }
         let asks_for_odd_collection_filter = labels
             .iter()
             .any(|label| label.ends_with(":PARITY:ODD"))
@@ -4943,6 +4965,18 @@ mod tests {
         assert!(prompt_programming_response_compatible(
             &square,
             square_prompt,
+            b"def square(n):\n    return n * n",
+        ));
+        let implicit_name_square_prompt =
+            "Create Python code computing the second power of a supplied number.";
+        assert!(!prompt_programming_response_compatible(
+            &square,
+            implicit_name_square_prompt,
+            b"def polynomial(x, a, b, c):\n    return a * x ** 2 + b * x + c",
+        ));
+        assert!(prompt_programming_response_compatible(
+            &square,
+            implicit_name_square_prompt,
             b"def square(n):\n    return n * n",
         ));
 
