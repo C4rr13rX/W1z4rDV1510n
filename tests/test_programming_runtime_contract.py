@@ -2065,6 +2065,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("--replay-deferred", forward)
         self.assertIn("--replay-deferred", replay)
         self.assertNotIn("--auto-quarantine-recovery", replay)
+
         self.assertEqual(
             forward[forward.index("--lock-chunk-size") + 1], "12"
         )
@@ -2115,6 +2116,21 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 "binding_pool_id": 0,
             },
         )
+
+    def test_persistent_service_hands_deferred_tail_to_replay(self) -> None:
+        source = (
+            ROOT / "scripts" / "aws" / "run_programming_curriculum_service.sh"
+        ).read_text(encoding="utf-8")
+        forward_position = source.index(
+            '"${common[@]}" --auto-quarantine-recovery --forward-harvest'
+        )
+        expected_handoff = source.index(
+            '[[ "${status_state}" != "deferred_intervals_pending" ]]'
+        )
+        replay_position = source.index('"${common[@]}" --replay-deferred')
+        self.assertLess(forward_position, expected_handoff)
+        self.assertLess(expected_handoff, replay_position)
+        self.assertIn('exit "${forward_rc}"', source)
 
     def test_reproducible_trainer_finalizes_zero_resident_wbrain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

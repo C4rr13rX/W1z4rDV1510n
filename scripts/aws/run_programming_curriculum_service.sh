@@ -43,5 +43,25 @@ common=(
 # The first pass accepts every safe forward span and records any failing span
 # for later isolation. The second pass cannot declare the curriculum complete
 # until every deferred interval passes the same comprehensive admission gate.
-"${common[@]}" --auto-quarantine-recovery --forward-harvest
+forward_rc=0
+"${common[@]}" --auto-quarantine-recovery --forward-harvest || forward_rc=$?
+if (( forward_rc != 0 )); then
+  status_state="$(
+    python3 - "${runtime}/curriculum-supervisor.status.json" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    payload = {}
+print(payload.get("state", ""))
+PY
+  )"
+  if [[ "${status_state}" != "deferred_intervals_pending" ]]; then
+    echo "Forward curriculum failed in state '${status_state}'" >&2
+    exit "${forward_rc}"
+  fi
+fi
 "${common[@]}" --replay-deferred
