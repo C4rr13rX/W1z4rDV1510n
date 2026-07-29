@@ -814,6 +814,8 @@ impl AtomEncoding for InstructionIntentEncoding {
         if text.contains("redact")
             || text.contains("mask secrets")
             || text.contains("masks secrets")
+            || text.contains("without leaking nested secrets")
+            || text.contains("without leaking secrets")
             || text.contains("remove credentials")
             || text.contains("removing credentials")
             || text.contains("cleanses nested credentials")

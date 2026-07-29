@@ -355,6 +355,22 @@ fn circuit_breaker_failure_cooldown_paraphrase_shares_intent() {
 }
 
 #[test]
+fn non_leaking_nested_secrets_emits_redaction_intent() {
+    let encoding = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    };
+    let features = encoding.atomize(
+        b"Create a Python observability module that writes correlated JSON logs without leaking nested secrets.",
+    );
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:ENTERPRISE:SECRET_REDACTION"));
+    assert!(features
+        .iter()
+        .any(|label| label == "intent:OBSERVABILITY:CORRELATED_LOGGING"));
+}
+
+#[test]
 fn native_enterprise_intents_combine_language_and_behavior() {
     let encoding = InstructionIntentEncoding {
         prefix: "intent".into(),

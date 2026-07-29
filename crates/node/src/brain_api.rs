@@ -1735,7 +1735,11 @@ fn is_single_language_single_behavior(labels: &[String]) -> bool {
 /// one omitted learned constraint, so its first complete manifest is safe to
 /// use directly. Multi-language requests must continue through composition;
 /// returning one component would silently truncate the requested project.
-fn single_language_ranked_manifest(labels: &[String], candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
+fn single_language_ranked_manifest(
+    labels: &[String],
+    prompt: &str,
+    candidates: &[Vec<u8>],
+) -> Option<Vec<u8>> {
     (labels
         .iter()
         .filter(|label| label.contains(":LANGUAGE:"))
@@ -1746,7 +1750,9 @@ fn single_language_ranked_manifest(labels: &[String], candidates: &[Vec<u8>]) ->
                 .iter()
                 .find(|candidate| {
                     is_complete_file_manifest(candidate)
-                        && programming_response_compatible(labels, candidate)
+                        && prompt_programming_response_compatible(
+                            labels, prompt, candidate,
+                        )
                 })
                 .cloned()
         })
@@ -2076,6 +2082,66 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
             return false;
         }
     }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":PERSISTENCE:SCHEMA_MIGRATION"))
+    {
+        let versioned = [
+            "pragma user_version",
+            "schema_version",
+            "schema version",
+            "migration_version",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence));
+        let changes_schema = [
+            "alter table",
+            "create table",
+            "migration",
+            "migrate(",
+        ]
+        .iter()
+        .any(|evidence| lowercase.contains(evidence));
+        if !versioned || !changes_schema {
+            return false;
+        }
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":RESILIENCE:CIRCUIT_BREAKER"))
+    {
+        let failure_threshold = lowercase.contains("failure_threshold")
+            || lowercase.contains("failure threshold")
+            || lowercase.contains("failures >=")
+            || lowercase.contains("failure_count");
+        let open_state = lowercase.contains("circuitopen")
+            || lowercase.contains("circuit_open")
+            || lowercase.contains("opened_at")
+            || lowercase.contains("state = \"open\"");
+        let recovery = lowercase.contains("recovery_timeout")
+            || lowercase.contains("cooldown")
+            || lowercase.contains("half_open")
+            || lowercase.contains("half-open");
+        if !failure_threshold || !open_state || !recovery {
+            return false;
+        }
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":CONCURRENCY:BOUNDED_ASYNC"))
+    {
+        let bounded = lowercase.contains("asyncio.semaphore(")
+            || lowercase.contains("semaphore(")
+            || lowercase.contains("max_concurrency")
+            || lowercase.contains("concurrency_limit");
+        let asynchronous = lowercase.contains("async def ")
+            || lowercase.contains("await ")
+            || lowercase.contains("task<")
+            || lowercase.contains("completablefuture");
+        if !bounded || !asynchronous {
+            return false;
+        }
+    }
     if !intent_requires(":PARITY:ODD", &["% 2", "%2", "& 1", "&1"]) {
         return false;
     }
@@ -2188,10 +2254,17 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
         || (lowercase.contains("balance")
             && lowercase.contains("source")
             && lowercase.contains("target"));
-    if labels.iter().any(|label| {
-        label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION")
-            || label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER")
-    }) && !paired_ledger_update
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER"))
+        && !paired_ledger_update
+    {
+        return false;
+    }
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION"))
+        && !paired_ledger_update
         && ![
             "rollback",
             "commit",
@@ -2351,23 +2424,26 @@ fn prompt_programming_response_compatible(
     prompt: &str,
     bytes: &[u8],
 ) -> bool {
-    if !programming_response_compatible(labels, bytes) || is_complete_file_manifest(bytes) {
+    if !programming_response_compatible(labels, bytes) {
         return false;
     }
+    let complete_manifest = is_complete_file_manifest(bytes);
     let source = String::from_utf8_lossy(bytes);
     if labels
         .iter()
         .any(|label| label.ends_with(":LANGUAGE:PYTHON"))
     {
-        if let Some(name) =
-            requested_python_identifier(prompt, &["function named ", "function called "])
-        {
-            let declaration = format!("def {name}(");
-            if !source
-                .lines()
-                .any(|line| line.trim_start().starts_with(&declaration))
+        if !complete_manifest {
+            if let Some(name) =
+                requested_python_identifier(prompt, &["function named ", "function called "])
             {
-                return false;
+                let declaration = format!("def {name}(");
+                if !source
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(&declaration))
+                {
+                    return false;
+                }
             }
         }
         let request = prompt.to_ascii_lowercase();
@@ -2426,6 +2502,28 @@ fn prompt_programming_response_compatible(
             if !iterates_collection || !returns_collection {
                 return false;
             }
+        }
+    }
+    let request = prompt.to_ascii_lowercase();
+    let asks_for_default_deny_owner_authorization = labels
+        .iter()
+        .any(|label| label.ends_with(":SECURITY:AUTHORIZATION"))
+        && (request.contains("default-deny")
+            || request.contains("default deny")
+            || request.contains("denies by default")
+            || (request.contains("administrator") && request.contains("owner"))
+            || (request.contains("superuser") && request.contains("identity")));
+    if asks_for_default_deny_owner_authorization {
+        let response = source.to_ascii_lowercase();
+        let has_admin = response.contains("admin") || response.contains("superuser");
+        let has_owner = response.contains("owner");
+        let has_read_rule = response.contains("read");
+        let has_deny = response.contains("return false")
+            || response.contains("returnfalse")
+            || response.contains("deny")
+            || response.contains("forbidden");
+        if !has_admin || !has_owner || !has_read_rule || !has_deny {
+            return false;
         }
     }
     true
@@ -3202,7 +3300,9 @@ async fn h_brain_chat(
             &turn_pools,
             &|candidate| {
                 (is_complete_file_manifest(candidate)
-                    && programming_response_compatible(labels, candidate))
+                    && prompt_programming_response_compatible(
+                        labels, prompt, candidate,
+                    ))
                     || is_grounded_code_fragment(candidate)
             },
         ) {
@@ -3278,7 +3378,9 @@ async fn h_brain_chat(
     });
     let ranked_single_manifest = composition_features
         .as_ref()
-        .and_then(|(_, labels)| single_language_ranked_manifest(labels, &feature_candidates));
+        .and_then(|(_, labels)| {
+            single_language_ranked_manifest(labels, prompt, &feature_candidates)
+        });
     let diagnostic_intent_labels = composition_features
         .as_ref()
         .map(|(_, labels)| labels.clone())
@@ -3313,7 +3415,10 @@ async fn h_brain_chat(
                     &chat_query_pools,
                     &turn_pools,
                     &|candidate| {
-                        prompt_programming_response_compatible(labels, prompt, candidate)
+                        !is_complete_file_manifest(candidate)
+                            && prompt_programming_response_compatible(
+                                labels, prompt, candidate,
+                            )
                     },
                 )
             })
@@ -3347,6 +3452,14 @@ async fn h_brain_chat(
                     .as_ref()
                     .is_some_and(|artifact| composed_artifact_contains_fragment(artifact, exact))
         });
+    let prompt_lowercase = prompt.to_ascii_lowercase();
+    let explicitly_requests_source_unit = (prompt_lowercase.contains("function")
+        || prompt_lowercase.contains("method")
+        || prompt_lowercase.contains("snippet"))
+        && !prompt_lowercase.contains("project")
+        && !prompt_lowercase.contains("module")
+        && !prompt_lowercase.contains("multiple files")
+        && !prompt_lowercase.contains("multi-file");
     let trained_bytes = if raw_is_exact && raw_trained.is_some() {
         // Direct sensory evidence is the strongest tier. Derived diagnostic
         // pools may compose novel requests, but can never overwrite an
@@ -3356,6 +3469,12 @@ async fn h_brain_chat(
         exact_complete_manifest
     } else if exact_is_composition_prerequisite && composed.is_some() {
         composed
+    } else if !explicitly_requests_source_unit && ranked_single_manifest.is_some() {
+        // Preserve a learned project/file response contract unless the user
+        // explicitly asks for one source unit. A popular plain source from
+        // the same sparse behavior class must not shadow a compatible
+        // validated manifest.
+        ranked_single_manifest
     } else if exact_feature
         .as_ref()
         .is_some_and(|candidate| {
@@ -4696,14 +4815,22 @@ mod tests {
             "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
         ];
         assert_eq!(
-            single_language_ranked_manifest(&labels, &[manifest.clone()]),
+            single_language_ranked_manifest(
+                &labels,
+                "Build a JavaScript transactional outbox project.",
+                &[manifest.clone()],
+            ),
             Some(manifest.clone())
         );
 
         let mut polyglot = labels;
         polyglot.push("intent:LANGUAGE:GO".to_string());
         assert_eq!(
-            single_language_ranked_manifest(&polyglot, &[manifest]),
+            single_language_ranked_manifest(
+                &polyglot,
+                "Build a JavaScript and Go project.",
+                &[manifest],
+            ),
             None
         );
 
@@ -4711,7 +4838,11 @@ mod tests {
         let javascript = br#"{"files":{"order_service.js":"class OrderService {}\n"}}"#.to_vec();
         let java_manifest = br#"{"files":{"AuditLog.java":"public class AuditLog {}\n"}}"#.to_vec();
         assert_eq!(
-            single_language_ranked_manifest(&java, &[javascript.clone(), java_manifest.clone()]),
+            single_language_ranked_manifest(
+                &java,
+                "Build Java code.",
+                &[javascript.clone(), java_manifest.clone()],
+            ),
             Some(java_manifest)
         );
         assert!(!programming_response_compatible(&java, &javascript));
@@ -5049,6 +5180,66 @@ mod tests {
             odd_prompt,
             b"def filter_odd(values):\n    return [value for value in values if value % 2]",
         ));
+
+        let authorization = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:SECURITY:AUTHORIZATION".to_string(),
+        ];
+        let authorization_prompt =
+            "Create Python access-control code that denies by default, permits administrators, and permits owner reads only.";
+        assert!(!prompt_programming_response_compatible(
+            &authorization,
+            authorization_prompt,
+            b"def oauth_authorization(client):\n    return client.exchange_token()",
+        ));
+        assert!(prompt_programming_response_compatible(
+            &authorization,
+            authorization_prompt,
+            br#"{"files":{"authorization.py":"def is_authorized(principal, action, owner_id):\n    if not principal:\n        return False\n    if 'admin' in principal.get('roles', []):\n        return True\n    return action == 'read' and principal.get('id') == owner_id\n"}}"#,
+        ));
+    }
+
+    #[test]
+    fn platform_behavior_contracts_reject_shape_only_collisions() {
+        let python = "instruction_intent:LANGUAGE:PYTHON".to_string();
+        let migration = vec![
+            python.clone(),
+            "instruction_intent:PERSISTENCE:SCHEMA_MIGRATION".to_string(),
+        ];
+        assert!(!programming_response_compatible(
+            &migration,
+            b"def setup_db(url):\n    return create_engine(url)",
+        ));
+        assert!(programming_response_compatible(
+            &migration,
+            br#"{"files":{"migrations.py":"def migrate(db):\n    version = db.execute('PRAGMA user_version').fetchone()[0]\n    if version < 2:\n        db.execute('ALTER TABLE users ADD COLUMN email TEXT')\n"}}"#,
+        ));
+
+        let circuit = vec![
+            python.clone(),
+            "instruction_intent:RESILIENCE:CIRCUIT_BREAKER".to_string(),
+        ];
+        assert!(!programming_response_compatible(
+            &circuit,
+            b"def retry_call(operation, attempts):\n    return operation()",
+        ));
+        assert!(programming_response_compatible(
+            &circuit,
+            br#"{"files":{"circuit.py":"class CircuitOpen(Exception): pass\nclass CircuitBreaker:\n    def __init__(self, failure_threshold, recovery_timeout):\n        self.failure_threshold = failure_threshold\n        self.recovery_timeout = recovery_timeout\n        self.opened_at = None\n"}}"#,
+        ));
+
+        let bounded = vec![
+            python,
+            "instruction_intent:CONCURRENCY:BOUNDED_ASYNC".to_string(),
+        ];
+        assert!(!programming_response_compatible(
+            &bounded,
+            b"def execute(pool, requests):\n    return [pool.submit(x) for x in requests]",
+        ));
+        assert!(programming_response_compatible(
+            &bounded,
+            br#"{"files":{"concurrency.py":"import asyncio\nasync def bounded_map(worker, items, limit):\n    semaphore = asyncio.Semaphore(limit)\n    async def run(item):\n        async with semaphore:\n            return await worker(item)\n    return await asyncio.gather(*(run(item) for item in items))\n"}}"#,
+        ));
     }
 
     #[test]
@@ -5188,6 +5379,7 @@ mod tests {
         assert_eq!(
             single_language_ranked_manifest(
                 &transaction,
+                "Build Python all-or-nothing account transfer code.",
                 &[
                     br#"{"files":{"audit.py":"def audit(record):\n    return record\n"}}"#
                         .to_vec(),
