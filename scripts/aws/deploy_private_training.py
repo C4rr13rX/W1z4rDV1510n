@@ -20,11 +20,11 @@ POLICY_ARN = f"arn:aws:iam::{ACCOUNT}:policy/{POLICY_NAME}"
 DEPLOYMENT_GROUP = "WizardVisionDeployers"
 
 
-def estimate(volume_gib: int, hours: int, spot_cap: float) -> dict[str, float]:
+def estimate(volume_gib: int, hours: int, hourly_compute: float) -> dict[str, float]:
     # us-east-1 public rates as of 2026-07-29. The deployer deliberately
     # assumes every compute hour reaches the Spot max-price ceiling.
     ebs = volume_gib * 0.08 * hours / 720.0
-    compute = spot_cap * hours
+    compute = hourly_compute * hours
     endpoints = 3 * 0.01 * hours
     staging = 4.0
     return {
@@ -132,18 +132,18 @@ def bootstrap_permissions() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--volume-gib", type=int, default=1024)
-    parser.add_argument("--hours", type=int, default=240)
-    parser.add_argument("--spot-max", type=float, default=0.20)
-    parser.add_argument("--instance-type", default="m6a.2xlarge")
+    parser.add_argument("--hours", type=int, default=192)
+    parser.add_argument("--hourly-compute-cap", type=float, default=0.1728)
+    parser.add_argument("--instance-type", default="m6a.xlarge")
     parser.add_argument("--acknowledge-max-usd", type=float, required=True)
     parser.add_argument("--bootstrap-permissions", action="store_true")
     parser.add_argument("--estimate-only", action="store_true")
     args = parser.parse_args()
     if not 512 <= args.volume_gib <= 2048:
         parser.error("--volume-gib must be between 512 and 2048")
-    if not 24 <= args.hours <= 240:
-        parser.error("--hours must be between 24 and 240")
-    costs = estimate(args.volume_gib, args.hours, args.spot_max)
+    if not 24 <= args.hours <= 192:
+        parser.error("--hours must be between 24 and 192")
+    costs = estimate(args.volume_gib, args.hours, args.hourly_compute_cap)
     print(json.dumps(costs, indent=2))
     if args.acknowledge_max_usd < costs["guarded_total"]:
         parser.error(
@@ -165,7 +165,6 @@ def main() -> int:
         "ArtifactBucket=wizard-vision-private-321572159829-us-east-1",
         f"InstanceType={args.instance_type}",
         f"DataVolumeGiB={args.volume_gib}",
-        f"MaximumSpotPrice={args.spot_max:.3f}",
         f"MaximumRuntimeHours={args.hours}",
         "--tags", "Project=WizardVision", "CostGuard=Temporary",
         "--no-fail-on-empty-changeset",

@@ -11,10 +11,10 @@ The stack in `infra/aws/wizard-vision-private-training.yaml` creates:
 - one VPC and subnet with no internet gateway and no public address;
 - no inbound security-group rules and no domain;
 - private S3, SSM, and SSM Messages endpoints;
-- one persistent Spot `m6a.2xlarge` capped at `$0.20/hour`;
+- one On-Demand `m6a.xlarge` with 4 vCPU and 16 GiB dedicated RAM;
 - one encrypted 1 TiB gp3 data volume retained independently of the instance;
 - an instance timer that cancels the Spot request and stops compute after at
-  most 240 hours; and
+  most 192 hours; and
 - a least-privilege instance role restricted to the Wizard Vision bucket
   prefix and its own cost-stop operations.
 
@@ -26,9 +26,9 @@ is enabled.
 ## Cost boundary
 
 `scripts/aws/deploy_private_training.py` refuses deployment unless the operator
-acknowledges a ceiling at or above its conservative estimate. The estimate
-assumes every Spot hour costs the configured maximum, rather than a favorable
-historical price. The initial deployment command is:
+acknowledges a ceiling at or above its conservative estimate. The initial
+deployment uses the full On-Demand hourly price rather than assuming Spot
+availability. The initial deployment command is:
 
 ```text
 python scripts/aws/deploy_private_training.py \
@@ -57,4 +57,3 @@ excludes logs, PID files, and temporary files but includes the authoritative
 container, WAL, rollback guard, identity, corpus ledgers, deferred intervals,
 and admission metadata. Do not delete local state until the AWS instance has
 restored the exact SHA-256 and passed the retention and enterprise gates.
-

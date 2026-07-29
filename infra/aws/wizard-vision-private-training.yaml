@@ -7,20 +7,17 @@ Parameters:
     Default: wizard-vision-private-321572159829-us-east-1
   InstanceType:
     Type: String
-    Default: m6a.2xlarge
+    Default: m6a.xlarge
   DataVolumeGiB:
     Type: Number
     Default: 1024
     MinValue: 512
     MaxValue: 2048
-  MaximumSpotPrice:
-    Type: String
-    Default: "0.20"
   MaximumRuntimeHours:
     Type: Number
-    Default: 240
+    Default: 192
     MinValue: 24
-    MaxValue: 240
+    MaxValue: 192
 
 Resources:
   TrainingVpc:
@@ -163,8 +160,6 @@ Resources:
               - Effect: Allow
                 Action:
                   - ec2:DescribeInstances
-                  - ec2:DescribeSpotInstanceRequests
-                  - ec2:CancelSpotInstanceRequests
                   - ec2:StopInstances
                 Resource: "*"
 
@@ -198,12 +193,6 @@ Resources:
       IamInstanceProfile: !Ref TrainingInstanceProfile
       SubnetId: !Ref PrivateSubnet
       SecurityGroupIds: [!Ref InstanceSecurityGroup]
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          InstanceInterruptionBehavior: stop
-          SpotInstanceType: persistent
-          MaxPrice: !Ref MaximumSpotPrice
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
@@ -225,8 +214,6 @@ Resources:
           set -euo pipefail
           TOKEN=$(curl -fsS -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token)
           INSTANCE_ID=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-          REQUEST_ID=$(aws ec2 describe-spot-instance-requests --region ${AWS::Region} --filters Name=instance-id,Values=$INSTANCE_ID --query 'SpotInstanceRequests[0].SpotInstanceRequestId' --output text)
-          if test "$REQUEST_ID" != "None"; then aws ec2 cancel-spot-instance-requests --region ${AWS::Region} --spot-instance-request-ids "$REQUEST_ID"; fi
           aws ec2 stop-instances --region ${AWS::Region} --instance-ids "$INSTANCE_ID"
           EOF
           chmod 750 /usr/local/sbin/wizard-cost-stop.sh
