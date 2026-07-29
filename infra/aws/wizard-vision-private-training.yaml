@@ -65,11 +65,7 @@ Resources:
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: 10.73.0.0/16
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          DestinationPrefixListId: !GetAtt S3Endpoint.PrefixListId
+          CidrIp: 0.0.0.0/0
       Tags:
         - {Key: Name, Value: wizard-vision-training}
         - {Key: Project, Value: WizardVision}
