@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
+import shutil
 import subprocess
-import tarfile
 import tempfile
 from pathlib import Path
 
@@ -16,15 +17,40 @@ BUCKET = "wizard-vision-private-321572159829-us-east-1"
 PREFIX = "wizard-vision/source"
 
 
-def tracked_files() -> list[Path]:
+def tracked_files(revision: str = "HEAD", root: Path = ROOT) -> list[str]:
     output = subprocess.check_output(
-        ["git", "ls-files", "-z"], cwd=ROOT
+        ["git", "ls-tree", "-r", "--name-only", "-z", revision], cwd=root
     )
     return [
-        ROOT / name.decode("utf-8")
+        name.decode("utf-8")
         for name in output.split(b"\0")
         if name
     ]
+
+
+def write_source_archive(output: Path, revision: str, root: Path = ROOT) -> None:
+    """Gzip the immutable Git tree with a reproducible wrapper header."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen(
+        ["git", "archive", "--format=tar", revision],
+        cwd=root,
+        stdout=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    try:
+        with output.open("wb") as raw, gzip.GzipFile(
+            filename="",
+            mode="wb",
+            compresslevel=6,
+            fileobj=raw,
+            mtime=0,
+        ) as compressed:
+            shutil.copyfileobj(process.stdout, compressed, 8 * 1024 * 1024)
+    finally:
+        process.stdout.close()
+    if process.wait() != 0:
+        output.unlink(missing_ok=True)
+        raise subprocess.CalledProcessError(process.returncode, process.args)
 
 
 def sha256(path: Path) -> str:
@@ -46,15 +72,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    files = tracked_files()
-    with tarfile.open(args.output, "w:gz", compresslevel=6) as archive:
-        for path in files:
-            if path.is_file():
-                archive.add(path, arcname=path.relative_to(ROOT))
     commit = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
     ).strip()
+    files = tracked_files(commit)
+    write_source_archive(args.output, commit)
     manifest = {
         "commit": commit,
         "file_count": len(files),
