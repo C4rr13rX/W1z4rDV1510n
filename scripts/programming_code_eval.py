@@ -34,14 +34,20 @@ class Client:
         self.prefix = url.path.rstrip("/")
         self.conn = http.client.HTTPConnection(url.hostname, url.port or 80, timeout=60)
 
-    def chat(self, prompt: str) -> str:
+    def chat_payload(self, prompt: str) -> dict:
         self.conn.request("POST", f"{self.prefix}/brain/chat", json.dumps({"text": prompt}),
                           {"Content-Type": "application/json"})
         response = self.conn.getresponse()
         payload = response.read()
         if response.status >= 400:
             raise RuntimeError(f"HTTP {response.status}: {payload[:300]!r}")
-        return str(json.loads(payload).get("reply") or "")
+        decoded = json.loads(payload)
+        if not isinstance(decoded, dict):
+            raise RuntimeError(f"chat returned non-object payload: {type(decoded).__name__}")
+        return decoded
+
+    def chat(self, prompt: str) -> str:
+        return str(self.chat_payload(prompt).get("reply") or "")
 
 
 def load_examples() -> list[dict]:
@@ -88,7 +94,8 @@ def main() -> int:
     for response_prefix, function, call_args, expected, novel_prompt in CASES:
         exemplar = next(row for row in rows if str(row.get("response", "")).startswith(response_prefix))
         for kind, prompt in (("trained", exemplar["prompt"]), ("novel_paraphrase", novel_prompt)):
-            reply = client.chat(prompt)
+            payload = client.chat_payload(prompt)
+            reply = str(payload.get("reply") or "")
             ran, error = executes(reply, function, call_args, expected)
             results.append({
                 "kind": kind, "function": function, "prompt": prompt,
@@ -99,6 +106,14 @@ def main() -> int:
                 "call_args": call_args,
                 "expected_result": expected,
                 "error": error,
+                "route": {
+                    "decoder": payload.get("decoder"),
+                    "grounding": payload.get("grounding"),
+                    "semantic_refinement_score": payload.get("semantic_refinement_score"),
+                    "semantic_refinement_margin": payload.get("semantic_refinement_margin"),
+                    "intent_diagnostics": payload.get("intent_diagnostics"),
+                    "paged_neurons_released": payload.get("paged_neurons_released"),
+                },
             })
     summary = {}
     for kind in ("trained", "novel_paraphrase"):

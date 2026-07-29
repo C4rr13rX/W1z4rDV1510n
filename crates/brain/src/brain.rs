@@ -4431,6 +4431,63 @@ impl Brain {
         active_context_pools: &[PoolId],
         conditioned_pools: &[PoolId],
     ) -> Vec<RankedFeatureBinding> {
+        self.decode_ranked_feature_bindings_with_evidence_filtered(
+            feature_pool,
+            query_labels,
+            target_pool,
+            max_results,
+            success_pool,
+            failure_pool,
+            active_context_pools,
+            conditioned_pools,
+            None,
+        )
+    }
+
+    /// Return the strongest feature-grounded action that also satisfies a
+    /// caller-owned deterministic validator. Filtering happens before
+    /// `max_results` truncation, so a popular but behaviorally incompatible
+    /// corpus action cannot crowd a rarer correct episode out of a bounded
+    /// readout. The validator sees only verbatim learned target bytes.
+    pub fn decode_first_ranked_feature_binding_with_context_where(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+        success_pool: Option<PoolId>,
+        failure_pool: Option<PoolId>,
+        active_context_pools: &[PoolId],
+        conditioned_pools: &[PoolId],
+        validator: &dyn Fn(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.decode_ranked_feature_bindings_with_evidence_filtered(
+            feature_pool,
+            query_labels,
+            target_pool,
+            1,
+            success_pool,
+            failure_pool,
+            active_context_pools,
+            conditioned_pools,
+            Some(validator),
+        )
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.bytes)
+    }
+
+    fn decode_ranked_feature_bindings_with_evidence_filtered(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+        target_pool: PoolId,
+        max_results: usize,
+        success_pool: Option<PoolId>,
+        failure_pool: Option<PoolId>,
+        active_context_pools: &[PoolId],
+        conditioned_pools: &[PoolId],
+        validator: Option<&dyn Fn(&[u8]) -> bool>,
+    ) -> Vec<RankedFeatureBinding> {
         if max_results == 0
             || feature_pool == target_pool
             || feature_pool == self.binding_pool_id
@@ -4741,6 +4798,7 @@ impl Brain {
         decoded
             .into_iter()
             .filter(|(_, rank)| !has_nonnegative || rank.0 >= 0)
+            .filter(|(bytes, _)| validator.is_none_or(|accept| accept(bytes)))
             .take(max_results)
             .map(|(bytes, rank)| RankedFeatureBinding {
                 bytes,

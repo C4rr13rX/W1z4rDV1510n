@@ -348,6 +348,59 @@ fn ranked_feature_readout_preserves_selection_evidence() {
 }
 
 #[test]
+fn deterministic_validator_filters_before_bounded_feature_readout() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let intent =
+        b"@intent:LANGUAGE:PYTHON\n@intent:PARITY:ODD\n";
+    let popular_but_wrong =
+        b"def median(values, count):\n    return values[count // 2] if count % 2 else 0";
+    let rarer_but_valid =
+        b"def filter_odd(values):\n    return [value for value in values if value % 2]";
+    for _ in 0..12 {
+        brain.observe(feature_pool, intent);
+        brain.observe(action_pool, popular_but_wrong);
+        brain.advance_tick();
+    }
+    for _ in 0..3 {
+        brain.observe(feature_pool, intent);
+        brain.observe(action_pool, rarer_but_valid);
+        brain.advance_tick();
+    }
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(intent);
+    assert_eq!(
+        brain
+            .decode_ranked_feature_bindings(feature_pool, &labels, action_pool, 1)
+            .first()
+            .map(Vec::as_slice),
+        Some(popular_but_wrong.as_slice())
+    );
+    let filtered = brain.decode_first_ranked_feature_binding_with_context_where(
+        feature_pool,
+        &labels,
+        action_pool,
+        None,
+        None,
+        &[feature_pool],
+        &[],
+        &|bytes| bytes.windows(b"filter_odd".len()).any(|part| part == b"filter_odd"),
+    );
+    assert_eq!(filtered.as_deref(), Some(rarer_but_valid.as_slice()));
+}
+
+#[test]
 fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
     let mut brain = Brain::new(BrainConfig::default());
     let feature_pool = brain.create_pool(

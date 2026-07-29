@@ -1760,6 +1760,16 @@ fn has_programming_language_intent(labels: &[String]) -> bool {
     labels.iter().any(|label| label.contains(":LANGUAGE:"))
 }
 
+fn contains_ascii_term(text: &str, term: &str) -> bool {
+    text.match_indices(term).any(|(start, matched)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + matched.len()..].chars().next();
+        let is_identifier = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+        before.is_none_or(|ch| !is_identifier(ch))
+            && after.is_none_or(|ch| !is_identifier(ch))
+    })
+}
+
 fn contains_ascii_call(text: &str, name: &str) -> bool {
     text.match_indices(name).any(|(start, matched)| {
         let before = text[..start].chars().next_back();
@@ -2318,6 +2328,67 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
             _ => false,
         }
     })
+}
+
+fn prompt_programming_response_compatible(
+    labels: &[String],
+    prompt: &str,
+    bytes: &[u8],
+) -> bool {
+    if !programming_response_compatible(labels, bytes) || is_complete_file_manifest(bytes) {
+        return false;
+    }
+    let source = String::from_utf8_lossy(bytes);
+    if labels
+        .iter()
+        .any(|label| label.ends_with(":LANGUAGE:PYTHON"))
+    {
+        if let Some(name) =
+            requested_python_identifier(prompt, &["function named ", "function called "])
+        {
+            let declaration = format!("def {name}(");
+            if !source
+                .lines()
+                .any(|line| line.trim_start().starts_with(&declaration))
+            {
+                return false;
+            }
+        }
+        let request = prompt.to_ascii_lowercase();
+        let asks_for_odd_collection_filter = labels
+            .iter()
+            .any(|label| label.ends_with(":PARITY:ODD"))
+            && (request.contains("only odd")
+                || (request.contains("odd")
+                    && (request.contains("keep") || request.contains("filter"))))
+            && [
+                "list",
+                "collection",
+                "numbers",
+                "integers",
+                "values",
+                "sequence",
+            ]
+            .iter()
+            .any(|term| contains_ascii_term(&request, term));
+        if asks_for_odd_collection_filter {
+            let compact = source
+                .chars()
+                .filter(|ch| !ch.is_ascii_whitespace())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let iterates_collection = compact.contains("for")
+                || compact.contains("filter(")
+                || compact.contains(".iter(");
+            let returns_collection = compact.contains("return[")
+                || compact.contains("returnlist(")
+                || compact.contains(".collect(");
+            if !iterates_collection || !returns_collection {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn derived_feature_artifact_compatible(labels: &[String], bytes: &[u8]) -> bool {
@@ -3156,6 +3227,28 @@ async fn h_brain_chat(
     let programming_language_intent = has_programming_language_intent(&diagnostic_intent_labels);
     let ranked_single_source =
         single_language_ranked_source(&diagnostic_intent_labels, &feature_candidates);
+    let ranked_validated_source = composition_features.as_ref().and_then(|(pool_id, labels)| {
+        (labels
+            .iter()
+            .filter(|label| label.contains(":LANGUAGE:"))
+            .count()
+            == 1)
+            .then(|| {
+                brain.decode_first_ranked_feature_binding_with_context_where(
+                    *pool_id,
+                    labels,
+                    action_pool,
+                    brain.fabric().pool(8).map(|_| 8),
+                    brain.fabric().pool(6).map(|_| 6),
+                    &chat_query_pools,
+                    &turn_pools,
+                    &|candidate| {
+                        prompt_programming_response_compatible(labels, prompt, candidate)
+                    },
+                )
+            })
+            .flatten()
+    });
     let raw_programming_compatible = raw_trained.as_ref().is_some_and(|candidate| {
         programming_response_compatible(&diagnostic_intent_labels, candidate)
     });
@@ -3205,6 +3298,11 @@ async fn h_brain_chat(
         // exactly while broad project fragments share enough diagnostics to
         // form a syntactically valid but unrelated composition.
         exact_feature
+    } else if ranked_validated_source.is_some() {
+        // Apply the complete deterministic request before candidate-window
+        // truncation. Popular but behaviorally incompatible corpus actions
+        // cannot crowd a rarer correct learned episode out of bounded recall.
+        ranked_validated_source
     } else if raw_motif_trained.as_ref().is_some_and(|candidate| {
         programming_response_compatible(&diagnostic_intent_labels, candidate)
     }) {
@@ -4827,6 +4925,43 @@ mod tests {
             ),
             Some(frequency)
         );
+    }
+
+    #[test]
+    fn prompt_constraints_disambiguate_shared_programming_intents() {
+        let square = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:POWER_SELF:2".to_string(),
+        ];
+        let square_prompt =
+            "Create a Python function named square that computes a number times itself.";
+        assert!(!prompt_programming_response_compatible(
+            &square,
+            square_prompt,
+            b"def Square(x, a, b, c):\n    return a * x ** 2 + b * x + c",
+        ));
+        assert!(prompt_programming_response_compatible(
+            &square,
+            square_prompt,
+            b"def square(n):\n    return n * n",
+        ));
+
+        let odd = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:PARITY:ODD".to_string(),
+        ];
+        let odd_prompt =
+            "Build a Python function which keeps only odd integers from an input list.";
+        assert!(!prompt_programming_response_compatible(
+            &odd,
+            odd_prompt,
+            b"def smedian(values, count):\n    return values[count // 2] if count % 2 else 0",
+        ));
+        assert!(prompt_programming_response_compatible(
+            &odd,
+            odd_prompt,
+            b"def filter_odd(values):\n    return [value for value in values if value % 2]",
+        ));
     }
 
     #[test]
