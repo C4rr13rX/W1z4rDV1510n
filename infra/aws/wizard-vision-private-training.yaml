@@ -1,0 +1,267 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Private, cost-bounded Wizard Vision corpus-training host.
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+    Default: wizard-vision-private-321572159829-us-east-1
+  InstanceType:
+    Type: String
+    Default: m6a.2xlarge
+  DataVolumeGiB:
+    Type: Number
+    Default: 1024
+    MinValue: 512
+    MaxValue: 2048
+  MaximumSpotPrice:
+    Type: String
+    Default: "0.20"
+  MaximumRuntimeHours:
+    Type: Number
+    Default: 240
+    MinValue: 24
+    MaxValue: 240
+
+Resources:
+  TrainingVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.73.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - {Key: Name, Value: wizard-vision-private}
+        - {Key: Project, Value: WizardVision}
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref TrainingVpc
+      CidrBlock: 10.73.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - {Key: Name, Value: wizard-vision-private-a}
+        - {Key: Project, Value: WizardVision}
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref TrainingVpc
+      Tags:
+        - {Key: Name, Value: wizard-vision-private}
+        - {Key: Project, Value: WizardVision}
+
+  PrivateRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: No-ingress Wizard Vision training host
+      VpcId: !Ref TrainingVpc
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.73.0.0/16
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          DestinationPrefixListId: !GetAtt S3Endpoint.PrefixListId
+      Tags:
+        - {Key: Name, Value: wizard-vision-training}
+        - {Key: Project, Value: WizardVision}
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS from the private training host to AWS endpoints
+      VpcId: !Ref TrainingVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - {Key: Name, Value: wizard-vision-endpoints}
+        - {Key: Project, Value: WizardVision}
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      VpcId: !Ref TrainingVpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds: [!Ref PrivateRouteTable]
+
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref TrainingVpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref TrainingVpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref TrainingVpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  TrainingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: wizard-vision-private-training
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: WizardVisionArtifactsAndCostStop
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/wizard-vision/*
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSpotInstanceRequests
+                  - ec2:CancelSpotInstanceRequests
+                  - ec2:StopInstances
+                Resource: "*"
+
+  TrainingInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: wizard-vision-private-training
+      Roles: [!Ref TrainingRole]
+
+  TrainingDataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !GetAtt PrivateSubnet.AvailabilityZone
+      Encrypted: true
+      Size: !Ref DataVolumeGiB
+      VolumeType: gp3
+      Iops: 3000
+      Throughput: 125
+      Tags:
+        - {Key: Name, Value: wizard-vision-training-data}
+        - {Key: Project, Value: WizardVision}
+        - {Key: CostGuard, Value: Temporary}
+
+  TrainingInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref TrainingInstanceProfile
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          InstanceInterruptionBehavior: stop
+          SpotInstanceType: persistent
+          MaxPrice: !Ref MaximumSpotPrice
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      Tags:
+        - {Key: Name, Value: wizard-vision-private-training}
+        - {Key: Project, Value: WizardVision}
+        - {Key: CostGuard, Value: Temporary}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y awscli2 python3 tar gzip
+          cat >/usr/local/sbin/wizard-cost-stop.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          TOKEN=$(curl -fsS -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token)
+          INSTANCE_ID=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+          REQUEST_ID=$(aws ec2 describe-spot-instance-requests --region ${AWS::Region} --filters Name=instance-id,Values=$INSTANCE_ID --query 'SpotInstanceRequests[0].SpotInstanceRequestId' --output text)
+          if test "$REQUEST_ID" != "None"; then aws ec2 cancel-spot-instance-requests --region ${AWS::Region} --spot-instance-request-ids "$REQUEST_ID"; fi
+          aws ec2 stop-instances --region ${AWS::Region} --instance-ids "$INSTANCE_ID"
+          EOF
+          chmod 750 /usr/local/sbin/wizard-cost-stop.sh
+          systemd-run --unit=wizard-cost-guard --on-active=${MaximumRuntimeHours}h /usr/local/sbin/wizard-cost-stop.sh
+          mkdir -p /srv/wizard
+          DATA_DEVICE=""
+          for ATTEMPT in $(seq 1 60); do
+            DATA_DEVICE=$(lsblk -bndo PATH,SIZE,TYPE | awk '$3=="disk" && $2>500000000000 {print $1; exit}')
+            if test -n "$DATA_DEVICE"; then break; fi
+            sleep 5
+          done
+          test -n "$DATA_DEVICE"
+          if ! blkid "$DATA_DEVICE"; then mkfs.xfs -f "$DATA_DEVICE"; fi
+          DATA_UUID=$(blkid -s UUID -o value "$DATA_DEVICE")
+          grep -q "$DATA_UUID" /etc/fstab || echo "UUID=$DATA_UUID /srv/wizard xfs defaults,nofail 0 2" >> /etc/fstab
+          mount /srv/wizard
+          mkdir -p /srv/wizard/project /srv/wizard/runtime /srv/wizard/control
+          chown -R ec2-user:ec2-user /srv/wizard
+          printf '{"state":"infrastructure_ready","region":"%s","bucket":"%s"}\n' '${AWS::Region}' '${ArtifactBucket}' >/srv/wizard/control/state.json
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref TrainingInstance
+      VolumeId: !Ref TrainingDataVolume
+
+Outputs:
+  InstanceId:
+    Value: !Ref TrainingInstance
+  DataVolumeId:
+    Value: !Ref TrainingDataVolume
+  PrivateIp:
+    Value: !GetAtt TrainingInstance.PrivateIp
+  ArtifactBucket:
+    Value: !Ref ArtifactBucket
+  MaximumRuntimeHours:
+    Value: !Ref MaximumRuntimeHours
