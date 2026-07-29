@@ -2011,7 +2011,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             "stop_runtime_node(runtime, args.endpoint)", trainer
         )
         self.assertIn(
-            "if not args.external_node and process is not None:", trainer
+            "process = start_node(args, runtime, identity)", trainer
         )
 
     def test_reproducible_trainer_separates_forward_and_deferred_replay(self) -> None:

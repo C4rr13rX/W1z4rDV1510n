@@ -21,10 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
+    from scripts.independent_snapshot import publish_independent_copy
     from scripts.programming_curriculum_supervisor import stop_runtime_node
 except ModuleNotFoundError:
     # Direct `python scripts/train_programming_brain.py` execution places the
     # scripts directory, rather than the repository root, on sys.path.
+    from independent_snapshot import publish_independent_copy
     from programming_curriculum_supervisor import stop_runtime_node
 
 
@@ -176,10 +178,23 @@ def guard_seed_stage(runtime: Path, stage: str) -> None:
     if not snapshot.is_file():
         raise RuntimeError(f"cannot guard missing brain snapshot: {snapshot}")
     if snapshot.suffix == ".wbrain":
-        temporary = guard.with_suffix(guard.suffix + ".tmp")
-        shutil.copy2(snapshot, temporary)
-        os.replace(temporary, guard)
-        guard_mode = "copy"
+        def require_headroom(source: Path, copies: int, operation: str) -> None:
+            size = source.stat().st_size
+            reserve = max(64 * 1024 * 1024, min(4 * 1024 ** 3, size // 10))
+            required = size * copies + reserve
+            free = shutil.disk_usage(source.parent).free
+            if free < required:
+                raise RuntimeError(
+                    f"insufficient disk headroom for {operation}: "
+                    f"{free} bytes free, {required} required"
+                )
+
+        guard_mode = publish_independent_copy(
+            snapshot,
+            guard,
+            operation="seed-stage .wbrain guard",
+            require_full_copy_headroom=require_headroom,
+        )
     else:
         os.link(snapshot, guard)
         guard_mode = "hardlink"
@@ -495,7 +510,7 @@ def main() -> int:
     state = read_state(state_path)
     process: subprocess.Popen | None = None
     try:
-        if not args.external_node and process is not None:
+        if not args.external_node:
             if endpoint_healthy(args.endpoint):
                 raise RuntimeError(
                     f"endpoint is already in use: {args.endpoint}; choose another "
