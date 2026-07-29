@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from scripts.aws.bootstrap_training_host import bootstrap_commands
+from scripts.aws.bootstrap_training_host import (
+    bootstrap_commands,
+    cost_guard_commands,
+)
 from scripts.aws.deploy_private_training import estimate_cost
 
 
@@ -55,3 +58,11 @@ def test_private_host_bootstrap_verifies_source_then_restores_manifests():
     assert "rust.tar.gz" in commands
     assert "restore_training_inputs.py" in commands
     assert "--source-commit " + "a" * 40 in commands
+
+
+def test_cost_guard_uses_a_persisted_absolute_deadline():
+    commands = "\n".join(cost_guard_commands(1_800_000_000))
+    assert "echo 1800000000 >/srv/wizard/control/cost-deadline.epoch" in commands
+    assert "wizard-cost-stop.timer" in commands
+    assert "OnUnitActiveSec=1min" in commands
+    assert "/sbin/shutdown -h now" in commands

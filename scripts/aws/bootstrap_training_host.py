@@ -6,6 +6,7 @@ import argparse
 import json
 import subprocess
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -18,12 +19,15 @@ AWSCLI_KEY = "wizard-vision/bootstrap/awscli-exe-linux-x86_64.zip"
 
 
 def aws(
-    profile: str, *arguments: str, capture: bool = True
+    profile: str,
+    *arguments: str,
+    capture: bool = True,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["aws", *arguments, "--profile", profile, "--region", REGION],
         cwd=ROOT,
-        check=True,
+        check=check,
         text=True,
         capture_output=capture,
     )
@@ -64,6 +68,70 @@ def wait_for_ssm(profile: str, instance_id: str, timeout: int) -> None:
             return
         time.sleep(10)
     raise TimeoutError(f"{instance_id} did not become SSM Online")
+
+
+def instance_deadline_epoch(
+    profile: str, instance_id: str, maximum_hours: int
+) -> int:
+    launched = aws(
+        profile,
+        "ec2",
+        "describe-instances",
+        "--instance-ids",
+        instance_id,
+        "--query",
+        "Reservations[0].Instances[0].LaunchTime",
+        "--output",
+        "text",
+    ).stdout.strip()
+    launch_time = datetime.fromisoformat(launched.replace("Z", "+00:00"))
+    return int((launch_time + timedelta(hours=maximum_hours)).timestamp())
+
+
+def cost_guard_commands(deadline_epoch: int) -> list[str]:
+    stop_script = """cat >/usr/local/sbin/wizard-cost-stop.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+DEADLINE_FILE=/srv/wizard/control/cost-deadline.epoch
+test -r "$DEADLINE_FILE" || exit 0
+if test "$(date +%s)" -ge "$(cat "$DEADLINE_FILE")"; then
+  /sbin/shutdown -h now
+fi
+EOF"""
+    service = """cat >/etc/systemd/system/wizard-cost-stop.service <<'EOF'
+[Unit]
+Description=Stop Wizard Vision training host after its persisted cost deadline
+RequiresMountsFor=/srv/wizard
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wizard-cost-stop.sh
+EOF"""
+    timer = """cat >/etc/systemd/system/wizard-cost-stop.timer <<'EOF'
+[Unit]
+Description=Check the Wizard Vision persisted cost deadline
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=true
+Unit=wizard-cost-stop.service
+
+[Install]
+WantedBy=timers.target
+EOF"""
+    return [
+        "set -euxo pipefail",
+        "mkdir -p /srv/wizard/control",
+        f"echo {deadline_epoch} >/srv/wizard/control/cost-deadline.epoch",
+        stop_script,
+        "chmod 750 /usr/local/sbin/wizard-cost-stop.sh",
+        service,
+        timer,
+        "systemctl daemon-reload",
+        "systemctl enable --now wizard-cost-stop.timer",
+        "systemctl start wizard-cost-stop.service",
+    ]
 
 
 def source_manifest(profile: str, commit: str) -> dict:
@@ -161,7 +229,12 @@ def bootstrap_commands(
 
 
 def send_and_wait(
-    profile: str, instance_id: str, commands: list[str], timeout: int
+    profile: str,
+    instance_id: str,
+    commands: list[str],
+    timeout: int,
+    *,
+    comment: str,
 ) -> dict:
     parameters = json.dumps({"commands": commands, "executionTimeout": [str(timeout)]})
     command_id = aws(
@@ -173,7 +246,7 @@ def send_and_wait(
         "--document-name",
         "AWS-RunShellScript",
         "--comment",
-        "Restore checksummed Wizard Vision training state",
+        comment,
         "--parameters",
         parameters,
         "--timeout-seconds",
@@ -185,18 +258,27 @@ def send_and_wait(
     ).stdout.strip()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        result = aws(
+            profile,
+            "ssm",
+            "get-command-invocation",
+            "--command-id",
+            command_id,
+            "--instance-id",
+            instance_id,
+            "--output",
+            "json",
+            check=False,
+        )
+        if result.returncode:
+            if "InvocationDoesNotExist" in result.stderr:
+                time.sleep(2)
+                continue
+            raise RuntimeError(
+                f"cannot inspect SSM command {command_id}: {result.stderr.strip()}"
+            )
         invocation = json.loads(
-            aws(
-                profile,
-                "ssm",
-                "get-command-invocation",
-                "--command-id",
-                command_id,
-                "--instance-id",
-                instance_id,
-                "--output",
-                "json",
-            ).stdout
+            result.stdout
         )
         status = invocation["Status"]
         if status == "Success":
@@ -220,12 +302,37 @@ def main() -> int:
         ).strip(),
     )
     parser.add_argument("--timeout", type=int, default=14_400)
+    parser.add_argument("--maximum-hours", type=int, default=192)
+    parser.add_argument("--cost-guard-only", action="store_true")
     args = parser.parse_args()
 
     instance_id = stack_instance_id(args.profile)
+    wait_for_ssm(args.profile, instance_id, min(args.timeout, 1800))
+    deadline = instance_deadline_epoch(
+        args.profile, instance_id, args.maximum_hours
+    )
+    guard = send_and_wait(
+        args.profile,
+        instance_id,
+        cost_guard_commands(deadline),
+        min(args.timeout, 600),
+        comment="Install persisted Wizard Vision cost deadline",
+    )
+    if args.cost_guard_only:
+        print(
+            json.dumps(
+                {
+                    "instance_id": instance_id,
+                    "status": guard["Status"],
+                    "deadline_epoch": deadline,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
     manifest = source_manifest(args.profile, args.source_commit)
     rust = rust_manifest(args.profile, args.source_commit)
-    wait_for_ssm(args.profile, instance_id, min(args.timeout, 1800))
     presigned_url = aws(
         args.profile,
         "s3",
@@ -244,6 +351,7 @@ def main() -> int:
             rust,
         ),
         args.timeout,
+        comment="Restore checksummed Wizard Vision training state",
     )
     print(
         json.dumps(
