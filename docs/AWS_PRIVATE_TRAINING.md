@@ -32,13 +32,16 @@ availability. The initial deployment command is:
 
 ```text
 python scripts/aws/deploy_private_training.py \
-  --acknowledge-max-usd 100 \
-  --bootstrap-permissions
+  --bootstrap-permissions \
+  --deploy \
+  --cost-cap-usd 100
 ```
 
 The EBS volume is retained if the stack is removed accidentally. After final
 validation, upload the settled final runtime, verify the object checksum,
 explicitly delete the retained volume, and remove the inline deployment policy.
+The deployment permission is a customer-managed policy attached through the
+dedicated `WizardVisionDeployers` group; it is not an inline user policy.
 
 ## Migration invariant
 
@@ -53,7 +56,15 @@ python scripts/aws/stage_training_state.py \
 
 After the manifest reports equal RAM and durable offsets and a successful
 checkpoint, stop the local brain server and rerun with `--upload`. The upload
-excludes logs, PID files, and temporary files but includes the authoritative
-container, WAL, rollback guard, identity, corpus ledgers, deferred intervals,
-and admission metadata. Do not delete local state until the AWS instance has
-restored the exact SHA-256 and passed the retention and enterprise gates.
+includes only the authoritative container, WAL, rollback guard, identity,
+corpus ledgers, deferred intervals, and admission metadata enumerated in its
+SHA-256 manifest. Do not delete local state until the AWS instance has restored
+the exact hashes and passed the retention and enterprise gates.
+
+Once the source, corpus, and stopped brain manifests all exist, restore through
+Systems Manager without opening ingress or adding a NAT gateway:
+
+```text
+python scripts/aws/bootstrap_training_host.py \
+  --source-commit <the-pushed-git-commit>
+```

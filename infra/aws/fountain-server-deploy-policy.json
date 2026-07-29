@@ -29,7 +29,6 @@
         "ec2:AssociateRouteTable",
         "ec2:AuthorizeSecurityGroupEgress",
         "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:CancelSpotInstanceRequests",
         "ec2:CreateRouteTable",
         "ec2:CreateSecurityGroup",
         "ec2:CreateSubnet",
@@ -58,17 +57,6 @@
       ],
       "Resource": "*",
       "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}
-    },
-    {
-      "Sid": "WizardVisionSpotServiceRole",
-      "Effect": "Allow",
-      "Action": ["iam:CreateServiceLinkedRole"],
-      "Resource": "arn:aws:iam::*:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot",
-      "Condition": {
-        "StringEquals": {
-          "iam:AWSServiceName": "spot.amazonaws.com"
-        }
-      }
     },
     {
       "Sid": "WizardVisionAmiParameter",

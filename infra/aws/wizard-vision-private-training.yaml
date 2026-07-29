@@ -153,12 +153,6 @@ Resources:
                   - s3:AbortMultipartUpload
                   - s3:ListMultipartUploadParts
                 Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/wizard-vision/*
-              - Effect: Allow
-                Action:
-                  - ec2:DescribeInstances
-                  - ec2:StopInstances
-                Resource: "*"
-
   TrainingInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:

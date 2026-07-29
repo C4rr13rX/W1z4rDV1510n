@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from scripts.aws.bootstrap_training_host import bootstrap_commands
 from scripts.aws.deploy_private_training import estimate_cost
 
 
@@ -36,3 +37,17 @@ def test_data_volume_is_encrypted_retained_and_reflink_ready():
     assert "Encrypted: true" in template
     assert "mkfs.xfs -f -m reflink=1" in template
     assert "wizard-cost-stop.timer" in template
+
+
+def test_private_host_bootstrap_verifies_source_then_restores_manifests():
+    commands = "\n".join(
+        bootstrap_commands(
+            "https://example.invalid/presigned",
+            "a" * 40,
+            {"archive": "source.tar.gz", "sha256": "b" * 64},
+        )
+    )
+    assert "sha256sum" in commands
+    assert '"b' in commands
+    assert "restore_training_inputs.py" in commands
+    assert "--source-commit " + "a" * 40 in commands
