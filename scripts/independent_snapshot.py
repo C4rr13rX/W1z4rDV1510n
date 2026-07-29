@@ -19,6 +19,20 @@ from typing import Callable
 FICLONE = 0x40049409
 
 
+def _preserve_posix_owner(source: Path, destination: Path) -> None:
+    """Keep service-readable ownership when an administrator publishes a copy.
+
+    ``shutil.copy2`` and ``copystat`` preserve metadata but deliberately do not
+    preserve uid/gid.  Recovery is commonly invoked through an administrative
+    service while the brain node runs as an unprivileged account, so inheriting
+    the recovery process owner can make an otherwise valid snapshot unreadable.
+    """
+    if os.name != "posix":
+        return
+    source_stat = source.stat()
+    os.chown(destination, source_stat.st_uid, source_stat.st_gid)
+
+
 def _clone_reflink(source: Path, destination: Path) -> bool:
     """Create *destination* as an independent COW clone when supported."""
     if not sys.platform.startswith("linux"):
@@ -59,11 +73,13 @@ def publish_independent_copy(
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.unlink(missing_ok=True)
     if _clone_reflink(source, temporary):
+        _preserve_posix_owner(source, temporary)
         os.replace(temporary, destination)
         return "reflink"
 
     require_full_copy_headroom(source, 1, operation)
     shutil.copy2(source, temporary)
+    _preserve_posix_owner(source, temporary)
     os.replace(temporary, destination)
     if os.path.samefile(source, destination):
         destination.unlink(missing_ok=True)

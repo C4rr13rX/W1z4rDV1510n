@@ -1697,6 +1697,37 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             )
             self.assertEqual(guard.read_bytes(), source.read_bytes())
 
+    def test_snapshot_publication_preserves_posix_service_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "brain.wbrain"
+            guard = root / "brain.last-good.wbrain"
+            source.write_bytes(b"accepted-container")
+
+            with (
+                patch(
+                    "scripts.independent_snapshot._clone_reflink",
+                    return_value=False,
+                ),
+                patch("scripts.independent_snapshot.os.name", "posix"),
+                patch(
+                    "scripts.independent_snapshot.os.chown", create=True
+                ) as chown,
+            ):
+                publish_independent_copy(
+                    source,
+                    guard,
+                    operation="test owner preservation",
+                    require_full_copy_headroom=Mock(),
+                )
+
+            source_stat = source.stat()
+            chown.assert_called_once_with(
+                guard.with_suffix(guard.suffix + ".tmp"),
+                source_stat.st_uid,
+                source_stat.st_gid,
+            )
+
     def test_snapshot_copy_refuses_to_consume_rollback_headroom(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "brain.wbrain"
