@@ -60,6 +60,14 @@ def test_private_host_bootstrap_verifies_source_then_restores_manifests():
     assert "--source-commit " + "a" * 40 in commands
 
 
+def test_deployer_can_apply_and_recover_in_place_instance_updates():
+    policy = (
+        ROOT / "infra" / "aws" / "fountain-server-deploy-policy.json"
+    ).read_text(encoding="utf-8")
+    assert '"ec2:ModifyInstanceAttribute"' in policy
+    assert '"cloudformation:ContinueUpdateRollback"' in policy
+
+
 def test_cost_guard_uses_a_persisted_absolute_deadline():
     commands = "\n".join(cost_guard_commands(1_800_000_000))
     assert "echo 1800000000 >/srv/wizard/control/cost-deadline.epoch" in commands
