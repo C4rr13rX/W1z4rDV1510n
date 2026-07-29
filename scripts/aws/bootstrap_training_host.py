@@ -189,7 +189,7 @@ def bootstrap_commands(
         "/tmp/aws/aws/install --update",
         (
             "dnf install -y rust cargo gcc gcc-c++ openssl-devel "
-            "pkgconf-pkg-config cmake"
+            "pkgconf-pkg-config cmake python3-psutil"
         ),
         "mkdir -p /srv/wizard/project /srv/wizard/staging",
         (

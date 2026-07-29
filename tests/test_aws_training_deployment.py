@@ -61,6 +61,7 @@ def test_private_host_bootstrap_verifies_source_then_restores_manifests():
     assert '"c' in commands
     assert "chmod a+x /tmp/aws/aws/install /tmp/aws/aws/dist/aws" in commands
     assert "dnf install -y rust cargo" in commands
+    assert "python3-psutil" in commands
     assert "rust.tar.gz" in commands
     assert "restore_training_inputs.py" in commands
     assert "--source-commit " + "a" * 40 in commands

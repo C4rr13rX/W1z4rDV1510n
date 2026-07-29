@@ -62,8 +62,10 @@ SHA-256 manifest. Do not delete local state until the AWS instance has restored
 the exact hashes and passed the retention and enterprise gates.
 
 Before provisioning, run `scripts/aws/stage_rust_dependencies.py --upload` to
-vendor the lockfile-pinned Rust dependencies under the same source commit.
-Once the source, corpus, Rust, and stopped brain manifests all exist, restore
+vendor the lockfile-pinned Rust dependencies under the same source commit and
+`scripts/aws/stage_supporting_data.py --upload` for the small generated
+benchmark corpora that are intentionally excluded from Git. Once the source,
+corpus, supporting-data, Rust, and stopped-brain manifests all exist, restore
 through Systems Manager without opening ingress or adding a NAT gateway:
 
 ```text

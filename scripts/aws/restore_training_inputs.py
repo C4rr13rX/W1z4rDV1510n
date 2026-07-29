@@ -126,6 +126,22 @@ def main() -> int:
     with tarfile.open(corpus_archive, "r:gz") as archive:
         safe_extract(archive, args.root / "corpora")
 
+    support_manifest_path = staging / "supporting-data-manifest.json"
+    support_root = f"s3://{BUCKET}/{PREFIX}/supporting-data"
+    s3_copy(f"{support_root}/manifest.json", support_manifest_path)
+    support_manifest = json.loads(
+        support_manifest_path.read_text(encoding="utf-8")
+    )
+    for item in support_manifest["files"]:
+        destination = args.root / "project" / item["path"]
+        s3_copy(f"{support_root}/{item['path']}", destination)
+        if destination.stat().st_size != item["bytes"]:
+            raise RuntimeError(f"supporting-data size mismatch: {item['path']}")
+        if digest(destination) != item["sha256"]:
+            raise RuntimeError(
+                f"supporting-data checksum mismatch: {item['path']}"
+            )
+
     brain_manifest_path = staging / "brain-manifest.json"
     brain_root = (
         f"s3://{BUCKET}/{PREFIX}/brain/programming-integrated-20260713"
@@ -147,6 +163,7 @@ def main() -> int:
         "source_commit": args.source_commit,
         "runtime": str(runtime),
         "corpus_files": len(corpus_manifest["files"]),
+        "supporting_files": len(support_manifest["files"]),
         "brain_files": len(brain_manifest["files"]),
         "rebased_progress_files": rebased,
         "rebased_guard_metadata": guard_rebased,
