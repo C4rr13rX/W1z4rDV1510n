@@ -1141,6 +1141,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         for key in ("GOCACHE", "GOMODCACHE", "DOTNET_CLI_HOME", "NUGET_PACKAGES"):
                 self.assertTrue(Path(environment[key]).is_relative_to(runtime))
 
+    def test_csharp_evaluator_forces_offline_package_sources(self) -> None:
+        source = (
+            ROOT / "scripts" / "programming_multilanguage_eval.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('(work / "NuGet.Config").write_text(', source)
+        self.assertIn("<packageSources><clear />", source)
+
     def test_semantic_stress_fails_on_any_missing_recall(self) -> None:
         source = (ROOT / "scripts" / "programming_semantic_stress.py").read_text(
             encoding="utf-8"

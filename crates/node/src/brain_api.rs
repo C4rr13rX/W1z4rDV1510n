@@ -1848,6 +1848,22 @@ fn declared_parameter_names(text: &str) -> Vec<String> {
         .collect()
 }
 
+fn parameter_self_power_evidence(text: &str, parameter: &str) -> bool {
+    let compact: String = text
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
+    [
+        format!("{parameter}*{parameter}"),
+        format!("{parameter}**2"),
+        format!("pow({parameter},2)"),
+        format!("{parameter}.pow(2)"),
+        format!("{parameter}.powi(2)"),
+    ]
+    .iter()
+    .any(|evidence| compact.contains(evidence))
+}
+
 fn collection_argument_mean_evidence(text: &str) -> bool {
     let body = text
         .find(')')
@@ -2372,8 +2388,10 @@ fn prompt_programming_response_compatible(
             let parameters = declared_parameter_names(&source)
                 .into_iter()
                 .filter(|parameter| parameter != "self" && parameter != "cls")
-                .count();
-            if parameters != 1 {
+                .collect::<Vec<_>>();
+            if parameters.len() != 1
+                || !parameter_self_power_evidence(&source, &parameters[0])
+            {
                 return false;
             }
         }
@@ -4973,6 +4991,11 @@ mod tests {
             &square,
             implicit_name_square_prompt,
             b"def polynomial(x, a, b, c):\n    return a * x ** 2 + b * x + c",
+        ));
+        assert!(!prompt_programming_response_compatible(
+            &square,
+            implicit_name_square_prompt,
+            b"def chi_squared(*choices):\n    return sum((item.expected - item.observed) ** 2 for item in choices)",
         ));
         assert!(prompt_programming_response_compatible(
             &square,

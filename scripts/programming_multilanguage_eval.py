@@ -78,6 +78,12 @@ def execute(case: Case, code: str) -> tuple[bool, str]:
             (work / "Eval.csproj").write_text(
                 '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType>'
                 '<TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>', encoding="utf-8")
+            (work / "NuGet.Config").write_text(
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<configuration><packageSources><clear />'
+                '</packageSources></configuration>',
+                encoding="utf-8",
+            )
             source = ("using System; class Program {\n" + code
                       + "\nstatic void Main() { if (Square(7) != 49) throw new Exception(); Console.WriteLine(\"PASS\"); }\n}")
         elif case.language == "go":
