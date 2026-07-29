@@ -67,6 +67,36 @@ def rebase_progress_corpora(runtime: Path, corpus_root: Path) -> list[str]:
     return changed
 
 
+def rebase_brain_guard_metadata(runtime: Path) -> bool:
+    """Point a verified rollback record at its restored host paths."""
+    path = runtime / "brain" / "brain.last-good.json"
+    if not path.is_file():
+        return False
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    guard = (runtime / "brain" / "brain.last-good.wbrain").resolve()
+    snapshot = (runtime / "brain" / "brain.wbrain").resolve()
+    if not guard.is_file() or not snapshot.is_file():
+        raise RuntimeError("rollback metadata exists without both restored brain files")
+    changed = False
+    replacements = {"guard": str(guard), "snapshot": str(snapshot)}
+    for field, value in replacements.items():
+        if metadata.get(field) != value:
+            metadata[field] = value
+            changed = True
+    checkpoint = (metadata.get("checkpoint_proof") or {}).get("checkpoint")
+    if isinstance(checkpoint, dict) and checkpoint.get("path") != str(snapshot):
+        checkpoint["path"] = str(snapshot)
+        changed = True
+    if changed:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    return changed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("/srv/wizard"))
@@ -111,6 +141,7 @@ def main() -> int:
         if digest(destination) != item["sha256"]:
             raise RuntimeError(f"brain checksum mismatch: {item['path']}")
     rebased = rebase_progress_corpora(runtime, args.root / "corpora")
+    guard_rebased = rebase_brain_guard_metadata(runtime)
     print(json.dumps({
         "restored": True,
         "source_commit": args.source_commit,
@@ -118,6 +149,7 @@ def main() -> int:
         "corpus_files": len(corpus_manifest["files"]),
         "brain_files": len(brain_manifest["files"]),
         "rebased_progress_files": rebased,
+        "rebased_guard_metadata": guard_rebased,
     }, indent=2))
     return 0
 

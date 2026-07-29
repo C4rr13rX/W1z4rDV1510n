@@ -6,7 +6,10 @@ from scripts.aws.bootstrap_training_host import (
     cost_guard_commands,
 )
 from scripts.aws.deploy_private_training import estimate_cost
-from scripts.aws.restore_training_inputs import rebase_progress_corpora
+from scripts.aws.restore_training_inputs import (
+    rebase_brain_guard_metadata,
+    rebase_progress_corpora,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,3 +98,33 @@ def test_cross_os_restore_rebases_verified_progress_corpus(tmp_path):
     restored = json.loads(progress.read_text(encoding="utf-8"))
     assert restored["corpus"] == str((corpora / "phase.jsonl").resolve())
     assert restored["durable_next_row"] == 7
+
+
+def test_cross_os_restore_rebases_guard_and_checkpoint_paths(tmp_path):
+    runtime = tmp_path / "runtime"
+    brain = runtime / "brain"
+    brain.mkdir(parents=True)
+    (brain / "brain.wbrain").write_bytes(b"live")
+    (brain / "brain.last-good.wbrain").write_bytes(b"guard")
+    metadata = brain / "brain.last-good.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "guard": r"D:\old\brain.last-good.wbrain",
+                "snapshot": r"D:\old\brain.wbrain",
+                "checkpoint_proof": {
+                    "checkpoint": {"path": r"D:\old\brain.wbrain"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert rebase_brain_guard_metadata(runtime)
+    restored = json.loads(metadata.read_text(encoding="utf-8"))
+    assert restored["guard"] == str((brain / "brain.last-good.wbrain").resolve())
+    assert restored["snapshot"] == str((brain / "brain.wbrain").resolve())
+    assert (
+        restored["checkpoint_proof"]["checkpoint"]["path"]
+        == str((brain / "brain.wbrain").resolve())
+    )
