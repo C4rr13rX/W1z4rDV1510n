@@ -3288,6 +3288,7 @@ async fn h_brain_chat(
             feature_candidates.push(candidate);
         }
     }
+    let mut diagnostic_component_routes = Vec::<serde_json::Value>::new();
     if let Some((pool_id, labels)) = composition_features.as_ref() {
         for candidate in brain.decode_ranked_feature_bindings_with_context_where(
             *pool_id,
@@ -3344,6 +3345,31 @@ async fn h_brain_chat(
                 if !component_candidates.contains(&candidate) {
                     component_candidates.push(candidate);
                 }
+            }
+            let route_artifacts: Vec<serde_json::Value> = component_candidates
+                .iter()
+                .take(8)
+                .filter_map(|candidate| {
+                    let value = serde_json::from_slice::<serde_json::Value>(candidate).ok()?;
+                    if let Some(files) = value.get("files").and_then(|files| files.as_object()) {
+                        return Some(json!({
+                            "kind": "manifest",
+                            "files": files.keys().cloned().collect::<Vec<_>>(),
+                        }));
+                    }
+                    let fragment = value.get("code_fragment")?.as_object()?;
+                    Some(json!({
+                        "kind": "fragment",
+                        "file": fragment.get("file").and_then(|file| file.as_str()),
+                        "role": fragment.get("role").and_then(|role| role.as_str()),
+                    }))
+                })
+                .collect();
+            if !route_artifacts.is_empty() {
+                diagnostic_component_routes.push(json!({
+                    "labels": subset,
+                    "artifacts": route_artifacts,
+                }));
             }
             let mut accepted_components = 0usize;
             for candidate in component_candidates {
@@ -3679,6 +3705,7 @@ async fn h_brain_chat(
             "ranked_candidates": feature_candidates.len(),
             "unweighted_candidates": diagnostic_unweighted_candidates,
             "fragment_candidates": diagnostic_fragment_candidates,
+            "component_routes": diagnostic_component_routes,
             "exact_feature": diagnostic_exact_feature,
             "exact_complete_manifest": diagnostic_exact_manifest,
             "fragment_composition_ready": diagnostic_fragment_composition_ready,
