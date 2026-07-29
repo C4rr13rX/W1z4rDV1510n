@@ -492,3 +492,74 @@ fn context_conditioned_corpus_action_cannot_override_context_free_rule() {
     assert_eq!(decoded.first().map(Vec::as_slice), Some(generic.as_slice()));
     assert!(!decoded.iter().any(|frame| frame == contextual));
 }
+
+#[test]
+fn validated_feature_recall_remains_visible_across_a_full_new_overlay() {
+    let mut config = BrainConfig::default();
+    config.binding_emergence_threshold = 1;
+    config.tentative_emergence_threshold = 1;
+    let mut brain = Brain::new(config);
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "w1z4rd_feature_generation_visibility_{}_{}.wbrain",
+        std::process::id(),
+        nonce,
+    ));
+    brain.attach_wbrain(&path).expect("attach wbrain");
+
+    let intent = b"@intent:LANGUAGE:PYTHON\n@intent:SECURITY:AUTHORIZATION\n";
+    let accepted = br#"{"files":{"authorization.py":"DEFAULT_DENY_OWNER_ADMIN"}}"#;
+    brain.observe(feature_pool, intent);
+    brain.observe(action_pool, accepted);
+    brain.advance_tick();
+    brain
+        .serialize_all_neurons_for_idle()
+        .expect("flush accepted generation");
+    assert_eq!(brain.binding_posting_residency().0, 0);
+    assert_eq!(brain.binding_posting_residency().1, 1);
+
+    // One corpus interval can contribute more than the bounded 512-candidate
+    // readout to the same sparse feature class. None of these actions satisfies
+    // the request-level deterministic contract.
+    for index in 0..520 {
+        let distractor = format!("def unrelated_admin_helper_{index}(): return {index}");
+        brain.observe(feature_pool, intent);
+        brain.observe(action_pool, distractor.as_bytes());
+        brain.advance_tick();
+    }
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(intent);
+    let recalled = brain.decode_first_ranked_feature_binding_with_context_where(
+        feature_pool,
+        &labels,
+        action_pool,
+        None,
+        None,
+        &[feature_pool],
+        &[],
+        &|bytes| bytes == accepted,
+    );
+    assert_eq!(
+        recalled.as_deref(),
+        Some(accepted.as_slice()),
+        "a full new overlay must not hide an older validated action",
+    );
+
+    drop(brain);
+    std::fs::remove_file(path).expect("remove test wbrain");
+}

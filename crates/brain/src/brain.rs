@@ -2254,6 +2254,89 @@ impl Brain {
         out
     }
 
+    /// Keep bounded attention representative across immutable experience
+    /// generations instead of allowing the newest overlay/generation to
+    /// consume the complete candidate window.
+    ///
+    /// Deterministic validators operate after posting lookup because they
+    /// inspect atom-grounded target bytes. If one high-volume corpus interval
+    /// fills the posting cap first, an older correct episode remains persisted
+    /// but becomes impossible to validate. Reserve an equal first-pass quota
+    /// for every source, then spend unused capacity newest-first. Memory and
+    /// neuron page-in stay bounded by `limit`, independent of corpus size.
+    fn bounded_binding_postings_across_generations(
+        &self,
+        key: &BindingPostingKey,
+        overlay: &[NeuronId],
+        limit: usize,
+    ) -> Vec<NeuronId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let references: Vec<_> = self.binding_posting_indexes.iter().rev().copied().collect();
+        let source_count = references.len() + usize::from(!overlay.is_empty());
+        if source_count == 0 {
+            return Vec::new();
+        }
+        let quota = (limit / source_count).max(1);
+        let mut out = Vec::with_capacity(limit);
+        let mut seen = ahash::AHashSet::with_capacity(limit);
+        fn append_unique(
+            out: &mut Vec<NeuronId>,
+            seen: &mut ahash::AHashSet<NeuronId>,
+            ids: &[NeuronId],
+            limit: usize,
+        ) {
+            for &id in ids {
+                if out.len() >= limit {
+                    break;
+                }
+                if seen.insert(id) {
+                    out.push(id);
+                }
+            }
+        }
+
+        // The live overlay is the newest experience generation. Select its
+        // newest entries so a freshly learned repair is immediately visible.
+        let overlay_start = overlay.len().saturating_sub(quota);
+        append_unique(&mut out, &mut seen, &overlay[overlay_start..], limit);
+        let Some(file) = self.wbrain_file.as_ref() else {
+            return out;
+        };
+        let store = file.pool(self.binding_pool_id);
+        let encoded = key.encode();
+        for reference in &references {
+            match crate::store::posting_index::lookup(&store, *reference, &encoded, quota) {
+                Ok(ids) => append_unique(&mut out, &mut seen, &ids, limit),
+                Err(error) => {
+                    tracing::warn!("binding posting lookup failed: {}", error);
+                    break;
+                }
+            }
+        }
+
+        // Sources whose key is absent leave quota unused. Spend that remainder
+        // newest-first only after every generation had a chance to contribute.
+        if out.len() < limit {
+            let overlay_start = overlay.len().saturating_sub(limit);
+            append_unique(&mut out, &mut seen, &overlay[overlay_start..], limit);
+        }
+        for reference in &references {
+            if out.len() >= limit {
+                break;
+            }
+            match crate::store::posting_index::lookup(&store, *reference, &encoded, limit) {
+                Ok(ids) => append_unique(&mut out, &mut seen, &ids, limit),
+                Err(error) => {
+                    tracing::warn!("binding posting lookup failed: {}", error);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     fn disk_scalar(&self, encoded_key: &[u8]) -> Option<u32> {
         let file = self.wbrain_file.as_ref()?;
         let store = file.pool(self.binding_pool_id);
@@ -2351,35 +2434,30 @@ impl Brain {
 
     fn binding_feature_postings(&self, pool: PoolId, neuron: NeuronId) -> Vec<NeuronId> {
         const MAX_FEATURE_POSTINGS: usize = 512;
-        let mut out = self
+        let overlay = self
             .binding_feature_atom_index
             .get(&(pool, neuron))
             .cloned()
             .unwrap_or_default();
-        out.truncate(MAX_FEATURE_POSTINGS);
-        for id in self.disk_binding_postings(
+        self.bounded_binding_postings_across_generations(
             &BindingPostingKey::Feature(pool, neuron),
+            &overlay,
             MAX_FEATURE_POSTINGS,
-        ) {
-            append_binding_posting(&mut out, id, MAX_FEATURE_POSTINGS);
-        }
-        out
+        )
     }
 
     fn binding_motif_postings(&self, pool: PoolId, motif: [u8; 3]) -> Vec<NeuronId> {
         const MAX_MOTIF_POSTINGS: usize = 512;
-        let mut out = self
+        let overlay = self
             .binding_motif_index
             .get(&(pool, motif))
             .cloned()
             .unwrap_or_default();
-        out.truncate(MAX_MOTIF_POSTINGS);
-        for id in
-            self.disk_binding_postings(&BindingPostingKey::Motif(pool, motif), MAX_MOTIF_POSTINGS)
-        {
-            append_binding_posting(&mut out, id, MAX_MOTIF_POSTINGS);
-        }
-        out
+        self.bounded_binding_postings_across_generations(
+            &BindingPostingKey::Motif(pool, motif),
+            &overlay,
+            MAX_MOTIF_POSTINGS,
+        )
     }
 
     fn flush_binding_posting_overlay(&mut self) -> std::io::Result<()> {
