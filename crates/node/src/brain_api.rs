@@ -2568,6 +2568,18 @@ fn select_composed_artifact(
     manifest_composition: Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
     let prompt = prompt.to_ascii_lowercase();
+    let language_count = labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .count();
+    if language_count > 1 {
+        // A multi-language response contract is necessarily a file
+        // container. An independently valid single-language fragment cannot
+        // satisfy it and must not shadow a manifest that covers every
+        // requested language merely because the paraphrase says
+        // "repository" or "codebase" instead of "project".
+        return manifest_composition.or(fragment_composition);
+    }
     let explicitly_multifile = prompt.contains("multi-file")
         || prompt.contains("multiple files")
         || prompt.contains("across multiple files")
@@ -4987,6 +4999,28 @@ mod tests {
                 Some(broad)
             ),
             Some(class)
+        );
+    }
+
+    #[test]
+    fn polyglot_composition_prefers_language_covering_manifest() {
+        let fragment =
+            br#"{"files":{"service.py":"def unrelated():\n    return True\n"}}"#.to_vec();
+        let manifest = br#"{"files":{"service.js":"module.exports = {};\n","worker.go":"package main\n"}}"#.to_vec();
+        let labels = vec![
+            "intent:LANGUAGE:JAVASCRIPT".to_string(),
+            "intent:LANGUAGE:GO".to_string(),
+            "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
+            "intent:CONCURRENCY:DEDUPLICATION".to_string(),
+        ];
+        assert_eq!(
+            select_composed_artifact(
+                &labels,
+                "Create one repository with Node.js and Golang workers.",
+                Some(fragment),
+                Some(manifest.clone()),
+            ),
+            Some(manifest)
         );
     }
 
