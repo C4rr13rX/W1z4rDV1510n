@@ -39,6 +39,7 @@
 /probe.json
 *.log
 *.tmp
+/scripts/aws/_tmp_ssm*.json
 # Git Bash creates a file named 'null' in CWD when a Windows EXE is run as a
 # background job (&) without explicit stdout redirection.
 /null
