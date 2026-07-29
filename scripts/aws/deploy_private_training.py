@@ -17,6 +17,7 @@ REGION = "us-east-1"
 ACCOUNT = "321572159829"
 POLICY_NAME = "WizardVisionPrivateTrainingDeployment"
 POLICY_ARN = f"arn:aws:iam::{ACCOUNT}:policy/{POLICY_NAME}"
+DEPLOYMENT_GROUP = "WizardVisionDeployers"
 
 
 def estimate(volume_gib: int, hours: int, spot_cap: float) -> dict[str, float]:
@@ -83,12 +84,49 @@ def bootstrap_permissions() -> None:
             "--set-as-default",
             "--profile", PROFILE,
         )
-    run(
-        "aws", "iam", "attach-user-policy",
-        "--user-name", "FountainServer",
-        "--policy-arn", POLICY_ARN,
-        "--profile", PROFILE,
+    attached = subprocess.run(
+        [
+            "aws", "iam", "attach-user-policy",
+            "--user-name", "FountainServer",
+            "--policy-arn", POLICY_ARN,
+            "--profile", PROFILE,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
     )
+    if attached.returncode:
+        if "PoliciesPerUser" not in attached.stderr:
+            raise subprocess.CalledProcessError(
+                attached.returncode, attached.args, attached.stdout, attached.stderr
+            )
+        group = subprocess.run(
+            [
+                "aws", "iam", "get-group", "--group-name", DEPLOYMENT_GROUP,
+                "--profile", PROFILE,
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if group.returncode:
+            run(
+                "aws", "iam", "create-group",
+                "--group-name", DEPLOYMENT_GROUP,
+                "--profile", PROFILE,
+            )
+        run(
+            "aws", "iam", "attach-group-policy",
+            "--group-name", DEPLOYMENT_GROUP,
+            "--policy-arn", POLICY_ARN,
+            "--profile", PROFILE,
+        )
+        run(
+            "aws", "iam", "add-user-to-group",
+            "--group-name", DEPLOYMENT_GROUP,
+            "--user-name", "FountainServer",
+            "--profile", PROFILE,
+        )
 
 
 def main() -> int:

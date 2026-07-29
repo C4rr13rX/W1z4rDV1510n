@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scripts.aws.deploy_private_training import POLICY_ARN, estimate
+from scripts.aws.deploy_private_training import DEPLOYMENT_GROUP, POLICY_ARN, estimate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +11,7 @@ def test_cost_guard_stays_below_acknowledged_ceiling():
     assert costs["guarded_total"] < 100
     assert costs["compute_max"] == 48.0
     assert POLICY_ARN.endswith(":policy/WizardVisionPrivateTrainingDeployment")
+    assert DEPLOYMENT_GROUP == "WizardVisionDeployers"
 
 
 def test_private_template_has_no_public_ingress_or_elasticache():
