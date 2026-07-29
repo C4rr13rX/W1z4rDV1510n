@@ -14,6 +14,9 @@ POLICY = ROOT / "infra" / "aws" / "fountain-server-deploy-policy.json"
 STACK = "wizard-vision-private-training"
 PROFILE = "FountainServer"
 REGION = "us-east-1"
+ACCOUNT = "321572159829"
+POLICY_NAME = "WizardVisionPrivateTrainingDeployment"
+POLICY_ARN = f"arn:aws:iam::{ACCOUNT}:policy/{POLICY_NAME}"
 
 
 def estimate(volume_gib: int, hours: int, spot_cap: float) -> dict[str, float]:
@@ -34,6 +37,58 @@ def estimate(volume_gib: int, hours: int, spot_cap: float) -> dict[str, float]:
 
 def run(*parts: str) -> None:
     subprocess.run(parts, cwd=ROOT, check=True)
+
+
+def bootstrap_permissions() -> None:
+    present = subprocess.run(
+        [
+            "aws", "iam", "get-policy", "--policy-arn", POLICY_ARN,
+            "--profile", PROFILE,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if present.returncode:
+        run(
+            "aws", "iam", "create-policy",
+            "--policy-name", POLICY_NAME,
+            "--description", "Scoped deployment actions for private Wizard Vision training",
+            "--policy-document", f"file://{POLICY}",
+            "--profile", PROFILE,
+        )
+    else:
+        versions = json.loads(subprocess.run(
+            [
+                "aws", "iam", "list-policy-versions", "--policy-arn", POLICY_ARN,
+                "--profile", PROFILE, "--output", "json",
+            ],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout)["Versions"]
+        removable = sorted(
+            (item for item in versions if not item["IsDefaultVersion"]),
+            key=lambda item: item["CreateDate"],
+        )
+        if len(versions) >= 5:
+            run(
+                "aws", "iam", "delete-policy-version",
+                "--policy-arn", POLICY_ARN,
+                "--version-id", removable[0]["VersionId"],
+                "--profile", PROFILE,
+            )
+        run(
+            "aws", "iam", "create-policy-version",
+            "--policy-arn", POLICY_ARN,
+            "--policy-document", f"file://{POLICY}",
+            "--set-as-default",
+            "--profile", PROFILE,
+        )
+    run(
+        "aws", "iam", "attach-user-policy",
+        "--user-name", "FountainServer",
+        "--policy-arn", POLICY_ARN,
+        "--profile", PROFILE,
+    )
 
 
 def main() -> int:
@@ -60,13 +115,7 @@ def main() -> int:
     if args.estimate_only:
         return 0
     if args.bootstrap_permissions:
-        run(
-            "aws", "iam", "put-user-policy",
-            "--user-name", "FountainServer",
-            "--policy-name", "WizardVisionPrivateTrainingDeployment",
-            "--policy-document", f"file://{POLICY}",
-            "--profile", PROFILE,
-        )
+        bootstrap_permissions()
     run(
         "aws", "cloudformation", "deploy",
         "--stack-name", STACK,
@@ -93,4 +142,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
