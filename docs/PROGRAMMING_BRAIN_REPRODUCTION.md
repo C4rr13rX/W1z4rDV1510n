@@ -230,3 +230,7 @@ the prompt, expected or accepted output, actual reply, grounding decision,
 route diagnostics, and assertion result. Aggregate counts locate a broken
 contract but cannot support a later causal repair once the candidate state has
 been discarded.
+Treat output shape and delivery semantics as part of behavioral compatibility.
+For example, a word-frequency function must return its mapping; code that
+computes the same mapping only to write a framework-managed file is not an
+interchangeable response.

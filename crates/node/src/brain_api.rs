@@ -1939,6 +1939,58 @@ fn collection_argument_empty_zero_evidence(text: &str) -> bool {
         })
 }
 
+fn python_word_frequency_returns_mapping(text: &str) -> bool {
+    let mut mapping_variables = std::collections::HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim().trim_end_matches(';');
+        let Some((left, right)) = trimmed.split_once('=') else {
+            continue;
+        };
+        // Do not reinterpret comparisons or indexed increments as mapping
+        // initialization. We need the actual accumulator declaration.
+        if left.ends_with('!')
+            || left.ends_with('<')
+            || left.ends_with('>')
+            || left.ends_with('=')
+            || left.contains('[')
+        {
+            continue;
+        }
+        let right = right.trim_start();
+        let initializes_mapping = right.starts_with("{}")
+            || right.starts_with("dict(")
+            || right.starts_with("defaultdict(")
+            || right.starts_with("counter(")
+            || right.starts_with("collections.counter(");
+        if !initializes_mapping {
+            continue;
+        }
+        let name = left
+            .split_ascii_whitespace()
+            .last()
+            .unwrap_or(left)
+            .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
+        if !name.is_empty() {
+            mapping_variables.insert(name.to_string());
+        }
+    }
+    text.lines().any(|line| {
+        let trimmed = line.trim().trim_end_matches(';');
+        let Some(expression) = trimmed.strip_prefix("return ") else {
+            return false;
+        };
+        let expression = expression.trim();
+        expression.starts_with('{')
+            || expression.starts_with("dict(")
+            || expression.starts_with("counter(")
+            || expression.starts_with("collections.counter(")
+            || mapping_variables.contains(expression)
+            || mapping_variables
+                .iter()
+                .any(|name| expression == format!("dict({name})"))
+    })
+}
+
 fn has_top_level_multi_value_return(text: &str) -> bool {
     text.lines().any(|line| {
         let trimmed = line.trim_start();
@@ -2186,6 +2238,19 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
         // together with an actual mapping accumulator (or the standard
         // Counter type), not generic counting-shaped syntax.
         if !segmentation || (!counter_aggregation && !mapping_aggregation) {
+            return false;
+        }
+        // A framework task can construct a word-count mapping only to write
+        // it to a file, yet it is not a callable transformation that returns
+        // the requested mapping. This exact collision appeared as a Luigi
+        // `run(self)` method during production corpus training. Apply the
+        // return contract to Python responses; other languages retain their
+        // own expression/return conventions.
+        if labels
+            .iter()
+            .any(|label| label.ends_with(":LANGUAGE:PYTHON"))
+            && !python_word_frequency_returns_mapping(lowercase)
+        {
             return false;
         }
     }
@@ -5121,6 +5186,17 @@ mod tests {
             .to_vec();
         let indexed_frequency = b"def word_freq(text):\n    out = {}\n    for word in text.split():\n        if word not in out:\n            out[word] = 0\n        out[word] += 1\n    return out"
             .to_vec();
+        let framework_task = br#"def run(self):
+    count = {}
+    for target in self.input():
+        for line in target.open('r'):
+            for word in line.strip().split():
+                count[word] = count.get(word, 0) + 1
+    output = self.output().open('w')
+    for word, amount in count.items():
+        output.write(f"{word}\t{amount}\n")
+    output.close()"#
+            .to_vec();
         assert!(!programming_response_compatible(&labels, &increment));
         assert!(!programming_response_compatible(&labels, &call_count));
         assert!(!programming_response_compatible(
@@ -5144,6 +5220,7 @@ mod tests {
             &labels,
             &file_statistics
         ));
+        assert!(!programming_response_compatible(&labels, &framework_task));
         assert!(programming_response_compatible(&labels, &frequency));
         assert!(programming_response_compatible(
             &labels,
