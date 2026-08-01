@@ -1,0 +1,26 @@
+from scripts.market_evolution_brain_gate import feature_frame, quantize, render_identity
+from scripts.market_evolution_service import Genome
+
+
+def genome():
+    return Genome(features=["r6", "funding_rate"], learning_rate=.1, max_iter=100,
+                  max_leaf_nodes=12, min_samples_leaf=20, l2_regularization=1,
+                  confidence_quantile=.2, binding_threshold=7, concept_threshold=9,
+                  presentations=3).finalize()
+
+
+def test_feature_frame_is_named_deterministic_and_atom_grounded():
+    row = {"features": {"r6": .0123, "funding_rate": -.0001}}
+    assert feature_frame(row, genome().features) == "funding_rate=n1e-4 r6=p1.2e-2"
+    assert quantize(0) == "zero"
+
+
+def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshold(tmp_path):
+    template = tmp_path / "template.toml"
+    template.write_text('binding_emergence_threshold = 3\n[[pools]]\nkind = "SensoryInput"\nconcept_emergence_threshold = 5\n[[pools]]\nkind = "Action"\nconcept_emergence_threshold = 3\n')
+    output = tmp_path / "identity.toml"
+    render_identity(template, output, genome())
+    text = output.read_text()
+    assert "binding_emergence_threshold = 7" in text
+    assert 'kind = "SensoryInput"\nconcept_emergence_threshold = 9' in text
+    assert 'kind = "Action"\nconcept_emergence_threshold = 3' in text

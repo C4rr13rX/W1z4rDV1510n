@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.market_brain_experiment import load_bars, safe_return  # noqa: E402
+from scripts.market_evolution_genome import load_genome  # noqa: E402
 
 
 STABLE_QUOTES = ("USDC", "USDT", "USDT0", "DAI", "USD")
@@ -54,6 +55,11 @@ FEATURE_GROUPS = {
         "spot_taker_imbalance", "futures_taker_imbalance", "flow_divergence",
         "spot_quote_ratio24", "futures_quote_ratio24", "spot_trade_ratio24",
         "futures_trade_ratio24", "futures_spot_quote_ratio",
+    ),
+    "breadth": (
+        "market_median_r1", "market_median_r6", "market_median_r24",
+        "market_breadth_r1", "market_breadth_r6", "market_dispersion_r6",
+        "relative_market_r6", "relative_market_r24",
     ),
 }
 
@@ -236,21 +242,43 @@ def continuous_features(
 
 def build_rows(record: dict[str, Any], bars: Sequence[dict[str, float]], *,
                reference: Sequence[dict[str, float]], reference_times: Sequence[float],
-               horizon: int, stride: int,
+               horizon: int, stride: int, direction_threshold: float = 0.003,
                supplemental: dict[int, dict[str, float]] | None = None) -> list[dict[str, Any]]:
     rows = []
     for index in range(168, len(bars) - horizon, stride):
         realized = safe_return(bars[index + horizon]["close"], bars[index]["close"])
-        if abs(realized) <= 0.003:
-            continue
         rows.append({
             "asset": record["base_asset"],
             "timestamp": bars[index]["timestamp"],
             "return": realized,
-            "target": 1 if realized > 0 else -1,
+            "target": (1 if realized > direction_threshold else
+                       -1 if realized < -direction_threshold else 0),
             "features": continuous_features(bars, index, reference, reference_times, supplemental),
         })
     return rows
+
+
+def attach_market_breadth(rows: Sequence[dict[str, Any]]) -> None:
+    """Attach same-time cross-sectional state without consulting any target."""
+    groups: dict[float, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(row["timestamp"], []).append(row)
+    for members in groups.values():
+        r1 = [float(row["features"]["r1"]) for row in members]
+        r6 = [float(row["features"]["r6"]) for row in members]
+        r24 = [float(row["features"]["r24"]) for row in members]
+        state = {
+            "market_median_r1": statistics.median(r1),
+            "market_median_r6": statistics.median(r6),
+            "market_median_r24": statistics.median(r24),
+            "market_breadth_r1": statistics.fmean(value > 0 for value in r1),
+            "market_breadth_r6": statistics.fmean(value > 0 for value in r6),
+            "market_dispersion_r6": statistics.pstdev(r6) if len(r6) > 1 else 0.0,
+        }
+        for row in members:
+            row["features"].update(state)
+            row["features"]["relative_market_r6"] = row["features"]["r6"] - state["market_median_r6"]
+            row["features"]["relative_market_r24"] = row["features"]["r24"] - state["market_median_r24"]
 
 
 def metrics(actual: np.ndarray, predicted: np.ndarray, probability: np.ndarray,
@@ -289,7 +317,18 @@ def main() -> int:
     parser.add_argument("--seed", default="market-signal-audit-v1")
     parser.add_argument("--supplemental-root", type=Path,
                         default=Path(r"D:\Projects\CoolCryptoUtilities\data\binance_public"))
+    parser.add_argument("--feature-sets",
+                        help="comma-separated ablations to run; default runs every configured set")
+    parser.add_argument("--permutation-repeats", type=int, default=0,
+                        help="diagnostic feature-importance repeats; zero skips the expensive ranking")
+    parser.add_argument("--genome", type=Path,
+                        help="market-evolution genome JSON; overrides evolvable evaluation settings")
     args = parser.parse_args()
+    genome = None
+    if args.genome:
+        genome = load_genome(json.loads(args.genome.read_text(encoding="utf-8")))
+        args.horizon = genome.horizon
+        args.stride = genome.stride
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     records = select_primary_assets(manifest["selected"])
@@ -300,7 +339,7 @@ def main() -> int:
     reference = load_bars(Path(reference_record["path"]))
     reference_times = [row["timestamp"] for row in reference]
     supplemental = load_supplemental(args.supplemental_root, records)
-    all_rows: list[dict[str, Any]] = []
+    all_context_rows: list[dict[str, Any]] = []
     data_quality = Counter()
     for position, record in enumerate(records, 1):
         bars = load_bars(Path(record["path"]))
@@ -310,9 +349,15 @@ def main() -> int:
         )
         rows = build_rows(record, bars, reference=reference, reference_times=reference_times,
                           horizon=args.horizon, stride=args.stride,
+                          direction_threshold=(genome.direction_threshold if genome else 0.003),
                           supplemental=supplemental.get(str(record["base_asset"])))
-        all_rows.extend(rows)
-        print(f"[{position}/{len(records)}] {record['base_asset']}: {len(rows)} directional moments", flush=True)
+        all_context_rows.extend(rows)
+        directional_count = sum(row["target"] != 0 for row in rows)
+        print(f"[{position}/{len(records)}] {record['base_asset']}: "
+              f"{directional_count} directional moments", flush=True)
+
+    attach_market_breadth(all_context_rows)
+    all_rows = [row for row in all_context_rows if row["target"] != 0]
 
     assets = sorted({row["asset"] for row in all_rows}, key=lambda value: stable_order(value, args.seed))
     holdout_n = max(1, round(len(assets) * args.holdout_fraction))
@@ -330,13 +375,28 @@ def main() -> int:
         "price_flow_cross_derivatives": (FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
                                          + FEATURE_GROUPS["cross"]
                                          + FEATURE_GROUPS["derivatives"]),
+        "price_flow_breadth": (FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
+                               + FEATURE_GROUPS["breadth"]),
+        "price_flow_derivatives_breadth": (FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
+                                           + FEATURE_GROUPS["derivatives"]
+                                           + FEATURE_GROUPS["breadth"]),
     }
+    if args.feature_sets:
+        requested = [value.strip() for value in args.feature_sets.split(",") if value.strip()]
+        unknown = set(requested) - set(feature_sets)
+        if unknown:
+            raise ValueError(f"unknown feature sets: {sorted(unknown)}")
+        feature_sets = {name: feature_sets[name] for name in requested}
+    if genome:
+        feature_sets = {"genome": genome.features}
     report: dict[str, Any] = {
         "purpose": "diagnostic_only_not_a_candidate_trading_model",
         "configuration": vars(args) | {
             "manifest": str(args.manifest), "out": str(args.out),
             "supplemental_root": str(args.supplemental_root),
+            "genome": str(args.genome) if args.genome else None,
         },
+        "genome": genome.as_json() if genome else None,
         "reference": {key: reference_record[key] for key in ("base_asset", "symbol", "chain", "path")},
         "assets": {"training": sorted(training_assets), "holdout": sorted(holdout_assets)},
         "data_quality": dict(data_quality),
@@ -344,7 +404,7 @@ def main() -> int:
         "feature_sets": {},
     }
     for set_name, names in feature_sets.items():
-        eligible_assets = (set(supplemental) if "derivatives" in set_name
+        eligible_assets = (set(supplemental) if any(name in FEATURE_GROUPS["derivatives"] for name in names)
                            else {row["asset"] for row in all_rows})
         folds = []
         for fold_index, cutoff in enumerate(cutoffs):
@@ -364,12 +424,16 @@ def main() -> int:
             x_train = np.asarray([[row["features"][name] for name in names] for row in train], dtype=np.float32)
             y_train = np.asarray([row["target"] for row in train], dtype=np.int8)
             model = HistGradientBoostingClassifier(
-                learning_rate=0.06, max_iter=180, max_leaf_nodes=24,
-                l2_regularization=1.0, random_state=17,
+                learning_rate=genome.learning_rate if genome else 0.06,
+                max_iter=genome.max_iter if genome else 180,
+                max_leaf_nodes=genome.max_leaf_nodes if genome else 24,
+                l2_regularization=genome.l2_regularization if genome else 1.0,
+                random_state=17,
             ).fit(x_train, y_train)
             train_probability = model.predict_proba(x_train)[:, list(model.classes_).index(1)]
             train_confidence = np.maximum(train_probability, 1.0 - train_probability)
-            confidence_threshold = float(np.quantile(train_confidence, 0.30))
+            confidence_quantile = genome.confidence_quantile if genome else 0.30
+            confidence_threshold = float(np.quantile(train_confidence, confidence_quantile))
             sections = {}
             for section_name, selected in (("known_asset_future", known), ("unseen_asset_future", unseen)):
                 x = np.asarray([[row["features"][name] for name in names] for row in selected], dtype=np.float32)
@@ -381,6 +445,10 @@ def main() -> int:
                 momentum = np.asarray([1 if row["features"]["r12"] > 0 else -1 for row in selected], dtype=np.int8)
                 section_metrics["momentum_accuracy"] = float((momentum == actual).mean())
                 section_metrics["inverse_momentum_accuracy"] = float((-momentum == actual).mean())
+                section_metrics["baseline_margin"] = (
+                    section_metrics["directional_accuracy"]
+                    - max(section_metrics["momentum_accuracy"], section_metrics["inverse_momentum_accuracy"])
+                )
                 confidence = np.maximum(probability, 1.0 - probability)
                 acted = confidence >= confidence_threshold
                 if acted.any():
@@ -390,15 +458,20 @@ def main() -> int:
                     selective["acted_observations"] = int(acted.sum())
                     selective["momentum_accuracy"] = float((momentum[acted] == actual[acted]).mean())
                     selective["inverse_momentum_accuracy"] = float((-momentum[acted] == actual[acted]).mean())
+                    selective["baseline_margin"] = (
+                        selective["directional_accuracy"]
+                        - max(selective["momentum_accuracy"], selective["inverse_momentum_accuracy"])
+                    )
                 else:
                     selective = {"coverage": 0.0, "acted_observations": 0}
-                section_metrics["selective_70"] = selective
+                section_metrics["selective"] = selective
                 sections[section_name] = section_metrics
             sample = known[:min(2500, len(known))]
-            if sample:
+            if sample and args.permutation_repeats > 0:
                 x_sample = np.asarray([[row["features"][name] for name in names] for row in sample], dtype=np.float32)
                 y_sample = np.asarray([row["target"] for row in sample], dtype=np.int8)
-                importance = permutation_importance(model, x_sample, y_sample, n_repeats=3,
+                importance = permutation_importance(model, x_sample, y_sample,
+                                                    n_repeats=args.permutation_repeats,
                                                     random_state=23, scoring="balanced_accuracy")
                 top = sorted(zip(names, importance.importances_mean), key=lambda item: item[1], reverse=True)[:10]
             else:

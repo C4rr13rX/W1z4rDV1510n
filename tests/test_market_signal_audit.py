@@ -1,4 +1,6 @@
-from scripts.market_signal_audit import derive_supplemental_features, select_primary_assets
+from scripts.market_signal_audit import (
+    attach_market_breadth, derive_supplemental_features, select_primary_assets,
+)
 
 
 def test_primary_asset_selection_prefers_stable_quote_then_longer_series():
@@ -33,3 +35,17 @@ def test_supplemental_rolling_features_never_read_future_rows():
     after = derive_supplemental_features(rows)
     assert before[20 * 3600] == after[20 * 3600]
     assert before[29 * 3600] != after[29 * 3600]
+
+
+def test_market_breadth_uses_current_features_not_future_targets():
+    rows = [
+        {"timestamp": 1, "target": target,
+         "features": {"r1": value, "r6": value * 2, "r24": value * 3}}
+        for target, value in ((1, .01), (-1, -.02), (0, .03))
+    ]
+    attach_market_breadth(rows)
+    before = [dict(row["features"]) for row in rows]
+    rows[0]["target"] = -1
+    attach_market_breadth(rows)
+    assert [row["features"] for row in rows] == before
+    assert rows[0]["features"]["market_breadth_r6"] == 2 / 3

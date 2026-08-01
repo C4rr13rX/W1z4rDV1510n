@@ -1,0 +1,60 @@
+name = "market_predictor_evolution"
+version = "0.1.0"
+binding_emergence_threshold = 3
+moment_history_window = 512
+min_atom_score = 0.94
+
+# The evolving relationship pool is deliberately atom-grounded: genomes may
+# select and combine causal numeric features, but every value still enters as
+# named characters and deterministic buckets rather than opaque token IDs.
+[[pools]]
+name = "forecast_horizon"
+id = 9
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_horizon"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 4096
+max_concept_member_count = 8
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "instrument_context"
+id = 10
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_instrument"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "future_outcome"
+id = 11
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_future"
+kind = "Action"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "evolved_causal_relationships"
+id = 15
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_evolved"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 131072
+max_concept_member_count = 32
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
