@@ -1,6 +1,7 @@
 from scripts.market_evolution_brain_gate import (
     available_port,
     feature_frame,
+    genome_feature_frame,
     quantize,
     render_identity,
     settle_brain,
@@ -19,6 +20,19 @@ def test_feature_frame_is_named_deterministic_and_atom_grounded():
     row = {"features": {"r6": .0123, "funding_rate": -.0001}}
     assert feature_frame(row, genome().features) == "funding_rate=n1e-4 r6=p1.2e-2"
     assert quantize(0) == "zero"
+
+
+def test_genome_feature_frame_includes_heritable_expression():
+    candidate = genome()
+    candidate.feature_programs = [
+        {"op": "sub", "left": "r6", "right": "funding_rate", "scale": 1}
+    ]
+    candidate.finalize()
+    frame = genome_feature_frame(
+        {"features": {"r6": .01, "funding_rate": .001}}, candidate
+    )
+    assert "evolved_" in frame
+    assert "=p9e-3" in frame
 
 
 def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshold(tmp_path):

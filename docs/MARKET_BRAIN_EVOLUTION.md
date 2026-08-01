@@ -12,6 +12,21 @@ no classifier state is copied into the Wizard brain. Numeric relationships
 enter neural validation as deterministic named character/atom magnitude frames
 through `brains/market_predictor_evolution.identity.toml`.
 
+Evolution schema 2 also evolves bounded causal feature programs and a recency
+half-life. Programs combine only same-moment or prior-derived inputs with
+canonical operations (addition, subtraction, product, stabilized ratio,
+absolute gap, signed square-root product, regime gate, and bounded nonlinear
+mix). Asset-relative rolling normalization uses only observations preceding
+the decision row; cross-sectional ranks use only markets observable at the
+same timestamp. The screening fit balances asset and outcome exposure and
+decays old observations according to the evolved half-life. These genes are
+rendered into named atom-grounded frames for the Wizard gate rather than
+copying the screening model.
+The screening learner family may mutate among directional gradient boosting,
+return regression, and extremely randomized trees. This is an information and
+relationship-discovery gene only: learner parameters and fitted weights are
+never installed in the Wizard brain.
+
 ## Protected stages
 
 ```text
@@ -27,6 +42,11 @@ Every genome fits before a purged calibration interval. Its attention threshold
 is selected on calibration data only, then it is scored on future familiar
 assets and completely withheld assets. Fitness uses the weakest section, never
 an average or best fold. The final interval is excluded from genetic fitness.
+The evaluation end is the newest timestamp supported by at least 75 percent of
+eligible instruments, after which the active instruments are deterministically
+split into trained and entirely held-out assets. This prevents one stale market
+from forcing every fold far into the past while preserving a true instrument
+holdout.
 
 The complete floor is defined in
 `docs/MARKET_BRAIN_GHOST_TRADING_ADMISSION.md`: observation count, actionable

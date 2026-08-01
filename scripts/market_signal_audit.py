@@ -42,8 +42,15 @@ FEATURE_GROUPS = {
         "acceleration", "rv6", "rv24", "rv168", "volatility_ratio",
         "drawdown", "location", "trend_vote", "hour_sin", "hour_cos",
         "dow_sin", "dow_cos",
+        "mean_r6", "mean_r24", "mean_r72", "return_autocorr24",
+        "return_skew24", "return_skew168", "rsi14", "price_sma_gap24",
+        "price_sma_gap72", "price_sma_gap168", "breakout24", "breakout72",
+        "range_ratio24", "downside_ratio24", "trend_efficiency24",
     ),
-    "flow": ("volume_ratio24", "volume_ratio168", "flow_imbalance"),
+    "flow": (
+        "volume_ratio24", "volume_ratio168", "flow_imbalance",
+        "volume_acceleration", "flow_mean6", "flow_mean24", "flow_acceleration",
+    ),
     "cross": (
         "reference_r1", "reference_r6", "reference_r12", "reference_r24",
         "relative_r1", "relative_r6", "relative_r12", "relative_r24",
@@ -55,6 +62,10 @@ FEATURE_GROUPS = {
         "spot_taker_imbalance", "futures_taker_imbalance", "flow_divergence",
         "spot_quote_ratio24", "futures_quote_ratio24", "spot_trade_ratio24",
         "futures_trade_ratio24", "futures_spot_quote_ratio",
+        "basis_z24", "basis_z168", "funding_mean24", "funding_z168",
+        "spot_imbalance_mean6", "spot_imbalance_mean24",
+        "futures_imbalance_mean6", "futures_imbalance_mean24",
+        "imbalance_acceleration", "derivative_volume_acceleration",
     ),
     "breadth": (
         "market_median_r1", "market_median_r6", "market_median_r24",
@@ -102,6 +113,8 @@ def derive_supplemental_features(rows: Sequence[dict[str, Any]]) -> dict[int, di
     basis = [float(row.get("futures_spot_basis") or 0.0) for row in rows]
     premium = [float(row.get("premium_close") or 0.0) for row in rows]
     funding = [float(row.get("funding_rate") or 0.0) for row in rows]
+    spot_imbalances: list[float] = []
+    futures_imbalances: list[float] = []
     for index, row in enumerate(rows):
         spot_volume = float(row.get("spot_base_volume") or 0.0)
         futures_volume = float(row.get("futures_base_volume") or 0.0)
@@ -119,6 +132,23 @@ def derive_supplemental_features(rows: Sequence[dict[str, Any]]) -> dict[int, di
 
         spot_imbalance = 2.0 * spot_buy / spot_volume - 1.0 if spot_volume else 0.0
         futures_imbalance = 2.0 * futures_buy / futures_volume - 1.0 if futures_volume else 0.0
+        spot_imbalances.append(spot_imbalance)
+        futures_imbalances.append(futures_imbalance)
+
+        def rolling_mean(values: Sequence[float], window: int) -> float:
+            return statistics.fmean(values[max(0, index - window + 1):index + 1])
+
+        def rolling_z(values: Sequence[float], window: int) -> float:
+            selected = values[max(0, index - window + 1):index + 1]
+            if len(selected) < 6:
+                return 0.0
+            deviation = statistics.pstdev(selected)
+            return (values[index] - statistics.fmean(selected)) / max(deviation, 1e-12)
+
+        spot_mean6 = rolling_mean(spot_imbalances, 6)
+        spot_mean24 = rolling_mean(spot_imbalances, 24)
+        futures_mean6 = rolling_mean(futures_imbalances, 6)
+        futures_mean24 = rolling_mean(futures_imbalances, 24)
         result[int(row["timestamp"])] = {
             "binance_spot_close": float(row.get("spot_close") or 0.0),
             "futures_spot_basis": basis[index],
@@ -136,6 +166,20 @@ def derive_supplemental_features(rows: Sequence[dict[str, Any]]) -> dict[int, di
             "spot_trade_ratio24": ratio("spot_trade_count", spot_trades),
             "futures_trade_ratio24": ratio("futures_trade_count", futures_trades),
             "futures_spot_quote_ratio": futures_quote / max(spot_quote, 1e-12),
+            "basis_z24": rolling_z(basis, 24),
+            "basis_z168": rolling_z(basis, 168),
+            "funding_mean24": rolling_mean(funding, 24),
+            "funding_z168": rolling_z(funding, 168),
+            "spot_imbalance_mean6": spot_mean6,
+            "spot_imbalance_mean24": spot_mean24,
+            "futures_imbalance_mean6": futures_mean6,
+            "futures_imbalance_mean24": futures_mean24,
+            "imbalance_acceleration": ((futures_mean6 - spot_mean6)
+                                       - (futures_mean24 - spot_mean24)),
+            "derivative_volume_acceleration": (
+                ratio("futures_quote_volume", futures_quote)
+                - ratio("spot_quote_volume", spot_quote)
+            ),
         }
     return result
 
@@ -179,6 +223,32 @@ def continuous_features(
     rolling_high = max(row["high"] for row in rolling)
     rolling_low = min(row["low"] for row in rolling)
     total_flow = bar["buy_volume"] + bar["sell_volume"]
+    flow_history = []
+    for prior in bars[index - 23:index + 1]:
+        prior_total = prior["buy_volume"] + prior["sell_volume"]
+        flow_history.append((prior["buy_volume"] - prior["sell_volume"]) / prior_total
+                            if prior_total else 0.0)
+    ranges = [max(0.0, prior["high"] - prior["low"]) / max(abs(prior["open"]), 1e-12)
+              for prior in bars[index - 23:index + 1]]
+    closes = [prior["close"] for prior in bars[index - 167:index + 1]]
+    recent24 = one_bar[-24:]
+    mean24 = statistics.fmean(recent24)
+    std24 = statistics.pstdev(recent24)
+    skew24 = (statistics.fmean(((value - mean24) / std24) ** 3 for value in recent24)
+              if std24 > 1e-12 else 0.0)
+    mean168 = statistics.fmean(one_bar)
+    std168 = statistics.pstdev(one_bar)
+    skew168 = (statistics.fmean(((value - mean168) / std168) ** 3 for value in one_bar)
+               if std168 > 1e-12 else 0.0)
+    autocorr24 = (float(np.corrcoef(recent24[:-1], recent24[1:])[0, 1])
+                  if np.std(recent24[:-1]) > 1e-12 and np.std(recent24[1:]) > 1e-12 else 0.0)
+    gains14 = sum(max(0.0, value) for value in one_bar[-14:])
+    losses14 = sum(max(0.0, -value) for value in one_bar[-14:])
+    rsi14 = gains14 / max(gains14 + losses14, 1e-12)
+    high24 = max(prior["high"] for prior in bars[index - 23:index + 1])
+    low24 = min(prior["low"] for prior in bars[index - 23:index + 1])
+    high72 = max(prior["high"] for prior in bars[index - 71:index + 1])
+    low72 = min(prior["low"] for prior in bars[index - 71:index + 1])
     dt = datetime.fromtimestamp(bar["timestamp"], timezone.utc)
     external = (supplemental or {}).get(int(bar["timestamp"]), {})
     binance_spot = external.get("binance_spot_close", 0.0)
@@ -228,6 +298,27 @@ def continuous_features(
         "hour_cos": math.cos(2 * math.pi * dt.hour / 24),
         "dow_sin": math.sin(2 * math.pi * dt.weekday() / 7),
         "dow_cos": math.cos(2 * math.pi * dt.weekday() / 7),
+        "mean_r6": statistics.fmean(one_bar[-6:]),
+        "mean_r24": mean24,
+        "mean_r72": statistics.fmean(one_bar[-72:]),
+        "return_autocorr24": autocorr24,
+        "return_skew24": skew24,
+        "return_skew168": skew168,
+        "rsi14": rsi14,
+        "price_sma_gap24": safe_return(close, statistics.fmean(closes[-24:])),
+        "price_sma_gap72": safe_return(close, statistics.fmean(closes[-72:])),
+        "price_sma_gap168": safe_return(close, statistics.fmean(closes)),
+        "breakout24": (close - low24) / max(high24 - low24, 1e-12) - .5,
+        "breakout72": (close - low72) / max(high72 - low72, 1e-12) - .5,
+        "range_ratio24": ranges[-1] / max(statistics.median(ranges), 1e-12),
+        "downside_ratio24": sum(value < 0 for value in recent24) / 24.0,
+        "trend_efficiency24": abs(values[24]) / max(sum(abs(value) for value in recent24), 1e-12),
+        "volume_acceleration": (statistics.fmean(volumes[-6:])
+                                / max(statistics.fmean(volumes[-24:]), 1e-12) - 1.0),
+        "flow_mean6": statistics.fmean(flow_history[-6:]),
+        "flow_mean24": statistics.fmean(flow_history),
+        "flow_acceleration": (statistics.fmean(flow_history[-6:])
+                              - statistics.fmean(flow_history)),
         **{f"reference_r{window}": value for window, value in reference_returns.items()},
         **{f"relative_r{window}": values[window] - reference_returns[window]
            for window in reference_returns},

@@ -1,8 +1,9 @@
 import random
 
 from scripts.market_evolution_service import (
-    Genome, add_derived_features, attach_news_features, crossover, mutate,
-    dataset_signature, passes_floor, recover_pending_gate, seed_genomes,
+    Genome, add_derived_features, attach_causal_normalization,
+    attach_news_features, crossover, dataset_signature, evaluation_scope, mutate,
+    passes_floor, program_name, program_value, recover_pending_gate, seed_genomes,
 )
 
 
@@ -22,6 +23,10 @@ def test_crossover_preserves_a_viable_feature_genome():
     assert len(child.features) >= 8
     assert child.generation == 4
     assert len(child.parents) >= 1
+
+
+def test_seed_population_honors_requested_size():
+    assert len(seed_genomes(4, random.Random(2))) == 4
 
 
 def test_floor_requires_every_relationship_not_accuracy_alone():
@@ -90,3 +95,37 @@ def test_dataset_signature_covers_primary_and_news_inputs(tmp_path):
     after_news = dataset_signature(manifest, features.parent, news)
     assert before != after_primary
     assert after_primary != after_news
+
+
+def test_evolved_program_is_deterministic_bounded_and_same_moment():
+    program = {"op": "regime_gate", "left": "r6", "right": "funding_rate", "scale": 2}
+    assert program_name(program) == program_name(dict(reversed(list(program.items()))))
+    assert program_value({"r6": .03, "funding_rate": -.001}, program) == -.06
+    assert abs(program_value({"r6": 1e20, "funding_rate": 1},
+                             {**program, "op": "mul"})) <= 1e6
+
+
+def test_causal_normalization_does_not_read_a_future_row():
+    def row(timestamp, value, asset="A"):
+        features = {name: 0.0 for name in (
+            "r1", "r6", "r12", "r24", "r72", "r168", "rv24",
+            "volatility_ratio", "volume_ratio24", "flow_imbalance",
+            "market_median_r6", "market_breadth_r6", "relative_market_r6",
+            "futures_spot_basis", "funding_rate", "flow_divergence",
+        )}
+        features["r6"] = value
+        return {"timestamp": timestamp, "asset": asset, "features": features}
+    prefix = [row(index, float(index)) for index in range(20)]
+    attach_causal_normalization(prefix)
+    before = prefix[-1]["features"]["causal_z14_r6"]
+    extended = [row(index, float(index)) for index in range(20)] + [row(20, -999.0)]
+    attach_causal_normalization(extended)
+    assert extended[-2]["features"]["causal_z14_r6"] == before
+
+
+def test_evaluation_scope_discards_only_stale_quarter_and_resplits():
+    dataset = {"asset_ends": {f"A{i}": float(i) for i in range(8)}}
+    training, holdout, end = evaluation_scope(dataset, set(dataset["asset_ends"]), "seed")
+    assert end == 1.0
+    assert training.isdisjoint(holdout)
+    assert len(training | holdout) == 7

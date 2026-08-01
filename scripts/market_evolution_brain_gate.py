@@ -27,7 +27,8 @@ from scripts.market_brain_experiment import (  # noqa: E402
     BrainClient, direction, evaluate_rows, parse_prediction,
 )
 from scripts.market_evolution_service import (  # noqa: E402
-    FLOOR, Genome, load_dataset, passes_floor,
+    FLOOR, Genome, evaluation_scope, genome_from_dict, genome_uses_derivatives,
+    load_dataset, passes_floor, program_name, program_value,
 )
 
 POOL_HORIZON = 9
@@ -53,9 +54,18 @@ def feature_frame(row: dict[str, Any], names: Sequence[str]) -> str:
                     for name in names)
 
 
+def genome_feature_frame(row: dict[str, Any], genome: Genome) -> str:
+    base = feature_frame(row, genome.features)
+    evolved = " ".join(
+        f"{program_name(program)}={quantize(program_value(row['features'], program))}"
+        for program in genome.feature_programs
+    )
+    return " ".join(part for part in (base, evolved) if part)
+
+
 def streams(row: dict[str, Any], genome: Genome, horizon: int) -> list[tuple[int, str]]:
     return [
-        (POOL_EVOLVED, feature_frame(row, genome.features)),
+        (POOL_EVOLVED, genome_feature_frame(row, genome)),
         (POOL_HORIZON, f"horizon_bars={horizon}"),
         (POOL_INSTRUMENT, f"base={str(row['asset']).lower()} market=crypto"),
     ]
@@ -120,6 +130,17 @@ def settle_brain(client: BrainClient) -> dict[str, Any]:
     return {"before": before, "sleep": sleep, "checkpoint": checkpoint, "after": after}
 
 
+def stop_brain_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
 def evenly_spaced(rows: Sequence[dict[str, Any]], count: int) -> list[dict[str, Any]]:
     if len(rows) <= count:
         return list(rows)
@@ -169,20 +190,23 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
     if fold_root.exists() and any(fold_root.iterdir()):
         raise RuntimeError(f"refusing to overwrite micro-brain {fold_root}")
     fold_root.mkdir(parents=True, exist_ok=True)
-    eligible = (dataset["supplemental_assets"] if genome.result
-                and genome.result.get("uses_derivatives") else set(dataset["assets"]))
+    uses_derivatives = genome_uses_derivatives(genome)
+    eligible = dataset["supplemental_assets"] if uses_derivatives else set(dataset["assets"])
+    training_assets, holdout_assets, _ = evaluation_scope(
+        dataset, set(eligible), "market-perpetual-v1"
+    )
     test_seconds = args.test_days * 86400
     calibration_seconds = args.calibration_days * 86400
     train_stop = cutoff - args.horizon * 3600
     calibration_start = train_stop - calibration_seconds
-    train = [row for row in dataset["rows"] if row["asset"] in dataset["training_assets"]
+    train = [row for row in dataset["rows"] if row["asset"] in training_assets
              and row["asset"] in eligible and row["timestamp"] < calibration_start]
-    calibration = [row for row in dataset["rows"] if row["asset"] in dataset["training_assets"]
+    calibration = [row for row in dataset["rows"] if row["asset"] in training_assets
                    and row["asset"] in eligible
                    and calibration_start <= row["timestamp"] < train_stop]
-    known = [row for row in dataset["rows"] if row["asset"] in dataset["training_assets"]
+    known = [row for row in dataset["rows"] if row["asset"] in training_assets
              and row["asset"] in eligible and cutoff <= row["timestamp"] < cutoff + test_seconds]
-    unseen = [row for row in dataset["rows"] if row["asset"] in dataset["holdout_assets"]
+    unseen = [row for row in dataset["rows"] if row["asset"] in holdout_assets
               and row["asset"] in eligible and cutoff <= row["timestamp"] < cutoff + test_seconds]
     train = select_per_asset(train, args.train_per_asset)
     calibration = select_per_asset(calibration, args.calibration_per_asset)
@@ -211,7 +235,34 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
                 for _ in range(genome.presentations):
                     if not client.consolidate(streams(row, genome, args.horizon), outcome):
                         failures += 1
+            checkpoint = client.post("/brain/checkpoint", {})
+            if checkpoint.get("ok") is False:
+                raise RuntimeError(f"pre-migration checkpoint failed: {checkpoint}")
+            # Fresh brain directories start in the compatibility layout.  The
+            # all-neuron rest transition is available only after conversion to
+            # the individually addressable `.wbrain` package.
+            stop_brain_process(process)
+            migration_mode = "already_neuron_addressable"
+            if not (fold_root / "brain.wbrain").is_file():
+                migration = subprocess.run(
+                    [str(args.migration_binary.resolve()), str(fold_root.resolve())],
+                    cwd=ROOT, env=environment, stdout=stdout, stderr=stderr,
+                    creationflags=creationflags, timeout=900,
+                )
+                if migration.returncode != 0:
+                    raise RuntimeError(
+                        f"brain migration failed with exit {migration.returncode}"
+                    )
+                migration_mode = "legacy_to_neuron_addressable"
+            process = subprocess.Popen(
+                [str(args.binary.resolve())], cwd=ROOT, env=environment,
+                stdout=stdout, stderr=stderr, creationflags=creationflags,
+            )
+            wait_health(endpoint, process)
+            client = BrainClient(endpoint, timeout=90)
             settlement = settle_brain(client)
+            settlement["pre_migration_checkpoint"] = checkpoint
+            settlement["storage_migration"] = migration_mode
             calibration_predictions = predict_rows(client, calibration, genome, args.horizon)
             confidences = sorted(row["confidence"] for row in calibration_predictions)
             threshold_index = round((len(confidences) - 1) * genome.confidence_quantile)
@@ -230,12 +281,7 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
                 "sections": sections,
             }
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            stop_brain_process(process)
 
 
 def main() -> int:
@@ -252,6 +298,8 @@ def main() -> int:
                         default=ROOT / "brains/market_predictor_evolution.identity.toml")
     parser.add_argument("--binary", type=Path,
                         default=ROOT / "target/debug/w1z4rd_brain_server.exe")
+    parser.add_argument("--migration-binary", type=Path,
+                        default=ROOT / "target/debug/w1z4rd_brain_migrate.exe")
     parser.add_argument("--runtime", type=Path, default=ROOT / "runtime/market-evolution/brain-gates")
     parser.add_argument("--port", type=int, default=0,
                         help="base port; zero reserves a free loopback port per fold")
@@ -267,7 +315,7 @@ def main() -> int:
     parser.add_argument("--cost-bps", type=float, default=20)
     args = parser.parse_args()
     payload = json.loads(args.candidate.read_text(encoding="utf-8"))
-    genome = Genome(**payload).finalize()
+    genome = genome_from_dict(payload).finalize()
     attempt = datetime.now(timezone.utc).strftime("attempt-%Y%m%dT%H%M%S-%fZ")
     args.attempt_root = args.runtime / genome.genome_id / attempt
     dataset = load_dataset(args.manifest, args.supplemental_root,
@@ -276,7 +324,10 @@ def main() -> int:
     render_identity(args.identity_template, identity, genome)
     test_seconds = args.test_days * 86400
     final_seconds = args.final_days * 86400
-    cutoffs = [dataset["end"] - final_seconds - (args.folds - fold) * test_seconds
+    uses_derivatives = genome_uses_derivatives(genome)
+    eligible = dataset["supplemental_assets"] if uses_derivatives else set(dataset["assets"])
+    _, _, evaluation_end = evaluation_scope(dataset, set(eligible), "market-perpetual-v1")
+    cutoffs = [evaluation_end - final_seconds - (args.folds - fold) * test_seconds
                for fold in range(args.folds)]
     started = datetime.now(timezone.utc).isoformat()
     folds = [run_fold(index, cutoff, genome, dataset, args, identity)

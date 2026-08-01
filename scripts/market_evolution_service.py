@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+from collections import Counter, defaultdict, deque
 import hashlib
 import json
 import math
@@ -27,7 +28,9 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import (
+    ExtraTreesClassifier, HistGradientBoostingClassifier, HistGradientBoostingRegressor,
+)
 
 try:
     import psutil
@@ -37,6 +40,8 @@ except ImportError:  # pragma: no cover
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+EVOLUTION_SCHEMA = 2
 
 from scripts.market_brain_experiment import load_bars  # noqa: E402
 from scripts.market_signal_audit import (  # noqa: E402
@@ -62,6 +67,25 @@ DERIVED_FEATURES = {
     "liquidity_acceleration": lambda f: (
         f["futures_quote_ratio24"] - f["spot_quote_ratio24"]),
 }
+ROLLING_SOURCES = (
+    "r1", "r6", "r12", "r24", "r72", "r168", "rv24",
+    "volatility_ratio", "volume_ratio24", "flow_imbalance",
+    "market_median_r6", "market_breadth_r6", "relative_market_r6",
+    "futures_spot_basis", "funding_rate", "flow_divergence",
+)
+ROLLING_WINDOWS = (14, 60)
+ROLLING_FEATURES = tuple(
+    f"causal_z{window}_{name}" for name in ROLLING_SOURCES for window in ROLLING_WINDOWS
+)
+CROSS_SECTION_SOURCES = (
+    "r1", "r6", "r12", "r24", "volume_ratio24", "flow_imbalance",
+    "futures_spot_basis", "funding_rate",
+)
+CROSS_SECTION_FEATURES = tuple(f"cross_rank_{name}" for name in CROSS_SECTION_SOURCES)
+EVOLVED_OPS = (
+    "add", "sub", "mul", "ratio", "abs_gap", "signed_sqrt_product",
+    "regime_gate", "tanh_mix",
+)
 NEWS_FEATURES = (
     "news_count_6h", "news_count_24h", "news_count_72h",
     "news_sentiment_6h", "news_sentiment_24h", "news_sentiment_72h",
@@ -70,12 +94,21 @@ NEWS_FEATURES = (
 )
 BASE_FEATURES = tuple(dict.fromkeys(
     FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
-    + FEATURE_GROUPS["derivatives"] + FEATURE_GROUPS["breadth"] + NEWS_FEATURES
+    + FEATURE_GROUPS["cross"] + FEATURE_GROUPS["derivatives"]
+    + FEATURE_GROUPS["breadth"] + NEWS_FEATURES
+    + ROLLING_FEATURES + CROSS_SECTION_FEATURES
 ))
 DERIVATIVE_FEATURES = set(FEATURE_GROUPS["derivatives"]) | {
     "flow_consensus", "flow_basis_pressure", "funding_basis_pressure",
     "liquidity_acceleration",
 }
+DERIVATIVE_FEATURES.update(
+    f"causal_z{window}_{source}"
+    for source in FEATURE_GROUPS["derivatives"] for window in ROLLING_WINDOWS
+)
+DERIVATIVE_FEATURES.update(
+    f"cross_rank_{source}" for source in FEATURE_GROUPS["derivatives"]
+)
 
 
 @dataclass
@@ -90,6 +123,9 @@ class Genome:
     binding_threshold: int
     concept_threshold: int
     presentations: int
+    feature_programs: list[dict[str, Any]] = field(default_factory=list)
+    recency_half_life_days: float = 720.0
+    learner_kind: str = "classifier"
     generation: int = 0
     parents: list[str] = field(default_factory=list)
     genome_id: str = ""
@@ -101,11 +137,104 @@ class Genome:
         for key in ("genome_id", "fitness", "result"):
             payload.pop(key, None)
         self.features = sorted(set(self.features))
+        self.feature_programs = sorted(
+            (normalize_program(program) for program in self.feature_programs),
+            key=lambda program: json.dumps(program, sort_keys=True, separators=(",", ":")),
+        )
         payload["features"] = self.features
+        payload["feature_programs"] = self.feature_programs
         self.genome_id = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
         return self
+
+
+def normalize_program(program: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize a bounded causal feature expression for stable heredity."""
+    universe = set(BASE_FEATURES) | set(DERIVED_FEATURES)
+    op = str(program.get("op", "sub"))
+    if op not in EVOLVED_OPS:
+        op = "sub"
+    left = str(program.get("left", "r6"))
+    right = str(program.get("right", "r24"))
+    if left not in universe:
+        left = "r6"
+    if right not in universe:
+        right = "r24"
+    scale = max(.05, min(20.0, float(program.get("scale", 1.0))))
+    return {"op": op, "left": left, "right": right, "scale": round(scale, 8)}
+
+
+def program_name(program: dict[str, Any]) -> str:
+    encoded = json.dumps(normalize_program(program), sort_keys=True,
+                         separators=(",", ":")).encode()
+    return "evolved_" + hashlib.sha256(encoded).hexdigest()[:12]
+
+
+def program_value(features: dict[str, float], program: dict[str, Any]) -> float:
+    """Evaluate one same-moment expression; no target or future state is accessible."""
+    program = normalize_program(program)
+    left = float(features.get(program["left"], 0.0))
+    right = float(features.get(program["right"], 0.0))
+    scale = float(program["scale"])
+    op = program["op"]
+    if op == "add":
+        value = left + scale * right
+    elif op == "sub":
+        value = left - scale * right
+    elif op == "mul":
+        value = scale * left * right
+    elif op == "ratio":
+        value = left / (abs(right) + 1e-6 * scale)
+    elif op == "abs_gap":
+        value = abs(left) - scale * abs(right)
+    elif op == "signed_sqrt_product":
+        product = left * right
+        value = math.copysign(math.sqrt(abs(product)), product) * scale
+    elif op == "regime_gate":
+        value = left if right >= 0 else -scale * left
+    else:  # tanh_mix
+        value = math.tanh(scale * left) + math.tanh(scale * right)
+    return float(max(-1e6, min(1e6, value))) if math.isfinite(value) else 0.0
+
+
+def feature_vector(row: dict[str, Any], genome: "Genome") -> list[float]:
+    features = row["features"]
+    return ([float(features.get(name, 0.0)) for name in genome.features]
+            + [program_value(features, program) for program in genome.feature_programs])
+
+
+def random_program(rng: random.Random) -> dict[str, Any]:
+    universe = list(BASE_FEATURES) + list(DERIVED_FEATURES)
+    return normalize_program({
+        "op": rng.choice(EVOLVED_OPS), "left": rng.choice(universe),
+        "right": rng.choice(universe), "scale": 10 ** rng.uniform(-.7, .7),
+    })
+
+
+def genome_uses_derivatives(genome: "Genome") -> bool:
+    references = set(genome.features)
+    for program in genome.feature_programs:
+        references.add(str(program.get("left", "")))
+        references.add(str(program.get("right", "")))
+    return bool(references & DERIVATIVE_FEATURES)
+
+
+@dataclass
+class Surrogate:
+    model: Any
+    kind: str
+    score_scale: float = 1.0
+
+    def probability(self, values: np.ndarray) -> np.ndarray:
+        if self.kind in {"classifier", "extra_trees"}:
+            return self.model.predict_proba(values)[:, list(self.model.classes_).index(1)]
+        score = np.asarray(self.model.predict(values), dtype=np.float64)
+        normalized = np.clip(score / max(self.score_scale, 1e-9), -30, 30)
+        return 1.0 / (1.0 + np.exp(-normalized))
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        return np.where(self.probability(values) >= .5, 1, -1).astype(np.int8)
 
 
 def utc_now() -> str:
@@ -155,6 +284,7 @@ def available_memory_gb() -> float:
 def dataset_signature(manifest: Path, supplemental_root: Path,
                       news_path: Path | None = None) -> str:
     digest = hashlib.sha256()
+    digest.update(f"evolution-schema:{EVOLUTION_SCHEMA}".encode())
     paths = [manifest, *sorted((supplemental_root / "features").glob("*.json"))]
     if manifest.is_file():
         payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -196,6 +326,64 @@ def add_derived_features(rows: Sequence[dict[str, Any]]) -> None:
                 features[name] = value if math.isfinite(value) else 0.0
             except (KeyError, TypeError, ValueError, ZeroDivisionError):
                 features[name] = 0.0
+
+
+def attach_causal_normalization(rows: Sequence[dict[str, Any]]) -> None:
+    """Add asset-relative rolling state and same-time cross-sectional ranks.
+
+    Rolling statistics use only observations strictly preceding the decision
+    row. Cross-sectional ranks use values simultaneously observable at that
+    decision timestamp. Both representations transfer to never-trained assets.
+    """
+    by_asset: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_asset[str(row["asset"])].append(row)
+    for members in by_asset.values():
+        members.sort(key=lambda row: float(row["timestamp"]))
+        history = {
+            (source, window): deque()
+            for source in ROLLING_SOURCES for window in ROLLING_WINDOWS
+        }
+        rolling_sum = {key: 0.0 for key in history}
+        rolling_square_sum = {key: 0.0 for key in history}
+        for row in members:
+            features = row["features"]
+            for source in ROLLING_SOURCES:
+                current = float(features.get(source, 0.0))
+                for window in ROLLING_WINDOWS:
+                    key = (source, window)
+                    prior = history[key]
+                    if len(prior) >= max(6, window // 3):
+                        mean = rolling_sum[key] / len(prior)
+                        variance = max(0.0, rolling_square_sum[key] / len(prior) - mean * mean)
+                        deviation = math.sqrt(variance)
+                        value = (current - mean) / max(deviation, 1e-8)
+                        features[f"causal_z{window}_{source}"] = max(-12.0, min(12.0, value))
+                    else:
+                        features[f"causal_z{window}_{source}"] = 0.0
+                    if len(prior) == window:
+                        expired = prior.popleft()
+                        rolling_sum[key] -= expired
+                        rolling_square_sum[key] -= expired * expired
+                    prior.append(current)
+                    rolling_sum[key] += current
+                    rolling_square_sum[key] += current * current
+
+    by_time: dict[float, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_time[float(row["timestamp"])].append(row)
+    for members in by_time.values():
+        for source in CROSS_SECTION_SOURCES:
+            ordered = sorted(
+                ((float(row["features"].get(source, 0.0)), index)
+                 for index, row in enumerate(members)),
+                key=lambda item: (item[0], item[1]),
+            )
+            denominator = max(1, len(ordered) - 1)
+            for rank, (_, index) in enumerate(ordered):
+                members[index]["features"][f"cross_rank_{source}"] = (
+                    2.0 * rank / denominator - 1.0 if len(ordered) > 1 else 0.0
+                )
 
 
 def attach_news_features(rows: Sequence[dict[str, Any]], path: Path | None) -> None:
@@ -278,18 +466,41 @@ def load_dataset(manifest_path: Path, supplemental_root: Path, horizon: int,
     attach_market_breadth(context_rows)
     attach_news_features(context_rows, news_path)
     add_derived_features(context_rows)
+    attach_causal_normalization(context_rows)
     rows = [row for row in context_rows if row["target"] != 0]
     assets = sorted({row["asset"] for row in rows}, key=lambda value: stable_order(value, seed))
     holdout_n = max(1, round(len(assets) * .25))
+    asset_ends = {
+        asset: max(float(row["timestamp"]) for row in rows if row["asset"] == asset)
+        for asset in assets
+    }
     return {
         "rows": rows,
         "training_assets": set(assets[holdout_n:]),
         "holdout_assets": set(assets[:holdout_n]),
         "supplemental_assets": set(supplemental),
-        "end": min(max(row["timestamp"] for row in rows if row["asset"] == asset)
-                   for asset in assets),
+        "end": min(asset_ends.values()),
+        "asset_ends": asset_ends,
         "assets": assets,
     }
+
+
+def evaluation_scope(dataset: dict[str, Any], eligible: set[str], seed: str
+                     ) -> tuple[set[str], set[str], float]:
+    """Use the newest timestamp supported by at least 75% of eligible assets."""
+    ends = sorted(float(dataset["asset_ends"][asset]) for asset in eligible
+                  if asset in dataset["asset_ends"])
+    if len(ends) < 4:
+        raise ValueError("fewer than four assets have eligible evaluation histories")
+    end = ends[max(0, math.ceil(len(ends) * .25) - 1)]
+    active = sorted(
+        (asset for asset in eligible if dataset["asset_ends"].get(asset, 0) >= end),
+        key=lambda value: stable_order(value, seed),
+    )
+    holdout_n = max(1, round(len(active) * .25))
+    if len(active) - holdout_n < 2:
+        raise ValueError("availability filter leaves too few training assets")
+    return set(active[holdout_n:]), set(active[:holdout_n]), end
 
 
 def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
@@ -299,11 +510,14 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
     breadth = list(FEATURE_GROUPS["breadth"])
     seeds = [price, price + flow, price + flow + derivatives,
              price + flow + breadth, price + flow + derivatives + breadth]
+    seed_learners = ("classifier", "regressor", "classifier", "extra_trees", "regressor")
     result = [Genome(
         features=features, learning_rate=.06, max_iter=180, max_leaf_nodes=24,
         min_samples_leaf=20, l2_regularization=1.0, confidence_quantile=.20,
         binding_threshold=3, concept_threshold=5, presentations=3,
-    ).finalize() for features in seeds]
+        feature_programs=[], recency_half_life_days=720.0,
+        learner_kind=seed_learners[index],
+    ).finalize() for index, features in enumerate(seeds[:population])]
     all_features = list(BASE_FEATURES) + list(DERIVED_FEATURES)
     while len(result) < population:
         count = rng.randint(10, min(36, len(all_features)))
@@ -316,6 +530,9 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
             confidence_quantile=rng.uniform(0, .30),
             binding_threshold=rng.randint(2, 7), concept_threshold=rng.randint(3, 9),
             presentations=rng.randint(2, 7),
+            feature_programs=[random_program(rng) for _ in range(rng.randint(1, 5))],
+            recency_half_life_days=10 ** rng.uniform(math.log10(90), math.log10(1500)),
+            learner_kind=rng.choice(("classifier", "regressor", "extra_trees")),
         ).finalize())
     return result
 
@@ -334,12 +551,12 @@ def _portfolio_drawdown(selected: Sequence[dict[str, Any]], predicted: np.ndarra
     return drawdown
 
 
-def evaluate_slice(model: HistGradientBoostingClassifier, selected: list[dict[str, Any]],
-                   names: Sequence[str], threshold: float, cost_bps: float) -> dict[str, Any]:
-    x = np.asarray([[row["features"][name] for name in names] for row in selected], dtype=np.float32)
+def evaluate_slice(model: Surrogate, selected: list[dict[str, Any]],
+                   genome: Genome, threshold: float, cost_bps: float) -> dict[str, Any]:
+    x = np.asarray([feature_vector(row, genome) for row in selected], dtype=np.float32)
     actual = np.asarray([row["target"] for row in selected], dtype=np.int8)
     realized = np.asarray([row["return"] for row in selected], dtype=np.float64)
-    probability = model.predict_proba(x)[:, list(model.classes_).index(1)]
+    probability = model.probability(x)
     confidence = np.maximum(probability, 1 - probability)
     mask = confidence >= threshold
     if not mask.any():
@@ -380,50 +597,88 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                     horizon: int, cost_bps: float) -> Genome:
     started = time.perf_counter()
     rows = dataset["rows"]
-    uses_derivatives = bool(set(genome.features) & DERIVATIVE_FEATURES)
+    uses_derivatives = genome_uses_derivatives(genome)
     eligible = dataset["supplemental_assets"] if uses_derivatives else set(dataset["assets"])
+    training_assets, holdout_assets, evaluation_end = evaluation_scope(
+        dataset, set(eligible), "market-perpetual-v1"
+    )
     test_seconds = test_days * 86400
     calibration_seconds = calibration_days * 86400
     final_seconds = final_days * 86400
-    cutoffs = [dataset["end"] - final_seconds - (folds - fold) * test_seconds
+    cutoffs = [evaluation_end - final_seconds - (folds - fold) * test_seconds
                for fold in range(folds)]
     fold_results = []
     try:
         for fold, cutoff in enumerate(cutoffs):
             fit_stop = cutoff - horizon * 3600 - calibration_seconds
             calibration_start = fit_stop + horizon * 3600
-            fit = [row for row in rows if row["asset"] in dataset["training_assets"]
+            fit = [row for row in rows if row["asset"] in training_assets
                    and row["asset"] in eligible and row["timestamp"] < fit_stop]
-            calibration = [row for row in rows if row["asset"] in dataset["training_assets"]
+            calibration = [row for row in rows if row["asset"] in training_assets
                            and row["asset"] in eligible
                            and calibration_start <= row["timestamp"] < cutoff - horizon * 3600]
-            known = [row for row in rows if row["asset"] in dataset["training_assets"]
+            known = [row for row in rows if row["asset"] in training_assets
                      and row["asset"] in eligible
                      and cutoff <= row["timestamp"] < cutoff + test_seconds]
-            unseen = [row for row in rows if row["asset"] in dataset["holdout_assets"]
+            unseen = [row for row in rows if row["asset"] in holdout_assets
                       and row["asset"] in eligible
                       and cutoff <= row["timestamp"] < cutoff + test_seconds]
             if min(len(fit), len(calibration), len(known), len(unseen)) == 0:
                 raise ValueError("one or more protected split sections are empty")
-            names = genome.features
-            x_fit = np.asarray([[row["features"][name] for name in names] for row in fit], dtype=np.float32)
+            x_fit = np.asarray([feature_vector(row, genome) for row in fit], dtype=np.float32)
             y_fit = np.asarray([row["target"] for row in fit], dtype=np.int8)
-            model = HistGradientBoostingClassifier(
-                learning_rate=genome.learning_rate, max_iter=genome.max_iter,
-                max_leaf_nodes=genome.max_leaf_nodes,
-                min_samples_leaf=genome.min_samples_leaf,
-                l2_regularization=genome.l2_regularization, random_state=1700 + fold,
-            ).fit(x_fit, y_fit)
-            x_cal = np.asarray([[row["features"][name] for name in names]
-                                for row in calibration], dtype=np.float32)
-            cal_probability = model.predict_proba(x_cal)[:, list(model.classes_).index(1)]
+            asset_counts = Counter(str(row["asset"]) for row in fit)
+            class_counts = Counter(int(row["target"]) for row in fit)
+            half_life_seconds = max(1.0, genome.recency_half_life_days * 86400)
+            weights = np.asarray([
+                (1.0 / asset_counts[str(row["asset"])])
+                * ((1.0 / class_counts[int(row["target"])])
+                   if genome.learner_kind != "regressor" else 1.0)
+                * math.exp(-math.log(2) * (fit_stop - float(row["timestamp"]))
+                           / half_life_seconds)
+                for row in fit
+            ], dtype=np.float64)
+            weights *= len(weights) / max(weights.sum(), 1e-12)
+            if genome.learner_kind == "regressor":
+                raw_model = HistGradientBoostingRegressor(
+                    learning_rate=genome.learning_rate, max_iter=genome.max_iter,
+                    max_leaf_nodes=genome.max_leaf_nodes,
+                    min_samples_leaf=genome.min_samples_leaf,
+                    l2_regularization=genome.l2_regularization, random_state=1700 + fold,
+                ).fit(
+                    x_fit, np.asarray([row["return"] for row in fit], dtype=np.float64),
+                    sample_weight=weights,
+                )
+                model = Surrogate(raw_model, "regressor")
+            elif genome.learner_kind == "extra_trees":
+                raw_model = ExtraTreesClassifier(
+                    n_estimators=min(240, max(80, genome.max_iter)),
+                    max_leaf_nodes=genome.max_leaf_nodes,
+                    min_samples_leaf=genome.min_samples_leaf,
+                    max_features="sqrt", class_weight=None, n_jobs=1,
+                    random_state=1700 + fold,
+                ).fit(x_fit, y_fit, sample_weight=weights)
+                model = Surrogate(raw_model, "extra_trees")
+            else:
+                raw_model = HistGradientBoostingClassifier(
+                    learning_rate=genome.learning_rate, max_iter=genome.max_iter,
+                    max_leaf_nodes=genome.max_leaf_nodes,
+                    min_samples_leaf=genome.min_samples_leaf,
+                    l2_regularization=genome.l2_regularization, random_state=1700 + fold,
+                ).fit(x_fit, y_fit, sample_weight=weights)
+                model = Surrogate(raw_model, "classifier")
+            x_cal = np.asarray([feature_vector(row, genome) for row in calibration], dtype=np.float32)
+            if genome.learner_kind == "regressor":
+                calibration_scores = np.asarray(raw_model.predict(x_cal), dtype=np.float64)
+                model.score_scale = max(float(np.median(np.abs(calibration_scores))), 1e-6)
+            cal_probability = model.probability(x_cal)
             cal_confidence = np.maximum(cal_probability, 1 - cal_probability)
             threshold = float(np.quantile(cal_confidence, genome.confidence_quantile))
             fold_results.append({
                 "fold": fold, "cutoff": cutoff, "fit_rows": len(fit),
                 "calibration_rows": len(calibration), "confidence_threshold": threshold,
-                "known_asset_future": evaluate_slice(model, known, names, threshold, cost_bps),
-                "unseen_asset_future": evaluate_slice(model, unseen, names, threshold, cost_bps),
+                "known_asset_future": evaluate_slice(model, known, genome, threshold, cost_bps),
+                "unseen_asset_future": evaluate_slice(model, unseen, genome, threshold, cost_bps),
             })
         sections = [fold_result[name] for fold_result in fold_results
                     for name in ("known_asset_future", "unseen_asset_future")]
@@ -459,6 +714,9 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             "status": ("surrogate_working_target_pass" if working_target else
                        "surrogate_floor_pass" if passed else "screened"),
             "uses_derivatives": uses_derivatives,
+            "evaluation_end": evaluation_end,
+            "training_assets": sorted(training_assets),
+            "holdout_assets": sorted(holdout_assets),
             "folds": fold_results,
             "summary": {
                 "min_accuracy": min_accuracy, "min_balanced_accuracy": min_balanced,
@@ -480,12 +738,30 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
 
 def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
     features = set(parent.features)
+    programs = [dict(program) for program in parent.feature_programs]
     universe = list(BASE_FEATURES) + list(DERIVED_FEATURES)
     for _ in range(rng.randint(1, 4)):
         if rng.random() < .55 and len(features) < 42:
             features.add(rng.choice(universe))
         elif len(features) > 8:
             features.remove(rng.choice(sorted(features)))
+    for _ in range(rng.randint(1, 3)):
+        action = rng.random()
+        if action < .45 and len(programs) < 10:
+            programs.append(random_program(rng))
+        elif action < .70 and programs:
+            programs.pop(rng.randrange(len(programs)))
+        elif programs:
+            index = rng.randrange(len(programs))
+            changed = dict(programs[index])
+            field_name = rng.choice(("op", "left", "right", "scale"))
+            if field_name == "op":
+                changed[field_name] = rng.choice(EVOLVED_OPS)
+            elif field_name in {"left", "right"}:
+                changed[field_name] = rng.choice(universe)
+            else:
+                changed[field_name] = float(changed[field_name]) * math.exp(rng.gauss(0, .35))
+            programs[index] = normalize_program(changed)
     child = Genome(
         features=sorted(features),
         learning_rate=min(.20, max(.01, parent.learning_rate * math.exp(rng.gauss(0, .22)))),
@@ -497,6 +773,11 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
         binding_threshold=min(9, max(2, parent.binding_threshold + rng.choice((-1, 0, 0, 1)))),
         concept_threshold=min(12, max(2, parent.concept_threshold + rng.choice((-1, 0, 0, 1)))),
         presentations=min(9, max(2, parent.presentations + rng.choice((-1, 0, 1)))),
+        feature_programs=programs,
+        recency_half_life_days=min(2200, max(45, parent.recency_half_life_days
+                                           * math.exp(rng.gauss(0, .25)))),
+        learner_kind=(rng.choice(("classifier", "regressor", "extra_trees"))
+                      if rng.random() < .12 else parent.learner_kind),
         generation=generation, parents=[parent.genome_id],
     )
     return child.finalize()
@@ -509,6 +790,12 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
     if len(features) < 8:
         features.update(rng.sample(list(BASE_FEATURES), 8 - len(features)))
     choose = lambda a, b: a if rng.random() < .5 else b
+    program_by_name = {
+        program_name(program): program
+        for program in left.feature_programs + right.feature_programs
+    }
+    inherited_programs = [program for _, program in sorted(program_by_name.items())
+                          if rng.random() < .6][:10]
     child = Genome(
         features=sorted(features), learning_rate=choose(left.learning_rate, right.learning_rate),
         max_iter=choose(left.max_iter, right.max_iter),
@@ -519,13 +806,21 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
         binding_threshold=choose(left.binding_threshold, right.binding_threshold),
         concept_threshold=choose(left.concept_threshold, right.concept_threshold),
         presentations=choose(left.presentations, right.presentations),
+        feature_programs=inherited_programs,
+        recency_half_life_days=choose(left.recency_half_life_days,
+                                     right.recency_half_life_days),
+        learner_kind=choose(left.learner_kind, right.learner_kind),
         generation=generation, parents=[left.genome_id, right.genome_id],
     ).finalize()
     return mutate(child, generation, rng) if rng.random() < .7 else child
 
 
 def genome_from_dict(payload: dict[str, Any]) -> Genome:
-    return Genome(**payload)
+    compatible = dict(payload)
+    compatible.setdefault("feature_programs", [])
+    compatible.setdefault("recency_half_life_days", 720.0)
+    compatible.setdefault("learner_kind", "classifier")
+    return Genome(**compatible)
 
 
 def main() -> int:
@@ -718,7 +1013,7 @@ def main() -> int:
                     next_population.append(child)
             population = next_population
             state = {
-                "schema": 1, "updated_at": utc_now(), "generation": generation,
+                "schema": EVOLUTION_SCHEMA, "updated_at": utc_now(), "generation": generation,
                 "configuration": {key: str(value) if isinstance(value, Path) else value
                                   for key, value in vars(args).items()},
                 "contract": str(ROOT / "docs/MARKET_BRAIN_GHOST_TRADING_ADMISSION.md"),
