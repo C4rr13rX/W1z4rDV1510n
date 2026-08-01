@@ -32,6 +32,7 @@ import joblib
 from sklearn.ensemble import (
     ExtraTreesClassifier, HistGradientBoostingClassifier, HistGradientBoostingRegressor,
 )
+from sklearn.linear_model import LogisticRegression
 
 try:
     import psutil
@@ -42,7 +43,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-EVOLUTION_SCHEMA = 3
+FEATURE_SCHEMA = 3
+EVOLUTION_SCHEMA = 4
 
 from scripts.market_brain_experiment import load_bars  # noqa: E402
 from scripts.market_signal_audit import (  # noqa: E402
@@ -260,6 +262,20 @@ class Surrogate:
         return np.where(self.probability(values) >= .5, 1, -1).astype(np.int8)
 
 
+def regression_probability_scale(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Fit confidence temperature while preserving the score-zero boundary."""
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int8)
+    fallback = max(float(np.median(np.abs(scores))), 1e-6)
+    if len(scores) < 20 or len(np.unique(labels)) < 2 or np.allclose(scores, 0):
+        return fallback
+    calibrator = LogisticRegression(
+        fit_intercept=False, C=1_000_000.0, solver="lbfgs", max_iter=200,
+    ).fit(scores.reshape(-1, 1), (labels > 0).astype(np.int8))
+    coefficient = float(calibrator.coef_[0, 0])
+    return 1.0 / coefficient if coefficient > 1e-9 else fallback
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -307,7 +323,7 @@ def available_memory_gb() -> float:
 def dataset_signature(manifest: Path, supplemental_root: Path,
                       news_path: Path | None = None) -> str:
     digest = hashlib.sha256()
-    digest.update(f"evolution-schema:{EVOLUTION_SCHEMA}".encode())
+    digest.update(f"evolution-schema:{FEATURE_SCHEMA}".encode())
     paths = [manifest, *sorted((supplemental_root / "features").glob("*.json"))]
     if manifest.is_file():
         payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -322,6 +338,17 @@ def dataset_signature(manifest: Path, supplemental_root: Path,
             digest.update(str(path.resolve()).encode())
             digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
     return digest.hexdigest()[:16]
+
+
+def evaluation_signature(data_signature: str, *, folds: int, test_days: int,
+                         calibration_days: int, final_days: int, horizon: int,
+                         cost_bps: float) -> str:
+    payload = (
+        f"{data_signature}|evaluation:{EVOLUTION_SCHEMA}|folds:{folds}|"
+        f"test:{test_days}|calibration:{calibration_days}|final:{final_days}|"
+        f"horizon:{horizon}|cost:{cost_bps:.8g}"
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def append_event(path: Path, event: str, **payload: Any) -> None:
@@ -756,7 +783,12 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             x_cal = np.asarray([feature_vector(row, genome) for row in calibration], dtype=np.float32)
             if genome.learner_kind == "regressor":
                 calibration_scores = np.asarray(raw_model.predict(x_cal), dtype=np.float64)
-                model.score_scale = max(float(np.median(np.abs(calibration_scores))), 1e-6)
+                calibration_labels = np.asarray(
+                    [row["target"] for row in calibration], dtype=np.int8
+                )
+                model.score_scale = regression_probability_scale(
+                    calibration_scores, calibration_labels
+                )
             cal_probability = model.probability(x_cal)
             cal_confidence = np.maximum(cal_probability, 1 - cal_probability)
             threshold = float(np.quantile(cal_confidence, genome.confidence_quantile))
@@ -1005,7 +1037,12 @@ def main() -> int:
             "required_memory_gb": args.min_free_memory_gb,
         })
         time.sleep(args.memory_poll_seconds)
-    signature = dataset_signature(args.manifest, args.supplemental_root, args.news)
+    data_signature = dataset_signature(args.manifest, args.supplemental_root, args.news)
+    signature = evaluation_signature(
+        data_signature, folds=args.folds, test_days=args.test_days,
+        calibration_days=args.calibration_days, final_days=args.final_days,
+        horizon=args.horizon, cost_bps=args.cost_bps,
+    )
     dataset = load_dataset_cached(args.manifest, args.supplemental_root,
                                   args.horizon, args.stride, args.seed, args.news,
                                   args.dataset_cache)

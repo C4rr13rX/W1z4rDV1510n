@@ -3,14 +3,16 @@ import math
 import random
 
 import pytest
+import numpy as np
 
 import scripts.market_evolution_service as evolution
 
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
-    load_dataset_cached, mutate, passes_floor, passes_prescreen, program_name, program_value,
-    recover_pending_gate, seed_genomes, select_diverse_elites,
+    evaluation_signature, load_dataset_cached, mutate, passes_floor,
+    passes_prescreen, program_name, program_value, recover_pending_gate,
+    regression_probability_scale, seed_genomes, select_diverse_elites,
 )
 
 
@@ -131,6 +133,28 @@ def test_dataset_signature_covers_primary_and_news_inputs(tmp_path):
     after_news = dataset_signature(manifest, features.parent, news)
     assert before != after_primary
     assert after_primary != after_news
+
+
+def test_evaluation_signature_changes_without_invalidating_feature_cache(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"selected":[]}')
+    supplemental = tmp_path / "supplemental"
+    (supplemental / "features").mkdir(parents=True)
+    data = dataset_signature(manifest, supplemental)
+    first = evaluation_signature(data, folds=3, test_days=42, calibration_days=30,
+                                 final_days=21, horizon=12, cost_bps=20)
+    second = evaluation_signature(data, folds=3, test_days=56, calibration_days=30,
+                                  final_days=21, horizon=12, cost_bps=20)
+    assert first != second
+    assert data == dataset_signature(manifest, supplemental)
+
+
+def test_regression_temperature_preserves_zero_boundary():
+    scores = np.asarray([-10, -8, -6, -4, -2, 2, 4, 6, 8, 10] * 4, dtype=float)
+    labels = np.asarray([-1, -1, -1, 1, -1, 1, 1, -1, 1, 1] * 4, dtype=int)
+    scale = regression_probability_scale(scores, labels)
+    assert scale > 0
+    assert (scores / scale >= 0).tolist() == (scores >= 0).tolist()
 
 
 def test_evolved_program_is_deterministic_bounded_and_same_moment():
