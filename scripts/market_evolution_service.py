@@ -784,17 +784,24 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
         min_observations = min(section.get("acted_observations", 0) for section in sections)
         evaluated_all_folds = len(fold_results) == folds
         passed = evaluated_all_folds and all(passes_floor(section) for section in sections)
-        penalty = (
-            max(0, FLOOR["coverage"] - min_coverage) * 100
-            + max(0, FLOOR["baseline_margin"] - min_margin) * 100
-            + max(0, FLOOR["ece"] - max_ece) * 0
-            + max(0, max_ece - FLOOR["ece"]) * 30
-            + max(0, FLOOR["observations"] - min_observations) / 20
-            + max(0, -min_expectancy) * 500
-            + max(0, max_drawdown - FLOOR["max_drawdown"]) * 20
+        # Fitness is a curriculum coordinate, never an admission shortcut.
+        # A candidate that earns another protected fold has repaired every
+        # earlier regime's prescreen and must outrank a one-fold specialist.
+        # Within the same stage, emphasize the directional evidence currently
+        # blocking progress while retaining smaller economic/risk pressure.
+        genome.fitness = (
+            1000 * (len(fold_results) - 1)
+            + 500 * min_accuracy
+            + 150 * min_balanced
+            + 100 * min_mcc
+            + 30 * min_margin
+            + 10 * min(min_profit, 2.0)
+            + 100 * min(0.01, max(-0.01, min_expectancy))
+            - 5 * max_ece
+            - 2 * max_drawdown
+            - max(0, FLOOR["coverage"] - min_coverage) * 20
+            - max(0, FLOOR["observations"] - min_observations) / 50
         )
-        genome.fitness = (100 * min_accuracy + 35 * min_balanced + 30 * min_mcc
-                          + 20 * min_margin + 3 * min(min_profit, 2.0) - penalty)
         working_target = (
             passed and min_accuracy >= WORKING_TARGET["accuracy"]
             and min_balanced >= WORKING_TARGET["balanced_accuracy"]
