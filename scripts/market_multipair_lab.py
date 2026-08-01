@@ -167,6 +167,8 @@ def main() -> int:
     parser.add_argument("--seed", default="market-v2-asset-holdout")
     parser.add_argument("--active-pools", default="2,4,5,6,9",
                         help="instrument pool 10 is excluded by default to permit unseen-asset transfer")
+    parser.add_argument("--settle-before-eval", action=argparse.BooleanOptionalAction, default=True,
+                        help="serialize the trained overlay neuron-by-neuron before read-only evaluation")
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -242,6 +244,15 @@ def main() -> int:
                 if not client.consolidate(streams, f"future {label}"):
                     failures += 1
 
+            settlement = None
+            if args.settle_before_eval:
+                settlement = client.post("/brain/sleep", {
+                    "min_use_count": 0,
+                    "stale_ticks": 9_223_372_036_854_775_807,
+                })
+                if settlement.get("error"):
+                    raise RuntimeError(f"brain settlement failed: {settlement['error']}")
+
             evaluation: dict[str, Any] = {}
             for name, records in (("known_asset_future", training_records),
                                   ("unseen_asset_future", holdout_records)):
@@ -262,6 +273,8 @@ def main() -> int:
                     add_baselines(market_metrics, market)
                     per_market.append({"chain": record["chain"], "symbol": record["symbol"],
                                        "family": record["family"], "metrics": market_metrics})
+                    print(f"evaluated {name} {len(per_market)}/{len(records)} "
+                          f"{record['chain']}:{record['symbol']}", flush=True)
                 metrics = evaluate_rows(rows, args.cost_bps)
                 add_baselines(metrics, rows)
                 evaluation[name] = {"metrics": metrics, "markets": per_market, "rows": rows}
@@ -284,7 +297,7 @@ def main() -> int:
                     "active_pools": sorted(active_pools), "cost_bps": args.cost_bps,
                 },
                 "training": {"episodes": len(training_candidates), "failures": failures,
-                             "label_counts": dict(label_counts)},
+                             "label_counts": dict(label_counts), "settlement": settlement},
                 "evaluation": evaluation,
             }
             args.out.parent.mkdir(parents=True, exist_ok=True)
