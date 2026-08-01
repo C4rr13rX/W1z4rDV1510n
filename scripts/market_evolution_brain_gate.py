@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import statistics
 import subprocess
@@ -28,7 +29,7 @@ from scripts.market_brain_experiment import (  # noqa: E402
 )
 from scripts.market_evolution_service import (  # noqa: E402
     FLOOR, Genome, evaluation_scope, genome_from_dict, genome_uses_derivatives,
-    load_dataset, passes_floor, program_name, program_value,
+    load_dataset_cached, passes_floor, program_name, program_value,
 )
 
 POOL_HORIZON = 9
@@ -139,6 +140,10 @@ def stop_brain_process(process: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
+
+
+def retain_attempt(passed: bool, retain_failed: bool) -> bool:
+    return passed or retain_failed
 
 
 def evenly_spaced(rows: Sequence[dict[str, Any]], count: int) -> list[dict[str, Any]]:
@@ -301,6 +306,8 @@ def main() -> int:
     parser.add_argument("--migration-binary", type=Path,
                         default=ROOT / "target/debug/w1z4rd_brain_migrate.exe")
     parser.add_argument("--runtime", type=Path, default=ROOT / "runtime/market-evolution/brain-gates")
+    parser.add_argument("--dataset-cache", type=Path,
+                        default=ROOT / "runtime/cache/market-evolution-dataset-v2.joblib")
     parser.add_argument("--port", type=int, default=0,
                         help="base port; zero reserves a free loopback port per fold")
     parser.add_argument("--horizon", type=int, default=12)
@@ -313,13 +320,17 @@ def main() -> int:
     parser.add_argument("--calibration-per-asset", type=int, default=8)
     parser.add_argument("--test-per-asset", type=int, default=40)
     parser.add_argument("--cost-bps", type=float, default=20)
+    parser.add_argument("--retain-failed-runtime", action="store_true",
+                        help="keep the generated microbrain even when its gate fails")
     args = parser.parse_args()
     payload = json.loads(args.candidate.read_text(encoding="utf-8"))
     genome = genome_from_dict(payload).finalize()
     attempt = datetime.now(timezone.utc).strftime("attempt-%Y%m%dT%H%M%S-%fZ")
     args.attempt_root = args.runtime / genome.genome_id / attempt
-    dataset = load_dataset(args.manifest, args.supplemental_root,
-                           args.horizon, args.stride, "market-perpetual-v1", args.news)
+    dataset = load_dataset_cached(
+        args.manifest, args.supplemental_root, args.horizon, args.stride,
+        "market-perpetual-v1", args.news, args.dataset_cache,
+    )
     identity = args.attempt_root / "identity.toml"
     render_identity(args.identity_template, identity, genome)
     test_seconds = args.test_days * 86400
@@ -344,6 +355,14 @@ def main() -> int:
         "all_brain_floor_gates": passed,
         "promotion": "eligible_for_untouched_final" if passed else "quarantined",
     }
+    keep_runtime = retain_attempt(passed, args.retain_failed_runtime)
+    report["attempt_runtime_retained"] = keep_runtime
+    if not keep_runtime:
+        try:
+            shutil.rmtree(args.attempt_root)
+        except OSError as error:
+            report["attempt_runtime_retained"] = True
+            report["attempt_cleanup_error"] = repr(error)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     print(json.dumps({"genome_id": genome.genome_id, "passed": passed,

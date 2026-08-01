@@ -3,6 +3,7 @@ from scripts.market_evolution_brain_gate import (
     feature_frame,
     genome_feature_frame,
     quantize,
+    retain_attempt,
     render_identity,
     settle_brain,
 )
@@ -79,3 +80,9 @@ def test_neural_gate_settles_without_pruning_before_evaluation():
         }),
         ("/brain/checkpoint", {}),
     ]
+
+
+def test_only_passing_or_explicitly_retained_gate_keeps_generated_brain():
+    assert retain_attempt(True, False)
+    assert retain_attempt(False, True)
+    assert not retain_attempt(False, False)
